@@ -489,71 +489,49 @@ int mm_pt_share_begin(pte_t *table, struct mm_struct *owner,
     return 0;
 }
 
-static void share_put_mask_refs(pte_t *table, struct pt_share *sh)
-{
-    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
-        if (!(sh->mask[i >> 3] & (1u << (i & 7))))
-            continue;
-        pte_t pte = ((pte_t *)table)[i];
-        if ((pte & PTE_V) && arch_pte_is_leaf(pte))
-            frame_put(phys_to_pfn(arch_pte_addr(pte)));
-    }
-}
 
-void mm_pt_share_end_borrow(pte_t *table)
+/* Copy the hardware page, the status/safe sidecars and the backing-object
+ * annotations of one leaf table into another already-allocated,
+ * node-initialized table.  Callers decide which side takes (or keeps) the
+ * leaf references; the annotation block is duplicated because each table
+ * owns its block, while the segment array underneath is shared with one
+ * more reference.  An annotation allocation failure leaves the copy without
+ * a segtab: file faults on the copy fall back to VMA dispatch, which is
+ * slower but correct. */
+void mm_pt_copy_table(pte_t *src, pte_t *dst)
 {
-    pt_meta_t *pm = mm_pt_meta(table);
-    struct pt_share *sh = pm ? pm->share : NULL;
-    if (!sh)
-        return;
-    share_put_mask_refs(table, sh);
-    pm->share = NULL;
-    kfree(sh);
-}
-
-void mm_pt_share_owner_handoff(pte_t *table)
-{
-    pt_meta_t *pm = mm_pt_meta(table);
-    struct pt_share *sh = pm ? pm->share : NULL;
-    if (!sh)
-        return;
-    /* The borrower already holds the mask[] references; take one for every
-     * other present leaf so the (now exclusive) borrower owns them all. */
-    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
-        pte_t pte = ((pte_t *)table)[i];
-        if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
-            continue;
-        if (sh->mask[i >> 3] & (1u << (i & 7)))
-            continue;
-        frame_get(phys_to_pfn(arch_pte_addr(pte)));
-    }
-    pm->share = NULL;
-    kfree(sh);
-}
-
-void mm_pt_share_borrower_copy(pte_t *table, pte_t *dst)
-{
-    pt_meta_t *pm = mm_pt_meta(table);
+    pt_meta_t *sm = mm_pt_meta(src);
     pt_meta_t *dm = mm_pt_meta(dst);
-    struct pt_share *sh = pm ? pm->share : NULL;
-    if (!sh || !dm)
+    if (!sm || !dm)
         return;
-    /* Copy the hardware page and the authoritative sidecars; nr_present is
-     * identical because the entries are. */
-    memcpy(dst, table, PAGE_SIZE);
-    memcpy(dm->cls, pm->cls, sizeof(dm->cls));
-    memcpy(dm->safe, pm->safe, sizeof(dm->safe));
-    dm->nr_present = pm->nr_present;
-    /* The borrower takes its own reference for every leaf the mask does not
-     * already cover; mask-covered leaves' references simply stay with it. */
-    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
-        pte_t pte = ((pte_t *)table)[i];
-        if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
-            continue;
-        if (sh->mask[i >> 3] & (1u << (i & 7)))
-            continue;
-        frame_get(phys_to_pfn(arch_pte_addr(pte)));
+    memcpy(dst, src, PAGE_SIZE);
+    memcpy(dm->cls, sm->cls, sizeof(dm->cls));
+    memcpy(dm->safe, sm->safe, sizeof(dm->safe));
+    dm->nr_present = sm->nr_present;
+    if (sm->segtab) {
+        mm_segtab_t *st = kcalloc(1, sizeof(*st) +
+                                  (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
+        if (st) {
+            st->idx = (uint8_t *)(st + 1);
+            memcpy(st->idx, sm->segtab->idx,
+                   (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
+            st->arr = sm->segtab->arr;
+            __atomic_add_fetch(&st->arr->refcount, 1, __ATOMIC_ACQ_REL);
+            dm->segtab = st;
+        }
     }
+}
+
+/* Detach a settled share.  The reference settlement (who takes or keeps
+ * which leaf references) is the caller's, because classifying a leaf --
+ * page-cache pin versus plain frame reference -- needs the mm's mapping
+ * list, which lives above this layer. */
+void mm_pt_share_detach(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    struct pt_share *sh = pm ? pm->share : NULL;
+    if (!sh)
+        return;
     pm->share = NULL;
     kfree(sh);
 }

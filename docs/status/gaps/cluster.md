@@ -9,3 +9,7 @@
 
 `check-mcu-program-rtl` 的构建阻塞属于全局构建规则，记录在
 [DELIVERY-06](delivery.md)，不在本领域台账内。
+
+新增的多独立机器单一系统映像目标单独记录在
+[cluster-ssi.md](cluster-ssi.md)。它扩展既有 1.0 范围，不把远程页快照服务
+当作透明共享内存或普通程序跨机线程执行已经完成。

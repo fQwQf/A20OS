@@ -95,6 +95,14 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append(f"name: '{inst.name}' must match {_NAME_RE.pattern}")
     if inst.board and not (repo_root / "kernel" / "platform" / inst.board).is_dir():
         e.append(f"board: no kernel/platform/{inst.board} directory")
+    physical_arch = {"pine-a64": "aarch64", "ls2k0300": "loongarch64",
+                     "lichee-pi-zero": "arm32", "quartz64-zero": "aarch64",
+                     "ox64": "riscv64",
+                     "m0sense-bl702": "riscv32"}.get(inst.board)
+    if physical_arch and inst.arch != physical_arch:
+        e.append(f"board {inst.board}: requires arch = {physical_arch}")
+    if inst.board == "m0sense-bl702" and (k.bringup is not True or k.nommu is not True):
+        e.append("board m0sense-bl702: requires kernel.bringup=true and kernel.nommu=true (M-mode probe)")
     if inst.abi is not None and inst.abi not in ABI_CHOICES:
         e.append(f"abi: unsupported '{inst.abi}'; supported: {', '.join(ABI_CHOICES)}")
     if k.profile is not None and k.profile not in PROFILES:
@@ -179,7 +187,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append("net.guest_gateway: only meaningful together with net.guest_ip")
     if t.timeout is not None and not _TIMEOUT_RE.fullmatch(t.timeout):
         e.append(f"test.timeout: '{t.timeout}' must match {_TIMEOUT_RE.pattern} (e.g. 45s)")
-    has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands, t.expect))
+    has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands,
+                                         t.expect, t.require_clean_exit))
     if has_test and not t.expect:
         # Without expect the gate can only ever pass vacuously, so require it
         # here rather than letting `a20 test` discover it after the build.
@@ -209,6 +218,10 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append("test.*: the a20 test harness drives the serial console and "
                  "cannot combine with gui.enabled")
     _validate_board_sections(inst, e, repo_root)
+    for field in ("prompt_timeout", "command_timeout"):
+        value = getattr(inst.handoff, field)
+        if value is not None and (not _TIMEOUT_RE.fullmatch(value) or int(value[:-1]) <= 0):
+            e.append(f"handoff.{field}: expected a positive duration, e.g. '30s'")
     _validate_target(inst, e)
     return e
 
@@ -384,6 +397,11 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
             if inst.target.boot_media:
                 e.append("package.kind kernel-bundle: not used with "
                          "target.boot_media; this kind exists for boards with no medium")
+        case "board-sdcard":
+            if inst.board not in {"pine-a64", "licheerv-nano", "lichee-pi-zero", "quartz64-zero", "ox64"}:
+                e.append("package.kind board-sdcard: no packager for this board")
+            if p.variant is not None:
+                e.append("package.variant: not used for board-sdcard")
         case unreachable:
             assert_never(unreachable)
     if p.kind != "release" and (p.kernel_out is not None or p.disk_out is not None):

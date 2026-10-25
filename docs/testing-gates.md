@@ -68,6 +68,16 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 
 ## 运行手册
 
+### 首次运行验收
+
+`make -j4 smoke-quickstart` 使用与 `qemu-riscv64` 相同的 RISC-V64、both ABI、
+单核、磁盘用户态配置。串口执行 shell 内置命令和 `/bin/echo`，分别要求实际输出，
+再执行 `poweroff`；必须出现关机标记且 QEMU 在 90 秒内以 0 退出。
+命令中的输出标记分段构造，串口回显命令本身不能满足断言。
+日志在 `.kernel-build/smoke/smoke-quickstart.log`，已接入 CI 的 QEMU smoke 步骤及独立 Quickstart 工作流。
+该实例通过 `[test].require_clean_exit = true` 要求期望标记齐全、未超时且 QEMU 退出码为 0。
+这一门禁不代替 syscall、压力或桌面验收；`smoke-riscv64` 仍只测试 bring-up。
+
 ### XFCE 桌面验收
 
 `tools/a20 run xfce-{riscv64,x86_64,aarch64,loongarch64}` 是交互式桌面实例

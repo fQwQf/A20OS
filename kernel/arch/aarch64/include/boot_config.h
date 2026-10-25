@@ -11,6 +11,9 @@
 #ifndef AARCH64_BOOT_IMAGE_HEADER
 #define AARCH64_BOOT_IMAGE_HEADER 0
 #endif
+#ifndef AARCH64_BOOT_IMAGE_FLAGS
+#define AARCH64_BOOT_IMAGE_FLAGS 2 /* LE, 4KiB pages, load near RAM base. */
+#endif
 #ifndef AARCH64_BOOT_CUSTOM_LAYOUT
 #define AARCH64_BOOT_CUSTOM_LAYOUT 0
 #endif

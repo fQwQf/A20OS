@@ -18,7 +18,7 @@ _start:
     .long   0
     .quad   AARCH64_BOOT_TEXT_OFFSET
     .quad   _end - _start
-    .quad   2 /* little endian, 4-KiB pages, load near RAM base */
+    .quad   AARCH64_BOOT_IMAGE_FLAGS
     .quad   0, 0, 0
     .long   0x644d5241
     .long   0

@@ -112,11 +112,42 @@ def _candidates(inst: Instance, vars_: dict[str, str]) -> list[tuple[str, str]]:
                     f"{vars_['PKG_IMAGE_DIR']}/{inst.rootfs.world}-{vars_['PKG_ARCH']}.img"))
     if inst.board == "visionfive2" or inst.package.kind == "fit-sdcard":
         out += _BOOT_CHAIN
+    out += [(f"boot-media-{i}", rel) for i, rel in enumerate(inst.target.boot_media or (), 1)]
+    if inst.package.kind in {"kernel-bundle", "board-sdcard"}:
+        folder = f"build/{inst.board}/handoff"
+        if inst.board == "m0sense-bl702":
+            out = [("mcu-probe-elf", f"{folder}/probe.elf"),
+                   ("mcu-probe-code", f"{folder}/probe.bin"),
+                   ("debug-loader", f"{folder}/load-probe.sh"),
+                   ("debug-config", f"{folder}/openocd.cfg"),
+                   ("usb-uf2", f"{folder}/probe.uf2"),
+                   ("usb-manifest", f"{folder}/probe.json"),
+                   ("usb-xip-elf", f"{folder}/probe-xip.elf"),
+                   ("usb-app-bin", f"{folder}/probe-app.bin"),
+                   ("usb-deployer", f"{folder}/deploy-uf2.py"),
+                   ("bundle-readme", f"{folder}/README.md")]
+        elif inst.board == "ls2k0300":
+            out += [("bundle-kernel", f"{folder}/kernel.elf"),
+                    ("bundle-manifest", f"{folder}/image.json"),
+                    ("firmware-inventory", f"{folder}/commands.txt"),
+                    ("handoff-template", f"{folder}/uboot.cmd.in")]
+        else:
+            out += [("bundle-image", f"{folder}/kernel.bin"),
+                    ("handoff-commands", f"{folder}/uboot.cmd"),
+                    ("bundle-manifest", f"{folder}/manifest.json")]
+        if inst.package.kind == "board-sdcard":
+            out += [("firmware-manifest", f"build/{inst.board}/firmware/manifest.json")]
+            out += [(f"boot-media-manifest-{i}", rel + ".json")
+                    for i, rel in enumerate(inst.target.boot_media or (), 1)]
     return [(role, rel) for role, rel in out if rel]
 
 
 def collect(inst: Instance, repo_root: Path = REPO_ROOT) -> Manifest:
     vars_ = query_make(inst, _MAKE_VARS)
+    if inst.board == "m0sense-bl702":
+        vars_["BUILD_DIR"] = "build/m0sense-bl702/handoff"
+        vars_["KERNEL_ELF"] = "build/m0sense-bl702/handoff/probe.elf"
+        vars_["KERNEL_BIN"] = "build/m0sense-bl702/handoff/probe.bin"
     artifacts: list[Artifact] = []
     missing: list[str] = []
     for role, rel in _candidates(inst, vars_):

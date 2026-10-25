@@ -444,6 +444,32 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
     return 0;
 }
 
+int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
+                      paddr_t *pa_out) {
+    if (!mm || !mm->pgdir || !pa_out || max_pages <= 0 ||
+        (va & (PAGE_SIZE - 1)))
+        return 0;
+    int idx1 = L1_INDEX(va);
+    if (!l1_index_valid(idx1) || !IS_TABLE(mm->pgdir[idx1]))
+        return 0;
+    pte_t *l2 = arch_pte_to_ptr(mm->pgdir[idx1]);
+    int first = L2_INDEX(va), count = 0;
+    /* The caller owns mm->lock; short descriptors have no generic node
+     * metadata. Keep each run inside this 256-entry coarse table. */
+    for (int i = first; i < ARM32_L2_ENTRIES && count < max_pages; i++) {
+        pte_t entry = l2[i];
+        if (!(entry & PTE_V) || !IS_LEAF(entry))
+            break;
+        pa_out[count++] = arch_pte_addr(entry);
+        l2[i] = 0;
+    }
+    if (count && pt_table_empty(l2, ARM32_L2_ENTRIES)) {
+        pt_free_internal(l2, 0);
+        mm->pgdir[idx1] = 0;
+    }
+    return count;
+}
+
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
     vaddr_t base;
     size_t size;

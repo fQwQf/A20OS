@@ -16,7 +16,7 @@
     .global __switch_la64
     .global __switch
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT) && \
     defined(CONFIG_LS2K_TRAP_TRACE)
     /* Single-character checkpoints for first-switch hardware bring-up. */
     .macro LS2K_SWITCH_MARK value

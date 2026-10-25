@@ -1,14 +1,39 @@
     .syntax unified
     .arch armv7-a
+#include "boot_config.h"
 
     .section .text.entry
     .global _start
 _start:
+    /* Linux ARM handoff supplies the DTB in r2. Keep it until BSS is clear. */
+    mov     r8, r2
+#if ARM32_BOOT_NORMALIZE_HYP
+    .arch_extension virt
+    cpsid   if
+    mrs     r0, cpsr
+    and     r0, r0, #0x1f
+    cmp     r0, #0x1a
+    bne     .Lsvc_ready
+    mov     r0, #0
+    mcr     p15, 4, r0, c1, c1, 0 /* HCR: no stage-2 translation/traps. */
+    mcr     p15, 4, r0, c1, c1, 2 /* HCPTR: permit VFP at PL1. */
+    mcrr    p15, 4, r0, r0, c14   /* CNTVOFF = 0. */
+    mov     r0, #3
+    mcr     p15, 4, r0, c14, c1, 0 /* CNTHCTL physical counter/timer. */
+    ldr     r0, =0x1d3
+    msr     spsr_cxsf, r0
+    adr     r0, .Lsvc_ready
+    msr     ELR_hyp, r0
+    eret
+.Lsvc_ready:
+    cps     #0x13
+#endif
     /* Running with the MMU off at the physical load address.
      * Use a small physical stack inside the entry section. */
     ldr     sp, =_early_stack_end
 
-    /* Early debug: send 'A' to the physical PL011 UART. */
+#if !ARM32_BOOT_BOARD_LAYOUT
+    /* QEMU's optional early PL011 debug marker. */
     ldr     r10, =0x09000000
 1:
     ldr     r11, [r10, #0x18]
@@ -16,6 +41,7 @@ _start:
     bne     1b
     mov     r11, #'A'
     str     r11, [r10]
+#endif
 
 #ifndef CONFIG_NOMMU
     /* boot_pgdir is placed in this physical section. */
@@ -53,9 +79,15 @@ _start:
 
     add     r2, r2, #0x100000
     add     r1, r1, #1
-    cmp     r1, #1024
+    cmp     r1, #ARM32_BOOT_RAM_SECTIONS
     blo     2b
 
+#if ARM32_BOOT_BOARD_LAYOUT
+    ldr     r7, =(ARM32_BOOT_DEVICE_SLOT * 4)
+    ldr     r1, =ARM32_BOOT_DEVICE_SECTION
+    add     r3, r0, r7
+    str     r1, [r3]
+#else
     /* Map the QEMU virt device region so that UART/GIC/virtio are usable
      * at their PAGE_OFFSET-relative virtual addresses. */
     ldr     r7, =(0x880 * 4)
@@ -72,6 +104,7 @@ _start:
     ldr     r1, =0x0A000616          /* PA 0x0A000000 -> VA 0x8A000000 (virtio) */
     add     r3, r0, r7
     str     r1, [r3]
+#endif
 
     /* Ensure page table writes reach memory before enabling the MMU. */
     dsb
@@ -92,6 +125,11 @@ _start:
 #ifndef CONFIG_NOMMU
     /* Invalidate TLBs and set the translation table base. */
     mov     r1, #0
+    /* Linux handoff only promises MMU-off. A bootloader built with LPAE
+     * may leave TTBCR.EAE set: select short descriptors and the full TTBR0
+     * address space before installing our 16-KiB L1 table. */
+    mcr     p15, 0, r1, c2, c0, 2 /* TTBCR = 0 (EAE=0, N=0). */
+    isb
     mcr     p15, 0, r1, c8, c7, 0
     mcr     p15, 0, r0, c2, c0, 0
     mcr     p15, 0, r1, c2, c0, 1
@@ -117,6 +155,7 @@ _start:
     .section .text
     .global _high_start
 _high_start:
+#if !ARM32_BOOT_BOARD_LAYOUT
     /* Debug: send 'B' through the high virtual UART. */
 #ifdef CONFIG_NOMMU
     ldr     r10, =0x09000000
@@ -129,6 +168,7 @@ _high_start:
     bne     1b
     mov     r11, #'B'
     str     r11, [r10]
+#endif
 
     /* Now running at high virtual addresses.  Use the linked BSS/stack. */
     ldr     sp, =_stack_end
@@ -157,6 +197,8 @@ _high_start:
     str     r2, [r0], #4
     b       2b
 3:
+    ldr     r0, =arm32_boot_dtb
+    str     r8, [r0]
     /* Install the vector table. */
     ldr     r0, =arm32_vector_table
     mcr     p15, 0, r0, c12, c0, 0
@@ -174,6 +216,7 @@ _high_start:
     mcr     p15, 0, r0, c1, c0, 0
     isb
 
+    bl      early_uart_init
     bl      kernel_main
 
 4:
@@ -202,3 +245,9 @@ _stack_bottom:
     .space 16384
     .global _stack_end
 _stack_end:
+
+    .section .bss
+    .align 2
+    .global arm32_boot_dtb
+arm32_boot_dtb:
+    .space 4

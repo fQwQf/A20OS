@@ -13,10 +13,9 @@
  * at commit 551c722f40809618230001baccf219193e22fc5a.
  *
  * Unverified: KERNEL_ENTRY.  A20OS's riscv64 load address is a compile-time
- * constant and this board's U-Boot kernel_addr has not been read off the
- * hardware.  The arch default 0x80200000 is kept because it is where every
- * other RISC-V port in this tree loads; if the board hangs before the first
- * printf, this is the first value to check.  See
+ * constant. The architecture's 2 MiB Image offset places the kernel above
+ * OpenSBI at 0x80200000; actual U-Boot/FDT/reserved-memory placement must be
+ * checked before loading, including the kernel's BSS footprint. See
  * docs/platforms/licheerv-nano.md.
  */
 

@@ -702,8 +702,8 @@ int firmware_console_getchar(void) {
  * the comment there) so we can read the real memory map instead of assuming
  * 1 GiB.  Only "available" (type 1) regions above the low 1 MiB are offered
  * (the low page holds the IVT/BDA/legacy hole and must never be handed out),
- * and nothing past the 2 GiB direct-map window that entry.S builds with 1 GiB
- * pages.  If anything is missing we fall back to the old 1 GiB range.
+ * below the 2 GiB cacheable part of the boot direct map. If anything is
+ * missing we fall back to the old 1 GiB range.
  */
 #define X86_MB_BOOTLOADER_MAGIC 0x2BADB002u
 #define X86_MB_INFO_MEM_MAP     0x00000040u
@@ -719,13 +719,17 @@ int firmware_console_getchar(void) {
  * ECAM and the MMIO window are at 2.75/3 GiB, inside the uncacheable part of
  * the boot map.  The boot map stops at 4 GiB, so map the whole 1 GiB chunks a
  * usable range fully covers, as cacheable RAM, and report them as usable.
- * Chunks are all-or-nothing on purpose: a partially RAM 1 GiB page would also
- * make whatever else is in it cacheable.
+ * Chunks remain all-or-nothing: do not make non-RAM holes cacheable. Each
+ * accepted chunk is installed as 512 ordinary 2 MiB leaves.
  */
 #define X86_HIGH_RAM_BASE       0x100000000ULL
 #define X86_HIGH_PAGE           0x40000000ULL
 
 extern uint64_t boot_pdpt_hh[512];
+/* Static tables are available before the frame allocator starts.  Do not
+ * install optional 1 GiB leaves while detecting memory on older Intel 64. */
+static uint64_t high_ram_pd[(X86_HIGH_RAM_MAP_END - X86_HIGH_RAM_BASE) >> 30][512]
+    __attribute__((aligned(4096)));
 
 static void x86_high_ram_map_flush(void)
 {
@@ -796,7 +800,11 @@ static void x86_ram_detect(void) {
                    chunk + X86_HIGH_PAGE <= X86_HIGH_RAM_MAP_END &&
                    n < X86_RAM_RANGE_MAX;
                  chunk += X86_HIGH_PAGE) {
-                boot_pdpt_hh[chunk >> 30] = (uint64_t)chunk | 0x83ULL;
+                uint64_t *pd = high_ram_pd[(chunk - X86_HIGH_RAM_BASE) >> 30];
+                for (unsigned i = 0; i < 512; i++)
+                    pd[i] = (uint64_t)(chunk + (paddr_t)i * 0x200000) | 0x83ULL;
+                boot_pdpt_hh[chunk >> 30] =
+                    ((uintptr_t)pd - PAGE_OFFSET) | 0x003ULL;
                 mapped_high = 1;
                 g_ram_base[n] = chunk;
                 g_ram_end[n] = chunk + X86_HIGH_PAGE;

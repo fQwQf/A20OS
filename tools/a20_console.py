@@ -30,6 +30,7 @@ import shlex
 import subprocess
 import termios
 import time
+import tty
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
@@ -158,8 +159,9 @@ class SerialTransport:
             data = data[written:]
 
     def close(self) -> None:
+        fd, self._fd = self._fd, -1
         with contextlib.suppress(OSError):
-            os.close(self._fd)
+            os.close(fd)
 
 
 @dataclass
@@ -185,6 +187,48 @@ class SessionResult:
     seen: tuple[str, ...] = ()
     transcript: Transcript = field(default_factory=Transcript)
 
+
+class InteractiveTransport:
+    """Forward operator input while the usual bounded boot checks keep running.
+
+    The bootloader and kernel share one UART. A second terminal must not race
+    with the verifier for its output. Ctrl-] aborts; close restores local input.
+    """
+    def __init__(self, transport: Transport, input_fd: int):
+        self.transport = transport
+        self.input_fd = input_fd
+        self._original_input_fd = input_fd
+        self.transcript = Transcript()
+        self.saved_tty = termios.tcgetattr(input_fd) if os.isatty(input_fd) else None
+        self.closed = False
+        if self.saved_tty is not None:
+            tty.setcbreak(input_fd)
+
+    def read(self, timeout: float) -> bytes:
+        if self.input_fd is not None and select.select([self.input_fd], [], [], 0)[0]:
+            data = os.read(self.input_fd, 4096)
+            if b"\x1d" in data:
+                raise ConsoleError("interactive console aborted (Ctrl-])")
+            if data:
+                self.transport.write(data)
+            else:
+                self.input_fd = None
+        chunk = self.transport.read(timeout)
+        self.transcript.append(chunk)
+        return chunk
+
+    def write(self, data: bytes, timeout: float = _WRITE_TIMEOUT_S) -> None:
+        self.transport.write(data, timeout)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.saved_tty is not None:
+                termios.tcsetattr(self._original_input_fd, termios.TCSANOW, self.saved_tty)
+        finally:
+            self.transport.close()
 
 def _missing(patterns: Sequence[str], text: str) -> list[str]:
     return [p for p in patterns if p not in text]

@@ -3,8 +3,9 @@
 The QEMU command line is printed by the `_qemu_argv` make target (the single
 source of truth for every flag, which already includes machine.extra_qemu via
 EXTRA_QEMU), then run with a timeout while [test].commands are injected over
-the serial console.  PASS semantics match the historical handwritten smokes:
-every [test].expect substring must appear in the log.
+the serial console. Every [test].expect substring must appear in the log.
+Tests with require_clean_exit also require a natural zero exit before the
+deadline; existing marker-only tests retain their historical semantics.
 """
 
 from __future__ import annotations
@@ -271,21 +272,23 @@ def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
                     _reap(proc)
                 with contextlib.suppress(Exception):
                     feeder.join(timeout=1.0)
+                if proc.stdin is not None:
+                    with contextlib.suppress(OSError):
+                        proc.stdin.close()
         text = log.read_text(errors="replace")
 
     missing = [p for p in expected if p not in text]
-    if not missing:
+    clean_exit = not timed_out and proc.returncode == 0
+    if not missing and (not inst.test.require_clean_exit or clean_exit):
         print(f"{inst.name}: PASS; log saved to {log}")
         return EXIT_OK
-    # "exited with status 0" reads as a contradiction next to FAIL: a guest that
-    # powers off cleanly has every right to exit 0, and that is the normal path.
-    # The guest's exit status is secondary to whether the markers appeared.
+    # Markers printed before a hang or QEMU failure cannot prove a clean boot.
     if timed_out:
         why = f"the guest did not finish within {_parse_timeout(inst.test.timeout):g}s"
     else:
         why = f"the guest exited with status {proc.returncode}"
-    print(f"{inst.name}: FAIL -- {len(missing)} of {len(expected)} expected "
-          f"marker(s) never appeared ({why})")
+    print(f"{inst.name}: FAIL -- {why}; "
+          f"{len(missing)} of {len(expected)} expected marker(s) missing")
     for pat in missing:
         print(f"  missing: {pat}")
     print(f"  transcript: {log} (last 80 lines below)")

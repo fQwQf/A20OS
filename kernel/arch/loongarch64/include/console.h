@@ -5,7 +5,7 @@
 #include "platform.h"
 
 static inline void arch_uart_init(void) {
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     /* Keep U-Boot's 115200 8N1 divisor.  The cooperative fallback polls;
      * the Phase 2 image enables RX only after LIOINTC was initialized. */
     volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;

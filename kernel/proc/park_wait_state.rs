@@ -201,6 +201,10 @@ pub unsafe extern "C" fn a20_rust_park_wait_wake(
 ) -> i32 {
     let Some(f) = (unsafe { fields_from(raw) }) else { return 0; };
     if seq == 0 { return 0; }
+    // PARK_SIGNAL_MODE_PROTOCOL: a plain signal wake only lands on
+    // WAIT_INTERRUPTIBLE parkers; a fatal signal or task exit bypasses the
+    // mode check but still loses to WAIT_UNINTERRUPTIBLE.  The generation
+    // (seq) comparison above decides which wake wins the race.
     unsafe {
         if load_u64(f.wait_seq, Ordering::Relaxed) != seq { return 0; }
         let mode = load_i32(f.wait_mode);
@@ -237,6 +241,10 @@ pub unsafe extern "C" fn a20_rust_park_wait_cancel(
 ) -> i32 {
     let Some(f) = (unsafe { fields_from(raw) }) else { return 0; };
     if seq == 0 { return 0; }
+    // PARK_SIGNAL_MODE_PROTOCOL: a plain signal wake only lands on
+    // WAIT_INTERRUPTIBLE parkers; a fatal signal or task exit bypasses the
+    // mode check but still loses to WAIT_UNINTERRUPTIBLE.  The generation
+    // (seq) comparison above decides which wake wins the race.
     unsafe {
         if load_u64(f.wait_seq, Ordering::Relaxed) != seq ||
            load_i32(f.park_state) != PARK_PREPARING { return 0; }
@@ -295,6 +303,10 @@ pub unsafe extern "C" fn a20_rust_park_wait_finish(
 ) -> i32 {
     let Some(f) = (unsafe { fields_from(raw) }) else { return 0; };
     if seq == 0 { return 0; }
+    // PARK_SIGNAL_MODE_PROTOCOL: a plain signal wake only lands on
+    // WAIT_INTERRUPTIBLE parkers; a fatal signal or task exit bypasses the
+    // mode check but still loses to WAIT_UNINTERRUPTIBLE.  The generation
+    // (seq) comparison above decides which wake wins the race.
     unsafe {
         if load_u64(f.wait_seq, Ordering::Relaxed) != seq ||
            load_i32(f.park_state) != PARK_WOKEN { return 0; }

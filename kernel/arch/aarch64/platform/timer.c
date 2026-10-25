@@ -49,15 +49,34 @@ void timer_init(void) {
 }
 
 void timer_set_interval(uint64_t ticks) {
+#ifdef AARCH64_TIMER_ERRATUM_SUN50I_A64
+    /* TVAL uses the same unstable counter internally. Compute the deadline
+     * from the filtered read, as upstream's sun50i A64 workaround does. */
+    uint64_t deadline = timer_get_ticks() + ticks;
+    __asm__ __volatile__("msr cntp_cval_el0, %0\n\tisb" :: "r"(deadline) : "memory");
+    timer_enable();
+#else
     __asm__ __volatile__("msr cntp_tval_el0, %0\n\t"
                          "mov x1, #1\n\t"
                          "msr cntp_ctl_el0, x1" ::"r"(ticks)
                          : "x1", "memory");
+#endif
 }
 
 uint64_t timer_get_ticks(void) {
     uint64_t val;
+#ifdef AARCH64_TIMER_ERRATUM_SUN50I_A64
+    /* A64's counter can glitch at carries. Reject low-nine-bit all-zero or
+     * all-one samples; 150 attempts bounds the wait (Linux v6.17
+     * drivers/clocksource/arm_arch_timer.c, sun50i UNKNOWN1 workaround). */
+    for (unsigned retry = 0; retry < 150; retry++) {
+        __asm__ __volatile__("isb\n\tmrs %0, cntpct_el0" : "=r"(val) :: "memory");
+        if (((val + 1) & 0x1ffUL) > 1)
+            return val;
+    }
+#else
     __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(val));
+#endif
     return val;
 }
 

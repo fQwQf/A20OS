@@ -33,7 +33,7 @@ HIDDEN_COMMANDS = frozenset({"complete"})
 # manifest *path*, so it gets no candidates and falls back to filenames.
 INSTANCE_COMMANDS = frozenset({
     "console", "deploy", "ledger", "show", "show-vars",
-    "build", "run", "debug", "test", "flash", "package", "ports",
+    "build", "prepare", "run", "debug", "test", "flash", "package", "ports",
 })
 
 
@@ -76,7 +76,7 @@ def _arches() -> list[str]:
 # Flag arguments whose values we can enumerate, keyed on (command, flag).
 _FLAG_VALUES: dict[tuple[str, str], object] = {
     ("list", "--arch"): _arches,
-    ("list", "--action"): lambda: ("build", "run", "debug", "test", "flash",
+    ("list", "--action"): lambda: ("build", "prepare", "run", "debug", "test", "flash",
                                    "package", "console", "deploy"),
     ("boards", "--arch"): _arches,
     ("check", "--require-arch"): _arches,

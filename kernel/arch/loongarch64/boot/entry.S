@@ -34,7 +34,7 @@ _start:
      * firmware's standard uncached/cached pair without ever dropping the
      * mapping that contains the current PC.  QEMU keeps its identity DMW.
      */
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     li.d        $t0, 0x800000000000000f
     csrwr       $t0, CSR_DMW0
     li.d        $t0, 0x900000000000001f
@@ -47,7 +47,7 @@ _start:
 
     invtlb      0, $zero, $zero
 
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     /* U-Boot already runs with paging and the cached DMW active. */
     li.d        $t0, 0xB0
 #else
@@ -64,7 +64,12 @@ _start:
      * instructions in its dynamic loader before main(), so every CPU must
      * enable LSX before it can enter userspace.
      */
+#ifdef CONFIG_BOARD_LS2K0300
+    /* LA264: scalar FPU only; never assume LSX exists. */
+    li.d        $t0, 1
+#else
     li.d        $t0, 3
+#endif
     csrwr       $t0, CSR_EUEN
 
     /* Set exception entry point */
@@ -98,8 +103,13 @@ bss_clear:
     b           bss_clear
 bss_done:
     /* Preserve the firmware DTB pointer after clearing BSS. */
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+#ifdef CONFIG_BOARD_LS2K0300
+    /* RAM loader has no established FDT argument contract yet. */
+    move        $t0, $zero
+#else
     li.d        $t0, 0x900000000a000000
+#endif
 #else
     li.d        $t0, 0x100000
 #endif
@@ -125,7 +135,7 @@ setup_mmu:
 
     /* Load the physical boot_pgdir address into PGDL and PGDH. */
     la.global   $t0, boot_pgdir
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     li.d        $t1, 0x9000000000000000
     sub.d       $t0, $t0, $t1
 #endif
@@ -191,17 +201,21 @@ setup_mmu:
     invtlb      0, $zero, $zero
 
     csrrd       $a0, CSR_CPUID
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+#ifdef CONFIG_BOARD_LS2K0300
+    move        $a1, $zero
+#else
     li.d        $a1, 0x900000000a000000
+#endif
 #else
     li.d        $a1, 0x100000
 #endif
 
     bnez        $a0, call_secondary
-    /* The physical board's 100 MHz timer can fire while the allocator and
+    /* A physical board's timer can fire while the allocator and
      * networking globals are still being initialized.  Keep IE clear until
      * kernel_main has initialized the process and progress subsystems. */
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     li.d        $t0, 0xB0
 #else
     li.d        $t0, 0xB4

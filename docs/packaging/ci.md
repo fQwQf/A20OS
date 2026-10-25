@@ -2,13 +2,17 @@
 
 最后核实：2026-10-08。
 
-## 三个 workflow
+## 构建与发布 workflow
 
 | 文件 | 触发 | 职责 |
 |------|------|------|
 | `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 按架构构建构建容器镜像并自检，推 `ghcr.io/<owner小写>/a20os-buildenv:<target>`，`multi` 另发 `:latest` |
 | `ci.yml` | PR / push main / 手动 | 宿主侧源码契约门禁（快速）→ 逐架构内核 bring-up 构建矩阵 → 四架构打包建库 + 组 base 镜像 → 独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
 | `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release（附件 = 各架构镜像） |
+| `quickstart.yml` | PR / push main / 手动 | Ubuntu 24.04 从干净 checkout 安装单架构依赖与固定 Rust，环境检查 → 完整开发镜像 → shell / 外部命令 / 正常关机；不依赖 GHCR 构建镜像或编译缓存 |
+
+首次体验优先按 [构建指南](../dev/build.md) 操作。`quickstart.yml` 与综合门禁独立，
+可以直接观察新用户路径是否成功；新增 workflow 的定义本身不代表远端已运行通过。
 
 镜像名小写：ghcr 镜像名必须全小写，而 `github.repository_owner` 可能含大写
 （如 `fQwQf`，buildx 会直接报 `repository name must be lowercase`）。三个

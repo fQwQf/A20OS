@@ -38,6 +38,10 @@ SECTIONS
         *(.text.entry)
         *(.text .text.*)
     } :text
+    ASSERT(__riscv_image_header_end - _start == 64,
+           "riscv64: Image header must be exactly 64 bytes")
+    ASSERT(PHYS_BASE - BOOT_MAP_PHYS == 0x200000,
+           "riscv64: Image header load offset must match linker layout")
 
     . = ALIGN(4096);
     __rodata_start = .;
@@ -86,6 +90,8 @@ SECTIONS
         *(COMMON)
         _bss_end = .;
     } :data
+    . = ALIGN(4096);
+    _end = .;
 
     /* Both invariants of the layout above, stated so a later edit that breaks
      * either fails the link instead of booting into silent corruption. */

@@ -7,7 +7,7 @@
  * by 2K1000LA ports; the QEMU virt target retains its existing folded Dir2
  * layout so its established kernel and userspace path is unchanged.
  */
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
 #define LA64_PT_LEVELS       4
 #define LA64_PT_ROOT_LEVEL   3
 #define LA64_PT_HAS_DIR2     1

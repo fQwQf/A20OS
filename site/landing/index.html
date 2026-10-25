@@ -195,11 +195,12 @@
       <h2 class="section-title" id="quickstart-title">快速开始</h2>
       <div class="code-block">
         <button class="copy-btn" type="button" data-copy aria-label="复制命令">复制</button>
-        <pre><code>$ git clone https://github.com/fQwQf/A20OS.git
+        <pre><code>$ git clone --recurse-submodules https://github.com/fQwQf/A20OS.git
 $ cd A20OS
-$ make ARCH=riscv64 BOARD=qemu-virt-riscv64 run</code></pre>
+$ python3 tools/check_quickstart.py
+$ tools/a20 run qemu-riscv64 -- -j4</code></pre>
       </div>
-      <p class="quickstart-caption">在 QEMU 中引导 A20OS 只需一条命令，环境准备见<a href="./docs/">完整文档</a>。</p>
+      <p class="quickstart-caption">先按<a href="./docs/dev/build/">首次运行指南</a>安装 Linux / RISC-V64 依赖，再执行环境检查和启动命令。进入 shell 后输入 <code>poweroff</code> 正常退出。</p>
     </div>
   </section>
 

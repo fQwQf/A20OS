@@ -388,6 +388,7 @@ jobs:
 
       - name: QEMU smoke gates
         run: |
+          make smoke-quickstart
           make smoke-riscv64
           make smoke-abi-linux
           make smoke-syscall-ext

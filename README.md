@@ -96,7 +96,7 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 
 `tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口；`make check-trim-registry` 保证实例校验与构建读到的矩阵不漂移。
 
-* **退出 1.0 的历史移植**：LoongArch32（LA32R / NaiLoong）与 PPC64LE（pSeries）。不再承诺继续完善或 Rust 迁移；历史资料见 [LoongArch32](docs/platforms/loongarch32.md) 和 [PPC64LE](docs/platforms/ppc64le.md)。
+* **退出 1.0 的历史移植**：LoongArch32（LA32R / NaiLoong）与 PPC64LE（pSeries）。不再承诺继续完善或 Rust 迁移；复现需使用 `v0.18` checkout 内的历史文档，见 [v0.18 说明](docs/releases/v0.18.md)。
 
 ## 网络栈的当前边界
 按名字读大这份能力是最容易出错的地方，所以把边界写在 README 而不是只留在设计文档里：
@@ -140,10 +140,33 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 
 ## 构建与运行
 
-### 1. 环境准备
-需要本机安装活跃架构的交叉工具链（RISC-V/LoongArch64/AArch64/x86_64/ARM；LoongArch32 与 PPC64LE 已退出 1.0）、QEMU 与镜像工具（mtools/dosfstools/e2fsprogs），完整的 apt 命令见 [docs/dev/build.md](docs/dev/build.md) 的"环境准备"一节。
+### 1. 第一次运行：RISC-V 64 串口系统
 
-### 2. 编译内核
+首次体验推荐 Linux 上的 RISC-V 64 QEMU 实例。它不需要开发板、图形界面或其他架构的工具链。
+当前属于开发版本；桌面、服务器与真机的验证范围见 [状态与缺口](docs/status/README.md)。
+
+```bash
+git clone --recurse-submodules https://github.com/fQwQf/A20OS.git
+cd A20OS
+# 已经普通 clone 的用户补执行：git submodule update --init --recursive
+```
+
+先按 [首次运行指南](docs/dev/build.md#首次运行linux--risc-v-64) 安装单架构依赖与 Rust，
+或按该页的容器方式准备环境，再执行：
+
+```bash
+python3 tools/check_quickstart.py             # 缺工具、Rust target、子模块时给出提示
+tools/a20 run qemu-riscv64 -- -j4             # 编译完整用户态并启动，保持默认 both ABI
+```
+
+看到 shell 提示符后，输入 `/bin/echo hello` 应输出 `hello`；输入 `poweroff` 正常关机并返回宿主终端。
+自动验收可运行 `make -j4 smoke-quickstart`：检查 shell、外部程序输出和 QEMU 正常退出。
+该验收覆盖完整开发镜像；`smoke-riscv64` 只覆盖内核 bring-up。
+
+推荐预留 8 GiB 宿主内存、20 GiB 可用磁盘；这是准备预算，不是最低硬件规格。
+完整步骤、资源等待说明、退出方式及故障排查见 [构建与运行指南](docs/dev/build.md)。
+
+### 2. 其他构建入口
 
 根目录不带参数的 `make`/`make all` 是双架构发布构建入口，而不是单架构开发构建。它构建 RISC-V64 与 LoongArch64 的 `PROFILE=benchmark`、8 核、embedded-driver 产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。
 
@@ -175,6 +198,7 @@ make ARCH=aarch64 BOARD=sun50i-h616    ABI=linux BRINGUP=1 kernel-only
 make ARCH=aarch64 BOARD=rk3328        ABI=linux BRINGUP=1 kernel-only
 make ARCH=x86_64  BOARD=x86_64-pc      ABI=linux BRINGUP=1 kernel-only
 
+# STM32 入口当前有 Rust target 构建阻塞，见构建指南的“其他平台与当前边界”
 # STM32F103 64 KiB Flash / 20 KiB SRAM 固件（无网络栈，见上）
 make stm32f103-bringup
 

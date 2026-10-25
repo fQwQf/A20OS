@@ -124,8 +124,16 @@ void arch_handle_irq(uint64_t irq, int from_user) {
      * the timer for as long as the sources keep arriving. */
     if (irq == IRQ_S_EXT) {
         uint32_t irq_id = arch_plic_claim();
-        if (irq_id != 0)
+        if (irq_id != 0) {
+            static int ext_dbg_once;
+            if (!ext_dbg_once) { ext_dbg_once = 1;
+                kinfo("[IRQDBG] first S-ext claim irq_id=%u\n", irq_id); }
             driver_irq_dispatch(irq_id);
+        } else {
+            static int ext_spurious_once;
+            if (!ext_spurious_once) { ext_spurious_once = 1;
+                kinfo("[IRQDBG] S-ext trap with claim=0\n"); }
+        }
         arch_plic_complete(irq_id);
         return;
     }

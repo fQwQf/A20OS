@@ -6,6 +6,8 @@
 /* QEMU uses an identity DMW; physical boards may provide their own map. */
 #ifdef CONFIG_BOARD_LS2K1000
 #include "ls2k1000_platform.h"
+#elif defined(CONFIG_BOARD_LS2K0300)
+#include "ls2k0300_platform.h"
 #else
 #define PHYS_MEMORY_BASE   0x80000000UL
 #define PHYS_MEMORY_END    0x90000000UL
@@ -40,7 +42,9 @@ void loongarch64_memory_init(void);
 
 #define CLINT_BASE         0x00000000UL
 #define CLINT_TIMER_FREQ   100000000UL   /* 100 MHz — QEMU loongarch rdtime.d runs at 10ns period */
+#ifndef ARCH_TIMER_FREQ
 #define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
+#endif
 
 void loongarch64_smp_send_ipi(unsigned cpu, unsigned vector);
 void loongarch64_iocsr_write64(uint64_t value, uint32_t reg);

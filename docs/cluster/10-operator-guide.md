@@ -3,6 +3,10 @@
 本文是实际实现的操作入口。部署配置语法、监管状态格式见
 [17-deployment-supervision.md](17-deployment-supervision.md)，ABI 见 01 文档。
 
+可选的远程页服务独立配置、默认关闭；只读/可写模式、容量与流量限制、初始
+文件和客户端 API 见 [63-configurable-remote-memory.md](63-configurable-remote-memory.md)。
+它提供显式页快照和原子提交，不会自动给普通进程建立跨机共享地址空间。
+
 ## 1. 部署前提
 
 每台机器有唯一持久 128 位 node_id，每次启动有非重复 boot epoch。

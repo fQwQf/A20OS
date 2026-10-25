@@ -2,13 +2,8 @@
 
 对应 V1-DESKTOP。现状见 [current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)；
 仍未关闭问题的诊断见 [notes/](notes/README.md)。
-
-### DESKTOP-06 Minecraft 性能
-
-- 现状：854×480、4 区块视距下约 8–18 FPS，菜单约 20 FPS。
-- 缺口：未达到稳定 30/60 FPS，也没有性能目标与对照。
-- 关闭条件：给出目标帧率与同输入对照，达到目标或把目标改为有依据的契约。
-- 来源：[current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)。
+电源菜单的关机、重启要求及验收结果见
+[桌面验收记录](../history/desktop-1.0-2026-10-23.md)。
 
 ### DESKTOP-14 `svcmgr` 强制终止在 AArch64 的验收
 

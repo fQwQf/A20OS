@@ -46,12 +46,17 @@ void trap_init(void) {
      * only timer/IPI; the Phase 2 image adds the LS2K HWI1 cascade below. */
     ecfg &= ~0x1FFFUL;
 #endif
+#ifdef CONFIG_BOARD_LS2K0300
+    /* Phase 1: discard firmware device routes and leave all IRQs masked. */
+    ecfg &= ~0x1FFFUL;
+#else
     ecfg |= (1UL << 12) | (1UL << 11);
+#endif
 #ifdef CONFIG_BOARD_LS2K1000
 #ifndef CONFIG_COOPERATIVE_BOOT
     ecfg |= (1UL << LS2K_LIOINTC_PARENT_IRQ);
 #endif
-#else
+#elif !defined(CONFIG_BOARD_LS2K0300)
     ecfg |= (1UL << 2);
 #endif
     __asm__ __volatile__("csrwr %0, 0x4"
@@ -61,7 +66,7 @@ void trap_init(void) {
 
     /* Unmask the PCH-PIC PCI INTx lines and enable the EIOINTC inputs so the
      * QEMU virt I/O interrupt controllers can deliver device IRQs on HWI0. */
-#ifndef CONFIG_BOARD_LS2K1000
+#if !defined(CONFIG_BOARD_LS2K1000) && !defined(CONFIG_BOARD_LS2K0300)
     la64_eiointc_pic_init();
 #endif
 }
