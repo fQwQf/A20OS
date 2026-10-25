@@ -246,4 +246,15 @@ int hyp_riscv_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
     return mm_s2_audit(vm->s2_root, ARCH_PT_ROOT_LEVEL, out);
 }
 
+#else
+/* This query is also used by the trap decoder in NoMMU builds, where no
+ * stage-2 backend is registered. Zero means no valid mapping/permissions;
+ * it must never advertise an accessible guest page without a stage-2. */
+pte_t hyp_riscv_s2_prot(hyp_vm_t *vm, uint64_t gpa)
+{
+    (void)vm;
+    (void)gpa;
+    return 0;
+}
+
 #endif
