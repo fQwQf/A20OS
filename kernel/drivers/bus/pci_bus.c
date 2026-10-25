@@ -582,16 +582,16 @@ static void pci_virtio_write32(virtio_transport_t *transport, uint32_t off,
     case VIRTIO_MMIO_QUEUE_DEVICE_LOW: writel(value, (volatile void *)(vt->common + PCOMMON_QUEUE_DEV_LO)); break;
     case VIRTIO_MMIO_QUEUE_DEVICE_HIGH: writel(value, (volatile void *)(vt->common + PCOMMON_QUEUE_DEV_HI)); break;
     case VIRTIO_MMIO_QUEUE_NOTIFY: {
-        /* QueueSelect still goes out: the spec defines the notify offset as a
-         * property of the selected queue, and leaving the selection alone
-         * keeps every later Queue* register the driver reads unambiguous. */
-        writew((uint16_t)value, (volatile void *)(vt->common + PCOMMON_QUEUE_SEL));
         uint16_t qidx = (uint16_t)value;
         uint16_t notify_off;
         if (qidx < PCI_VIRTIO_NOTIFY_CACHE &&
             (vt->notify_off_cached & (1U << qidx))) {
             notify_off = vt->notify_off_cache[qidx];
         } else {
+            /* Select only to discover the immutable per-queue offset. A
+             * cached kick needs just the doorbell, which KVM can handle via
+             * ioeventfd without emulating the common-config register. */
+            writew(qidx, (volatile void *)(vt->common + PCOMMON_QUEUE_SEL));
             notify_off = readw((const volatile void *)(vt->common +
                            PCOMMON_QUEUE_NOTIFY_OFF));
             if (qidx < PCI_VIRTIO_NOTIFY_CACHE) {
