@@ -89,16 +89,16 @@ static int probe(device_t *dev)
         res->end - res->start < LSDC_BOOT_REG_BYTES - 1)
         return -ENODEV;
     const lsdc_boot_policy_t *policy = dev->plat_data;
-    if (policy) {
-        if (policy->magic != LSDC_BOOT_POLICY_MAGIC ||
-            policy->version != LSDC_BOOT_POLICY_VERSION ||
-            policy->register_base != res->start)
-            return -EINVAL;
-        aperture[0] = policy->aperture_base;
-        aperture[1] = policy->aperture_bytes;
-    } else if (fw_node_read_u64_array(&dev->firmware_node,
-                                      "a20,scanout-aperture", aperture, 2))
-        return -ENODEV;
+    /* A firmware property cannot authorize an uncached alias of allocator
+     * RAM. The architecture must exclude the aperture and prepare its cache
+     * state before this driver can expose a writable borrowed scanout. */
+    if (!policy) return -ENODEV;
+    if (policy->magic != LSDC_BOOT_POLICY_MAGIC ||
+        policy->version != LSDC_BOOT_POLICY_VERSION ||
+        policy->register_base != res->start || !policy->prepare)
+        return -EINVAL;
+    aperture[0] = policy->aperture_base;
+    aperture[1] = policy->aperture_bytes;
     struct lsdc_boot *s = kcalloc(1, sizeof(*s));
     if (!s) return -ENOMEM;
     s->registers = arch_device_map_mmio(res->start, LSDC_BOOT_REG_BYTES, res->flags);
@@ -112,6 +112,11 @@ static int probe(device_t *dev)
         kfree(s);
         printf("[GPU] lsdc boot: no stable supported firmware scanout\n");
         return -ENODEV;
+    }
+    int prepared = policy->prepare(s->mode.physical, (size_t)s->mode.bytes);
+    if (prepared) {
+        arch_device_unmap_mmio((void *)s->registers, LSDC_BOOT_REG_BYTES);
+        kfree(s); return prepared;
     }
     s->scanout = arch_device_map_mmio(s->mode.physical, (size_t)s->mode.bytes, 0);
     if (!s->scanout) {

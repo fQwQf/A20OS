@@ -50,6 +50,12 @@ static uint8_t scanout;
 static unsigned config_reads;
 static int unstable;
 static uint64_t aperture[2]={0x08000000,0x07000000};
+static int prepared,prepare_result;
+static int prepare_scanout(uint64_t pa,size_t bytes){
+ assert(pa>=0x08000000 && bytes && bytes<=0x0f000000-pa);
+ prepared++;return prepare_result;
+}
+static lsdc_boot_policy_t default_policy;
 static device_t device={.resource={0x16090000,0x16091fff,0}};
 uint32_t readl(const volatile void *p){
  const volatile uint32_t *r=p;
@@ -62,6 +68,7 @@ void *arch_device_map_mmio(uint64_t pa,size_t size,uint32_t flags){
  if(fail_map && maps+1==(unsigned)fail_map){maps++;return NULL;}
  maps++;
  if(pa==0x16090000){assert(size==LSDC_BOOT_REG_BYTES);return registers;}
+ assert(prepared);
  assert(pa>=aperture[0] && pa+size<=aperture[0]+aperture[1]);return &scanout;
 }
 void arch_device_unmap_mmio(void *p,size_t size){assert(p && size);unmaps++;}
@@ -83,6 +90,9 @@ static void defaults(void){
  config_reads=0;unstable=fail_alloc=fail_map=register_result=property_result=0;
  allocations=frees=maps=unmaps=registrations=unregisters=barriers=0;
  aperture[0]=0x08000000;aperture[1]=0x07000000;
+ default_policy=(lsdc_boot_policy_t){LSDC_BOOT_POLICY_MAGIC,LSDC_BOOT_POLICY_VERSION,
+                                    0x16090000,aperture[0],aperture[1],prepare_scanout};
+ device.plat_data=&default_policy;prepared=prepare_result=0;
 }
 static void rejected(unsigned off,uint32_t value){
  defaults();registers[off/4]=value;
@@ -108,10 +118,11 @@ int main(void){
  rejected(LSDC_BOOT_ADDR0,0x0efff000); /* mapping crosses upper bound */
  rejected(LSDC_BOOT_HI0,1);
  defaults();aperture[0]=UINT64_MAX-4095;aperture[1]=8192;
+ default_policy.aperture_base=aperture[0];default_policy.aperture_bytes=aperture[1];
  assert(probe(&device)==-ENODEV && !registrations && allocations==frees);
  defaults();property_result=-ENOENT;
  lsdc_boot_policy_t policy={LSDC_BOOT_POLICY_MAGIC,LSDC_BOOT_POLICY_VERSION,
-                            0x16090000,0x08000000,0x07000000};
+                            0x16090000,0x08000000,0x07000000,prepare_scanout};
  device.plat_data=&policy;
  assert(!probe(&device));assert(!remove_device(&device));
  assert(device.plat_data==&policy); /* borrowed policy survives remove */
@@ -124,7 +135,9 @@ int main(void){
  defaults();device.plat_data=&policy;policy.aperture_base=0x0e800000;
  assert(probe(&device)==-ENODEV&&!registrations);policy.aperture_base=0x08000000;
  defaults();unstable=1;assert(probe(&device)==-ENODEV&&!registrations);
- defaults();property_result=-ENOENT;assert(probe(&device)==-ENODEV&&!maps);
+ defaults();device.plat_data=NULL;assert(probe(&device)==-ENODEV&&!maps);
+ defaults();default_policy.prepare=NULL;assert(probe(&device)==-EINVAL&&!maps);
+ defaults();prepare_result=-EIO;assert(probe(&device)==-EIO&&prepared==1&&maps==1&&unmaps==1);
  defaults();fail_alloc=1;assert(probe(&device)==-ENOMEM&&!maps);
  defaults();fail_map=1;assert(probe(&device)==-ENXIO&&allocations==frees);
  defaults();fail_map=2;assert(probe(&device)==-ENXIO&&unmaps==1&&allocations==frees);
@@ -166,20 +179,22 @@ static int exists,match,enumerations,puts_count;
 static const int display_tree;
 device_t *device_find_get_by_mmio(uint64_t pa){assert(pa==0x16090000);return exists?&canonical:NULL;}
 resource_t *device_get_resource(device_t*d,int type,int index){assert(type==RES_MMIO&&!index);return &d->resource;}
-int fw_node_match_id(const fw_node_t*n,const char*id){(void)n;assert(!strcmp(id,"loongson,la2k0300-dc"));return match;}
+int fw_node_match_id(const fw_node_t*n,const char*id){(void)n;assert(!strcmp(id,"loongson,la2k0300-dc")||!strcmp(id,"a20,ls2k0300-boot-display"));return match;}
 void device_put(device_t*d){assert(d==&canonical);puts_count++;}
-void board_firmware_static_enumerate(const int*t){assert(t==&display_tree);enumerations++;}
+void board_firmware_static_enumerate(const int*t){assert(t==&display_tree);enumerations++;exists=match=1;canonical.resource=(resource_t){0x16090000,0x16091fff,0};}
+int ls2k0300_scanout_prepare(uint64_t pa,size_t bytes){(void)pa;(void)bytes;return 0;}
 POLICY
 CONFIGURE
 int main(void){
  (void)platform_bus;(void)allocations;(void)frees;(void)maps;(void)unmaps;
  (void)registrations;(void)unregisters;(void)barriers;(void)fail_map;
  (void)register_result;(void)property_result;
- configure_devices();assert(enumerations==1&&!puts_count);
+ configure_devices();assert(enumerations==1&&puts_count==1&&canonical.plat_data==&display_policy);
  exists=1;match=1;canonical.resource=(resource_t){0x16090000,0x16091fff,0};
- configure_devices();assert(canonical.plat_data==&display_policy&&enumerations==1&&puts_count==1);
+ configure_devices();assert(canonical.plat_data==&display_policy&&enumerations==1&&puts_count==2);
  assert(display_policy.aperture_base==0x08000000&&display_policy.aperture_bytes==0x07000000);
  canonical.plat_data=NULL;match=0;configure_devices();assert(!canonical.plat_data&&enumerations==1);
+ match=-EINVAL;configure_devices();assert(!canonical.plat_data);
  match=1;canonical.resource.start++;configure_devices();assert(!canonical.plat_data);
  canonical.resource.start=0x16090000;canonical.resource.end=0x160900ff;
  configure_devices();assert(!canonical.plat_data);
