@@ -1,0 +1,25 @@
+Subject: [9/9] configs: nanopi-r5c: enable HDMI video output
+
+Enable the VOP2 display controller and RK3568 DesignWare HDMI so U-Boot
+drives the HDMI port: vidconsole for the boot menu on a monitor, and
+EFI GOP (which registers automatically once a UCLASS_VIDEO device
+exists) for graphical UEFI payloads. Uses the in-tree dw_hdmi driver;
+no separate PHY driver is needed on RK3568.
+
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+---
+ configs/nanopi-r5c-rk3568_defconfig | 4 ++++
+ 1 file changed, 4 insertions(+)
+diff --git a/configs/nanopi-r5c-rk3568_defconfig b/configs/nanopi-r5c-rk3568_defconfig
+index e75a24dadc8..a89ade9829b 100644
+--- a/configs/nanopi-r5c-rk3568_defconfig
++++ b/configs/nanopi-r5c-rk3568_defconfig
+@@ -68,4 +68,8 @@ CONFIG_USB_OHCI_HCD=y
+ CONFIG_USB_OHCI_GENERIC=y
+ CONFIG_USB_DWC3=y
+ CONFIG_USB_DWC3_GENERIC=y
++CONFIG_VIDEO=y
++CONFIG_DISPLAY=y
++CONFIG_VIDEO_ROCKCHIP=y
++CONFIG_DISPLAY_ROCKCHIP_HDMI=y
+ CONFIG_ERRNO_STR=y

@@ -421,8 +421,8 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
         case "board-sdcard":
             if inst.board not in {"pine-a64", "licheerv-nano", "lichee-pi-zero", "quartz64-zero", "ox64"}:
                 e.append("package.kind board-sdcard: no packager for this board")
-            if p.variant is not None:
-                e.append("package.variant: not used for board-sdcard")
+            if p.variant is not None and not (inst.board == "quartz64-zero" and p.variant == "video"):
+                e.append("package.variant: board-sdcard only supports quartz64-zero video")
         case unreachable:
             assert_never(unreachable)
     if p.kind != "release" and (p.kernel_out is not None or p.disk_out is not None):

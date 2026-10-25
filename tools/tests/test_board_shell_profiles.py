@@ -6,7 +6,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from a20_board import run_package
+from a20_board import firmware_make_args, run_package
 from a20_derive import derive_make_vars
 from a20_instance import parse_instance
 from a20_make import REPO_ROOT, build_instance
@@ -15,6 +15,25 @@ from a20_validate import validate_instance
 
 
 class BoardShellProfiles(unittest.TestCase):
+    def test_physical_media_profiles_select_players_and_matching_firmware(self):
+        for board in ('pine-a64', 'quartz64-zero', 'ls2k0300'):
+            with self.subTest(board=board):
+                inst = parse_instance(REPO_ROOT / 'instances' / f'{board}-media.toml')
+                self.assertEqual(validate_instance(inst, REPO_ROOT), [])
+                self.assertIn('RAMFS_MEDIA=1', derive_make_vars(inst))
+                with patch('a20_board.exec_make') as execute:
+                    run_package(inst, [], False)
+                    extra = execute.call_args.args[2]
+                    if board == 'quartz64-zero':
+                        self.assertEqual(firmware_make_args(inst), ['QUARTZ64_ZERO_VIDEO=1'])
+                        self.assertIn('QUARTZ64_ZERO_VIDEO=1', extra)
+                        self.assertIn(('firmware-manifest', 'build/quartz64-zero/firmware-video/manifest.json'),
+                                      _candidates(inst, {'KERNEL_ELF': 'kernel.elf', 'KERNEL_BIN': 'kernel.bin'}))
+                    else:
+                        self.assertEqual(firmware_make_args(inst), [])
+                invalid = replace(inst, package=replace(inst.package, kind='board-sdcard', variant='unknown'))
+                self.assertTrue(any('package.variant' in e for e in validate_instance(invalid, REPO_ROOT)))
+
     def test_media_profile_is_explicit_and_requires_ramfs(self):
         inst = parse_instance(REPO_ROOT / 'instances/j1900-pc-uefi-shell.toml')
         self.assertEqual(validate_instance(inst, REPO_ROOT), [])

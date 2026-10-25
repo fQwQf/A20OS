@@ -103,9 +103,13 @@ check-firmware-model:
 	  tools.tests.test_arm32_poll_abi tools.tests.test_fault_ffi_width \
 	  tools.tests.test_vma_release_ffi_width \
 	  tools.tests.test_boot_framebuffer \
+	  tools.tests.test_dt_framebuffer tools.tests.test_simplefb_lifecycle \
+	  tools.tests.test_lsdc_boot tools.tests.test_quartz64_zero_video \
+	  tools.tests.test_sunxi_audio \
 	  tools.tests.test_videoplay tools.tests.test_media_mount \
 	  tools.tests.test_uefi_esp_image \
 	  tools.tests.test_memcpy_boundaries
+	$(PYTHON) -m unittest tools.tests.test_sleep_abi
 
 # Execute the production common fabric driver for x86-64, AArch64 and RV64.
 .PHONY: check-shared-fabric-portability

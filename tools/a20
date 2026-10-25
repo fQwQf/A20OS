@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 from typing import assert_never
 
-from a20_board import run_flash, run_package
+from a20_board import firmware_make_args, run_flash, run_package
 from a20_complete import BASH_COMPLETION, candidates as completion_candidates
 from a20_error import (
     A20Error,
@@ -271,7 +271,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
     if target is None:
         raise A20Error(f"{inst.board}: no firmware preparation target; consult its platform guide")
     _gate_resources(inst, args, guest=False)
-    exec_make(inst, target, list(args.make_args), args.dry_run)
+    exec_make(inst, target, [*firmware_make_args(inst), *args.make_args], args.dry_run)
 
 
 def cmd_run(args: argparse.Namespace) -> None:

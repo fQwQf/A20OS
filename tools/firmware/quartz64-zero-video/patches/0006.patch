@@ -1,0 +1,67 @@
+Subject: [6/9] video: rockchip: rk3568: ungate the HDMI controller clocks
+
+The RK3568 HDMI probe polled the PHY hot-plug-detect status but always
+timed out ('hdmi can not get hpd signal', -ENODEV), so the controller
+never probed and HDMI output was dead even with a monitor attached.
+
+The HDMI controller clocks are never enabled: neither the dw_hdmi glue
+nor the RK3568 clock driver manages the pclk_hdmi_host / clk_hdmi_sfr /
+clk_hdmi_cec gates (CLKGATE_CON21 bits 3-5). clk_hdmi_sfr feeds the
+controller/PHY logic that produces the HPD status and is parented off
+xin24m, independent of the pclk_vo domain that VOP2 bring-up enables, so
+it stayed gated: register reads returned a clean zero and the HPD bit
+never asserted. Mainline Linux enables isfr/iahb before reading the same
+HDMI_PHY_STAT0 HPD bit.
+
+Ungate the three HDMI gates in rk3568_hdmi_probe() before probing the
+controller.
+
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+---
+ drivers/video/rockchip/rk3568_hdmi.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+diff --git a/drivers/video/rockchip/rk3568_hdmi.c b/drivers/video/rockchip/rk3568_hdmi.c
+index c3f4504ca8f..7b2034d6b3f 100644
+--- a/drivers/video/rockchip/rk3568_hdmi.c
++++ b/drivers/video/rockchip/rk3568_hdmi.c
+@@ -7,12 +7,18 @@
+ #include <dm.h>
+ #include <dw_hdmi.h>
+ #include <edid.h>
++#include <asm/arch-rockchip/clock.h>
++#include <asm/arch-rockchip/cru_rk3568.h>
+ #include <asm/arch-rockchip/hardware.h>
+ #include <asm/arch-rockchip/grf_rk3568.h>
+ #include "rk_hdmi.h"
+ 
+ #define RK3568_IO_DDC_IN_MSK             ((3 << 14) | (3 << (14 + 16)))
+ 
++/* CLKGATE_CON21: pclk_hdmi_host (b3), clk_hdmi_sfr (b4), clk_hdmi_cec (b5) */
++#define RK3568_HDMI_CLKGATE_CON		21
++#define RK3568_HDMI_CLKGATE_MSK		(0x7 << 3)
++
+ static int rk3568_hdmi_enable(struct udevice *dev, int panel_bpp,
+ 			      const struct display_timing *edid)
+ {
+@@ -41,10 +47,21 @@ static int rk3568_hdmi_probe(struct udevice *dev)
+ {
+ 	struct rk_hdmi_priv *priv = dev_get_priv(dev);
+ 	struct rk3568_grf *grf = priv->grf;
++	struct rk3568_cru *cru = rockchip_get_cru();
+ 
+ 	rk_hdmi_probe_regulators(dev, rk3568_hdmi_reg_names,
+ 				 ARRAY_SIZE(rk3568_hdmi_reg_names));
+ 
++	/*
++	 * Ungate the HDMI controller clocks. The RK3568 clock driver does
++	 * not manage these gates, and clk_hdmi_sfr in particular must be
++	 * running for the PHY hot-plug-detect status to be valid; without it
++	 * the HPD poll times out and the controller is not probed.
++	 */
++	if (cru)
++		rk_clrreg(&cru->clkgate_con[RK3568_HDMI_CLKGATE_CON],
++			  RK3568_HDMI_CLKGATE_MSK);
++
+ 	writel(RK3568_IO_DDC_IN_MSK, &grf->vo_con1);
+ 
+ 	return rk_hdmi_probe(dev);

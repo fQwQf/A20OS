@@ -1,0 +1,81 @@
+Subject: [8/9] video: rockchip: rk3568: power the HDMI PHY analog supplies
+
+On a cold boot the RK3568 HDMI output stayed dead (no hot-plug detect),
+while after a warm reboot from Linux it worked, including graphical UEFI.
+The difference was the PHY analog supplies avdd-0v9 and avdd-1v8
+(vdda0v9_image and vcca1v8_image on the R5C): Linux enables them and a
+warm reset leaves the PMIC LDOs on, but U-Boot left them disabled at
+their minimum voltage on cold boot, so the PHY had no analog power and
+never asserted HPD.
+
+The driver did call rk_hdmi_probe_regulators() with "avdd-0v9"/"avdd-1v8",
+but that resolves regulators by their regulator-name via
+regulator_autoset_by_name(), which does not match the vdda0v9_image /
+vcca1v8_image names, so the lookup failed and the supplies were never
+enabled. regulator_autoset() would not have helped either: it returns
+early for regulators that are neither always-on nor boot-on.
+
+Resolve the supplies through the avdd-0v9-supply / avdd-1v8-supply
+phandles, set the constrained voltage and enable them, matching the
+kernel's dw_hdmi-rockchip behaviour.
+
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+---
+ drivers/video/rockchip/rk3568_hdmi.c | 29 +++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+diff --git a/drivers/video/rockchip/rk3568_hdmi.c b/drivers/video/rockchip/rk3568_hdmi.c
+index 9b3e54ce6fd..4fd164cd40b 100644
+--- a/drivers/video/rockchip/rk3568_hdmi.c
++++ b/drivers/video/rockchip/rk3568_hdmi.c
+@@ -12,6 +12,7 @@
+ #include <asm/arch-rockchip/cru_rk3568.h>
+ #include <asm/arch-rockchip/hardware.h>
+ #include <asm/arch-rockchip/grf_rk3568.h>
++#include <power/regulator.h>
+ #include "rk_hdmi.h"
+ 
+ /* Default HDMI PHY reference rate to bring HPLL up for hot-plug detect */
+@@ -47,11 +48,30 @@ static int rk3568_hdmi_of_to_plat(struct udevice *dev)
+ 	return rk_hdmi_of_to_plat(dev);
+ }
+ 
+-static const char * const rk3568_hdmi_reg_names[] = {
+-	"avdd-0v9",
+-	"avdd-1v8"
++static const char * const rk3568_hdmi_supplies[] = {
++	"avdd-0v9-supply",
++	"avdd-1v8-supply",
+ };
+ 
++static void rk3568_hdmi_enable_supplies(struct udevice *dev)
++{
++	struct dm_regulator_uclass_plat *plat;
++	struct udevice *reg;
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(rk3568_hdmi_supplies); i++) {
++		if (device_get_supply_regulator(dev, rk3568_hdmi_supplies[i],
++						&reg))
++			continue;
++
++		plat = dev_get_uclass_plat(reg);
++		if (plat->min_uV)
++			regulator_set_value(reg, plat->min_uV);
++
++		regulator_set_enable(reg, true);
++	}
++}
++
+ static int rk3568_hdmi_probe(struct udevice *dev)
+ {
+ 	struct rk_hdmi_priv *priv = dev_get_priv(dev);
+@@ -59,8 +79,7 @@ static int rk3568_hdmi_probe(struct udevice *dev)
+ 	struct rk3568_cru *cru = rockchip_get_cru();
+ 	struct clk ref_clk;
+ 
+-	rk_hdmi_probe_regulators(dev, rk3568_hdmi_reg_names,
+-				 ARRAY_SIZE(rk3568_hdmi_reg_names));
++	rk3568_hdmi_enable_supplies(dev);
+ 
+ 	/*
+ 	 * Ungate the HDMI controller clocks. The RK3568 clock driver does

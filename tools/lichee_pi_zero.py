@@ -99,7 +99,7 @@ def prepare(args) -> None:
     make, gcc = common.tool('make'), common.tool(args.cross_compile + 'gcc')
     for name in ('bison', 'flex', 'swig', 'openssl'):
         common.tool(name)
-    env = dict(os.environ, SOURCE_DATE_EPOCH=common.SOURCE_DATE_EPOCH, TZ='UTC')
+    env = common.firmware_environment()
     work, out = args.work.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
     deps = work / 'python-deps'

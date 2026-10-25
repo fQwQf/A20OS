@@ -1,0 +1,46 @@
+name = "quartz64-zero-media"
+description = "quartz64-zero HDMI firmware scanout; no PCM audio driver; physical validation pending"
+arch = "aarch64"
+board = "quartz64-zero"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ramfs_media = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 1500000
+boot_wait = 3
+boot_timeout = "120s"
+# Wait for init to launch mksh; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/quartz64-zero/a20os-quartz64-zero-media-sdcard.img"]
+# Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+variant = "video"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv loadaddr 0x02080000",
+    "setenv fdt_addr_r 0x0a000000",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} rk3566-quartz64-zero.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """RAM shell with existing videoplay and audioplay. HDMI firmware scanout; no PCM audio driver.
+Physical execution is pending; see docs/platforms/quartz64-zero.md.
+Video/audio devices are exposed only after their hardware probe succeeds.
+Files remain in RAM and disappear at reset. No SSH service is provided.
+"""

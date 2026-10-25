@@ -1,0 +1,47 @@
+Subject: [5/9] video: rockchip: vop2: fix NULL register base in rk3568 probe
+
+rk3568_vop_probe() calls rkvop2_initialize() before rk_vop2_probe(),
+but priv->regs (the VOP register base) was only resolved inside
+rk_vop2_probe() via dev_read_addr_ptr(). rkvop2_initialize()
+dereferences priv->regs (sysctrl = priv->regs + VOP2_SYSREG_OFFSET),
+so on probe it faulted on a NULL base:
+
+  Synchronous Abort, esr 0x96000010, far 0x50
+  ... rk3568_vop_probe
+
+Resolve the register base at the top of rk3568_vop_probe(), before
+rkvop2_initialize() runs; rk_vop2_probe() then sets it again to the
+same value.
+
+Fixes: the in-review 'video: rockchip: Add VOP2 support' change.
+Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+---
+ drivers/video/rockchip/rk3568_vop.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+diff --git a/drivers/video/rockchip/rk3568_vop.c b/drivers/video/rockchip/rk3568_vop.c
+index 787060c1d80..ce182d1d51c 100644
+--- a/drivers/video/rockchip/rk3568_vop.c
++++ b/drivers/video/rockchip/rk3568_vop.c
+@@ -179,12 +179,22 @@ static int rk3568_vop_remove(struct udevice *dev)
+ 
+ static int rk3568_vop_probe(struct udevice *dev)
+ {
++	struct rk_vop2_priv *priv = dev_get_priv(dev);
+ 	int ret;
+ 
+ 	/* Before relocation we don't need to do anything */
+ 	if (!(gd->flags & GD_FLG_RELOC))
+ 		return 0;
+ 
++	/*
++	 * rkvop2_initialize() touches the VOP registers, so the register
++	 * base must be resolved before it runs; rk_vop2_probe() sets it
++	 * again to the same value.
++	 */
++	priv->regs = dev_read_addr_ptr(dev);
++	if (!priv->regs)
++		return -EINVAL;
++
+ 	ret = rkvop2_initialize(dev);
+ 	if (ret)
+ 		return ret;

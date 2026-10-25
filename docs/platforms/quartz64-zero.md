@@ -61,7 +61,8 @@ fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也�
 | 定时器 | 非安全物理定时器 PPI 14 / INTID 30；从 CNTFRQ 读取频率，固件配置预期 24 MHz |
 | 电源 | TF-A PSCI SMC 重启/关机；实际断电效果需上板确认 |
 | microSD | SDMMC0 `0xfe2b0000`、SPI 98 / INTID 130；DW-MSHC 单线 PIO，固定 3.3 V、最高 12 MHz，SDSC/SDHC/SDXC，发布统一 block class；实机读写未验收 |
-| 未实现 | eMMC、USB、PCIe、以太网、Wi-Fi/BT、HDMI、音频、PMIC、DVFS、SMP、ITS/MSI |
+| 可选视频固件 | RK3566 VOP2 → Synopsys DW-HDMI，EDID 模式选择，实际扫描缓冲区以 DT simplefb 交接；交叉构建可验证，Zero 实机显示待验收。 |
+| 未实现 | eMMC、USB、PCIe、以太网、Wi-Fi/BT、PCM 音频、内核 PMIC/DVFS、SMP、ITS/MSI |
 
 GICv3 是上游 RK356x SoC 设备树确认的硬件事实。GICv3 的 CPU 接口不是 GICv2 的 GICC
 MMIO，不能沿用 PINE A64 的中断控制器。EL3 固件必须先将 UART 和非安全物理定时器
@@ -266,6 +267,52 @@ booti ${loadaddr} - ${fdt_addr_r}
 可用另一张卡作对照。该下载是厂商镜像格式；不要把它当作本流程的 U-Boot 二进制或
 直接替换 `u-boot-rockchip.bin`，也不要使用 Model A/B 的镜像。
 
+## 可选 HDMI 固件和显示交接
+
+默认 `prepare` 和 shell 包保持串口配置。需要 HDMI 时，使用独立的视频固件输出：
+
+```sh
+tools/a20 prepare quartz64-zero-media
+tools/a20 package quartz64-zero-media -- -j2
+tools/a20 deploy quartz64-zero-media --media-device /dev/实际SD设备
+```
+
+`quartz64-zero-media` 嵌入既有 `videoplay`/`audioplay` 播放器，自动选择独立的
+`firmware-video`，生成 `a20os-quartz64-zero-media-sdcard.img` 并记录所用视频固件摘要。
+`deploy` 按上文的整盘确认流程写卡；此处 `/dev/实际SD设备` 必须换成经核对的目标。
+开机前连接供电正常、支持 HDMI 的显示器；串口仍为 UART2、1500000 8N1。
+不要把 Model A/B、SOQuartz 或 NanoPi 的 DTB 写入 Zero 包。
+
+视频配置固定 U-Boot v2026.07 和 [VOP2/HDMI 九补丁系列](https://patchwork.ozlabs.org/project/uboot/list/?series=514476)。
+源码、每个补丁和本地板级 glue 均记录校验摘要；其 GPL-2.0+ 许可证及作者见
+[视频固件输入说明](../../tools/firmware/quartz64-zero-video/README.md)。
+默认的 v2025.10 固件没有 RK3566 VOP2 驱动，仅开启 `VIDEO_ROCKCHIP` 不会获得显示。
+
+显示链路为 VOP2 VP0 → DW-HDMI → 板上 HDMI 接口。Zero 原理图第 23 页确认
+RK817 LDO2（0.9 V）和 LDO7（1.8 V）经 R2137/R2136 为 HDMI PHY 供电，
+视频 DT 单独描述这两路电源，不借用其他板型完整 PMIC 配置。
+U-Boot 使能控制器 gate、PHY 参考时钟和这两路电源，通过 EDID 确定实际模式。
+在启动内核前，板级 `EVT_FT_FIXUP` 将已成功探测的宽高、stride、物理地址和像素格式写到
+`/chosen/framebuffer@...`，并通过 `/reserved-memory` 保留整个 U-Boot video 分配。
+像素 fetch 为 ARGB8888，但 VP0 单层底部 mixer 显式设为全局 alpha=255、禁用逐像素 alpha，
+源颜色系数为全局 alpha、目标系数为其反值，HDR 混合旁路。因此高 8 位不参与颜色合成，
+发布 `x8r8g8b8` 与实际像素语义一致；不依赖冷启动或热复位后的寄存器默认值。
+寄存器设置对照 [Linux v6.12 `vop2_setup_alpha`/`vop2_parse_alpha`](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/rockchip/rockchip_drm_vop2.c)
+及 [mixer 寄存器定义](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/rockchip/rockchip_drm_vop2.h)。
+`VIDEO_REMOVE` 关闭，避免 U-Boot 在交接时停掉 VOP2；内核接管后不得关闭这些显示时钟和电源。
+串口应出现 `A20OS HDMI simplefb:` 及实际模式。未连接显示器或 HDMI 探测失败时不创建虚假 framebuffer，
+继续串口启动。内核能否显示图像还取决于相同版本的通用 simplefb/fbdev 驱动。
+
+此配置的主机交叉构建、DTB 编译和普通文件 SD 封装可以自动检查；**HDMI 冷启动、
+EDID 兼容性、持续扫描和内核画面尚无 Zero 实机验收结果**。QEMU virt 不模拟该显示链路。
+验收时保留串口日志、`firmware-video/manifest.json`、SD 镜像 manifest 与显示器型号；
+分别确认冷启动首屏、内核接管后持续输出及连续更新画面。
+
+音频有两条不同通路：SoC 内部 `i2s0_8ch` → HDMI 音频发送器，以及原理图第 23 页的
+`I2S1_M0` → RK817 codec → 耳机模拟输出。当前未提供 RK356x I2S、DMA、DW-HDMI
+PCM/时钟恢复或 RK817 codec 内核驱动，视频配置也不启用 `hdmi-sound`。
+因此不能将有 HDMI 画面视为有声音，也不把静态 `simple-audio-card` 节点视为音频驱动。
+
 ## 依据
 
 - [PINE64 Quartz64-Zero 设备页](https://pine64.org/devices/quartz64-zero/)：RK3566T、1 GiB LPDDR4、供电规格。
@@ -279,3 +326,5 @@ booti ${loadaddr} - ${fdt_addr_r}
 - [Arm GIC 架构规范 IHI0069](https://developer.arm.com/documentation/ihi0069/latest/) 与 [TF-A GICv3 分组实现](https://github.com/TrustedFirmware-A/trusted-firmware-a/blob/v2.13.0/drivers/arm/gic/v3/gicv3_main.c)：安全/非安全中断归属边界。
 
 - [Linux v6.12 DW-MMC 核心](https://github.com/torvalds/linux/blob/v6.12/drivers/mmc/host/dw_mmc.c)、[Rockchip 接入](https://github.com/torvalds/linux/blob/v6.12/drivers/mmc/host/dw_mmc-rockchip.c) 和 [RK3568 时钟](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/rockchip/clk-rk3568.c)：寄存器布局、FIFO、固定二分频和 gate/mux 事实参考；本仓库驱动独立实现，未复制上游 GPL 实现。
+
+- [Linux v6.12 RK356x HDMI audio topology](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/rockchip/rk356x.dtsi)：`hdmi_sound` 的 CPU DAI 是 `i2s0_8ch`，codec DAI 是 DW-HDMI；模拟 RK817 音频使用独立 I2S1。

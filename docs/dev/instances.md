@@ -95,7 +95,8 @@ werror = true
 cooperative_boot = false
 storage_read_only = false
 external_root = false
-ramfs_user = false           # 仅 loongarch64/riscv64（components/trim.toml 的 ramfs-user 矩阵）
+ramfs_user = false           # 支持范围见 components/trim.toml 的 ramfs-user 矩阵
+ramfs_media = false          # 需要 ramfs_user=true；嵌入已有 videoplay/audioplay
 virtio_console_profile = "throughput" # 默认；compact 减少队列与缓冲区内存
 # virtio_console_rx_slots = 2         # 可单独覆盖预设，必须为 1～16 的 2 次幂
 # virtio_console_tx_slots = 2
@@ -202,6 +203,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `kernel.ubsan` / `werror` | `CONFIG_UBSAN` / `KERNEL_WERROR` |
 | `kernel.swap` | `CONFIG_SWAP`（y/n） |
 | `kernel.cooperative_boot` / `storage_read_only` / `external_root` / `ramfs_user` | `COOPERATIVE_BOOT` / `STORAGE_READ_ONLY` / `EXTERNAL_ROOT` / `RAMFS_USER` |
+| `kernel.ramfs_media` | `RAMFS_MEDIA`；仅增加现有播放器，不承诺具体板型的显示/音频硬件可用 |
 | `machine.smp` / `memory` / `allow_unverified_smp` | `NR_CPUS` / `QEMU_MEMORY` / `ALLOW_UNVERIFIED_SMP` |
 | `gui.display` / `audio_driver` / `audio_device` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` |
 | `net.hostfwd` | `NET_HOSTFWD`（逗号连接） |
@@ -338,6 +340,9 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 
 没有内核块驱动时，仍可由固件通过 SD FAT、USB 或网络载入内核；A20OS 启动后的块设备能力需另行验证。
 `board-sdcard` 生成板级 SD 镜像；固件、DTB 和启动脚本的组成由平台打包器决定。
+其中 `board=quartz64-zero` 可选择 `package.variant="video"`：prepare 与 package
+共同使用独立的 `firmware-video`，manifest 也记录该固件来源。其他板型不接受此 variant。
+`quartz64-zero-media` 已提供该配置；其显示前提和音频限制见对应 platform 文档。
 `prepare` 取得固件依赖，`package` 生成可写介质。完整操作由对应单平台页面说明。
 
 ```sh
