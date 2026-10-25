@@ -140,7 +140,15 @@ int hyp_riscv_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
         mm_pt_node_unlock(table);
         return -EEXIST;
     }
-    mm_pt_frame_lend(pfn);
+    uint64_t pf = spin_lock_irqsave(&pfa.lock);
+    if (!pfa.meta[pfn].refcount ||
+        (pfa.meta[pfn].flags & (FRAME_F_PT | FRAME_F_GUEST))) {
+        spin_unlock_irqrestore(&pfa.lock, pf);
+        mm_pt_node_unlock(table);
+        return -EBUSY;
+    }
+    pfa.meta[pfn].flags |= FRAME_F_GUEST;
+    spin_unlock_irqrestore(&pfa.lock, pf);
     table[idx] = arch_pte_leaf(pfn_to_phys(pfn), flags);
     mm_pt_note_present(table, 0, idx,
                        (uint8_t)(MM_ST_CLS_BYTE(MM_ST_GUEST_MEM) |
@@ -217,6 +225,18 @@ paddr_t hyp_riscv_s2_translate(hyp_vm_t *vm, uint64_t gpa)
     if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
         return 0;
     return arch_pte_addr(pte);
+}
+
+/* Permissions distinguish a denied access from a concurrent missing-page
+ * fill. A fault on an existing RX page must not be retried as demand RAM. */
+pte_t hyp_riscv_s2_prot(hyp_vm_t *vm, uint64_t gpa)
+{
+    pte_t *table = hyp_s2_walk(vm, gpa, 0);
+    if (!table) return 0;
+    mm_pt_node_lock(table);
+    pte_t p = table[arch_pt_vpn(gpa, 0)];
+    mm_pt_node_unlock(table);
+    return (p & PTE_V) && arch_pte_is_leaf(p) ? p & (PTE_V | PTE_R | PTE_W | PTE_X) : 0;
 }
 
 int hyp_riscv_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)

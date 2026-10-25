@@ -6,9 +6,11 @@
 #include "core/timer.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/progress.h"
+#include "core/smp.h"
 
 static void plic_init_hart(void) {
-    int hart = (int)cpu_current_id();
+    const smp_cpu_desc_t *cpu = smp_cpu_desc(cpu_current_id());
+    int hart = cpu ? (int)cpu->hw_id : (int)arch_smp_boot_hw_id();
     /* SENABLE is a per-context register (offset 0x2080 + hart * 0x100) and its
      * bit position is the PLIC interrupt ID itself, not an index into a smaller
      * slice.  Only UART0_IRQ is routed to this hart, so the word written here
@@ -27,7 +29,8 @@ static void plic_init_hart(void) {
 }
 
 static uint32_t plic_claim(void) {
-    int hart = (int)cpu_current_id();
+    const smp_cpu_desc_t *cpu = smp_cpu_desc(cpu_current_id());
+    int hart = cpu ? (int)cpu->hw_id : (int)arch_smp_boot_hw_id();
     /* Reading the claim register is what picks the highest-priority pending
      * source for this context and simultaneously moves it to the in-service
      * state, so the ID returned here is the one the PLIC will not hand out
@@ -37,7 +40,8 @@ static uint32_t plic_claim(void) {
 }
 
 static void plic_complete(uint32_t irq) {
-    int hart = (int)cpu_current_id();
+    const smp_cpu_desc_t *cpu = smp_cpu_desc(cpu_current_id());
+    int hart = cpu ? (int)cpu->hw_id : (int)arch_smp_boot_hw_id();
     /* The same register completes a claim: writing the ID back takes the source
      * out of the in-service state, which is the only thing that lets the PLIC
      * raise this context again for that source.  A forgotten completion is not a
@@ -102,6 +106,7 @@ void arch_handle_irq(reg_t irq, int from_user) {
          * current hart's register, so the hart consumes its own pending software
          * interrupt and no other hart's IPI is lost. */
         arch_write_sip(arch_read_sip() & ~SIE_SSIE);
+        smp_membarrier_ipi_ack(cpu_current_id());
         timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
         proc_sched_request_current();
     }

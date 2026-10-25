@@ -12,10 +12,7 @@ static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__(".word 0x0000100f" ::: "memory"); }
 static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
 
-static inline unsigned arch_current_cpu_id(void) {
-    extern uint32_t __boot_hart_id;
-    return (unsigned)__boot_hart_id;
-}
+unsigned arch_current_cpu_id(void);
 
 static inline void arch_local_irq_disable(void) {
     __asm__ __volatile__("csrc sstatus, %0" :: "r"(SSTATUS_SIE));

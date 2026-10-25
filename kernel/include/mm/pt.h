@@ -181,7 +181,9 @@
  * page-table page, and freed together with that page-table page.
  */
 #ifndef MM_PT_META_ENTRIES
-# define MM_PT_META_ENTRIES ARCH_PT_LEVEL_ENTRIES(0)
+/* A native stage-2 page always contains 512 descriptors, including on
+ * short-descriptor ARM hosts whose stage-1 leaves have only 256 entries. */
+# define MM_PT_META_ENTRIES ((ARCH_PT_LEVEL_ENTRIES(0) < 512) ? 512 : ARCH_PT_LEVEL_ENTRIES(0))
 #endif
 
 typedef struct pt_meta {
@@ -913,5 +915,17 @@ int  frame_is_lent_to_guest(pfn_t pfn);
 int mm_s2_audit(pte_t *root, int root_level, mm_pt_audit_report_t *out);
 
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
+
+/* Native stage-2 metadata is also available when the host uses a private
+ * short-descriptor MM implementation. These do not walk host page tables. */
+#if defined(ARCH_HAS_HYP_S2) && !defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+pt_meta_t *mm_pt_meta(pte_t *table);
+int mm_pt_node_init_atomic(pte_t *table, int level);
+void mm_pt_node_fini(pte_t *table);
+void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls);
+void mm_pt_note_absent(pte_t *table, int level, int idx);
+void mm_pt_frame_return(pfn_t pfn);
+int frame_is_lent_to_guest(pfn_t pfn);
+#endif
 
 #endif /* _MM_PT_H */

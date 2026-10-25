@@ -661,9 +661,9 @@ static void net_option_view_init(net_socket_t *s, net_option_view_t *v)
     v->recv_timeout_ticks = &s->recv_timeout_ticks;
     v->send_timeout_ticks = &s->send_timeout_ticks;
     v->passcred = &s->passcred;
-    v->peer_pid = (const int *)&s->peer_pid;
-    v->peer_uid = (const int *)&s->peer_uid;
-    v->peer_gid = (const int *)&s->peer_gid;
+    v->peer_pid = &s->peer_pid;
+    v->peer_uid = &s->peer_uid;
+    v->peer_gid = &s->peer_gid;
     v->long_size = (int)sizeof(long);
     /* A macro that expands to a function call on riscv64: the Rust side cannot
      * know it, so it is handed over with the rest of the view. */

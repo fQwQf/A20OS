@@ -23,6 +23,15 @@
     .equ CAUSE_STORE_PAGE_FAULT, 14
     .equ CAUSE_INTR_MASK,        (1 << 31)
 
+    /* Trap metadata is per physical CPU; no global cause race on SMP. */
+    .macro percpu_address dst, symbol
+    push {r12}
+    mrc p15,0,r12,c0,c0,5
+    and r12,r12,#255
+    ldr \dst,=\symbol
+    add \dst,\dst,r12,lsl #2
+    pop {r12}
+    .endm
     .section .text
     .align 5
     .global arm32_vector_table
@@ -46,7 +55,7 @@ svc_vector:
     sub     sp, sp, #8
     stmia   sp, {r0, r1}
     ldr     r0, =CAUSE_ECALL_U
-    ldr     r1, =arm32_trap_flags
+    percpu_address r1, arm32_trap_flags
     str     r0, [r1]
     ldmia   sp, {r0, r1}
     add     sp, sp, #8
@@ -56,7 +65,7 @@ pabort_vector:
     sub     sp, sp, #8
     stmia   sp, {r0, r1}
     ldr     r0, =CAUSE_INSN_PAGE_FAULT
-    ldr     r1, =arm32_trap_flags
+    percpu_address r1, arm32_trap_flags
     str     r0, [r1]
     ldmia   sp, {r0, r1}
     add     sp, sp, #8
@@ -70,7 +79,7 @@ dabort_vector:
     tst     r1, #(1 << 11)
     ldrne   r0, =CAUSE_STORE_PAGE_FAULT
     ldreq   r0, =CAUSE_LOAD_PAGE_FAULT
-    ldr     r2, =arm32_trap_flags
+    percpu_address r2, arm32_trap_flags
     str     r0, [r2]
     ldmia   sp, {r0-r2}
     add     sp, sp, #12
@@ -81,7 +90,7 @@ irq_vector:
     sub     sp, sp, #8
     stmia   sp, {r0, r1}
     ldr     r0, =CAUSE_INTR_MASK
-    ldr     r1, =arm32_trap_flags
+    percpu_address r1, arm32_trap_flags
     str     r0, [r1]
     ldmia   sp, {r0, r1}
     add     sp, sp, #8
@@ -135,7 +144,7 @@ trap_common:
      *   SVC / prefetch:    LR = next instr + 4  -> LR-4
      *   Data abort:        LR = next instr + 8  -> LR-8
      */
-    ldr     r2, =arm32_trap_flags
+    percpu_address r2, arm32_trap_flags
     ldr     r2, [r2]                   /* cause */
     ldr     r3, =CAUSE_INTR_MASK
     tst     r2, r3
@@ -151,7 +160,7 @@ trap_common:
 
     /* Capture DFAR for data aborts and IFAR for prefetch aborts. */
     ldr     r2, =CAUSE_STORE_PAGE_FAULT
-    ldr     r3, =arm32_trap_flags
+    percpu_address r3, arm32_trap_flags
     ldr     r3, [r3]
     cmp     r3, r2
     cmpne   r3, #CAUSE_LOAD_PAGE_FAULT
@@ -163,11 +172,11 @@ trap_common:
 7:
     mrc     p15, 0, r2, c6, c0, 0       /* DFAR */
 8:
-    ldr     r3, =arm32_fault_addr
+    percpu_address r3, arm32_fault_addr
     str     r2, [r3]
 3:
     ldr     r2, [r1, #8]
-    ldr     r3, =arm32_fault_pc
+    percpu_address r3, arm32_fault_pc
     str     r2, [r3]
 
     mrs     r2, spsr
@@ -197,7 +206,7 @@ trap_common:
     str     r2, [r1, #20]              /* trap.kernel_sp */
 
     /* IRQ: ack and overwrite cause code with the real interrupt number. */
-    ldr     r1, =arm32_trap_flags
+    percpu_address r1, arm32_trap_flags
     ldr     r1, [r1]
     ldr     r2, =CAUSE_INTR_MASK
     tst     r1, r2
@@ -206,13 +215,13 @@ trap_common:
     bl      arm32_gic_ack
     ldr     r2, =CAUSE_INTR_MASK
     orr     r0, r0, r2
-    ldr     r2, =arm32_trap_flags
+    percpu_address r2, arm32_trap_flags
     str     r0, [r2]
     pop     {r0-r3, lr}
 5:
 
     /* Record the cause for arch_read_cause(). */
-    ldr     r2, =arm32_trap_flags
+    percpu_address r2, arm32_trap_flags
     ldr     r2, [r2]
 
     /* Dispatch to the appropriate C handler. */
@@ -322,7 +331,27 @@ user_trap_return:
     ldr     r3, [r0, #TF_CPSR]
     bic     r3, r3, #0x80              /* return to user with IRQs enabled */
     msr     spsr_cxsf, r3
-    mov     sp, r12                    /* tear down any dynamic SVC trap frame */
+    /* SVC owns the task kernel stack. IRQ/abort modes keep their dedicated
+     * per-CPU stacks even after a user return, so a later kernel IRQ cannot
+     * overwrite a live SVC frame on that task's stack. */
+    mrs     r3, cpsr
+    and     r3, r3, #31
+    cmp     r3, #0x13
+    moveq   sp, r12
+    beq     .Luser_exception_stack_ready
+    mrc     p15, 0, r12, c0, c0, 5
+    and     r12, r12, #255
+    ldr     sp, =arm32_exception_stacks
+    add     sp, sp, r12, lsl #14
+    cmp     r3, #0x12
+    addeq   sp, sp, #4096
+    cmp     r3, #0x17
+    addeq   sp, sp, #8192
+    cmp     r3, #0x1b
+    addeq   sp, sp, #12288
+    cmp     r3, #0x11
+    addeq   sp, sp, #16384
+.Luser_exception_stack_ready:
     ldr     r1, [r0, #4]
     ldr     r2, [r0, #8]
     ldr     r4, [r0, #16]

@@ -311,10 +311,12 @@ static int64_t a20_file_io(const a20_syscall_args_t *args, int writing) {
         }
         total += iov[i].len;
     }
-    if (total > INT64_MAX) {
+#if __SIZEOF_SIZE_T__ > 4
+    if ((uint64_t)total > (uint64_t)INT64_MAX) {
         result = -A20_ERR_INVALID_ARGUMENT;
         goto out;
     }
+#endif
     if (!total) {
         result = 0;
         goto publish;

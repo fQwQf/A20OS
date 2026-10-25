@@ -44,6 +44,7 @@
 #define HYP_VM_RX_RING 256
 #define HYP_MAX_VCPUS 8
 struct hyp_vcpu;
+struct hyp_s2_format;
 
 typedef struct hyp_vm {
     uint32_t magic;
@@ -111,6 +112,10 @@ typedef struct hyp_vm {
     unsigned vcpu_count, vcpu_limit, parallel_limit;
     uint32_t active_cpu_mask;
     int shutdown, broken;
+    /* Serializes native-format stage-2 trees and RUN activation. */
+    spinlock_t s2_lock;
+    const struct hyp_s2_format *s2_format;
+    unsigned peak_run_count; /* observed concurrent RUN owners, control_lock */
 } hyp_vm_t;
 
 struct hyp_stats {
@@ -185,5 +190,6 @@ int  hyp_vm_ram_contains(hyp_vm_t *vm, uint64_t gpa);
  * VM, maps and verifies pages, audits, unmaps, destroys, and writes one
  * HYP_SELFTEST line per step.  Returns 0 when every step passed. */
 int  hyp_selftest(void);
+void hyp_boot_selftest(void);
 
 #endif /* _HYP_H */

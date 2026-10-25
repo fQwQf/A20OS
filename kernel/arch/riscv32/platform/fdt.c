@@ -2,6 +2,7 @@
 
 #include "core/types.h"
 #include "core/string.h"
+#include "../../riscv64/platform/fdt_isa.h"
 
 #define FDT_MAGIC 0xd00dfeedU
 #define FDT_BEGIN_NODE 1U
@@ -85,6 +86,60 @@ static int fdt_extract_bootargs(uint32_t dtb_pa, char *out, size_t outsz) {
 }
 
 extern uint32_t __boot_dtb_ptr;
+
+int riscv32_fdt_has_isa_extension(const char *extension)
+{
+    /* Before MMU initialization, OpenSBI's physical pointer is reachable
+     * through the temporary identity map. */
+    const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
+    if (!base || !extension || read_be32(base) != FDT_MAGIC)
+        return 0;
+
+    uint32_t totalsize = read_be32(base + 4);
+    uint32_t off_struct = read_be32(base + 8);
+    uint32_t off_strings = read_be32(base + 12);
+    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize)
+        return 0;
+
+    const uint8_t *p = base + off_struct;
+    const uint8_t *endp = base + totalsize;
+    const uint8_t *stringsp = base + off_strings;
+    while (p + 4 <= endp) {
+        uint32_t token = read_be32(p);
+        p += 4;
+        if (token == FDT_END)
+            break;
+        if (token == FDT_BEGIN_NODE) {
+            const char *name_end = (const char *)p;
+            while ((const uint8_t *)name_end < endp && *name_end)
+                name_end++;
+            if ((const uint8_t *)name_end >= endp)
+                return 0;
+            p = (const uint8_t *)(((uintptr_t)(name_end + 1) + 3) & ~3UL);
+            continue;
+        }
+        if (token == FDT_END_NODE || token == FDT_NOP)
+            continue;
+        if (token != FDT_PROP || p + 8 > endp)
+            return 0;
+
+        uint32_t len = read_be32(p);
+        uint32_t nameoff = read_be32(p + 4);
+        p += 8;
+        uint32_t padded = (len + 3U) & ~3U;
+        if (p + padded > endp || off_strings + nameoff >= totalsize)
+            return 0;
+        const char *propname = (const char *)(stringsp + nameoff);
+        int legacy_isa = strcmp(propname, "riscv,isa") == 0;
+        if ((legacy_isa || strcmp(propname, "riscv,isa-extensions") == 0) &&
+            fdt_isa_string_has_extension((const char *)p, len, extension,
+                                         legacy_isa))
+            return 1;
+        p += padded;
+    }
+    return 0;
+}
+
 
 const char *arch_bootargs_get(void) {
     static char bootargs_buf[1024];
