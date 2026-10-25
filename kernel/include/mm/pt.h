@@ -216,7 +216,44 @@ typedef struct pt_meta {
      * every PT page of a purely anonymous address space, so anonymous
      * workloads pay exactly nothing. */
     struct mm_segtab *segtab;
+    /* Fork table-sharing state, allocated only while a fork lends this
+     * level-0 table to one borrower (see struct pt_share).  NULL on every
+     * exclusive table, so the common case pays one pointer field. */
+    struct pt_share  *share;
 } pt_meta_t;
+
+/* ------------------------------------------------------------------ *
+ * Fork table sharing (the borrower-debt model)
+ * ------------------------------------------------------------------ *
+ * A fork can lend an exclusive level-0 table to the child instead of
+ * cloning it leaf by leaf: the child's L1 entry points at the SAME table
+ * page and the parent's writable leaves are downgraded in place.  The
+ * borrower holds NO per-page frame references for what it inherited -- the
+ * owner's references cover the frames while the table stays shared -- so a
+ * child that exits without writing releases its share per TABLE, not per
+ * page.  The debt is settled lazily:
+ *
+ *   - a parent-side COW fault in a shared table materializes exactly one
+ *     page (frame reference transferred to the borrower, remembered in
+ *     mask[]),
+ *   - any borrower-side structure change (fault install, unmap, mprotect,
+ *     swap-out) first gives the borrower its own copy of the table and the
+ *     references for every leaf it inherited,
+ *   - an owner-side structure change hands the table to the borrower and
+ *     moves the owner to a private copy.
+ *
+ * struct pt_share exists only while a table is lent out; at most one
+ * borrower per table, so a fork of an already-borrowed table falls back to
+ * the eager per-page clone.  Every field is touched only under the table's
+ * own node lock. */
+struct pt_share {
+    struct mm_struct *owner;    /* mm whose mapping created the table  */
+    struct mm_struct *borrower; /* the single fork child borrowing it  */
+    /* Materialized-borrower bitmap: bit i set means the borrower holds a
+     * frame reference for leaf i (transferred by an owner COW fault); clear
+     * means the owner's reference is still the only one. */
+    uint8_t mask[MM_PT_META_ENTRIES / 8];
+};
 
 /* ------------------------------------------------------------------ *
  * Backing-object segments  (P6, see docs/status/history/mm-single-level-migration-log.md 12.6)
@@ -601,6 +638,33 @@ static inline int mm_pt_meta_level(const pt_meta_t *m) { return m->level; }
 static inline int mm_pt_meta_stale(const pt_meta_t *m)  { return m->stale; }
 void mm_pt_meta_set_stale(pt_meta_t *m, int stale);
 void mm_pt_node_lock(pte_t *table);
+void mm_pt_node_unlock(pte_t *table);
+
+/* Fork table-sharing state (struct pt_share above).  All of these run under
+ * the table's own node lock (mm_pt_node_lock/mm_pt_node_unlock) except where
+ * noted; they never sleep and never allocate except mm_pt_share_begin. */
+/* Lend @table from @owner to @borrower: allocates the share record.  The
+ * caller has already made the child's L1 entry point at the table.  Returns
+ * 0, or -ENOMEM when the record could not be allocated (the caller then
+ * falls back to the eager per-page clone). */
+int mm_pt_share_begin(pte_t *table, struct mm_struct *owner,
+                      struct mm_struct *borrower);
+/* Borrower exit on a table it never wrote: release the materialized
+ * references recorded in mask[] and detach the share.  The table stays with
+ * the owner. */
+void mm_pt_share_end_borrow(pte_t *table);
+/* Owner structure change: hand the table to the borrower by materializing a
+ * frame reference for every present leaf the borrower does not already hold
+ * (mask[] clear).  On return the borrower owns the table exclusively. */
+void mm_pt_share_owner_handoff(pte_t *table);
+/* Borrower structure change: copy the table page and its status/safe
+ * sidecars into @dst (already allocated and node-initialized), taking a
+ * frame reference for every present leaf that mask[] does not already cover,
+ * then detach the share so @table is exclusive to the owner again. */
+void mm_pt_share_borrower_copy(pte_t *table, pte_t *dst);
+/* Non-NULL while the table is lent out.  Read side only; mutate the record
+ * only under the node lock. */
+struct pt_share *mm_pt_share(pte_t *table);
 void mm_pt_node_unlock(pte_t *table);
 
 /* The table that owns the leaf slot for addr, i.e. the parent of the leaf.

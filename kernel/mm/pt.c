@@ -456,6 +456,108 @@ int mm_pt_node_init_atomic(pte_t *table, int level)
     return mm_pt_node_init_mode(table, level, 0);
 }
 
+/* ------------------------------------------------------------------ *
+ * Fork table sharing (struct pt_share, see mm/pt.h)
+ * ------------------------------------------------------------------ *
+ * All mutators run under the table's node lock; the frame references they
+ * move are plain refcount operations with no failure path, so a transition
+ * is all-or-nothing by construction.  mm_pt_node_fini() also frees a share
+ * record that is still attached -- which for a healthy table never happens
+ * (a shared table has two referencers and is not torn down), so reaching it
+ * there is itself a leak report. */
+struct pt_share *mm_pt_share(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    return pm ? pm->share : NULL;
+}
+
+int mm_pt_share_begin(pte_t *table, struct mm_struct *owner,
+                      struct mm_struct *borrower)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    if (!pm || pm->level != 0)
+        return -EINVAL;
+    if (pm->share)
+        return -EEXIST;
+    struct pt_share *sh = kmalloc(sizeof(*sh));
+    if (!sh)
+        return -ENOMEM;
+    memset(sh, 0, sizeof(*sh));
+    sh->owner = owner;
+    sh->borrower = borrower;
+    pm->share = sh;
+    return 0;
+}
+
+static void share_put_mask_refs(pte_t *table, struct pt_share *sh)
+{
+    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
+        if (!(sh->mask[i >> 3] & (1u << (i & 7))))
+            continue;
+        pte_t pte = ((pte_t *)table)[i];
+        if ((pte & PTE_V) && arch_pte_is_leaf(pte))
+            frame_put(phys_to_pfn(arch_pte_addr(pte)));
+    }
+}
+
+void mm_pt_share_end_borrow(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    struct pt_share *sh = pm ? pm->share : NULL;
+    if (!sh)
+        return;
+    share_put_mask_refs(table, sh);
+    pm->share = NULL;
+    kfree(sh);
+}
+
+void mm_pt_share_owner_handoff(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    struct pt_share *sh = pm ? pm->share : NULL;
+    if (!sh)
+        return;
+    /* The borrower already holds the mask[] references; take one for every
+     * other present leaf so the (now exclusive) borrower owns them all. */
+    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
+        pte_t pte = ((pte_t *)table)[i];
+        if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+            continue;
+        if (sh->mask[i >> 3] & (1u << (i & 7)))
+            continue;
+        frame_get(phys_to_pfn(arch_pte_addr(pte)));
+    }
+    pm->share = NULL;
+    kfree(sh);
+}
+
+void mm_pt_share_borrower_copy(pte_t *table, pte_t *dst)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    pt_meta_t *dm = mm_pt_meta(dst);
+    struct pt_share *sh = pm ? pm->share : NULL;
+    if (!sh || !dm)
+        return;
+    /* Copy the hardware page and the authoritative sidecars; nr_present is
+     * identical because the entries are. */
+    memcpy(dst, table, PAGE_SIZE);
+    memcpy(dm->cls, pm->cls, sizeof(dm->cls));
+    memcpy(dm->safe, pm->safe, sizeof(dm->safe));
+    dm->nr_present = pm->nr_present;
+    /* The borrower takes its own reference for every leaf the mask does not
+     * already cover; mask-covered leaves' references simply stay with it. */
+    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
+        pte_t pte = ((pte_t *)table)[i];
+        if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+            continue;
+        if (sh->mask[i >> 3] & (1u << (i & 7)))
+            continue;
+        frame_get(phys_to_pfn(arch_pte_addr(pte)));
+    }
+    pm->share = NULL;
+    kfree(sh);
+}
+
 void mm_pt_node_fini(pte_t *table)
 {
     if (!table)
@@ -471,6 +573,14 @@ void mm_pt_node_fini(pte_t *table)
     spin_unlock_irqrestore(&pfa.lock, flags);
 
     if (m) {
+        /* A share record still attached at teardown means a shared table was
+         * freed while lent out -- the refcount discipline above makes that a
+         * bug, and kfree here at least names the leak instead of silently
+         * dropping the borrower's materialized references. */
+        if (m->share) {
+            kwarn("[PTSHARE] freed table %p still lent out; leaking\n", table);
+            m->share = NULL;
+        }
         /* Drop the backing-object references this page-table page held.
          * The page is already detached (FRAME_F_PT cleared, frame marked
          * stale by the unlink before this runs), so no cursor can reach the
