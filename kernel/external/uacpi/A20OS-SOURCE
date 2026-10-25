@@ -1,0 +1,6 @@
+Upstream: https://github.com/uACPI/uACPI
+Commit: c0edecef62bcac6ce3f783540099190bafadadda
+Version: 7.0.0
+Archive SHA256: 5c1dfc80120f05a1179e0b49452371a9b310127b05c3d5bba10974fe308bceea
+License: MIT; see LICENSE
+Unmodified upstream include/ and source/; OS integration in kernel/firmware/acpi/.
