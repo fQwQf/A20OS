@@ -6,6 +6,8 @@
 
 void uart_init(void);
 void uart_putc(char c);
+/* Caller holds the console serialization lock, as for uart_putc(). */
+void uart_write(const char *data, size_t length);
 void uart_receive_char(char c);
 int  uart_getc(void);
 int  uart_try_getc(void);

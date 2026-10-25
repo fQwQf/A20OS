@@ -189,6 +189,15 @@ void uart_putc(char c) {
     arch_uart_putc(c);
 }
 
+void uart_write(const char *data, size_t length) {
+#ifdef ARCH_UART_HAS_WRITE
+    if (length) arch_uart_write(data, length);
+#else
+    for (size_t i = 0; i < length; i++)
+        arch_uart_putc(data[i]);
+#endif
+}
+
 // blocking read of one character (yields the CPU if there is no data)
 int uart_getc(void) {
     for (;;) {
