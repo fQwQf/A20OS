@@ -1,3 +1,4 @@
+#include "cluster/ssi.h"
 #include "proc/resource_ns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -142,6 +143,8 @@ int a20_clone_task_uid(const task_t *t)
 
 int a20_clone_flags_supported(uint64_t flags)
 {
+    if (cluster_ssi_managed(proc_current()) && (flags & CLONE_VM) && !(flags & CLONE_THREAD))
+        return -EOPNOTSUPP;
 #ifdef CONFIG_NOMMU
     /* A nommu vfork must share the address space; there is no COW copy. */
     if (!(flags & CLONE_VM))

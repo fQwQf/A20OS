@@ -25,6 +25,8 @@
 #include "proc/signal.h"
 #include "mm/pt.h"
 #include "core/panic.h"
+#include "cluster/ssi.h"
+#include "uapi/a20/cluster_ssi.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     task_t *t = proc_current();
@@ -1311,6 +1313,12 @@ void a20_pp_set_name(task_t *t, uint64_t addr)
 }
 
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
+#ifdef CONFIG_CLUSTER_SSI
+    if ((unsigned)op == A20_PR_CLUSTER_SSI) {
+        if (a2 || a3 || a4) return -EINVAL;
+        return cluster_ssi_configure(a1);
+    }
+#endif
 #ifdef CONFIG_ELF_EXEC_TEST
     task_t *t = proc_current();
     /* Private test-profile operation: fail this task's next exec at a

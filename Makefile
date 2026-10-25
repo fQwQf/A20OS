@@ -1113,6 +1113,22 @@ endif
 # suffix exceeds NAME_MAX when combined with ARCH and BOARD. Keep existing short
 # paths stable; hash only long variants, with the digest covering the full
 # descriptive selector/configuration string.
+CLUSTER_SSI ?= 0
+ifneq ($(words $(CLUSTER_SSI)),1)
+$(error CLUSTER_SSI must be one value: 0 or 1)
+endif
+ifeq ($(filter $(CLUSTER_SSI),0 1),)
+$(error CLUSTER_SSI must be 0 or 1)
+endif
+ifeq ($(CLUSTER_SSI),1)
+ifneq ($(ARCH):$(NR_CPUS):$(NOMMU),x86_64:1:0)
+$(error CLUSTER_SSI=1 currently requires ARCH=x86_64 NR_CPUS=1 NOMMU=0)
+endif
+ifeq ($(filter $(ABI),linux both),)
+$(error CLUSTER_SSI=1 requires ABI=linux or both)
+endif
+BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
+endif
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -2367,6 +2383,24 @@ $(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
 endif
 endif
 include tools/rust-kernel.mk
+ifeq ($(CLUSTER_SSI),1)
+CFLAGS += -DCONFIG_CLUSTER_SSI
+SSI_STATE_OBJECT := $(BUILD_DIR)/rust/ssi_state.o
+.PHONY: FORCE_SSI_STATE_FLAGS
+FORCE_SSI_STATE_FLAGS:
+$(BUILD_DIR)/rust/.ssi-state-flags: FORCE_SSI_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose) --edition=2021 --target x86_64-unknown-none panic=abort code-model=large no-redzone=yes opt=$(RUST_OPT_LEVEL)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+$(SSI_STATE_OBJECT): kernel/cluster/ssi_state.rs $(BUILD_DIR)/rust/.ssi-state-flags
+	@mkdir -p $(dir $@)
+	$(RUSTC) --edition=2021 --crate-type lib --emit=obj --target x86_64-unknown-none -C panic=abort -C code-model=large -C no-redzone=yes -C opt-level=$(RUST_OPT_LEVEL) -o $@ $<
+endif
+.PHONY: check-cluster-ssi check-cluster-ssi-network
+check-cluster-ssi:
+	$(PYTHON) tools/check-cluster-ssi.py
+check-cluster-ssi-network:
+	$(PYTHON) tools/check-cluster-ssi-network.py
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
@@ -2487,6 +2521,7 @@ endif
 # that calls it.
 ifneq ($(filter $(KERNEL_DIR)/proc/proc.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_TASKLIST_OBJECT)
+KERNEL_OBJ += $(SSI_STATE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # The accounting reports are Rust-only now.

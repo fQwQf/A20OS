@@ -7,6 +7,11 @@
 文件和客户端 API 见 [63-configurable-remote-memory.md](63-configurable-remote-memory.md)。
 它提供显式页快照和原子提交，不会自动给普通进程建立跨机共享地址空间。
 
+普通 Linux pthread 的自动跨机执行与透明缺页见
+[64-transparent-thread-slices.md](64-transparent-thread-slices.md)。该功能有独立
+的默认关闭开关与资源限制，当前为 x86_64/UP 的串行交接实验模式，尚不提供
+同进程多机并行加速；worker 需要 `a20.tcpmode=lwip`。
+
 ## 1. 部署前提
 
 每台机器有唯一持久 128 位 node_id，每次启动有非重复 boot epoch。

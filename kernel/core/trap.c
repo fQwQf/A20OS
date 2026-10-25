@@ -1,3 +1,4 @@
+#include "cluster/ssi.h"
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
@@ -577,7 +578,8 @@ static void user_trap_handler(trap_context_t *ctx) {
 
 void trap_handler(trap_context_t *ctx)
 {
-    user_trap_handler(ctx);
+    if (!cluster_ssi_intercept(ctx))
+        user_trap_handler(ctx);
     /*
      * All user trap exits share this safe point. A reschedule IPI or a timer
      * interrupt may have arrived while the task was in a long syscall; the
@@ -585,6 +587,7 @@ void trap_handler(trap_context_t *ctx)
      */
     if (arch_syscall_resched_allowed())
         (void)proc_sched_safe_point();
+    cluster_ssi_before_user(ctx);
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {

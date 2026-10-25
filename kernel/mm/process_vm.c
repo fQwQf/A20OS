@@ -12,6 +12,7 @@
 #include "mm/vm.h"
 #include "proc/proc.h"
 #include "core/cpu.h"
+#include "cluster/ssi.h"
 
 /*
  * Cross-process memory copy.
@@ -219,6 +220,7 @@ void a20_process_vm_mark_dirty(mm_struct_t *mm, uintptr_t address)
 long process_vm_read_kernel(struct task_t *src_task, const void *src,
                             void *dst, size_t len)
 {
+    if (cluster_ssi_mm_busy(src_task)) return -EBUSY;
     if (!src_task || !src_task->mm || !src_task->mm->pgdir || !src || !dst)
         return -EINVAL;
     if (!process_vm_range_ok((uint64_t)(uintptr_t)src, len))
@@ -246,6 +248,7 @@ long process_vm_read_kernel(struct task_t *src_task, const void *src,
 long process_vm_write_kernel(struct task_t *dst_task, void *dst,
                              const void *src, size_t len)
 {
+    if (cluster_ssi_mm_busy(dst_task)) return -EBUSY;
     if (!dst_task || !dst_task->mm || !dst_task->mm->pgdir || !src || !dst)
         return -EINVAL;
     if (!process_vm_range_ok((uint64_t)(uintptr_t)dst, len))
@@ -295,12 +298,14 @@ extern long a20_process_vm_write_kernel_rust(task_t *, void *, const void *, siz
 long process_vm_read_kernel(task_t *src_task, const void *src,
                             void *dst, size_t len)
 {
+    if (cluster_ssi_mm_busy(src_task)) return -EBUSY;
     return a20_process_vm_read_kernel_rust(src_task, src, dst, len);
 }
 
 long process_vm_write_kernel(task_t *dst_task, void *dst,
                              const void *src, size_t len)
 {
+    if (cluster_ssi_mm_busy(dst_task)) return -EBUSY;
     return a20_process_vm_write_kernel_rust(dst_task, dst, src, len);
 }
 #endif

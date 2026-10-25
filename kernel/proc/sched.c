@@ -20,6 +20,7 @@
 #include "cg/cgroup_impl.h"
 #include "proc/task_placement.h"
 #include "proc/rt_sched_account.h"
+#include "cluster/ssi.h"
 
 /*
  * RT_PRI_LEVELS: exact per-priority FIFO buckets for SCHED_FIFO/SCHED_RR
@@ -737,6 +738,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
                           sched_policy_rt_value(t->sched_policy)
                               ? t->priority : 0);
     if (!sched_policy_valid(policy) ||
+        (cluster_ssi_managed(t) && sched_policy_rt_value(policy)) ||
         (sched_policy_rt_value(policy)
              ? (priority < 1 || priority > 99)
              : priority != 0))
@@ -1783,6 +1785,23 @@ static task_t *sched_runq_pick_local(int *rt_throttled_out)
             t = eevdf_pick_eligible_locked(rq);
             if (!t)
                 t = rq->eevdf_first;
+            if (t && !cluster_ssi_task_allowed(t)) {
+                /* Leave frozen siblings linked, with their queue references.
+                 * Search by deadline without removing any blocked candidate. */
+                eevdf_node_t *node = rq->eevdf_first ? &rq->eevdf_first->eevdf_node : NULL;
+                t = NULL;
+                while (node) {
+                    task_t *candidate = node->owner;
+                    if (cluster_ssi_task_allowed(candidate)) { t = candidate; break; }
+                    if (node->right) {
+                        node = node->right;
+                        while (node->left) node = node->left;
+                    } else {
+                        while (node->parent && node == node->parent->right) node = node->parent;
+                        node = node->parent;
+                    }
+                }
+            }
             q = EEVDF_LEVEL;
         }
         if (!t)

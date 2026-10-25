@@ -1,3 +1,4 @@
+#include "cluster/ssi.h"
 #include "proc/proc.h"
 #include "proc/task_object.h"
 #include "proc/proc_internal.h"
@@ -645,6 +646,7 @@ void proc_exit(int exit_code)
     task_t *t = proc_current();
     if (!t)
         panic("proc_exit: no current task");
+    cluster_ssi_exit(t);
     proc_exit_rust(t, exit_code);
     panic("proc_exit: returned from Rust path");
 }
