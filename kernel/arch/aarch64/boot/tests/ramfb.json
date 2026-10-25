@@ -1,0 +1,12 @@
+{
+  "qemu": "qemu-system-aarch64",
+  "machine": "virt",
+  "cpu": "cortex-a53",
+  "memory_mb": 256,
+  "fw_cfg": 151126016,
+  "dma": 1190133760,
+  "framebuffer": 1191182336,
+  "width": 320,
+  "height": 240,
+  "stride": 1280
+}

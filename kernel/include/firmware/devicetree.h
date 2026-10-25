@@ -2,6 +2,7 @@
 #define A20_FIRMWARE_DEVICETREE_H
 #include "core/fdt_view.h"
 #include "firmware/node.h"
+#include "boot/framebuffer.h"
 
 typedef struct fw_dt {
     fdt_view_t view;
@@ -17,6 +18,18 @@ int fw_dt_root(const fw_dt_t *tree, fw_node_t *out);
 int fw_dt_find_path(const fw_node_t *root, const char *path, fw_node_t *out);
 int fw_dt_find_phandle(const fw_node_t *root, uint32_t handle, fw_node_t *out);
 int fw_dt_bootargs(const fw_dt_t *tree, char *out, size_t capacity);
+
+/* Every enabled firmware scanout is validated before any reservation is
+ * published. Selection prefers stdout-path, then display0; ambiguous multiple
+ * displays fail rather than depending on DT node ordering. */
+typedef int (*fw_dt_framebuffer_visitor_t)(void *, const fw_node_t *,
+                                           const boot_framebuffer_t *);
+int fw_dt_framebuffer_resource(const fw_node_t *, size_t index, fw_resource_t *);
+int fw_dt_framebuffers(const fw_dt_t *, fw_dt_framebuffer_visitor_t, void *);
+int fw_dt_framebuffer_select(const fw_dt_t *, boot_framebuffer_t *,
+                              enum boot_framebuffer_memory *, fw_node_t *selected);
+int arch_boot_framebuffer_reservation(const boot_framebuffer_t *,
+                                      uint64_t *base, uint64_t *bytes);
 
 typedef struct fw_dt_range {
     uint64_t base, size;

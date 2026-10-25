@@ -35,6 +35,13 @@ int boot_framebuffer_enumerate(void) {
     int rc = boot_framebuffer_validate(fb);
     if (rc)
         return rc;
+    const fw_node_t *selected = &boot_context_get()->framebuffer_node;
+    if (fw_node_valid(selected)) {
+        device_t *device = firmware_device_find(selected);
+        if (!device) return -ENODEV;
+        device_put(device);
+        return 0;
+    }
     scanout_resource = (fw_resource_t){FW_RESOURCE_MEMORY, fb->physical,
                                        fb->aperture_bytes, 0, "scanout"};
     fw_node_t root;
@@ -63,20 +70,26 @@ static int layout(device_t *dev, gpu_scanout_layout_t *out) {
 static int flush(device_t *dev, uint32_t x, uint32_t y, uint32_t w,
                  uint32_t h) {
     const boot_framebuffer_t *fb = dev->plat_data;
-    return x > fb->width || y > fb->height || w > fb->width - x ||
-                   h > fb->height - y
-               ? -EINVAL
-               : 0;
+    if (x > fb->width || y > fb->height || w > fb->width - x ||
+        h > fb->height - y) return -EINVAL;
+    return boot_framebuffer_flush();
 }
 static int probe(device_t *dev) {
-    const boot_framebuffer_t *fb = &boot_context_get()->framebuffer;
+    const boot_context_t *boot = boot_context_get();
+    const boot_framebuffer_t *fb = &boot->framebuffer;
+    if (fw_node_valid(&boot->framebuffer_node) &&
+        !fw_node_equal(&dev->firmware_node, &boot->framebuffer_node))
+        return -ENODEV;
     int rc = boot_framebuffer_validate(fb);
     if (rc)
         return rc;
     if (fb->physical > (uintptr_t)-1 || fb->aperture_bytes > (size_t)-1)
         return -EOVERFLOW;
-    const resource_t *resource = device_get_resource(dev, RES_MMIO, 0);
-    void *mapped = resource ? device_map_resource(dev, resource) : NULL;
+    if (fw_node_valid(&boot->framebuffer_node)) {
+        rc = firmware_device_retain_resources(dev);
+        if (rc) return rc;
+    }
+    void *mapped = boot_framebuffer_map();
     if (!mapped) {
         printf("[GPU] firmware framebuffer: no safe device mapping for 0x%lx "
                "(%lu bytes)\n",
@@ -104,6 +117,11 @@ static int probe(device_t *dev) {
                 for (unsigned n = 0; n < bytes; n++)
                     p[n] = pixel >> (8 * n);
             }
+        if (boot_framebuffer_flush()) {
+            gpu_device_unregister(dev);
+            dev->plat_data = NULL; dev->drv_priv = NULL;
+            return -EIO;
+        }
         printf("[GPU] firmware framebuffer colour bars rendered\n");
     }
     return 0;
@@ -114,7 +132,8 @@ static int remove_device(device_t *dev) {
     dev->drv_priv = NULL;
     return 0;
 }
-static const firmware_device_id_t ids[] = {{.id = "a20,boot-framebuffer"}, {0}};
+static const firmware_device_id_t ids[] = {{.id = "a20,boot-framebuffer"},
+                                            {.id = "simple-framebuffer"}, {0}};
 static const gpu_dev_ops_t ops = {
     .get_info = info,
     .get_fb = framebuffer,
