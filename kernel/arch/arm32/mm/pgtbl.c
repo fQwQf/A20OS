@@ -21,6 +21,19 @@
 #define IS_TABLE(pte)      (((pte) & 0x3U) == ARM32_L1_TYPE_TABLE)
 #define IS_LEAF(pte)       (((pte) & 0x3U) == ARM32_L2_TYPE_SMALL)
 
+/* Publish a descriptor before any frame or table it used to name can be
+ * recycled. TTBR0 tables use normal memory; clean the descriptor and complete
+ * an inner-shareable invalidation, including hardware walk caches. */
+static void arm32_sync_descriptor(const pte_t *entry) {
+    uint32_t zero = 0;
+    __asm__ __volatile__(
+        "mcr p15, 0, %0, c7, c10, 1\n\t"
+        "dsb ish\n\t"
+        "mcr p15, 0, %1, c8, c3, 0\n\t"
+        "dsb ish\n\tisb"
+        :: "r"(entry), "r"(zero) : "memory");
+}
+
 static inline size_t pt_level_size(int level) {
     return PAGE_SIZE << (ARCH_PT_BITS * level);
 }
@@ -84,9 +97,10 @@ static void pt_destroy_recursive(pte_t *table, int level) {
             continue;
         if (IS_TABLE(pte)) {
             pte_t *next = arch_pte_to_ptr(pte);
+            table[i] = 0;
+            arm32_sync_descriptor(&table[i]);
             pt_destroy_recursive(next, level - 1);
             pt_free_internal(next, 0);
-            table[i] = 0;
         }
     }
 }
@@ -125,7 +139,9 @@ pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
         next = (pte_t *)frame_alloc();
         if (!next)
             return NULL;
+        arch_flush_icache_range(next, ARM32_L2_SIZE);
         table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+        arm32_sync_descriptor(&table[idx]);
         table = next;
     }
 
@@ -255,6 +271,7 @@ int mm_mark_leaf_dirty_if_writable(pt_root_t *pgdir, vaddr_t va) {
         return -1;
     flags = arch_pte_flags(*pte);
     *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
+    arm32_sync_descriptor(pte);
     arch_tlb_flush_page(va);
     return 0;
 }
@@ -287,11 +304,15 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
 
     if (*pte & PTE_V) {
         old_pa = arch_pte_addr(*pte);
-        if (old_pa != pa && IS_LEAF(*pte))
+        if (old_pa != pa && IS_LEAF(*pte)) {
+            *pte = 0;
+            arm32_sync_descriptor(pte);
             frame_put(phys_to_pfn(old_pa));
+        }
     }
 
     *pte = arch_pte_leaf(pa, flags);
+    arm32_sync_descriptor(pte);
     return 0;
 }
 
@@ -301,7 +322,10 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls) {
     (void)cls;
-    if (flags & PTE_X) {
+    /* PTE_X is zero in the short-descriptor manager-domain backend: every
+     * user mapping may execute. Publish all user pages coherently instead
+     * of testing a permission bit that this encoding cannot represent. */
+    if (flags & PTE_U) {
         pfn_t pfn = phys_to_pfn(pa);
         if (pfn_valid(pfn))
             arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
@@ -334,6 +358,7 @@ int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
         return -EEXIST;
 
     *pte = arm32_section_pte(pa, flags);
+    arm32_sync_descriptor(pte);
     return 0;
 }
 
@@ -374,9 +399,11 @@ int pt_unmap(struct mm_struct *mm, vaddr_t va) {
         return -EINVAL;
 
     *leaf = 0;
+    arm32_sync_descriptor(leaf);
     if (pt_table_empty(l2, ARM32_L2_ENTRIES)) {
-        pt_free_internal(l2, 0);
         pgdir[idx1] = 0;
+        arm32_sync_descriptor(&pgdir[idx1]);
+        pt_free_internal(l2, 0);
     }
     return 0;
 }
@@ -406,6 +433,7 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
     if (IS_LEAF(pte)) {
         base = va & ~((vaddr_t)(PMD_SIZE - 1));
         pgdir[idx1] = 0;
+        arm32_sync_descriptor(&pgdir[idx1]);
         if (pa_out)
             *pa_out = arch_pte_addr(pte);
         if (base_out)
@@ -437,9 +465,11 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
         *level_out = 0;
 
     *leaf = 0;
+    arm32_sync_descriptor(leaf);
     if (pt_table_empty(l2, ARM32_L2_ENTRIES)) {
-        pt_free_internal(l2, 0);
         pgdir[idx1] = 0;
+        arm32_sync_descriptor(&pgdir[idx1]);
+        pt_free_internal(l2, 0);
     }
     return 0;
 }
@@ -462,9 +492,11 @@ int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
             break;
         pa_out[count++] = arch_pte_addr(entry);
         l2[i] = 0;
+        arm32_sync_descriptor(&l2[i]);
     }
     if (count && pt_table_empty(l2, ARM32_L2_ENTRIES)) {
         mm->pgdir[idx1] = 0;
+        arm32_sync_descriptor(&mm->pgdir[idx1]);
         pt_free_internal(l2, 0);
     }
     return count;
@@ -539,8 +571,10 @@ static pte_t *pt_clone_l2(pte_t *src) {
             return NULL;
         }
         memcpy(pfn_to_virt(np), pfn_to_virt(pfn), PAGE_SIZE);
+        arch_flush_icache_range(pfn_to_virt(np), PAGE_SIZE);
         dst[i] = arch_pte_leaf(pfn_to_phys(np), arch_pte_flags(pte));
     }
+    arch_flush_icache_range(dst, ARM32_L2_SIZE);
     return dst;
 }
 
@@ -578,6 +612,7 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
                 return NULL;
             }
             memcpy(pfn_to_virt(np), pfn_to_virt(pfn), leaf_size);
+            arch_flush_icache_range(pfn_to_virt(np), leaf_size);
             if (level == ARCH_PT_ROOT_LEVEL)
                 dst[i] = arm32_section_pte(pfn_to_phys(np), arch_pte_flags(pte));
             else
@@ -592,6 +627,7 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
             dst[i] = arch_pte_from_pa(va_to_pa(next_dst)) | PTE_DIR;
         }
     }
+    arch_flush_icache_range(dst, level == ARCH_PT_ROOT_LEVEL ? ARM32_L1_SIZE : ARM32_L2_SIZE);
     return dst;
 }
 
@@ -618,8 +654,9 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
             continue;
 
         if (IS_LEAF(pte)) {
-            frame_put(phys_to_pfn(arch_pte_addr(pte)));
             table[i] = 0;
+            arm32_sync_descriptor(&table[i]);
+            frame_put(phys_to_pfn(arch_pte_addr(pte)));
         } else if (IS_TABLE(pte)) {
             next_pa = arch_pte_addr(pte);
             next_pfn = phys_to_pfn(next_pa);
@@ -627,12 +664,14 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
                 kerr("pt_destroy_user: skip invalid non-leaf level=%d idx=%d pte=0x%lx pa=0x%lx\n",
                      level, i, (unsigned long)pte, (unsigned long)next_pa);
                 table[i] = 0;
+                arm32_sync_descriptor(&table[i]);
                 continue;
             }
             next = arch_pte_to_ptr(pte);
+            table[i] = 0;
+            arm32_sync_descriptor(&table[i]);
             pt_destroy_user_recursive(next, level - 1);
             frame_free(next);
-            table[i] = 0;
         }
     }
 }

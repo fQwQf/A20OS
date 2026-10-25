@@ -53,7 +53,7 @@ typedef struct {
     uint32_t        flag;
     arch_ucontext_t uc;
     arch_siginfo_t  info;
-    uint32_t        arch_extra;
+    arch_signal_extra_t arch_extra;
     uint32_t        tramp[2];
 } arch_sig_rt_frame_t;
 
@@ -93,6 +93,6 @@ static inline uint64_t arch_user_sigset_to_kernel(const arch_sigset_t *mask) {
 static inline arch_siginfo_t *arch_sigframe_info_ptr(arch_sig_rt_frame_t *frame) { return &frame->info; }
 static inline arch_ucontext_t *arch_sigframe_ucontext_ptr(arch_sig_rt_frame_t *frame) { return &frame->uc; }
 static inline uint32_t *arch_sigframe_tramp_ptr(arch_sig_rt_frame_t *frame) { return frame->tramp; }
-static inline uint32_t *arch_sigframe_extra_ptr(arch_sig_rt_frame_t *frame) { return &frame->arch_extra; }
+static inline arch_signal_extra_t *arch_sigframe_extra_ptr(arch_sig_rt_frame_t *frame) { return &frame->arch_extra; }
 
 #endif

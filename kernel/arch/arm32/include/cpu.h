@@ -9,18 +9,28 @@
 extern volatile uint32_t arm32_trap_flags[CONFIG_NR_CPUS];
 uint32_t arm32_gic_ack(void);
 
-/*
- * ARMv7 exception modes use banked stacks.  Until nested IRQ entry switches
- * to a dedicated re-entrant frame, keep syscall dispatch non-preemptible.
- */
-#define ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE 1
+/* trap.S migrates exception frames onto each task's SVC stack before C.
+ * Syscalls and IRQ-return safe points can therefore use ordinary preemption. */
 
 static inline void arch_mb(void) { __asm__ __volatile__("dmb ish" ::: "memory"); }
 static inline void arch_rmb(void) { __asm__ __volatile__("dmb ish" ::: "memory"); }
 static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
+#define ARCH_HAS_SAFE_IDLE_WAIT 1
+static inline void arch_idle_wait(void) {
+    /* ARMv7-A physical IRQ wakes WFI even with CPSR.I set. Keep IRQs masked
+     * across the idle predicate and WFI; the caller unmasks after return. */
+    __asm__ __volatile__("dsb sy\n\twfi" ::: "memory");
+}
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
-static inline void arch_fence_i(void) { __asm__ __volatile__("dsb ish\n\tisb" ::: "memory"); }
+static inline void arch_fence_i(void) {
+    uint32_t zero = 0;
+    /* Writers clean the changed physical pages before publication. Flush
+     * stale instruction aliases as well when installing the new image. */
+    __asm__ __volatile__("dsb ish\n\tmcr p15, 0, %0, c7, c5, 0\n\t"
+                         "mcr p15, 0, %0, c8, c3, 0\n\tdsb ish\n\tisb"
+                         :: "r"(zero) : "memory");
+}
 static inline void arch_flush_icache_range(const void *addr, size_t size) {
     /*
      * Module load and JIT publish instructions through the D-cache, so the

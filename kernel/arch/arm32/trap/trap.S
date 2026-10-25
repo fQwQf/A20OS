@@ -1,5 +1,6 @@
     .syntax unified
     .arch armv7-a
+    .fpu vfpv3-d16
 
     .equ MODE_USR, 0x10
     .equ MODE_SVC, 0x13
@@ -14,7 +15,9 @@
     .equ TF_KERNEL_SP,          72
     .equ TF_TTBR0,              76
     .equ TF_FAULT_ADDR,         80
-    .equ TF_SIZE,               84
+    .equ TF_SIZE,               224
+    .equ TF_VFP_D,              88
+    .equ TF_FPSCR,              216
 
     /* Generic cause codes matching kernel/core/trap.h expectations. */
     .equ CAUSE_ECALL_U,          11
@@ -104,10 +107,13 @@ irq_vector:
      *   spsr = saved CPSR
      */
 trap_common:
-    /* Build the trap frame on the exception-mode stack.  The extra word keeps
-     * the C-call stack 8-byte aligned while trap_context_t remains 84 bytes. */
-    sub     sp, sp, #88
+    /* Both the trap frame and its VFP register block are 8-byte aligned. */
+    sub     sp, sp, #224
     stmia   sp, {r0-r12}
+    add     r1, sp, #TF_VFP_D
+    vstmia  r1, {d0-d15}
+    vmrs    r1, fpscr
+    str     r1, [sp, #TF_FPSCR]
     add     r1, sp, #TF_SP             /* r1 -> trap.sp */
 
     /*
@@ -134,7 +140,7 @@ trap_common:
 
 1:  /* Kernel trap: current sp is the kernel exception stack. */
     mov     r6, sp
-    add     r6, r6, #88
+    add     r6, r6, #224
     str     r6, [r1]                   /* trap.sp */
     str     lr, [r1, #4]               /* trap.lr */
 
@@ -193,7 +199,7 @@ trap_common:
     mrc     p15, 0, r2, c13, c0, 3
     str     r2, [r1, #28]              /* user-visible TLS pointer */
 
-    add     r2, sp, #88
+    add     r2, sp, #224
     mrs     r3, spsr
     and     r3, r3, #0x1f
     cmp     r3, #MODE_USR
@@ -211,13 +217,13 @@ trap_common:
     ldr     r2, =CAUSE_INTR_MASK
     tst     r1, r2
     beq     5f
-    push    {r0-r3, lr}
+    push    {r0-r3, r12, lr}
     bl      arm32_gic_ack
     ldr     r2, =CAUSE_INTR_MASK
     orr     r0, r0, r2
     percpu_address r2, arm32_trap_flags
     str     r0, [r2]
-    pop     {r0-r3, lr}
+    pop     {r0-r3, r12, lr}
 5:
 
     /* Record the cause for arch_read_cause(). */
@@ -229,6 +235,30 @@ trap_common:
     and     r2, r2, #0x1f
     cmp     r2, #MODE_USR
     beq     5f
+    /* IRQ/abort stacks are entry scratch space, never schedulable stacks.
+     * Move a privileged exception onto the interrupted task's SVC stack
+     * before C may preempt it; otherwise another task reuses the banked
+     * per-CPU stack while this handler is suspended there. */
+    mrs     r2, cpsr
+    and     r2, r2, #0x1f
+    cmp     r2, #MODE_SVC
+    beq     .Lkernel_frame_ready
+    mov     r0, sp
+    add     sp, sp, #224
+    cps     #MODE_SVC
+    mov     r1, lr
+    mov     r2, sp
+    sub     sp, sp, #224
+    mov     r3, sp
+    mov     r12, #7
+.Lcopy_kernel_frame:
+    ldmia   r0!, {r4-r11}
+    stmia   r3!, {r4-r11}
+    subs    r12, r12, #1
+    bne     .Lcopy_kernel_frame
+    str     r1, [sp, #TF_LR]
+    str     r2, [sp, #TF_SP]
+.Lkernel_frame_ready:
     mov     r0, sp
     bl      kernel_trap_handler
     b       __return_to_user
@@ -242,15 +272,23 @@ trap_common:
     cmp     r0, sp
     beq     6f
     mov     r3, sp
+    mov     r12, #7
+.Lcopy_trap_frame:
     ldmia   r3!, {r4-r11}
     stmia   r0!, {r4-r11}
-    ldmia   r3!, {r4-r11}
-    stmia   r0!, {r4-r11}
-    ldmia   r3!, {r4-r8}
-    stmia   r0!, {r4-r8}
+    subs    r12, r12, #1
+    bne     .Lcopy_trap_frame
     sub     r0, r0, #TF_SIZE
     str     r2, [r0, #TF_KERNEL_SP]
 6:
+    /* User exceptions also run C on their task's SVC stack. The persistent
+     * frame at r0 remains above the call stack across scheduling. */
+    mrs     r1, cpsr
+    and     r1, r1, #0x1f
+    cmp     r1, #MODE_SVC
+    addne   sp, sp, #224
+    cps     #MODE_SVC
+    mov     sp, r0
     bl      trap_handler
     b       user_trap_return
 
@@ -271,9 +309,6 @@ __return_to_user:
     beq     9f
 
     /* Kernel-mode return uses the dynamic exception frame already on sp. */
-    ldr     lr, [sp, #TF_PC]
-    ldr     r1, [sp, #TF_CPSR]
-    msr     spsr_cxsf, r1
     ldr     r1, [sp, #TF_KERNEL_TP]
     mcr     p15, 0, r1, c13, c0, 4
 #ifndef CONFIG_NOMMU
@@ -290,9 +325,21 @@ __return_to_user:
     isb
 .Lttbr0_unchanged_k32:
 #endif
+    add     r1, sp, #TF_VFP_D
+    vldmia  r1, {d0-d15}
+    ldr     r1, [sp, #TF_FPSCR]
+    vmsr    fpscr, r1
+    /* The last eight scratch bytes become an RFE pair after VFP restore.
+     * RFE restores PC/CPSR together and writeback recovers the original SP;
+     * LR is the interrupted SVC LR, not the exception return address. */
+    ldr     r1, [sp, #TF_PC]
+    ldr     r2, [sp, #TF_CPSR]
+    str     r1, [sp, #216]
+    str     r2, [sp, #220]
+    ldr     lr, [sp, #TF_LR]
     ldmia   sp, {r0-r12}
-    add     sp, sp, #88                /* tear down the dynamic kernel trap frame */
-    movs    pc, lr
+    add     sp, sp, #216
+    rfeia   sp!
 
 9:
 user_trap_return:
@@ -352,6 +399,10 @@ user_trap_return:
     cmp     r3, #0x11
     addeq   sp, sp, #16384
 .Luser_exception_stack_ready:
+    add     r1, r0, #TF_VFP_D
+    vldmia  r1, {d0-d15}
+    ldr     r1, [r0, #TF_FPSCR]
+    vmsr    fpscr, r1
     ldr     r1, [r0, #4]
     ldr     r2, [r0, #8]
     ldr     r4, [r0, #16]

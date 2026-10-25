@@ -279,24 +279,32 @@ unsafe fn clone_leaf(
     unsafe { a20_cow_geometry(level, &mut size, &mut pmd_size, &mut pmd_order) };
 
     if shared == 0 && unsafe { a20_cow_requires_private_copy() } != 0 {
-        // Private-copy needs the source PFN and architecture flags.  The
-        // shared path gets its authoritative leaf state from the locked,
-        // pinned snapshot below, so an unlocked probe there is redundant.
-        let mut src = Src::default();
-        unsafe { a20_cow_probe(parent, va, &mut src) };
-        if src.present == 0 || src.is_leaf == 0 {
-            return 0;
-        }
+        // Allocation may reclaim memory. Pin the authoritative source leaf
+        // before dropping its node lock, just as the sharing transaction does.
         let order = if size == pmd_size { pmd_order } else { 0 };
         if size != 4096 && size != pmd_size {
             return ENOMEM;
         }
+        let mut src = SharedSnapshot::default();
+        let pinned = match location {
+            None => unsafe { a20_cow_share_snapshot(parent, va, level, &mut src) },
+            Some(location) => unsafe {
+                a20_cow_share_snapshot_at(parent, va, level, location.slot,
+                                          location.node, &mut src)
+            },
+        };
+        if pinned == 0 {
+            return 0;
+        }
+        unsafe { a20_cow_share_unlock(&src) };
         let copy = unsafe { a20_cow_frame_alloc(order) };
         if copy == PFN_NONE {
+            unsafe { a20_cow_release_ref(&src) };
             return ENOMEM;
         }
         unsafe { a20_cow_frame_copy(copy, src.pfn, size) };
         let r = unsafe { a20_cow_map_child(child, va, copy, src.raw_flags, src.class, level) };
+        unsafe { a20_cow_release_ref(&src) };
         if r < 0 {
             unsafe { a20_cow_frame_free(copy, order) };
             return r;

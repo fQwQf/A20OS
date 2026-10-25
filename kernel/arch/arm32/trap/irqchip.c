@@ -76,11 +76,9 @@ static void handle_timer_irq(int from_user) {
     kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
     gic_eoi(IRQ_S_TIMER);
-    if (!from_user)
-        return;
-    task_t *cur = proc_current();
-    if (cur)
-        cur->total_time++;
+    /* Expire wait and signal timers even when every user task is asleep.
+     * Accounting alone leaves an idle CPU with no task to reap deadlines. */
+    proc_sched_tick(from_user);
 }
 
 void trap_init(void) {

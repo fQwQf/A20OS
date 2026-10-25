@@ -98,17 +98,26 @@ void *memcpy(void *d, const void *s, size_t n) {
         while (n >= 64) {
             dw[0] = sw[0]; dw[1] = sw[1]; dw[2] = sw[2]; dw[3] = sw[3];
             dw[4] = sw[4]; dw[5] = sw[5]; dw[6] = sw[6]; dw[7] = sw[7];
+            /* A direct mapping may end at UINTPTR_MAX on ILP32. Do not
+             * form a wrapped one-past pointer after the final transfer. */
+            if (n == 64) return d;
             dw += 8; sw += 8; n -= 64;
         }
-        while (n >= 8) { *dw++ = *sw++; n -= 8; }
+        while (n >= 8) {
+            *dw = *sw;
+            if (n == 8) return d;
+            dw++; sw++; n -= 8;
+        }
         dp = (unsigned char *)dw; sp = (const unsigned char *)sw;
     } else {
         while (n >= 8 && !((uintptr_t)dp & 7) && !((uintptr_t)sp & 7)) {
             *(uint64_t *)dp = *(const uint64_t *)sp;
+            if (n == 8) return d;
             dp += 8; sp += 8; n -= 8;
         }
     }
-    while (n--) *dp++ = *sp++;
+    while (n > 1) { *dp++ = *sp++; n--; }
+    if (n) *dp = *sp;
     return d;
 }
 

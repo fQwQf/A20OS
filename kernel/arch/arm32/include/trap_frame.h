@@ -16,9 +16,13 @@ typedef struct {
     uint32_t kernel_sp;
     uint32_t ttbr0;
     uint32_t fault_addr;
+    uint32_t vfp_pad;
+    uint64_t vfp_d[16];
+    uint32_t fpscr;
+    uint32_t vfp_reserved;
 } trap_context_t;
 
-_Static_assert(sizeof(trap_context_t) == 84, "trap_context_t must stay in sync with trap.S");
+_Static_assert(sizeof(trap_context_t) == 224, "trap_context_t must stay in sync with trap.S");
 _Static_assert(__builtin_offsetof(trap_context_t, sp) == 52, "trap_context_t.sp offset mismatch");
 _Static_assert(__builtin_offsetof(trap_context_t, lr) == 56, "trap_context_t.lr offset mismatch");
 _Static_assert(__builtin_offsetof(trap_context_t, pc) == 60, "trap_context_t.pc offset mismatch");
@@ -27,6 +31,8 @@ _Static_assert(__builtin_offsetof(trap_context_t, kernel_tp) == 68, "trap_contex
 _Static_assert(__builtin_offsetof(trap_context_t, kernel_sp) == 72, "trap_context_t.kernel_sp offset mismatch");
 _Static_assert(__builtin_offsetof(trap_context_t, ttbr0) == 76, "trap_context_t.ttbr0 offset mismatch");
 _Static_assert(__builtin_offsetof(trap_context_t, fault_addr) == 80, "trap_context_t.fault_addr offset mismatch");
+_Static_assert(__builtin_offsetof(trap_context_t, vfp_d) == 88, "trap VFP offset mismatch");
+_Static_assert(__builtin_offsetof(trap_context_t, fpscr) == 216, "trap FPSCR offset mismatch");
 
 typedef struct {
     uint32_t ra;
@@ -43,13 +49,18 @@ typedef struct {
     uint32_t ttbr0;
     uint32_t cpsr;
     uint32_t user_tp;
+    uint64_t vfp_callee[8];
+    uint32_t fpscr;
+    uint32_t vfp_reserved;
 } task_context_t;
 
-_Static_assert(sizeof(task_context_t) == 56, "task_context_t must stay in sync with switch.S");
+_Static_assert(sizeof(task_context_t) == 128, "task_context_t must stay in sync with switch.S");
 _Static_assert(__builtin_offsetof(task_context_t, sp) == 40, "task_context_t.sp offset mismatch");
 _Static_assert(__builtin_offsetof(task_context_t, ttbr0) == 44, "task_context_t.ttbr0 offset mismatch");
 _Static_assert(__builtin_offsetof(task_context_t, cpsr) == 48, "task_context_t.cpsr offset mismatch");
 _Static_assert(__builtin_offsetof(task_context_t, user_tp) == 52, "task_context_t.user_tp offset mismatch");
+_Static_assert(__builtin_offsetof(task_context_t, vfp_callee) == 56, "switch VFP offset mismatch");
+_Static_assert(__builtin_offsetof(task_context_t, fpscr) == 120, "switch FPSCR offset mismatch");
 
 typedef struct {
     uint32_t r[13];
@@ -59,11 +70,17 @@ typedef struct {
     uint32_t cpsr;
 } arch_sigcontext_t;
 
+typedef struct {
+    uint64_t vfp_d[16];
+    uint32_t fpscr;
+    uint32_t reserved;
+} arch_signal_extra_t;
+
 #define ARCH_UCONTEXT_PAD_FIELDS uint32_t uc_pad;
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint32_t arch_extra;
 
-#define TRAP_CONTEXT_SIZE  ((13 + 8) * 4)
-#define TASK_CONTEXT_SIZE  (14 * 4)
+#define TRAP_CONTEXT_SIZE  224
+#define TASK_CONTEXT_SIZE  128
 #define KTRAP_CONTEXT_SIZE TRAP_CONTEXT_SIZE
 #define ARCH_SYSCALL_TRACE_MIN_PID 3
 
@@ -134,7 +151,7 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx, trap_co
     /*
      * Keep the live SVC stack below the persistent trap frame at the top of
      * each user task's kernel stack.  Starting at stack_top makes the first
-     * 88-byte exception frame overlap trap_context_t and corrupts saved user
+     * exception frame overlap trap_context_t and corrupts saved user
      * registers during fork/exec-heavy startup.
      */
     ctx->sp = trap ? trap->kernel_sp : (uint32_t)stack_top;
@@ -184,11 +201,11 @@ static inline uint64_t arch_signal_tramp_pte_flags(void) {
 }
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {
-    ctx->kernel_sp = (uint32_t)(ksp - 88U);
+    ctx->kernel_sp = (uint32_t)(ksp - 224U);
 }
 
 static inline uint64_t arch_trap_ctx_get_kernel_stack(const trap_context_t *ctx, uint64_t fallback) {
-    return ctx->kernel_sp ? (uint64_t)(ctx->kernel_sp + 88U) : fallback;
+    return ctx->kernel_sp ? (uint64_t)(ctx->kernel_sp + 224U) : fallback;
 }
 
 static inline void arch_advance_syscall_epc(trap_context_t *ctx) {
@@ -205,8 +222,10 @@ static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc, const trap_
 }
 
 static inline void arch_signal_build_frame_extra(void *extra, const trap_context_t *ctx) {
-    (void)extra;
-    (void)ctx;
+    arch_signal_extra_t *state = extra;
+    for (int i = 0; i < 16; i++)
+        state->vfp_d[i] = ctx->vfp_d[i];
+    state->fpscr = ctx->fpscr;
 }
 
 static inline void arch_signal_restore_mcontext(trap_context_t *ctx, const arch_sigcontext_t *sc) {
@@ -219,8 +238,10 @@ static inline void arch_signal_restore_mcontext(trap_context_t *ctx, const arch_
 }
 
 static inline void arch_signal_restore_frame_extra(trap_context_t *ctx, const void *extra) {
-    (void)ctx;
-    (void)extra;
+    const arch_signal_extra_t *state = extra;
+    for (int i = 0; i < 16; i++)
+        ctx->vfp_d[i] = state->vfp_d[i];
+    ctx->fpscr = state->fpscr;
 }
 
 

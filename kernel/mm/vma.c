@@ -14,8 +14,8 @@
 #include "core/klog.h"
 
 /* munmap_txn.rs: release transaction for run-batched final-destroy leaves. */
-extern void a20_vma_free_run_release_rust(mm_seg_t *vma, uint64_t start_va,
-                                          const pfn_t *pfns, int count,
+extern void a20_vma_free_run_release_rust(mm_seg_t *vma, uintptr_t start_va,
+                                          const pfn_t *pfns, size_t count,
                                           int no_frame_ref);
 #include "core/perf.h"
 
