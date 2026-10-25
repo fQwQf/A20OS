@@ -93,3 +93,20 @@ QEMU 日志在 `.kernel-build/smoke/hyp-*.log`；Bochs 保存 serial、配置、
 其它资料：[ARM32](../../kernel/arch/arm32/hyp/README.md)、
 [RV32](../../kernel/arch/riscv32/hyp/README.md)、
 [AArch64](../../kernel/arch/aarch64/hyp/README.md)。
+
+## 合并 main 后复测
+
+文档使用入口已更新为 [使用指南](03-usage.md)。在合并后的 main 上重新构建
+全部可执行架构并复测，上表的双核正控与负控均通过；LoongArch 仍只执行
+无 LVZ 负控。集成修复 `312c39a7` 保留物理板配置和 HYP 路径，避免 ARM32
+的 DTB 被 relocation scratch 覆盖，并为 QEMU 提供独立的强 bootargs 入口。
+x86 在 BIOS/UEFI entry 清零 BSS 前保存 Multiboot 命令行，解决 QEMU 将其
+放在载入镜像末尾、随后被 BSS/启动页表覆盖而漏启测试的问题。UEFI 入口
+使用同样的保存协议，本轮补测没有新增物理机或 UEFI 启动验收。
+
+合并后的 14 份运行记录、镜像与日志哈希见
+[main 复测清单](validation-main-2026-10-25.json)。相关 hypervisor、trim 和
+ARM 板级部署单元测试共 59 项通过。原 worktree 的最终 18 份运行/用户构建
+日志已迁至主目录的 `.kernel-build/hypervisor-validation/2026-10-25-worktree/`，
+其下路径对应旧 `.kernel-build/` 的相对路径；清理旧 worktree 不会丢失这些证据。
+复测日志留在主目录 `.kernel-build/smoke/` 与 `.kernel-build/vmx-bochs-main*/`。
