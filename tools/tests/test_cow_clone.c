@@ -178,6 +178,8 @@ int a20_cow_requires_private_copy(void) { return g_requires_copy; }
 uint32_t a20_cow_frame_alloc(int order)
 {
     (void)order;
+    check(snapshot_calls > release_calls && !snapshot_locked,
+          "private allocation holds a source pin but no node lock");
     alloc_calls++;
     return g_alloc_pfn;
 }
@@ -376,6 +378,8 @@ static void private_copy(void)
     check(last_map_flags == g_probe_raw, "private: the child keeps the raw arch flags");
     check(rss_calls == 1 && rss_pages == 1, "private: rss is charged");
     check(downgrade_calls == 0, "private: the parent is not downgraded");
+    check(unlock_calls == 1 && release_calls == 1,
+          "private: source pin is released after the map");
 
     /* A huge leaf copies with the PMD order. */
     reset();
@@ -396,6 +400,7 @@ static void private_copy(void)
           "private: a failed map is propagated");
     check(free_calls == 1, "private: the copied frame is freed");
     check(rss_calls == 0, "private: a failed copy charges no rss");
+    check(release_calls == 1, "private: map failure releases source pin");
 
     /* A failed frame allocation maps nothing. */
     reset();
@@ -404,6 +409,7 @@ static void private_copy(void)
     check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == -12,
           "private: an allocation failure is ENOMEM");
     check(copy_calls == 0 && map_calls == 0, "private: nothing is copied or mapped");
+    check(release_calls == 1, "private: allocation failure releases source pin");
 }
 
 static void share_and_cow(void)
@@ -510,14 +516,14 @@ static void private_probe_validation(void)
     static int child, parent;
     reset();
     g_requires_copy = 1;
-    g_probe_present = 0;
+    g_snapshot_present = 0;
     check(a20_cow_clone_leaf_rust(&child, &parent, 0x1000, 0, 0) == 0,
           "private direct leaf: absent source is skipped");
-    check(probe_calls == 1 && alloc_calls == 0 && map_calls == 0,
-          "private direct leaf: probe validates before allocation");
+    check(snapshot_calls == 1 && alloc_calls == 0 && map_calls == 0,
+          "private direct leaf: snapshot validates before allocation");
     reset();
     g_requires_copy = 1;
-    g_probe_leaf = 0;
+    g_snapshot_leaf = 0;
     check(a20_cow_clone_leaf_rust(&child, &parent, 0x1000, 0, 0) == 0,
           "private direct leaf: non-leaf source is skipped");
     check(alloc_calls == 0 && map_calls == 0,
@@ -528,8 +534,8 @@ static void private_probe_validation(void)
     check(a20_cow_clone_leaf_at_rust(&child, &parent, 0x1000, 0, 0, 0,
                                      &snapshot_slot, &snapshot_node) == 0,
           "walker hint: private-copy succeeds");
-    check(probe_calls == 1 && snapshot_at_calls == 0 && map_calls == 1,
-          "walker hint: private-copy retains source probe validation");
+    check(probe_calls == 0 && snapshot_at_calls == 1 && map_calls == 1,
+          "walker hint: private-copy pins the walker source before allocation");
 }
 
 int main(void)

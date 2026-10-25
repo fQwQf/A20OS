@@ -111,7 +111,13 @@ check-firmware-model:
 	  tools.tests.test_sdhci \
 	  tools.tests.test_dw_sdio \
 	  tools.tests.test_ls2k0300_liointc \
-	  tools.tests.test_boot_framebuffer
+	  tools.tests.test_board_shell_profiles \
+	  tools.tests.test_serial_shell_smoke \
+	  tools.tests.test_arm32_poll_abi \
+	  tools.tests.test_fault_ffi_width \
+	  tools.tests.test_vma_release_ffi_width \
+	  tools.tests.test_boot_framebuffer \
+	  tools.tests.test_memcpy_boundaries
 
 # Execute the production common fabric driver for x86-64, AArch64 and RV64.
 .PHONY: check-shared-fabric-portability

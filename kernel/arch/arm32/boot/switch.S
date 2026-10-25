@@ -1,16 +1,14 @@
     .syntax unified
     .arch armv7-a
+    .fpu vfpv3-d16
 
 /*
  * IRQ, prefetch-abort, data-abort and FIQ all run their vector prologue and
- * the 88-byte trap_context_t on the banked exception stack this switch
- * points below the incoming task_context_t, and an IRQ additionally calls
- * into C there before the frame is copied to the task's persistent
- * trap_ctx.  Overflow runs into the context being restored, so the reserve
- * has to stay above the prologue plus the frame.  Enforced here because the
- * frame size lives in trap/trap.S and would otherwise be a silent contract.
+ * the 224-byte trap_context_t on a per-CPU banked entry stack. trap.S then
+ * migrates the frame to the task's SVC stack before calling schedulable C.
+ * Each bank has 4 KiB; keep the prologue and GIC acknowledge inside it.
  */
-    .equ ARM32_TRAP_FRAME_SIZE, 88
+    .equ ARM32_TRAP_FRAME_SIZE, 224
     .equ ARM32_BANKED_SP_RESERVE, 4096
     .if ARM32_TRAP_FRAME_SIZE + 16 > ARM32_BANKED_SP_RESERVE
     .error "arm32 banked SP reserve is smaller than the trap frame it must hold"
@@ -33,8 +31,8 @@ __switch:
     /* r1 = previous task pointer */
     mrc     p15, 0, r1, c13, c0, 4
 
-    /* Make room for task_context_t (14 * 4 = 56 bytes) on current stack. */
-    sub     sp, sp, #56
+    /* GPR/TLS state plus AAPCS callee-saved VFP registers and FPSCR. */
+    sub     sp, sp, #128
 
     /* task_context_t.ra = lr */
     str     lr, [sp, #0]
@@ -50,7 +48,7 @@ __switch:
     str     r10, [sp, #32]
     str     r11, [sp, #36]
     /* task_context_t.sp = stack pointer before this context was saved */
-    add     r2, sp, #56
+    add     r2, sp, #128
     str     r2, [sp, #40]
     /* task_context_t.ttbr0 */
 #ifndef CONFIG_NOMMU
@@ -67,6 +65,11 @@ __switch:
     mrc     p15, 0, r2, c13, c0, 3
     str     r2, [sp, #52]
 
+    add     r2, sp, #56
+    vstmia  r2, {d8-d15}
+    vmrs    r2, fpscr
+    str     r2, [sp, #120]
+
     /* prev->kstack = sp */
     str     sp, [r1]
 
@@ -74,7 +77,10 @@ __switch:
     mov     sp, r0
 
     /* Load the next task's context. */
-    ldr     lr, [sp, #0]
+    add     r2, sp, #56
+    vldmia  r2, {d8-d15}
+    ldr     r2, [sp, #120]
+    vmsr    fpscr, r2
     ldr     r1, [sp, #4]
     mcr     p15, 0, r1, c13, c0, 4
     ldr     r4, [sp, #8]
@@ -101,7 +107,12 @@ __switch:
 .Lttbr0_unchanged:
 #endif
     ldr     r3, [sp, #48]
-    ldr     r0, [sp, #52]            /* user_tp; r0 is free after stack switch */
+    ldr     r0, [sp, #52]
+    mcr     p15, 0, r0, c13, c0, 3
+    /* LR is banked between SVC and IRQ. Keep the target return address in
+     * an unbanked caller-saved register until the target mode is installed;
+     * otherwise a timer-driven IRQ -> SVC switch returns through stale LR. */
+    ldr     r0, [sp, #0]
 
     /* If the target context is for a user task (CPSR mode == USR), stay in
      * SVC mode so that lr (user_trap_return) runs with kernel privileges.
@@ -110,40 +121,44 @@ __switch:
     cmp     r12, #0x10
     beq     1f
 
-    /* Keep the privileged exception-mode stack pointers in sync with the
-     * next task's SVC stack so IRQ/abort handlers always run on a valid
-     * kernel stack.  The reserve below is bounded by ARM32_BANKED_SP_RESERVE
-     * at the top of this file.  r2 holds the next SVC sp; r3 holds the target
-     * CPSR. */
-    mov     r12, r2
-    sub     r12, r12, #ARM32_BANKED_SP_RESERVE
-    cps     #0x12                    /* IRQ mode */
-    mov     sp, r12
-    cps     #0x17                    /* ABT mode */
-    mov     sp, r12
-    cps     #0x1B                    /* UND mode */
-    mov     sp, r12
-    cps     #0x11                    /* FIQ mode */
-    mov     sp, r12
-    cps     #0x13                    /* SVC mode */
+    /* Banked stacks hold entry scratch only; C handlers migrate to SVC.
+     * Fixed per-CPU areas cannot overlap a deep task stack. r1 is unbanked
+     * even in FIQ mode (r8-r14 are banked there). */
+    mrc     p15, 0, r1, c0, c0, 5
+    and     r1, r1, #255
+    ldr     r12, =arm32_exception_stacks
+    add     r1, r12, r1, lsl #14
+    cps     #0x12
+    add     sp, r1, #4096
+    cps     #0x17
+    add     sp, r1, #8192
+    cps     #0x1B
+    add     sp, r1, #12288
+    cps     #0x11
+    add     sp, r1, #16384
+    cps     #0x13
     msr     cpsr_cxsf, r3
     mov     sp, r2
-
+    mov     lr, r0
     bx      lr
 
 1:
-    mov     r12, r2
-    sub     r12, r12, #ARM32_BANKED_SP_RESERVE
+    /* Banked stacks hold entry scratch only; C handlers migrate to SVC.
+     * Fixed per-CPU areas cannot overlap a deep task stack. r1 is unbanked
+     * even in FIQ mode (r8-r14 are banked there). */
+    mrc     p15, 0, r1, c0, c0, 5
+    and     r1, r1, #255
+    ldr     r12, =arm32_exception_stacks
+    add     r1, r12, r1, lsl #14
     cps     #0x12
-    mov     sp, r12
+    add     sp, r1, #4096
     cps     #0x17
-    mov     sp, r12
+    add     sp, r1, #8192
     cps     #0x1B
-    mov     sp, r12
+    add     sp, r1, #12288
     cps     #0x11
-    mov     sp, r12
+    add     sp, r1, #16384
     cps     #0x13
     mov     sp, r2
-    /* Restore the user-visible TLS pointer before entering user mode. */
-    mcr     p15, 0, r0, c13, c0, 3
+    mov     lr, r0
     bx      lr

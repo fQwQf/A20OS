@@ -380,7 +380,7 @@ static pte_t cow_replacement_leaf(paddr_t pa, pte_t flags, size_t leaf_size)
  * frame allocator's lock, the copy, the diagnostic hooks and the local TLB
  * flush.
  */
-extern int a20_cow_fault_locked_rust(task_t *t, mm_struct_t *mm, uint64_t stval,
+extern int a20_cow_fault_locked_rust(task_t *t, mm_struct_t *mm, uintptr_t stval,
                                      pfn_t *old_pfn_out,
                                      page_cache_page_t **old_page_out);
 
@@ -1277,7 +1277,10 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
      * backend supports batched fills.  The mapping owns its cache pin and
      * stays COW, so a later store cannot modify the cache or another mm.
      * Single-page backends keep the existing anonymous-copy policy. */
-    int direct_private = !shared &&
+    /* A private cache mapping needs real write protection and COW teardown
+     * metadata. Backends that require eager private copies cannot borrow the
+     * canonical cache frame: their leaf teardown owns an ordinary frame ref. */
+    int direct_private = !shared && !arch_fork_requires_private_copy() &&
         ((fault_around && !executable) || vf->vnode->ops->readpages);
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
@@ -1484,13 +1487,13 @@ _Static_assert(_Alignof(struct a20_fault_status_ctx) <= _Alignof(uint64_t),
                "Rust/C status-COW cursor alignment");
 
 extern int a20_cow_from_status_rust(task_t *t, mm_struct_t *mm,
-                                    uint64_t page_va, pfn_t *retired_pfn);
+                                    uintptr_t page_va, pfn_t *retired_pfn);
 
 /* Open the cursor over the page and pin the leaf's frame.  Returns 1 with the
  * facts filled and the cursor open (the caller must close it), or 0 when the
  * leaf is not there to break -- in which case the cursor has already been
  * released and no lock is held. */
-int a20_cowf_status_open(void *ctx_ptr, mm_struct_t *mm, uint64_t page_va,
+int a20_cowf_status_open(void *ctx_ptr, mm_struct_t *mm, uintptr_t page_va,
                          uint8_t *cls_out, uintptr_t *pa_out, int *uffd_out)
 {
     struct a20_fault_status_ctx *ctx = ctx_ptr;
@@ -1512,7 +1515,7 @@ int a20_cowf_status_open(void *ctx_ptr, mm_struct_t *mm, uint64_t page_va,
     return 1;
 }
 
-int a20_cowf_status_replace(void *ctx_ptr, uint64_t page_va, uintptr_t expect_pa,
+int a20_cowf_status_replace(void *ctx_ptr, uintptr_t page_va, uintptr_t expect_pa,
                             uintptr_t new_pa, uint8_t cls, uintptr_t *replaced_out)
 {
     struct a20_fault_status_ctx *ctx = ctx_ptr;
@@ -1683,13 +1686,13 @@ int handle_demand_fault(task_t *t, uint64_t stval)
  * install, the zeroing, the accounting and the local flush.
  */
 extern int a20_fault_from_status_rust(task_t *t, mm_struct_t *mm,
-                                      uint64_t page_va, uint64_t stval,
+                                      uintptr_t page_va, uintptr_t stval,
                                       int access);
 
 /* Open the cursor over the page and report the entry's facts.  Returns 1 with
  * the cursor open -- the caller decides and closes it -- or 0 with no lock held
  * when there is no page table to walk. */
-int a20_fault_status_open(void *ctx_ptr, mm_struct_t *mm, uint64_t page_va,
+int a20_fault_status_open(void *ctx_ptr, mm_struct_t *mm, uintptr_t page_va,
                           uint8_t *cls_out, int *already_out, int *uffd_out)
 {
     struct a20_fault_status_ctx *ctx = ctx_ptr;
@@ -1703,7 +1706,7 @@ int a20_fault_status_open(void *ctx_ptr, mm_struct_t *mm, uint64_t page_va,
     return 1;
 }
 
-int a20_fault_status_map_if_absent(void *ctx_ptr, uint64_t page_va,
+int a20_fault_status_map_if_absent(void *ctx_ptr, uintptr_t page_va,
                                    uintptr_t pa, uintptr_t allow, uint8_t cls)
 {
     struct a20_fault_status_ctx *ctx = ctx_ptr;
@@ -1740,7 +1743,7 @@ void a20_fault_status_bump(task_t *t)
     __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
 }
 
-void a20_fault_status_flush_local(uint64_t stval)
+void a20_fault_status_flush_local(uintptr_t stval)
 {
     arch_tlb_flush_page_local(stval);
 }
