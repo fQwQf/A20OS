@@ -98,36 +98,6 @@ int64_t sys_clock_getres(int clk, void *tp) {
     return 0;
 }
 
-int64_t sys_nanosleep(void *req, void *rem) {
-    (void)rem;
-    if (!req) return -EFAULT;
-    uint64_t ts[2];
-    if (copy_from_user(ts, req, sizeof(ts)) < 0) return -EFAULT;
-    uint64_t sec  = ts[0];
-    uint64_t nsec = ts[1];
-    if ((int64_t)sec < 0 || (int64_t)nsec < 0 || nsec >= 1000000000ULL)
-        return -EINVAL;
-    uint64_t ticks = sec * TICKS_PER_SEC +
-                     (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
-    if (ticks == 0)
-        return 0;
-    uint64_t until = timer_get_ticks() + ticks;
-
-    task_t *t = proc_current();
-    if (t) {
-        proc_wake_reason_t reason =
-            proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
-        if (reason == PROC_WAKE_TIMEOUT_CAPACITY)
-            return -EAGAIN;
-        if (proc_wake_reason_is_task_interrupt(reason) ||
-            signal_task_has_unblocked(t))
-            return -ERESTARTSYS;
-    } else {
-        while (timer_get_ticks() < until) cpu_relax();
-    }
-    return 0;
-}
-
 int64_t sys_gettimeofday(void *tv, void *tz) {
     if (tv) {
         uint64_t t[2];

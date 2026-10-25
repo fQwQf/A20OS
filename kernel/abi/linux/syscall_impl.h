@@ -258,6 +258,8 @@ int64_t sys_clock_gettime(int clk, void *tp);
 int64_t sys_clock_gettime32(int clk, void *tp);
 int64_t sys_clock_getres(int clk, void *tp);
 int64_t sys_nanosleep(void *req, void *rem);
+int64_t sys_nanosleep_abi(const void *req, void *rem, int time32);
+int64_t sys_clock_nanosleep_abi(int clk, int flags, const void *req, void *rem, int time32);
 int64_t sys_gettimeofday(void *tv, void *tz);
 int64_t sys_settimeofday(void *tv, void *tz);
 int64_t sys_times(void *buf);

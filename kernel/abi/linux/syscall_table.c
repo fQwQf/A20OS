@@ -1,6 +1,10 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 
+#ifndef ARCH_LINUX_LEGACY_SLEEP_TIME32
+#define ARCH_LINUX_LEGACY_SLEEP_TIME32 0
+#endif
+
 #define A(n) (args->arg[(n)])
 
 static int64_t linux_sys_clone_call(const linux_syscall_args_t *args)
