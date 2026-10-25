@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* SG2002 Nano rev1.4 onboard DAC/PA. Register topology and DMA arguments:
+ * sipeed/LicheeRV-Nano-Build d4003f15b35d43ad4842f427050ab2bba0114fa5,
+ * build/boards/default/dts/sg200x/soph_base.dtsi. The PA enable is pulled
+ * high in hardware; no mute GPIO is invented. Clock/routing policy is arch-owned.
+ */
+&{/soc} {
+    audio_top: top-syscon@3000000 {
+        compatible = "sophgo,sg2002-top-syscon", "syscon";
+        reg = <0x03000000 0x1000>;
+    };
+    audio_subsys: i2s-subsystem@4108000 {
+        compatible = "sophgo,sg2002-i2s-subsystem", "syscon";
+        reg = <0x04108000 0x100>;
+    };
+    audio_reset: reset-syscon@3003000 {
+        compatible = "sophgo,sg2002-reset-syscon", "syscon";
+        reg = <0x03003000 0x100>;
+    };
+    audio_pinmux: pinmux-syscon@3001000 {
+        compatible = "sophgo,sg2002-pinmux-syscon", "syscon";
+        reg = <0x03001000 0x1000>;
+    };
+    audio_dma: dma-controller@4330000 {
+        compatible = "snps,dmac-bm";
+        reg = <0x04330000 0x1000>;
+        interrupts = <29>;
+        #dma-cells = <3>;
+        dma-channels = <8>;
+        dma-requests = <16>;
+        dma-masters = <2>;
+        data-width = <4 4>;
+        status = "okay";
+    };
+    audio_i2s3: i2s@4130000 {
+        compatible = "cvitek,cv1835-i2s";
+        reg = <0x04130000 0x2000>;
+        interrupts = <43>;
+        #sound-dai-cells = <0>;
+        capability = "tx";
+        dev-id = <3>;
+        mclk_out = "true";
+        dmas = <&audio_dma 7 1 1>;
+        dma-names = "tx";
+        status = "okay";
+    };
+    audio_dac: audio-codec@300a000 {
+        compatible = "cvitek,cv182xadac";
+        reg = <0x0300a000 0x100>;
+        #sound-dai-cells = <0>;
+        status = "okay";
+    };
+};
+/ {
+    sound {
+        compatible = "simple-audio-card";
+        simple-audio-card,name = "LicheeRV Nano DAC";
+        simple-audio-card,format = "i2s";
+        simple-audio-card,bitclock-master = <&nano_audio_cpu>;
+        simple-audio-card,frame-master = <&nano_audio_cpu>;
+        nano_audio_cpu: simple-audio-card,cpu { sound-dai = <&audio_i2s3>; };
+        simple-audio-card,codec { sound-dai = <&audio_dac>; };
+    };
+};

@@ -21,6 +21,7 @@ DTB_NAME = "sg2002-licheerv-nano-b.dtb"
 LOAD_ADDRESS = 0x80200000
 FDT_ADDRESS = 0x82000000
 SCRIPT_ADDRESS = 0x8E000000
+AUDIO_DTSI = ROOT / "tools/firmware/licheerv-nano-audio.dtsi"
 SOURCES = {
     "u-boot": common.SOURCES["u-boot"],
     "opensbi": {
@@ -154,6 +155,10 @@ def prepare(args) -> None:
     sources = {name: common.source_tree(name, args.cache.resolve(), spec)
                for name, spec in SOURCES.items()}
     uboot, opensbi, fiptool = (sources[name] for name in ("u-boot", "opensbi", "fiptool"))
+    dt_dir = uboot / "dts/upstream/src/riscv/sophgo"
+    shutil.copy2(AUDIO_DTSI, dt_dir / AUDIO_DTSI.name)
+    with (dt_dir / (DTB_NAME[:-4] + ".dts")).open("a") as stream:
+        stream.write('\n#include "licheerv-nano-audio.dtsi"\n')
     env_header = uboot / "include/configs/licheerv_nano.h"
     patch_environment(env_header)
     ub_out, sbi_out = work / "u-boot", work / "opensbi"
@@ -198,6 +203,7 @@ def prepare(args) -> None:
     manifest = {
         "format": "a20os-licheerv-nano-firmware-v1", "board": "licheerv-nano", "ram_mib": 256,
         "hardware_validated": False, "sources": SOURCES,
+        "audio_dtsi": common.artifact(AUDIO_DTSI),
         "defconfig": "sipeed_licheerv_nano_defconfig", "opensbi_platform": "generic",
         "config_overrides": ["CONFIG_CRC32_VERIFY=y", "CONFIG_BOOTMETH_SCRIPT=y"],
         "script_address": SCRIPT_ADDRESS, "fdt_address": FDT_ADDRESS,

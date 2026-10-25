@@ -59,7 +59,7 @@ fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也�
 | SD | `0x04310000`，IRQ 36，SDHCI/DWCMSHC；`sdhci` 块驱动提供 1-bit、3.3 V、最高 25 MHz 的 PIO 读写，尚未实机验证 |
 | 网络 | E/WE 有 100M 网口；U-Boot TFTP 能力不等于 A20OS 已有 SG2002 网卡驱动 |
 | 显示 | 板载 31-pin、2-lane MIPI DSI 接口；没有 HDMI。A20OS 尚无 SG2002 显示控制器、DSI PHY 和屏幕初始化驱动 |
-| 音频 | 板载模拟麦克风和可接小于 1 W 扬声器的功放；A20OS 尚无 SG2002 DAC/I2S/DMA 播放驱动 |
+| 音频 | 原生 `sg2002-audio`：I2S3 → 内部 DAC → 板载功放，48 kHz stereo S16_LE PCM；板上单功放仅接右路，物理输出为 mono。麦克风录音未实现；实机未验证 |
 
 UART 使用 32 位寄存器访问与 4 字节间距，保留 FSBL/U-Boot 设置的时钟、引脚和 115200 波特率。
 内核采用标准 RISC-V Image 头，由 U-Boot 以 `booti KERNEL - DTB` 启动；
@@ -67,18 +67,61 @@ UART 使用 32 位寄存器访问与 4 字节间距，保留 FSBL/U-Boot 设置�
 
 ### 显示和声音的设备条件
 
-Nano 的音频硬件确实存在，不能因为尚未编写驱动而归为“无对应设备”。
-其显示口需要具体的 MIPI 屏幕、转接板和排线；不同屏幕的 DCS 初始化、
+Nano 的板载 DAC/功放已有原生播放驱动。显示口仍需要具体的 MIPI 屏幕、转接板和排线；不同屏幕的 DCS 初始化、
 lane 时序、复位与背光供电不能由通用 framebuffer 推断。
 [厂商规格及接线入口](https://wiki.sipeed.com/hardware/en/lichee/RV_Nano/1_intro.html)
 列出了显示接口、板载功放和不同型号的配置。
 
-厂商公开的 [SG2002 板级设备树](https://github.com/sipeed/LicheeRV-Nano-Build/blob/main/build/boards/sg200x/sg2002_licheervnano_sd/dts_riscv/sg2002_licheervnano_sd.dts)
-及 [CVITEK 音频实现](https://github.com/sipeed/LicheeRV-Nano-Build/tree/main/linux_5.10/sound/soc/cvitek)
-可作为寄存器和拓扑依据。当前 A20OS 的 RISC-V DMA 同步钩子尚未实现
-C906 非一致性缓存维护；在补齐并验证这条路径前，不能把通用 DMA 分配接口
-直接当作可用的音频 DMA。现有 SD 驱动采用 PIO，不依赖该能力。
-默认实例继续提供串口 shell，不创建虚假的 `/dev/fb0` 或 PCM 播放设备。
+启动固件的 mainline DT 原本没有完整音频节点；prepare 会加入本仓库的
+`tools/firmware/licheerv-nano-audio.dtsi`，描述真实 I2S3、DAC、DMA 和系统控制资源，
+并把该输入的摘要记入固件 manifest。板级代码验证实际枚举的资源再附加时钟/缓存策略，
+通用 PCM 驱动不含 RISC-V 指令或板级物理地址。没有初始化具体屏幕，不发布虚假的 `/dev/fb0`。
+
+## 板载功放 PCM
+
+使用包含现有播放器的独立 RAMFS 实例：
+
+```sh
+tools/a20 prepare licheerv-nano-media
+tools/a20 package licheerv-nano-media -- -j2
+tools/a20 deploy licheerv-nano-media --media-device /dev/实际SD整盘设备 --no-console
+tools/a20 console licheerv-nano-media --serial /dev/ttyUSB0 --interactive
+```
+
+镜像为 `build/licheerv-nano/a20os-licheerv-nano-media-sdcard.img`。
+进入串口 shell 后运行 `audioplay --tone 440 --duration 1000`，或将适合的 PCM WAV
+交给 `audioplay /tmp/clip.wav`。默认镜像不含外部媒体文件，也不提供网络登录。
+
+PCM 接口固定为 48 kHz 双声道 S16_LE；Nano rev1.4 的单功放 U11 仅连接 DAC 右路，
+实际扬声器输出为 mono，不要据此接口格式推断板上有两个声道。
+功放 EN 经 R36 上拉固定使能，没有可用的 GPIO mute；静音通过内部 DAC 数字路径控制。
+驱动不假定不同扩展板的功放或屏幕接线。
+
+DMA 使用 SG200x 的 AXI 风格寄存器和 64-byte LLI，不能套用通常的 DW AHB 布局。
+channel 7、request 7、master 1/1 承担播放，32 KiB PCM 环形缓冲按 4 KiB 周期中断；
+每个微块不超过 64 byte，512 个 LLI 另占 32 KiB。支持背压、尾部排空、停止与错误回报。
+停止无法确认时撤销中断回调，仅隔离仍可能被硬件读取的 DMA 存储。
+不提供通用 DMA channel 分配器，不能让其他驱动同时占用 channel 7。
+
+板级逻辑读取并验证共享 A0PLL，选择能精确得到 24.576 MHz 的 AUD3 分频；
+不重新调节同时供给 C906B 的 PLL。内部 DAC 使用厂商明确的 S16 stereo 特殊 framing，
+不将文件名 `cv1835-i2s` 当作 CV1835 codec 的寄存器兼容承诺。
+
+C906 DMA 缓存维护在设备 probe 前授权：核对 SG2002/C906 和 SBI vendor ID，
+再执行可精确恢复的 S-mode 指令探针。只有指定 PC 的非法指令可恢复，普通异常保持原行为。
+成功后，CPA/CIPA 以物理地址维护 64-byte 缓存行，并完成同步屏障。
+权限或型号不满足时，DMA mask/分配接口拒绝启用，音频不发布；串口与 PIO SD 继续工作。
+它不等于其他 RISC-V 板型的非一致性 DMA 已经完成。
+
+生产代码模型可执行：
+
+```sh
+python3 -m unittest tools.tests.test_sg2002_audio tools.tests.test_riscv_dma_cache \
+  tools.tests.test_dma_arch_readiness
+```
+
+检查覆盖 PCM 队列、环末边界、LLI、缓存物理地址、精准异常恢复、失败清理和未就绪 DMA 拒绝。
+模型与交叉构建不能验证板上 S-mode 权限、真实 DMA 握手、声学输出或供电时序，尚无实机发声记录。
 
 ## 从空卡准备完整产物
 
@@ -309,8 +352,9 @@ SDHCI 已有独立的 SD 卡块驱动，支持 SDSC、SDHC/SDXC 的容量解码�
 它不能验证真实电气时序。实机需要先读取镜像已知扇区比对哈希，再在专用测试分区做写入/读回；
 仅看到 `[SDHCI] ... sectors` 不足以宣布存储验证通过。
 
-目前仍不提供 SG2002 网卡、DMA、NPU、视频或第二核驱动。后续网卡/DMA 需完成 T-Head 缓存维护
-和设备地址约束。PLIC 的边沿中断扩展也未覆盖；SBI TIME/SRST 和 T-Head MMU/cache 设置需实机记录。
+目前仍不提供 SG2002 网卡、通用 DMA broker、NPU、视频或第二核驱动。
+音频 DMA 与 C906 缓存维护已有专门实现，其他 DMA 设备仍需自己的所有权和地址约束。
+PLIC 的边沿中断扩展也未覆盖；SBI TIME/SRST 和 T-Head MMU/cache 设置需实机记录。
 
 内存解析现在检查 DTB v17 的 RAM 描述、`memreserve` 与 `/reserved-memory/reg`，也保留 DTB 缓冲区本身。
 公共分配器保留被保留区分割后的多个可用区间，并限制在板级 256 MiB 物理窗口内；
@@ -325,6 +369,11 @@ SDHCI 已有独立的 SD 卡块驱动，支持 SDSC、SDHC/SDXC 的容量解码�
 
 - [Sipeed 板卡规格与 B/E/W/WE 区别](https://wiki.sipeed.com/hardware/en/lichee/RV_Nano/1_intro.html)
 - [Sipeed 官方 SDK](https://github.com/sipeed/LicheeRV-Nano-Build)
+- [Nano 70418 官方原理图 rev1.4](https://dl.sipeed.com/fileList/LICHEE/LicheeRV_Nano/02_Schematic/LicheeRV_Nano-70418_Schematic.pdf)：第 4 页单路功放、DAC 右路与固定上拉 EN。
+- [固定 SDK 音频实现](https://github.com/sipeed/LicheeRV-Nano-Build/tree/d4003f15b35d43ad4842f427050ab2bba0114fa5/linux_5.10/sound/soc/cvitek)、
+  [DMA 实现](https://github.com/sipeed/LicheeRV-Nano-Build/tree/d4003f15b35d43ad4842f427050ab2bba0114fa5/linux_5.10/drivers/dma/cvitek)
+  和 [RISC-V 缓存维护](https://github.com/sipeed/LicheeRV-Nano-Build/tree/d4003f15b35d43ad4842f427050ab2bba0114fa5/linux_5.10/arch/riscv/mm)：寄存器和协议事实依据；A20 内核代码为独立实现。
+- [U-Boot v2025.10 T-Head CMO](https://github.com/u-boot/u-boot/blob/v2025.10/arch/riscv/lib/thead_cmo.c)：使用物理地址的缓存指令编码。
 - [Linux SDHCI/DWCMSHC 的 CV18xx/SG2002 PHY reset 与设备匹配](https://github.com/torvalds/linux/blob/master/drivers/mmc/host/sdhci-of-dwcmshc.c)
 - [Linux CV18xx 时钟寄存器](https://github.com/torvalds/linux/blob/master/drivers/clk/sophgo/clk-cv1800.c)
   和 [SG2002 引脚寄存器](https://github.com/torvalds/linux/blob/master/drivers/pinctrl/sophgo/pinctrl-sg2002.c)

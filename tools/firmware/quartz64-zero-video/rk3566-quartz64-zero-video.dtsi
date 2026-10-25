@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
-/* Zero schematic v0.1, sheets 15, 23 and 25: RK817 LDO2/LDO7 feed HDMI. */
+/* Zero schematic v0.1: LDO2/LDO7 feed HDMI; LDO4 supplies I2S1 IO. */
 #include <dt-bindings/soc/rockchip,vop2.h>
 / {
     hdmi-con {
@@ -7,13 +7,29 @@
         type = "a";
         port { zero_hdmi_con: endpoint { remote-endpoint = <&zero_hdmi_out>; }; };
     };
+    zero_sound: sound {
+        compatible = "simple-audio-card";
+        simple-audio-card,name = "Quartz64-Zero RK817";
+        simple-audio-card,format = "i2s";
+        simple-audio-card,mclk-fs = <256>;
+        simple-audio-card,bitclock-master = <&zero_i2s_cpu>;
+        simple-audio-card,frame-master = <&zero_i2s_cpu>;
+        zero_i2s_cpu: simple-audio-card,cpu { sound-dai = <&i2s1_8ch>; };
+        simple-audio-card,codec { sound-dai = <&rk817>; };
+    };
 };
 &i2c0 {
     status = "okay";
     rk817: pmic@20 {
         compatible = "rockchip,rk817";
         reg = <0x20>;
+        interrupt-parent = <&gpio0>;
+        interrupts = <RK_PA3 IRQ_TYPE_LEVEL_LOW>;
         #clock-cells = <1>;
+        #sound-dai-cells = <0>;
+        clocks = <&cru I2S1_MCLKOUT_TX>;
+        clock-names = "mclk";
+        codec {};
         regulators {
             zero_hdmi_0v9: LDO_REG2 {
                 regulator-name = "vdda0v9_image";
@@ -29,8 +45,26 @@
                 regulator-always-on;
                 regulator-boot-on;
             };
+            zero_audio_3v3: LDO_REG4 {
+                regulator-name = "vccio_acodec";
+                regulator-min-microvolt = <3300000>;
+                regulator-max-microvolt = <3300000>;
+                regulator-always-on;
+                regulator-boot-on;
+            };
         };
     };
+};
+&pmu_io_domains {
+    vccio1-supply = <&zero_audio_3v3>;
+    status = "okay";
+};
+&i2s1_8ch {
+    #sound-dai-cells = <0>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&i2s1m0_mclk &i2s1m0_sclktx &i2s1m0_lrcktx &i2s1m0_sdo0>;
+    rockchip,playback-only;
+    status = "okay";
 };
 &hdmi {
     avdd-0v9-supply = <&zero_hdmi_0v9>;
@@ -50,4 +84,4 @@
         remote-endpoint = <&zero_hdmi_in>;
     };
 };
-/* HDMI audio/I2S and RK817 codec are not enabled until PCM drivers exist. */
+/* HDMI audio remains disabled; RK817 headphone PCM uses separate I2S1. */

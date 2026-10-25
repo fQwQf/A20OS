@@ -19,7 +19,9 @@ The video allocation and actual mode are published during EVT_FT_FIXUP into
 allocation. `VIDEO_REMOVE` is disabled so VOP2 remains running. A failed HDMI
 probe publishes no framebuffer and leaves serial boot available. No guessed
 framebuffer address, static resolution or invented hardware validation is used.
-HDMI/I2S and RK817 PCM audio are not implemented by this profile.
+This profile also describes I2S1_M0 and RK817 headphone PCM for the native
+A20OS driver. LDO4 supplies their shared 3.3 V IO domain; LDO2/LDO7 remain
+the separate HDMI rails. U-Boot does not play audio. HDMI/I2S0 PCM is disabled.
 
 `a20_vop2_opaque.h` (MIT) explicitly configures VP0's one-plane bottom
 mixer for global alpha 255 with per-pixel alpha disabled, then bypasses HDR
