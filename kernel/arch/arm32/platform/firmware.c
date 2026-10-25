@@ -3,19 +3,27 @@
 #include "firmware.h"
 #include "cpu.h"
 #include "console.h"
+#include "core/cpu.h"
+extern uint32_t arm32_hyp_boot_cpus[];
+static int owns_hyp(void) { return ((uint32_t *)((uintptr_t)arm32_hyp_boot_cpus + PAGE_OFFSET))[cpu_current_id()] == 1; }
 
 #define PSCI_SYSTEM_OFF     0x84000008U
 #define PSCI_SYSTEM_RESET   0x84000009U
 
-static void arm32_psci_call(uint32_t fn_id) {
-    __asm__ __volatile__(
-        ".arch_extension virt\n"
-        "mov r0, %0\n"
-        "hvc #0\n"
-        :
-        : "r"(fn_id)
-        : "r0", "r1", "r2", "r3", "memory"
-    );
+static int32_t psci(uint32_t fn, uint32_t target, uint32_t entry, uint32_t context) {
+    register uint32_t r0 __asm__("r0") = fn;
+    register uint32_t r1 __asm__("r1") = target;
+    register uint32_t r2 __asm__("r2") = entry;
+    register uint32_t r3 __asm__("r3") = context;
+    if (owns_hyp())
+        __asm__ volatile(".arch_extension sec\nsmc #0" : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3) :: "memory");
+    else
+        __asm__ volatile(".arch_extension virt\nhvc #0" : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3) :: "memory");
+    return (int32_t)r0;
+}
+static void arm32_psci_call(uint32_t fn) { (void)psci(fn, 0, 0, 0); }
+int32_t firmware_cpu_on(uint32_t target, uint32_t entry, uint32_t context) {
+    return psci(0x84000003, target, entry, context);
 }
 
 void platform_firmware_shutdown(void) __attribute__((weak));

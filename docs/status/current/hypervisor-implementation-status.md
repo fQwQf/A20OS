@@ -1,4 +1,4 @@
-# VM 平台状态与目标（2026-10-13）
+# VM 平台状态与目标（2026-10-25）
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
@@ -11,7 +11,7 @@
 
 ## 当前实现
 
-Native 与 Linux 扩展 syscall 包装共享 VM/vCPU 核心，统一引用、生命周期、配置、控制和统计。Linux 扩展 syscall **不是 KVM ABI**。实际后端只有 RISC-V H，要求 Sstc 和 firmware 权限；其它架构返回不支持。
+Native 与 Linux 扩展 syscall 包装共享 VM/vCPU 核心，统一引用、生命周期、配置、控制和统计。Linux 扩展 syscall **不是 KVM ABI**。既有 RISC-V H 后端要求 Sstc 和 firmware 权限。2026-10-25 增加并实际运行验证了 AArch64 EL2、ARM32 HYP、RV32 H、x86_64 AMD SVM/Intel VMX 后端，以及每种可执行后端的双宿主 CPU / 双 vCPU 并行、按需映射、权限拒绝、抢占、停止和回收。VMX 使用 Bochs 软件 CPU 实际执行，SVM 另有嵌套 KVM 记录；没有 Intel 实机验收。LoongArch LVZ 仅提供默认关闭的实验实现，尚无 LVZ 正控运行证据。完整 OS guest SMP、virtual GIC/APIC 和长期稳定性没有因此验收。见 [多架构后端](../../hypervisor/08-multiarch-backends.md) 与 [SMP 验证记录](../../hypervisor/09-smp-validation.md)。
 
 Sv39x4 根表 16 KiB 对齐，开放低 512 GiB GPA，使用 VMID 0 并在激活时刷新两阶段翻译。RAM 按页分配记账，设备通过 pin/copy 访问。vCPU 激活为 CPU-local，保存 VS CSR、FP、计时器和 IRQ 状态。
 
@@ -19,7 +19,7 @@ hypvm managed 模式提供独立输入输出队列和可恢复 RUN。a20-vmd 用
 
 已加入实验性多 vCPU、SBI HSM/IPI/RFENCE、远程 stage-2 失效和 SMP FDT。profile 接受 1–8 vCPU，实际并行受宿主 CPU 和后端限制；**参数上限不代表已经验收**。supervisor 最多 8 个记录、512 MiB 运行 guest RAM 请求预算，每台 8–256 MiB；预算尚未覆盖完整内核、VMM、pipe 和设备开销。
 
-## 实际验证
+## RISC-V 平台既有验证（2026-10-13）
 
 环境：Linux 开发机，QEMU 10.0.13，RISC-V GCC，TCG；ABI=both、启用抢占。宿主、用户程序、RAMFS guest 和镜像均从本 worktree 新构建，不用旧预编译内核作为通过证据。
 

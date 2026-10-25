@@ -6,7 +6,7 @@
 #include "board_boot.h"
 #endif
 #ifndef AARCH64_BOOT_NORMALIZE_EL
-#define AARCH64_BOOT_NORMALIZE_EL 0
+#define AARCH64_BOOT_NORMALIZE_EL 1
 #endif
 #ifndef AARCH64_BOOT_IMAGE_HEADER
 #define AARCH64_BOOT_IMAGE_HEADER 0

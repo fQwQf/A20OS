@@ -3,6 +3,7 @@
 
 #include "core/types.h"
 
+int32_t firmware_cpu_on(uint32_t target, uint32_t entry, uint32_t context);
 void firmware_shutdown(void);
 void firmware_reboot(void);
 void firmware_console_putchar(char c);

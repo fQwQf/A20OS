@@ -1,0 +1,354 @@
+{
+  "date": "2026-10-25",
+  "branch": "codex/hypervisor-multiarch",
+  "base_commit": "8c5260fce25e52607a1daf2a64bd9760aa234484",
+  "scope": "Uncommitted sources on this branch verified before the implementation commit; see 09-smp-validation.md for commands and limits.",
+  "qemu_version": "QEMU emulator version 10.0.13 (Debian 1:10.0.13+ds-0+deb13u1)",
+  "loongarch_positive": "not run; no LVZ-capable hardware available; experimental backend is closed by default",
+  "runs": [
+    {
+      "arch": "aarch64",
+      "backend": "aarch64-el2",
+      "environment": "tcg",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/aarch64-qemu-virt-aarch64-both-4cbb0d6c90f2421d/kernel.bin",
+        "sha256": "e13f5def9b16695d5fd3b3348113fd6c143bedc665b976c1e59cb2e49c487c98"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-aarch64-smp-tcg.log",
+        "sha256": "3e6f11ea930b232e4a81639c81bdf6ec9c75e680af491a1c4d64b80713c55915"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=9)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: preemption+stop PASS",
+        "HYP_ARCH_TEST: PASS backend=aarch64-el2 rounds=3",
+        "HYP_SMP_TEST: PASS backend=aarch64-el2 cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "aarch64",
+      "backend": "aarch64-el2",
+      "environment": "disabled-tcg",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/aarch64-qemu-virt-aarch64-both-4cbb0d6c90f2421d/kernel.bin",
+        "sha256": "e13f5def9b16695d5fd3b3348113fd6c143bedc665b976c1e59cb2e49c487c98"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-aarch64-smp-disabled-tcg.log",
+        "sha256": "7a33f7f47b99a66c69110a9d237670260ff5bac65f484bcc795e4abdcaea8a33"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "arm32",
+      "backend": "arm32-hyp",
+      "environment": "tcg",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/arm32-qemu-virt-arm32-both-7443db624a39212e/kernel.bin",
+        "sha256": "9e0b72bee12b8cff2bc8a106c550fa633e5996051ab70232e53a3caa937bd033"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-arm32-smp-tcg.log",
+        "sha256": "c8b7859c546358ee6aed970e1a4f96c06c452299d17dd33cd099d8685c27352a"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=9)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: preemption+stop PASS",
+        "HYP_ARCH_TEST: PASS backend=arm32-hyp rounds=3",
+        "HYP_SMP_TEST: PASS backend=arm32-hyp cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "arm32",
+      "backend": "arm32-hyp",
+      "environment": "disabled-tcg",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/arm32-qemu-virt-arm32-both-7443db624a39212e/kernel.bin",
+        "sha256": "9e0b72bee12b8cff2bc8a106c550fa633e5996051ab70232e53a3caa937bd033"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-arm32-smp-disabled-tcg.log",
+        "sha256": "e479e2b3d724937abc6d318dfee2759d48ec351664da2b2a7cd03be4a2eb564b"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "riscv32",
+      "backend": "riscv32-h",
+      "environment": "tcg",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/riscv32-qemu-virt-riscv32-both-53d8e12d2de00b0a/kernel.elf",
+        "sha256": "ef3d8e89196b7d2454ef66950186f81be35dc950996f81b83a0a0762b024d685"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-riscv32-smp-tcg.log",
+        "sha256": "1be4201d6b0229bd9f03f5db2cb19e6ed9ab307e941250dc938071b9d534f3df"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=2048)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: preemption+stop PASS",
+        "HYP_ARCH_TEST: PASS backend=riscv32-h rounds=3",
+        "HYP_SMP_TEST: PASS backend=riscv32-h cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "riscv32",
+      "backend": "riscv32-h",
+      "environment": "disabled-tcg",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/riscv32-qemu-virt-riscv32-both-53d8e12d2de00b0a/kernel.elf",
+        "sha256": "ef3d8e89196b7d2454ef66950186f81be35dc950996f81b83a0a0762b024d685"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-riscv32-smp-disabled-tcg.log",
+        "sha256": "53b71a9f6be9bb504f857ab8ec65a69fa215f3472df2ce98a7891eddfa3311d3"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "riscv64",
+      "backend": "riscv-h",
+      "environment": "tcg",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/riscv64-qemu-virt-riscv64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "7af66bedde066c479a4684aeca4d7e29188d968e9aece9add60887788f4fb5f4"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-riscv64-smp-tcg.log",
+        "sha256": "1088538729268982c2075d46987290a71fc26c3f20dbbbb998e44b0868cf6624"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=1024)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: PASS backend=riscv-h rounds=3",
+        "HYP_SMP_TEST: PASS backend=riscv-h cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "riscv64",
+      "backend": "riscv-h",
+      "environment": "disabled-tcg",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/riscv64-qemu-virt-riscv64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "7af66bedde066c479a4684aeca4d7e29188d968e9aece9add60887788f4fb5f4"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-riscv64-smp-disabled-tcg.log",
+        "sha256": "eadafec5228021864aa1b2eabb57e6eeb80b41d37c436a4fea2e0c410bebbc03"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "x86_64",
+      "backend": "x86-svm",
+      "environment": "tcg",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/x86_64-qemu-virt-x86_64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "a9aa0e8a21be2221cc277ca1cddb03e2d48a29854f5d13dd980129be81b08fc9"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-x86_64-smp-tcg.log",
+        "sha256": "246eba4b456d67b7f759e76f00e63c2237fd65e25d13c6def4ffa64a49c3642a"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=11)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: preemption+stop PASS",
+        "HYP_ARCH_TEST: PASS backend=x86-svm rounds=3",
+        "HYP_SMP_TEST: PASS backend=x86-svm cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "x86_64",
+      "backend": "x86-svm",
+      "environment": "kvm",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/x86_64-qemu-virt-x86_64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "a9aa0e8a21be2221cc277ca1cddb03e2d48a29854f5d13dd980129be81b08fc9"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-x86_64-smp-kvm.log",
+        "sha256": "160419b8b1835e8b83208a218ff510340e0ca62154c4ffa7d3dd7338814e16aa"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=11)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: preemption+stop PASS",
+        "HYP_ARCH_TEST: PASS backend=x86-svm rounds=3",
+        "HYP_SMP_TEST: PASS backend=x86-svm cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "x86_64",
+      "backend": "x86-svm",
+      "environment": "disabled-tcg",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/x86_64-qemu-virt-x86_64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "a9aa0e8a21be2221cc277ca1cddb03e2d48a29854f5d13dd980129be81b08fc9"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-x86_64-smp-disabled-tcg.log",
+        "sha256": "35a5ddf3aa28a1da1f0acea74d5b491d0e9cf9d289e431ba8e2e76bc63ae2533"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "loongarch64",
+      "backend": "loongarch-lvz-experimental",
+      "environment": "disabled-tcg",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/loongarch64-qemu-virt-loongarch64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "ddb81f5cbc78d71b45255bef729bfdd6273cfe25498e46a28180d94f76c99daa"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-loongarch64-smp-disabled-tcg.log",
+        "sha256": "0587ad27cdbf5591106e52de00e0ce3eaf9d46dc9db8333324e14d41b1013759"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "x86_64",
+      "backend": "x86-vmx",
+      "environment": "Bochs 3.0 software CPU VMX=2",
+      "cpus": 2,
+      "result": "guest-smp-pass",
+      "kernel": {
+        "path": ".kernel-build/x86_64-qemu-virt-x86_64-both-4cbb0d6c90f2421d/kernel.bin",
+        "sha256": "bec60ac037890c20eef530c3eeb8114fee1982c590f73de94745e390363ae366"
+      },
+      "log": {
+        "path": ".kernel-build/vmx-bochs-release/serial.log",
+        "sha256": "0645f2f9871ae02a60a766344731a288f190558c8a89792b995c13a257896916"
+      },
+      "markers": [
+        "HYP_SELFTEST: PASS (vmid=0 entries=11)",
+        "HYP_ARCH_TEST: NX+RO PASS",
+        "HYP_ARCH_TEST: preemption+stop PASS",
+        "HYP_ARCH_TEST: PASS backend=x86-vmx rounds=3",
+        "HYP_SMP_TEST: PASS backend=x86-vmx cpus=0,1 peak=2 step=stopped",
+        "System is going down for power-off NOW"
+      ]
+    },
+    {
+      "arch": "x86_64",
+      "backend": "x86-vmx",
+      "environment": "Bochs 3.0 software CPU VMX disabled",
+      "cpus": 2,
+      "result": "unavailable-negative-pass",
+      "kernel": {
+        "path": ".kernel-build/x86_64-qemu-virt-x86_64-both-4cbb0d6c90f2421d/kernel.bin",
+        "sha256": "bec60ac037890c20eef530c3eeb8114fee1982c590f73de94745e390363ae366"
+      },
+      "log": {
+        "path": ".kernel-build/vmx-bochs-release-disabled/serial.log",
+        "sha256": "e7ab5227645857786a1b168a6e787c7086afa41de3d02b0db6ac6099733f48af"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)",
+        "System is going down for power-off NOW"
+      ]
+    }
+  ],
+  "unit_tests": {
+    "command": "python3 -m unittest tools.tests.test_hyp_s2 tools.tests.test_hyp_backend_contract tools.tests.test_arch_boundary tools.tests.test_a20_trim -v",
+    "passed": 23
+  },
+  "trim_registry": "make check-trim-registry: passed",
+  "userspace_compile_only": [
+    {
+      "arch": "aarch64",
+      "binary": {
+        "path": "user/build/aarch64/hyp_test",
+        "sha256": "9258a0bc8e05a2cc5228ec8fc60d3ecb1ba0a6e84607f6a32951bbc2e690246d"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-aarch64-user-build.log",
+        "sha256": "75e0171368fe247ad79e93b9541a1fc8f5ea9bb91617e1933fe4b56630155d77"
+      }
+    },
+    {
+      "arch": "arm32",
+      "binary": {
+        "path": "user/build/arm32/hyp_test",
+        "sha256": "96cccf3f2ce229600ea225261a8a98e8518878beb0ec86c4548ce6831a844f9c"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-arm32-user-build.log",
+        "sha256": "78bf989a98a1ed01ecd8a07a11059c1e3a0bf9c6ec394404ffc2a5528ca465b9"
+      }
+    },
+    {
+      "arch": "riscv32",
+      "binary": {
+        "path": "user/build/riscv32/hyp_test",
+        "sha256": "1ee0f8e0052edfb2d972ad4cc0f8a43f149f31df751971f641564ddf99a065d3"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-riscv32-user-build.log",
+        "sha256": "823285441d12772bab6a96ead3ffc3fceb8743886a00600ea364a89d8a305756"
+      }
+    },
+    {
+      "arch": "x86_64",
+      "binary": {
+        "path": "user/build/x86_64/hyp_test",
+        "sha256": "20d3a782abab0bbf65a1aa39a1211c22168f27447979078da6d5429f6fe246c5"
+      },
+      "log": {
+        "path": ".kernel-build/smoke/hyp-x86_64-user-build.log",
+        "sha256": "0452d123bf837eef96ae9d8aedf74f9819a5c609b9780993c4e60f23e28ffb54"
+      }
+    }
+  ]
+}

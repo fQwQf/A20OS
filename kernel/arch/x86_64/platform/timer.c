@@ -325,6 +325,19 @@ void timer_set_interval(uint64_t ticks) {
     lapic_write(LAPIC_TIMER_INIT, (uint32_t)count);
 }
 
+/* Bound a hypervisor activation even when tickless idle left a long or
+ * exhausted one-shot. Preserve an earlier deadline across frequent exits. */
+void x86_64_timer_ensure_deadline(uint64_t ticks) {
+    uint64_t count = scale_ticks(ticks, ARCH_TIMER_FREQ,
+                                lapic_freq[arch_current_cpu_id()]);
+    if (!count) count = 1;
+    if (count > 0xffffffffU) count = 0xffffffffU;
+    uint32_t current = lapic_read(LAPIC_TIMER_CUR);
+    if (!current || current > count)
+        lapic_write(LAPIC_TIMER_INIT, (uint32_t)count);
+    timer_enable();
+}
+
 uint64_t timer_get_ticks(void) {
 #ifdef CONFIG_QEMU_SHARED_SMP
     if (cpu_current_id() != 0)

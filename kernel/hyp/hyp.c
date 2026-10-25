@@ -17,7 +17,7 @@
 #include "core/string.h"
 
 /* Host PTE permission input is translated by the selected stage-2 backend. */
-#define HYP_RAM_PAGE_PROT (PTE_R | PTE_W | PTE_X)
+#define HYP_RAM_PAGE_PROT (PTE_R | PTE_W | HYP_PROT_EXEC)
 
 static uint64_t hyp_live_vms, hyp_live_vcpus, hyp_mapped_pages, hyp_table_pages;
 void hyp_account_vcpu(int delta)
@@ -46,6 +46,7 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
     const hyp_backend_t *backend = hyp_arch_backend();
     if (!hyp_supported() || !backend || !backend->vm_init || !backend->vm_destroy ||
         !backend->map || !backend->unmap || !backend->translate ||
+        !backend->load || !backend->enter || !backend->put ||
         mem_size == 0 || (mem_size & (PAGE_SIZE - 1)) ||
         backend->ram_base >= backend->gpa_limit ||
         mem_size > backend->gpa_limit - backend->ram_base)
@@ -61,6 +62,7 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
     vm->vcpu_limit = vm->parallel_limit = 1;
     spin_init(&vm->control_lock);
     spin_init(&vm->console_lock);
+    spin_init(&vm->s2_lock);
     task_t *owner = proc_current();
     vm->charge_cg = owner ? owner->cgroup : NULL;
     if (backend->vm_init(vm) != 0) {
@@ -101,7 +103,8 @@ int hyp_vm_configure_smp(hyp_vm_t *vm, unsigned count)
     else if (count > 1) rc = vm->backend->probe_smp(vm);
     if (!rc) {
         vm->vcpu_limit = count;
-        vm->parallel_limit = count;
+        vm->parallel_limit = count < vm->backend->max_running_vcpus ?
+                             count : vm->backend->max_running_vcpus;
     }
     hyp_vm_end_update(vm);
     return rc;
@@ -282,7 +285,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
         return -EINVAL;
     if (!hyp_vm_ram_contains(vm, gpa))
         return -EFAULT;
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+#if (defined(ARCH_HAS_PGTABLE_OPS) || defined(ARCH_HAS_HYP_S2)) && !defined(CONFIG_NOMMU)
 
     /* Already translated: there is nothing to fill.  Reached when the guest
      * touches the page twice through two different faults (or when a caller
@@ -326,7 +329,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
 
 /* ---- kernel-side selftest (docs/hypervisor/00-design.md, S4) ---- */
 
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+#if (defined(ARCH_HAS_PGTABLE_OPS) || defined(ARCH_HAS_HYP_S2)) && !defined(CONFIG_NOMMU)
 
 static int st_fail(const char *step)
 {
@@ -349,7 +352,7 @@ int hyp_selftest(void)
     /* Map four pages at the demo guest's RAM base, each holding its own
      * pattern, and read them back THROUGH the stage-2 translation -- that
      * is the pair (gpa->host pa) and (host pa -> bytes) agreeing. */
-    static const uint64_t base = 0x80000000ULL;
+    const uint64_t base = vm->ram_base;
     pfn_t pfns[4];
     for (int i = 0; i < 4; i++) {
         pfns[i] = pfa_alloc_page();
@@ -405,10 +408,14 @@ int hyp_selftest(void)
     memset(failbuf, 0x5a, PAGE_SIZE * 2);
 
     /* Out-of-window and bad-frame refusals happen before any ownership moves. */
-    if (hyp_s2_map(vm, 1ULL << 40, pfns[0], PTE_R) != -ERANGE)
+    if (hyp_s2_map(vm, vm->backend->gpa_limit, pfns[0], PTE_R) != -ERANGE)
         return st_fail("map-range");
     if (hyp_s2_map(vm, base + 5 * PAGE_SIZE, PFN_NONE, PTE_R) != -EINVAL)
         return st_fail("map-bad-pfn");
+    if (hyp_s2_map(vm, base + 5 * PAGE_SIZE, virt_to_pfn(vm->s2_root), PTE_R) != -EBUSY)
+        return st_fail("map-page-table-frame");
+    if (hyp_s2_map(vm, base + 5 * PAGE_SIZE, pfns[0], PTE_R) != -EBUSY)
+        return st_fail("map-duplicate-frame");
     if (hyp_ram_fill(vm, 0) != -EFAULT)
         return st_fail("fill-outside-window");
     /* The UART is device space, not RAM: a fill there must refuse and must
@@ -475,6 +482,17 @@ int hyp_selftest(void)
         return st_fail("oom-leak");
     vm->charge_cg = saved_cg;
     kfree(failbuf);
+
+    /* Exercise the final root slot, including Sv32x4's fourth root page. */
+    pfn_t edge = pfa_alloc_page();
+    uint64_t edge_gpa = vm->backend->gpa_limit - PAGE_SIZE;
+    if (edge == PFN_NONE || hyp_s2_map(vm, edge_gpa, edge, PTE_R | PTE_W))
+        return st_fail("edge-map");
+    if (hyp_s2_translate(vm, edge_gpa) != pfn_to_phys(edge) ||
+        hyp_s2_audit(vm, &rep))
+        return st_fail("edge-audit");
+    if (hyp_s2_unmap(vm, edge_gpa)) return st_fail("edge-unmap");
+    frame_put(edge);
 
     /* Destroy: every lent frame returns with its reference dropped, so the
      * buddy sees exactly the four frames this test allocated, free again. */

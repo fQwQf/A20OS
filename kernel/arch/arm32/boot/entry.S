@@ -1,33 +1,40 @@
     .syntax unified
     .arch armv7-a
 #include "boot_config.h"
+    .arch_extension virt
 
     .section .text.entry
     .global _start
 _start:
-    /* Linux ARM handoff supplies the DTB in r2. Keep it until BSS is clear. */
-    mov     r8, r2
-#if ARM32_BOOT_NORMALIZE_HYP
-    .arch_extension virt
-    cpsid   if
-    mrs     r0, cpsr
-    and     r0, r0, #0x1f
-    cmp     r0, #0x1a
-    bne     .Lsvc_ready
-    mov     r0, #0
-    mcr     p15, 4, r0, c1, c1, 0 /* HCR: no stage-2 translation/traps. */
-    mcr     p15, 4, r0, c1, c1, 2 /* HCPTR: permit VFP at PL1. */
-    mcrr    p15, 4, r0, r0, c14   /* CNTVOFF = 0. */
-    mov     r0, #3
-    mcr     p15, 4, r0, c14, c1, 0 /* CNTHCTL physical counter/timer. */
-    ldr     r0, =0x1d3
-    msr     spsr_cxsf, r0
-    adr     r0, .Lsvc_ready
-    msr     ELR_hyp, r0
-    eret
-.Lsvc_ready:
-    cps     #0x13
+    /* QEMU's raw ARM boot protocol loads at RAM+0x10000. Relocate the
+     * contiguous image to its linked physical base before absolute accesses;
+     * copy backwards because the source and destination may overlap. */
+    adr r3,_start
+    ldr r4,=_start
+    cmp r3,r4
+    beq .Lrelocated
+#ifdef CONFIG_NOMMU
+    ldr r5,=_end
+#else
+    ldr r5,=(_end - 0x80000000)
 #endif
+    sub r5,r5,r4
+    add r6,r3,r5
+    add r7,r4,r5
+.Lrelocate:
+    ldr r8,[r6,#-4]!
+    str r8,[r7,#-4]!
+    subs r5,r5,#4
+    bne .Lrelocate
+    dsb sy
+    isb
+    ldr pc,=.Lrelocated
+.Lrelocated:
+    /* Preserve Linux boot r2 before normalization clobbers argument registers. */
+    ldr r0,=arm32_boot_dtb
+    str r2,[r0]
+    bl arm32_hyp_boot
+    cpsid if
     /* Running with the MMU off at the physical load address.
      * Use a small physical stack inside the entry section. */
     ldr     sp, =_early_stack_end
@@ -177,13 +184,17 @@ _high_start:
      * IRQ/abort handlers have a valid stack before the scheduler is ready. */
     mrs     r4, cpsr
     cps     #0x12                    /* IRQ mode */
-    ldr     sp, =_stack_end
+    ldr     sp, =arm32_exception_stacks
+    add     sp, sp, #4096
     cps     #0x17                    /* ABT mode */
-    ldr     sp, =_stack_end
+    ldr     sp, =arm32_exception_stacks
+    add     sp, sp, #8192
     cps     #0x1B                    /* UND mode */
-    ldr     sp, =_stack_end
+    ldr     sp, =arm32_exception_stacks
+    add     sp, sp, #12288
     cps     #0x11                    /* FIQ mode */
-    ldr     sp, =_stack_end
+    ldr     sp, =arm32_exception_stacks
+    add     sp, sp, #16384
     cps     #0x13                    /* SVC mode */
     msr     cpsr_cxsf, r4
 
@@ -246,8 +257,76 @@ _stack_bottom:
     .global _stack_end
 _stack_end:
 
-    .section .bss
+    .section .text.entry
     .align 2
     .global arm32_boot_dtb
 arm32_boot_dtb:
-    .space 4
+    .word 0
+
+/* PSCI secondaries use the existing boot table, never clear shared BSS. */
+    .global arm32_secondary_start
+arm32_secondary_start:
+    bl arm32_hyp_boot
+    cpsid if
+    mrc p15,0,r8,c0,c0,5
+    and r8,r8,#255
+#ifndef CONFIG_NOMMU
+    ldr r0,=boot_pgdir
+    mov r1,#0
+    mcr p15,0,r1,c8,c7,0
+    mcr p15,0,r0,c2,c0,0
+    mcr p15,0,r1,c2,c0,1
+    ldr r1,=0xffffffff
+    mcr p15,0,r1,c3,c0,0
+#endif
+    mrc p15,0,r1,c1,c0,2
+    orr r1,r1,#0xf00000
+    mcr p15,0,r1,c1,c0,2
+    isb
+    mov r1,#0x40000000
+    fmxr fpexc,r1
+    mrc p15,0,r1,c1,c0,0
+#ifndef CONFIG_NOMMU
+    orr r1,r1,#1
+#endif
+    orr r1,r1,#4
+    orr r1,r1,#0x1000
+    orr r1,r1,#0x800
+    mcr p15,0,r1,c1,c0,0
+    dsb sy
+    isb
+    ldr pc,=.Lsecondary_high
+    .ltorg
+    .section .text
+.Lsecondary_high:
+    ldr r6,=arm32_secondary_stacks
+    add r6,r6,r8,lsl #14
+    add r6,r6,#16384
+    ldr r7,=arm32_exception_stacks
+    add r7,r7,r8,lsl #14
+    cps #0x12
+    add sp,r7,#4096
+    cps #0x17
+    add sp,r7,#8192
+    cps #0x1b
+    add sp,r7,#12288
+    cps #0x11
+    add sp,r7,#16384
+    cps #0x13
+    mov sp,r6
+    ldr r0,=arm32_vector_table
+    mcr p15,0,r0,c12,c0,0
+    isb
+    mov r0,r8
+    bl arm32_secondary_entry
+    b .
+    .section .bss.stack
+    .align 14
+arm32_secondary_stacks:
+    .space CONFIG_NR_CPUS * 16384
+
+    .section .bss.stack
+    .align 12
+    .global arm32_exception_stacks
+arm32_exception_stacks:
+    .space CONFIG_NR_CPUS * 16384

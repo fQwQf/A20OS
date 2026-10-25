@@ -45,7 +45,7 @@
  *
  * R|W|X is valid. Guest stage-1 permissions still apply.
  */
-#define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | PTE_X)
+#define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | HYP_PROT_EXEC)
 
 /* CPU-local activation: one RUN owner per vCPU, with each VM bounded by
  * its configured parallel limit and synchronous stage-2 fences. Distinct managed
@@ -136,6 +136,8 @@ void hyp_vcpu_put(hyp_vcpu_t *vcpu)
     vm->vcpus[vcpu->id] = NULL;
     vm->vcpu_count--;
     spin_unlock_irqrestore(&vm->control_lock, flags);
+    if (vm->backend->vcpu_destroy)
+        vm->backend->vcpu_destroy(vcpu);
     vcpu->vm = NULL;
     vcpu->magic = 0;
     hyp_account_vcpu(-1);
@@ -424,6 +426,7 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     preempt_disable();
     arch_local_irq_disable();
     unsigned cpu = cpu_current_id();
+    uint64_t s2_flags = spin_lock_irqsave(&vcpu->vm->s2_lock);
     uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
     uint64_t vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
     int legacy = !vcpu->vm->managed_console;
@@ -431,6 +434,7 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
         vcpu->vm->run_count >= vcpu->vm->parallel_limit || (legacy && hyp_legacy_vcpu)) {
         spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
         spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        spin_unlock_irqrestore(&vcpu->vm->s2_lock, s2_flags);
         preempt_enable();
         if (irqs_were_on) arch_local_irq_enable();
         return -EBUSY;
@@ -442,6 +446,7 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
         if (reason) *reason = vcpu->exit;
         spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
         spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        spin_unlock_irqrestore(&vcpu->vm->s2_lock, s2_flags);
         preempt_enable();
         if (irqs_were_on) arch_local_irq_enable();
         return broken ? -EIO : 0;
@@ -452,6 +457,7 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
         if (reason) *reason = HYP_EXIT_HART_STOPPED;
         spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
         spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        spin_unlock_irqrestore(&vcpu->vm->s2_lock, s2_flags);
         preempt_enable();
         if (irqs_were_on) arch_local_irq_enable();
         return 0;
@@ -459,12 +465,16 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     vcpu->claimed = 1;
     vcpu->host_cpu = cpu;
     vcpu->vm->run_count++;
+    if (vcpu->vm->run_count > vcpu->vm->peak_run_count)
+        vcpu->vm->peak_run_count = vcpu->vm->run_count;
     vcpu->vm->active_cpu_mask |= 1u << cpu;
     hyp_vcpu_get(vcpu);
     if (legacy) hyp_legacy_vcpu = vcpu;
     __atomic_store_n(&hyp_active_vcpus[cpu], vcpu, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
     spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+
+    spin_unlock_irqrestore(&vcpu->vm->s2_lock, s2_flags);
 
     int rc = 0;
     vcpu->exit = HYP_EXIT_NONE;
