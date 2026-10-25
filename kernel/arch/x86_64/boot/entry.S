@@ -29,6 +29,28 @@ _start:
     movl  %eax, (g_mb_magic - PAGE_OFFSET)
     movl  %ebx, (g_mb_info - PAGE_OFFSET)
 
+    /* Snapshot the Multiboot command line before BSS clearing or page-table
+     * setup can overwrite the bootloader's buffer. g_bootargs is .data. */
+    cmpl  $0x2BADB002, %eax
+    jne   .Lmb_cmd_done
+    testl %ebx, %ebx
+    jz    .Lmb_cmd_done
+    testl $4, (%ebx)
+    jz    .Lmb_cmd_done
+    movl  16(%ebx), %esi
+    testl %esi, %esi
+    jz    .Lmb_cmd_done
+    movl  $(g_bootargs - PAGE_OFFSET), %edi
+    movl  $255, %ecx
+.Lmb_cmd_copy:
+    lodsb
+    stosb
+    testb %al, %al
+    jz    .Lmb_cmd_done
+    loop  .Lmb_cmd_copy
+    movb  $0, (%edi)
+.Lmb_cmd_done:
+
     /* Set up stack */
     movl  $(_stack_end - PAGE_OFFSET), %esp
 
@@ -179,6 +201,26 @@ _start_uefi:
                                          multiboot path's EBX */
     movabsq $x86_boot_acpi_rsdp - PAGE_OFFSET, %rcx
     movq   %rsi, (%rcx)
+
+    /* The UEFI loader supplies the same v1 command-line field. Preserve it
+     * before BSS clearing, using only the current identity mapping. */
+    testq  %rdi, %rdi
+    jz     .Lefi_cmd_done
+    testl  $4, (%rdi)
+    jz     .Lefi_cmd_done
+    movl   16(%rdi), %esi
+    testq  %rsi, %rsi
+    jz     .Lefi_cmd_done
+    movabsq $(g_bootargs - PAGE_OFFSET), %rdi
+    movl   $255, %ecx
+.Lefi_cmd_copy:
+    lodsb
+    stosb
+    testb  %al, %al
+    jz     .Lefi_cmd_done
+    loop   .Lefi_cmd_copy
+    movb   $0, (%rdi)
+.Lefi_cmd_done:
 
     /* The stack has to be a physical address too: at this point only the
      * firmware's identity map exists, so the higher-half alias is not

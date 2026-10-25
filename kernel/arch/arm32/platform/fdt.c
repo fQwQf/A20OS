@@ -3,7 +3,7 @@
 #include "core/bootargs.h"
 #include "platform.h"
 extern uint32_t arm32_boot_dtb;
-const char *arch_bootargs_get(void)
+const char *arm32_fdt_bootargs_get(void)
 {
     static char buf[1024];
     static int ready;

@@ -33,7 +33,9 @@ _start:
     /* Preserve Linux boot r2 before normalization clobbers argument registers. */
     ldr r0,=arm32_boot_dtb
     str r2,[r0]
+#if ARM32_BOOT_NORMALIZE_HYP
     bl arm32_hyp_boot
+#endif
     cpsid if
     /* Running with the MMU off at the physical load address.
      * Use a small physical stack inside the entry section. */
@@ -208,8 +210,7 @@ _high_start:
     str     r2, [r0], #4
     b       2b
 3:
-    ldr     r0, =arm32_boot_dtb
-    str     r8, [r0]
+    /* arm32_boot_dtb lives in .text.entry, outside the cleared BSS. */
     /* Install the vector table. */
     ldr     r0, =arm32_vector_table
     mcr     p15, 0, r0, c12, c0, 0
@@ -266,13 +267,17 @@ arm32_boot_dtb:
 /* PSCI secondaries use the existing boot table, never clear shared BSS. */
     .global arm32_secondary_start
 arm32_secondary_start:
+#if ARM32_BOOT_NORMALIZE_HYP
     bl arm32_hyp_boot
+#endif
     cpsid if
     mrc p15,0,r8,c0,c0,5
     and r8,r8,#255
 #ifndef CONFIG_NOMMU
     ldr r0,=boot_pgdir
     mov r1,#0
+    mcr p15,0,r1,c2,c0,2 /* TTBCR: short descriptors after firmware. */
+    isb
     mcr p15,0,r1,c8,c7,0
     mcr p15,0,r0,c2,c0,0
     mcr p15,0,r1,c2,c0,1
