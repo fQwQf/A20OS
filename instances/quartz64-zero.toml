@@ -1,0 +1,46 @@
+# Quartz64-Zero RK3566T 1 GiB. No physical boot claim.
+name = "quartz64-zero"
+description = "Quartz64-Zero 1 GiB AArch64 single-core UART bring-up; hardware validation pending"
+arch = "aarch64"
+board = "quartz64-zero"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 1500000
+boot_wait = 3
+boot_timeout = "120s"
+console_check = ["[Quartz64-Zero] allocator RAM=", "System ready", "part ok"]
+boot_media = ["build/quartz64-zero/a20os-quartz64-zero-sdcard.img"]
+# Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv loadaddr 0x02080000",
+    "setenv fdt_addr_r 0x0a000000",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} rk3566-quartz64-zero.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Run a20 prepare quartz64-zero once, then a20 package quartz64-zero to build a complete
+MBR/FAT32 SD image with Rockchip DDR/SPL/TF-A/U-Boot, matching Zero-specific DTB, kernel
+and checked boot.scr. The card autoboots; the commands above are manual recovery
+after interrupting U-Boot. The prepared matching DTB is also staged in handoff.
+kernel.bin has the AArch64 Image header and is linked at 0x02080000;
+fdt_addr_r is separate, below 1 GiB RAM end. Run manual load commands one at
+a time and stop on any error. Do not saveenv during first bring-up.
+No kernel SD/Ethernet/USB/HDMI driver or physical acceptance is claimed. See
+docs/platforms/quartz64-zero.md for SD preparation, serial wiring and acceptance.
+"""

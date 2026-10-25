@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "rk356x-u-boot.dtsi"
+/ {
+    aliases { /delete-property/ mmc1; mmc0 = &sdmmc0; };
+    chosen { u-boot,spl-boot-order = "same-as-spl", &sdmmc0; };
+};
+&vcc3v3_sys { bootph-all; };

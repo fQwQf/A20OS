@@ -1,0 +1,212 @@
+# Quartz64-Zero（RK3566T）
+
+本平台对应 **PINE64 Quartz64-Zero / Quartz64 Model “Zero”、RK3566T、1 GiB LPDDR4**，
+实例为 `instances/quartz64-zero.toml`。不适用于 Quartz64 Model A/B、SOQuartz 或 Radxa Zero。
+当前提供单核 MMU 内核、UART2、GICv3、架构定时器、固件 DTB 内存保护和 PSCI 调用，
+以及可构建的完整 microSD 镜像。**实机启动尚未验证**；默认实例仅执行内核初始化与
+内存分配检查，没有交互 shell、用户态程序或持久 rootfs。
+
+## 硬件与内核接口
+
+| 项目 | 实现及约束 |
+| --- | --- |
+| SoC | RK3566T，四核 Cortex-A55；仅启用硬件 CPU0，拒绝多核配置 |
+| 启动协议 | ARM64 Image，物理入口 `0x02080000`；EL2/EL1 统一进入 EL1；U-Boot `booti` 传入 DTB |
+| Image 头 | text offset `0x80000`、flags `0xa`，允许在 2 MiB 对齐的任意 RAM 基址上加载；不可改为强制靠近 RAM 起点的 flags |
+| DDR | `0x00000000..0x40000000` 上限；分配范围排除前 2 MiB，必须检查 DTB RAM 和固件保留区域 |
+| MMIO | 启动页表覆盖 `0xc0000000..0x100000000` 为 Device；DDR 为 Normal memory |
+| 串口 | UART2 `0xfe660000`，DW APB UART，32 位访问、寄存器间距 4 字节；SPI 118 / INTID 150；1500000、8N1 |
+| 中断 | **GICv3 / GIC600**，GICD `0xfd400000`，GICR `0xfd460000..0xfd4e0000`；按 GICR_TYPER affinity 选择启动 CPU 的 redistributor；CPU 接口使用 ICC 系统寄存器 |
+| 定时器 | 非安全物理定时器 PPI 14 / INTID 30；从 CNTFRQ 读取频率，固件配置预期 24 MHz |
+| 电源 | TF-A PSCI SMC 重启/关机；实际断电效果需上板确认 |
+| 未实现 | 内核 MMC/eMMC、USB、PCIe、以太网、Wi-Fi/BT、HDMI、音频、PMIC、DVFS、SMP、ITS/MSI |
+
+GICv3 是上游 RK356x SoC 设备树确认的硬件事实。GICv3 的 CPU 接口不是 GICv2 的 GICC
+MMIO，不能沿用 PINE A64 的中断控制器。EL3 固件必须先将 UART 和非安全物理定时器
+分配为 Group 1 Non-secure；非安全 EL1 无权改写固件的安全中断归属。
+`IGRPMODR` 在启用安全扩展时对非安全访问为 RAZ/WI，内核不会尝试改写安全分组。RK356x ITS 存在 DDR 地址限制，本平台没有启用
+ITS，也不宣称支持 PCIe MSI。
+
+串口保留固件配置的时钟、pinmux 和波特率除数。必须经过 DDR 初始化、TF-A 和 U-Boot，
+不能从 BootROM 直接跳转内核。分配器只接收一段连续内存；DTB、memreserve 或
+reserved-memory 位于内核后方时，保守地丢弃该位置之后的 RAM。错误板型、缺少有效
+DTB、内核与保留区域重叠、内存不足会停止启动。动态 `reserved-memory` 的 `size`
+分配请求不受支持，遇到此属性会明确停止，不能忽略后继续释放 RAM。
+
+## 主机准备与完整构建
+
+先满足仓库 AArch64 内核构建依赖，包括交叉工具链和 Rust targets。固件与 SD 组装还需要：
+
+```sh
+sudo apt install build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+  bison flex swig libssl-dev libgnutls28-dev python3-dev python3-pip \
+  python3-setuptools python3-yaml dosfstools mtools
+```
+
+在仓库根目录执行：
+
+```sh
+tools/a20 check instances/quartz64-zero.toml
+tools/a20 prepare quartz64-zero
+tools/a20 package quartz64-zero
+tools/a20 deploy quartz64-zero --dry-run
+```
+
+`prepare` 下载带 SHA256 校验的固定源码与 Rockchip 二进制固件，构建 SPL/U-Boot 和
+Zero 独立 DTB。pyelftools 0.32 安装到私有构建目录，不修改主机 Python 环境。
+源码每次从已校验归档重新解包；编译输出在独立目录重用。需预留约 1 GiB 主机空间。
+`package` 自动构建对应内核、组合引导固件和 FAT32 分区，并逐文件读回校验。
+准备与打包只写普通文件，不需要 root、loop mount 或手工分区。
+
+| 产物 | 用途 |
+| --- | --- |
+| `build/quartz64-zero/firmware/` | `u-boot-rockchip.bin`、`rk3566-quartz64-zero.dtb`、宿主 mkimage、来源 manifest |
+| `build/quartz64-zero/a20os-quartz64-zero-sdcard.img` | 默认 128 MiB 整盘 SD 镜像 |
+| 同名 `.img.json` | 镜像及 FAT 文件 SHA256、固件版本和布局 |
+| `build/quartz64-zero/handoff/` | ELF、ARM64 Image、匹配 DTB、manifest、U-Boot 命令文本 |
+
+只需普通内核构建时运行 `tools/a20 build quartz64-zero`；`kernel.bin` 是内核 Image，
+不能把它当作整盘镜像写卡。独立入口为 `python3 tools/quartz64_zero.py prepare` 和
+`python3 tools/quartz64_zero.py sdcard`，各自 `--help` 可查看缓存、交叉编译器和镜像位置参数。
+
+## 固件选择与板级设备树
+
+启动链为 Rockchip BootROM → rkbin DDR 初始化程序 → U-Boot SPL → rkbin TF-A BL31
+→ U-Boot → A20OS。使用以下固定输入：
+
+| 组件 | 来源 |
+| --- | --- |
+| U-Boot | v2025.10，提交 `e50b1e8715011def8aff1588081a2649a2c6cd47`，归档 SHA256 `33b6910dc737bfbbf4317ae0a48fe687335d6a08eee8fdfcb3a4adffc4c4a516` |
+| Rockchip rkbin | 提交 `3e288fe814e059dd06833495f845cab04ac20a5c` |
+| DDR/TPL | `rk3566_ddr_1056MHz_v1.26.bin`，SHA256 `9966c21aadf00737ccecc2fad6fe3c902ff26956433029f70dfd759d4f60616a` |
+| TF-A BL31 | `rk3568_bl31_v1.46.elf`，SHA256 `c81ac7e8e1fd727cf7f0db62a9aaea760bde2b270e34d98eb264a264b86df749` |
+| 基础配置 | `generic-rk3568_defconfig`，明确替换 DEFAULT_DEVICE_TREE、OF_LIST 和 SPL_OF_LIST 为 Zero 独立 DT |
+| 本地板级源码 | `tools/firmware/quartz64-zero/`；使用上游 RK3566 SoC DTS，根 compatible 为 `pine64,quartz64-zero` |
+
+上游这一版本只有 Quartz64 Model A/B 的板级配置，没有 Zero defconfig。因此这里构建的是
+本仓库维护的最小 Zero 配置，不能称为上游已验证的 Zero 固件。Rockchip 的 RK3566 DDR
+和 RK3568 BL31 命名来自厂商组件及 PINE64 的构建说明；**1056 MHz DDR 训练程序对
+Zero 实际 DRAM 颗粒的兼容性仍须到货确认**。准备成功表示主机侧构建完成。
+
+Zero 原理图的 SD 插座电源直接接 `VCC3V3_SYS`，检测脚为 GPIO0_A4。设备树启用
+SDMMC0 四位总线，固定 3.3 V、最高 25 MHz，并禁用 1.8 V 切换；不复制 Model A
+的 GPIO 控制 SD 电源。保留已有 PMIC 电源状态，不执行未经核实的 PMIC/DVFS 调节。
+eMMC、SPI、USB 和其他板级外设不作为启动依赖。OP-TEE 不是此路径的组成部分。
+固件 manifest 记录本地 DTS 的哈希；Model A/B 的 DTB 无法通过包的板型校验。
+
+## 写入 microSD
+
+| 镜像位置 | 内容 |
+| --- | --- |
+| LBA 0 | MBR，第一分区为 bootable FAT32 |
+| 32 KiB / LBA 64 | `u-boot-rockchip.bin` 起点，Rockchip DDR + SPL |
+| 8 MiB / LBA 16384 | 合并固件内的 U-Boot FIT；相对合并镜像偏移 `0x7f8000` |
+| 16 MiB / LBA 32768 | FAT32 分区起点，避开合并固件范围 |
+| FAT 根目录 | `kernel.bin`、`rk3566-quartz64-zero.dtb`、`boot.cmd`、`boot.scr` |
+
+32 KiB 写入位置来自 PINE64 官方说明；FIT 相对位置来自固定 U-Boot 的 binman 配置与
+`CONFIG_SPL_PAD_TO`，脚本检查 RKNS 头、FIT 标记与分区前的容量边界。
+`boot.scr` 先检查 FAT 加载返回、文件大小和 CRC32，全部通过才执行 `booti`。
+这是传输完整性检查，不是签名安全启动。脚本不写持久环境，也不更新 SPI/eMMC。
+
+确认读卡器**整盘**设备和其所有分区已卸载，再执行：
+
+```sh
+tools/a20 deploy quartz64-zero --media-device /dev/实际SD整盘设备 --no-console
+```
+
+该步骤会覆盖所选卡的分区表和前 128 MiB 内容；实例 `/dev/sdX` 是占位符。
+使用专用空卡，并按读卡器容量/型号识别设备。卡可以更大，镜像后方空间暂不使用。
+
+## 供电、串口与首次启动
+
+官方设备说明要求 **5 V / 3 A** 供电，圆口外径 **3.5 mm**、内径 **1.35 mm**、中心正极。
+按板上接口及电源铭牌确认规格。串口转接器不要接供电线。
+
+使用支持 **1500000 baud** 的 **3.3 V TTL** USB 串口。根据官方原理图第 18 页 PI-2
+40 针座和丝印确认方向：
+
+| 板上物理针脚 | 连接 |
+| --- | --- |
+| 8：UART2_TX_M0 / GPIO0_D1 | 接转接器 RX |
+| 10：UART2_RX_M0 / GPIO0_D0 | 接转接器 TX |
+| 6 或 9：GND | 共地 |
+
+本实例为 1500000、8N1、无硬件流控。115200 设置会产生乱码。先连接终端：
+
+```sh
+tools/a20 console quartz64-zero --interactive --serial /dev/serial/by-id/实际串口设备
+```
+
+断电插卡后上电。预期顺序是 DDR 训练、SPL、BL31、U-Boot，随后自动扫描 FAT 中的
+`boot.scr`，打印 `A20OS Quartz64-Zero SD boot`，进入 A20OS。
+默认 bring-up 应输出 `[Quartz64-Zero] allocator RAM=`、定时器/内存初始化、
+`System ready (bringup, no userspace)`、`part ok`，然后请求 PSCI 关机。
+终端工具保存日志并检查实例标记。`part ok` 仅是初始化及一次内存分配检查，不证明
+长期稳定、UART RX IRQ 压力、定时器精度或持久存储能力。
+
+### U-Boot 提示符下恢复
+
+使用本仓库准备的固件时，SD 为 `mmc 0`。打断倒计时后先检查：
+
+```text
+version
+bdinfo
+mmc list
+mmc dev 0
+mmc rescan
+fatls mmc 0:1
+```
+
+确认 DRAM 从零开始、容量为 1 GiB、SD 文件齐全，然后运行带校验的自带脚本：
+
+```text
+setenv scriptaddr 0x00c00000
+fatload mmc 0:1 ${scriptaddr} boot.scr
+source ${scriptaddr}
+```
+
+`fatload` 必须打印读取字节数且没有错误，方可继续 `source`。手工逐项排查时也可使用：
+
+```text
+setenv loadaddr 0x02080000
+setenv fdt_addr_r 0x0a000000
+fatload mmc 0:1 ${loadaddr} kernel.bin
+fatload mmc 0:1 ${fdt_addr_r} rk3566-quartz64-zero.dtb
+booti ${loadaddr} - ${fdt_addr_r}
+```
+
+逐条执行、任一失败即停止；不要启动上次残留的 RAM。手工命令没有自动 CRC 校验，
+优先执行卡上 `boot.scr`。DTB 暂存地址与内核完整 footprint 分离；U-Boot 仍可为 DTB
+分配最终位置，内核按接收到的地址保护它。不要 `saveenv`。
+
+### 到货时的失败定位
+
+- 没有 DDR/SPL 首屏：先核对电源、8/10/GND 接线、1.5 Mbps 及 SD 内容；移除可拆卸
+  eMMC 模块以排除其他固件启动优先级。若能通过原厂镜像启动而本镜像止于 DDR 训练，
+  保留两份串口日志，DDR/TPL 与该板 DRAM 的兼容性尚未通过验收。
+- 停在 U-Boot：用上述 `mmc`/`fatls` 区分卡检测、文件与启动脚本错误；`crc32` 或大小
+  检查失败应重新 package、写卡，不能跳过校验直接启动。
+- 内核内存检查停止：记录完整 `bdinfo`、固件版本、DTB 与镜像 manifest；不得换用
+  A/B DTB 绕过板型检查。
+- 卡上 SPL/U-Boot 尚未执行就进入其他固件：检查可拆卸 eMMC 和现有启动介质。此流程
+  不自动改写其他介质；从 SD 启动不需要升级板载固件。ROM/板上启动顺序与 DDR
+  颗粒均是首次上板要实际确认的项目。
+- 内核有首屏但定时器无后续进展：保存 GIC/异常日志，确认固件支持非安全 ICC 接口、
+  CNTFRQ 非零和 CPU0 入口。GICv3 IRQ、PSCI 实际掉电效果仍需各自实机验收。
+
+厂商发布页提供 **明确标为 Quartz64 Zero 的 SD Android 镜像及配套 SDCardTool**，
+可用另一张卡作对照。该下载是厂商镜像格式；不要把它当作本流程的 U-Boot 二进制或
+直接替换 `u-boot-rockchip.bin`，也不要使用 Model A/B 的镜像。
+
+## 依据
+
+- [PINE64 Quartz64-Zero 设备页](https://pine64.org/devices/quartz64-zero/)：RK3566T、1 GiB LPDDR4、供电规格。
+- [PINE64 官方 Zero 原理图](https://pine64.sfo3.cdn.digitaloceanspaces.com/doc/quartz64/Quartz64-ZERO_Schematic_v01_20240428.pdf)：第 18 页 PI-2 UART2，第 19 页 SD 插座与直接 3.3 V 供电。
+- [固定 U-Boot 的上游 RK356x DTS](https://github.com/u-boot/u-boot/blob/e50b1e8715011def8aff1588081a2649a2c6cd47/dts/upstream/src/arm64/rockchip/rk356x-base.dtsi)：GICv3、UART2 地址/IRQ、PSCI、架构定时器。
+- [PINE64 U-Boot 构建指南](https://pine64.org/documentation/Quartz64/Software/Building_U-Boot/)：RK3566 DDR、RK3568 BL31 组件及 SD 32 KiB 位置；板型表没有 Zero。
+- [U-Boot RK356x 启动描述](https://github.com/u-boot/u-boot/blob/e50b1e8715011def8aff1588081a2649a2c6cd47/arch/arm/dts/rockchip-u-boot.dtsi)：binman 合并格式。
+- [Rockchip RK3566 DDR 选择](https://github.com/rockchip-linux/rkbin/blob/3e288fe814e059dd06833495f845cab04ac20a5c/RKBOOT/RK3566MINIALL.ini) 与 [RK3568 BL31 选择](https://github.com/rockchip-linux/rkbin/blob/3e288fe814e059dd06833495f845cab04ac20a5c/RKTRUST/RK3568TRUST.ini)：固定二进制版本。
+- [PINE64 发布页 Zero 专用下载](https://pine64.org/documentation/Quartz64/Software/Releases/)：原厂 SD 对照镜像及 SDCardTool。
+- [ARM64 Image 协议](https://docs.kernel.org/arch/arm64/booting.html)：Image flags、加载位置和 DTB 入口。
+- [Arm GIC 架构规范 IHI0069](https://developer.arm.com/documentation/ihi0069/latest/) 与 [TF-A GICv3 分组实现](https://github.com/TrustedFirmware-A/trusted-firmware-a/blob/v2.13.0/drivers/arm/gic/v3/gicv3_main.c)：安全/非安全中断归属边界。

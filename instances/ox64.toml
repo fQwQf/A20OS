@@ -1,0 +1,44 @@
+name = "ox64"
+description = "PINE64 Ox64 D0 RV64 Sv39 kernel bring-up; preserve OpenBouffalo SPI firmware"
+arch = "riscv64"
+board = "ox64"
+abi = "linux"
+
+[kernel]
+bringup = true
+nommu = false
+driver_deployment = "embedded"
+swap = false
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 2000000
+boot_media = ["build/ox64/a20os-ox64-sdcard.img"]
+# Deliberate placeholder: select the actual card with deploy --media-device.
+media_device = "/dev/sdX"
+boot_timeout = "120s"
+console_check = ["[Ox64] D0 C906", "[FDT] RAM range", "System ready (bringup, no userspace)", "part ok"]
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "mmc rescan",
+    "setenv fdt_addr_r 0x53800000",
+    "setenv fdt_high 0xffffffffffffffff",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} bl808-pine64-ox64.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Ox64 16 MiB flash/64 MiB PSRAM board with microSD. Preserve the SPI M0/D0
+lowload + OpenSBI + U-Boot chain; SD has payload files only. Default autoboot
+requires the prepared OpenBouffalo v1.0.1 SPI firmware; auto-handoff can stop
+at its prompt and validate each load. Console GPIO16/17 (physical32/31),
+2000000 baud, 3.3V UART. ROM programming uses separate GPIO14/15 (physical1/2).
+D0-only RV64 S-mode with Sv39. A20 has no BL808 SD, USB, Ethernet or M0 IPC driver;
+this instance checks early kernel allocation and exits, with no shell. SPI SRST
+poweroff is firmware-dependent: part ok is the completion marker. No physical
+board validation. See docs/platforms/ox64.md.
+"""

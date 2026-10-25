@@ -1,0 +1,50 @@
+# Exercise the documented native setup without the pre-published buildenv or
+# build caches. This job is independent of the wider subsystem gate matrix.
+name: Quickstart
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  riscv64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LC_ALL: C
+      A20_WAIT_TIMEOUT: "60"
+      CCACHE: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install the documented single-architecture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git curl ca-certificates xz-utils file python3 \
+            dosfstools e2fsprogs mtools util-linux \
+            gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          sudo apt-get install -y qemu-system-misc
+      - name: Install the pinned Rust toolchain and RISC-V cores
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$version" --profile minimal
+          rustup target add --toolchain "$version" riscv64imac-unknown-none-elf riscv64gc-unknown-none-elf
+      - name: Check prerequisites
+        run: python3 tools/check_quickstart.py
+      - name: Build, enter the shell, execute an external command, and power off
+        run: make -j4 smoke-quickstart
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quickstart-riscv64-log
+          path: .kernel-build/smoke/smoke-quickstart.log
+          include-hidden-files: true
+          if-no-files-found: warn

@@ -1,0 +1,12 @@
+# The same both-ABI, disk-backed configuration as qemu-riscv64.
+name = "smoke-quickstart"
+description = "First boot: shell, external program, and clean QEMU exit"
+arch = "riscv64"
+abi = "both"
+
+[test]
+require_clean_exit = true
+# Split the markers so terminal echo cannot satisfy the output assertions.
+commands = ["printf 'A20_SHELL_%s\\n' READY", "/bin/echo A20_EXTERNAL_$(printf OK)", "poweroff"]
+expect = ["A20_SHELL_READY", "A20_EXTERNAL_OK", "System is going down for power-off NOW"]
+timeout = "90s"

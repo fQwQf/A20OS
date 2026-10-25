@@ -1,0 +1,46 @@
+# PINE A64 512 MiB (original board, not A64+ / LTS). No physical boot claim.
+name = "pine-a64"
+description = "PINE A64 512 MiB AArch64 single-core UART bring-up; hardware validation pending"
+arch = "aarch64"
+board = "pine-a64"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 3
+boot_timeout = "120s"
+console_check = ["[PINE A64] allocator RAM=", "System ready", "part ok"]
+boot_media = ["build/pine-a64/a20os-pine-a64-sdcard.img"]
+# Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv loadaddr 0x40080000",
+    "setenv fdt_addr_r 0x4fa00000",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} sun50i-a64-pine64.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Run a20 prepare pine-a64 once, then a20 package pine-a64 to build a complete
+MBR/FAT32 SD image with SPL/TF-A/U-Boot, matching original-board DTB, kernel
+and checked boot.scr. The card autoboots; the commands above are manual recovery
+after interrupting U-Boot. The prepared matching DTB is also staged in handoff.
+kernel.bin has the AArch64 Image header and is linked at 0x40080000;
+fdt_addr_r is separate, below 512 MiB RAM end. Run manual load commands one at
+a time and stop on any error. Do not saveenv during first bring-up.
+No kernel SD/EMAC/USB/HDMI driver or physical acceptance is claimed. See
+docs/platforms/pine-a64.md for SD preparation, serial wiring and acceptance.
+"""

@@ -1,0 +1,45 @@
+# SG2002 single-hart S-mode bring-up, not a userspace image. No board run yet.
+name = "licheerv-nano-e-tftp"
+description = "Optional vendor E/WE U-Boot TFTP handoff after verifying Ethernet; no empty-card firmware"
+arch = "riscv64"
+board = "licheerv-nano"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+swap = false
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 0
+boot_timeout = "120s"
+# BRINGUP without RAMFS_USER checks allocator then shuts down, no shell.
+console_check = ["[FDT] RAM range", "System ready (bringup, no userspace)", "part ok", "System is going down for power-off NOW"]
+
+[package]
+kind = "kernel-bundle"
+
+[handoff]
+method = "tftp"
+commands = [
+    "setenv fdt_addr_r 0x82000000",
+    "tftpboot ${loadaddr} kernel.bin",
+    "fdt move ${fdtcontroladdr} ${fdt_addr_r} 0x20000",
+    "fdt addr ${fdt_addr_r}",
+    "fdt print /memory@80000000",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Configure serverip and ipaddr for your LAN before tftpboot. Host TFTP root
+must contain this instance's kernel.bin. Confirm Ethernet support in the actual
+U-Boot (E variant, PHY, ethact); mainline defaults to a Nano B device tree with
+no Ethernet enabled. If unavailable, use the licheerv-nano MMC handoff.
+Check bdinfo and a valid SG2002 DTB at fdtcontroladdr. Clone it to a free
+0x82000000..0x82020000 buffer (128 KiB maximum); stop if fdt move fails or
+this buffer overlaps firmware/RTOS reservations. Passing the original control
+DTB directly can fail because it belongs to U-Boot's reserved malloc region.
+Alternatively load a separately verified matching DTB by TFTP into this buffer.
+A20OS has no SG2002 Ethernet or SDHCI driver yet.
+No hardware run has been performed. See docs/platforms/licheerv-nano.md.
+"""
