@@ -182,14 +182,12 @@ static inline int arch_is_kernel_address(const void *ptr) {
 #endif
 }
 
+#include "dma_cache.h"
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {
-    (void)addr;
-    (void)size;
+    riscv_dma_sync_device(addr, size);
 }
-
 static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
-    (void)addr;
-    (void)size;
+    riscv_dma_sync_cpu(addr, size);
 }
 
 struct backtrace_frame {

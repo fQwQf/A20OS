@@ -37,6 +37,8 @@
 #include "drivers/irqchip/plic.h"
 #include "firmware.h"
 #include "platform.h"
+#include "sg2002_audio.h"
+#include "dma_cache.h"
 
 /* SG2002 oscillator, as published by /cpus timebase-frequency in the upstream
  * device tree.  arch_timer_frequency() prefers the firmware DTB and falls back
@@ -78,6 +80,13 @@ static void lrn_reboot(void) {
  * clock/pin/PHY mechanisms. Ethernet remains unbound until a matching MAC
  * driver is implemented. */
 void licheerv_nano_configure_storage(void);
+static void lrn_configure_devices(void) {
+    licheerv_nano_configure_storage();
+    int result = riscv_sg2002_dma_cache_prepare();
+    if (result < 0)
+        printf("[LicheeRV Nano] non-coherent DMA unavailable: %d\n", result);
+    sg2002_audio_configure();
+}
 
 static const board_config_t licheerv_nano = {
     .name              = "licheerv-nano",
@@ -92,7 +101,7 @@ static const board_config_t licheerv_nano = {
     .early_init        = lrn_early_init,
     .poweroff          = lrn_poweroff,
     .reboot            = lrn_reboot,
-    .configure_devices = licheerv_nano_configure_storage,
+    .configure_devices = lrn_configure_devices,
 };
 
 const board_config_t *const current_board = &licheerv_nano;

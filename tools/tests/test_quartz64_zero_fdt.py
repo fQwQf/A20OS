@@ -60,6 +60,8 @@ class Quartz64ZeroFirmwareTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix="a20-quartz64-zero-")
         work = Path(cls.tmp.name)
         stubs = {
+            # Audio enumeration and MMIO have separate production fixtures.
+            "arch/common/rk3566_audio.h": "static inline int rk3566_board_prepare_audio(void) { return 0; }\n",
             "core/arch.h": '''#pragma once
 #include "core/types.h"
 #define PAGE_OFFSET 0UL

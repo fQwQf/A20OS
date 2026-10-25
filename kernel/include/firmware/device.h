@@ -6,6 +6,10 @@ struct device;
  * availability. Re-enumeration is idempotent by firmware-node identity. */
 int firmware_device_enumerate(const fw_node_t *root);
 int firmware_device_prepare(struct device *device);
+/* Translate an auxiliary device's IRQ before it has a driver binding. Uses
+ * already published resources or its firmware reference and registered domain;
+ * does not bind, probe or mutate the provider. Errors include EPROBE_DEFER. */
+int firmware_device_irq(struct device *device, size_t index);
 /* Returned pointers carry a reference released by device_put(). */
 struct device *firmware_device_find(const fw_node_t *node);
 /* Firmware-retained consumers call this from probe. Referenced clocks, resets

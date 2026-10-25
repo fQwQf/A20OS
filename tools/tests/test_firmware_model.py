@@ -173,6 +173,20 @@ static void irq_sources(fw_node_t root) {
  fw_reference_t r;assert(fw_static_get(&tree,1,&custom)==0);
  assert(fw_node_irq(&custom,0,&r)==0);uint32_t irq,flags;
  assert(fw_irq_resolve(&r,&irq,&flags)==0 && irq==5);
+ device_t *early=firmware_device_find(&custom);assert(early&&!early->drv);
+ assert(!device_get_resource(early,RES_IRQ,0));
+ assert(firmware_device_irq(early,0)==5);
+ assert(firmware_device_irq(early,1)==-ENODEV);
+ assert(!device_get_resource(early,RES_IRQ,0)&&!early->drv);
+ device_put(early);
+ resource_t direct={.type=RES_IRQ,.start=7,.end=7};
+ device_t raw={.res=&direct,.res_count=1};
+ assert(firmware_device_irq(&raw,0)==7);
+ direct.end=8;assert(firmware_device_irq(&raw,0)==-EINVAL);
+ direct.start=direct.end=PLATFORM_IRQ_MAX_LINES;
+ assert(firmware_device_irq(&raw,0)==-ERANGE);
+ raw.res_count=0;assert(firmware_device_irq(&raw,0)==-ENODEV);
+ assert(firmware_device_irq(NULL,0)==-EINVAL);
 }
 static void custom_irq(void) {
  fw_node_t other;assert(fw_static_get(&tree,4,&other)==0);

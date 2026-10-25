@@ -12,6 +12,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/platform_bus.h"
 #include "core/errno.h"
+#include "firmware/device.h"
 #include "core/stdio.h"
 
 static sunxi_audio_platform_t sunxi_audio_platform;
@@ -172,7 +173,7 @@ static int sunxi_board_prepare_audio(unsigned variant, int connected) {
         if (result < 0) goto done;
     }
     if (devices[0]->plat_data) { result = -EBUSY; goto done; }
-    int irq = platform_device_irq(devices[1]);
+    int irq = firmware_device_irq(devices[1], 0);
     if (irq <= 0) { result = irq < 0 ? irq : -EINVAL; goto done; }
     /* Configuration publishes only validated resources. The driver registers
      * every provider dependency during probe, because the core clears links

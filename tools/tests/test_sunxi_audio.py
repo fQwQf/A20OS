@@ -64,6 +64,7 @@ int device_add_dependency(device_t *a,device_t *b);
 void device_put(device_t *d);
 resource_t *device_get_resource(device_t *d,int t,int index);
 int platform_device_irq(device_t *d);
+int firmware_device_irq(device_t *d,size_t index);
 int fw_node_match_id(const int *n,const char *id);
 #endif
 '''
@@ -110,7 +111,7 @@ void mdelay(unsigned ms){
  for(unsigned j=0;j<ms;j++){
   ticks+=1000;
   if(dma_mmio[DMA_EN/4] && handler && ticks-last_dma>=21334){
-   unsigned next=((dma_mmio[DMA_SRC/4]-0x44000000U)/4096+1)%SUNXI_PCM_PERIODS;
+   unsigned next=((dma_mmio[DMA_SRC/4]-0x44000000U)/4096+1)%PCM_PERIODS;
    dma_mmio[DMA_SRC/4]=0x44000000U+next*4096;
    dma_mmio[0x10/4]|=DMA_IRQ_PACKAGE;last_dma=ticks;handler(82,handler_arg);
   }
@@ -199,7 +200,7 @@ GLUE_HARNESS = r'''
 #include "test_stub.h"
 #include "PRODUCTION"
 static uint32_t ccu[256],rsb[16];static uint8_t pmic[256];
-static int lock_fail,bus_fail,maps,writes,enumerate,dependencies,model_v3s;
+static int lock_fail,bus_fail,maps,writes,enumerate,dependencies,model_v3s,irq_fallback_calls;
 static device_t nodes[6];
 static const uint64_t addresses[]={0x01c22c00,0x01c02000,0x01c20000,0x01f015c0,0x01c22e00,0x01f03400};
 static const unsigned lengths[]={0x200,0x1000,0x400,4,0x600,0x40};
@@ -222,13 +223,16 @@ device_t *device_find_get_by_mmio(uint64_t pa){if(enumerate)for(unsigned i=0;i<6
 void device_put(device_t *d){(void)d;}
 int device_add_dependency(device_t*a,device_t*b){assert(a&&b);dependencies++;return 0;}
 resource_t *device_get_resource(device_t*d,int t,int i){(void)t;(void)i;return &d->resource;}
-int platform_device_irq(device_t*d){return d->irq;}
+int platform_device_irq(device_t*d){return d->irq?d->irq:-ENODEV;}
+/* Auxiliary provider was enumerated, but never prepared/bound: no RES_IRQ.
+ * The generic firmware IRQ API can translate its immutable reference anyway. */
+int firmware_device_irq(device_t*d,size_t index){assert(d==&nodes[1]&&index==0);if(d->irq)return d->irq;irq_fallback_calls++;return 82;}
 int fw_node_match_id(const int*n,const char*id){
  static const char *v3s[]={"allwinner,sun8i-v3s-codec","allwinner,sun8i-v3s-dma","allwinner,sun8i-v3s-ccu","allwinner,sun8i-v3s-codec-analog"};
  return *n>=0&&*n<(model_v3s?4:6)&&!strcmp(model_v3s?v3s[*n]:ids[*n],id);
 }
-static void reset(void){memset(ccu,0,sizeof(ccu));memset(rsb,0,sizeof(rsb));memset(pmic,0,sizeof(pmic));sunxi_audio_ccu_pa=1;sunxi_audio_rsb_pa=2;sunxi_audio_platform.variant=SUNXI_AUDIO_A64;sunxi_audio_supply_changed=0;lock_fail=bus_fail=maps=writes=enumerate=dependencies=model_v3s=0;pmic[3]=0x41;
- memset(nodes,0,sizeof(nodes));for(unsigned i=0;i<6;i++){nodes[i].resource=(resource_t){addresses[i],addresses[i]+lengths[i]-1};nodes[i].firmware_node=i;nodes[i].irq=82;}}
+static void reset(void){memset(ccu,0,sizeof(ccu));memset(rsb,0,sizeof(rsb));memset(pmic,0,sizeof(pmic));sunxi_audio_ccu_pa=1;sunxi_audio_rsb_pa=2;sunxi_audio_platform.variant=SUNXI_AUDIO_A64;sunxi_audio_supply_changed=0;lock_fail=bus_fail=maps=writes=enumerate=dependencies=model_v3s=irq_fallback_calls=0;pmic[3]=0x41;
+ memset(nodes,0,sizeof(nodes));for(unsigned i=0;i<6;i++){nodes[i].resource=(resource_t){addresses[i],addresses[i]+lengths[i]-1};nodes[i].firmware_node=i;nodes[i].irq=0;}}
 static void resources(void){
  for(unsigned v=0;v<2;v++)for(unsigned i=0;i<(v?4:6);i++)for(unsigned defect=0;defect<4;defect++){
   reset();enumerate=1;model_v3s=v;if(v)nodes[3].resource=(resource_t){0x01c23000,0x01c23003};
@@ -243,7 +247,7 @@ static void resources(void){
  }
  reset();enumerate=model_v3s=1;nodes[3].resource=(resource_t){0x01c23000,0x01c23003};assert(sunxi_board_prepare_audio(SUNXI_AUDIO_V3S,1)==0&&dependencies==0&&!maps&&!writes);assert(sunxi_audio_platform.variant==SUNXI_AUDIO_V3S&&!sunxi_audio_platform.digital_pa&&!sunxi_audio_rsb_pa);
  reset();enumerate=1;nodes[1].irq=-EINVAL;assert(sunxi_board_prepare_audio(SUNXI_AUDIO_A64,1)==-EINVAL&&!dependencies&&!nodes[0].plat_data);
- reset();enumerate=1;assert(sunxi_board_prepare_audio(SUNXI_AUDIO_A64,1)==0);assert(dependencies==0&&!maps&&!writes);assert(nodes[0].plat_data==&sunxi_audio_platform&&sunxi_audio_platform.dma_irq==82);
+ reset();enumerate=1;assert(sunxi_board_prepare_audio(SUNXI_AUDIO_A64,1)==0);assert(dependencies==0&&!maps&&!writes&&irq_fallback_calls==1);assert(nodes[0].plat_data==&sunxi_audio_platform&&sunxi_audio_platform.dma_irq==82);
 }
 int main(void){
  resources();(void)platform_bus;reset();assert(sunxi_board_prepare_audio(SUNXI_AUDIO_V3S,0)==0&&maps==0);
@@ -278,7 +282,7 @@ class SunxiAudioTests(unittest.TestCase):
                          'drivers/core/driver_register.h', 'drivers/core/driver_hwapi.h',
                          'drivers/core/driver_core.h', 'core/types.h', 'core/errno.h',
                          'core/lock.h', 'core/sync.h', 'core/string.h', 'core/stdio.h',
-                         'core/poll.h', 'mm/slab.h'):
+                         'core/poll.h', 'mm/slab.h', 'firmware/device.h'):
                 destination = work / path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_text('#include "test_stub.h"\n')

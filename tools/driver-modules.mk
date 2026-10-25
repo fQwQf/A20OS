@@ -44,7 +44,7 @@ endif
 # offsets while the kernel reads the new ones, and the failure surfaces far away
 # as a driver registering with the wrong class.  Generate the real dependency
 # list instead of maintaining it by hand.
-DRVMOD_CFLAGS += -MMD -MP
+DRVMOD_CFLAGS += -MMD -MP -DCONFIG_DRIVER_MODULE
 ifneq ($(filter $(ARCH),riscv64 x86_64 aarch64 loongarch64),)
 DRVMOD_CFLAGS += -DCONFIG_64BIT
 endif
@@ -194,8 +194,22 @@ $(USER_BUILD_DIR)/virtio-snd.a20drv: $(DRVMOD_DIR)/virtio_snd.c \
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
 $(USER_BUILD_DIR)/sunxi-codec.a20drv: $(DRVMOD_DIR)/sunxi_audio.c \
-		kernel/drivers/audio/sunxi_audio.c kernel/drivers/audio/sunxi_pcm_ring.h \
+		kernel/drivers/audio/sunxi_audio.c kernel/drivers/audio/pcm_period_ring.h \
 		kernel/include/drivers/audio/sunxi_audio.h kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/rk817-codec.a20drv: $(DRVMOD_DIR)/rk817_audio.c \
+		kernel/drivers/audio/rk817_audio.c kernel/drivers/audio/pcm_period_ring.h \
+		kernel/drivers/dma/pl330_audio_program.h \
+		kernel/include/drivers/audio/rk817_audio.h kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/sg2002-audio.a20drv: $(DRVMOD_DIR)/sg2002_audio.c \
+		kernel/drivers/audio/sg2002_audio.c kernel/drivers/audio/sg2002_audio_hw.h \
+		kernel/drivers/audio/pcm_period_ring.h \
+		kernel/include/drivers/audio/sg2002_audio.h kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 

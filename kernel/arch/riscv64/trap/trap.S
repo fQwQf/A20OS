@@ -415,9 +415,12 @@ __trap_from_kernel:
     /* First argument: TrapContext address */
     mv      a0, sp
 
-    /* Call C kernel trap handler */
+    /* Recover only the architecture's active, exact-PC C906 cache probe. */
+    call    riscv_c906_cache_probe_fixup
+    bnez    a0, .Lkernel_probe_recovered
+    mv      a0, sp
     call    kernel_trap_handler
-
+.Lkernel_probe_recovered:
     /* Restore context after handler returns */
     ld      t0, 32*8(sp)
     ld      t1, 33*8(sp)

@@ -54,6 +54,8 @@ EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/gpu/vmsvga.c \
     $(KERNEL_DIR)/drivers/audio/virtio_snd.c \
     $(KERNEL_DIR)/drivers/audio/sunxi_audio.c \
+    $(KERNEL_DIR)/drivers/audio/rk817_audio.c \
+    $(KERNEL_DIR)/drivers/audio/sg2002_audio.c \
     $(KERNEL_DIR)/drvmod/examples/hda.c \
     $(KERNEL_DIR)/drvmod/examples/vinput.c \
     $(KERNEL_DIR)/drivers/usb/host/xhci.c \

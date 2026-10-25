@@ -97,6 +97,18 @@ arches = ["aarch64"]
 description = "Allwinner internal codec PCM playback (PINE A64)"
 
 [[driver]]
+name = "rk817-codec"
+source = "kernel/drvmod/examples/rk817_audio.c"
+arches = ["aarch64"]
+description = "RK3566 I2S1 / RK817 headphone PCM (Quartz64 Zero)"
+
+[[driver]]
+name = "sg2002-audio"
+source = "kernel/drvmod/examples/sg2002_audio.c"
+arches = ["riscv64"]
+description = "SG2002 internal DAC PCM with C906 DMA cache handoff"
+
+[[driver]]
 name = "vinput"
 source = "kernel/drvmod/examples/vinput.c"
 arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
