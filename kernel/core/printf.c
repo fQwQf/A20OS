@@ -173,8 +173,7 @@ static void vprintf_putc(char c, void *ctx) {
 /* Emit len bytes with the console lock already held by the caller. */
 void console_emit_locked(const char *s, size_t len)
 {
-    for (size_t i = 0; i < len; i++)
-        uart_putc(s[i]);
+    uart_write(s, len);
 }
 
 void vprintf(const char *fmt, va_list args) {

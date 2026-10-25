@@ -7,7 +7,11 @@
 static inline void arch_uart_init(void) {
     outb(0x3F8 + 1, 0x00);  /* Disable interrupts */
     outb(0x3F8 + 3, 0x80);  /* Enable DLAB */
-    outb(0x3F8 + 0, 0x03);  /* Divisor = 3 (38400 baud) */
+#ifdef CONFIG_BOARD_QEMU_VIRT_X86_64
+    outb(0x3F8 + 0, 0x01);  /* QEMU: divisor = 1 (115200 baud) */
+#else
+    outb(0x3F8 + 0, 0x03);  /* Physical boards retain 38400 baud. */
+#endif
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x03);  /* 8N1 */
     outb(0x3F8 + 2, 0xC7);  /* Enable FIFO, clear, 14-byte threshold */
@@ -25,6 +29,23 @@ static inline void arch_uart_putc(char c) { x86_shared_console_putc(c); }
 static inline int arch_uart_poll_getc(void) { return x86_shared_console_getc(); }
 static inline void arch_uart_flush(void) { x86_shared_console_flush(); }
 #else
+#define ARCH_UART_HAS_WRITE 1
+/* THRE means the transmit FIFO is empty. Fill at most its 16-byte depth;
+ * string I/O also lets KVM submit the burst in one port-I/O transaction.
+ * A UART without enabled FIFOs keeps the single-byte path. Callers serialize
+ * this with every other console writer, including interrupt-time printk. */
+static inline void arch_uart_write(const char *data, size_t length) {
+    size_t depth = (inb(0x3F8 + 2) & 0xc0) == 0xc0 ? 16 : 1;
+    while (length) {
+        while (!(inb(0x3F8 + 5) & 0x20))
+            ;
+        size_t n = length < depth ? length : depth;
+        length -= n;
+        __asm__ __volatile__("rep outsb" : "+S"(data), "+c"(n)
+                             : "d"((uint16_t)0x3F8) : "memory");
+    }
+}
+
 static inline void arch_uart_putc(char c) {
     while ((inb(0x3F8 + 5) & 0x20) == 0)
         ;
