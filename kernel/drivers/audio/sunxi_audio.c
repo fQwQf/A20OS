@@ -129,10 +129,13 @@ static void dma_start_locked(struct sunxi_audio *s) {
 static int sunxi_irq(int irq, void *opaque) {
     (void)irq;
     struct sunxi_audio *s = opaque;
-    uint32_t pending = reg_read(s->dma, 0x10) & DMA_IRQ_MASK;
-    if (!pending) return 0;
-    reg_write(s->dma, 0x10, pending);
     uint64_t flags = spin_lock_irqsave(&s->lock);
+    uint32_t pending = reg_read(s->dma, 0x10) & DMA_IRQ_MASK;
+    if (!pending) {
+        spin_unlock_irqrestore(&s->lock, flags);
+        return 0;
+    }
+    reg_write(s->dma, 0x10, pending);
     if (s->ring.running && (pending & DMA_IRQ_PACKAGE)) {
         uint32_t source = reg_read(s->dma, DMA_SRC);
         unsigned expected = (s->ring.consumer + 1) % SUNXI_PCM_PERIODS;

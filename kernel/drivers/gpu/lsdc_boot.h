@@ -5,10 +5,11 @@
 /* Architecture-owned scanout authorization for a canonical firmware device.
  * No DT mutation is needed when vendor firmware omits an aperture property. */
 #define LSDC_BOOT_POLICY_MAGIC 0x4c534442U
-#define LSDC_BOOT_POLICY_VERSION 1U
+#define LSDC_BOOT_POLICY_VERSION 2U
 typedef struct lsdc_boot_policy {
     uint32_t magic, version;
     uint64_t register_base, aperture_base, aperture_bytes;
+    int (*prepare)(uint64_t physical, size_t bytes);
 } lsdc_boot_policy_t;
 
 /* Register facts: Loongson vendor 2K0300 lsdc_regs.h/plane.c/crtc.c,
