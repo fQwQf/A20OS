@@ -21,6 +21,10 @@ RV64_LINUX_DEV_SMP4_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=
 smoke-riscv64:
 	tools/a20 test smoke-riscv64
 
+.PHONY: smoke-quickstart
+smoke-quickstart:
+	tools/a20 test smoke-quickstart
+
 smoke-ext4-truncate-rust:
 	$(PYTHON) tools/smoke.py smoke-ext4-truncate-rust
 

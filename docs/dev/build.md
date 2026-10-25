@@ -16,45 +16,189 @@ A20OS 最常用的构建和运行命令都在项目根目录执行。更详细�
 > [packaging/overview.md](../packaging/overview.md)；CI 容器（可复现构建环境）见
 > [packaging/ci.md](../packaging/ci.md)。
 
-## 环境准备
+## 首次运行：Linux + RISC-V 64 {#首次运行linux--risc-v-64}
 
-需要本机安装各架构交叉工具链与镜像工具。Debian/Ubuntu 上一次装齐：
+推荐先完成这一条串口路径，再选择桌面或其他架构。无需开发板、宿主图形界面或
+硬件虚拟化；QEMU 使用软件模拟。本文的原生工具链基线是 x86_64 Debian 13、
+GCC 14.2、QEMU 10.0.13、Python 3.13、Rust 1.96.0。Ubuntu 24.04 的安装入口
+也列在下方，但其发行版工具链组合应以实际构建和 smoke 结果为准。
 
-```bash
-sudo apt-get install -y \
-    build-essential curl git vim wget xz-utils file ripgrep \
-    dosfstools e2fsprogs mtools \
-    grub-pc-bin grub-efi-amd64-bin xorriso \
-    qemu-system-misc qemu-system-x86 qemu-system-arm openocd \
-    gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
-    gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu \
-    gcc-arm-linux-gnueabihf gcc-arm-none-eabi binutils-arm-none-eabi \
-    libc6-dev-riscv64-cross libc6-dev-arm64-cross libc6-dev-armhf-cross \
-    python3 python3-pip rustc cargo
-```
+推荐宿主 8 GiB 内存、20 GiB 可用磁盘，初次用 `-j4` 控制编译并发；容器镜像还会
+占用 Docker 存储空间。实际用量与配置有关，这些是准备预算。串口 guest 默认 1 GiB
+内存；运行前会检查可用内存、磁盘及其他实例，资源不足时可能等待，见下方排查表。
 
-Rust 不能只靠发行版的 `rustc` / `cargo` 包：内核与用户态都按 `--target` 编
-no_std 目标，需要 rustup 装好 target 列表，而且 riscv32 需要 `rust-src`。
+### 1. 获取完整源码
+
+先安装 Git（Debian/Ubuntu：`sudo apt-get update && sudo apt-get install -y git`），再执行：
 
 ```bash
-rustup toolchain install 1.96.0          # 与 delivery 基线一致
-rustup component add rust-src
-rustup target add aarch64-unknown-none armv7a-none-eabihf \
-    loongarch64-unknown-none riscv64gc-unknown-none-elf \
-    riscv64imac-unknown-none-elf thumbv7m-none-eabi x86_64-unknown-none
+git clone --recurse-submodules https://github.com/fQwQf/A20OS.git
+cd A20OS
 ```
 
-riscv32 必须安装 `rust-src`；缺少它会使构建失败。构建入口设置所需选项，无需额外切换工具链。
+已有普通 clone 时执行 `git submodule update --init --recursive`。
+fastfetch 是固定 commit 的子模块，普通 clone 或 GitHub 源码 ZIP 不包含它的内容。
+当前基础用户态构建会跳过缺席的 fastfetch，所以“编译完成”不保证拿到了完整程序集合；
+下方环境检查会明确报出这个缺项。更新代码后再次执行子模块初始化命令。
+
+### 2. 安装单架构依赖
+
+以下清单只为 RISC-V64 串口开发镜像准备，不要求安装 LoongArch、ARM 或桌面依赖：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+    build-essential git curl ca-certificates xz-utils file python3 \
+    dosfstools e2fsprogs mtools util-linux \
+    gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
+    gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+
+# Debian 13：
+sudo apt-get install -y qemu-system-riscv
+# Ubuntu 24.04 用下面这一条替代上一条：
+# sudo apt-get install -y qemu-system-misc
+```
+
+Python 必须为 3.11 或更新版本，仅需标准库；此路径不需要 pip、Conda、CMake 或 GRUB。
+`riscv64-unknown-elf-gcc` 编译内核和静态用户态；Linux 交叉工具链与交叉头文件供
+包括 fastfetch 在内的构建使用。显式安装交叉 libc 头，避免 `--no-install-recommends`
+下出现编译器在而头文件不在的情况。
+
+Rust 使用 rustup 管理。尚未安装 rustup 时执行：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/a20-rustup-init.sh
+sh /tmp/a20-rustup-init.sh -y --profile minimal --default-toolchain 1.96.0
+. "$HOME/.cargo/env"
+```
+
+已有 rustup 的用户也执行以下步骤：
+
+```bash
+rustup toolchain install 1.96.0 --profile minimal
+rustup target add --toolchain 1.96.0 \
+    riscv64imac-unknown-none-elf riscv64gc-unknown-none-elf
+rustc --version
+python3 tools/check_quickstart.py
+```
+
+仓库的 `rust-toolchain.toml` 选择 1.96.0，不改变仓库外的默认版本。确保
+`$HOME/.cargo/bin` 在 PATH 前部；已有 `RUSTUP_TOOLCHAIN` 环境变量或 rustup 目录覆盖
+会优先于该文件，应清除不再需要的覆盖。发行版 `rustc` 不会读取 rustup 的版本选择。
+RISC-V64 首次运行只需要上述两个预编译 core，不需要 `rust-src`。
+环境检查使用临时文件试编译，检查工具、目标 core、交叉头文件与子模块；不会安装依赖，
+也不证明整个内核可以编译。
+
+### 3. 编译、启动与退出
+
+在仓库根目录运行，编译和 QEMU 都使用普通用户权限：
+
+```bash
+tools/a20 run qemu-riscv64 -- -j4
+```
+
+这会构建内核、用户态及磁盘镜像，再启动串口 QEMU。首次构建比后续增量构建慢；
+不要同时在同一 checkout 启动多个构建或修改正在被 guest 使用的磁盘镜像。
+看到 shell 提示符后执行：
+
+```sh
+/bin/echo hello
+poweroff
+```
+
+应看到单独一行 `hello`，随后看到 `System is going down for power-off NOW`，
+QEMU 退出并返回宿主 shell。`poweroff` 是正常退出方式；如 guest 已无响应，
+串口 QEMU 可以先按 `Ctrl-a`、再按 `x` 强制退出，但这不算正常关机验收。
+
+也可以自动检查完整流程：
+
+```bash
+make -j4 smoke-quickstart
+```
+
+该门禁使用与首次运行相同的 both ABI 开发镜像，验证 shell 内置命令、外部程序
+`/bin/echo`、关机标记和 QEMU 的 0 退出码；超时或异常退出都失败。
+结果在 `.kernel-build/smoke/smoke-quickstart.log`。`make smoke-riscv64` 只验证
+kernel-only bring-up，不能代替这项用户态验收。
+
+裸 `make` / `make all` 是 RISC-V64 + LoongArch64 双架构发布构建，不是首次体验入口。
+只编译不启动可用 `tools/a20 build qemu-riscv64 -- -j4`。
+
+### 可选：使用构建容器
+
+有 Docker 的用户可在获取完整源码后，用仓库内 Dockerfile 构建单架构环境，省去
+宿主工具链安装。需要 Docker daemon 可用，且能访问 Debian 仓库和 Rust 下载服务。
+不依赖预先发布的 GHCR tag；本地旧镜像不会因为源码更新而自动更新。
+
+```bash
+tools/ci/build-image.sh riscv
+docker run --rm -it -v "$PWD:/src" -w /src a20os-buildenv:riscv bash
+# 以下在容器内执行：
+python3 tools/check_quickstart.py
+tools/a20 run qemu-riscv64 -- -j4
+```
+
+脚本先构建镜像，再自检其工具链；Dockerfile 固定 Rust 版本，但 Debian 包随仓库更新，
+这不是按包哈希冻结的环境。容器默认以 root 写挂载目录，产物可能归 root；需要改回
+宿主构建时，在退出容器后按需执行 `sudo chown -R "$(id -u):$(id -g)" .kernel-build user/build build`。
+更多镜像、缓存和 CI 说明见 [CI/CD](../packaging/ci.md)。
+
+### 常见阻塞
+
+| 现象 | 处理 |
+| --- | --- |
+| `rustup: command not found` | 安装 rustup，并执行 `. "$HOME/.cargo/env"`；仅 apt 安装 rustc/cargo 不足以完成本指南 |
+| `can't find crate for core` | 按上述命令给 **1.96.0** 安装两个 target；用 `rustup show active-toolchain` 检查覆盖和 PATH |
+| `tomllib` / `assert_never` 导入失败 | 当前 Python 太旧，换用 Python 3.11+ |
+| `bits/libc-header-start.h` 或 Linux UAPI 头缺失 | 安装对应架构的 `libc6-dev-*-cross`，不要仅安装交叉 gcc |
+| 环境检查报 fastfetch 缺失 | 执行 `git submodule update --init --recursive`；检查 GitHub 网络连通性 |
+| 启动前显示资源不足并等待 | `tools/a20 resources` 查看预算，释放内存/磁盘或停止不用的实例；用 `tools/a20 run qemu-riscv64 --wait-timeout 60 -- -j4` 限制等待 |
+| 镜像被占用或实例 busy | 退出该 checkout 的已有 QEMU；确认实例停止后重试 |
+| 环境检查通过，但 C/Rust 编译失败 | 保存完整命令、`git rev-parse HEAD`、编译器版本和首个错误；这是构建问题，不应关闭 `-Werror` 假装成功 |
+| GUI 启动失败 | 串口快速路径不需要显示服务；桌面额外需要显示、图形与音频后端，按 [发行版文档](../distro/README.md) 配置 |
+| Alpine world 下载返回 403 或超时 | world 构建可加 `ALPINE_MIRROR_ROOT=https://dl-cdn.alpinelinux.org/alpine`；串口快速路径不下载 Alpine world |
+
+## 其他平台与当前边界
+
+Linux 原生快速路径是本页的验收重点。Windows 用户可在 Linux 虚拟机或 WSL2 中尝试，
+macOS 用户可尝试 Linux 容器；本页没有对这些宿主组合做端到端验收，不承诺原生命令通用。
+桌面能启动、内核 bring-up 通过、普通 shell 可用和真机可用是不同层级，
+请同时核对 [交付基线](../status/current/delivery-baseline.md) 与 [缺口台账](../status/gaps/README.md)。
+STM32 当前有 `ARCH=armv7m` 的 Rust target 解析期阻塞，安装 ARM gcc 不会解决它；
+相关命令仅是维护入口，状态见 [驱动缺口](../status/gaps/drivers.md)。
+
+需要扩展架构时，在通用工具与 rustup 已安装的基础上按目标补依赖：
+
+| 架构 | Debian 13 工具链 / QEMU 包 | 1.96.0 Rust target |
+| --- | --- | --- |
+| x86_64 | `gcc-x86-64-linux-gnu qemu-system-x86` | `x86_64-unknown-none` |
+| AArch64 | `gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-system-arm` | `aarch64-unknown-none`，另装 `rust-src` |
+| LoongArch64 | `gcc-loongarch64-linux-gnu libc6-dev-loong64-cross qemu-system-misc` | `loongarch64-unknown-none` |
+| ARM32 | `gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-system-arm` | `armv7a-none-eabihf` |
+| RISC-V32 | 与 RISC-V64 共用工具链和 QEMU | 自定义目标，另装 `rust-src` |
+| ARMv7-M | `gcc-arm-none-eabi binutils-arm-none-eabi qemu-system-arm openocd` | `thumbv7m-none-eabi`，当前仍有上述构建阻塞 |
+
+按所选架构执行 `rustup target add --toolchain 1.96.0 <表中的目标>`。
+AArch64 内核使用 `aarch64-unknown-none-softfloat` 自建 core，用户态使用
+`aarch64-unknown-none`；RISC-V32 使用自定义 JSON 目标
+`tools/rust-targets/riscv32imafdc-a20.json`。这两种内核构建需要：
+
+```bash
+rustup component add --toolchain 1.96.0 rust-src
+```
+
+构建入口会设置 `RUSTC_BOOTSTRAP=1`，通过 `-Z build-std=core` 构建 core，
+首次运行 Cargo 可能需要联网下载依赖。不需要另装 nightly。
 技术依据见 [目标运行库](tooling-internals.md#target-runtime)。
 
 注意：
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
-- LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出，相关文档与实例已删除；如确需复现，使用 `v0.18` 的干净 checkout。
+- LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出；历史资料不代表当前支持，如需复现，使用 `v0.18` 的干净 checkout。
 - 交叉 gcc 只把 `libc6-dev-*-cross` 列为 **Recommends**：用
   `--no-install-recommends` 装出来的是一个头文件不全的编译器。内核里有几处
   会包含 libc 头（例如 `kernel/ipc/keyring.c` 的 `<limits.h>`），所以上面把
-  三个 `libc6-dev-*-cross` 显式写进来；它们同时带来
+  对应的 `libc6-dev-*-cross` 显式写进来；它们同时带来
   `linux-libc-dev-*-cross`（UAPI 头）。
 - arm32：`libc6-dev-armhf-cross` 提供内核与用户态需要的 libc/UAPI 头。若只把
   交叉工具链解包到临时目录，可把 `FF_LINUX_UAPI_ROOT` 指向包含
@@ -89,7 +233,9 @@ riscv32 必须安装 `rust-src`；缺少它会使构建失败。构建入口设�
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为六架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译六个 hosted 架构的内核 bring-up 和用户态 | 完整活跃架构构建检查 |
 
-STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](../platforms/stm32f103-port.md)。
+STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名；目前仍受上述 Rust target 阻塞影响。
+QEMU 运行和实板烧录还分别依赖 `qemu-system-arm`、OpenOCD 与实际调试硬件。
+准确产物路径见 [STM32F103 移植说明](../platforms/stm32f103-port.md)。
 
 ## 声明式构建配置（instances/ 与 components/trim.toml）
 
@@ -116,7 +262,6 @@ Makefile 之外的构建配置有两个声明式入口，日常应优先使用�
 - `NOMMU`: `1` 开启 NOMMU 模式；构建支持 `riscv64`、`riscv32`、`aarch64`、`arm32`、`armv7m`（出处：`components/trim.toml` 的 `nommu` 矩阵）。hosted MMU/NOMMU runtime matrix 只包含前四项，ARMv7-M 走独立 MCU 入口。
 - `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M 和发布构建使用 embedded。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
-- `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。
 - `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。
 
 > 桌面环境已改为 Alpine xfce world（`make image-world PKG_WORLD=xfce` 组镜像，`make run-world-gui PKG_WORLD=xfce` 以 GUI 启动）。原先基于 `user/wayland` + `user/external/gui` 从源码构建的 Weston/XFCE 路径与 LVGL 原生桌面已退役，归档在 `archive/legacy-desktop`。

@@ -1,192 +1,248 @@
-# Sipeed LicheeRV Nano（SophGo SG2002）
+# Sipeed LicheeRV Nano / SG2002-E
 
-> **1.0 范围（2026-10-22）**：本板移出 1.0 运行矩阵。没有板卡，SD/eMMC 与 GMAC 驱动无法在实体板上验证；源码、构建目标与本文档保留，不再作为 1.0 启动/存储/网络能力的验收对象。硬件到位后可重新立项。
+当前提供单核 S-mode 内核初始化配置，使用 Sv39 MMU、UART 和 SBI 定时器。实机运行状态：未验证。
+`licheerv-nano` 与 `licheerv-nano-e` 默认生成可写入空卡的 MBR/FAT/FIP 镜像，使用同一个
+`BOARD=licheerv-nano` 内核；`licheerv-nano-e-tftp` 另保留已验证厂商 E/WE 固件的可选网络救援方案。
+主线默认 Nano B 设备树只用于共同的 SD/UART 路径，不据此声明 E/WE 网口已适配。
 
-`ARCH=riscv64 BOARD=licheerv-nano`
+## 硬件与系统支持
 
-仓库里最便宜的板子（约 9–14 美元），也是需要新代码最少的一块：核心是 T-Head C906，上游描述为
-`rv64imafdc`、`mmu-type riscv,sv39`，正是 riscv64 构建已经瞄准的目标。
+| 项 | 当前依据与处理 |
+|---|---|
+| CPU | SG2002 主核 C906 1 GHz（与 A53 二选一），另有 700 MHz C906 与低功耗 8051；本移植只启用固件交出的主核 |
+| 内存 | 256 MiB DDR3，物理窗口 `0x80000000..0x90000000`；内核装载到 `0x80200000` |
+| ISA/MMU | RV64IMAFDC，Sv39；内核用 LP64 软件浮点 ABI，无须厂商向量扩展 |
+| UART0 | DW APB UART，`0x04140000`，PLIC IRQ 44，**32 位读写、寄存器间距 4 字节** |
+| 时间 | 固件 DTB timebase 优先，回退 25 MHz；定时器与关机通过 OpenSBI |
+| 中断 | T-Head C900 PLIC，`0x70000000`；当前只覆盖电平中断路径 |
+| SD | `0x04310000`，IRQ 36，SDHCI/DWCMSHC；现有 A20 dw-mci 驱动不能代用 |
+| 网络 | E/WE 有 100M 网口；U-Boot TFTP 能力不等于 A20OS 已有 SG2002 网卡驱动 |
 
-**只验证到构建。未在硬件上运行。** 该构建结论现在由 `make check-lao64-board-builds` 在每次提交上复现，
-因此这块板不会悄悄编译不过。下文标注"未验证"的内容，都是因为这块板还没有在 A20OS 下上电。
+UART 使用 32 位寄存器访问与 4 字节间距，保留 FSBL/U-Boot 设置的时钟、引脚和 115200 波特率。
+内核采用标准 RISC-V Image 头，由 U-Boot 以 `booti KERNEL - DTB` 启动；
+第三参数必须为独立 DTB，`-` 只表示不使用 initrd。
 
-## 硬件事实
+## 从空卡准备完整产物
 
-全部来自上游，而非厂商文档：
+安装仓库 RISC-V 构建依赖。固件还需要宿主 C 编译器、make、bison、flex、swig、
+OpenSSL/GnuTLS 开发头文件、Python 开发头文件、pip/setuptools/PyYAML；整卡组装需要
+`dosfstools`、`mtools`。Debian/Ubuntu 的补充包示例：
 
-| 项 | 取值 | 来源 |
-|---|---|---|
-| SoC | SophGo SG2002 | `sg2002.dtsi` |
-| CPU | 1× T-Head C906 @1 GHz（另有 C906 @700 MHz，上游未描述） | `cv180x-cpus.dtsi` |
-| ISA | `rv64imafdc`，扩展 `i m a f d c zicntr zicsr zifencei zihpm` | `cv180x-cpus.dtsi` |
-| MMU | `riscv,sv39` | `cv180x-cpus.dtsi` |
-| RAM | 256 MiB 集成 DDR3，位于 `0x80000000`，长度 `0x10000000` | `sg2002.dtsi` `memory@80000000` |
-| Timebase | 25 MHz | `cv180x-cpus.dtsi` `timebase-frequency` |
-| UART0 | `0x04140000`，256 字节，IRQ 44 | `cv180x.dtsi` `serial@4140000` |
-| MAC | `0x04070000`，IRQ 31，`"sophgo,cv1800b-dwmac", "snps,dwmac-3.70a"` | `cv180x.dtsi` `ethernet@4070000` |
-| SD | `0x04310000`，IRQ 36，`"sophgo,sg2002-dwcmshc"` | `cv180x.dtsi` `mmc@4310000` |
-| PLIC | `0x70000000`，64 MiB，101 个中断 | `sg2002.dtsi` `interrupt-controller@70000000` |
-| CLINT | `0x74000000` | `sg2002.dtsi` `timer@74000000` |
-| Pin mux | `0x03001000`（sys）、`0x05027000`（rtc） | `sg2002.dtsi` |
-| Clock | `0x03002000` | `sg2002.dtsi` |
-| 启动介质 | TF 卡，或 TF 槽下的 SD-NAND | Sipeed wiki |
+```sh
+sudo apt install build-essential gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+  bison flex swig libssl-dev libgnutls28-dev python3-dev python3-pip \
+  python3-setuptools python3-yaml dosfstools mtools
+```
 
-UART0 是 `"snps,dw-apb-uart"`，带 `reg-shift = <2>` 与 `reg-io-width = <4>`：一个 16550 寄存器布局的
-DesignWare APB UART，正是各架构 `console.h` 已经声明的形态。
+在仓库根目录执行：
 
-外设中断编号为 `SOC_PERIPHERAL_IRQ(nr) = nr + 16`，因此 DTS 里的中断号比 PLIC 线号小 16。本板使用线号。
+```sh
+tools/a20 check instances/licheerv-nano.toml
+tools/a20 prepare licheerv-nano
+tools/a20 package licheerv-nano
+# E/WE 使用相同 SD/UART 早期固件：
+tools/a20 package licheerv-nano-e
+```
 
-## 树上已有的、可直接复用的部分
+`prepare` 下载固定提交的源码归档并验证 SHA256，构建主线 U-Boot/OpenSBI，再调用官方
+sophgo/fiptool，将厂商 FSBL、DDR 参数、OpenSBI、U-Boot 合成为 FAT 中的 `fip.bin`。
+pyelftools 0.32 安装到私有构建目录，不修改主机 Python site-packages。默认缓存/构建约需
+600 MiB，建议至少留 1 GiB 空间；归档缓存有效时不用再次下载。
 
-- **PLIC 是共享实现。** DTS 写的是 `"thead,c900-plic"`，mainline Linux 把它绑定到
-  `drivers/irqchip/irq-sifive-plic.c`——标准 SiFive PLIC，不是单独的 T-Head 驱动。因此
-  `kernel/drivers/irqchip/plic.c` 原样适用。（mainline 为该 compatible 标了 `PLIC_QUIRK_EDGE_INTERRUPT`，
-  因为 C900 可以发出边沿触发中断；本 DTS 里每个中断都是 `IRQ_TYPE_LEVEL_HIGH`，走的是无需特殊处理的
-  电平路径。）
-- **无需覆盖链接脚本。** DRAM 从 `0x80000000` 开始，正是 `kernel/arch/riscv64/boot/ldscript.ld` 已指向的
-  地址，架构默认镜像原样正确。
-- **无需架构适配。** ISA 字符串与构建的 `-march=rv64imafdc_zicsr_zifencei -mabi=lp64` 完全一致。
-- **时间与电源走 SBI。** riscv64 读 `time` CSR 并通过 `firmware_set_timer()` 编程比较器；没有任何 riscv64
-  代码读取 `CLINT_BASE`，因此上面的 CLINT 地址只是记录，并未使用。
+| 组件 | 固定来源与构建契约 |
+| --- | --- |
+| U-Boot | v2025.10，`e50b1e8715011def8aff1588081a2649a2c6cd47`，`sipeed_licheerv_nano_defconfig` |
+| OpenSBI | v1.7，`a32a91069119e7a5aa31e6bc51d5e00860be3d80`，`PLATFORM=generic FW_FDT_PATH=<本次 U-Boot DTB>` |
+| fiptool / FSBL | sophgo/fiptool，`7f59889c91f7d5d440d6a09aad0209f0aca3d09d`，SG2002 使用 **cv181x.bin** |
+| DDR 参数 | 同一 fiptool 提交的 `data/ddr_param.bin` |
+| 二核 RTOS | 显式传入空文件，生成后解析 FIP 确认 `BLCP_2ND_SIZE=0`，不加载默认 cvirtos |
+| DTB | `sg2002-licheerv-nano-b.dtb`，根 compatible 含 Nano/SG2002，memory reg 必须为 `0x80000000,0x10000000` |
 
-## 启动链
+FSBL/DDR 参数来自厂商二进制，不能把这条链称作全部源码可构建。归档 SHA256、编译器版本、
+实际每个产物的 SHA256 和厂商许可文件都保存在 `build/licheerv-nano/firmware/`。
+固定来源、参数和布局可重跑，主机工具版本/FAT 时间戳仍可能改变最终镜像哈希；不声称跨主机逐字节一致。
+
+U-Boot 只增加 `CONFIG_CRC32_VERIFY=y` 与 `CONFIG_BOOTMETH_SCRIPT=y` 命令能力，另将默认
+`scriptaddr` 从 **0x80c00000** 移到 **0x8e000000**，`kernel_addr_r` 改为 `0x80200000`。
+旧脚本地址位于 A20OS Image/BSS 内部：当前完整 Image 覆盖 `0x80200000..0x81231000`，
+加载内核会把尚在执行的 U-Boot 脚本冲掉。外置启动 DTB 放 `0x82000000`，与 Image 分离。
+打包检查 Image footprint 未触及 DTB；固件构建检查 U-Boot ELF、malloc 和额外栈/GD/FDT
+空间的保守预算不超过 DDR 顶部 16 MiB。实际 `bdinfo` 的重定位/堆栈仍需首板核对，不能仅凭
+固定地址断言任意厂商固件均使用同一布局。
+
+主要输出：
+
+| 路径 | 内容 |
+| --- | --- |
+| `build/licheerv-nano/firmware/` | fip.bin、匹配 DTB、OpenSBI、U-Boot、vendor FSBL/DDR 参数、mkimage、manifest |
+| `build/licheerv-nano/a20os-licheerv-nano-sdcard.img` | 默认 128 MiB 的完整 MBR/FAT32 整盘镜像 |
+| 镜像旁 `.img.json` | 固件来源/布局与各文件、整镜像 SHA256 |
+| `build/licheerv-nano/handoff/` | 同一 ELF 产生的 Image、匹配 DTB、manifest 和手动救援文本 |
+
+两个默认实例共用板级产物目录。`handoff/kernel.bin` 是内核 Image，不能直接当整盘镜像写卡。
+`handoff/uboot.cmd` 是命令文本；FAT 中 `boot.scr` 才是 mkimage 包装的二进制脚本。
+`tools/licheerv_nano.py prepare/sdcard` 是等价私有入口，支持自定义缓存、输出、交叉工具前缀与并行数。
+
+## 写空卡与自动启动
+
+镜像构建不需要 root 或 loop mount，自动创建 bootable MBR FAT32 分区，从 8 MiB 开始：
 
 ```text
-CV1800B boot ROM  →  厂商 FSBL（cv181x.bin）  →  OpenSBI  →  kernel
+LBA 0                    MBR
+8 KiB 等 raw 区域         保持零，不写 Allwinner SPL
+8 MiB 起的 FAT 根目录      fip.bin
+                         kernel.bin
+                         sg2002-licheerv-nano-b.dtb
+                         boot.cmd / boot.scr
 ```
 
-FSBL 初始化时钟与 DRAM 并加载 OpenSBI；厂商工具把 FSBL + OpenSBI + U-Boot 打包成 `fip.bin`，放在 TF 卡
-的 FAT 分区上。FSBL 是公开发布的，**没有签名**——与 Amlogic 不同，这里没有厂商签名 blob。
+SG2002 BootROM 从 FAT 文件加载 **fip.bin**，不是从 PINE A64 的 8 KiB 固件偏移取 SPL。
+构建逐文件从 FAT 读回并比对 SHA256。默认 U-Boot `run distro_bootcmd` 扫描 `boot.scr`；
+脚本检查内核和 DTB 的加载状态、字节数和 CRC32，全部通过才 `booti`，失败退出、不 `saveenv`。
+这些是旧文件/损坏检测，不是签名安全启动。内核没有 SD 驱动并不妨碍 U-Boot 读 FAT；接管后内核仍不能访问卡。
 
-mainline U-Boot 有板级目标 `configs/licheerv_nano_defconfig`，启用了 ns16550 UART 与 **Synopsys DesignWare
-MSHC** 驱动。这一点值得知道：它同时确认了控制台与 SD 控制器都落在 A20OS 已经会说的 IP 上。
-
-## 部署
-
-部署工具是 `tools/a20`。本节没有 make 命令，这是刻意的：本板没有块驱动，所以没有卡可写，也没有东西
-让 `dd` 去写镜像。产物是内核，加上把内核交给板上已有启动链的那几条命令。
-
-### 你会得到什么
+确认待写卡的**整盘设备**和所有分区已卸载，再执行：
 
 ```sh
-tools/a20 package licheerv-nano
+tools/a20 deploy licheerv-nano --media-device /dev/实际SD整盘设备 --no-console
 ```
 
-写出 `build/licheerv-nano/handoff/`：
+`/dev/sdX` 是实例占位符。写卡会覆盖该卡分区表及前 128 MiB 内容，首次使用专用空卡，
+保留原来的厂商工作卡作为恢复路径。卡可以大于镜像，余下空间目前不用。
+构建脚本只接受普通文件输出，不会打开真实块设备。
 
-| 文件 | 内容 |
-|---|---|
-| `kernel.bin` | 原始内核，装载到 `uboot.cmd` 里给出的地址 |
-| `uboot.cmd` | 在 U-Boot 提示符下逐行执行的命令 |
-| `README.md` | 同样的说明，随产物一起提供 |
+## 串口启动与恢复
 
-装载地址**不**写在本文件或实例里。`a20 package` 从刚构建出的内核的第一个 `PT_LOAD` 头里读出它，因此链接
-脚本会重定位镜像的板子不会在这里留下过期地址。对本板它解析为 `0x80200000`，即 riscv64 的 `PHYS_BASE`。
-
-刻意不提供 device tree。见下文[为什么不带 DTB](#为什么不带-dtb)。
-
-### 把它弄到板上
-
-1. 按板子自己的方式启动：厂商 FSBL，然后 OpenSBI，然后 U-Boot。FSBL 与 `fip.bin` 打包来自 SophGo 工具；
-   把 FSBL 留在卡上，因为卡是唯一的退路。
-2. 打断 U-Boot 的自动启动。
-3. 告诉 U-Boot 主机在哪，然后装载内核：
-
-   ```text
-   setenv serverip <你的主机 IP>
-   setenv ipaddr <板子 IP>
-   tftp 0x80200000 kernel.bin
-   ```
-
-   从 `build/licheerv-nano/handoff/` 取 `kernel.bin`。传输方式随你的主机怎么连到板子而定——上面的 TFTP，
-   或者 U 盘加 `fatload usb 0:1 0x80200000 kernel.bin`。
-4. 启动内核：
-
-   ```text
-   booti 0x80200000 - 0x80200000
-   ```
-
-   中间的 `-` 是 device tree 指针。留空是正确的：U-Boot 自己会在 `a1` 里传入它自己的板级 DTB。
-
-### 验证
-
-`tools/a20 deploy licheerv-nano` 完成构建与打包、打印 handoff 命令，然后接上控制台检查结果。只想观察
-一块已在运行的板子：
+接 3.3 V USB-UART，板 TX 接适配器 RX，板 RX 接适配器 TX，共地，115200 8N1；
+根据官方引脚图使用 UART0，USB-C 供电口不是本移植的串口。
+在上电前打开同一条可交互且有断言的连接：
 
 ```sh
-tools/a20 console licheerv-nano
+tools/a20 console licheerv-nano --interactive --serial /dev/serial/by-id/实际串口设备
 ```
 
-控制台是 `/dev/ttyUSB0`，115200 8N1。若你的适配器枚举成别的节点，改掉它——插拔前后各执行一次
-`ls /dev/ttyUSB*`。
+将写好的卡插入板再上电，观察 FSBL → OpenSBI → U-Boot → `A20OS LicheeRV Nano SD boot`
+→ 内核。正常自动启动无需键入 handoff。若失败，打断 U-Boot autoboot，先检查
+`mmc list`、`part list mmc 0`、`bdinfo`、`printenv scriptaddr fdt_addr_r`，再逐行恢复：
 
-只有**同时**出现下面两行才算启动成功：
+```text
+fatload mmc 0:1 ${scriptaddr} boot.scr
+source ${scriptaddr}
+```
 
-| 行 | 证明什么 |
-|---|---|
-| `[FDT] RAM range ...` | 固件交出了 device tree |
-| `System ready` | 内核进入了用户态 |
+该方式保留文件大小/CRC 校验。进一步排查可用 handoff 文本对应的显式装载：
 
-实例里的 `console_check` 等的正是这两行，因此 `a20 console` 能区分"启动"与"卡住"。若你看到的是 RAM 窗口
-回退消息而不是一个范围，说明 U-Boot 没有传 `a1`，是装载错了，不是内核的问题。
+```text
+setenv loadaddr 0x80200000
+setenv fdt_addr_r 0x82000000
+fatload mmc 0:1 ${loadaddr} kernel.bin
+fatload mmc 0:1 ${fdt_addr_r} sg2002-licheerv-nano-b.dtb
+fdt addr ${fdt_addr_r}
+fdt print /memory@80000000
+booti ${loadaddr} - ${fdt_addr_r}
+```
 
-随后它执行 `cat /etc/os-release` 与 `poweroff`，并检查 `A20OS` 与 `poweroff`。
+显式命令本身不带自动 CRC 检查，任一步失败立即停止。`mmc 0:1` 按实际卡布局核对。
+`booti` 第三参数始终是独立可写的启动 DTB，不能直接用控制 DTB 的 malloc 区，
+也不能用内核地址；`go` 的 argc/argv ABI 不满足内核要求。
 
-### NOMMU
+## E/WE 厂商固件 TFTP 可选路径
 
-riscv64 在 `NOMMU_SUPPORTED_ARCHES` 里，想要更小的占用只差一个覆盖参数：
+默认主线 Nano B 设备树没有启用 E/WE 网口，不能因为编译了 MAC 驱动就假设 TFTP 可用。
+只有先用 `help tftpboot`、`printenv ethact`、`ping` 确认原厂 E/WE 固件可用网口后，才使用：
 
 ```sh
-tools/a20 package licheerv-nano -- NOMMU=1
+tools/a20 package licheerv-nano-e-tftp
 ```
 
-VisionFive 2 的链接脚本为自己的 DRAM 窗口把镜像重定位到 `0x40200000`；本板 DRAM 在 `0x80000000`，所以
-架构默认值成立，不需要 NOMMU 专属脚本。注意 NOMMU 跑不了 `mksh`，也跑不了任何需要 `fork`/`mmap` 的
-东西，因此上面的控制台内检查就是 NOMMU 构建的上限。
+这是 kernel-bundle，不重建空卡固件。下面以主机 `192.168.50.10`、板子 `192.168.50.20`
+为例；替换为同一实际 LAN 的地址，主机地址必须已配置到连接板子的网卡，板子地址应未被占用。
+不要随后再打包另一实例：同一 handoff 目录会更新为另一个实例的 manifest。
 
-### 为什么不带 DTB
+终端 1 启动只读服务：
 
-这一族的板子都经厂商 FSBL 与 U-Boot 启动，U-Boot 在 `a1` 里传入它自己的板级 DTB。那份 DTB 是板子的
-权威描述：`riscv64_memory_init()` 从中读 RAM，平台 device tree walker 从中读设备。再从内核树里带第二份
-拷贝，就等于多了一个必须与固件保持同步的东西，而树里没有任何机制会在它漂移时察觉。
+```sh
+sudo python3 tools/a20_tftp.py --bundle "$PWD/build/licheerv-nano/handoff" \
+  --bind 192.168.50.10 --port 69
+```
 
-后果是真实的，值得说清楚：如果你的 U-Boot 编译时没有带 DTB，或传进来的 DTB 描述了不同的 RAM 窗口，
-内核会回退到板级编译期窗口，`[FDT] RAM range` 那行就不会出现。
+服务在打开 UDP 端口前验证 manifest 中 `kernel.bin` 的大小和 SHA256，只提供这一个文件的
+不可变快照；拒绝上传、其他路径和非 octet 模式。UDP 69 通常需要绑定权限，因此示例用 sudo。
+确认该地址上的 UDP 69 未被其他 TFTP 服务占用，主机防火墙允许板子访问 TFTP 及其响应端口。
+每次重新 `package` 后停止旧服务再启动，避免继续提供旧快照。Ctrl-C 退出服务。
 
-### 如果启动不了
+终端 2 在板子上电之前运行自动串口交接：
 
-按这个顺序排查，它按实际最先出问题的顺序排列。
+```sh
+tools/a20 console licheerv-nano-e-tftp --auto-handoff \
+  --serial /dev/serial/by-id/实际串口设备 \
+  --server-ip 192.168.50.10 --board-ip 192.168.50.20
+```
 
-1. **控制台什么都没有。** UART 或 pinmux 错了。UART0 在 GPIO 排针上的 `0x04140000`；时钟由 FSBL 释放，
-   所以控制台静默通常意味着 FSBL 没跑，而不是内核错了。
-2. **U-Boot banner 之后静默。** 装载地址。把 `uboot.cmd` 里的地址与板上 `bdinfo` 的结果对一下。
-3. **`[FDT] memory node unavailable`。** U-Boot 没有传 `a1`。检查你的 U-Boot 是否带 `CONFIG_OF_BOARD`
-   编译，或 `booti` 是否指向了一份被截断的 DTB。
-4. **RAM 范围不对。** U-Boot 的 DTB 与板子不一致。那是固件问题；`riscv64_memory_init()` 只是忠实报告
-   它拿到的内容。
-5. **`System ready` 之后卡住。** 你已经过了 bring-up。这不再是本文的主题，见 `porting-guide.md`。
+该命令在同一串口连接打断 U-Boot，设置易失的 `serverip`/`ipaddr`，验证每条命令状态、
+实际下载字节数/CRC32 和 FDT 头，最后检查内核日志。服务本身不打开串口、不会写板载 Flash。
+板子仍需已具备可用的厂商 E/WE 网络固件；看到明确 U-Boot 提示符之后才会发送装载指令。
 
-## 这个移植做了什么、没做什么
+也可用 `console --interactive` 手动输入；与生成的 recipe 一致的完整地址设置为：
 
-做了：由固件 DTB 收窄的 RAM 发现、共享 PLIC、SBI 时基、UART0 控制台、经 SBI SRST 的 `poweroff`/`reboot`。
+```text
+setenv serverip 192.168.50.10
+setenv ipaddr 192.168.50.20
+setenv loadaddr 0x80200000
+setenv fdt_addr_r 0x82000000
+tftpboot ${loadaddr} kernel.bin
+fdt move ${fdtcontroladdr} ${fdt_addr_r} 0x20000
+fdt addr ${fdt_addr_r}
+fdt print /memory@80000000
+booti ${loadaddr} - ${fdt_addr_r}
+```
 
-没做，且每一项都需要真正的驱动工作而不是往设备表里加一行：
+克隆空间上限为 128 KiB，`fdt move` 失败就停止；先确认 `0x82000000..0x82020000` 未被
+厂商固件/小核 RTOS 保留。控制 DTB 必须包含真实 RAM 和保留区，不能把被裁剪的控制树当完整启动树。
+也可 TFTP 加载单独核对过的匹配 DTB。带二核 RTOS/多媒体固件的厂商卡，必须提供它们实际占用
+DDR 的 reserved-memory；不能沿用空 RTOS 的内存假设。TFTP 成功只证明 U-Boot 网卡能力，
+A20OS 仍没有 SG2002 Ethernet 驱动。
 
-- **存储。** SD 控制器是 DesignWare CMSH（`sophgo,sg2002-dwcmshc`，上游由 `sdhci-of-dwcmshc.c` 驱动）。
-  A20OS 的 `dw_sdio.c` 面向 VisionFive 2 的 dw-mci 所用的较老 DesignWare SDIO/MMC MSHC 寄存器布局。
-  两者是近亲，但近到不足以假装一个驱动能覆盖两个。这是越不过仅 RAM 启动的那道坎。
-- **以太网。** MAC 是 `snps,dwmac-3.70a`，比 `ls2k_gmac.c` 面向的 DWMAC1000 更老。它还有内部 PHY
-  （`phy-mode = "internal"`）。只有 `-E` 与 `-WE` 变体才焊出 RJ45。
-- **SMP。** 第二个 C906 在上游 device tree 里没有描述，因此 `smp` 为 `NULL`。`porting-guide.md` 明确
-  规定：无法启动从核的板子不得提供一个假的空 ops 表。
+## 验收与局限
 
-## 在宣称硬件验证之前
+```sh
+tools/a20 console licheerv-nano --interactive
+```
 
-1. `tools/a20 package licheerv-nano` 产出 `build/licheerv-nano/handoff/kernel.bin`。
-2. FSBL 起来之后按[部署](#部署)一节通过 U-Boot 装载它。
-3. 在 GPIO 排针、115200 8N1 的 UART0 上确认 `System ready`。
-4. 确认 DTB 到达了内核——`riscv64_memory_init()` 会打印 `[FDT] RAM range ...`；静默回退到板级窗口
-   意味着 U-Boot 没传 `a1`。
-5. 按 `porting-guide.md` 记录验收表。在第 3 步发生之前，关于这个移植唯一成立的说法是"它能编译"。
+在内核启动**之前**开始监听，确保同时捕获：
 
-保持恢复路径完整：把厂商 FSBL 留在卡上，不要覆盖它。卡是唯一的退路。
+- `[FDT] RAM range`：有效 DTB 到达内核并收窄内存范围。
+- `System ready (bringup, no userspace)`：完成内核初始化。
+- `part ok`：最小分配/释放成功。
+- `System is going down for power-off NOW`：进入 SBI 关机路径；还需实际确认板子已停止运行。
+
+当前实例 `bringup=true`、`RAMFS_USER=0`，会自动关机，**没有 shell**；旧版本的 `cat /etc/os-release`
+与 `poweroff` 串口命令并不适用于这个配置。`System ready` 本身也不证明进入用户态。
+
+目前不提供 SD、网卡、DMA、NPU、视频或第二核驱动。C906 的 DMA 缓存一致性不能视为 QEMU 的一致性：
+后续 SDHCI/网卡实现需要单独完成 T-Head 缓存维护和设备地址约束，再做实际数据校验。PLIC 的边沿中断
+扩展也未覆盖。固件是否提供 SBI TIME/SRST、其 T-Head MMU/cache 设置仍需实机记录。
+
+内存解析现在检查 DTB v17 的 RAM 描述、`memreserve` 与 `/reserved-memory/reg`，也保留 DTB 缓冲区本身。
+当前板级分配接口提供单一连续区间，因此从内核之后的第一个保留区起保守截去高地址 RAM；可用容量
+可能小于完整 256 MiB。保留区与内核重叠、坏 DTB、动态 `size` 保留或非空 `ranges` 会停止启动，
+避免继续分配固件内存。缺失 DTB 仍有板级窗口回退，但不计入本实例的成功验收。
+厂商多媒体/小核固件可能占用 DDR，必须给出与实际固件匹配的保留区；不能把任意 Linux DTB 改成
+256 MiB 后直接使用。没有写进 DTB 的固件占用无法由内核推断。
+
+实机运行状态尚未验证；SBI TIME/SRST、PLIC 路由、RAM 保留区和断电行为以实际固件及板卡为准。
+
+## 参考资料
+
+- [Sipeed 板卡规格与 B/E/W/WE 区别](https://wiki.sipeed.com/hardware/en/lichee/RV_Nano/1_intro.html)
+- [Sipeed 官方 SDK](https://github.com/sipeed/LicheeRV-Nano-Build)
+- [Linux SG2002 DTS](https://github.com/torvalds/linux/blob/master/arch/riscv/boot/dts/sophgo/sg2002.dtsi)
+  与 [CV180x 外设 DTS](https://github.com/torvalds/linux/blob/master/arch/riscv/boot/dts/sophgo/cv180x.dtsi)
+- [U-Boot 官方 Nano FSBL/OpenSBI/FAT FIP 启动指南](https://docs.u-boot.org/en/v2025.10/board/sophgo/licheerv_nano.html)
+- [Sophgo 官方 fiptool、cv181x FSBL、DDR 参数](https://github.com/sophgo/fiptool/tree/7f59889c91f7d5d440d6a09aad0209f0aca3d09d)
+- [U-Boot 正确板名与默认 Nano B DTB](https://github.com/u-boot/u-boot/blob/master/configs/sipeed_licheerv_nano_defconfig)
+- [U-Boot booti 头校验](https://github.com/u-boot/u-boot/blob/master/arch/riscv/lib/image.c)
+  与 [a0/a1 交接实现](https://github.com/u-boot/u-boot/blob/master/arch/riscv/lib/bootm.c)
+- [RISC-V 64 字节 Image 头协议](https://docs.kernel.org/arch/riscv/boot-image-header.html)
+
+以上来源证明硬件事实及固件协议，不构成 A20OS 已完成实机验收的证据。

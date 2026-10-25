@@ -50,6 +50,7 @@ from a20_error import (
 )
 from a20_console import (
     ConsoleError,
+    InteractiveTransport,
     console_log_path,
     open_transport,
     run_console_session,
@@ -59,6 +60,8 @@ from a20_derive import derive_make_vars
 from dataclasses import replace
 
 from a20_instance import (
+    PREPARE_TARGETS,
+    PHYSICAL_ONLY_BOARDS,
     QEMU_RUNNABLE_ARCHES,
     Instance,
     InstanceError,
@@ -173,6 +176,12 @@ def _load(arg: str) -> Instance:
 
 
 def _check_runnable(inst: Instance, action: str) -> None:
+    if inst.board == "m0sense-bl702":
+        raise A20Error(f"'{action}' cannot run an M-mode BL702 probe on the S-mode QEMU virt machine",
+                       hint="use a20 package m0sense-bl702-probe and the board debugging guide")
+    if inst.board in PHYSICAL_ONLY_BOARDS:
+        raise A20Error(f"'{action}' has no QEMU machine for board {inst.board}",
+                       hint="use a20 package/deploy/console and the board's platform guide")
     if inst.arch not in QEMU_RUNNABLE_ARCHES:
         raise A20Error(
             f"'{action}' has no generic QEMU path for {inst.arch}",
@@ -256,6 +265,15 @@ def cmd_build(args: argparse.Namespace) -> None:
     build_instance(inst, list(args.make_args), args.dry_run)
 
 
+def cmd_prepare(args: argparse.Namespace) -> None:
+    inst = _load(args.instance)
+    target = PREPARE_TARGETS.get(inst.board)
+    if target is None:
+        raise A20Error(f"{inst.board}: no firmware preparation target; consult its platform guide")
+    _gate_resources(inst, args, guest=False)
+    exec_make(inst, target, list(args.make_args), args.dry_run)
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     inst = _load(args.instance)
     if inst.machine.vm_manager and not args.name:
@@ -337,8 +355,18 @@ def cmd_console(args: argparse.Namespace) -> int:
         raise A20Error(f"{inst.source}: a20 console needs a [target] section",
                        hint="a [target] section declares serial, console_check, "
                             "commands and expect")
+    if getattr(args, "serial", None):
+        inst = replace(inst, target=replace(inst.target, serial=args.serial))
     if args.no_reset:
         inst = replace(inst, target=replace(inst.target, reset=None))
+    auto_handoff = getattr(args, "auto_handoff", False)
+    if auto_handoff and getattr(args, "interactive", False):
+        raise A20Error("--auto-handoff and --interactive cannot be combined")
+    if auto_handoff and inst.board not in {"pine-a64", "licheerv-nano", "ls2k0300",
+                                           "lichee-pi-zero", "quartz64-zero", "ox64"}:
+        raise A20Error(f"automatic U-Boot handoff is unavailable for {inst.board}")
+    if auto_handoff and not inst.handoff.commands:
+        raise A20Error("automatic handoff requires the instance's [handoff].commands")
     if args.dry_run:
         # Previously ignored: `a20 console --dry-run` opened the real serial
         # port and injected target.commands at a live board, which is the exact
@@ -350,6 +378,10 @@ def cmd_console(args: argparse.Namespace) -> int:
         if t.console_check:
             print(f"would wait for prompt: {t.console_check!r} "
                   f"(timeout {t.boot_timeout or '120s'})")
+        if getattr(args, "interactive", False):
+            print("would forward operator input on this same serial connection (Ctrl-] aborts)")
+        if auto_handoff:
+            print("would stop U-Boot autoboot, verify payloads, load the kernel and check its boot log")
         for cmd in t.commands or ():
             print(f"would send: {cmd}")
         for want in t.expect or ():
@@ -364,9 +396,36 @@ def cmd_console(args: argparse.Namespace) -> int:
             f"cannot open console {inst.target.serial!r}: {e}",
             hint="is the board attached, and is this user in the dialout group?") from None
     try:
-        result = run_console_session(transport, inst, on_output=_echo)
-    except ConsoleError as e:
+        if getattr(args, "interactive", False):
+            transport = InteractiveTransport(transport, sys.stdin.fileno())
+            print("Interactive boot console: enter bootloader commands here; Ctrl-] aborts. "
+                  "Boot checks still use target.boot_timeout.", flush=True)
+    except OSError as e:
         transport.close()
+        raise BoardUnreachable(
+            f"cannot enable operator input: {e}") from None
+    try:
+        if auto_handoff:
+            bundle = REPO_ROOT / "build" / inst.board / "handoff"
+            if inst.board == "ls2k0300":
+                from ls2k0300_handoff import run_handoff
+                try:
+                    result = run_handoff(transport, inst, bundle=bundle,
+                                         server_ip=args.server_ip, board_ip=args.board_ip,
+                                         transfer=args.transfer, on_output=_echo)
+                finally:
+                    transport.close()
+            else:
+                from a20_handoff import run_image_handoff
+                result = run_image_handoff(transport, inst, bundle,
+                                          server_ip=args.server_ip, board_ip=args.board_ip,
+                                          on_output=_echo)
+        else:
+            result = run_console_session(transport, inst, on_output=_echo)
+    except (ConsoleError, KeyboardInterrupt) as e:
+        transport.close()
+        if isinstance(transport, InteractiveTransport):
+            write_console_log(log, transport.transcript)
         raise BoardUnreachable(str(e)) from None
     return _report(inst, result, log)
 
@@ -374,12 +433,30 @@ def cmd_console(args: argparse.Namespace) -> int:
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Build, program the board, write boot media, then verify it over the console."""
     inst = _load(args.instance)
+    stage_mount = getattr(args, "stage_mount", None)
+    if stage_mount and inst.board != "ls2k0300":
+        raise A20Error("--stage-mount is available only for the LS2K0300 FAT handoff bundle")
+    if inst.board == "m0sense-bl702":
+        return _deploy_m0sense(inst, args)
+    if getattr(args, "media_device", None):
+        inst = replace(inst, target=replace(inst.target, media_device=args.media_device))
     if not section_is_set(inst.target):
         raise A20Error(f"{inst.source}: a20 deploy needs a [target] section")
     if inst.target.boot_media and not inst.target.media_device:
         raise A20Error(f"{inst.source}: target.boot_media is declared but "
                        "target.media_device is not, so there is nowhere to write it")
-    if not args.no_flash and section_is_set(inst.flash):
+    if not (inst.target.boot_media or inst.handoff.commands or inst.flash.tool):
+        raise A20Error(f"{inst.source}: deploy needs boot media, handoff commands or a flash backend")
+    no_build = getattr(args, "no_build", False)
+    if getattr(args, "auto_handoff", False) and getattr(args, "no_console", False):
+        raise A20Error("--auto-handoff and --no-console cannot be combined")
+    if getattr(args, "interactive", False) and getattr(args, "no_console", False):
+        raise A20Error("--interactive and --no-console cannot be combined")
+    if no_build and inst.flash.tool and not args.no_flash:
+        raise A20Error("deploy --no-build with a flash backend requires --no-flash")
+    if no_build:
+        print(f"{inst.name}: using existing deployment artifacts (--no-build)")
+    elif not args.no_flash and section_is_set(inst.flash):
         run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
     elif section_is_set(inst.flash):
         pass
@@ -394,6 +471,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         run_package(inst, list(args.make_args), args.dry_run)
     elif not args.dry_run:
         build_instance(inst, list(args.make_args), args.dry_run)
+    if stage_mount:
+        if args.dry_run:
+            print(f"would verify and stage kernel.elf to {stage_mount}/a20/kernel.elf")
+        else:
+            from ls2k0300_handoff import stage_bundle
+            try:
+                result = stage_bundle(REPO_ROOT / "build/ls2k0300/handoff", Path(stage_mount))
+            except (OSError, ValueError) as exc:
+                raise A20Error(f"LS2K0300 FAT staging: {exc}") from None
+            print(f"LS2K0300: staged {result['destination']} (sha256 {result['sha256']})")
     if inst.target.boot_media:
         if args.dry_run:
             print(f"would write {' '.join(inst.target.boot_media)} "
@@ -406,26 +493,75 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             exec_make(inst, "target-write-media", list(args.make_args), args.dry_run)
     if inst.handoff and inst.handoff.commands:
         _handoff_report(inst, args)
+    if getattr(args, "no_console", False):
+        print(f"{inst.name}: deployment preparation finished; boot the hardware, "
+              "with a20 console already attached to capture and validate its boot")
+        return EXIT_OK
     return cmd_console(args)
 
 
-def _handoff_report(inst, args: argparse.Namespace) -> None:
-    """Say what to type at the boot chain, because a20 will not type it.
+def _deploy_m0sense(inst: Instance, args: argparse.Namespace) -> int:
+    from m0sense_deploy_uf2 import deploy
+    if getattr(args, "auto_handoff", False):
+        raise A20Error("M0Sense uses its USB UF2 bootloader; --auto-handoff is for U-Boot")
+    if not getattr(args, "no_build", False):
+        run_package(inst, list(args.make_args), args.dry_run)
+    folder = REPO_ROOT / "build/m0sense-bl702/handoff"
+    transport = None
+    if args.dry_run:
+        print(f"would verify probe.uf2 and copy it to the identified M0Sense UF2 volume "
+              f"({getattr(args, 'uf2_mount', None) or 'auto-detected'})")
+    else:
+        try:
+            if not getattr(args, "no_console", False):
+                if getattr(args, "serial", None):
+                    inst = replace(inst, target=replace(inst.target, serial=args.serial))
+                # The factory USB loader resets immediately after the final
+                # UF2 block. Open UART first so its one-shot boot markers are
+                # queued before the copy completes.
+                transport = open_transport(inst)
+            deploy(folder / "probe.uf2", folder / "probe.json",
+                   Path(args.uf2_mount) if args.uf2_mount else None, False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            if transport is not None:
+                transport.close()
+            raise A20Error(f"M0Sense UF2 deployment: {exc}") from None
+        except BaseException:
+            if transport is not None:
+                transport.close()
+            raise
+    if getattr(args, "no_console", False):
+        print("M0Sense: UF2 transfer prepared/completed; check the documented blue-LED heartbeat. "
+              "Use an external 3.3 V UART for serial acceptance.")
+        return EXIT_OK
+    if args.dry_run:
+        print("would open the external UART before uploading UF2, then verify startup markers")
+        return cmd_console(args)
+    try:
+        result = run_console_session(transport, replace(inst, target=replace(inst.target, reset=None)),
+                                     on_output=_echo)
+        return _report(inst, result, console_log_path(inst))
+    finally:
+        transport.close()
 
-    A board with no block driver has no medium to write, so the last mile is a
-    person interrupting U-Boot and loading the kernel.  Driving that from here
-    would mean feeding the boot chain over a serial line this code does not own,
-    so the boundary is deliberate: package the artifact, print the commands, and
-    let the console check below judge the result.  Printing them from the
-    manifest is the point -- the commands on the board are then the commands in
-    the repository.
-    """
+
+def _handoff_report(inst, args: argparse.Namespace) -> None:
+    """Explain default card boot, automatic RAM handoff or manual recovery."""
     h = inst.handoff
-    print(f"\n{h.method or 'handoff'} for {inst.board}: "
-          f"transfer the bundle, then run these at the boot chain.\n")
+    if getattr(args, "auto_handoff", False):
+        print(f"\nAutomatic RAM handoff for {inst.board}; bootloader replies and payload checks are required.")
+    elif inst.package.kind == "board-sdcard":
+        print(f"\n{inst.board}: the prepared SD card auto-boots. The following commands are manual recovery only.")
+    else:
+        print(f"\n{h.method or 'handoff'} for {inst.board}: transfer the bundle, then run these at the boot chain.\n")
     if h.server:
         print(f"  server {h.server}")
-    for line in h.commands:
+    recipe = REPO_ROOT / "build" / inst.board / "handoff" / "uboot.cmd"
+    lines = (recipe.read_text().splitlines()
+             if not args.dry_run and recipe.is_file() else h.commands)
+    if args.dry_run and inst.board not in {"ls2k0300", "m0sense-bl702"}:
+        print("  (the packaged uboot.cmd supplies the checked payload and kernel addresses)")
+    for line in lines:
         print(f"  {line}")
     if h.note:
         print(f"\n{h.note}")
@@ -930,7 +1066,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only instances built for these architectures")
     pl.add_argument("--action", nargs="*", default=(), metavar="ACT",
                     help="only instances that support every one of these "
-                         "actions (build run debug test flash package "
+                         "actions (build run debug test flash prepare package "
                          "console deploy)")
     p_brd = sub.add_parser("boards", help="list the boards in the tree")
     p_brd.add_argument("--arch", metavar="ARCH",
@@ -943,9 +1079,29 @@ def build_parser() -> argparse.ArgumentParser:
         pc = add_instance_cmd(name, help_text, True)
         pc.add_argument("--no-reset", action="store_true",
                         help="attach without pulsing the board's reset line")
+        pc.add_argument("--serial", metavar="DEVICE",
+                        help="override target.serial for this connection")
+        pc.add_argument("--interactive", action="store_true",
+                        help="forward operator input to the bootloader while checking the same serial session")
+        pc.add_argument("--auto-handoff", action="store_true",
+                        help="automatically stop U-Boot, verify and load the packaged RAM kernel")
+        pc.add_argument("--server-ip", help="host TFTP server IPv4 address for automatic handoff")
+        pc.add_argument("--board-ip", help="board IPv4 address for automatic TFTP handoff")
+        pc.add_argument("--transfer", choices=("tftp", "mmc", "usb"), default="mmc",
+                        help="LS2K0300 RAM handoff file transport")
         if name == "deploy":
+            pc.add_argument("--stage-mount", metavar="DIRECTORY",
+                            help="stage the LS2K0300 ELF on an explicitly selected mounted FAT SD/USB volume")
+            pc.add_argument("--uf2-mount", metavar="DIRECTORY",
+                            help="mounted M0Sense UF2 bootloader volume (otherwise auto-detected)")
             pc.add_argument("--no-flash", action="store_true",
                             help="skip the [flash] programming step")
+            pc.add_argument("--media-device", metavar="DEVICE",
+                            help="override the boot-media destination (prefer /dev/disk/by-id/)")
+            pc.add_argument("--no-console", action="store_true",
+                            help="prepare media or handoff only; validate later with a20 console")
+            pc.add_argument("--no-build", action="store_true",
+                            help="use existing artifacts, for a separate privileged media-write step")
 
     p_ports = sub.add_parser(
         "ports", help="show which host ports instances claim, and whether they are free now")
@@ -964,6 +1120,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_instance_cmd("trim", "show the kernel trim plan the instance builds with",
                    with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
+    add_instance_cmd("prepare", "prepare the board's pinned boot firmware", with_make_args=True)
     prun = add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
     prun.add_argument("--name", help="create a named runtime with private writable disks")
     prun.add_argument("--detach", action="store_true", help="leave the named runtime running")
@@ -1011,7 +1168,7 @@ def build_parser() -> argparse.ArgumentParser:
     # the three that launch a guest: build, flash and package are gated too, and
     # omitting them left them crashing on a missing attribute before doing any
     # work at all.
-    for gated in ("build", "run", "debug", "test", "flash", "package"):
+    for gated in ("build", "prepare", "run", "debug", "test", "flash", "package"):
         _add_resource_flags(sub.choices[gated])
 
     return parser
@@ -1045,7 +1202,7 @@ def main(argv: list[str] | None = None) -> int:
                      "a20 flags must be spelled correctly; make arguments go after '--', "
                      "e.g. `a20 build <instance> -- -j8`")
     ns.make_args = make_args
-    if make_args and ns.command not in {"build", "run", "debug", "test", "flash", "package", "deploy"}:
+    if make_args and ns.command not in {"build", "prepare", "run", "debug", "test", "flash", "package", "deploy"}:
         parser.error(f"{ns.command} does not accept make arguments")
 
     rc = _dispatch(ns)
@@ -1102,6 +1259,8 @@ def _dispatch(ns: argparse.Namespace) -> int | None:
             return cmd_show_vars(ns)
         case "build":
             return cmd_build(ns)
+        case "prepare":
+            return cmd_prepare(ns)
         case "run":
             return cmd_run(ns)
         case "debug":

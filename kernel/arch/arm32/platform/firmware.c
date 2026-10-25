@@ -18,14 +18,25 @@ static void arm32_psci_call(uint32_t fn_id) {
     );
 }
 
+void platform_firmware_shutdown(void) __attribute__((weak));
+void platform_firmware_reboot(void) __attribute__((weak));
+
+void early_uart_init(void) {
+    arch_uart_init();
+}
+
 void firmware_shutdown(void) {
     arch_local_irq_disable();
+    if (platform_firmware_shutdown)
+        platform_firmware_shutdown();
     arm32_psci_call(PSCI_SYSTEM_OFF);
     arch_halt();
 }
 
 void firmware_reboot(void) {
     arch_local_irq_disable();
+    if (platform_firmware_reboot)
+        platform_firmware_reboot();
     arm32_psci_call(PSCI_SYSTEM_RESET);
     arch_halt();
 }

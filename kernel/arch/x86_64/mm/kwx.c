@@ -1,8 +1,8 @@
 /*
  * A20OS x86_64 — kernel's own W^X (KXAN)
  *
- * At boot, entry.S maps physical 0..4 GiB into the high half with four 1 GiB
- * huge pages (boot_pdpt_hh, RWX; EFER.NXE is turned on by trap_init).  This
+ * At boot, entry.S maps physical 0..4 GiB with 2 MiB leaves under
+ * boot_pdpt_hh (RWX; EFER.NXE is turned on by trap_init). This
  * file runs after mm_init() (arch_kernel_wx_finalize, from kernel_main, still
  * in the BSP single-core stage) and refines them into:
  *
@@ -150,8 +150,10 @@ void arch_kernel_wx_finalize(void)
      * guest with no FAT32 device, no /bin, and a panic at PID 1. */
     for (int slot = 0; slot < (int)(X86_HIGH_RAM_MAP_END >> 30); slot++) {
         uint64_t e = boot_pdpt_hh[slot];
-        if (!(e & PTE_V) || !(e & PTE_PS))
+        if (!(e & PTE_V))
             continue;
+        uint64_t *old_pd = (e & PTE_PS) ? NULL :
+            (uint64_t *)(uintptr_t)((e & ~0xfffULL & ~PTE_NX) + PAGE_OFFSET);
         paddr_t base = (paddr_t)slot * X86_GIGA_SIZE;
         int covers_ram = (slot == 0);   /* slot 0 holds the image; must downgrade */
         size_t nranges = arch_ram_range_count();
@@ -162,7 +164,12 @@ void arch_kernel_wx_finalize(void)
                 covers_ram = 1;
         }
         if (!covers_ram) {
-            boot_pdpt_hh[slot] = e | PTE_NX;
+            if (old_pd) {
+                for (int i = 0; i < 512; i++)
+                    old_pd[i] |= PTE_NX;
+            } else {
+                boot_pdpt_hh[slot] = e | PTE_NX;
+            }
             continue;
         }
 
@@ -170,7 +177,8 @@ void arch_kernel_wx_finalize(void)
         if (!pd)
             panic("kwx: cannot allocate PD");
         for (int i = 0; i < 512; i++)
-            pd[i] = (base + (paddr_t)i * PMD_SIZE) | (e & 0xFFFUL) | PTE_NX;
+            pd[i] = old_pd ? old_pd[i] | PTE_NX :
+                (base + (paddr_t)i * PMD_SIZE) | (e & 0xFFFUL) | PTE_NX;
 
         /* the image's 2 MiB block in this slot, linked in once its PT is built */
         for (vaddr_t blk = ROUND_DOWN(img_start, PMD_SIZE); blk < img_end;

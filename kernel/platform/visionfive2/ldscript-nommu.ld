@@ -25,6 +25,10 @@ SECTIONS
         *(.text.entry)
         *(.text .text.*)
     } :text
+    ASSERT(__riscv_image_header_end - _start == 64,
+           "riscv64: Image header must be exactly 64 bytes")
+    ASSERT(PHYS_BASE - BOOT_MAP_PHYS == 0x200000,
+           "riscv64: Image header load offset must match linker layout")
 
     . = ALIGN(4096);
     .rodata : {
@@ -56,6 +60,8 @@ SECTIONS
         *(COMMON)
         _bss_end = .;
     } :data
+    . = ALIGN(4096);
+    _end = .;
 
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)

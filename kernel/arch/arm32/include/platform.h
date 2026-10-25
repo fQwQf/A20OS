@@ -3,15 +3,29 @@
 
 #include "core/types.h"
 
-#define PHYS_MEMORY_BASE   0x40000000UL
-#define PHYS_MEMORY_END    0x80000000UL
-#define KERNEL_ENTRY       0x40080000UL
 #ifdef CONFIG_NOMMU
 #define PAGE_OFFSET        0x0UL
 #define USER_VA_LIMIT      PHYS_MEMORY_END
 #else
 #define PAGE_OFFSET        0x80000000UL
 #define USER_VA_LIMIT      0x70000000UL
+#endif
+
+#if __has_include("board_platform.h")
+#include "board_platform.h"
+#else
+#define PHYS_MEMORY_BASE   0x40000000UL
+#define PHYS_MEMORY_END    0x80000000UL
+#define KERNEL_ENTRY       0x40080000UL
+#define UART0_BASE         (0x09000000UL + PAGE_OFFSET)
+#define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
+#define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
+#define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
+#define PCIE_ECAM_BASE     (0x3F000000UL + PAGE_OFFSET)
+#define PCIE_BUS_START     0
+#define PCIE_BUS_END       0
+#define UART0_IRQ          33U
+#define ARCH_TIMER_FREQ    62500000UL
 #endif
 
 static inline size_t arch_ram_range_count(void) {
@@ -21,23 +35,20 @@ static inline size_t arch_ram_range_count(void) {
 static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
     if (idx != 0 || !base || !end)
         return -1;
+#ifdef ARCH_BOARD_RAM_RANGE
+    return ARCH_BOARD_RAM_RANGE(idx, base, end);
+#else
     *base = PHYS_MEMORY_BASE;
     *end = PHYS_MEMORY_END;
     return 0;
+#endif
 }
 
-#define UART0_BASE         (0x09000000UL + PAGE_OFFSET)
-#define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
-#define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
-#define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
-#define PCIE_ECAM_BASE     (0x3F000000UL + PAGE_OFFSET)
-#define PCIE_BUS_START     0
-#define PCIE_BUS_END       0
-#define UART0_IRQ          33U
+#ifndef IRQ_S_TIMER
 #define IRQ_S_TIMER        30U
+#endif
 #define IRQ_S_EXT          UART0_IRQ
 #define IRQ_S_SOFT         1U
-#define ARCH_TIMER_FREQ    62500000UL
 
 #define CAUSE_ECALL_U           11U
 #define CAUSE_INSN_PAGE_FAULT   12U

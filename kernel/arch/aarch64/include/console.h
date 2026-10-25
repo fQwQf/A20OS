@@ -4,6 +4,10 @@
 #include "core/types.h"
 #include "platform.h"
 
+#if __has_include("board_console.h")
+#include "board_console.h"
+#else
+
 #ifndef PL011_BAUD_IBRD
 #define PL011_BAUD_IBRD 13
 #define PL011_BAUD_FBRD 1
@@ -68,4 +72,5 @@ static inline void arch_uart_ack_irq(void) {
     *arch_uart_reg32(PL011_ICR) = PL011_IMSC_RXIM | PL011_IMSC_RTIM;
 }
 
+#endif /* board console or PL011 */
 #endif /* _ARCH_AARCH64_CONSOLE_H */

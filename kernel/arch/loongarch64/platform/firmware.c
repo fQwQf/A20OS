@@ -33,7 +33,7 @@ void firmware_set_timer(uint64_t time) {
 
 void firmware_shutdown(void) {
     arch_local_irq_disable();
-#ifndef CONFIG_BOARD_LS2K1000
+#if !defined(CONFIG_BOARD_LS2K1000) && !defined(CONFIG_BOARD_LS2K0300)
     qemu_virt_poweroff();
 #endif
     while (1) {
@@ -43,7 +43,7 @@ void firmware_shutdown(void) {
 
 void firmware_reboot(void) {
     arch_local_irq_disable();
-#ifndef CONFIG_BOARD_LS2K1000
+#if !defined(CONFIG_BOARD_LS2K1000) && !defined(CONFIG_BOARD_LS2K0300)
     qemu_virt_reset();
 #endif
     while (1) {

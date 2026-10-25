@@ -129,11 +129,11 @@ arches = ["riscv64", "aarch64", "loongarch64", "x86_64"]
 # SG2002/CV1800B boards are the first RISC-V targets in the tree without PCIe.
 [capability.pcie-mmio-alloc]
 arches = ["x86_64", "loongarch64", "riscv64"]
-board_exclusions = ["licheerv-nano", "milk-v-duo"]
+board_exclusions = ["licheerv-nano", "milk-v-duo", "ox64"]
 
 [capability.pcie-mmio-ecam]
 arches = ["loongarch64", "riscv64"]
-board_exclusions = ["licheerv-nano", "milk-v-duo"]
+board_exclusions = ["licheerv-nano", "milk-v-duo", "ox64"]
 
 # ---------------------------------------------------------------------------
 # Per-architecture feature defines

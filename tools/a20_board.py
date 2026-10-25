@@ -52,6 +52,15 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
     if kind is None:
         raise A20Error(f"{inst.source}: [package] kind is required for 'a20 package'")
     match kind:
+        case "board-sdcard":
+            target = {"pine-a64": "pine-a64-sdcard",
+                      "licheerv-nano": "licheerv-nano-sdcard",
+                      "lichee-pi-zero": "lichee-pi-zero-sdcard",
+                      "quartz64-zero": "quartz64-zero-sdcard",
+                      "ox64": "ox64-sdcard"}.get(inst.board)
+            if target is None:
+                raise A20Error(f"no SD-card packager for board {inst.board}")
+            exec_make(inst, target, [*make_args, f"HANDOFF_INSTANCE={inst.source}"], dry_run)
         case "grub-iso":
             # A physical PC boots the same ISO from a USB stick, so it needs the
             # artifact at a stable path an instance can name in boot_media; the
@@ -87,7 +96,12 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # boot-chain commands to load it.  mk_kernel_bundle.sh takes the
             # load address from the ELF, so nothing about the board is restated
             # here or in the manifest.
-            exec_make(inst, "kernel-bundle", list(make_args), dry_run)
+            target = {"ls2k0300": "ls2k0300-bundle",
+                      "m0sense-bl702": "m0sense-probe"}.get(inst.board, "kernel-bundle")
+            extra = list(make_args)
+            if target == "kernel-bundle":
+                extra.append(f"HANDOFF_INSTANCE={inst.source}")
+            exec_make(inst, target, extra, dry_run)
         case "fit-sdcard":
             # VF2 image assembly (firmware check, extra partition variants)
             # is orchestrated by the vf2-* make targets; the instance carries

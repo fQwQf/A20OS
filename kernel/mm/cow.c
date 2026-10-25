@@ -24,7 +24,7 @@ static size_t vm_pt_level_size(int level) {
     return PAGE_SIZE << (ARCH_PT_BITS * level);
 }
 
-static uint64_t mm_cow_flags(uint64_t pte) {
+uint64_t mm_cow_flags(uint64_t pte) {
     uint64_t flags = pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A |
                             PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF |
                             PTE_COW);

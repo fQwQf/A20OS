@@ -10,7 +10,7 @@ LoongArch32/PPC64LE 已退出 1.0，不再接受面向该版本的新增移植�
 ## 1. fork 与分支
 
 ```bash
-git clone <你的 fork>
+git clone --recurse-submodules <你的 fork>
 cd A20OS
 git checkout -b fix/<简短描述>
 # 或 feature/<子系统>-<描述>
@@ -20,10 +20,14 @@ git checkout -b fix/<简短描述>
 
 ## 2. 本地构建
 
-先确认能编译并运行。详细命令见 [docs/dev/build.md](dev/build.md)。
+先按 [首次运行指南](dev/build.md#首次运行linux--risc-v-64) 准备单架构依赖，确认能编译并运行。
+已有普通 clone 先执行 `git submodule update --init --recursive`。
 
 ```bash
-make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
+python3 tools/check_quickstart.py
+tools/a20 run qemu-riscv64 -- -j4
+# 自动验证 shell、外部命令与正常关机：
+make -j4 smoke-quickstart
 ```
 
 ## 3. 通过测试门禁

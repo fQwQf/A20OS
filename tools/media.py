@@ -14,6 +14,7 @@ TARGET_BOOT_MEDIA) and arrive as arguments.  Nothing here re-derives them.
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -48,16 +49,40 @@ def check_block_device(media_device: str) -> int | None:
 
 
 def is_mounted(media_device: str) -> bool:
-    if shutil.which("mountpoint") is None:
-        return False
-    r = subprocess.run(["mountpoint", "-q", media_device],
-                       check=False, capture_output=True)
-    return r.returncode == 0
+    # mountpoint(1) checks a directory, not a block node. Inspect the whole
+    # disk's descendants, including mounted partitions and active swap.
+    if shutil.which("lsblk") is None:
+        raise ValueError("lsblk is required to inspect the destination; refusing to write")
+    r = subprocess.run(["lsblk", "--json", "--output", "PATH,MOUNTPOINTS",
+                        "--", str(Path(media_device).resolve())],
+                       check=False, capture_output=True, text=True)
+    if r.returncode:
+        raise ValueError(f"cannot inspect {media_device}: {r.stderr.strip()}")
+    try:
+        nodes = json.loads(r.stdout)["blockdevices"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ValueError("invalid lsblk response; refusing to write") from exc
+    if not nodes:
+        raise ValueError("lsblk returned no destination; refusing to write")
+    swaps = {str(Path(line.split()[0]).resolve())
+             for line in Path("/proc/swaps").read_text().splitlines()[1:] if line.split()}
+
+    def busy(node: dict) -> bool:
+        return (bool(any(node.get("mountpoints") or []))
+                or str(Path(node["path"]).resolve()) in swaps
+                or any(busy(child) for child in node.get("children", [])))
+    try:
+        return any(busy(node) for node in nodes)
+    except (KeyError, TypeError) as exc:
+        raise ValueError("incomplete lsblk device tree; refusing to write") from exc
 
 
 def check_not_mounted(media_device: str) -> int | None:
-    if is_mounted(media_device):
-        return _fail(f"{media_device} is mounted; unmount it first")
+    try:
+        if is_mounted(media_device):
+            return _fail(f"{media_device} is mounted; unmount it first (including partitions/swap)")
+    except (OSError, ValueError) as exc:
+        return _fail(str(exc))
     return None
 
 
@@ -68,8 +93,16 @@ def write(media_device: str, image: Path) -> int:
          "status=progress"], check=False)
     if r.returncode != 0:
         return r.returncode
-    subprocess.run(["sync"], check=False)
+    if subprocess.run(["sync"], check=False).returncode != 0:
+        return _fail("sync failed")
     return 0
+
+
+def device_capacity(media_device: str) -> int:
+    import fcntl
+    import struct
+    with open(media_device, "rb", buffering=0) as device:
+        return struct.unpack("Q", fcntl.ioctl(device.fileno(), 0x80081272, bytes(8)))[0]
 
 
 def main() -> int:
@@ -81,8 +114,7 @@ def main() -> int:
     a = ap.parse_args()
 
     for guard in (lambda: check_named(a.boot_media, a.media_device),
-                  lambda: check_block_device(a.media_device),
-                  lambda: check_not_mounted(a.media_device)):
+                  lambda: check_block_device(a.media_device)):
         rc = guard()
         if rc is not None:
             return rc
@@ -91,6 +123,20 @@ def main() -> int:
     for image in images:
         if not image.is_file():
             return _fail(f"missing image {image}")
+    if len(images) != 1:
+        return _fail("exactly one complete image is required; multiple dd writes overwrite each other")
+
+    rc = check_not_mounted(a.media_device)
+    if rc is not None:
+        return rc
+    # BLKGETSIZE64 is Linux's byte capacity query; fail before writing even
+    # one byte if an image does not fit. Recheck mounts just before dd.
+    try:
+        capacity = device_capacity(a.media_device)
+        if images[0].stat().st_size > capacity:
+            return _fail(f"image exceeds destination capacity ({capacity} bytes)")
+    except OSError as exc:
+        return _fail(f"cannot read destination capacity: {exc}")
 
     if a.dry_run:
         for image in images:
@@ -98,6 +144,9 @@ def main() -> int:
         return 0
 
     for image in images:
+        rc = check_not_mounted(a.media_device)
+        if rc is not None:
+            return rc
         rc = write(a.media_device, image)
         if rc != 0:
             return rc

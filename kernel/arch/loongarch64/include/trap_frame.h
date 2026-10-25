@@ -159,7 +159,7 @@ static inline uint64_t arch_task_kernel_status(void) {
 }
 
 static inline uint64_t arch_user_initial_status(void) {
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
     /* PPLV=3 with PIE clear: timer delivery is intentionally disabled until
      * the LS2K1000 trap path has completed hardware validation. */
     return SSTATUS_FS_CLEAN;

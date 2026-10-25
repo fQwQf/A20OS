@@ -6,7 +6,7 @@
  * Boot chain: the SG2002 boot ROM loads a vendor FSBL (cv181x.bin) from the
  * TF card, which initialises clocks and DRAM and loads OpenSBI; OpenSBI then
  * hands S-mode to the kernel image.  mainline U-Boot has a board target for
- * this part (configs/licheerv_nano_defconfig) and mainline OpenSBI supports it
+ * this part (configs/sipeed_licheerv_nano_defconfig) and mainline OpenSBI supports it
  * via fw_dynamic, so the SBI interfaces the kernel already uses -- timer,
  * console, SRST -- are the same ones QEMU virt uses.
  *
@@ -15,7 +15,9 @@
  *
  * The CPU is a T-Head C906, and upstream describes it as rv64imafdc with
  * mmu-type riscv,sv39.  That is exactly the -march=rv64imafdc_zicsr_zifencei
- * the riscv64 build already uses, so no architecture work is needed here.
+ * the riscv64 build already uses. The UART still requires 32-bit accesses at
+ * four-byte register strides, unlike QEMU's byte-stride NS16550, and U-Boot
+ * booti needs the standard RISC-V Image header in arch entry.S.
  *
  * Interrupt controller: the DTS calls it "thead,c900-plic", which mainline
  * binds to its standard SiFive PLIC driver, so the shared PLIC in

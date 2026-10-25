@@ -49,7 +49,7 @@
     .global loongarch64_idle_region_start
     .global loongarch64_idle_region_end
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT) && \
     defined(CONFIG_LS2K_TRAP_TRACE)
     /* Return/trap checkpoints for physical-board userspace bring-up.  Callers
      * place these only after the interrupted t0/t1 values are safely stored. */
@@ -109,7 +109,7 @@ loongarch64_idle_region_end:
  * If PPLV==3 (user mode): sp = user sp, SAVE0 = kernel sp, SAVE1 = task tp.
  * If PPLV==0 (kernel mode): sp = kernel sp.
  */
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     /* LS2K1000 clears EENTRY[11:0].  Keep this physical-board-only so the
      * QEMU exception layout and object code remain unchanged. */
     .section .trap_entry, "ax"
@@ -130,7 +130,7 @@ trap_entry_la64:
     b       __trap_from_user     /* PPLV != 0 → came from user */
 .Ltrap_kernel:
     b       __trap_from_kernel
-#ifdef CONFIG_BOARD_LS2K1000
+#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
     .section .text
 #endif
 
@@ -184,6 +184,40 @@ __trap_from_kernel:
     st.d    $s7,   $sp, REG_OFF(30)
     st.d    $s8,   $sp, REG_OFF(31)
 
+#ifdef CONFIG_BOARD_LS2K0300
+    fst.d     $f0,  $sp, VR_OFF(0)
+    fst.d     $f1,  $sp, VR_OFF(1)
+    fst.d     $f2,  $sp, VR_OFF(2)
+    fst.d     $f3,  $sp, VR_OFF(3)
+    fst.d     $f4,  $sp, VR_OFF(4)
+    fst.d     $f5,  $sp, VR_OFF(5)
+    fst.d     $f6,  $sp, VR_OFF(6)
+    fst.d     $f7,  $sp, VR_OFF(7)
+    fst.d     $f8,  $sp, VR_OFF(8)
+    fst.d     $f9,  $sp, VR_OFF(9)
+    fst.d     $f10, $sp, VR_OFF(10)
+    fst.d     $f11, $sp, VR_OFF(11)
+    fst.d     $f12, $sp, VR_OFF(12)
+    fst.d     $f13, $sp, VR_OFF(13)
+    fst.d     $f14, $sp, VR_OFF(14)
+    fst.d     $f15, $sp, VR_OFF(15)
+    fst.d     $f16, $sp, VR_OFF(16)
+    fst.d     $f17, $sp, VR_OFF(17)
+    fst.d     $f18, $sp, VR_OFF(18)
+    fst.d     $f19, $sp, VR_OFF(19)
+    fst.d     $f20, $sp, VR_OFF(20)
+    fst.d     $f21, $sp, VR_OFF(21)
+    fst.d     $f22, $sp, VR_OFF(22)
+    fst.d     $f23, $sp, VR_OFF(23)
+    fst.d     $f24, $sp, VR_OFF(24)
+    fst.d     $f25, $sp, VR_OFF(25)
+    fst.d     $f26, $sp, VR_OFF(26)
+    fst.d     $f27, $sp, VR_OFF(27)
+    fst.d     $f28, $sp, VR_OFF(28)
+    fst.d     $f29, $sp, VR_OFF(29)
+    fst.d     $f30, $sp, VR_OFF(30)
+    fst.d     $f31, $sp, VR_OFF(31)
+#else
     vst     $vr0,  $sp, VR_OFF(0)
     vst     $vr1,  $sp, VR_OFF(1)
     vst     $vr2,  $sp, VR_OFF(2)
@@ -216,6 +250,7 @@ __trap_from_kernel:
     vst     $vr29, $sp, VR_OFF(29)
     vst     $vr30, $sp, VR_OFF(30)
     vst     $vr31, $sp, VR_OFF(31)
+#endif
     movfcsr2gr $t0, $fcsr0
     st.d    $t0, $sp, FCSR_OFF
     movcf2gr $t0, $fcc0
@@ -279,7 +314,7 @@ __trap_from_user:
     st.d    $t0, $sp, REG_OFF(12)
     st.d    $t1, $sp, REG_OFF(13)
     LS2K_TRAP_MARK 85              /* U: user exception frame active */
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT) && \
     defined(CONFIG_LS2K_TRAP_TRACE)
     csrrd   $t0, 0x5               /* ESTAT.Ecode */
     srli.d  $t0, $t0, 16
@@ -342,6 +377,40 @@ __trap_from_user:
     st.d    $s8,   $sp, REG_OFF(31)
     LS2K_TRAP_MARK 86              /* V: all user GPRs saved */
 
+#ifdef CONFIG_BOARD_LS2K0300
+    fst.d     $f0,  $sp, VR_OFF(0)
+    fst.d     $f1,  $sp, VR_OFF(1)
+    fst.d     $f2,  $sp, VR_OFF(2)
+    fst.d     $f3,  $sp, VR_OFF(3)
+    fst.d     $f4,  $sp, VR_OFF(4)
+    fst.d     $f5,  $sp, VR_OFF(5)
+    fst.d     $f6,  $sp, VR_OFF(6)
+    fst.d     $f7,  $sp, VR_OFF(7)
+    fst.d     $f8,  $sp, VR_OFF(8)
+    fst.d     $f9,  $sp, VR_OFF(9)
+    fst.d     $f10, $sp, VR_OFF(10)
+    fst.d     $f11, $sp, VR_OFF(11)
+    fst.d     $f12, $sp, VR_OFF(12)
+    fst.d     $f13, $sp, VR_OFF(13)
+    fst.d     $f14, $sp, VR_OFF(14)
+    fst.d     $f15, $sp, VR_OFF(15)
+    fst.d     $f16, $sp, VR_OFF(16)
+    fst.d     $f17, $sp, VR_OFF(17)
+    fst.d     $f18, $sp, VR_OFF(18)
+    fst.d     $f19, $sp, VR_OFF(19)
+    fst.d     $f20, $sp, VR_OFF(20)
+    fst.d     $f21, $sp, VR_OFF(21)
+    fst.d     $f22, $sp, VR_OFF(22)
+    fst.d     $f23, $sp, VR_OFF(23)
+    fst.d     $f24, $sp, VR_OFF(24)
+    fst.d     $f25, $sp, VR_OFF(25)
+    fst.d     $f26, $sp, VR_OFF(26)
+    fst.d     $f27, $sp, VR_OFF(27)
+    fst.d     $f28, $sp, VR_OFF(28)
+    fst.d     $f29, $sp, VR_OFF(29)
+    fst.d     $f30, $sp, VR_OFF(30)
+    fst.d     $f31, $sp, VR_OFF(31)
+#else
     vst     $vr0,  $sp, VR_OFF(0)
     vst     $vr1,  $sp, VR_OFF(1)
     vst     $vr2,  $sp, VR_OFF(2)
@@ -374,6 +443,7 @@ __trap_from_user:
     vst     $vr29, $sp, VR_OFF(29)
     vst     $vr30, $sp, VR_OFF(30)
     vst     $vr31, $sp, VR_OFF(31)
+#endif
     LS2K_TRAP_MARK 87              /* W: LSX state saved */
     movfcsr2gr $t0, $fcsr0
     st.d    $t0, $sp, FCSR_OFF
@@ -459,6 +529,40 @@ user_trap_return:
     LS2K_TRAP_MARK 75              /* K: return CSRs installed */
 
     /* Restore scalar FP and LSX state before GPRs. */
+#ifdef CONFIG_BOARD_LS2K0300
+    fld.d     $f0,  $sp, VR_OFF(0)
+    fld.d     $f1,  $sp, VR_OFF(1)
+    fld.d     $f2,  $sp, VR_OFF(2)
+    fld.d     $f3,  $sp, VR_OFF(3)
+    fld.d     $f4,  $sp, VR_OFF(4)
+    fld.d     $f5,  $sp, VR_OFF(5)
+    fld.d     $f6,  $sp, VR_OFF(6)
+    fld.d     $f7,  $sp, VR_OFF(7)
+    fld.d     $f8,  $sp, VR_OFF(8)
+    fld.d     $f9,  $sp, VR_OFF(9)
+    fld.d     $f10, $sp, VR_OFF(10)
+    fld.d     $f11, $sp, VR_OFF(11)
+    fld.d     $f12, $sp, VR_OFF(12)
+    fld.d     $f13, $sp, VR_OFF(13)
+    fld.d     $f14, $sp, VR_OFF(14)
+    fld.d     $f15, $sp, VR_OFF(15)
+    fld.d     $f16, $sp, VR_OFF(16)
+    fld.d     $f17, $sp, VR_OFF(17)
+    fld.d     $f18, $sp, VR_OFF(18)
+    fld.d     $f19, $sp, VR_OFF(19)
+    fld.d     $f20, $sp, VR_OFF(20)
+    fld.d     $f21, $sp, VR_OFF(21)
+    fld.d     $f22, $sp, VR_OFF(22)
+    fld.d     $f23, $sp, VR_OFF(23)
+    fld.d     $f24, $sp, VR_OFF(24)
+    fld.d     $f25, $sp, VR_OFF(25)
+    fld.d     $f26, $sp, VR_OFF(26)
+    fld.d     $f27, $sp, VR_OFF(27)
+    fld.d     $f28, $sp, VR_OFF(28)
+    fld.d     $f29, $sp, VR_OFF(29)
+    fld.d     $f30, $sp, VR_OFF(30)
+    fld.d     $f31, $sp, VR_OFF(31)
+#else
     vld     $vr0,  $sp, VR_OFF(0)
     vld     $vr1,  $sp, VR_OFF(1)
     vld     $vr2,  $sp, VR_OFF(2)
@@ -491,6 +595,7 @@ user_trap_return:
     vld     $vr29, $sp, VR_OFF(29)
     vld     $vr30, $sp, VR_OFF(30)
     vld     $vr31, $sp, VR_OFF(31)
+#endif
     ld.d    $t0, $sp, FCSR_OFF
     movgr2fcsr $fcsr0, $t0
     ld.d    $t0, $sp, FCC_OFF
@@ -571,7 +676,7 @@ arch_return_to_user:
     .p2align 12
 tlb_refill_entry_la64:
     csrwr   $r21, 0x8B             /* TLBRSAVE = save $r21 (reserved, not used by user) */
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
     csrwr   $t0, 0x33              /* SAVE3 = interrupted $t0 */
     csrwr   $t1, 0x34              /* SAVE4 = interrupted $t1 */
 #endif
@@ -606,7 +711,7 @@ tlb_refill_entry_la64:
     tlbfill
     LS2K_REFILL_MARK 84            /* T: refill installed */
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
     csrrd   $t0, 0x33
     csrrd   $t1, 0x34
 #endif
@@ -630,7 +735,7 @@ tlb_refill_entry_la64:
     csrwr   $zero, 0x8C
     csrwr   $zero, 0x8D
     tlbfill
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
     csrrd   $t0, 0x33
     csrrd   $t1, 0x34
 #endif

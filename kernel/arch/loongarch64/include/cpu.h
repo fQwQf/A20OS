@@ -3,7 +3,7 @@
 
 #define ARCH_HAS_LOCAL_TLB_FLUSH 1
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
 /* Physical-board bring-up runs without interrupt delivery until the LS2K1000
  * timer and interrupt-controller paths are validated.  Keep syscall dispatch
  * consistent with that polling model instead of re-enabling CRMD.IE. */

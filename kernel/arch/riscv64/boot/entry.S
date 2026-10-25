@@ -21,6 +21,26 @@
     .section .text.entry
     .globl _start
 _start:
+    /* Linux-compatible 64-byte RISC-V Image header.  U-Boot booti validates
+     * magic2 and uses text_offset/image_size before entering with a0=hartid,
+     * a1=FDT.  Keep the entry executable for OpenSBI and QEMU ELF loaders. */
+    .option push
+    .option norvc
+    j       .Limage_entry
+    .word   0
+    .dword  0x200000                /* all supported boards: RAM + 2 MiB */
+    .dword  _end - _start
+    .dword  0                       /* little endian */
+    .word   2                       /* header version 0.2 */
+    .word   0
+    .dword  0
+    .ascii  "RISCV\0\0\0"
+    .word   0x05435352              /* RSC\x05 */
+    .word   0                       /* no PE/COFF header */
+    .option pop
+.Limage_entry:
+    .global __riscv_image_header_end
+__riscv_image_header_end:
     /* a0 = hart ID, a1 = DTB pointer (passed by OpenSBI).
      * Only the boot hart runs global initialization; others wait for release.
      * BSS is cleared below, so boot arguments are saved after that. */
@@ -244,6 +264,16 @@ _start:
 .early_putc:
     /* Do not clobber t0-t3 (saved trap state), or t4-t6 (the caller's hex
      * loop state). */
+#ifdef CONFIG_BOARD_OX64
+    li      a1, 0x30002000       /* BL808 UART3, not a 16550 */
+    li      a2, 100000
+5:  lw      a4, 0x84(a1)         /* TX FIFO free slots */
+    andi    a4, a4, 0x3f
+    bnez    a4, 6f
+    addi    a2, a2, -1
+    bnez    a2, 5b
+6:  sw      a0, 0x88(a1)
+#else
     li      a1, 0x10000000
     li      a2, 100000             /* bounded wait: do not hide a trap */
 5:  lbu     a4, 5(a1)              /* NS16550 LSR */
@@ -253,6 +283,7 @@ _start:
     bnez    a2, 5b
 6:
     sb      a0, 0(a1)
+#endif
     ret
 #else
     la      t0, .Lhh_entry

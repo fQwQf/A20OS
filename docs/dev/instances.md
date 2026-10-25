@@ -142,6 +142,7 @@ timeout = "20s"              # 默认 20s
 input_delay = 8              # 注入命令前等待秒数，默认 8
 commands = ["syscall_smoke", "poweroff"]  # 启动后经串口注入的命令
 expect = ["SYSCALL_SMOKE: PASS"]          # 日志中必须全部出现的子串
+# require_clean_exit = true              # 额外要求在时限内自然退出且 QEMU 状态为 0
 
 # [stm32]                      # 仅 arch = "armv7m"：STM32 板级变体
 # flash_kb = 512               # → STM32_FLASH_KB
@@ -205,7 +206,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
 | `target.serial` / `boot_media` / `media_device` | `TARGET_SERIAL` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` |
 
-`gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
+`gui.enabled`、`test.commands`、`test.expect`、`test.require_clean_exit`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 
 `[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）只供 a20 控制台动作读取，不导出 make 变量。用 `a20 show` 查看串口、复位、命令与匹配条件，不能从 `show-vars` 的 make 变量列表推断它们是否配置。接线约束见 [实例解析参考](tooling-internals.md#instance-parsing)。
 
@@ -223,8 +224,9 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
 | `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
 | `console` | 需要 `[target]` 段：接串口、可选复位、等 `console_check`、注入 `commands`、断言 `expect`、落盘 transcript |
-| `deploy` | 需要 `[target]`，并且**有东西可以放到板子上**：要么 `boot_media` + `media_device` 配对，要么 `[handoff].commands`（无块驱动的板走这条路）。有 `[flash]` 则先烧录，然后写启动介质或打印 handoff 命令，最后同 `console` 验证 |
-| `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`grub-disk`（x86_64 可直接启动的 GRUB 磁盘）、`uefi-disk`（x86_64 可直接启动的 BOOTX64.EFI 磁盘）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（无块驱动的板，产出 handoff 目录而非可写镜像） |
+| `deploy` | 需要 `[target]`，并且**有东西可以放到板子上**：要么 `boot_media` + `media_device` 配对，要么 `[handoff].commands`（无块驱动的板走这条路）。有 `[flash]` 则先烧录，然后写启动介质或准备 handoff；M0Sense 上传 UF2 应用，最后同 `console` 验证。`--auto-handoff` 可自动完成支持板型的 U-Boot RAM 装载 |
+| `prepare` | 根据板型构建固定版本的启动固件或取得恢复资产。只准备宿主文件，不连接或烧写板卡 |
+| `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`grub-disk`（x86_64 可直接启动的 GRUB 磁盘）、`uefi-disk`（x86_64 可直接启动的 BOOTX64.EFI 磁盘）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（内核交接目录或 MCU 探针）、`board-sdcard`（板级完整 SD 镜像，具体固件依赖见平台页） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](../platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
@@ -285,6 +287,16 @@ vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 cons
 
 ## 物理目标与上板验证（`[target]`）
 
+板级支持范围、默认实例和部署方法见
+[硬件平台](../platforms/README.md)。
+`console` / `deploy` 支持 `--serial DEVICE` 覆盖串口；`deploy` 支持
+`--media-device DEVICE` 覆盖目的盘、`--no-console` 将介质准备与上板验证分开、
+`--no-build` 复用已构建产物（带烧录后端时还需 `--no-flash`）。
+`deploy ls2k0300 --stage-mount DIRECTORY --no-console` 将校验后的 ELF 放到显式指定的已挂载 FAT 卷；
+`deploy m0sense-bl702-probe --uf2-mount DIRECTORY --no-console` 上传原厂 UF2 应用，未指定卷时自动识别。
+`--interactive` 在同一串口连接转发人工输入，供操作 U-Boot，同时记录日志并检查启动断言；
+Ctrl-] 退出，等待仍受 `target.boot_timeout` 限制，不能与 `--no-console` 合用。
+
 其余所有段描述的要么是构建，要么是 QEMU 里的 guest。`[target]` 描述的是串口线那头那块板：控制台在哪、怎么让它重启、它的启动日志必须出现什么才算真的起来。这个段存在，就意味着这是一个物理目标；所以没有 `kind` 字段可以跟它自相矛盾。
 
 ```bash
@@ -305,45 +317,51 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 ### 安全边界
 
 - `reset` 按命令参数执行，不经 shell；清单中不能使用管道或 `;` 连接多条命令。
-- `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
+- `target-write-media` 在 `dd` 之前检查块设备、整盘及子分区的挂载/交换使用状态与容量；`lsblk` 检查失败即停止。只接受一份完整镜像，避免多份镜像连续从偏移零写入互相覆盖。目的盘身份仍须人工核对，工具不会判断哪支盘是你想写的盘。
 - `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，正是「产物账本」一节要消灭的那类东西。
 - 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
 
-## 无块驱动的板怎么部署（`[handoff]`）
+## 固件装载内核与自动交接（`[handoff]`）
 
-`deploy` 的每一步都对应一个既有机制，而这些机制都假设**有可写介质**：烧录走烧录后端，写启动介质走 `target-write-media`。一块 SD 控制器还没有驱动的板没有介质可写，于是它既没有可打包的产物，`deploy` 也就只剩下「编个内核，然后连上一台什么都没拿到东西的板子的串口」。
+没有内核块驱动时，仍可由固件通过 SD FAT、USB 或网络载入内核；A20OS 启动后的块设备能力需另行验证。
+`board-sdcard` 生成板级 SD 镜像；固件、DTB 和启动脚本的组成由平台打包器决定。
+`prepare` 取得固件依赖，`package` 生成可写介质。完整操作见 [硬件平台](../platforms/README.md)。
 
-`[handoff]` 就是为这种板补的最后一公里。
-
-```bash
-tools/a20 package licheerv-nano    # 产出 build/licheerv-nano/handoff/
-tools/a20 deploy  licheerv-nano    # 构建 + 打包 + 打印该敲的命令 + 串口验证
+```sh
+tools/a20 prepare pine-a64
+tools/a20 package pine-a64
+tools/a20 deploy pine-a64 --no-build --no-console --media-device /dev/disk/by-id/实际读卡器
+# 移卡到目标板，先连接串口，再上电；卡内脚本自动启动。
+tools/a20 console pine-a64 --serial /dev/serial/by-id/实际串口
 ```
 
-`a20 package` 写出一个目录：`kernel.bin`、`uboot.cmd`（要在 U-Boot 提示符下敲的准确命令）、以及一份随产物走的 `README.md`。
+`kernel-bundle` 只生成交接目录。通用 Image 包含 `kernel.bin`、`kernel.elf`、`uboot.cmd`、
+`manifest.json` 与操作说明；LS2K0300 使用核对过的 ELF 和独立装载器，M0Sense 使用独立 RV32 M-mode UF2 探针。
+打包器从 ELF `PT_LOAD` 读取地址范围；Image 包核对镜像头覆盖含 BSS 的内存占用。
+Lichee Pi Zero 使用 ARM32 uImage/`bootm`，分别检查载荷暂存区和实际内核装载区，
+不将 `bootm` 暂存地址当作 ELF 入口。
+`[handoff].commands` 描述载入命令；包内 `uboot.cmd` 包含核对后的实际地址。
 
-```toml
-[package]
-kind = "kernel-bundle"
+SD 实例默认通过卡内配置启动。支持 `--auto-handoff` 的平台可从正在运行的 U-Boot 重新载入：
 
-[handoff]
-method = "tftp"
-commands = [
-    "tftp ${loadaddr} kernel.bin",
-    "booti ${loadaddr} - ${loadaddr}",
-]
-note = "这些命令未经验证：这块板从未在 A20OS 下上电过。"
+```sh
+tools/a20 console pine-a64 --auto-handoff --serial /dev/serial/by-id/实际串口
+# LS2K0300 的 FAT USB 路径：先在宿主暂存，再移到板子。
+tools/a20 deploy ls2k0300 --stage-mount /media/用户名/实际FAT卷 --no-console
+tools/a20 console ls2k0300 --auto-handoff --transfer usb --serial /dev/serial/by-id/实际串口
 ```
 
-两个设计上的选择值得说明：
+`--auto-handoff` 独占同一串口，停止倒计时，逐条验证装载回应、传输长度与 CRC，
+再执行启动并检查内核标记。Image/uImage 交接还核对实例与包的身份、DTB 与内核/BSS 分离；
+LS2K0300 依据完整 DDR/LMB 信息选择 ELF 暂存地址。
+自动路径不写固件、不执行 `saveenv`；不支持的固件命令、缺少文件或校验失败会停止。
+`[handoff].prompt_timeout`、`command_timeout` 可设正的时间值（如 `30s`）；内核等待使用 `[target]` 的超时。
 
-**载入地址不在清单里。** `a20 package` 从刚编出来的内核 ELF 的第一个 `PT_LOAD` 头里读出来，写进 `uboot.cmd`。板级 ldscript 会挪镜像（VisionFive 2 就挪到了 `0x40200000`），把地址抄进清单等于多一份会过期的副本。
-
-**不打包 DTB。** 这一族板子走 vendor FSBL → OpenSBI → U-Boot，U-Boot 用 `a1` 传自己的板级 DTB，而那正是 `riscv64_memory_init()` 和平台设备树遍历读的东西。从内核树再打包一份，只是多一个要和固件同步、而同步坏了没人会发现的副本。
-
-`a20 deploy` 只打印命令，不代敲。让 `a20` 越过串口去驱动 boot chain 意味着去操作一条它并不拥有的线路；边界就划在这里——打包产物、打印命令、再由 `console_check` 判断结果。而命令写在清单里，就意味着仓库里的命令和板子上敲的命令是同一份。
-
-没有 `[handoff].commands` 也没有可写介质的实例，`deploy` 不会被 `a20 show` 列出。这不是新约束，是原有 guard 的漏洞：它此前只检查 `boot_media` 与 `media_device` 不是半声明状态，**两个都没有反而通过**。
+较老固件可用 `--interactive` 在同一窗口人工粘贴包内命令；不能与 `--auto-handoff` 合用。
+`--no-console` 只准备产物，稍后先连接串口再上电。DTB 必须匹配板型并位于独立 RAM；
+Nano TFTP 路径会先复制固件控制 DTB，避免直接使用固件 malloc 区的地址。
+M0Sense 仅 USB 时加 `--no-console`，依据蓝灯心跳人工确认；有外部 UART 时部署器先监听，
+再上传 UF2，捕获 loader 重启后的首次探针标记。USB 复制成功本身不算内核验收。
 
 ## 边角但必要的开关
 
@@ -351,7 +369,7 @@ note = "这些命令未经验证：这块板从未在 A20OS 下上电过。"
 
 ### `--dry-run`：什么都不碰
 
-`run` / `debug` / `test` / `console` / `deploy` / `flash` / `package` 都接受 `--dry-run`。它的含义是**一个字节都不写出去**：不构建、不启动 QEMU、不开串口、不烧录、不写启动介质，只打印将要执行的命令。
+`prepare` / `run` / `debug` / `test` / `console` / `deploy` / `flash` / `package` 都接受 `--dry-run`。它的含义是**一个字节都不写出去**：不构建、不启动 QEMU、不开串口、不烧录、不写启动介质，只打印将要执行的命令。
 
 ```bash
 tools/a20 console vf2-physical --dry-run   # 只打印，不会往在线板子注入命令
@@ -541,7 +559,11 @@ a20: waiting to run qemu-riscv64 -- host resources are short
 
 带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 先构建并启动该实例，等待 `input_delay` 秒后经串口注入 `commands`，在 `timeout` 内等待退出或终止超时会话。`bringup = true` 只构建内核，其他实例构建开发镜像；额外的 QEMU 参数由 `machine.extra_qemu` 声明。参数生成契约见 [工具技术参考](tooling-internals.md#qemu-arguments)。
 
-判定规则与旧的手写冒烟一致：**日志中 `expect` 的全部子串都出现即 PASS**（超时杀掉但日志已齐也算 PASS）；否则 FAIL 并打印日志末尾 80 行。日志保存在 `.kernel-build/smoke/<实例名>.log`。
+默认保留旧的标记判定：日志中 `expect` 的全部子串都出现即 PASS，超时杀掉但日志已齐也算 PASS。
+需要验证完整启动和关机的实例应设置 `[test].require_clean_exit = true`，此时还要求
+QEMU 在时限内自然退出且状态为 0，打印标记后卡死或异常退出均失败。
+`smoke-quickstart` 使用此严格模式。失败打印日志末尾 80 行；日志保存在
+`.kernel-build/smoke/<实例名>.log`。
 
 把旧冒烟迁移成实例只需三步：
 

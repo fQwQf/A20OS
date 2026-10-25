@@ -392,6 +392,9 @@ void uart_handle_irq(void) {
 static int uart_irq_wrapper(int irq, void *priv) {
     (void)irq;
     (void)priv;
+    static int wrapper_once;
+    if (!wrapper_once) { wrapper_once = 1;
+        kinfo("[IRQDBG] uart top-half first run\n"); }
     uart_handle_irq();
     return 0;
 }

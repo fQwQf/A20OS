@@ -233,14 +233,15 @@ typedef struct pt_meta {
  * child that exits without writing releases its share per TABLE, not per
  * page.  The debt is settled lazily:
  *
- *   - a parent-side COW fault in a shared table materializes exactly one
- *     page (frame reference transferred to the borrower, remembered in
- *     mask[]),
- *   - any borrower-side structure change (fault install, unmap, mprotect,
- *     swap-out) first gives the borrower its own copy of the table and the
- *     references for every leaf it inherited,
- *   - an owner-side structure change hands the table to the borrower and
- *     moves the owner to a private copy.
+ *   - any per-mm divergence after the fork -- a fault install, a COW copy,
+ *     an unmap, an mprotect, a swap-out, on EITHER side -- first ends the
+ *     share: the diverging side takes a private copy of the table and the
+ *     frame references for every leaf it inherits, and the table stays with
+ *     the other side.  In-place single-page materialization cannot work
+ *     because the status sidecar is shared too, so one slot cannot describe
+ *     two mms at once.
+ *   - a borrower that exits without ever diverging settles its share per
+ *     TABLE: it holds no references, so nothing per page is released.
  *
  * struct pt_share exists only while a table is lent out; at most one
  * borrower per table, so a fork of an already-borrowed table falls back to
@@ -249,10 +250,6 @@ typedef struct pt_meta {
 struct pt_share {
     struct mm_struct *owner;    /* mm whose mapping created the table  */
     struct mm_struct *borrower; /* the single fork child borrowing it  */
-    /* Materialized-borrower bitmap: bit i set means the borrower holds a
-     * frame reference for leaf i (transferred by an owner COW fault); clear
-     * means the owner's reference is still the only one. */
-    uint8_t mask[MM_PT_META_ENTRIES / 8];
 };
 
 /* ------------------------------------------------------------------ *
@@ -649,22 +646,15 @@ void mm_pt_node_unlock(pte_t *table);
  * falls back to the eager per-page clone). */
 int mm_pt_share_begin(pte_t *table, struct mm_struct *owner,
                       struct mm_struct *borrower);
-/* Borrower exit on a table it never wrote: release the materialized
- * references recorded in mask[] and detach the share.  The table stays with
- * the owner. */
-void mm_pt_share_end_borrow(pte_t *table);
-/* Owner structure change: hand the table to the borrower by materializing a
- * frame reference for every present leaf the borrower does not already hold
- * (mask[] clear).  On return the borrower owns the table exclusively. */
-void mm_pt_share_owner_handoff(pte_t *table);
-/* Borrower structure change: copy the table page and its status/safe
- * sidecars into @dst (already allocated and node-initialized), taking a
- * frame reference for every present leaf that mask[] does not already cover,
- * then detach the share so @table is exclusive to the owner again. */
-void mm_pt_share_borrower_copy(pte_t *table, pte_t *dst);
+/* Detach a share whose references have been settled by the caller (the
+ * mm layer classifies each leaf: page-cache pin or frame reference). */
+void mm_pt_share_detach(pte_t *table);
 /* Non-NULL while the table is lent out.  Read side only; mutate the record
  * only under the node lock. */
 struct pt_share *mm_pt_share(pte_t *table);
+/* Copy one leaf table's hardware page and status/safe sidecars into another
+ * already-allocated table. */
+void mm_pt_copy_table(pte_t *src, pte_t *dst);
 void mm_pt_node_unlock(pte_t *table);
 
 /* The table that owns the leaf slot for addr, i.e. the parent of the leaf.

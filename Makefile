@@ -1997,6 +1997,16 @@ $(error STORAGE_READ_ONLY=1 is an experiment and cannot be combined with the LS2
 endif
 endif
 endif
+# LS2K0300 first hardware image deliberately uses a polled, single-core shell.
+ifeq ($(BOARD),ls2k0300)
+ifneq ($(ARCH),loongarch64)
+$(error BOARD=ls2k0300 requires ARCH=loongarch64)
+endif
+ifneq ($(NR_CPUS),1)
+$(error LS2K0300 is a single-core SoC; use NR_CPUS=1)
+endif
+CFLAGS += -DCONFIG_COOPERATIVE_BOOT -DCONFIG_ELF_EAGER_LOAD
+endif
 ifeq ($(BOARD),virtualbox-aarch64)
 CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
@@ -3180,6 +3190,12 @@ include tools/targets-smoke.mk
 include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
+include tools/m0sense.mk
+include tools/pine-a64.mk
+include tools/licheerv-nano.mk
+include tools/quartz64-zero.mk
+include tools/lichee-pi-zero.mk
+include tools/ox64.mk
 include tools/raspberrypi4.mk
 include tools/execution.mk
 include tools/target-console.mk
@@ -3225,3 +3241,6 @@ check-envelope-coverage:
 # The stamp existence check must cover exactly what native-programs builds,
 # otherwise binaries can go missing from the image while the stamp still passes.
 NATIVE_BINS := $(NATIVE_OUTPUTS)
+
+# LS2K0300 RAM bring-up (vendor firmware is preserved).
+include tools/ls2k0300.mk

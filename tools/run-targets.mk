@@ -59,7 +59,7 @@ _vbox_iso_x86_64_impl: dev-build
 # board and variant, so it cannot be written by a manifest that has to commit to
 # one path.  This is the whole deployment route for a thin client: dd this to a
 # USB stick and boot it.
-pc-rescue-iso: dev-build
+pc-rescue-iso: $(if $(filter 1,$(BRINGUP)),kernel-only,dev-build)
 	@mkdir -p build/x86_64-pc
 	tools/mk_grub_iso.sh $(KERNEL_ELF) build/x86_64-pc/a20os-rescue.iso
 	@echo "rescue ISO ready: build/x86_64-pc/a20os-rescue.iso"
@@ -94,10 +94,10 @@ x86_64-uefi-disk: $(VBOX_X86_64_IMG)
 # kernel plus the commands that hand it to the boot chain already on the board.
 # The load address is read back out of the ELF by the script, so a board that
 # relocates its image needs no entry here.
-kernel-bundle: dev-build
+kernel-bundle: $(if $(filter 1,$(BRINGUP)),kernel-only,dev-build)
 	@mkdir -p build/$(BOARD)
 	READELF="$(READELF)" tools/mk_kernel_bundle.sh \
-		$(KERNEL_ELF) $(KERNEL_BIN) build/$(BOARD)/handoff $(BOARD)
+		$(KERNEL_ELF) $(KERNEL_BIN) build/$(BOARD)/handoff $(BOARD) "$(HANDOFF_INSTANCE)"
 _x86_64_uefi_disk_impl: $(VBOX_X86_64_IMG)
 	@echo "VirtualBox x86_64 UEFI disk ready: $(VBOX_X86_64_IMG)"
 _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)

@@ -9,6 +9,8 @@
  * instruction-set mechanisms only. */
 #if defined(CONFIG_BOARD_LICHEERV_NANO)
 #include "licheerv_nano_platform.h"
+#elif defined(CONFIG_BOARD_OX64)
+#include "ox64_platform.h"
 #elif defined(CONFIG_BOARD_MILK_V_DUO)
 #include "milk_v_duo_platform.h"
 #else
@@ -40,7 +42,7 @@ uint64_t riscv64_fdt_timebase_freq(void);
  * absent tree from a tree that simply describes nothing it has a driver for. */
 int riscv64_fdt_enumerate_platform_devices(void);
 
-#if !(defined(CONFIG_BOARD_LICHEERV_NANO) || defined(CONFIG_BOARD_MILK_V_DUO))
+#if !(defined(CONFIG_BOARD_LICHEERV_NANO) || defined(CONFIG_BOARD_MILK_V_DUO) || defined(CONFIG_BOARD_OX64))
 /* MMIO base addresses.  The SophGo boards supply their own UART0_BASE,
  * PLIC_BASE and UART0_IRQ from the header above and have neither a PCIe
  * controller nor a virtio MMIO transport, so those constants are deliberately

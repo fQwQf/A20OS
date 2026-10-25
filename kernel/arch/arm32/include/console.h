@@ -4,6 +4,10 @@
 #include "core/types.h"
 #include "platform.h"
 
+#if __has_include("board_console.h")
+#include "board_console.h"
+#else
+
 #define PL011_DR        0x00
 #define PL011_FR        0x18
 #define PL011_IBRD      0x24
@@ -60,4 +64,5 @@ static inline void arch_uart_ack_irq(void) {
     *arch_uart_reg32(PL011_ICR) = PL011_IMSC_RXIM | PL011_IMSC_RTIM;
 }
 
+#endif
 #endif

@@ -6,6 +6,13 @@ set -e
 
 KERNEL_ELF="${1:-}"
 OUTPUT_ISO="${2:-}"
+KERNEL_ARGS="${3:-a20.dhcp=1}"
+RESCUE_OPTIONS=()
+# Useful for an explicitly selected firmware target or an unpacked host
+# dependency. With no override GRUB discovers all installed platform modules.
+if [ -n "${GRUB_RESCUE_DIR:-}" ]; then
+    RESCUE_OPTIONS+=(--directory="$GRUB_RESCUE_DIR")
+fi
 
 if [ -z "$KERNEL_ELF" ] || [ -z "$OUTPUT_ISO" ]; then
     echo "Usage: $0 <kernel.elf> <output.iso>"
@@ -45,19 +52,19 @@ mkdir -p "$TMPDIR/boot/grub"
 
 cp "$KERNEL_ELF" "$TMPDIR/boot/kernel.elf"
 
-cat > "$TMPDIR/boot/grub/grub.cfg" <<'EOF'
+cat > "$TMPDIR/boot/grub/grub.cfg" <<EOF
 set timeout=0
 set default=0
 
 menuentry "A20OS" {
-    multiboot /boot/kernel.elf
+    multiboot /boot/kernel.elf $KERNEL_ARGS
     boot
 }
 EOF
 
 echo "Building GRUB ISO with $GRUB_MKRESCUE..."
-"$GRUB_MKRESCUE" -o "$OUTPUT_ISO" "$TMPDIR" \
+"$GRUB_MKRESCUE" "${RESCUE_OPTIONS[@]}" -o "$OUTPUT_ISO" "$TMPDIR" \
     --modules="multiboot normal boot rescue serial terminal linux configfile" \
-    2>/dev/null || "$GRUB_MKRESCUE" -o "$OUTPUT_ISO" "$TMPDIR"
+    2>/dev/null || "$GRUB_MKRESCUE" "${RESCUE_OPTIONS[@]}" -o "$OUTPUT_ISO" "$TMPDIR"
 
 echo "ISO created: $OUTPUT_ISO"

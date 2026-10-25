@@ -127,7 +127,9 @@ class TestSafetyProperties(unittest.TestCase):
             img = Path(d) / "a.img"
             img.write_bytes(b"A" * 4096)
             dev = Path(d) / "dev"
-            with patch.object(media, "check_block_device", return_value=None):
+            with patch.object(media, "check_block_device", return_value=None), \
+                    patch.object(media, "is_mounted", return_value=False), \
+                    patch.object(media, "device_capacity", return_value=1 << 20):
                 rc, out = run_main(str(img), str(dev))
         self.assertEqual(rc, 0)
 

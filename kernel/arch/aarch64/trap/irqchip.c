@@ -154,7 +154,22 @@ static void gic_init(void) {
     value |= 1U;
     __asm__ __volatile__("msr icc_sre_el1, %0\n\tisb" :: "r"(value) : "memory");
 
-    *gicd_reg32(GICD_CTLR) = (1U << 4) | (1U << 1);
+    /* ARE_NS must change while both non-secure groups are disabled. */
+    uint32_t ctlr = *gicd_reg32(GICD_CTLR) & ~3U;
+    *gicd_reg32(GICD_CTLR) = ctlr; /* Preserve ARE_NS: clearing it is invalid. */
+    while (*gicd_reg32(GICD_CTLR) & (1U << 31))
+        arch_cpu_relax();
+    /* Firmware IRQ enables must not survive into unregistered OS devices. */
+    unsigned groups = (*gicd_reg32(0x004) & 0x1fU) + 1U;
+    for (unsigned group = 1; group < groups; group++)
+        *gicd_reg32(0x180 + group * 4) = 0xffffffffU;
+    while (*gicd_reg32(GICD_CTLR) & (1U << 31))
+        arch_cpu_relax();
+    ctlr |= 1U << 4;
+    *gicd_reg32(GICD_CTLR) = ctlr;
+    while (*gicd_reg32(GICD_CTLR) & (1U << 31))
+        arch_cpu_relax();
+    *gicd_reg32(GICD_CTLR) = ctlr | (1U << 1);
     while (*gicd_reg32(GICD_CTLR) & (1U << 31))
         arch_cpu_relax();
 
@@ -164,12 +179,16 @@ static void gic_init(void) {
     while (*gicr_reg32(0x14) & (1U << 2))
         arch_cpu_relax();
 
+    *gicr_reg32(0x10000 + 0x180) = 0xffffffffU;
+    while (*gicr_reg32(0x000) & (1U << 3))
+        arch_cpu_relax();
+
     /* The UART SPI is handled as non-secure Group 1. */
 #ifndef CONFIG_COOPERATIVE_BOOT
     /* The normal AArch64 boards use the architected timer PPI as Group 1. */
-    *gicr_reg32(0x10000 + 0x80) = 1U << IRQ_S_TIMER;
+    *gicr_reg32(0x10000 + 0x80) |= 1U << IRQ_S_TIMER;
 #endif
-    *gicd_reg32(0x80 + (UART0_IRQ / 32U) * 4) = 1U << (UART0_IRQ % 32U);
+    *gicd_reg32(0x80 + (UART0_IRQ / 32U) * 4) |= 1U << (UART0_IRQ % 32U);
     *(volatile uint64_t *)(uintptr_t)(GICD_BASE + 0x6000 + UART0_IRQ * 8U) = 0;
 
 #ifndef CONFIG_COOPERATIVE_BOOT
@@ -181,6 +200,10 @@ static void gic_init(void) {
 #endif
     gic_enable_irq(UART0_IRQ);
 
+    /* EOI also deactivates: inherited split EOI mode would leave IRQs active. */
+    __asm__ __volatile__("mrs %0, icc_ctlr_el1" : "=r"(value));
+    value &= ~(1UL << 1);
+    __asm__ __volatile__("msr icc_ctlr_el1, %0\n\tisb" :: "r"(value) : "memory");
     value = 0xFF;
     __asm__ __volatile__("msr icc_pmr_el1, %0" :: "r"(value) : "memory");
     value = 0;

@@ -166,6 +166,8 @@ native-libc: $(DEFAULT_NATIVE_LIBC_TARGETS)
 
 native-libc-all: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32
 
+include tools/cluster-memory.mk
+
 native-programs: $(NATIVE_OUTPUTS)
 
 define NATIVE_FUTEX_RECIPE

@@ -67,25 +67,28 @@ _start:
     addl  $0x200000, %eax
     loop  1b
 
-    /*
-     * Higher-half map using 1GB pages.
-     * PDPT_hh[0..3] map 0xFFFF800000000000 -> physical 0-4GB.
-     *
-     * 0-2GB: RAM — normal WB caching (flags 0x83).
-     * 2-4GB: MMIO (PCI ECAM, LAPIC, IOAPIC, PCI BARs) — PCD=1 (bit 3)
-     *        forces Uncacheable access so MMIO reads return live values
-     *        instead of stale cache lines.  On QEMU 2G RAM this entire
-     *        range is device memory so blanket PCD is safe.
-     */
+    /* Use 2 MiB pages: 1 GiB pages are optional even on Intel 64 CPUs
+     * (notably Bay Trail/J1900). Preserve WB below 2 GiB and UC above. */
     movl  $(boot_pdpt_hh - PAGE_OFFSET), %edi
-    movl  $0x00000083, %eax    /* 1GB page: physical 0-1GB (RAM, WB) */
+    movl  $(boot_pd_hh - PAGE_OFFSET + 0x003), %eax
+    movl  $4, %ecx
+1:
     movl  %eax, (%edi)
-    movl  $0x40000083, %eax    /* 1GB page: physical 1-2GB (RAM, WB) */
-    movl  %eax, 8(%edi)
-    movl  $0x8000008B, %eax    /* 1GB page: physical 2-3GB (MMIO, UC) */
-    movl  %eax, 16(%edi)
-    movl  $0xC000008B, %eax    /* 1GB page: physical 3-4GB (MMIO, UC) */
-    movl  %eax, 24(%edi)
+    addl  $4096, %eax
+    addl  $8, %edi
+    loop  1b
+    movl  $(boot_pd_hh - PAGE_OFFSET), %edi
+    movl  $0x83, %eax
+    movl  $2048, %ecx
+1:
+    testl %eax, %eax
+    jns   2f
+    orl   $0x18, %eax          /* default PAT entry 3: UC for MMIO */
+2:
+    movl  %eax, (%edi)
+    addl  $8, %edi
+    addl  $0x200000, %eax
+    loop  1b
 
     /* Enable PAE and 2 MiB pages used by the temporary identity map. */
     movl  %cr4, %eax
@@ -191,7 +194,7 @@ _start_uefi:
 
     /* Build the boot page tables: PML4 -> PDPT_id/PDPT_hh -> PD_id, an
      * identity map of the first gigabyte in 2 MiB pages, and a higher-half
-     * window over 0-4 GiB in 1 GiB pages.  2-4 GiB is marked uncacheable
+     * window over 0-4 GiB in 2 MiB pages.  2-4 GiB is marked uncacheable
      * because that is where PCI ECAM and the APICs live. */
     movabsq $(boot_pgdir - PAGE_OFFSET), %rdi
     xorl  %eax, %eax
@@ -221,14 +224,25 @@ _start_uefi:
     loop   1b
 
     movabsq $(boot_pdpt_hh - PAGE_OFFSET), %rdi
-    movl   $0x00000083, %eax
+    movabsq $(boot_pd_hh - PAGE_OFFSET + 0x003), %rax
+    movl   $4, %ecx
+1:
     movq   %rax, (%rdi)
-    movl   $0x40000083, %eax
-    movq   %rax, 8(%rdi)
-    movl   $0x8000008B, %eax
-    movq   %rax, 16(%rdi)
-    movl   $0xC000008B, %eax
-    movq   %rax, 24(%rdi)
+    addq   $4096, %rax
+    addq   $8, %rdi
+    loop   1b
+    movabsq $(boot_pd_hh - PAGE_OFFSET), %rdi
+    movl   $0x83, %eax
+    movl   $2048, %ecx
+1:
+    testl  %eax, %eax
+    jns    2f
+    orl    $0x18, %eax         /* default PAT entry 3: UC for MMIO */
+2:
+    movq   %rax, (%rdi)
+    addq   $8, %rdi
+    addl   $0x200000, %eax
+    loop   1b
 
     /* PAE and the 2 MiB pages the identity map uses.  LME and PG are already
      * set: we were started in long mode by the firmware.  These are 64-bit
@@ -309,6 +323,9 @@ boot_pdpt_hh:
     .align 4096
 boot_pd_id:
     .space 4096
+    .align 4096
+boot_pd_hh:
+    .space 4096 * 4
 
 /* BSP boot stack, 64 KiB -- the same size the other arches reserve (see
  * arch/aarch64/boot/entry.S).  .bss.stack is collected first by

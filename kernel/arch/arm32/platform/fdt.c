@@ -2,7 +2,7 @@
 
 #include "core/types.h"
 
-const char *arch_bootargs_get(void) {
+__attribute__((weak)) const char *arch_bootargs_get(void) {
     return NULL;
 }
 

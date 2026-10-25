@@ -8,6 +8,8 @@
 #include "firmware.h"
 #include "platform.h"
 #include "fdt_isa.h"
+#include "fdt_memory.h"
+#include "core/panic.h"
 #include "drivers/core/driver_core.h"
 
 #define FDT_MAGIC       0xd00dfeedU
@@ -28,12 +30,6 @@ static uint32_t be32(uint32_t v)
 static uint32_t read_be32(const void *p)
 {
     return be32(*(const uint32_t *)p);
-}
-
-static uint64_t read_be64(const void *p)
-{
-    return ((uint64_t)read_be32(p) << 32) |
-           (uint64_t)read_be32((const uint8_t *)p + 4);
 }
 
 extern uint64_t __boot_dtb_ptr;
@@ -192,122 +188,38 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
 void riscv64_memory_init(void)
 {
     riscv64_window_from_board();
-
-    /* Snapshot the only ISA properties consumed after MMU initialization.
-     * OpenSBI's DTB is passed as a physical pointer and may not be mapped (or
-     * retained) after the temporary boot identity map is removed. */
+    extern char _start[], _end[];
+    uint64_t dtb = __boot_dtb_ptr;
+    size_t available = 0;
+    if (dtb) {
+        if ((dtb & 7) || dtb < riscv64_ram_base || dtb >= riscv64_ram_end)
+            panic("RISC-V: firmware DTB lies outside the board boot RAM map");
+        uint64_t mapped = riscv64_ram_end - dtb;
+        available = mapped < 0x200000 ? (size_t)mapped : 0x200000;
+    }
+    riscv_fdt_memory_t memory;
+    int rc = riscv_fdt_memory_window((const void *)(uintptr_t)dtb, available,
+        dtb, riscv64_ram_base, riscv64_ram_end,
+        (uintptr_t)_start - PAGE_OFFSET, (uintptr_t)_end - PAGE_OFFSET, &memory);
+    if (rc < 0)
+        panic("RISC-V: invalid FDT RAM/reservation or firmware overlaps kernel");
+    riscv64_ram_base = (paddr_t)memory.base;
+    riscv64_ram_end = (paddr_t)memory.end;
+    if (rc == 1) {
+        printf("[FDT] memory node unavailable, using board window 0x%lx..0x%lx\n",
+               (unsigned long)riscv64_ram_base, (unsigned long)riscv64_ram_end);
+    } else {
+        printf("[FDT] RAM range 0x%lx..0x%lx (%lu MiB, firmware reservations excluded)\n",
+               (unsigned long)riscv64_ram_base, (unsigned long)riscv64_ram_end,
+               (unsigned long)((riscv64_ram_end - riscv64_ram_base) >> 20));
+    }
+    /* Snapshot ISA facts only after validating the DTB. Physical boot mappings
+     * are removed later; the firmware buffer is now excluded from allocation. */
     if (!riscv64_fdt_isa_cache_ready) {
         riscv64_fdt_has_h = riscv64_fdt_has_isa_extension("h");
         riscv64_fdt_has_sstc = riscv64_fdt_has_isa_extension("sstc");
         riscv64_fdt_isa_cache_ready = 1;
     }
-
-    const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
-    if (!base || read_be32(base) != FDT_MAGIC) {
-        printf("[FDT] memory node unavailable, using board window "
-               "0x%lx..0x%lx\n",
-               (unsigned long)riscv64_ram_base,
-               (unsigned long)riscv64_ram_end);
-        return;
-    }
-
-    uint32_t totalsize = read_be32(base + 4);
-    uint32_t off_struct = read_be32(base + 8);
-    uint32_t off_strings = read_be32(base + 12);
-    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize) {
-        printf("[FDT] malformed header, using board window "
-               "0x%lx..0x%lx\n",
-               (unsigned long)riscv64_ram_base,
-               (unsigned long)riscv64_ram_end);
-        return;
-    }
-
-    const uint8_t *p = base + off_struct;
-    const uint8_t *endp = base + totalsize;
-    const uint8_t *stringsp = base + off_strings;
-    int depth = 0;
-    int memory_depth = -1;
-
-    while (p + 4 <= endp) {
-        uint32_t token = read_be32(p);
-        p += 4;
-        if (token == FDT_END)
-            break;
-
-        if (token == FDT_BEGIN_NODE) {
-            const char *name = (const char *)p;
-            const char *name_end = name;
-            while ((const uint8_t *)name_end < endp && *name_end)
-                name_end++;
-            if ((const uint8_t *)name_end >= endp)
-                break;
-            depth++;
-            if (depth == 2 &&
-                (strcmp(name, "memory") == 0 ||
-                 strncmp(name, "memory@", 7) == 0))
-                memory_depth = depth;
-            p = (const uint8_t *)(((uintptr_t)(name_end + 1) + 3) & ~3UL);
-            continue;
-        }
-
-        if (token == FDT_END_NODE) {
-            if (depth == memory_depth)
-                memory_depth = -1;
-            depth--;
-            continue;
-        }
-
-        if (token == FDT_NOP)
-            continue;
-
-        if (token != FDT_PROP || p + 8 > endp)
-            break;
-
-        uint32_t len = read_be32(p);
-        uint32_t nameoff = read_be32(p + 4);
-        p += 8;
-        if (p + ((len + 3U) & ~3U) > endp ||
-            off_strings + nameoff >= totalsize)
-            break;
-
-        const char *propname = (const char *)(stringsp + nameoff);
-        if (depth == memory_depth && strcmp(propname, "reg") == 0 && len >= 16) {
-            uint64_t ram_base = read_be64(p);
-            uint64_t ram_size = read_be64(p + 8);
-            uint64_t ram_end = ram_base + ram_size;
-            if (ram_end < ram_base)
-                break;
-            if (ram_end > PHYS_MEMORY_MAX_END) {
-                printf("[FDT] RAM end 0x%lx exceeds boot map, clamping to 0x%lx\n",
-                       (unsigned long)ram_end,
-                       (unsigned long)PHYS_MEMORY_MAX_END);
-                ram_end = PHYS_MEMORY_MAX_END;
-            }
-            /* Accept the first memory range that overlaps the board's usable
-             * physical window and clamp it to that window. */
-            if (ram_end > (uint64_t)riscv64_ram_base &&
-                ram_base < (uint64_t)riscv64_ram_end) {
-                if (ram_base < (uint64_t)riscv64_ram_base)
-                    ram_base = riscv64_ram_base;
-                if (ram_end > (uint64_t)riscv64_ram_end)
-                    ram_end = riscv64_ram_end;
-                riscv64_ram_base = (paddr_t)(ram_base & ~(PAGE_SIZE - 1));
-                riscv64_ram_end = (paddr_t)(ram_end & ~(PAGE_SIZE - 1));
-                printf("[FDT] RAM range 0x%lx..0x%lx (%lu MiB)\n",
-                       (unsigned long)riscv64_ram_base,
-                       (unsigned long)riscv64_ram_end,
-                       (unsigned long)((riscv64_ram_end -
-                                        riscv64_ram_base) >> 20));
-                return;
-            }
-        }
-        p += (len + 3U) & ~3U;
-    }
-
-    printf("[FDT] memory node parse failed, using board window "
-           "0x%lx..0x%lx\n",
-           (unsigned long)riscv64_ram_base,
-           (unsigned long)riscv64_ram_end);
 }
 
 const char *arch_bootargs_get(void)

@@ -147,7 +147,8 @@ class TestRetiredArchitectures(unittest.TestCase):
             with self.subTest(target=target):
                 proc = subprocess.run(
                     ["make", "-s", "-n", target], cwd=REPO_ROOT,
-                    text=True, capture_output=True, check=False)
+                    text=True, capture_output=True, check=False,
+                    env={**os.environ, "LC_ALL": "C"})
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("No rule to make target", proc.stderr)
 

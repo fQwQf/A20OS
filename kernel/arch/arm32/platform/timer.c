@@ -9,7 +9,7 @@ void timer_init(void) {
 }
 
 void timer_set_interval(uint64_t ticks) {
-    uint32_t v = (uint32_t)ticks;
+    uint32_t v = ticks > 0x7fffffffULL ? 0x7fffffffU : (uint32_t)ticks;
     __asm__ __volatile__(
         "mcr p15, 0, %0, c14, c2, 0\n\t"
         "mov r1, #1\n\t"
@@ -19,9 +19,12 @@ void timer_set_interval(uint64_t ticks) {
 }
 
 uint64_t timer_get_ticks(void) {
-    uint32_t lo;
-    __asm__ __volatile__("mrc p15, 0, %0, c14, c0, 0" : "=r"(lo));
-    return lo;
+    uint32_t lo, hi;
+    /* MRC c14,c0,0 is CNTFRQ (constant), not the counter. CNTPCT requires
+     * an atomic 64-bit MRRC read and must not wrap at the low 32 bits. */
+    __asm__ __volatile__("isb\n\tmrrc p15, 0, %0, %1, c14"
+                         : "=r"(lo), "=r"(hi) :: "memory");
+    return ((uint64_t)hi << 32) | lo;
 }
 
 void timer_irq_tick(void) {

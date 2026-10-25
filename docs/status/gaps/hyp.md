@@ -17,3 +17,10 @@
   资源计数回到基线；双 vCPU guest 正常进入/退出。
 - 来源：[current/hypervisor-implementation-status.md](../current/hypervisor-implementation-status.md)、
   [current/v1.0-progress.md](../current/v1.0-progress.md) V1-HYP 行。
+
+### HYP-03 其他后端
+
+- 现状：本包只闭合既有 RISC-V H-extension 生命周期。
+- 缺口：AArch64 EL2、Intel VMX、AMD SVM、`/dev/kvm`、用户态设备模型与完整 Linux guest 均未实现。
+- 关闭条件：这些需要独立立项并实现
+- 来源：[current/v1.0-progress.md](../current/v1.0-progress.md)、PLAN 的明确继续开发事项。

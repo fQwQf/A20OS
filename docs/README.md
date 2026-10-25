@@ -3,7 +3,11 @@
 1.0 开发与范围决策以 [1.0 计划](releases/v1.0.md) 为入口：完成已承诺的子系统功能并验证稳定性；在共享状态、争用和复杂生命周期等确有收益的职责中使用 Rust，保留合理的 C 与硬件机制边界；LoongArch32/PPC64LE 退出支持。功能与性能验收要求见 [验收计划](releases/v1.0-validation.md)。
 这些是发布要求，不能引用为当前已实现能力；早期阶段边界不豁免 1.0 验收。
 
-五分钟上手：先读 [OS-Design.md](OS-Design.md) 把握整体架构，再跑 `make ARCH=riscv64 BOARD=qemu-virt-riscv64 run` 把开发镜像在 QEMU 里启动起来。根目录 `make all` 是双架构发布构建，不是这个开发流程的缩写。
+第一次运行：按 [构建与运行指南](dev/build.md#首次运行linux--risc-v-64) 获取完整子模块、
+安装单架构依赖与固定 Rust，运行 `python3 tools/check_quickstart.py`，再执行
+`tools/a20 run qemu-riscv64 -- -j4`。进入 shell 后用 `poweroff` 退出；
+`make -j4 smoke-quickstart` 自动验收 shell、外部命令和正常关机。
+根目录 `make all` 是双架构发布构建。了解系统架构可继续阅读 [OS-Design.md](OS-Design.md)。
 
 ---
 
@@ -27,6 +31,7 @@
 驱动开发教程中的寄存器与 DMA 契约、调试命令需要的参数布局属于其读者完成操作的前提。
 
 - 运行系统：从 [构建](dev/build.md)、[实例](dev/instances.md)、[打包快速开始](packaging/quickstart.md)、[翻译器使用](exec-xlator/01-usage.md)、[虚拟机使用](hypervisor/03-usage.md)、[集群运维](cluster/10-operator-guide.md) 进入。
+- 远程页数据共享：[可配置远程内存](cluster/63-configurable-remote-memory.md) 描述默认关闭、只读/可写模式、容量/流量限制、SDK 与部署；当前提供显式快照和事务，不提供普通线程自动跨机执行。
 - 理解实现：阅读各子系统的技术契约；例如 [调度](kernel/process-scheduler.md)、[网络锁](net/network-lock-contract.md)、[翻译器内部](exec-xlator/03-internals.md)、[驱动运行时](drivers/guide/runtime-contracts.md)。
 - 检查文档：`make check-doc-drift` 检查源码路径、候选内容与行号范围；`mkdocs build` 构建文档站并严格检查内部链接和锚点；`make docs` 生成参考手册 PDF。依赖与聚合门禁的边界见 [文档门禁现状](status/current/docs-gates.md)。
 
@@ -76,7 +81,8 @@
 ## 平台移植与运行
 
 - [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
-- [platforms/licheerv-nano.md](platforms/licheerv-nano.md)、[platforms/milk-v-duo.md](platforms/milk-v-duo.md)、[platforms/rk3328.md](platforms/rk3328.md)、[platforms/sun50i-h616.md](platforms/sun50i-h616.md)：廉价 SBC 目标（build-verified；2026-10-22 起移出 1.0 运行矩阵，无板卡，源码保留）
+- [platforms/README.md](platforms/README.md)：硬件平台支持范围、默认实例与各平台部署文档
+- [platforms/licheerv-nano.md](platforms/licheerv-nano.md)、[platforms/milk-v-duo.md](platforms/milk-v-duo.md)、[platforms/rk3328.md](platforms/rk3328.md)、[platforms/sun50i-h616.md](platforms/sun50i-h616.md)：RISC-V 与 ARM SBC 的平台配置、设备支持范围及部署方法
 - [platforms/x86_64-pc.md](platforms/x86_64-pc.md)：x86_64 PC / 瘦客户机目标（PIRQ 与 INTx 已在 QEMU i440fx 实测；真机未验证）
 - `tools/a20 boards`：列出树里全部板子及其架构、SMP、链接脚本情况
 - [platforms/not-yet-ported.md](platforms/not-yet-ported.md)：Kendryte K230 与 Allwinner D1s/F133 的已核实事实与阻塞点（K230 的 PLIC 在 60 GiB，需要启动页表第三个 MMIO 槽；D1s 缺 `SOC_PERIPHERAL_IRQ` 偏移与 DDR 基址的可引用出处）

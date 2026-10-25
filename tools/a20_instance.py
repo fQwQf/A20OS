@@ -28,6 +28,10 @@ ACTIVE_ARCHES: Final = tuple(arch for arch in KNOWN_ARCHES if arch not in RETIRE
 QEMU_RUNNABLE_ARCHES: Final = (
     "riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "riscv32",
 )
+PHYSICAL_ONLY_BOARDS: Final = frozenset({
+    "pine-a64", "licheerv-nano", "ls2k0300", "m0sense-bl702",
+    "lichee-pi-zero", "quartz64-zero", "ox64",
+})
 # Capability arch matrices (nommu, swap, xlator, ramfs-user, smp-verified-qemu)
 # moved to components/trim.toml -- the same registry the Makefile consumes via
 # components/trim.mk.  a20_validate reads them from there, so instance
@@ -36,7 +40,13 @@ ABI_CHOICES: Final = ("linux", "native", "both")
 DRIVER_DEPLOYMENTS: Final = ("generic", "embedded")
 PROFILES: Final = ("full", "benchmark", "mcu")
 PACKAGE_KINDS: Final = ("grub-iso", "grub-disk", "uefi-disk", "uefi-image",
-                     "fit-sdcard", "release", "kernel-bundle")
+                     "fit-sdcard", "release", "kernel-bundle", "board-sdcard")
+PREPARE_TARGETS: Final = {"pine-a64": "pine-a64-prepare",
+                          "licheerv-nano": "licheerv-nano-prepare",
+                          "lichee-pi-zero": "lichee-pi-zero-prepare",
+                          "quartz64-zero": "quartz64-zero-prepare",
+                          "ox64": "ox64-prepare",
+                          "m0sense-bl702": "m0sense-recovery-assets"}
 RELEASE_ARCH_ARTIFACTS: Final = {
     "riscv64": ("kernel-rv", "disk.img"),
     "loongarch64": ("kernel-la", "disk-la.img"),
@@ -190,6 +200,7 @@ class TestCfg:
     input_delay: int | None = None
     commands: tuple[str, ...] | None = None
     expect: tuple[str, ...] | None = None
+    require_clean_exit: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,18 +266,11 @@ class TargetCfg:
 
 @dataclass(frozen=True, slots=True)
 class HandoffCfg:
-    """How the kernel reaches a board that has no bootable storage.
+    """Firmware RAM-loading recipe, used by manual and automatic handoff.
 
-    A board with a block driver boots from media, so [package] + boot_media is
-    the whole story.  A board whose SD controller has no driver has no media to
-    write: the only route left is to hand the kernel to the boot chain that is
-    already on the board, which is what this section describes.  It is the
-    deployment path for every SBC port that cannot mount a card yet, so leaving
-    it out meant `a20 deploy` had nothing to do for them at all.
-
-    Nothing here touches the serial line.  The operator drives the boot chain and
-    this records what to type, so the commands in the repository and the commands
-    on the board cannot drift apart silently.
+    Firmware may read a card even before the kernel has a block driver. The
+    packaged recipe records exact commands; --auto-handoff executes supported
+    recipes over one verified serial session without persisting firmware state.
     """
 
     method: str | None = None
@@ -274,6 +278,8 @@ class HandoffCfg:
     load_addr: str | None = None
     commands: tuple[str, ...] | None = None
     note: str | None = None
+    prompt_timeout: str | None = None
+    command_timeout: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,7 +336,9 @@ _SECTION_SPECS: Final = {
                    else "str" if f == "world"
                    else "bool" if f == "alpine" else "int")
                for f in RootfsCfg.__dataclass_fields__},
-    "test": {f: ("int" if f == "input_delay" else "str_list" if f in ("commands", "expect") else "str")
+    "test": {f: ("bool" if f == "require_clean_exit"
+                 else "int" if f == "input_delay"
+                 else "str_list" if f in ("commands", "expect") else "str")
              for f in TestCfg.__dataclass_fields__},
     "stm32": {f: ("int" if f in ("flash_kb", "ram_kb", "bt_baud")
                   else "bool" if f in ("xuanwu", "qemu") else "str")
@@ -444,10 +452,14 @@ def applicable_actions(inst: Instance) -> tuple[str, ...]:
     two readings of one rule.
     """
     acts: list[str] = ["build"]
+    if inst.board in PREPARE_TARGETS:
+        acts.append("prepare")
     # cmd_run: the generic QEMU path, or armv7m reaching a guest only through
     # stm32vldiscovery, which QEMU_RUNNABLE_ARCHES deliberately excludes.
     runnable = (inst.arch in QEMU_RUNNABLE_ARCHES
                 or (inst.arch == "armv7m" and bool(inst.stm32.qemu)))
+    if inst.board in PHYSICAL_ONLY_BOARDS:
+        runnable = False   # QEMU virt does not emulate these board memory maps
     if runnable:
         acts += ["run", "debug"]
     if runnable and inst.test.expect:
@@ -463,6 +475,7 @@ def applicable_actions(inst: Instance) -> tuple[str, ...]:
         # with neither is what left the storage-less SBC ports with a command
         # that built the kernel and then attached to a dead console.
         if ((inst.target.boot_media and inst.target.media_device)
-                or (inst.handoff and inst.handoff.commands)):
+                or (inst.handoff and inst.handoff.commands)
+                or (inst.board == "m0sense-bl702" and inst.package.kind == "kernel-bundle")):
             acts.append("deploy")
     return tuple(acts)
