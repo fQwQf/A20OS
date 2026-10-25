@@ -111,8 +111,8 @@ const char *hyp_guest_call_error(long rc)
      * generic failure: this is the case where a boot gate goes green having
      * tested nothing (see docs/hypervisor/01-a20os-guest.md §8.4). */
     if (errno == ENOTSUP)
-        return "kernel refuses the hyp syscalls: this CPU has no H extension "
-               "(QEMU needs -cpu rv64,h=true)";
+        return "kernel refuses the hyp operation: no usable virtualization backend "
+               "or operation unsupported by this backend";
     if (errno == ENOSYS)
         return "kernel has no hyp syscalls (built without CONFIG_HYPER?)";
     return NULL;

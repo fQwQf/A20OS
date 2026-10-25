@@ -46,6 +46,7 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
     const hyp_backend_t *backend = hyp_arch_backend();
     if (!hyp_supported() || !backend || !backend->vm_init || !backend->vm_destroy ||
         !backend->map || !backend->unmap || !backend->translate ||
+        !backend->load || !backend->enter || !backend->put ||
         mem_size == 0 || (mem_size & (PAGE_SIZE - 1)) ||
         backend->ram_base >= backend->gpa_limit ||
         mem_size > backend->gpa_limit - backend->ram_base)
@@ -61,6 +62,7 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
     vm->vcpu_limit = vm->parallel_limit = 1;
     spin_init(&vm->control_lock);
     spin_init(&vm->console_lock);
+    spin_init(&vm->s2_lock);
     task_t *owner = proc_current();
     vm->charge_cg = owner ? owner->cgroup : NULL;
     if (backend->vm_init(vm) != 0) {
@@ -349,7 +351,7 @@ int hyp_selftest(void)
     /* Map four pages at the demo guest's RAM base, each holding its own
      * pattern, and read them back THROUGH the stage-2 translation -- that
      * is the pair (gpa->host pa) and (host pa -> bytes) agreeing. */
-    static const uint64_t base = 0x80000000ULL;
+    const uint64_t base = vm->ram_base;
     pfn_t pfns[4];
     for (int i = 0; i < 4; i++) {
         pfns[i] = pfa_alloc_page();
@@ -405,7 +407,7 @@ int hyp_selftest(void)
     memset(failbuf, 0x5a, PAGE_SIZE * 2);
 
     /* Out-of-window and bad-frame refusals happen before any ownership moves. */
-    if (hyp_s2_map(vm, 1ULL << 40, pfns[0], PTE_R) != -ERANGE)
+    if (hyp_s2_map(vm, vm->backend->gpa_limit, pfns[0], PTE_R) != -ERANGE)
         return st_fail("map-range");
     if (hyp_s2_map(vm, base + 5 * PAGE_SIZE, PFN_NONE, PTE_R) != -EINVAL)
         return st_fail("map-bad-pfn");

@@ -4,6 +4,12 @@
 #include "platform.h"
 #include "cpu.h"
 #include "console.h"
+#include "core/cpu.h"
+extern uint64_t aarch64_hyp_boot_cpus[CONFIG_NR_CPUS];
+
+static int firmware_psci_uses_smc(void) {
+    return aarch64_hyp_boot_cpus[cpu_current_id()] == 1;
+}
 
 #define PSCI_SYSTEM_OFF 0x84000008UL
 #define PSCI_SYSTEM_RESET 0x84000009UL
@@ -11,7 +17,10 @@
 
 static inline uint64_t psci_call0(uint64_t fn) {
     register uint64_t x0 __asm__("x0") = fn;
-    __asm__ __volatile__("hvc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+    if (firmware_psci_uses_smc())
+        __asm__ __volatile__("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
+    else
+        __asm__ __volatile__("hvc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
     return x0;
 }
 
@@ -20,10 +29,10 @@ int64_t firmware_cpu_on(uint64_t target_cpu, uint64_t entry, uint64_t context) {
     register uint64_t x1 __asm__("x1") = target_cpu;
     register uint64_t x2 __asm__("x2") = entry;
     register uint64_t x3 __asm__("x3") = context;
-    __asm__ __volatile__("hvc #0"
-                         : "+r"(x0)
-                         : "r"(x1), "r"(x2), "r"(x3)
-                         : "memory");
+    if (firmware_psci_uses_smc())
+        __asm__ __volatile__("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: "memory");
+    else
+        __asm__ __volatile__("hvc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: "memory");
     return (int64_t)x0;
 }
 

@@ -42,6 +42,7 @@
 
 /* hyp_exit_reason_t, kernel/include/hyp/hyp_vcpu.h (frozen contract). */
 #define HYP_EXIT_SHUTDOWN 1
+#define HYP_EXIT_YIELD 4
 
 /* Mirror of struct hyp_vm_status, kernel/abi/linux/sys_a20_bridge.c.  Same
  * shape as user/cmds/core/hyp/hyp_guest.h's copy; this program does not link
@@ -58,7 +59,13 @@ struct hyp_test_status {
 
 /* Where the demo guest lives; the stage-2 root only programs root entries
  * [0, 512 GiB), so this is well inside the limit. */
+#if defined(__aarch64__)
+#define GUEST_BASE 0x40000000ULL
+#elif defined(__x86_64__)
+#define GUEST_BASE 0x100000ULL
+#else
 #define GUEST_BASE 0x80000000ULL
+#endif
 #define GUEST_MEM  (2ULL << 20)
 
 /* qemu-virt's 16550, as the guest spells it: THR/RBR at +0, LSR at +5.  The
@@ -72,6 +79,7 @@ struct hyp_test_status {
 #define GUEST_UART_LSR_OFF  5
 #define GUEST_UART_RBR_OFF  0
 
+#if !defined(__aarch64__) && !defined(__x86_64__)
 /*
  * Minimal guest: print "HYP\n" with four legacy SBI console_putchar calls,
  * then shut down.  Every word below was assembled and disassembled with
@@ -151,6 +159,8 @@ static const uint32_t guest_echo[] = {
     0x00000073u,   /* ecall                -- shutdown */
 };
 
+#endif
+
 /* Bytes the guest is told to expect when it is in echo mode.  Kept next to
  * the encodings so the two cannot drift apart silently. */
 #define GUEST_ECHO_N 3
@@ -164,7 +174,7 @@ static int fail(const char *what, long rc)
 static void usage(const char *prog)
 {
     printf("Usage: %s [echo]\n"
-           "  (no args)  guest prints \"HYP\" over SBI, then shuts down.\n"
+           "  (no args)  guest prints \"HYP\" over hypercalls, then shuts down.\n"
            "  echo       additionally: the guest polls the modelled UART's\n"
            "             LSR, pops %d bytes from RBR and writes each back\n"
            "             out through SBI -- a host-keystrokes-to-guest\n"
@@ -183,6 +193,25 @@ int main(int argc, char **argv)
         do_echo = 1;
     }
 
+#if defined(__aarch64__)
+    static const uint32_t code[] = {
+        0xd2800020, 0xd2800901, 0xd4000002,
+        0xd2800020, 0xd2800b21, 0xd4000002,
+        0xd2800020, 0xd2800a01, 0xd4000002,
+        0xd2800020, 0xd2800141, 0xd4000002,
+        0xd2800100, 0xd4000002,
+    };
+    size_t code_size = sizeof(code);
+#elif defined(__x86_64__)
+    static const uint8_t code[] = {
+        0xb8,1,0,0,0, 0xbb,'H',0,0,0, 0x0f,0x01,0xd9,
+        0xb8,1,0,0,0, 0xbb,'Y',0,0,0, 0x0f,0x01,0xd9,
+        0xb8,1,0,0,0, 0xbb,'P',0,0,0, 0x0f,0x01,0xd9,
+        0xb8,1,0,0,0, 0xbb,'\n',0,0,0, 0x0f,0x01,0xd9,
+        0xb8,8,0,0,0, 0x0f,0x01,0xd9,
+    };
+    size_t code_size = sizeof(code);
+#else
     /* In echo mode the guest is ONE program: the banner followed by the round
      * trip and the shutdown, laid at the same base.  Appending the round trip
      * to the banner's own shutdown would never execute it -- that ecall ends
@@ -213,12 +242,21 @@ int main(int argc, char **argv)
         code[n++] = 0x00000073u;   /* ecall   */
     }
 
+    size_t code_size = n * sizeof(code[0]);
+#endif
+#if defined(__aarch64__) || defined(__x86_64__)
+    if (do_echo) {
+        fprintf(stderr, "hyp_test: echo requires the RISC-V UART guest payload\n");
+        return 2;
+    }
+#endif
+
     long vm = syscall(SYS_hyp_vm_create, GUEST_MEM);
     if (vm < 0)
         return fail("vm_create", vm);
 
     long r = syscall(SYS_hyp_vm_load, vm, (unsigned long)GUEST_BASE,
-                     (unsigned long)code, n * sizeof(code[0]));
+                     (unsigned long)code, code_size);
     if (r < 0) {
         syscall(SYS_hyp_vm_destroy, vm);
         return fail("vm_load", r);
@@ -240,7 +278,11 @@ int main(int argc, char **argv)
         fflush(stdout);
     }
 
-    long reason = syscall(SYS_hyp_vcpu_run, vcpu);
+    long reason;
+    unsigned slices = 0;
+    do {
+        reason = syscall(SYS_hyp_vcpu_run, vcpu);
+    } while (reason == HYP_EXIT_YIELD && ++slices < 128);
 
     /* Read the ingress count BEFORE destroying the VM: the VM owns the ring
      * the counter lives in.  rx_bytes is the number the gate anchors on, and

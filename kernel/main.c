@@ -1,5 +1,6 @@
 #include "core/stdio.h"
 #include "core/bootargs.h"
+#include "hyp/hyp.h"
 #include "drivers/char/uart.h"
 #include "mm/mm.h"
 #include "mm/oom.h"
@@ -229,6 +230,7 @@ void kernel_main(void) {
 
 #if defined(BRINGUP) && !defined(CONFIG_RAMFS_USER)
     printf("[INIT] System ready (bringup, no userspace)\n\n");
+    hyp_boot_selftest();
     smp_selftest_boot();
     bringup_smoke_test();
 #else
@@ -325,6 +327,7 @@ void init_kthread(void) {
     printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
 
     arch_run_bootarg_selftests();
+    hyp_boot_selftest();
 
     /* Generic systems discover optional packages after the root filesystem is
      * available. Embedded deployments link all drivers into the kernel. */
