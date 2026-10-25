@@ -91,6 +91,12 @@ arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
 description = "virtio sound device"
 
 [[driver]]
+name = "sunxi-codec"
+source = "kernel/drvmod/examples/sunxi_audio.c"
+arches = ["aarch64"]
+description = "Allwinner internal codec PCM playback (PINE A64)"
+
+[[driver]]
 name = "vinput"
 source = "kernel/drvmod/examples/vinput.c"
 arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]

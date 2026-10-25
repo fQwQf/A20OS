@@ -16,6 +16,8 @@ DRIVER_CORE_SRCS := \
 # used by optional .a20drv packages and remain in the image.
 # simplefb is the bootstrap exception: it preserves the firmware-owned
 # scanout before a native GPU driver or module-backed display is available.
+# lsdc-boot is the same explicit bootstrap exception for firmware that exposes
+# an active scanout through controller registers rather than a DT/GOP handoff.
 GENERIC_KERNEL_SERVICE_SRCS := \
     $(KERNEL_DIR)/drivers/block/loop.c \
     $(KERNEL_DIR)/drivers/block/udisk.c \
@@ -23,6 +25,7 @@ GENERIC_KERNEL_SERVICE_SRCS := \
     $(KERNEL_DIR)/drivers/char/uart.c \
     $(KERNEL_DIR)/drivers/gpu/framebuffer.c \
     $(KERNEL_DIR)/drivers/gpu/simplefb.c \
+    $(KERNEL_DIR)/drivers/gpu/lsdc_boot.c \
     $(KERNEL_DIR)/drivers/gpu/gpu_core.c \
     $(KERNEL_DIR)/drivers/gpu/drm.c \
     $(KERNEL_DIR)/drivers/audio/audio_core.c \
@@ -50,6 +53,7 @@ EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/gpu/virtio_gpu.c \
     $(KERNEL_DIR)/drivers/gpu/vmsvga.c \
     $(KERNEL_DIR)/drivers/audio/virtio_snd.c \
+    $(KERNEL_DIR)/drivers/audio/sunxi_audio.c \
     $(KERNEL_DIR)/drvmod/examples/hda.c \
     $(KERNEL_DIR)/drvmod/examples/vinput.c \
     $(KERNEL_DIR)/drivers/usb/host/xhci.c \

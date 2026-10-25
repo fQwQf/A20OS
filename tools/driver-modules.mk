@@ -193,6 +193,12 @@ $(USER_BUILD_DIR)/virtio-snd.a20drv: $(DRVMOD_DIR)/virtio_snd.c \
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
+$(USER_BUILD_DIR)/sunxi-codec.a20drv: $(DRVMOD_DIR)/sunxi_audio.c \
+		kernel/drivers/audio/sunxi_audio.c kernel/drivers/audio/sunxi_pcm_ring.h \
+		kernel/include/drivers/audio/sunxi_audio.h kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
 # These settings affect only this driver, not the common userland build ID.
 # Recheck the header on each build, but change its timestamp only when the
 # resolved values change. Switching presets (including back to defaults)

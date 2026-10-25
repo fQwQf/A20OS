@@ -1,4 +1,5 @@
 #include "arch/common/sunxi_mmc0.h"
+#include "arch/common/sunxi_audio.h"
 #include "core/arch.h"
 #include "firmware/devicetree.h"
 #include "boot/context.h"
@@ -99,7 +100,21 @@ void platform_firmware_reboot(void) {
     arch_mb();
     arch_halt();
 }
-static void v3s_configure_devices(void) { sunxi_board_prepare_mmc0(0); }
+static void v3s_configure_devices(void) {
+    sunxi_board_prepare_mmc0(0);
+    /* A bare Zero has no headphone connector. A Dock firmware tree or an
+     * explicit board-wiring property is required before touching the codec. */
+    const boot_context_t *boot = boot_context_get();
+    fw_dt_t tree; fw_node_t root;
+    int connected = boot && boot->fdt &&
+        !fw_dt_init(&tree, boot->fdt, boot->fdt_available) &&
+        !fw_dt_root(&tree, &root) &&
+        (fw_node_match_id(&root, "licheepi,licheepi-zero-dock") == 1 ||
+         fw_node_has_property(&root, "a20,headphone-connected") == 1);
+    int result = sunxi_board_prepare_audio(SUNXI_AUDIO_V3S, connected);
+    if (result < 0)
+        printf("[V3s] analog audio topology unavailable: %d\n", result);
+}
 static const board_config_t v3s_board = {
     .configure_devices = v3s_configure_devices,
     .name = "lichee-pi-zero",

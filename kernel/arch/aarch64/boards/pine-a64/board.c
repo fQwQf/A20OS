@@ -1,4 +1,5 @@
 #include "arch/common/sunxi_mmc0.h"
+#include "arch/common/sunxi_audio.h"
 #include "core/arch.h"
 #include "firmware/devicetree.h"
 #include "boot/context.h"
@@ -13,8 +14,8 @@
 #include "gicv2_device.h"
 #include "smp_boot.h"
 
-/* Initial physical bring-up: UART, GICv2, counter, firmware RAM and PSCI.
- * SD uses the shared sunxi PIO engine; no EMAC/USB/display driver is claimed. */
+/* UART, GICv2, counter, firmware RAM and PSCI. SD uses the shared PIO engine;
+ * HDMI retains firmware scanout and analog PCM uses the internal A64 codec. */
 extern char _start[], _end[];
 static fw_dt_range_t memory_ranges[PFA_MAX_RANGES];
 static size_t memory_count;
@@ -65,7 +66,12 @@ static const timer_ops_t pine_a64_timer = {
     .read_ticks = pine_a64_ticks,
     .ticks_per_sec = pine_a64_frequency,
 };
-static void pine_a64_configure_devices(void) { sunxi_board_prepare_mmc0(1); }
+static void pine_a64_configure_devices(void) {
+    sunxi_board_prepare_mmc0(1);
+    int result = sunxi_board_prepare_audio(SUNXI_AUDIO_A64, 1);
+    if (result < 0)
+        printf("[PINE A64] analog audio topology unavailable: %d\n", result);
+}
 static const board_config_t pine_a64_board = {
     .configure_devices = pine_a64_configure_devices,
     .name = "pine-a64",
