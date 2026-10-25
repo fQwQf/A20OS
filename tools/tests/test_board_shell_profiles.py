@@ -16,7 +16,7 @@ from a20_validate import validate_instance
 
 class BoardShellProfiles(unittest.TestCase):
     def test_physical_media_profiles_select_players_and_matching_firmware(self):
-        for board in ('pine-a64', 'quartz64-zero', 'ls2k0300'):
+        for board in ('pine-a64', 'quartz64-zero', 'ls2k0300', 'licheerv-nano'):
             with self.subTest(board=board):
                 inst = parse_instance(REPO_ROOT / 'instances' / f'{board}-media.toml')
                 self.assertEqual(validate_instance(inst, REPO_ROOT), [])

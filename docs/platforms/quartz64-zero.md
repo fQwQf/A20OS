@@ -62,7 +62,8 @@ fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也�
 | 电源 | TF-A PSCI SMC 重启/关机；实际断电效果需上板确认 |
 | microSD | SDMMC0 `0xfe2b0000`、SPI 98 / INTID 130；DW-MSHC 单线 PIO，固定 3.3 V、最高 12 MHz，SDSC/SDHC/SDXC，发布统一 block class；实机读写未验收 |
 | 可选视频固件 | RK3566 VOP2 → Synopsys DW-HDMI，EDID 模式选择，实际扫描缓冲区以 DT simplefb 交接；交叉构建可验证，Zero 实机显示待验收。 |
-| 未实现 | eMMC、USB、PCIe、以太网、Wi-Fi/BT、PCM 音频、内核 PMIC/DVFS、SMP、ITS/MSI |
+| 耳机音频 | I2S1_M0 → RK817 codec，PL330 DMA1 连续 PCM，48 kHz / stereo / S16_LE；media 固件描述接线与 LDO4 供电，实机未验证 |
+| 未实现 | eMMC、USB、PCIe、以太网、Wi-Fi/BT、HDMI 音频、录音/混音、通用 PMIC/DVFS、SMP、ITS/MSI |
 
 GICv3 是上游 RK356x SoC 设备树确认的硬件事实。GICv3 的 CPU 接口不是 GICv2 的 GICC
 MMIO，不能沿用 PINE A64 的中断控制器。EL3 固件必须先将 UART 和非安全物理定时器
@@ -308,10 +309,47 @@ EDID 兼容性、持续扫描和内核画面尚无 Zero 实机验收结果**。Q
 验收时保留串口日志、`firmware-video/manifest.json`、SD 镜像 manifest 与显示器型号；
 分别确认冷启动首屏、内核接管后持续输出及连续更新画面。
 
-音频有两条不同通路：SoC 内部 `i2s0_8ch` → HDMI 音频发送器，以及原理图第 23 页的
-`I2S1_M0` → RK817 codec → 耳机模拟输出。当前未提供 RK356x I2S、DMA、DW-HDMI
-PCM/时钟恢复或 RK817 codec 内核驱动，视频配置也不启用 `hdmi-sound`。
-因此不能将有 HDMI 画面视为有声音，也不把静态 `simple-audio-card` 节点视为音频驱动。
+## RK817 耳机 PCM
+
+`quartz64-zero-media` 同时包含原生 `rk817-codec` 播放驱动和现有 `audioplay`。
+声音走 `I2S1_M0` → RK817 codec → 模拟耳机接口。HDMI 的 `i2s0_8ch` 通路仍未实现，
+DT 不启用 `hdmi-sound`；有 HDMI 画面不代表 HDMI 线会输出声音。
+
+media 固件还描述 I2S1 的 MCLK/SCLKTX/LRCKTX/SDO0 四根引脚、I2C0 上地址 0x20
+的 RK817、GPIO0_A3 active-low PMIC 中断，以及给 VCCIO1/codec IO 供电的 LDO4=3.3 V。
+驱动严格检查匹配的节点、范围、两条 DMA IRQ 和 MCLK 引用，消费同一套真实枚举设备，
+不创建虚假的 codec MMIO 设备。默认串口固件没有这些完整连接，需使用 media 实例的 prepare/package。
+
+I2S1 以 12.288 MHz MCLK、3.072 MHz BCLK、64-bit frame 运行；输入固定为
+48 kHz 双声道 S16_LE，驱动扩展为两个 32-bit FIFO slot，通过 DMA 连续发送。
+它读取并验证现有 GPLL，使用精确分数分频，不改动共享 GPLL 或 HDMI 的时钟。
+仅验证启动固件已将共享 LDO4 打开为 3.3 V，不自行改压；HDMI 的 LDO2/LDO7 保持原配置。
+codec 内部 DAC、PLL、charge pump 和静音状态由原生驱动管理，失败恢复期间保持静音。
+
+当前独占整个 DMA1 控制器和其 debug manager，使用 channel 0 / event 0；
+任何已有活动 channel、event、manager，或已绑定的 DMA/I2C 驱动都会阻止接管。
+没有通用 PL330 多客户端 broker，不能将另一设备同时分配到 DMA1。DMA0 不在本驱动所有权内。
+PCM 支持背压、drain、stop、欠载/时延错误，停止无法确认时隔离缓冲，避免释放正在被 DMA 读取的内存。
+
+按上一节部署 media 镜像后，通过串口运行：
+
+```sh
+ls /dev
+audioplay --tone 440 --duration 1000
+videoplay --test 320 240 30
+```
+
+PCM WAV 可交给 `audioplay /tmp/clip.wav`；默认 RAM 镜像不包含外部媒体文件。
+无需窗口管理器；播放器、帧缓冲和音频类接口沿用公共子系统。
+`python3 -m unittest tools.tests.test_rk817_audio` 执行生产 I2C/时钟/codec 代码模型和
+PL330 bytecode 解释模型，覆盖连续周期、背压、尾部排空、manager/channel fault 和失败恢复。
+这些测试不模拟板上电气或真正 DMA 握手，耳机持续发声仍无实机验收记录。
+
+协议和寄存器依据：[Linux v6.17 I2S/TDM](https://github.com/torvalds/linux/blob/v6.17/sound/soc/rockchip/rockchip_i2s_tdm.c)、
+[RK817 codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/codecs/rk817_codec.c)、
+[PL330](https://github.com/torvalds/linux/blob/v6.17/drivers/dma/pl330.c)、
+[RK817 DT binding](https://github.com/torvalds/linux/blob/v6.17/Documentation/devicetree/bindings/mfd/rockchip,rk817.yaml)
+及下列 Zero 原理图。A20 内核驱动独立实现；U-Boot 第三方补丁的许可证单独记录。
 
 ## 依据
 

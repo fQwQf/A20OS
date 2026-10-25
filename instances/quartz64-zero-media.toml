@@ -1,5 +1,5 @@
 name = "quartz64-zero-media"
-description = "quartz64-zero HDMI firmware scanout; no PCM audio driver; physical validation pending"
+description = "quartz64-zero HDMI firmware scanout and RK817 headphone PCM; physical validation pending"
 arch = "aarch64"
 board = "quartz64-zero"
 abi = "linux"
@@ -39,7 +39,7 @@ commands = [
     "fatload mmc 0:1 ${fdt_addr_r} rk3566-quartz64-zero.dtb",
     "booti ${loadaddr} - ${fdt_addr_r}",
 ]
-note = """RAM shell with existing videoplay and audioplay. HDMI firmware scanout; no PCM audio driver.
+note = """RAM shell with existing videoplay and audioplay. HDMI scanout and RK817 headphone PCM.
 Physical execution is pending; see docs/platforms/quartz64-zero.md.
 Video/audio devices are exposed only after their hardware probe succeeds.
 Files remain in RAM and disappear at reset. No SSH service is provided.
