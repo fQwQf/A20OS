@@ -128,20 +128,35 @@
 
 ### 虚拟化（hypervisor）
 
-riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户可从 shell 运行 `/hypvm` 指定 guest 内核与参数，也可使用固定参数的 `/hyp_boot`；宿主与 guest 之间的控制台字节通道已接入。`smoke-hyp-shell` 已验证 RAMFS guest 启动到 shell、执行两次交互命令并由 guest 请求关机；这项证据覆盖当前测试镜像的 guest shell，不代表完整发行版或通用 guest 设备模型。Native ABI 表中登记 5 个 hyp 入口：`hyp_vm_create`、`hyp_vm_load`、`hyp_vcpu_create`、`hyp_vcpu_run`、`hyp_vm_destroy`。源码与测试入口是当前状态依据，设计页仍保留实现过程与限制：
+共享 VM/vCPU 核心现有 RV64 H、RV32 H、AArch64 EL2、ARM32 HYP、AMD SVM 与
+Intel VMX 后端，多架构小载荷的双 vCPU 并行运行已验证。Intel VMX 使用 Bochs
+软件 CPU，尚无 Intel 实机验证。LoongArch LVZ 是默认关闭的实验实现，仅通过
+编译与无 LVZ 负控，没有实际 LVZ guest 执行证据。完整 OS guest 的 ELF/FDT
+装载和管理器工作流仍面向 RV64，完整 OS SMP、虚拟 GIC/APIC 和长稳尚未验收。
 
-- [hypervisor/00-design.md](hypervisor/00-design.md)：设计记录——单级内存模型如何复用为 stage-2、riscv64 架构半、vcpu 运行循环的已落地形状、评审发现与遗留
-- [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)：v2 设计——委托表、VS CSR 直通、SBI 面、二级缺页路由、16550/CLINT 设备模型、引导协议、冒烟判据，以及与 Linux KVM 的设计差异
-- [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
-- [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——CPU H 扩展前提、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
-- [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：总体设计提案（未实现）——多架构后端、多 VM/vCPU、`tools/a20` 交互实例、用户态设备模型与 QEMU/KVM 兼容路线，以及分阶段验收标准
-- [status/current/hypervisor-implementation-status.md](status/current/hypervisor-implementation-status.md)：当前代码、静态验证证据和未完成项
-- [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)：命名 QEMU 宿主实例、磁盘隔离和交互控制台（待运行验证）
-- [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：双 guest 管理、控制协议、重连和待运行门禁
+- [hypervisor/README.md](hypervisor/README.md)：文档导航、当前后端与验收边界。
+- [hypervisor/03-usage.md](hypervisor/03-usage.md)：依赖、构建、QEMU / Bochs、
+  bootargs、日志判据、用户态最小 guest、VMM/SMP 调用顺序和故障排查。
+- [hypervisor/08-multiarch-backends.md](hypervisor/08-multiarch-backends.md)：
+  各后端 guest 模式、页表、寄存器与设备边界。
+- [hypervisor/09-smp-validation.md](hypervisor/09-smp-validation.md)：实际运行
+  矩阵、复现命令、SMP 方法及镜像/日志哈希清单。
+- [status/current/hypervisor-implementation-status.md](status/current/hypervisor-implementation-status.md)：
+  当前实现、完整 guest 场景和未完成项。
+- [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)、
+  [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：RV64
+  命名实例、磁盘与控制台隔离、双 guest 管理及控制协议。
+- [hypervisor/00-design.md](hypervisor/00-design.md)、
+  [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)、
+  [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)、
+  [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：基础设计、
+  历史阶段与后续平台目标，以当前使用指南和运行记录为状态依据。
 
-验证入口包括 8 个正向门禁：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-console-p0`、`make smoke-hyp-a20os`、`make smoke-hyp-vm`、`make smoke-hyp-vm-96`、`make smoke-hyp-console` 与 `make smoke-hyp-shell`；以及负向门禁 `make smoke-hyp-no-h`。正向门禁覆盖宿主自检、vcpu、guest 16550 收发、完整 A20OS guest、RAM 窗口配置、控制台入口及交互式 shell，并显式以 `-cpu rv64,h=true` 表达 CPU 前提；负向门禁以 `h=false` 检查内核安全拒绝缺少 H 扩展的 CPU。
-
-当前实现要求 CPU 支持 RISC-V H 和 Sstc，且 firmware 允许虚拟 timer 的 STCE。以下 smoke 记录属于此前实现，本轮静态修改尚未重跑。当前 `hyp_probe()` 在执行 H CSR 探测前先查询启动阶段缓存的 FDT ISA 声明；FDT 如实声明 `h=false` 时，内核会拒绝虚拟化并安全跳过，`smoke-hyp-no-h` 覆盖此路径。固件若错误地声明 H 存在，内核仍无法仅凭 CSR 可读性安全识别不支持 H 的 CPU，后续 H 指令可能触发宿主异常。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，正向门禁可运行；显式 `-cpu rv64,h=true` 用于表达测试前提，不是运行时能力判据。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
+多架构运行入口为 `python3 tools/check_hyp_multiarch.py --arch ARCH --cpus 2
+--build`，VMX 另用 Bochs runner。旧 `smoke-hyp-*` 门禁保留 RV64 完整 guest
+场景覆盖；不能将多架构小载荷通过等同于这些完整 guest 场景全部通过。
+Native 与 Linux 扩展 ABI 共享内核核心，但编号、handle 和权限包装各自独立；
+当前没有 A20 `/dev/kvm` 兼容层。
 
 ## 当前契约与边界记录
 

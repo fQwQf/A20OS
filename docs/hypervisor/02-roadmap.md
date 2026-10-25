@@ -1,5 +1,9 @@
 # hypervisor 路线图
 
+> 2026-10-25：多架构后端与小载荷双 vCPU 并发已落地，详见
+> [后端说明](08-multiarch-backends.md) 和 [运行验证](09-smp-validation.md)。
+> 下文旧使用指南节号属于历史阶段；现行命令见 [使用指南](03-usage.md)。
+
 > 历史设计记录：下文的“当前”“未提交”和单 vCPU 等状态描述属于 v2 设计阶段。
 > 现行实现与实际验证边界以 [实现状态](../status/current/hypervisor-implementation-status.md) 和
 > [guest supervisor](07-guest-supervisor.md) 为准。2026-10-13 已更新拆分后的源码引用；
