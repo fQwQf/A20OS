@@ -39,6 +39,7 @@
 #include "core/progress.h"
 #include "core/random.h"
 #include "proc/proc.h"
+#include "proc/signal.h"
 #include "sys/usercopy.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
@@ -421,6 +422,7 @@ const struct drv_export drv_export_table[] = {
     /* scheduling / wait primitives used by module completion paths */
     { "proc_park_prepare",   (void *)proc_park_prepare },
     { "proc_yield",          (void *)proc_yield },
+    { "signal_task_has_unblocked", (void *)signal_task_has_unblocked },
     { "arch_current_cpu_id", (void *)arch_current_cpu_id },
     { "g_a20_perf_enabled", (void *)&g_a20_perf_enabled },
     { "g_a20_perf_percpu", (void *)g_a20_perf_percpu },
