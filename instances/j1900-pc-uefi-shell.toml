@@ -1,0 +1,29 @@
+# Native 64-bit UEFI with GOP. J1900 is a CPU family; motherboard I/O varies.
+name = "j1900-pc-uefi-shell"
+description = "PC/J1900 native UEFI serial RAM shell with GOP software video and optional HDA audio"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ramfs_media = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[package]
+kind = "uefi-disk"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 38400
+boot_timeout = "180s"
+console_check = ["[RAM] usable", "System ready", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/x86_64-pc/a20os-j1900-shell-uefi.img"]
+media_device = "/dev/sdX"
+log = ".kernel-build/console/j1900-pc-uefi-shell.log"

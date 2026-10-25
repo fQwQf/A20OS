@@ -6,6 +6,10 @@
  * in-probe stream smoke test (CONFIG_HDA_SMOKE_TEST, same code).
  */
 
+#ifdef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
+#include "drivers/core/driver_register.h"
+#include "core/klog.h"
+#else
 #include "drvmod/drvmod.h"
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
@@ -13,6 +17,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
                       0, 1,
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI,
                                            0xFFFFFFFFU, 0xFFFFFFFFU));
+#endif
 #include "drivers/audio/audio_core.h"
 #include "drivers/audio/hda_internal.h"
 #include "drivers/bus/pci_bus.h"
@@ -27,8 +32,10 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "mm/slab.h"
 #include "proc/proc.h"
 
+#ifndef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
 #define kinfo(...) drv_log(__VA_ARGS__)
 #define kerr(...) drv_log(__VA_ARGS__)
+#endif
 
 /*
  * Intel High Definition Audio PCM playback driver
@@ -543,10 +550,12 @@ static int hda_probe(device_t *dev)
         goto fail_nodev;
     uint8_t input_streams = (uint8_t)((gcap >> 8) & 0x0fU);
     uint8_t output_streams = (uint8_t)((gcap >> 12) & 0x0fU);
-    uintptr_t stream = hda->regs + 0x80U + (uintptr_t)input_streams * 0x20U;
-    if (!output_streams || stream + 0x20U > (uintptr_t)bar->end + 1U)
+    size_t stream_offset = 0x80U + (size_t)input_streams * 0x20U;
+    size_t bar_bytes = (size_t)(bar->end - bar->start + 1U);
+    if (!output_streams || stream_offset > bar_bytes ||
+        0x20U > bar_bytes - stream_offset)
         goto fail_nodev;
-    hda->stream = stream;
+    hda->stream = hda->regs + stream_offset;
     writel(0, hda_reg(hda, HDA_REG_INTCTL));
     const char *stage = "reset";
     int ret = hda_reset(hda);
@@ -985,9 +994,13 @@ void hda_codec_disable(hda_controller_t *hda)
     hda->codec_configured = 0;
 }
 
+#ifdef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
+DRIVER_REGISTER(hda_driver);
+#else
 uintptr_t DriverEntry(void)
 {
     int r = drv_driver_register(&hda_driver);
     drv_log("[HDA] driver registered in core: %d\n", r);
     return r == 0 ? 0 : 1;
 }
+#endif

@@ -87,36 +87,24 @@ HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 .PHONY: check-firmware-model
 check-firmware-model:
 	$(PYTHON) -m unittest tools.tests.test_firmware_model \
-	  tools.tests.test_devicetree \
-	  tools.tests.test_acpi_tables \
-	  tools.tests.test_uacpi_namespace \
-	  tools.tests.test_pci_resources \
-	  tools.tests.test_arch_layout \
-	  tools.tests.test_arch_mmio \
-	  tools.tests.test_arch_fdt_memory \
-	  tools.tests.test_board_module_devices \
-	  tools.tests.test_pine_a64_fdt \
-	  tools.tests.test_quartz64_zero_fdt \
-	  tools.tests.test_lichee_pi_zero_fdt \
-	  tools.tests.test_riscv_fdt_memory \
-	  tools.tests.test_ssi_arch_state \
-	  tools.tests.test_elf_load_span \
-	  tools.tests.test_mcu_heap_backend \
-	  tools.tests.test_x86_boot_memory \
-	  tools.tests.test_aarch64_uefi_memory \
-	  tools.tests.test_aarch64_uefi_loader \
-	  tools.tests.test_class_binding \
-	  tools.tests.test_native_bus_lifetime \
-	  tools.tests.test_sunxi_mmc \
-	  tools.tests.test_sdhci \
-	  tools.tests.test_dw_sdio \
-	  tools.tests.test_ls2k0300_liointc \
-	  tools.tests.test_board_shell_profiles \
-	  tools.tests.test_serial_shell_smoke \
-	  tools.tests.test_arm32_poll_abi \
-	  tools.tests.test_fault_ffi_width \
+	  tools.tests.test_devicetree tools.tests.test_acpi_tables \
+	  tools.tests.test_uacpi_namespace tools.tests.test_pci_resources \
+	  tools.tests.test_arch_layout tools.tests.test_arch_mmio \
+	  tools.tests.test_arch_fdt_memory tools.tests.test_board_module_devices \
+	  tools.tests.test_pine_a64_fdt tools.tests.test_quartz64_zero_fdt \
+	  tools.tests.test_lichee_pi_zero_fdt tools.tests.test_riscv_fdt_memory \
+	  tools.tests.test_ssi_arch_state tools.tests.test_elf_load_span \
+	  tools.tests.test_mcu_heap_backend tools.tests.test_x86_boot_memory \
+	  tools.tests.test_aarch64_uefi_memory tools.tests.test_aarch64_uefi_loader \
+	  tools.tests.test_class_binding tools.tests.test_native_bus_lifetime \
+	  tools.tests.test_sunxi_mmc tools.tests.test_sdhci \
+	  tools.tests.test_dw_sdio tools.tests.test_ls2k0300_liointc \
+	  tools.tests.test_board_shell_profiles tools.tests.test_serial_shell_smoke \
+	  tools.tests.test_arm32_poll_abi tools.tests.test_fault_ffi_width \
 	  tools.tests.test_vma_release_ffi_width \
 	  tools.tests.test_boot_framebuffer \
+	  tools.tests.test_videoplay tools.tests.test_media_mount \
+	  tools.tests.test_uefi_esp_image \
 	  tools.tests.test_memcpy_boundaries
 
 # Execute the production common fabric driver for x86-64, AArch64 and RV64.

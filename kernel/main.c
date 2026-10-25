@@ -248,6 +248,9 @@ void kernel_main(void) {
     /* The boot card contains firmware payloads, not the RAM shell's /bin.
      * Keep embedded executables visible; data disks can be mounted explicitly. */
     printf("[INIT] RAMFS userspace: keeping embedded /bin\n");
+#ifdef CONFIG_RAMFS_MEDIA
+    mount_ramfs_media();
+#endif
 #elif defined(BRINGUP)
     printf("[INIT] BRINGUP mode: no block devices\n");
 #else

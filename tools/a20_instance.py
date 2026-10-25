@@ -78,10 +78,12 @@ class KernelCfg:
     storage_read_only: bool | None = None
     external_root: bool | None = None
     ramfs_user: bool | None = None
+    ramfs_media: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class MachineCfg:
+    console: str | None = None
     vm_manager: bool | None = None
     accel: str | None = None
     smp: int | None = None
@@ -322,7 +324,7 @@ _TOP_SPECS: Final = {"name": "str", "description": "str", "arch": "str", "board"
 _SECTION_SPECS: Final = {
     "kernel": {f: ("bool" if f in {
         "bringup", "nommu", "ubsan", "swap", "werror",
-        "cooperative_boot", "storage_read_only", "external_root", "ramfs_user",
+        "cooperative_boot", "storage_read_only", "external_root", "ramfs_user", "ramfs_media",
     } else "str") for f in KernelCfg.__dataclass_fields__},
     "machine": {f: ("int" if f == "smp" else "bool" if f in ("allow_unverified_smp", "gpu_3d", "vm_manager")
                     else "str_list" if f == "extra_qemu" else "str")

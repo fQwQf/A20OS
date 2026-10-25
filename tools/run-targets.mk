@@ -85,10 +85,11 @@ pc-rescue-disk: dev-build
 # under .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT) and that name varies
 # with the build.  Staging it here is what lets instances/vbox-x86_64.toml
 # deploy the disk its own comment describes, rather than a GRUB one.
+PC_UEFI_OUTPUT ?= build/x86_64-pc/a20os-uefi-disk.img
 x86_64-uefi-disk: $(VBOX_X86_64_IMG)
-	@mkdir -p build/x86_64-pc
-	cp -f $(VBOX_X86_64_IMG) build/x86_64-pc/a20os-uefi-disk.img
-	@echo "UEFI disk ready: build/x86_64-pc/a20os-uefi-disk.img"
+	@mkdir -p "$(dir $(PC_UEFI_OUTPUT))"
+	cp -f "$(VBOX_X86_64_IMG)" "$(PC_UEFI_OUTPUT)"
+	@echo "UEFI disk ready: $(PC_UEFI_OUTPUT)"
 
 # A board with no block driver has no medium to write, so its artifact is the
 # kernel plus the commands that hand it to the boot chain already on the board.

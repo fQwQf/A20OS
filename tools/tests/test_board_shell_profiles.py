@@ -15,6 +15,23 @@ from a20_validate import validate_instance
 
 
 class BoardShellProfiles(unittest.TestCase):
+    def test_media_profile_is_explicit_and_requires_ramfs(self):
+        inst = parse_instance(REPO_ROOT / 'instances/j1900-pc-uefi-shell.toml')
+        self.assertEqual(validate_instance(inst, REPO_ROOT), [])
+        self.assertIn('RAMFS_MEDIA=1', derive_make_vars(inst))
+        invalid = replace(inst, kernel=replace(inst.kernel, ramfs_user=False))
+        self.assertTrue(any('ramfs_media requires' in e for e in validate_instance(invalid, REPO_ROOT)))
+
+    def test_media_and_plain_shell_build_directories_are_distinct(self):
+        from a20_make import query_make
+        inst = parse_instance(REPO_ROOT / 'instances/j1900-pc-uefi-shell.toml')
+        plain = replace(inst, kernel=replace(inst.kernel, ramfs_media=False))
+        media_vars = query_make(inst, ['BUILD_DIR', 'CFLAGS'])
+        plain_vars = query_make(plain, ['BUILD_DIR', 'CFLAGS'])
+        self.assertNotEqual(media_vars['BUILD_DIR'], plain_vars['BUILD_DIR'])
+        self.assertIn('-DCONFIG_RAMFS_MEDIA', media_vars['CFLAGS'])
+        self.assertNotIn('-DCONFIG_RAMFS_MEDIA', plain_vars['CFLAGS'])
+
     def test_shell_kernel_and_package_configuration(self):
         for board in ('pine-a64', 'quartz64-zero', 'licheerv-nano', 'ox64', 'ls2k0300'):
             with self.subTest(board=board):

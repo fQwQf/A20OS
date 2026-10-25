@@ -119,7 +119,7 @@ block_dev_t *mount_setup_block_device(int index)
     return rc ? NULL : &handle->block;
 }
 
-#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY)
+#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY) || defined(CONFIG_RAMFS_MEDIA)
 typedef struct {
     block_dev_t block;
     block_dev_t *parent;
@@ -155,68 +155,79 @@ static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *
 static int partition_flush(block_dev_t *block)
 {
     partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
-    if (!part || !part->parent || !part->parent->flush)
-        return -EOPNOTSUPP;
+    if (!part || !part->parent) return -ENODEV;
+    if (part->read_only) return 0;
+    if (!part->parent->flush) return -EOPNOTSUPP;
     return part->parent->flush(part->parent);
-}
-
-/* Expose individual GPT partitions to the filesystem probe.  VF2's boot
- * image has raw SPL/FIT partitions followed by the user FAT32 partition, so
- * looking only at GPT entry zero can never find /bin. */
-static block_dev_t *gpt_partition(block_dev_t *parent, int parent_index,
-                                  int ordinal) {
-    static partition_block_dev_t partitions[16][16];
-    uint8_t entry[128];
-    uint8_t entry_sector[512];
-    uint8_t header[512];
-    if (!parent || parent_index < 0 || parent_index >= 16 || ordinal < 0 ||
-        ordinal >= 16 || !parent->read_sector ||
-        parent->read_sector(parent, 1, header, 1) != 0)
-        return NULL;
-    if (memcmp(header, "EFI PART", 8) != 0)
-        return NULL;
-
-    uint64_t entries_lba = 0;
-    for (int i = 0; i < 8; i++)
-        entries_lba |= (uint64_t)header[72 + i] << (i * 8);
-    uint32_t entry_count = (uint32_t)header[80] | ((uint32_t)header[81] << 8) |
-                           ((uint32_t)header[82] << 16) | ((uint32_t)header[83] << 24);
-    uint32_t entry_size = (uint32_t)header[84] | ((uint32_t)header[85] << 8) |
-                          ((uint32_t)header[86] << 16) | ((uint32_t)header[87] << 24);
-    if (!entries_lba || !entry_count || ordinal >= (int)entry_count ||
-        entry_size < sizeof(entry) || entry_size > 512 ||
-        parent->read_sector(parent, entries_lba +
-                            ((uint64_t)ordinal * entry_size) / 512,
-                            entry_sector, 1) != 0)
-        return NULL;
-    uint32_t entry_offset = ((uint32_t)ordinal * entry_size) % 512;
-    if (entry_offset + sizeof(entry) > sizeof(entry_sector))
-        return NULL;
-    memcpy(entry, entry_sector + entry_offset, sizeof(entry));
-
-    uint64_t first = 0, last = 0;
-    for (int i = 0; i < 8; i++) {
-        first |= (uint64_t)entry[32 + i] << (i * 8);
-        last |= (uint64_t)entry[40 + i] << (i * 8);
-    }
-    if (!first || last < first || last >= parent->capacity)
-        return NULL;
-    partition_block_dev_t *partition = &partitions[parent_index][ordinal];
-    partition->parent = parent;
-    partition->first_lba = first;
-    partition->sectors = last - first + 1;
-    partition->read_only = 0;
-    partition->block.read_sector = partition_read_sector;
-    partition->block.write_sector = partition_write_sector;
-    partition->block.capacity = partition->sectors;
-    partition->block.sector_size = parent->sector_size;
-    partition->block.priv = partition;
-    return &partition->block;
 }
 
 static uint32_t read_le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static uint64_t read_le64(const uint8_t *p) {
+    return read_le32(p) | ((uint64_t)read_le32(p + 4) << 32);
+}
+static uint32_t gpt_crc32(uint32_t crc, const uint8_t *data, size_t bytes) {
+    while (bytes--) {
+        crc ^= *data++;
+        for (unsigned bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1)));
+    }
+    return crc;
+}
+/* Validate bounded GPT metadata before using partition offsets. Unsupported
+ * logical sector geometry is refused before reading into 512-byte buffers.
+ * The complete entry-array CRC prevents a valid header from hiding corrupt
+ * partition LBAs. The boot policy examines the first sixteen entries. */
+static block_dev_t *gpt_partition(block_dev_t *parent, int parent_index,
+                                  int ordinal) {
+    static partition_block_dev_t partitions[16][16];
+    uint8_t header[512], sector[512], entry[128];
+    if (!parent || parent_index < 0 || parent_index >= 16 || ordinal < 0 ||
+        ordinal >= 16 || !parent->read_sector || parent->sector_size != 512 ||
+        parent->capacity < 3 || parent->read_sector(parent, 1, header, 1))
+        return NULL;
+    if (memcmp(header, "EFI PART", 8) || read_le32(header + 8) != 0x10000)
+        return NULL;
+    uint32_t header_bytes = read_le32(header + 12), checksum = read_le32(header + 16);
+    if (header_bytes < 92 || header_bytes > sizeof(header) ||
+        read_le32(header + 20) || read_le64(header + 24) != 1 ||
+        read_le64(header + 32) >= parent->capacity) return NULL;
+    memset(header + 16, 0, 4);
+    if (~gpt_crc32(~0U, header, header_bytes) != checksum) return NULL;
+    uint64_t first_usable = read_le64(header + 40), last_usable = read_le64(header + 48);
+    uint64_t entries_lba = read_le64(header + 72);
+    uint32_t entry_count = read_le32(header + 80), entry_size = read_le32(header + 84);
+    if (!entry_count || entry_count > 4096 || (unsigned)ordinal >= entry_count ||
+        (entry_size != 128 && entry_size != 256 && entry_size != 512) ||
+        first_usable < 3 || first_usable > last_usable || last_usable >= parent->capacity ||
+        entries_lba < 2 || entries_lba >= parent->capacity) return NULL;
+    uint64_t bytes = (uint64_t)entry_count * entry_size, sectors = (bytes + 511) / 512;
+    if (sectors > parent->capacity - entries_lba ||
+        entries_lba + sectors > first_usable) return NULL;
+    uint32_t crc = ~0U;
+    for (uint64_t at = 0; at < sectors; at++) {
+        if (parent->read_sector(parent, entries_lba + at, sector, 1)) return NULL;
+        size_t count = bytes > 512 ? 512 : (size_t)bytes;
+        crc = gpt_crc32(crc, sector, count);
+        bytes -= count;
+    }
+    if (~crc != read_le32(header + 88)) return NULL;
+    uint64_t offset = (uint64_t)(unsigned)ordinal * entry_size;
+    if (parent->read_sector(parent, entries_lba + offset / 512, sector, 1)) return NULL;
+    memcpy(entry, sector + offset % 512, sizeof(entry));
+    int used = 0;
+    for (unsigned i = 0; i < 16; i++) used |= entry[i];
+    uint64_t first = read_le64(entry + 32), last = read_le64(entry + 40);
+    if (!used || first < first_usable || last < first || last > last_usable) return NULL;
+    partition_block_dev_t *part = &partitions[parent_index][ordinal];
+    *part = (partition_block_dev_t){.parent = parent, .first_lba = first,
+                                   .sectors = last - first + 1};
+    part->block = (block_dev_t){.read_sector = partition_read_sector,
+        .write_sector = partition_write_sector, .flush = partition_flush,
+        .capacity = part->sectors, .sector_size = parent->sector_size, .priv = part};
+    return &part->block;
 }
 
 static block_dev_t *first_mbr_linux_partition(block_dev_t *parent,
@@ -311,6 +322,56 @@ static int try_mount_read_only(block_dev_t *dev, const char *mnt,
     }
     printf("[STORAGE-RO] mounted %s read-only at %s\n", fstype, mnt);
     return 0;
+}
+
+/* Only FAT32 volumes are automatic media inputs. A read-only block view
+ * supplements VFS_MOUNT_RDONLY: even a later remount cannot write the card. */
+static int media_fat32(block_dev_t *disk) {
+    uint8_t boot[512];
+    if (!disk || !disk->read_sector || disk->sector_size != 512 ||
+        disk->read_sector(disk, 0, boot, 1) || boot[510] != 0x55 || boot[511] != 0xaa ||
+        boot[11] != 0 || boot[12] != 2 || boot[17] || boot[18] || boot[22] || boot[23])
+        return 0;
+    unsigned cluster = boot[13], fats = boot[16];
+    uint64_t reserved = boot[14] | ((unsigned)boot[15] << 8);
+    uint64_t fat_sectors = read_le32(boot + 36), total = read_le32(boot + 32);
+    if (!cluster || cluster > 128 || (cluster & (cluster - 1)) || !reserved ||
+        !fats || fats > 2 || !fat_sectors || !total || total > disk->capacity)
+        return 0;
+    uint64_t data = reserved + fats * fat_sectors;
+    if (data >= total) return 0;
+    uint64_t clusters = (total - data) / cluster;
+    uint32_t root = read_le32(boot + 44);
+    return clusters >= 65525 && root >= 2 && root - 2 < clusters &&
+           fat_sectors * 128 >= clusters + 2;
+}
+static int mount_media_disk(block_dev_t *disk, int index) {
+    static partition_block_dev_t whole[16];
+    if (!disk || index < 0 || index >= 16 || disk->sector_size != 512) return -ENODEV;
+    partition_block_dev_t *view = &whole[index];
+    *view = (partition_block_dev_t){.parent = disk, .sectors = disk->capacity, .read_only = 1};
+    view->block = (block_dev_t){.read_sector = partition_read_sector,
+        .write_sector = partition_write_sector, .flush = partition_flush,
+        .capacity = disk->capacity, .sector_size = 512, .priv = view};
+    if (media_fat32(&view->block) && !try_mount_read_only(&view->block, "/media", "fat32"))
+        return 0;
+    for (int ordinal = 0; ordinal < 16; ordinal++) {
+        block_dev_t *part = gpt_partition(disk, index, ordinal);
+        if (!part) continue;
+        ((partition_block_dev_t *)part->priv)->read_only = 1;
+        if (media_fat32(part) && !try_mount_read_only(part, "/media", "fat32")) return 0;
+    }
+    return -ENODEV;
+}
+void mount_ramfs_media(void) {
+    for (int index = 0; index < 16; index++) {
+        block_dev_t *disk = mount_setup_block_device(index);
+        if (!mount_media_disk(disk, index)) {
+            printf("[MEDIA] disk %d FAT32 available read-only at /media; embedded /bin retained\n", index);
+            return;
+        }
+    }
+    printf("[MEDIA] no readable FAT32 media; RAM shell continues\n");
 }
 
 void mount_read_only_storage(void) {
@@ -425,5 +486,6 @@ void mount_read_only_storage(void)
 {
     printf("[INIT] read-only storage experiment is not enabled\n");
 }
+void mount_ramfs_media(void) { }
 
 #endif /* !BRINGUP || CONFIG_STORAGE_READ_ONLY */
