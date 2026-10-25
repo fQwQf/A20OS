@@ -48,6 +48,10 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"RAMFS_USER={_b(k.ramfs_user)}")
     if k.ramfs_media is not None:
         v.append(f"RAMFS_MEDIA={_b(k.ramfs_media)}")
+    for name in ("profile", "rx_slots", "tx_slots", "buffer_size", "ring_size"):
+        value = getattr(k, "virtio_console_" + name)
+        if value is not None:
+            v.append(f"VIRTIO_CONSOLE_{name.upper()}={value}")
     if m.accel is not None:
         v.append(f"QEMU_ACCEL={m.accel}")
     if m.console is not None:

@@ -14,6 +14,7 @@ class VportTransmitTest(unittest.TestCase):
         structs = text[text.index('typedef struct {'):text.index('/* One port, one instance')]
         functions = text[text.index('/* Called with the instance lock and tx_lock held.'):text.index('static int vport_class_poll(')]
         prefix = r'''
+#include "drivers/char/virtio_console_config.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -50,7 +51,7 @@ static void proc_yield(void) {}
 #define wmb() __sync_synchronize()
 #define mb() __sync_synchronize()
 '''
-        fixture = prefix + constants + structs + functions + r'''
+        fixture = prefix + constants + '\n#define TEST_BYTES ((VPORT_BUF_SIZE < 512) ? VPORT_BUF_SIZE : 512)\n' + structs + functions + r'''
 static vport_inst_t port;
 static device_t dev={&port};
 static unsigned notifications, consumed;
@@ -76,7 +77,7 @@ static void notify(virtio_transport_t *vt,uint32_t reg,uint32_t queue) {
  }
 }
 static void fill(void) {
- unsigned char data[512];
+ unsigned char data[TEST_BYTES];
  for(unsigned i=0;i<VPORT_TX_SLOTS;i++) {memset(data,i+1,sizeof(data));assert(vport_class_write(&dev,data,sizeof(data))==sizeof(data));}
  assert(port.tx_busy==(1U<<VPORT_TX_SLOTS)-1);
 }
@@ -89,12 +90,12 @@ int main(void) {
  memset(&port,0,sizeof(port));pthread_mutex_init(&port.lock,NULL);pthread_mutex_init(&port.tx_lock,NULL);
  port.tx_mem=calloc(1,sizeof(*port.tx_mem));assert(port.tx_mem);port.tx_dma=0x100000;
  port.vt.write32=notify;port.tx_queue=VPORT_Q_TX;port.valid=1;port.console_output=1;
- fill();unsigned char data[512];memset(data,42,sizeof(data));unsigned before=notifications;
+ fill();unsigned char data[TEST_BYTES];memset(data,42,sizeof(data));unsigned before=notifications;
  assert(vport_class_write(&dev,data,sizeof(data))==-ETIMEDOUT);assert(notifications==before);
- for(unsigned i=0;i<VPORT_TX_SLOTS;i++)assert(!memcmp(snapshot[i],port.tx_mem->buf[i],512));
+ for(unsigned i=0;i<VPORT_TX_SLOTS;i++)assert(!memcmp(snapshot[i],port.tx_mem->buf[i],sizeof(data)));
  interrupted=1;assert(vport_class_write(&dev,data,sizeof(data))==-ERESTARTSYS);interrupted=0;
  assert(notifications==before&&port.tx_busy==(1U<<VPORT_TX_SLOTS)-1);
- complete(3);assert(vport_class_write(&dev,data,sizeof(data))==sizeof(data));assert(owned[3]);
+ complete(VPORT_TX_SLOTS-1);assert(vport_class_write(&dev,data,sizeof(data))==sizeof(data));assert(owned[VPORT_TX_SLOTS-1]);
  for(unsigned i=0;i<VPORT_TX_SLOTS;i++)complete(i);
  assert(!vport_tx_wait(&port,1,0));assert(!port.tx_busy);
  /* Cross the 16-bit avail/used-index rollover, validating every frame. */
@@ -121,9 +122,22 @@ int main(void) {
 '''
         with tempfile.TemporaryDirectory() as tmp:
             source=Path(tmp)/'tx.c';source.write_text(fixture);exe=Path(tmp)/'tx'
-            subprocess.run(['cc','-std=gnu99','-O2','-Wall','-Wextra','-Werror','-pthread',
-                            '-fsanitize=address,undefined',str(source),'-o',str(exe)],check=True)
-            subprocess.run([str(exe)],check=True)
+            for name, config in [
+                ('throughput', []),
+                ('compact', ['-DCONFIG_VIRTIO_CONSOLE_RX_SLOTS=2',
+                             '-DCONFIG_VIRTIO_CONSOLE_TX_SLOTS=2',
+                             '-DCONFIG_VIRTIO_CONSOLE_BUFFER_SIZE=512',
+                             '-DCONFIG_VIRTIO_CONSOLE_RING_SIZE=512']),
+                ('minimum', ['-DCONFIG_VIRTIO_CONSOLE_RX_SLOTS=1',
+                             '-DCONFIG_VIRTIO_CONSOLE_TX_SLOTS=1',
+                             '-DCONFIG_VIRTIO_CONSOLE_BUFFER_SIZE=64',
+                             '-DCONFIG_VIRTIO_CONSOLE_RING_SIZE=128']),
+            ]:
+                with self.subTest(profile=name):
+                    subprocess.run(['cc','-std=gnu99','-O2','-Wall','-Wextra','-Werror','-pthread',
+                                    '-fsanitize=address,undefined',f'-I{ROOT}/kernel/include',
+                                    *config,str(source),'-o',str(exe)],check=True)
+                    subprocess.run([str(exe)],check=True)
 
 
 if __name__ == '__main__':

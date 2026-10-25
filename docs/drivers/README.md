@@ -27,6 +27,7 @@
 | 文档 | 说明 |
 |---|---|
 | [输入子系统](classes/input.md) | `/dev/event0` mux、vinput.a20drv 模块、evdev ioctl 面、双驻留协调 |
+| [Virtio-console 内存配置](classes/virtio-console.md) | 吞吐/小内存预设、队列和缓冲区配置、DMA 内存预算 |
 | [Display/Framebuffer](classes/display.md) | framebuffer 与 GPU 驱动 |
 | [3D 图形加速栈](../graphics/3d-graphics.md) | virtio-gpu virgl 3D：原理、接口、实现与用户态对接 |
 | [音频子系统](classes/audio.md) | 音频类、UAPI 与 Intel HDA PCM |
