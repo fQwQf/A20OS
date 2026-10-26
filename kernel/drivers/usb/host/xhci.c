@@ -691,6 +691,14 @@ static uint8_t xhci_ep_type(uint8_t usb_type, uint8_t addr) {
     }
 }
 
+static void xhci_slot_add_context(uint32_t *slot, uint8_t dci)
+{
+    uint32_t entries = (slot[0] >> 27) & 0x1fU;
+    if (entries < dci)
+        entries = dci;
+    slot[0] = (slot[0] & ~(0x1fU << 27)) | (entries << 27);
+}
+
 /* ------------------------------------------------------------------ */
 /* usb_hcd_ops                                                         */
 /* ------------------------------------------------------------------ */
@@ -909,7 +917,9 @@ xhci_ep_t *ep = NULL;
     control[1] |= 1U << dci;
     xhci_fill_ep_context(xhci, dci, &ep->ring, xhci_ep_type(ep_type, addr),
                          max_packet, xhci_interval(dev->speed, interval));
-    in_slot[0] = (in_slot[0] & ~(0x1fU << 27)) | ((uint32_t)dci << 27);
+    /* Adding a lower-numbered endpoint must not hide existing higher ones:
+     * BOT commonly configures OUT EP2 (DCI4) before IN EP1 (DCI3). */
+    xhci_slot_add_context(in_slot, dci);
     arch_dma_sync_for_device(xhci->input_context, sizeof(xhci->input_context));
     result = xhci_command_locked(xhci, va_to_pa(xhci->input_context), 0,
                                  XHCI_TRB_TYPE(XHCI_TRB_CONFIGURE_ENDPOINT) |
