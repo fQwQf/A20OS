@@ -121,6 +121,7 @@ unsafe extern "C" {
         class: u32,
         level: i32,
     ) -> i32;
+    fn a20_cow_note_child_cache(child: *mut c_void, va: usize, pcp: *mut c_void);
     fn a20_cow_share_snapshot(
         parent: *mut c_void,
         va: usize,
@@ -363,6 +364,9 @@ unsafe fn clone_leaf(
     if r < 0 {
         unsafe { a20_cow_release_ref(&snap) };
         return r;
+    }
+    if !snap.pcp.is_null() {
+        unsafe { a20_cow_note_child_cache(child, va, snap.pcp) };
     }
     unsafe { a20_cow_rss_add(child, size / 4096) };
     0

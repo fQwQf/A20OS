@@ -186,6 +186,8 @@
 # define MM_PT_META_ENTRIES ((ARCH_PT_LEVEL_ENTRIES(0) < 512) ? 512 : ARCH_PT_LEVEL_ENTRIES(0))
 #endif
 
+struct page_cache_page;
+
 typedef struct pt_meta {
     /* MCS lock body.  A queued lock rather than a flat spinlock: a cursor
      * may hold a hierarchy of up to ARCH_PT_LEVELS nodes covering many
@@ -218,6 +220,10 @@ typedef struct pt_meta {
      * every PT page of a purely anonymous address space, so anonymous
      * workloads pay exactly nothing. */
     struct mm_segtab *segtab;
+    /* Canonical cache owner per leaf, allocated on first annotated file page.
+     * The mapping's existing pin owns the pointer; NULL falls back to VMA/PFN
+     * classification, so allocation failure never changes mapping semantics. */
+    struct page_cache_page **cache_owner;
     /* Fork table-sharing state, allocated only while a fork lends this
      * level-0 table to one borrower (see struct pt_share).  NULL on every
      * exclusive table, so the common case pays one pointer field. */
@@ -773,6 +779,11 @@ extern uint64_t mm_seg_full_lvl[8];
  * the two representations without going through a cursor. */
 void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte);
 void mm_pt_note_absent(pte_t *table, int level, int idx);
+/* Cache annotation does not acquire a reference. The caller already owns the
+ * mapping pin. Peek runs under the leaf node lock or on an unpublished table. */
+void mm_pt_cache_note(pt_root_t *pgdir, vaddr_t va,
+                      struct page_cache_page *page);
+struct page_cache_page *mm_pt_cache_peek(pte_t *table, int idx);
 /* Re-derive protection and the COW bit from a PTE a non-cursor writer just
  * rewrote, keeping the class the caller already knows.  Every direct-PTE
  * writer outside pt.c (mprotect, cow, madvise, demote) must call this after

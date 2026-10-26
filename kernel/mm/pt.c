@@ -508,6 +508,9 @@ void mm_pt_copy_table(pte_t *src, pte_t *dst)
     memcpy(dm->cls, sm->cls, sizeof(dm->cls));
     memcpy(dm->safe, sm->safe, sizeof(dm->safe));
     dm->nr_present = sm->nr_present;
+    if (dm->cache_owner)
+        memset(dm->cache_owner, 0,
+               MM_PT_META_ENTRIES * sizeof(*dm->cache_owner));
     if (sm->segtab) {
         mm_segtab_t *st = kcalloc(1, sizeof(*st) +
                                   (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
@@ -566,6 +569,8 @@ void mm_pt_node_fini(pte_t *table)
          * this leaks one segment reference per PT page a file mapping spans --
          * and, worse, keeps a vnode alive that munmap was supposed to drop. */
         segtab_detach_locked(m);
+        if (m->cache_owner)
+            pfa_free(virt_to_pfn(m->cache_owner), 0);
         pfa_free(virt_to_pfn(m), pt_meta_order(sizeof(pt_meta_t)));
     }
 }
@@ -585,6 +590,43 @@ static inline uint8_t *safe_bit(pt_meta_t *m, int idx)
     if (!m || idx < 0 || idx >= MM_PT_META_ENTRIES)
         return NULL;
     return &m->safe[idx >> 3];
+}
+
+static struct page_cache_page **cache_owner_slot(pt_meta_t *m, int idx)
+{
+    if (!m || !m->cache_owner || idx < 0 || idx >= MM_PT_META_ENTRIES)
+        return NULL;
+    return &m->cache_owner[idx];
+}
+
+struct page_cache_page *mm_pt_cache_peek(pte_t *table, int idx)
+{
+    struct page_cache_page **slot = cache_owner_slot(mm_pt_meta(table), idx);
+    return slot ? *slot : NULL;
+}
+
+void mm_pt_cache_note(pt_root_t *pgdir, vaddr_t va,
+                      struct page_cache_page *page)
+{
+    if (!pgdir || !page)
+        return;
+    pte_t *table = mm_pt_leaf_table(pgdir, va);
+    pt_meta_t *m = mm_pt_meta(table);
+    if (!table || !m || m->level != 0)
+        return;
+    int idx = arch_pt_vpn(va, 0);
+    mm_pt_node_lock(table);
+    if (!m->cache_owner) {
+        pfn_t owner_pfn = pfa_alloc_page();
+        if (owner_pfn != PFN_NONE) {
+            m->cache_owner = pfn_to_virt(owner_pfn);
+            memset(m->cache_owner, 0, PAGE_SIZE);
+        }
+    }
+    struct page_cache_page **slot = cache_owner_slot(m, idx);
+    if (slot)
+        *slot = page;
+    mm_pt_node_unlock(table);
 }
 
 /* ------------------------------------------------------------------ *
@@ -763,7 +805,11 @@ static void pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte)
 void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
 {
     (void)level;
-    pt_note_present_meta(mm_pt_meta(table), idx, cls_byte);
+    pt_meta_t *m = mm_pt_meta(table);
+    struct page_cache_page **owner = cache_owner_slot(m, idx);
+    if (owner)
+        *owner = NULL;
+    pt_note_present_meta(m, idx, cls_byte);
 }
 
 /*
@@ -825,6 +871,9 @@ void mm_pt_note_absent(pte_t *table, int level, int idx)
     if (MM_ST_GET_CLASS(*slot) != MM_ST_INVALID && m->nr_present)
         m->nr_present--;
     *slot = 0;
+    struct page_cache_page **owner = cache_owner_slot(m, idx);
+    if (owner)
+        *owner = NULL;
     /* Safety bits describe the class that was just cleared, so they must go
      * with it -- otherwise a reused slot would inherit a stale UFFD or
      * NO_FA flag and the fault path would make the wrong decision. */
@@ -965,6 +1014,9 @@ int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level)
     memcpy(dst->safe, src->safe, sizeof(src->safe));
     dst->nr_present = src->nr_present;
     dst->level = (uint8_t)level;
+    if (dst->cache_owner)
+        memset(dst->cache_owner, 0,
+               MM_PT_META_ENTRIES * sizeof(*dst->cache_owner));
 
     /* Segments are SHARED across the fork boundary, not duplicated: both
      * address spaces describe the same file, so the vnode and the offset

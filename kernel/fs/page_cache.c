@@ -536,6 +536,11 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
         page_cache_state_scan_bridge);
 }
 
+void page_cache_pin(page_cache_page_t *page)
+{
+    a20_pagecache_pin(page, (size_t *)g_bucket_pinned);
+}
+
 void page_cache_put(page_cache_page_t *page)
 {
     (void)a20_pagecache_put(page, (size_t *)g_bucket_pinned);

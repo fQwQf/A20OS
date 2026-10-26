@@ -15,7 +15,8 @@
 
 /* munmap_txn.rs: release transaction for run-batched final-destroy leaves. */
 extern void a20_vma_free_run_release_rust(mm_seg_t *vma, uintptr_t start_va,
-                                          const pfn_t *pfns, size_t count,
+                                          const pfn_t *pfns,
+                                          void *const *owners, size_t count,
                                           int no_frame_ref);
 #include "core/perf.h"
 
@@ -928,6 +929,7 @@ void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
     int runs_ok = !(vma->vm_flags & (VM_SHARED | VM_PFNMAP | VM_VMO |
                                      VM_SYSV_SHM));
     paddr_t run_pa[A20_VMA_FREE_RUN_PAGES];
+    void *run_owner[A20_VMA_FREE_RUN_PAGES];
     for (uint64_t va = vma->start; va < vma->end; ) {
         if (runs_ok) {
             /* The run must never cross the VMA boundary: pages past vma->end
@@ -935,7 +937,9 @@ void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
             uint64_t span = (vma->end - va) / PAGE_SIZE;
             int max = span < A20_VMA_FREE_RUN_PAGES ? (int)span
                                                     : A20_VMA_FREE_RUN_PAGES;
-            int n = max > 0 ? pt_unmap_leaf_run(mm, va, max, run_pa) : 0;
+            int n = max > 0
+                        ? pt_unmap_leaf_run_owned(mm, va, max, run_pa, run_owner)
+                        : 0;
             if (n > 0) {
                 /* Reference release is a transaction in Rust (see
                  * munmap_txn.rs): per-page PFN classification decides cache
@@ -945,7 +949,7 @@ void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
                     run_pfn[i] = phys_to_pfn(run_pa[i]);
                 int no_frame_ref =
                     (vma->vm_flags & (VM_PFNMAP | VM_VMO)) != 0;
-                a20_vma_free_run_release_rust(vma, va, run_pfn, n,
+                a20_vma_free_run_release_rust(vma, va, run_pfn, run_owner, n,
                                               no_frame_ref);
                 va += (uint64_t)n * PAGE_SIZE;
                 continue;

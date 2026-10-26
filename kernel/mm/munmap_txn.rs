@@ -420,25 +420,21 @@ pub unsafe extern "C" fn a20_munmap_rust(mm: *mut c_void, addr: usize, len: usiz
 /// already cleared in the final-destroy sweep (`free_vma_pages`).
 ///
 /// This is the same classification rule the unmap transaction applies per
-/// leaf, restated for a batch whose page-table work is already done: a leaf
-/// whose PFN is the canonical page-cache page of its file index puts the
-/// cache pin plus the temporary lookup (two puts of one object); a plain
-/// anonymous frame puts its frame reference; a VMO/PFNMAP leaf puts nothing
-/// because the mapping never took a frame reference to it.  Classification
-/// is per page by PFN -- never from a VMA-wide flag -- so a private file
-/// mapping that mixes clean cache leaves with anonymous COW copies stays
-/// correct, and the ownership rule lives in exactly one place next to the
-/// unmap transaction instead of being restated in the C sweep loop.
+/// leaf, restated for a batch whose page-table work is already done. An
+/// annotated cache leaf puts only its mapping pin; an unannotated cache leaf
+/// still puts the pin plus the temporary lookup. A plain anonymous frame puts
+/// its frame reference; a VMO/PFNMAP leaf puts nothing. Classification remains
+/// per page, never a VMA-wide assumption, so mixed private mappings stay correct.
 ///
-/// The caller passes the PFNs of the cleared leaves in order together with
-/// `no_frame_ref` (the VMA's no-frame-reference predicate).  The loop has no
-/// failure path -- cache lookups that miss are a classification result, not
-/// an error -- so every page releases exactly the references it holds.
+/// The caller passes the PFNs and optional direct cache owners of the cleared
+/// leaves in order together with `no_frame_ref`. A direct owner releases only
+/// the mapping's pin; an unannotated page keeps the old lookup-plus-pin pair.
 #[no_mangle]
 pub unsafe extern "C" fn a20_vma_free_run_release_rust(
     vma: *mut c_void,
     start_va: usize,
     pfns: *const u32,
+    owners: *const *mut c_void,
     count: usize,
     no_frame_ref: i32,
 ) {
@@ -451,6 +447,14 @@ pub unsafe extern "C" fn a20_vma_free_run_release_rust(
     let mut i = 0usize;
     while i < count {
         let pfn = unsafe { *pfns.add(i) };
+        if !owners.is_null() {
+            let owner = unsafe { *owners.add(i) };
+            if !owner.is_null() {
+                unsafe { page_cache_put(owner) };
+                i += 1;
+                continue;
+            }
+        }
         let va = start_va + i * PAGE_SIZE;
         let page = unsafe { mm_file_cache_mapping_get(vma, va, pfn) };
         if !page.is_null() {
