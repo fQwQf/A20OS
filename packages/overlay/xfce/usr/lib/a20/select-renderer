@@ -5,18 +5,23 @@ import fcntl
 import os
 import struct
 
-renderer = "pixman"
-try:
-    fd = os.open("/dev/dri/renderD128", os.O_RDWR | os.O_CLOEXEC)
+def select_renderer(device="/dev/dri/renderD128"):
+    """Firmware KMS uses pixman; GLES requires negotiated virgl features."""
     try:
-        features = ctypes.c_uint64()
-        # Linux drm_virtgpu_getparam: 3D_FEATURES and pointer to its output.
-        request = struct.pack("=QQ", 1, ctypes.addressof(features))
-        fcntl.ioctl(fd, 0xC0106443, request)
-        if features.value == 1:
-            renderer = "gles2"
-    finally:
-        os.close(fd)
-except OSError:
-    pass
-print(renderer)
+        fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            features = ctypes.c_uint64()
+            # Linux drm_virtgpu_getparam: 3D_FEATURES and pointer to its output.
+            request = struct.pack("=QQ", 1, ctypes.addressof(features))
+            fcntl.ioctl(fd, 0xC0106443, request)
+            if features.value == 1:
+                return "gles2"
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+    return "pixman"
+
+
+if __name__ == "__main__":
+    print(select_renderer())

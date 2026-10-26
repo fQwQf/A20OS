@@ -5,10 +5,12 @@
  * Minimal DRM/KMS device backend (kernel/drivers/gpu/drm.c).
  *
  * Exposes the standard Linux DRM ioctl surface on /dev/dri/card0 for the
- * virtio-gpu / vmsvga drivers, implemented on top of the existing
+ * virtio-gpu / vmsvga and retained firmware displays, on top of the existing
  * gpu_dev_ops_t (get_info/get_fb/flush).  Supports the buffer-object + KMS
  * subset that libdrm-based compositors (wlroots/labwc, weston, kmscube) and
  * Mesa's software/GBM backends need:
+ * Firmware displays remain in their boot mode; KMS dumb-buffer presentation
+ * converts XRGB8888 into the driver's stride and RGB masks.
  *
  *   VERSION, GET_CAP, SET_CLIENT_CAP
  *   GEM_CREATE, GEM_OPEN, GEM_MMAP, GEM_CLOSE, GEM_GET_HANDLE
