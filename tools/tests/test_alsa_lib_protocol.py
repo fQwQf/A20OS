@@ -94,17 +94,90 @@ int snd_pcm_hw_params_set_format(void*,void*,int);
 int snd_pcm_hw_params_set_channels(void*,void*,unsigned);
 int snd_pcm_hw_params_set_rate_near(void*,void*,unsigned*,int*);
 int snd_pcm_hw_params_set_period_size_near(void*,void*,unsigned long*,int*);
+int snd_pcm_hw_params_set_period_time_near(void*,void*,unsigned*,int*);
+int snd_pcm_hw_params_set_periods_min(void*,void*,unsigned*,int*);
+int snd_pcm_hw_params_set_periods_first(void*,void*,unsigned*,int*);
+int snd_pcm_hw_params_set_periods(void*,void*,unsigned,int);
 int snd_pcm_hw_params_set_buffer_size_near(void*,void*,unsigned long*);
+int snd_pcm_hw_params_get_buffer_size(const void*,unsigned long*);
 int snd_pcm_hw_params(void*,void*);
 int snd_pcm_prepare(void*);
 int snd_pcm_start(void*);
 long snd_pcm_avail(void*);
 long snd_pcm_writei(void*,const void*,unsigned long);
-int main(void){void*pcm,*params;int r,dir=0;unsigned rate=48000;unsigned long period=2048,buffer=8192;
+static void constraints_regression(void){
+ struct snd_interval i={.min=16,.max=32,.openmin=1};
+ struct snd_interval limit={.min=16,.max=100,.integer=1};
+ assert(!hw_params_interval_intersect(&i,&limit)&&i.min==17&&i.max==32&&!i.openmin);
+ i=(struct snd_interval){.min=16,.max=32,.openmax=1};
+ assert(!hw_params_interval_intersect(&i,&limit)&&i.min==16&&i.max==31&&!i.openmax);
+ i=(struct snd_interval){.min=16,.max=16,.openmin=1};
+ assert(hw_params_interval_intersect(&i,&limit)==-EINVAL);
+ struct snd_pcm_hw_params h;
+#define ANY() do{memset(&h,0,sizeof(h));hw_params_fill_supported(&h,&backend);}while(0)
+#define PIN(p,v) hw_params_interval_set(&h.intervals[HW_PARAM_INT_IDX(p)],v,v)
+ ANY();PIN(SNDRV_PCM_HW_PARAM_PERIOD_SIZE,2048);PIN(SNDRV_PCM_HW_PARAM_PERIODS,2);
+ assert(!hw_params_refine_constraints(&h,&backend));
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)].min==4096);
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)].max==4096);
+ struct snd_interval*time=&h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_TIME)];
+ assert(time->min==42666&&time->max==42667&&time->openmin&&time->openmax&&!time->integer);
+ PIN(SNDRV_PCM_HW_PARAM_PERIOD_TIME,42667);
+ assert(hw_params_refine_constraints(&h,&backend)==-EINVAL);
+ ANY();PIN(SNDRV_PCM_HW_PARAM_PERIOD_BYTES,4096);
+ assert(!hw_params_refine_constraints(&h,&backend));
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].min==1024);
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].max==1024);
+ ANY();PIN(SNDRV_PCM_HW_PARAM_BUFFER_BYTES,16384);PIN(SNDRV_PCM_HW_PARAM_PERIODS,2);
+ assert(!hw_params_refine_constraints(&h,&backend));
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)].min==4096);
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].min==2048);
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].max==2048);
+ ANY();PIN(SNDRV_PCM_HW_PARAM_PERIOD_SIZE,2048);PIN(SNDRV_PCM_HW_PARAM_PERIODS,3);
+ PIN(SNDRV_PCM_HW_PARAM_BUFFER_SIZE,4096);
+ assert(hw_params_refine_constraints(&h,&backend)==-EINVAL);
+ ANY();PIN(SNDRV_PCM_HW_PARAM_PERIOD_SIZE,2048);PIN(SNDRV_PCM_HW_PARAM_PERIOD_TIME,10000);
+ assert(hw_params_refine_constraints(&h,&backend)==-EINVAL);
+ ANY();PIN(SNDRV_PCM_HW_PARAM_PERIOD_TIME,10000);PIN(SNDRV_PCM_HW_PARAM_PERIODS,2);
+ assert(!hw_params_refine_constraints(&h,&backend));
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].min==480);
+ assert(h.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)].max==960);
+}
+int main(int argc,char**argv){void*pcm,*params;int r,dir=0;unsigned rate=48000,periods=2;unsigned long period=2048,buffer=8192;
+ constraints_regression();
+ int scenario=argc>1?atoi(argv[1]):0;
 #define CALL(x) do{fprintf(stderr,"call %s\n",#x);r=(x);fprintf(stderr,"result %d\n",r);if(r<0)return 1;}while(0)
  CALL(snd_pcm_hw_open(&pcm,"a20",0,0,-1,0,1,0,1));
  CALL(snd_pcm_hw_params_malloc(&params));CALL(snd_pcm_hw_params_any(pcm,params));
- CALL(snd_pcm_hw_params_set_access(pcm,params,3));CALL(snd_pcm_hw_params_set_format(pcm,params,2));CALL(snd_pcm_hw_params_set_channels(pcm,params,2));CALL(snd_pcm_hw_params_set_rate_near(pcm,params,&rate,&dir));CALL(snd_pcm_hw_params_set_period_size_near(pcm,params,&period,&dir));CALL(snd_pcm_hw_params_set_buffer_size_near(pcm,params,&buffer));CALL(snd_pcm_hw_params(pcm,params));CALL(snd_pcm_prepare(pcm));r=snd_pcm_start(pcm);assert(r==-EPIPE);CALL(snd_pcm_avail(pcm));int16_t samples[4096]={0};CALL(snd_pcm_writei(pcm,samples,2048));assert(written==8192);return 0;}
+ CALL(snd_pcm_hw_params_set_access(pcm,params,3));
+ CALL(snd_pcm_hw_params_set_format(pcm,params,2));
+ CALL(snd_pcm_hw_params_set_channels(pcm,params,2));
+ CALL(snd_pcm_hw_params_set_rate_near(pcm,params,&rate,&dir));
+ if(scenario==3){
+  unsigned time=10000;CALL(snd_pcm_hw_params_set_period_time_near(pcm,params,&time,&dir));
+  assert(time==10000);period=480;
+ }else{
+  if(scenario==2)period=1024;
+  CALL(snd_pcm_hw_params_set_period_size_near(pcm,params,&period,&dir));
+ }
+ if(!scenario){
+  CALL(snd_pcm_hw_params_set_buffer_size_near(pcm,params,&buffer));
+ }else if(scenario==2){
+  CALL(snd_pcm_hw_params_set_periods(pcm,params,3,0));
+ }else{
+  /* SDL3 3.2.26 ALSA_pcm_cfg(): no explicit buffer-size request. */
+  CALL(snd_pcm_hw_params_set_periods_min(pcm,params,&periods,NULL));
+  CALL(snd_pcm_hw_params_set_periods_first(pcm,params,&periods,NULL));
+  assert(periods==2);
+ }
+ CALL(snd_pcm_hw_params(pcm,params));
+ CALL(snd_pcm_hw_params_get_buffer_size(params,&buffer));
+ unsigned long expected=!scenario?8192:scenario==2?3072:period*2;
+ fprintf(stderr,"NEGOTIATED period=%lu buffer=%lu expected=%lu\n",period,buffer,expected);
+ assert(buffer==expected);
+ CALL(snd_pcm_prepare(pcm));r=snd_pcm_start(pcm);assert(r==-EPIPE);
+ CALL(snd_pcm_avail(pcm));int16_t samples[4096]={0};
+ CALL(snd_pcm_writei(pcm,samples,2048));assert(written==8192);return 0;}
 
 '''
 
@@ -138,8 +211,11 @@ class AlsaLibProtocol(unittest.TestCase):
             subprocess.run(["cc", "-O0", "-g", "-rdynamic", "-fsanitize=undefined",
                             "-I" + str(stubs), str(probe), "-l:" + library,
                             "-o", str(exe)], check=True, capture_output=True, text=True)
-            result = subprocess.run([str(exe)], timeout=10, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for scenario in range(4):
+                with self.subTest(scenario=scenario):
+                    result = subprocess.run([str(exe), str(scenario)], timeout=10,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_empty_start_is_rejected_without_state_change(self):
         source = (ROOT / "kernel/drivers/audio/alsa.c").read_text()
