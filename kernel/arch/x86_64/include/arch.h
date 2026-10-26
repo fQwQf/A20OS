@@ -3,6 +3,7 @@
 
 #define ARCH_NAME "x86_64"
 
+#define ARCH_FAST_CURRENT 1
 #define ARCH_HAS_VDSO 1
 /* CET shadow stack (map_shadow_stack(2)).  Architectures without it keep
  * Linux's arch-correct -ENOSYS from the shared syscall body. */
