@@ -832,6 +832,90 @@ static void e1000_itr_init(device_t *dev, e1000_device_t *nic)
     kinfo("[E1000] 82574L: interrupt throttle %u us\n", (unsigned)nic->itr_us);
 }
 
+/* Called after drv_priv is published and device causes are masked.  A forced
+ * polling run must not touch MSI/MSI-X capabilities or claim even an INTx
+ * handler: some physical firmware exposes incomplete interrupt routing. */
+static void e1000_setup_interrupts(device_t *dev, e1000_device_t *nic)
+{
+    /* Keep the line free throughout a forced-polling run. */
+    if (e1000_force_poll)
+        kinfo("[E1000] a20.e1000.poll=1: skipping vector setup\n");
+    /* Prefer message-signalled interrupts: the table entries are programmed
+     * and left masked, so nothing can arrive before the handlers below exist.
+     * A device that cannot describe its table keeps the shared INTx line, and
+     * one that does but whose vectors cannot be reserved also falls back. */
+    int msix = e1000_force_poll ? -1 : e1000_msix_setup(dev, nic);
+    if (msix == 0) {
+        /* The cause-to-entry mapping must exist before the function is enabled;
+         * the entries themselves stay masked until the handlers below are in
+         * place. */
+        e1000_msix_program_ivar(nic);
+        for (int i = 0; i < nic->msix_vectors; i++) {
+            uint32_t line = (uint32_t)(nic->msix_base + i);
+            if (request_irq(line, e1000_irq_handler, 0, dev) != 0) {
+                kinfo("[E1000] vector %d not reservable; using legacy "
+                      "interrupts\n", line);
+                /* Earlier table entries already have handlers. Remove them
+                 * before tearing down the vector allocation and falling back. */
+                for (int installed = 0; installed < i; installed++)
+                    free_irq((uint32_t)(nic->msix_base + installed), dev);
+                e1000_msix_teardown(dev, nic);
+                msix = -1;
+                break;
+            }
+        }
+        if (msix == 0) {
+            /* Both handlers are installed, so the entries may now be armed and
+             * the function enabled. */
+            e1000_msix_commit(dev, nic);
+            nic->irq = nic->msix_base;
+            nic->irq_registered = 1;
+        }
+    }
+    /* MSI is the next step down from MSI-X, not a replacement for it: one
+     * message cannot separate RX from TX, so it is only used when the table
+     * could not be armed or one of its handlers could not be registered. */
+    if (!e1000_force_poll && msix != 0) {
+        int vec = irq_alloc_vectors(1);
+        if (vec >= 0) {
+            if (pci_msi_enable(dev, (uint32_t)vec) == 0) {
+                if (request_irq((uint32_t)vec, e1000_irq_handler, 0,
+                                dev) == 0) {
+                    nic->irq = vec;
+                    nic->irq_registered = 1;
+                    nic->msi = 1;
+                } else {
+                    pci_msi_disable(dev);
+                    irq_free_vectors((uint32_t)vec, 1);
+                }
+            } else {
+                irq_free_vectors((uint32_t)vec, 1);
+            }
+        }
+    }
+    if (!e1000_force_poll && msix != 0 && !nic->irq_registered) {
+        int irq = pci_intx_irq(dev);
+        if (irq >= 0) {
+            if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
+                            dev) == 0) {
+                nic->irq = irq;
+                nic->irq_registered = 1;
+            } else {
+                kinfo("[E1000] IRQ %d registration failed; using polling\n",
+                      irq);
+            }
+        }
+    }
+    /* Unmask device causes only with a handler in place.  Every path above
+     * that failed to install one has already left IMS fully masked by the
+     * IMC write at the top of probe, so this is the single place a cause is
+     * ever enabled. */
+    nic->poll_only = e1000_force_poll || !nic->irq_registered;
+    if (!nic->poll_only)
+        e1000_write(nic, E1000_IMS,
+                    nic->msix_vectors > 0 ? E1000_IMS_MSIX : E1000_IMS_USED);
+}
+
 static int e1000_probe(device_t *dev)
 {
     if (pci_enable_and_assign_bars(dev) < 0)
@@ -965,82 +1049,8 @@ static int e1000_probe(device_t *dev)
     /* Throttle before the causes are unmasked below, so the first interrupt
      * this device can raise is already governed by ITR. */
     e1000_itr_init(dev, nic);
-    /* Read once, before any vector is claimed: a20.e1000.poll=1 has to keep
-     * the line free so the forced-polling run cannot be perturbed by an
-     * interrupt that would not have been there. */
     e1000_poll_mode_init();
-    if (e1000_force_poll)
-        kinfo("[E1000] a20.e1000.poll=1: skipping vector setup\n");
-    /* Prefer message-signalled interrupts: the table entries are programmed
-     * and left masked, so nothing can arrive before the handlers below exist.
-     * A device that cannot describe its table keeps the shared INTx line, and
-     * one that does but whose vectors cannot be reserved also falls back. */
-    int msix = e1000_force_poll ? -1 : e1000_msix_setup(dev, nic);
-    if (msix == 0) {
-        /* The cause-to-entry mapping must exist before the function is enabled;
-         * the entries themselves stay masked until the handlers below are in
-         * place. */
-        e1000_msix_program_ivar(nic);
-        for (int i = 0; i < nic->msix_vectors; i++) {
-            uint32_t line = (uint32_t)(nic->msix_base + i);
-            if (request_irq(line, e1000_irq_handler, 0, dev) != 0) {
-                kinfo("[E1000] vector %d not reservable; using legacy "
-                      "interrupts\n", line);
-                e1000_msix_teardown(dev, nic);
-                msix = -1;
-                break;
-            }
-        }
-        if (msix == 0) {
-            /* Both handlers are installed, so the entries may now be armed and
-             * the function enabled. */
-            e1000_msix_commit(dev, nic);
-            nic->irq = nic->msix_base;
-            nic->irq_registered = 1;
-        }
-    }
-    /* MSI is the next step down from MSI-X, not a replacement for it: one
-     * message cannot separate RX from TX, so it is only used when the table
-     * could not be armed or one of its handlers could not be registered. */
-    if (msix != 0) {
-        int vec = irq_alloc_vectors(1);
-        if (vec >= 0) {
-            if (pci_msi_enable(dev, (uint32_t)vec) == 0) {
-                if (request_irq((uint32_t)vec, e1000_irq_handler, 0,
-                                dev) == 0) {
-                    nic->irq = vec;
-                    nic->irq_registered = 1;
-                    nic->msi = 1;
-                } else {
-                    pci_msi_disable(dev);
-                    irq_free_vectors((uint32_t)vec, 1);
-                }
-            } else {
-                irq_free_vectors((uint32_t)vec, 1);
-            }
-        }
-    }
-    if (msix != 0 && !nic->irq_registered) {
-        int irq = pci_intx_irq(dev);
-        if (irq >= 0) {
-            if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
-                            dev) == 0) {
-                nic->irq = irq;
-                nic->irq_registered = 1;
-            } else {
-                kinfo("[E1000] IRQ %d registration failed; using polling\n",
-                      irq);
-            }
-        }
-    }
-    /* Unmask device causes only with a handler in place.  Every path above
-     * that failed to install one has already left IMS fully masked by the
-     * IMC write at the top of probe, so this is the single place a cause is
-     * ever enabled. */
-    nic->poll_only = e1000_force_poll || !nic->irq_registered;
-    if (!nic->poll_only)
-        e1000_write(nic, E1000_IMS,
-                    nic->msix_vectors > 0 ? E1000_IMS_MSIX : E1000_IMS_USED);
+    e1000_setup_interrupts(dev, nic);
     /* STATUS[1] is the read-only link status: 1 = link up. */
     kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d%s%s ring=%u itr=%uus\n",
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],

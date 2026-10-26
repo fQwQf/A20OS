@@ -18,6 +18,10 @@
 #include "core/errno.h"
 #include "drivers/input/evdev.h"
 
+/* IRQ-safe readiness notification; fanout/draining remains in evdev process
+ * context and must never acquire the mux's sleeping mutex from this driver. */
+extern void input_mux_wake(void);
+
 #define USB_HID_REPORT_MAX  64U
 #define USB_HID_EVENTS      64U
 
@@ -96,7 +100,7 @@ static void usb_hid_emit(usb_hid_dev_t *h, uint16_t type, uint16_t code,
     e->code = code;
     e->value = value;
     h->head = next;
-    if (type == EV_KEY && !h->key_logged) {
+    if (type == EV_KEY && !h->key_logged && !h->key_pending) {
         h->first_key_code = code;
         h->first_key_value = value;
         h->key_pending = 1;
@@ -208,6 +212,7 @@ static void usb_hid_complete(usb_urb_t *urb)
         return;
     uint64_t flags = spin_lock_irqsave(&h->lock);
     int running = h->running;
+    uint16_t old_head = h->head;
     if (running && urb->status == 0) {
         if (h->kind == USB_HID_KBD)
             usb_hid_parse_keyboard(h);
@@ -219,9 +224,16 @@ static void usb_hid_complete(usb_urb_t *urb)
     uint16_t code = h->first_key_code;
     int32_t value = h->first_key_value;
     int announce = h->key_pending;
-    h->key_logged = 1;
+    int queued = h->head != old_head;
+    if (announce)
+        h->key_logged = 1;
     h->key_pending = 0;
     spin_unlock_irqrestore(&h->lock, flags);
+    /* Producers publish their queue before waking read/poll/epoll waiters.
+     * Without this edge libinput can sleep forever after its initial probe:
+     * an xHCI IRQ alone never wakes the evdev readiness source. */
+    if (queued)
+        input_mux_wake();
     if (announce)
         kinfo("[USB-HID] key event: code=%u value=%d\n", code, value);
     if (!running)
