@@ -944,6 +944,8 @@ pte_t *pt_clone(pt_root_t *src_pgdir) {
 
 static void pt_destroy_user_recursive(pte_t *table, int level) {
     if (!table) return;
+    pfn_t put_batch[64];
+    size_t put_count = 0;
     /* Only user half (0..255) lives at root; kernel half is shared
      * and must not be freed.  Lower levels may span all 512 entries. */
     int limit = (level == ARCH_PT_ROOT_LEVEL) ?
@@ -952,6 +954,10 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
         pte_t pte = table[i];
 #ifdef CONFIG_SWAP
         if (pte_is_swap(pte)) {
+            if (put_count) {
+                frame_put_many(put_batch, put_count);
+                put_count = 0;
+            }
             swap_free(pte_to_swp_entry(pte));
             table[i] = 0;
             continue;
@@ -964,9 +970,17 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
         if (is_leaf) {
             /* Ownership follows the user address range, including protected
              * leaves whose user-access permission is temporarily cleared. */
-            frame_put(phys_to_pfn(arch_pte_addr(pte)));
+            put_batch[put_count++] = phys_to_pfn(arch_pte_addr(pte));
             table[i] = 0;
+            if (put_count == 64) {
+                frame_put_many(put_batch, put_count);
+                put_count = 0;
+            }
         } else {
+            if (put_count) {
+                frame_put_many(put_batch, put_count);
+                put_count = 0;
+            }
             paddr_t next_pa = arch_pte_addr(pte);
             pfn_t next_pfn = phys_to_pfn(next_pa);
             if ((next_pa & (PAGE_SIZE - 1)) || !pfn_valid(next_pfn)) {
@@ -982,6 +996,8 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
             mm_pt_note_absent(table, level, i);
         }
     }
+    if (put_count)
+        frame_put_many(put_batch, put_count);
 }
 
 void pt_destroy_user(pt_root_t *pgdir) {
