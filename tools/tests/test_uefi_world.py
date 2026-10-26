@@ -119,6 +119,26 @@ class UefiWorldOracle(unittest.TestCase):
             self.assertNotIn('stdio', command)
         self.assertEqual(smoke.drive_path(Path('/media/my,image.img')), '/media/my,,image.img')
 
+    def test_usb_boot_disk_shares_xhci_with_hid_and_keeps_snapshot(self):
+        command = smoke.qemu_command('qemu-system-x86_64', Path('/source/world.img'),
+            Path('/source/code.fd'), Path('/temporary/vars.fd'), Path('/temporary/qmp.sock'),
+            Path('/output/serial.log'), 'tcg', 'usb')
+        storage = 'usb-storage,drive=world,bus=xhci.0,bootindex=1'
+        self.assertIn(storage, command)
+        self.assertLess(command.index('qemu-xhci,id=xhci'), command.index(storage))
+        self.assertIn('usb-kbd,bus=xhci.0', command)
+        self.assertIn('usb-mouse,bus=xhci.0', command)
+        self.assertIn('if=none,id=world,format=raw,snapshot=on,file=/source/world.img', command)
+        self.assertNotIn('ide-hd,drive=world,bus=ide.0', command)
+        self.assertNotIn('virtio', ' '.join(command))
+        # The executed-output oracle applies equally to a distro on USB.
+        smoke.validate_output('[USB-STORAGE] ready\r\n'+COMPLETE, 0, MARKER)
+
+    def test_invalid_storage_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            smoke.qemu_command('qemu', Path('/image'), Path('/code'), Path('/vars'),
+                               Path('/qmp'), Path('/serial'), 'tcg', 'unknown')
+
     def test_usb_qcodes_cover_exact_command_and_shift_redirection(self):
         command = 'echo '+MARKER+' >/dev/console'
         for char in command:

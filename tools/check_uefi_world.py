@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a packaged UEFI world through GOP, AHCI and an xHCI USB terminal.
+"""Verify a packaged UEFI world through GOP, AHCI/USB storage and a USB terminal.
 
 No virtio GPU, serial command injection, shared build or physical board is used.
 The OVMF fixture fixes X-PciMmio64Mb=0: this verifies the current below-4-GiB
@@ -146,8 +146,13 @@ def drive_path(path: Path) -> str:
 
 
 def qemu_command(qemu: str, image: Path, code: Path, variables: Path,
-                 qmp_path: Path, serial: Path, acceleration: str) -> list[str]:
+                 qmp_path: Path, serial: Path, acceleration: str,
+                 storage: str = 'ahci') -> list[str]:
+    if storage not in ('ahci', 'usb'):
+        raise ValueError(f'unsupported storage fixture: {storage}')
     cpu = ('host' if acceleration == 'kvm' else 'max') + ',pdpe1gb=off,avx=off,avx2=off'
+    disk_device = ('usb-storage,drive=world,bus=xhci.0,bootindex=1'
+                   if storage == 'usb' else 'ide-hd,drive=world,bus=ide.0')
     return [qemu, '-machine', 'q35', '-accel', acceleration, '-cpu', cpu,
             '-m', '2048M', '-smp', '1', '-display', 'none',
             '-serial', f'file:{serial}', '-monitor', 'none', '-no-reboot', '-nic', 'none',
@@ -155,8 +160,8 @@ def qemu_command(qemu: str, image: Path, code: Path, variables: Path,
             '-drive', f'if=pflash,format=raw,readonly=on,file={drive_path(code)}',
             '-drive', f'if=pflash,format=raw,file={drive_path(variables)}',
             '-drive', f'if=none,id=world,format=raw,snapshot=on,file={drive_path(image)}',
-            '-device', 'ide-hd,drive=world,bus=ide.0',
-            '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0',
+            '-device', 'qemu-xhci,id=xhci', '-device', disk_device,
+            '-device', 'usb-kbd,bus=xhci.0',
             '-device', 'usb-mouse,bus=xhci.0', '-device', 'intel-hda', '-device', 'hda-duplex',
             '-qmp', f'unix:{qmp_path},server=on,wait=off']
 
@@ -232,6 +237,8 @@ def main(argv=None) -> int:
     parser.add_argument('--image', type=Path, required=True)
     parser.add_argument('--output', type=Path, default=ROOT / '.kernel-build/smoke/uefi-world')
     parser.add_argument('--timeout', type=float, default=300)
+    parser.add_argument('--storage', choices=('ahci', 'usb'), default='ahci',
+                        help='guest disk transport; usb tests an xHCI USB boot disk')
     parser.add_argument('--code', type=Path, default=Path(os.environ.get('OVMF_CODE', '/usr/share/OVMF/OVMF_CODE_4M.fd')))
     parser.add_argument('--vars', type=Path, default=Path(os.environ.get('OVMF_VARS', '/usr/share/OVMF/OVMF_VARS_4M.fd')))
     args = parser.parse_args(argv)
@@ -262,7 +269,8 @@ def main(argv=None) -> int:
     marker = 'a20-uefi-world-' + secrets.token_hex(8)
     result = {'passed': False, 'image': str(args.image), 'marker': marker,
               'acceleration': acceleration, 'ram_mb': 2048, 'cpus': 1,
-              'storage': 'AHCI', 'display': 'GOP', 'keyboard': 'xHCI USB',
+              'storage': 'USB' if args.storage == 'usb' else 'AHCI',
+              'display': 'GOP', 'keyboard': 'xHCI USB',
               'key_hold_ms': KEY_HOLD_MS, 'key_interval_ms': int(KEY_INTERVAL_SECONDS * 1000),
               'ovmf_mmio64_mb': 0, 'image_sha256_before': image_hash,
               'vars_sha256_before': vars_hash}
@@ -274,7 +282,7 @@ def main(argv=None) -> int:
             variables, qmp_path = stage / 'vars.fd', stage / 'qmp.sock'
             shutil.copyfile(args.vars, variables)
             command = qemu_command(qemu, args.image, args.code, variables,
-                                   qmp_path, serial, acceleration)
+                                   qmp_path, serial, acceleration, args.storage)
             (args.output / 'command.json').write_text(json.dumps(command, indent=2) + '\n')
             with qemu_log.open('wb') as log:
                 try:
