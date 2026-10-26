@@ -91,6 +91,7 @@ check-firmware-model:
 	  tools.tests.test_uacpi_namespace tools.tests.test_pci_resources \
 	  tools.tests.test_e1000_interrupt_setup tools.tests.test_ahci_pci_policy \
 	  tools.tests.test_xhci_firmware_policy tools.tests.test_usb_hid_readiness \
+	  tools.tests.test_xhci_endpoint_types \
 	  tools.tests.test_alsa_lib_protocol \
 	  tools.tests.test_hda_pcm_readiness \
 	  tools.tests.test_arch_layout tools.tests.test_arch_mmio \

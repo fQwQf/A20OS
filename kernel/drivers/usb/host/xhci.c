@@ -664,29 +664,28 @@ static void xhci_fill_ep_context(xhci_controller_t *xhci, uint8_t dci,
     ep[2] = (uint32_t)dequeue;
     ep[3] = (uint32_t)(dequeue >> 32);
     ep[4] = max_packet;
-    /* High-bandwidth burst size (3.3.5): only an interrupt or isochronous IN
-     * endpoint can run more than one transaction per microframe. */
-    if (ep_type == 4U || ep_type == 6U)
+    /* Max ESIT Payload applies to periodic endpoints, in either direction.
+     * Bulk and control endpoints do not have a service interval. */
+    if (ep_type == 1U || ep_type == 3U || ep_type == 5U || ep_type == 7U)
         ep[4] |= (uint32_t)max_packet << 16;
 }
 
 /* bmAttributes' transfer type and the endpoint context's EP Type field do not
  * use the same encoding.  bmAttributes says "interrupt" = 3 and says nothing
  * about direction; the endpoint context spells the same endpoint
- * "interrupt IN" = 6 (3.3.5).  Writing the bmAttributes number straight into
- * EP Type programs an OUT endpoint, and the controller then issues OUT tokens
- * to an IN endpoint -- the device answers with a STALL, and a STALL leaves the
- * endpoint halted in the controller, so the interface is dead from then on. */
+ * "interrupt IN" = 7 (xHCI 1.2 table 6-9). Values 1..3 are OUT, 4 is control,
+ * and 5..7 are IN. Programming bulk IN as 5 makes it isochronous, so the
+ * first BOT data/CSW transfer cannot complete as a bulk transaction. */
 static uint8_t xhci_ep_type(uint8_t usb_type, uint8_t addr) {
     switch (usb_type) {
     case USB_XFER_CONTROL:
-        return 0U;
+        return 4U;
     case USB_XFER_ISOC:
-        return (addr & USB_DIR_IN) ? 4U : 1U;
+        return (addr & USB_DIR_IN) ? 5U : 1U;
     case USB_XFER_BULK:
-        return (addr & USB_DIR_IN) ? 5U : 2U;
+        return (addr & USB_DIR_IN) ? 6U : 2U;
     case USB_XFER_INTERRUPT:
-        return (addr & USB_DIR_IN) ? 6U : 3U;
+        return (addr & USB_DIR_IN) ? 7U : 3U;
     default:
         return 0U;
     }
@@ -950,15 +949,11 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
     }
     memset(urb->buf, 0, urb->len);
     arch_dma_sync_for_device(urb->buf, urb->len);
-    /* TRB bit 16 is the transfer direction and the controller reads it as the
-     * token PID, not as advice: a NORMAL TRB without it is a host-to-device
-     * transfer, so an IN endpoint receives an OUT token and the device stalls
-     * the endpoint.  The result is a stream of Stall Error transfer events that
-     * look exactly like a dead interrupt path from the driver's side. */
+    /* A Normal TRB gets its direction from the endpoint context. Bit 16 is
+     * reserved here; DIR belongs to a control Data Stage TRB only. */
     xhci_ring_enqueue(&ep->ring, va_to_pa(urb->buf), (uint32_t)urb->len,
                       XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP |
-                      XHCI_TRB_IOC |
-                      ((addr & USB_DIR_IN) ? XHCI_TRB_DIR_IN : 0U));
+                      XHCI_TRB_IOC);
     ep->pending = urb;
     wmb();
     xhci_write32(xhci->doorbell, (uint32_t)urb->dev->slot * 4U, dci);
@@ -999,15 +994,11 @@ static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
     }
 
     arch_dma_sync_for_device(urb->buf, urb->len);
-    /* Same direction bit as the interrupt path above: the BOT data-in and the
-     * CSW are both IN transfers, and without bit 16 they are sent as OUT
-     * tokens and stall. */
+    /* Direction is already encoded in this bulk endpoint's EP Type. */
     uint64_t pointer = xhci_ring_enqueue(&ep->ring, va_to_pa(urb->buf),
                                          (uint32_t)urb->len,
                                          XHCI_TRB_TYPE(XHCI_TRB_NORMAL) |
-                                         XHCI_TRB_ISP | XHCI_TRB_IOC |
-                                         ((addr & USB_DIR_IN) ?
-                                          XHCI_TRB_DIR_IN : 0U));
+                                         XHCI_TRB_ISP | XHCI_TRB_IOC);
     wmb();
     xhci_write32(xhci->doorbell, (uint32_t)urb->dev->slot * 4U, dci);
     spin_unlock_irqrestore(&xhci->lock, flags);
