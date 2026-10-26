@@ -334,3 +334,11 @@
 - 最终干净源码 ELF 为 `build/performance/fork-final.elf`（sha256 `50aec13a1e1bfe2ebce80a14cc3b5a889ac60b59f5e2c7734b24e80beb17e5db`），不含临时 `MMDESTROY` 诊断。Linux ABI 最终 15 项×3 回归 45/45 通过；Native ABI 通过 8 次真实 `task_clone(A20_CLONE_COW_VM)` + exit/task_wait 和 1024 个私有字隔离检查。
 - 最终交替微基准（`micro-fork-final-{base,fast}{1,2,3}-2026-10-26`）：touched fork 1062.26→825.53µs（-22.29%），空进程 fork 130.02→135.92µs（+4.54%），稀疏 fork -0.58%；空进程第三轮 fast 173.11µs、稀疏第三轮 198.27µs 为明显离群值，完整保留而不选择性删除。getpid/yield/futex 改善与第四轮基本持平。
 - 最终原始基线/累计版本各五轮 APK（`apk-fork-final-base-2026-10-26-r5` / `apk-fork-final-2026-10-26-r5`）：fork 837.69→898.73 ops/s（+7.29%，最终为同轮 Linux 的 21.41%）、threads-2 6179.83→7338.25 ev/s（+18.75%，61.64%）、switch 316914.35→350859.88 ops/s（+10.71%，Linux 侧波动较大）。60/60 样本有效、guest 计数器审计全 0、输入哈希不变。
+
+## 2026-10-27 北京时间（第六轮：cache owner 与最终销毁）
+
+- `9bfb4212` 采用 16 页批克隆窗口；`d805270b` 为 PTE 记录直接 cache owner，COW 快照和释放可绕过 VMA/PFN 查询；`05278bba` 合并私有文件页到最终页表销毁，并保留 VMA 生命周期到回退结束；`7c589a53` 禁止锁内 owner 数组分配触发回收；`2432a186` 在子页表映射时内联标注，省去第二次根遍历；`940685ca` 将最终销毁的元数据查询提升到页表页粒度，并跳过匿名 clone 的 cache 查询。均为双 ABI 公共实现。
+- 独立三轮 APK fork：cache-owner +1.71%，统一销毁 +7.82%，内联标注 +4.00%。FD 临时数组/计数候选 -4.89%，64 页窗口 -0.89%，均不提交；FD 补丁保存为 `build/performance/fd-sparse-rejected.patch`。
+- 初版统一销毁让匿名页每叶重复查询元数据，touched fork 回退 19.66%；经 batch16/cache/unified/inline 消融定位并修复。最终三轮微基准：空进程 fork 127.10→122.53µs（-3.59%）、稀疏 123.99→120.19µs（-3.07%）、touched 829.82→851.28µs（+2.59%，不宣称改善）；getpid/yield/futex/mutex 中位变化均在 ±1.5% 内。
+- 最终 ELF `build/performance/fork-mm-final.elf`（sha256 `9878004a6ca57a624596098bf7ea8f4e764452786a104b681d80d166db5a4ca9`）。真实 C/Rust host 测试通过，Linux ABI 15 项×3 共 45/45 通过，Native ABI 8 次 COW clone/exit/wait 与 1024 字隔离检查通过。证据 `fork-mm-final-regression-full15x3-v2-2026-10-27`、`native-lifecycle-final-v2-2026-10-27`、`micro-fork-mm-v2-{base,fast}{1,2,3}-2026-10-27`。
+- 最终原始基线/累计版本各五轮完整 APK（`apk-fork-mm-final-base-2026-10-27-r5` / `apk-fork-mm-final-2026-10-27-r5`）：fork 885.55→1282.33 ops/s（+44.81%，为同轮 Linux 的 27.06%）、threads-2 +19.94%、switch +23.23%、memory-write +2.61%；cpu-1/cpu-2/SHA256 基本持平。合计 140/140 样本有效、guest 计数器审计全 0、输入哈希不变。fork 与 Linux 的差距约 3.70×，switch 不把波动下的比率当固定优势。
