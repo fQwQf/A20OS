@@ -805,6 +805,8 @@ void signal_deliver_user(trap_context_t *ctx) {
         __atomic_load_n(&ss->pending, __ATOMIC_ACQUIRE);
     uint64_t thread_pending =
         __atomic_load_n(&t->thread_pending, __ATOMIC_ACQUIRE);
+    if (!(process_pending | thread_pending))
+        return;
     if (a20_signal_deliverable_mask(process_pending, thread_pending,
                                     t->sig_blocked) == 0)
         return;
