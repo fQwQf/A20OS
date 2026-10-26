@@ -43,7 +43,10 @@ static int arch_pt_vpn(vaddr_t va, int level) {
 static void mm_pt_node_lock(pte_t *t) { (void)t; locks++; }
 static void mm_pt_node_unlock(pte_t *t) { (void)t; unlocks++; }
 static uint8_t owner_page[4096];
-static pfn_t pfa_alloc_page(void) { return 0x1000; }
+static pfn_t pfa_alloc_flags(int order, int can_reclaim) {
+    assert(order == 0 && can_reclaim == 0);
+    return 0x1000;
+}
 static void *pfn_to_virt(uint32_t pfn) {
     assert(pfn == 0x1000);
     return owner_page;
