@@ -37,7 +37,7 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls);
 
 /* Bounded private-fork record shared by the C and Rust clone transaction. */
-#define A20_COW_ANON_BATCH_PAGES 64
+#define A20_COW_ANON_BATCH_PAGES 16
 struct a20_cow_anon_batch_page {
     uint32_t pfn;
     uint32_t class;

@@ -89,11 +89,11 @@ class AnonChildBatch(unittest.TestCase):
         fixture = fixture.replace("/* REAL_BATCH_MAPPER */", extract_block(old_mapper, "int pt_map_anon_batch("))
         # The intentionally wrong physical addresses no longer resolve through
         # the synthetic PFA, so executable-cache maintenance is skipped in this
-        # negative control; the positive fixture retains the full 64-flush check.
-        flush_assert = "assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==64);"
+        # negative control; the positive fixture retains the full 16-flush check.
+        flush_assert = "assert(walk_calls==1 && installs==16 && status_calls==16 && exec_flushes==16);"
         self.assertEqual(fixture.count(flush_assert), 3)
         fixture = fixture.replace(flush_assert,
-                                  "assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==0);", 1)
+                                  "assert(walk_calls==1 && installs==16 && status_calls==16 && exec_flushes==0);", 1)
         header = (TREE / "kernel/include/mm/mm.h").read_text()
         assert_start = header.rindex("#if __SIZEOF_POINTER__ == 8", 0, header.index("_Static_assert(sizeof(struct a20_cow_anon_batch_page)"))
         assert_end = header.index("/* Map a bounded private fork batch", assert_start)
@@ -113,7 +113,7 @@ class AnonChildBatch(unittest.TestCase):
         code = source[start:end]
         code = code.replace(extract_block(code, 'unsafe extern "C" {'), "")
         harness = r'''use core::ffi::c_void;
-const ANON_BATCH_PAGES: usize = 64;
+const ANON_BATCH_PAGES: usize = 16;
 const PAGE_SIZE: usize = 4096;
 const ENOMEM: i32 = -12;
 unsafe extern "C" {
@@ -143,7 +143,7 @@ static mut RSS:usize=0;
 #[no_mangle] unsafe extern "C" fn mock_snapshot(_p:*mut c_void,_c:*mut c_void,_v:usize,_n:*mut c_void,
                                                    out:*mut AnonBatchPage,_shared:i32)->i32 {
     unsafe { SNAPSHOTS+=1; if SNAPSHOT_RESULT!=1 { return SNAPSHOT_RESULT; }
-        PINS=if SPARSE!=0 {63} else {64}; for i in 0..64 {
+        PINS=if SPARSE!=0 {15} else {16}; for i in 0..16 {
             if SPARSE!=0 && i==0 { *out.add(i)=AnonBatchPage::default(); continue; }
             let cache=i%3==0;
             *out.add(i)=AnonBatchPage{pfn:(i+1) as u32,
@@ -155,7 +155,7 @@ static mut RSS:usize=0;
 }
 #[no_mangle] unsafe extern "C" fn mock_map_batch(_c:*mut c_void,va:usize,
                                                   pages:*const AnonBatchPage,count:usize,_shared:i32)->i32 {
-    unsafe { MAP_CALLS+=1; assert_eq!(va,0x20000); assert_eq!(count,64);
+    unsafe { MAP_CALLS+=1; assert_eq!(va,0x20000); assert_eq!(count,16);
         let mut present=0;
         for i in 0..count { let p=*pages.add(i); if p.class==0 { continue; }
             assert_eq!(p.pfn,(i+1) as u32);
@@ -183,13 +183,13 @@ fn main() { unsafe {
     assert_eq!((PINS,RELEASED,MAP_CALLS,RSS),(0,0,0,0));
     reset();
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),1);
-    assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,64,1,64));
+    assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,16,1,16));
     reset(); SPARSE=1;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),1);
-    assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,63,1,63));
+    assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,15,1,15));
     reset(); MAP_RESULT=ENOMEM;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),ENOMEM);
-    assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,42,22,0,1,0));
+    assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,10,6,0,1,0));
     reset(); SNAPSHOT_RESULT=-5;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),-5);
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,0,0,0));
