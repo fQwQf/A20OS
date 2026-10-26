@@ -651,7 +651,9 @@ static void xhci_fill_ep_context(xhci_controller_t *xhci, uint8_t dci,
                                  uint16_t max_packet, uint8_t interval) {
     uint32_t *ep = xhci_input_context(xhci, (unsigned)dci + 1U);
     ep[0] = (uint32_t)interval << 16;
-    ep[1] = (3U << 1) | ((uint32_t)ep_type << 3) |
+    /* Isochronous endpoints do not retry transactions (CERR is zero). */
+    uint32_t errors = (ep_type == 1U || ep_type == 5U) ? 0U : 3U;
+    ep[1] = (errors << 1) | ((uint32_t)ep_type << 3) |
             ((uint32_t)max_packet << 16);
     /* Ring Dequeue Pointer: the next TRB this ring will produce, carrying the
      * cycle bit that TRB is written with.  Hard-coding trbs[0] with cycle 1
