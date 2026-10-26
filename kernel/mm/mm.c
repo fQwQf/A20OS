@@ -474,8 +474,14 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
     }
 
     for (size_t i = 0; i < nr; i++) {
+        uint32_t cls = pages[i].class;
+        if (!cls) {
+            if (pages[i].pfn || pages[i].flags || pages[i].pcp || pages[i].kind)
+                return -EINVAL;
+            continue;
+        }
         if (!pfn_valid((pfn_t)pages[i].pfn) ||
-            pages[i].class != MM_ST_ANON_MAPPED ||
+            (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE) ||
             !(pages[i].flags & PTE_U) || (pages[i].flags & PTE_W))
             return -EINVAL;
     }
@@ -500,6 +506,8 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
     /* No operation below this point can fail.  The caller's frame references
      * become child mapping references only after this entire function returns. */
     for (size_t i = 0; i < nr; i++) {
+        if (!pages[i].class)
+            continue;
         vaddr_t va = start + i * PAGE_SIZE;
         /* PFNs index compact allocator metadata; a range base is required to
          * recover the corresponding physical address. */

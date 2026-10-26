@@ -33,6 +33,7 @@ static pfa_t pfa;
 #define EEXIST 17
 #define ENOMEM 12
 #define MM_ST_ANON_MAPPED 2u
+#define MM_ST_FILE_PRIVATE 4u
 #define A20_COW_ANON_BATCH_PAGES 64
 #define MM_ST_CLS_BYTE(c) ((uint8_t)(c))
 #define MM_ST_COW_BIT 0x80u
@@ -41,6 +42,8 @@ struct a20_cow_anon_batch_page {
     uint32_t pfn;
     uint32_t class;
     uintptr_t flags;
+    void *pcp;
+    uint32_t kind;
 };
 /* ANON_BATCH_ABI_ASSERTS */
 static pte_t child_slots[512];
@@ -69,7 +72,8 @@ static void arch_flush_icache_range(void *ptr, size_t len) { (void)ptr; assert(l
 static pte_t arch_pte_leaf(paddr_t pa, pte_t flags) { installs++; return pa | flags | PTE_V; }
 static void mm_pt_note_present(pte_t *owner, int level, int idx, uint8_t cls) {
     assert(owner == child_slots); assert(level == 0); assert(idx >= 0 && idx < 512);
-    assert((cls & 0x7f) == MM_ST_ANON_MAPPED); status_calls++;
+    assert((cls & 0x7f) == MM_ST_ANON_MAPPED ||
+           (cls & 0x7f) == MM_ST_FILE_PRIVATE); status_calls++;
 }
 static int mm_pt_prot_bits(pte_t flags) { (void)flags; return 0; }
 
@@ -91,7 +95,7 @@ static void reset(void) {
 static void fill(struct a20_cow_anon_batch_page *pages, size_t n, uintptr_t flags) {
     for (size_t i=0;i<n;i++) pages[i]=(struct a20_cow_anon_batch_page){
         .pfn=(uint32_t)(i<32 ? 1000+i : 5000+i-32),
-        .class=MM_ST_ANON_MAPPED, .flags=flags };
+        .class=MM_ST_ANON_MAPPED, .flags=flags, .pcp=NULL, .kind=1 };
 }
 int main(void) {
     struct a20_cow_anon_batch_page pages[64];
@@ -121,6 +125,20 @@ int main(void) {
         }
         assert(child_slots[32+i] == (expected_pa|PTE_U|PTE_X|PTE_V));
     }
+
+    reset(); fill(pages,64,PTE_U|PTE_X);
+    pages[0].class=MM_ST_FILE_PRIVATE;
+    pages[31].class=MM_ST_FILE_PRIVATE;
+    pages[63].class=MM_ST_FILE_PRIVATE;
+    assert(pt_map_anon_batch(child_slots,start,pages,64)==0);
+    assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==64);
+
+    reset(); fill(pages,64,PTE_U|PTE_X);
+    pages[5]=(struct a20_cow_anon_batch_page){0};
+    pages[60]=(struct a20_cow_anon_batch_page){0};
+    assert(pt_map_anon_batch(child_slots,start,pages,64)==0);
+    assert(walk_calls==1 && installs==62 && status_calls==62 && exec_flushes==62);
+    assert(child_slots[32+5]==0 && child_slots[32+60]==0);
 
     for (size_t bad_at_i=0; bad_at_i<4; bad_at_i++) {
         reset(); fill(pages,64,PTE_U|PTE_X);

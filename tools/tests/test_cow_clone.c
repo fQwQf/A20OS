@@ -54,7 +54,12 @@ struct a20_cow_shared_snapshot {
     int32_t kind;
 };
 _Static_assert(sizeof(struct a20_cow_shared_snapshot) == 64, "host snapshot ABI");
-struct a20_cow_anon_batch_page { uint32_t pfn, class; uintptr_t flags; };
+struct a20_cow_anon_batch_page {
+    uint32_t pfn, class;
+    uintptr_t flags;
+    void *pcp;
+    uint32_t kind;
+};
 static int snapshot_slot, snapshot_node, snapshot_locked;
 
 /* ------------------------------------------------------------- the model */
@@ -231,6 +236,10 @@ int a20_cow_map_child_anon_batch(void *child, uintptr_t va,
 void frame_put_many(const uint32_t *pfns, size_t count)
 {
     (void)pfns; (void)count;
+}
+void page_cache_put(void *page)
+{
+    (void)page;
 }
 
 int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,

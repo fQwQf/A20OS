@@ -510,7 +510,7 @@ static int cow_child_batch_empty(mm_struct_t *child, uintptr_t start,
 /* The caller is the active level-0 C walker under parent->lock. `node` is its
  * borrowed leaf table, whose lifetime is protected until this call returns;
  * this helper holds only this one source-node lock at a time. Preflight, pin,
- * and downgrade one dense anonymous 4K run. Zero is side-effect-free fallback. */
+ * and downgrade one possibly sparse private 4K run. Zero is side-effect-free fallback. */
 int a20_cow_share_anon_batch_snapshot(
     void *parent_ptr, void *child_ptr, uintptr_t start, pte_t *node,
     struct a20_cow_anon_batch_page *out)
@@ -539,11 +539,12 @@ int a20_cow_share_anon_batch_snapshot(
     /* mm_fork() holds parent->lock, so this single VMA record and its policy
      * remain stable for the complete source snapshot. */
     mm_seg_t *vma = mm_seg_find(parent, start);
-    const uint64_t excluded = VM_FILE | VM_SHARED | VM_PFNMAP | VM_VMO |
+    const uint64_t excluded = VM_SHARED | VM_PFNMAP | VM_VMO |
                               VM_DONTFORK | VM_WIPEONFORK;
     if (!vma || start < vma->start || end > vma->end)
         return 0;
-    if ((vma->vm_flags & (VM_ANON | excluded)) != VM_ANON)
+    if (!(vma->vm_flags & (VM_ANON | VM_FILE)) ||
+        (vma->vm_flags & excluded))
         return 0;
 
     /* Inspect the unpublished destination before source pinning/downgrade.
@@ -554,14 +555,22 @@ int a20_cow_share_anon_batch_snapshot(
 
     pte_t *slots[A20_COW_ANON_BATCH_PAGES];
     pfn_t pfns[A20_COW_ANON_BATCH_PAGES];
+    pfn_t frame_pfns[A20_COW_ANON_BATCH_PAGES];
+    size_t frame_count = 0;
     mm_pt_node_lock(node);
     for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
         int index = first + (int)i;
         pte_t *slot = &node[index];
         pte_t source = *slot;
+        slots[i] = slot;
+        pfns[i] = 0;
+        out[i] = (struct a20_cow_anon_batch_page){0};
+        if (!source)
+            continue;
         uint8_t status = mm_pt_peek(node, 0, index);
+        uint32_t cls = MM_ST_GET_CLASS(status);
         if (!(source & PTE_V) || !arch_pte_is_leaf(source) ||
-            MM_ST_GET_CLASS(status) != MM_ST_ANON_MAPPED ||
+            (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE) ||
             mm_pt_safe_test(node, 0, index, MM_SAFE_UFFD) ||
             mm_pt_safe_test(node, 0, index, MM_SAFE_NO_FA)) {
             mm_pt_node_unlock(node);
@@ -572,15 +581,28 @@ int a20_cow_share_anon_batch_snapshot(
             mm_pt_node_unlock(node);
             return 0;
         }
-        slots[i] = slot;
         pfns[i] = pfn;
         out[i].pfn = pfn;
-        out[i].class = MM_ST_GET_CLASS(status);
+        out[i].class = cls;
         out[i].flags = mm_cow_flags(source);
     }
 
     /* All 64 entries are validated before any reference or PTE changes. */
-    frame_get_many(pfns, A20_COW_ANON_BATCH_PAGES);
+    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+        if (!out[i].class)
+            continue;
+        uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
+        page_cache_page_t *pcp =
+            mm_file_cache_mapping_get(vma, va, pfns[i]);
+        if (pcp) {
+            out[i].pcp = pcp;
+            out[i].kind = 2;
+        } else {
+            out[i].kind = 1;
+            frame_pfns[frame_count++] = pfns[i];
+        }
+    }
+    frame_get_many(frame_pfns, frame_count);
     for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
         pte_t source = *slots[i];
         if (source & (PTE_W | PTE_COW)) {
@@ -593,7 +615,7 @@ int a20_cow_share_anon_batch_snapshot(
             snap.raw_flags = arch_pte_flags(source);
             snap.cow_flags = mm_cow_flags(source);
             snap.w_or_cow = 1;
-            snap.class = MM_ST_ANON_MAPPED;
+            snap.class = out[i].class;
             a20_cow_share_downgrade(parent, va, 0, &snap, snap.cow_flags);
         }
     }

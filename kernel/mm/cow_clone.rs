@@ -154,15 +154,25 @@ struct AnonBatchPage {
     pfn: u32,
     class: u32,
     flags: usize,
+    pcp: *mut c_void,
+    kind: u32,
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: [(); 16] = [(); core::mem::size_of::<AnonBatchPage>()];
+const _: [(); 32] = [(); core::mem::size_of::<AnonBatchPage>()];
 #[cfg(target_pointer_width = "32")]
-const _: [(); 12] = [(); core::mem::size_of::<AnonBatchPage>()];
+const _: [(); 20] = [(); core::mem::size_of::<AnonBatchPage>()];
 const _: [(); 0] = [(); core::mem::offset_of!(AnonBatchPage, pfn)];
 const _: [(); 4] = [(); core::mem::offset_of!(AnonBatchPage, class)];
 const _: [(); 8] = [(); core::mem::offset_of!(AnonBatchPage, flags)];
+#[cfg(target_pointer_width = "64")]
+const _: [(); 16] = [(); core::mem::offset_of!(AnonBatchPage, pcp)];
+#[cfg(target_pointer_width = "64")]
+const _: [(); 24] = [(); core::mem::offset_of!(AnonBatchPage, kind)];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 12] = [(); core::mem::offset_of!(AnonBatchPage, pcp)];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 16] = [(); core::mem::offset_of!(AnonBatchPage, kind)];
 
 unsafe extern "C" {
     fn a20_cow_share_anon_batch_snapshot(
@@ -179,6 +189,7 @@ unsafe extern "C" {
         count: usize,
     ) -> i32;
     fn frame_put_many(pfns: *const u32, count: usize);
+    fn page_cache_put(page: *mut c_void);
 }
 
 /* Owns the references pinned by the C snapshot until each child mapping
@@ -195,27 +206,29 @@ impl Drop for AnonBatchGuard {
         if !self.pinned || self.transferred == ANON_BATCH_PAGES {
             return;
         }
-        let remaining = ANON_BATCH_PAGES - self.transferred;
         let mut pfns = [0u32; ANON_BATCH_PAGES];
-        /* Only the untransferred tail pins remain guard-owned. */
-        for (page, dst) in self
-            .pages
-            .iter()
-            .skip(self.transferred)
-            .zip(pfns.iter_mut())
-        {
-            *dst = page.pfn;
+        let mut frame_count = 0usize;
+        let mut frame_out = pfns.iter_mut();
+        for page in self.pages.iter().skip(self.transferred) {
+            if page.kind == 2 {
+                unsafe { page_cache_put(page.pcp) };
+            } else if page.kind == 1 {
+                if let Some(dst) = frame_out.next() {
+                    *dst = page.pfn;
+                    frame_count += 1;
+                }
+            }
         }
-        /* The array is bounded to 64 and releases only pins not transferred
-         * to successful child mappings. */
-        unsafe { frame_put_many(pfns.as_ptr(), remaining) };
+        if frame_count != 0 {
+            unsafe { frame_put_many(pfns.as_ptr(), frame_count) };
+        }
     }
 }
 
-/// Attempt one all-or-nothing anonymous source snapshot.  Zero means the C
+/// Attempt one all-or-nothing private source snapshot.  Zero means the C
 /// preflight made no changes and the existing scalar walker should proceed;
-/// one means all 64 child leaves were mapped; negative aborts this fork after
-/// the guard drains every reference not already transferred to the child.
+/// one means every present child leaf in the window was mapped; negative aborts
+/// this fork after the guard drains every reference not transferred to the child.
 #[no_mangle]
 pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     child: *mut c_void,
@@ -258,8 +271,9 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     }
     /* The C mapper validates the complete destination and has no failure
      * point after its first PTE write, so ownership and RSS move as one batch. */
+    let mapped = guard.pages.iter().filter(|page| page.class != 0).count();
     guard.transferred = ANON_BATCH_PAGES;
-    unsafe { a20_cow_rss_add(child, ANON_BATCH_PAGES) };
+    unsafe { a20_cow_rss_add(child, mapped) };
     1
 }
 
