@@ -222,6 +222,11 @@ static void hw_params_fill_supported(struct snd_pcm_hw_params *hp,
 {
     unsigned int rate_min = ops->caps.min_rate ? ops->caps.min_rate : 8000;
     unsigned int rate_max = ops->caps.max_rate ? ops->caps.max_rate : 48000;
+    unsigned int channels_min = 1, channels_max = 2;
+    if (ops->pcm_format.rate)
+        rate_min = rate_max = ops->pcm_format.rate;
+    if (ops->pcm_format.channels)
+        channels_min = channels_max = ops->pcm_format.channels;
 
     hw_params_mask_set(&hp->masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
                        SNDRV_PCM_ACCESS_RW_INTERLEAVED);
@@ -230,8 +235,8 @@ static void hw_params_fill_supported(struct snd_pcm_hw_params *hp,
     hw_params_mask_set(&hp->masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_SUBFORMAT)],
                        SNDRV_PCM_SUBFORMAT_STD);
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_SAMPLE_BITS)], 16, 16);
-    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_FRAME_BITS)], 16, 32);
-    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)], 1, 2);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_FRAME_BITS)], 16 * channels_min, 16 * channels_max);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)], channels_min, channels_max);
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate_min, rate_max);
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_TIME)], 0, 0xffffffffu);
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)], 16, 1u << 20);
@@ -240,7 +245,10 @@ static void hw_params_fill_supported(struct snd_pcm_hw_params *hp,
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_TIME)], 0, 0xffffffffu);
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)], 16, 1u << 22);
     hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_BYTES)], 16, 1u << 22);
-    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_TICK_TIME)], 0, 0xffffffffu);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_TICK_TIME)], 0, 0);
+    /* Durations are rational microseconds, unlike integral frame counts. */
+    hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_TIME)].integer = 0;
+    hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_TIME)].integer = 0;
 
     hp->flags = 0;
     hp->rmask = 0x000fffff;
@@ -248,18 +256,6 @@ static void hw_params_fill_supported(struct snd_pcm_hw_params *hp,
     hp->info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
     hp->msbits = 16;
     hp->fifo_size = 0;
-}
-
-static unsigned int hw_params_clamp(unsigned int value, unsigned int lo,
-                                    unsigned int hi, unsigned int fallback)
-{
-    if (value == 0)
-        value = fallback;
-    if (value < lo)
-        value = lo;
-    if (value > hi)
-        value = hi;
-    return value;
 }
 
 static int hw_params_mask_refine(struct snd_mask *mask,
@@ -273,32 +269,146 @@ static int hw_params_mask_refine(struct snd_mask *mask,
     return any ? 0 : -EINVAL;
 }
 
-/* Narrow one interval to [lo, hi]; an open bound that coincides with the
- * supported limit means the intersection is empty. */
-static int hw_params_interval_refine(struct snd_interval *itv, unsigned int lo,
-                                     unsigned int hi)
+static int hw_params_interval_intersect(struct snd_interval *itv,
+                                        const struct snd_interval *limit)
 {
-    if (itv->empty || itv->min > hi || itv->max < lo)
+    if (itv->empty || limit->empty)
         return -EINVAL;
-    if (itv->min < lo) {
-        itv->min = lo;
-        itv->openmin = 0;
-    } else if (itv->min == lo && itv->openmin) {
-        return -EINVAL;
+    if (itv->min < limit->min) {
+        itv->min = limit->min;
+        itv->openmin = limit->openmin;
+    } else if (itv->min == limit->min) {
+        itv->openmin |= limit->openmin;
     }
-    if (itv->max > hi) {
-        itv->max = hi;
-        itv->openmax = 0;
-    } else if (itv->max == hi && itv->openmax) {
-        return -EINVAL;
+    if (itv->max > limit->max) {
+        itv->max = limit->max;
+        itv->openmax = limit->openmax;
+    } else if (itv->max == limit->max) {
+        itv->openmax |= limit->openmax;
     }
+    itv->integer |= limit->integer;
+    if (itv->integer) {
+        if ((itv->openmin && itv->min == 0xffffffffU) ||
+            (itv->openmax && !itv->max))
+            return -EINVAL;
+        itv->min += itv->openmin;
+        itv->max -= itv->openmax;
+        itv->openmin = itv->openmax = 0;
+    }
+    if (itv->min > itv->max ||
+        (itv->min == itv->max && (itv->openmin || itv->openmax)))
+        return -EINVAL;
     return 0;
+}
+
+static uint64_t hw_params_div_ceil(uint64_t n, uint64_t d)
+{
+    return n / d + (n % d != 0);
+}
+
+static int hw_params_interval_bound(struct snd_interval *itv,
+                                    uint64_t lo, uint64_t hi)
+{
+    if (lo > 0xffffffffU || lo > hi)
+        return -EINVAL;
+    struct snd_interval limit = {
+        .min = (unsigned int)lo,
+        .max = hi > 0xffffffffU ? 0xffffffffU : (unsigned int)hi,
+        .integer = 1,
+    };
+    return hw_params_interval_intersect(itv, &limit);
+}
+
+/* Positive integer relation c = a*b/div. Propagate both directions, keeping
+ * every application's exact/near constraint; no client-specific geometry. */
+static int hw_params_product(struct snd_pcm_hw_params *hp,
+                              unsigned a_id, unsigned b_id, unsigned c_id,
+                              unsigned div)
+{
+    struct snd_interval *a = &hp->intervals[HW_PARAM_INT_IDX(a_id)];
+    struct snd_interval *b = &hp->intervals[HW_PARAM_INT_IDX(b_id)];
+    struct snd_interval *c = &hp->intervals[HW_PARAM_INT_IDX(c_id)];
+    if (!a->min || !b->min)
+        return -EINVAL;
+    if (hw_params_interval_bound(c,
+            hw_params_div_ceil((uint64_t)a->min * b->min, div),
+            (uint64_t)a->max * b->max / div) < 0 ||
+        hw_params_interval_bound(a,
+            hw_params_div_ceil((uint64_t)c->min * div, b->max),
+            (uint64_t)c->max * div / b->min) < 0 ||
+        hw_params_interval_bound(b,
+            hw_params_div_ceil((uint64_t)c->min * div, a->max),
+            (uint64_t)c->max * div / a->min) < 0)
+        return -EINVAL;
+    return 0;
+}
+
+static int hw_params_duration(struct snd_pcm_hw_params *hp,
+                               unsigned size_id, unsigned time_id)
+{
+    struct snd_interval *rate = &hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)];
+    struct snd_interval *size = &hp->intervals[HW_PARAM_INT_IDX(size_id)];
+    struct snd_interval *time = &hp->intervals[HW_PARAM_INT_IDX(time_id)];
+    uint64_t min = (uint64_t)size->min * 1000000U;
+    uint64_t max = (uint64_t)size->max * 1000000U;
+    struct snd_interval limit = {
+        .min = (unsigned int)(min / rate->max),
+        .max = hw_params_div_ceil(max, rate->min) > 0xffffffffU ?
+                    0xffffffffU : (unsigned int)hw_params_div_ceil(max, rate->min),
+        .openmin = min % rate->max != 0,
+        .openmax = max % rate->min != 0 && max / rate->min < 0xffffffffU,
+    };
+    if (min / rate->max > 0xffffffffU ||
+        hw_params_interval_intersect(time, &limit) < 0)
+        return -EINVAL;
+    min = (uint64_t)time->min * rate->min;
+    max = (uint64_t)time->max * rate->max;
+    return hw_params_interval_bound(size,
+        hw_params_div_ceil(min, 1000000U) +
+            (time->openmin && min % 1000000U == 0),
+        max / 1000000U - (time->openmax && max % 1000000U == 0));
+}
+
+static int hw_params_refine_constraints(struct snd_pcm_hw_params *hp,
+                                         audio_dev_ops_t *ops)
+{
+    struct snd_pcm_hw_params supported;
+    memset(&supported, 0, sizeof(supported));
+    hw_params_fill_supported(&supported, ops);
+    for (unsigned i = 0; i < 3; i++)
+        if (hw_params_mask_refine(&hp->masks[i], &supported.masks[i]) < 0)
+            return -EINVAL;
+    for (unsigned i = 0; i < 12; i++)
+        if (hw_params_interval_intersect(&hp->intervals[i],
+                                         &supported.intervals[i]) < 0)
+            return -EINVAL;
+    /* Monotonic interval contraction. All products fit in 64 bits because
+     * each wire operand is 32 bits. Refuse malformed nonconvergence. */
+    for (unsigned pass = 0; pass < 64; pass++) {
+        struct snd_interval before[12];
+        memcpy(before, hp->intervals, sizeof(before));
+        if (hw_params_product(hp, SNDRV_PCM_HW_PARAM_SAMPLE_BITS,
+                SNDRV_PCM_HW_PARAM_CHANNELS, SNDRV_PCM_HW_PARAM_FRAME_BITS, 1) < 0 ||
+            hw_params_product(hp, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+                SNDRV_PCM_HW_PARAM_FRAME_BITS, SNDRV_PCM_HW_PARAM_PERIOD_BYTES, 8) < 0 ||
+            hw_params_product(hp, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+                SNDRV_PCM_HW_PARAM_FRAME_BITS, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 8) < 0 ||
+            hw_params_product(hp, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+                SNDRV_PCM_HW_PARAM_PERIODS, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 1) < 0 ||
+            hw_params_duration(hp, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+                SNDRV_PCM_HW_PARAM_PERIOD_TIME) < 0 ||
+            hw_params_duration(hp, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+                SNDRV_PCM_HW_PARAM_BUFFER_TIME) < 0)
+            return -EINVAL;
+        if (memcmp(before, hp->intervals, sizeof(before)) == 0)
+            return 0;
+    }
+    return -EINVAL;
 }
 
 static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
 {
     struct snd_pcm_hw_params hp;
-    struct snd_pcm_hw_params sup;
     device_t *dev;
     audio_dev_ops_t *ops;
     int r;
@@ -316,19 +426,11 @@ static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
      * hardware supports; replacing them (as an earlier version did) silently
      * widens an exact channel count back to a range and alsa-lib then rejects
      * the object. */
-    memset(&sup, 0, sizeof(sup));
-    hw_params_fill_supported(&sup, ops);
-    for (unsigned i = 0; i < 3; i++)
-        if (hw_params_mask_refine(&hp.masks[i], &sup.masks[i]) < 0)
-            return -EINVAL;
-    for (unsigned i = 0; i < 12; i++) {
-        struct snd_interval *itv = &hp.intervals[i];
-        if (hw_params_interval_refine(itv, sup.intervals[i].min,
-                                      sup.intervals[i].max) < 0)
-            return -EINVAL;
-    }
+    r = hw_params_refine_constraints(&hp, ops);
+    if (r < 0)
+        return r;
     hp.flags = 0;
-    hp.rmask = 0x000fffff;
+    hp.rmask = 0;
     hp.cmask = 0;
     hp.info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
     return copy_to_user(arg, &hp, sizeof(hp)) < 0 ? -EFAULT : 0;
@@ -381,6 +483,10 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
     if (!(ops->caps.flags & A20_AUDIO_CAP_PCM))
         return -EOPNOTSUPP;
 
+    r = hw_params_refine_constraints(&hp, ops);
+    if (r < 0)
+        return r;
+
     if (!hw_params_mask_has(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
                             SNDRV_PCM_ACCESS_RW_INTERLEAVED) ||
         !hw_params_mask_has(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
@@ -395,28 +501,25 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
         &hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)];
     const struct snd_interval *buffer_itv =
         &hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)];
-    unsigned int rate_min = ops->caps.min_rate ? ops->caps.min_rate : 8000;
-    unsigned int rate_max = ops->caps.max_rate ? ops->caps.max_rate : 48000;
-
     /* Every negotiated parameter must become a single value inside the range
      * the application offered; alsa-lib validates the returned params and
      * rejects a range where it asked for a value. */
-    unsigned int channels = ch_itv->min ? ch_itv->min : 2;
-    channels = hw_params_clamp(channels, 1, 2, 2);
-    if (!hw_params_interval_allows(ch_itv, channels))
+    unsigned int channels = ch_itv->min;
+    unsigned int rate = rate_itv->min;
+    unsigned int period = period_itv->min;
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)], channels, channels);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate, rate);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)], period, period);
+    if (hw_params_refine_constraints(&hp, ops) < 0)
         return -EINVAL;
-    unsigned int rate = rate_itv->min ? rate_itv->min : 48000;
-    rate = hw_params_clamp(rate, rate_min, rate_max, 48000);
-    if (!hw_params_interval_allows(rate_itv, rate))
+    uint64_t buffer_candidate = hw_params_div_ceil(buffer_itv->min, period) * period;
+    if (buffer_candidate > 0xffffffffU)
         return -EINVAL;
-    unsigned int period = period_itv->min ? period_itv->min : 1024;
-    period = hw_params_clamp(period, 16, 1u << 20, 1024);
-    if (!hw_params_interval_allows(period_itv, period))
-        return -EINVAL;
-    unsigned int buffer = buffer_itv->min ? buffer_itv->min : period * 2;
-    buffer = hw_params_clamp(buffer, period * 2, 1u << 22, period * 2);
-    buffer -= buffer % period;
+    unsigned int buffer = (unsigned int)buffer_candidate;
     if (!hw_params_interval_allows(buffer_itv, buffer))
+        return -EINVAL;
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)], buffer, buffer);
+    if (hw_params_refine_constraints(&hp, ops) < 0)
         return -EINVAL;
 
     ctx->format = SNDRV_PCM_FORMAT_S16_LE;
@@ -438,25 +541,19 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
                            channels, channels);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)],
                            rate, rate);
-    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_TIME)],
-                           (unsigned int)((uint64_t)period * 1000000 / rate),
-                           (unsigned int)((uint64_t)period * 1000000 / rate));
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)],
                            period, period);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_BYTES)],
                            period * channels * 2, period * channels * 2);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIODS)],
                            buffer / period, buffer / period);
-    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_TIME)],
-                           (unsigned int)((uint64_t)buffer * 1000000 / rate),
-                           (unsigned int)((uint64_t)buffer * 1000000 / rate));
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)],
                            buffer, buffer);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_BYTES)],
                            buffer * channels * 2, buffer * channels * 2);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_TICK_TIME)], 0, 0);
     hp.flags = 0;
-    hp.rmask = 0x000fffff;
+    hp.rmask = 0;
     hp.cmask = 0;
     hp.info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
     hp.msbits = 16;
