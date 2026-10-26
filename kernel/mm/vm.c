@@ -635,22 +635,23 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
     return mm;
 }
 
-/* The final unpublished MM may leave ordinary anonymous leaves for the
- * terminal page-table walk.  This is not safe for munmap/exec-discard, where
- * the page table remains live, and never applies to NOMMU builds. */
+/* The final unpublished MM may leave ordinary anonymous and private-file
+ * leaves for the terminal page-table walk. Shared-file dirty harvesting, VMO,
+ * PFNMAP and SysV retain their VMA-specific teardown. */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-static int mm_destroy_can_defer_anon_leaf_release(const mm_seg_t *vma)
+static int mm_destroy_can_defer_leaf_release(const mm_seg_t *vma)
 {
-    const uint64_t excluded = VM_FILE | VM_SHARED | VM_PFNMAP | VM_VMO |
-                              VM_SYSV_SHM;
+    const uint64_t excluded = VM_SHARED | VM_PFNMAP | VM_VMO | VM_SYSV_SHM;
 
-    if (!vma || !(vma->vm_flags & VM_ANON) || (vma->vm_flags & excluded))
+    if (!vma || !(vma->vm_flags & (VM_ANON | VM_FILE)) ||
+        (vma->vm_flags & excluded) || vma->vmo || vma->vmar_owner)
         return 0;
-    return !vma->file && !vma->file_vnode && !vma->vmo &&
-           !vma->vmar_owner;
+    if (vma->vm_flags & VM_FILE)
+        return vma->file_vnode != NULL;
+    return !vma->file && !vma->file_vnode;
 }
 #else
-static int mm_destroy_can_defer_anon_leaf_release(const mm_seg_t *vma)
+static int mm_destroy_can_defer_leaf_release(const mm_seg_t *vma)
 {
     (void)vma;
     return 0;
@@ -722,17 +723,20 @@ static void mm_destroy_impl(mm_struct_t *mm) {
             }
         }
 #endif
-        /* The final mm is unpublished and has no next executor.  For plain
-         * anonymous backing, keep leaf references until the post-shootdown
-         * pt_destroy_user() walk drops each resident/swap leaf exactly once. */
-        if (!mm_destroy_can_defer_anon_leaf_release(vma)) {
+        /* The final mm is unpublished and has no next executor. Eligible
+         * leaves keep their references until the post-shootdown page-table
+         * walk drops each resident/swap leaf exactly once. */
+        if (!mm_destroy_can_defer_leaf_release(vma)) {
             free_vma_pages(mm, vma);
         }
+        /* mm_tlb_invalidate_finish() also drains deferred VMA releases. Keep
+         * the whole interval list alive across it: a terminal private-file
+         * cache lookup may have to walk past anonymous neighbours. */
+        vma_get(vma);
         mm_seg_t *next = vma->next;
         vma_put(mm, vma);
         vma = next;
     }
-    mm_vma_flush_deferred(mm);
 
     /* free_vma_pages() retired the now-empty page-table pages through
      * mm_pt_retire_table(); reclaim them before the page table itself goes
@@ -753,8 +757,14 @@ static void mm_destroy_impl(mm_struct_t *mm) {
     /* Drain any huge-page demotion holds before page-table frames are freed. */
     mm_tlb_invalidate_finish(mm);
     if (mm->pgdir) {
-        pt_destroy_user(mm->pgdir);
+        pt_destroy_user_mm(mm);
         mm->pgdir = NULL;
+    }
+    vma = mm->mmap;
+    while (vma) {
+        mm_seg_t *next = vma->next;
+        vma_put(mm, vma);
+        vma = next;
     }
     /* PT metadata can drop the last VMA segment references while the tree is
      * destroyed. Their deferred releases run only after the root is gone, and
