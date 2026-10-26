@@ -447,7 +447,7 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
  * reclaimed by ordinary mm_destroy if preflight fails. */
 int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                       const struct a20_cow_anon_batch_page *pages,
-                      size_t nr)
+                      size_t nr, int shared)
 {
     if (!pgdir || !pages || nr == 0 || nr > A20_COW_ANON_BATCH_PAGES ||
         (start & (PAGE_SIZE - 1)) || start >= USER_VA_LIMIT ||
@@ -480,9 +480,11 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                 return -EINVAL;
             continue;
         }
+        int shared_class = cls == MM_ST_ANON_SHARED || cls == MM_ST_FILE_SHARED;
         if (!pfn_valid((pfn_t)pages[i].pfn) ||
-            (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE) ||
-            !(pages[i].flags & PTE_U) || (pages[i].flags & PTE_W))
+            (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE &&
+             !shared_class) || !(pages[i].flags & PTE_U) ||
+            (!shared && (pages[i].flags & PTE_W)))
             return -EINVAL;
     }
 

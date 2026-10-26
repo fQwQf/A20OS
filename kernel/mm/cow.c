@@ -147,7 +147,7 @@ extern int a20_cow_clone_leaf_at_rust(mm_struct_t *child, mm_struct_t *parent,
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 extern int a20_cow_clone_anon_batch_rust(mm_struct_t *child,
                                          mm_struct_t *parent, vaddr_t va,
-                                         pte_t *node);
+                                         pte_t *node, int shared);
 #endif
 
 struct a20_cow_src {
@@ -300,13 +300,13 @@ int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
  * only after every child leaf is installed. */
 int a20_cow_map_child_anon_batch(
     void *child_ptr, uintptr_t va,
-    const struct a20_cow_anon_batch_page *pages, size_t nr)
+    const struct a20_cow_anon_batch_page *pages, size_t nr, int shared)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     mm_struct_t *child = child_ptr;
     if (!child || !child->pgdir)
         return -EINVAL;
-    return pt_map_anon_batch(child->pgdir, va, pages, nr);
+    return pt_map_anon_batch(child->pgdir, va, pages, nr, shared);
 #else
     (void)child_ptr;
     (void)va;
@@ -509,11 +509,12 @@ static int cow_child_batch_empty(mm_struct_t *child, uintptr_t start,
 
 /* The caller is the active level-0 C walker under parent->lock. `node` is its
  * borrowed leaf table, whose lifetime is protected until this call returns;
- * this helper holds only this one source-node lock at a time. Preflight, pin,
- * and downgrade one possibly sparse private 4K run. Zero is side-effect-free fallback. */
+ * this helper holds only this one source-node lock at a time. Preflight and pin
+ * one possibly sparse 4K run, downgrading parents only for private mappings.
+ * Zero is side-effect-free fallback. */
 int a20_cow_share_anon_batch_snapshot(
     void *parent_ptr, void *child_ptr, uintptr_t start, pte_t *node,
-    struct a20_cow_anon_batch_page *out)
+    struct a20_cow_anon_batch_page *out, int shared)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     mm_struct_t *parent = parent_ptr;
@@ -539,7 +540,7 @@ int a20_cow_share_anon_batch_snapshot(
     /* mm_fork() holds parent->lock, so this single VMA record and its policy
      * remain stable for the complete source snapshot. */
     mm_seg_t *vma = mm_seg_find(parent, start);
-    const uint64_t excluded = VM_SHARED | VM_PFNMAP | VM_VMO |
+    const uint64_t excluded = VM_PFNMAP | VM_VMO |
                               VM_DONTFORK | VM_WIPEONFORK;
     if (!vma || start < vma->start || end > vma->end)
         return 0;
@@ -570,7 +571,8 @@ int a20_cow_share_anon_batch_snapshot(
         uint8_t status = mm_pt_peek(node, 0, index);
         uint32_t cls = MM_ST_GET_CLASS(status);
         if (!(source & PTE_V) || !arch_pte_is_leaf(source) ||
-            (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE) ||
+            (cls != MM_ST_ANON_MAPPED && cls != MM_ST_ANON_SHARED &&
+             cls != MM_ST_FILE_PRIVATE && cls != MM_ST_FILE_SHARED) ||
             mm_pt_safe_test(node, 0, index, MM_SAFE_UFFD) ||
             mm_pt_safe_test(node, 0, index, MM_SAFE_NO_FA)) {
             mm_pt_node_unlock(node);
@@ -584,7 +586,7 @@ int a20_cow_share_anon_batch_snapshot(
         pfns[i] = pfn;
         out[i].pfn = pfn;
         out[i].class = cls;
-        out[i].flags = mm_cow_flags(source);
+        out[i].flags = shared ? arch_pte_flags(source) : mm_cow_flags(source);
     }
 
     /* All 64 entries are validated before any reference or PTE changes. */
@@ -605,7 +607,7 @@ int a20_cow_share_anon_batch_snapshot(
     frame_get_many(frame_pfns, frame_count);
     for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
         pte_t source = *slots[i];
-        if (source & (PTE_W | PTE_COW)) {
+        if (!shared && (source & (PTE_W | PTE_COW))) {
             struct a20_cow_shared_snapshot snap = {0};
             uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
             snap.slot = slots[i];
@@ -627,6 +629,7 @@ int a20_cow_share_anon_batch_snapshot(
     (void)start;
     (void)node;
     (void)out;
+    (void)shared;
     return 0;
 #endif /* ARCH_HAS_PGTABLE_OPS */
 }
@@ -703,14 +706,14 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
         /* Try only a complete aligned run contained in the requested range.
          * The C snapshot does the all-or-nothing preflight; zero keeps the
          * existing scalar path untouched, and success skips exactly 64 leaves. */
-        if (!shared && level == 0 && i % A20_COW_ANON_BATCH_PAGES == 0 &&
+        if (level == 0 && i % A20_COW_ANON_BATCH_PAGES == 0 &&
             entries - i >= A20_COW_ANON_BATCH_PAGES && entry_base >= start &&
             entry_base <= (vaddr_t)-1 - A20_COW_ANON_BATCH_PAGES * PAGE_SIZE) {
             vaddr_t batch_end =
                 entry_base + A20_COW_ANON_BATCH_PAGES * PAGE_SIZE;
             if (batch_end <= end) {
                 int batch = a20_cow_clone_anon_batch_rust(
-                    child, parent, entry_base, table);
+                    child, parent, entry_base, table, shared);
                 if (batch < 0)
                     return batch;
                 if (batch > 0) {
@@ -791,9 +794,10 @@ int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
  * batch, so its C snapshot hook is an unconditional no-op fallback. */
 int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
                                       uintptr_t start, pte_t *node,
-                                      struct a20_cow_anon_batch_page *out)
+                                      struct a20_cow_anon_batch_page *out,
+                                      int shared)
 {
-    (void)parent; (void)child; (void)start; (void)node; (void)out;
+    (void)parent; (void)child; (void)start; (void)node; (void)out; (void)shared;
     return 0;
 }
 
@@ -823,12 +827,13 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
 
 int a20_cow_map_child_anon_batch(
     void *child, uintptr_t va,
-    const struct a20_cow_anon_batch_page *pages, size_t nr)
+    const struct a20_cow_anon_batch_page *pages, size_t nr, int shared)
 {
     (void)child;
     (void)va;
     (void)pages;
     (void)nr;
+    (void)shared;
     return -EOPNOTSUPP;
 }
 
