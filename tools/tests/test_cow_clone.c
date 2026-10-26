@@ -205,22 +205,18 @@ void a20_cow_frame_copy(uint32_t dst, uint32_t src, uintptr_t size)
 }
 
 int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
-                      uint32_t class, int level)
+                      uint32_t class, int level, void *pcp)
 {
     (void)child;
     (void)va;
     (void)class;
+    (void)pcp;
     check(!snapshot_locked, "map child only after unlocking snapshot node");
     map_calls++;
     last_map_pfn = pfn;
     last_map_flags = flags;
     last_map_level = level;
     return g_map_rc;
-}
-
-void a20_cow_note_child_cache(void *child, uintptr_t va, void *pcp)
-{
-    (void)child; (void)va; (void)pcp;
 }
 
 /* The scalar suite does not enter batch mapping; provide its current ABI. */

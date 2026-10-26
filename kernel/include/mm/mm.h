@@ -9,6 +9,7 @@
 
 /* Defined in mm/vm.h; only ever handled as a pointer here. */
 struct mm_struct;
+struct page_cache_page;
 
 /* Physical frame allocator */
 void mm_init(void);
@@ -35,6 +36,9 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
  * so a later fault resolves it from the metadata instead of a VMA. */
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls);
+/* The cache-owner fast path requires an exclusively owned, unpublished pgdir. */
+int pt_map_cache_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+                     uint8_t cls, struct page_cache_page *page);
 
 /* Bounded private-fork record shared by the C and Rust clone transaction. */
 #define A20_COW_ANON_BATCH_PAGES 16

@@ -31,15 +31,16 @@ static uint8_t seen_cls;
 static uintptr_t pfn_to_phys(uint32_t pfn) {
     return 0x100000UL + (uintptr_t)pfn * 4096;
 }
-static int pt_map_cls(void *pgdir, uintptr_t va, uintptr_t pa,
-                      uintptr_t flags, uint8_t cls);
+static int pt_map_cache_cls(void *pgdir, uintptr_t va, uintptr_t pa,
+                      uintptr_t flags, uint8_t cls, void *pcp);
 static int pt_map_huge(mm_struct_t *mm, uintptr_t va, uintptr_t pa,
                        uintptr_t flags, uint8_t cls);
 
 /* PRODUCTION_FUNCTION */
 
-static int pt_map_cls(void *pgdir, uintptr_t va, uintptr_t pa,
-                      uintptr_t flags, uint8_t cls) {
+static int pt_map_cache_cls(void *pgdir, uintptr_t va, uintptr_t pa,
+                      uintptr_t flags, uint8_t cls, void *pcp) {
+    (void)pcp;
     map_cls_calls++;
     seen_pgdir = pgdir;
     seen_va = va;
@@ -74,7 +75,7 @@ int main(void) {
     };
     for (unsigned i = 0; i < sizeof(classes) / sizeof(classes[0]); ++i) {
         reset();
-        int rc = a20_cow_map_child(&child, 0x4000, 19, 0x55, classes[i], 0);
+        int rc = a20_cow_map_child(&child, 0x4000, 19, 0x55, classes[i], 0, NULL);
         assert(rc == 0);
         assert(map_cls_calls == 1 && map_huge_calls == 0);
         assert(seen_pgdir == child.pgdir && seen_va == 0x4000);
@@ -83,7 +84,7 @@ int main(void) {
     }
     for (unsigned i = 0; i < sizeof(classes) / sizeof(classes[0]); ++i) {
         reset();
-        int rc = a20_cow_map_child(&child, 0x200000, 23, 0xA5, classes[i], 1);
+        int rc = a20_cow_map_child(&child, 0x200000, 23, 0xA5, classes[i], 1, NULL);
         assert(rc == 0);
         assert(map_cls_calls == 0 && map_huge_calls == 1);
         assert(seen_mm == &child && seen_va == 0x200000);
@@ -93,12 +94,12 @@ int main(void) {
     reset();
     map_cls_result = -12;
     assert(a20_cow_map_child(&child, 0x8000, 7, 0x11,
-                             MM_ST_FILE_PRIVATE, 0) == -12);
+                             MM_ST_FILE_PRIVATE, 0, NULL) == -12);
     assert(map_cls_calls == 1 && map_huge_calls == 0);
     reset();
     map_huge_result = -95;
     assert(a20_cow_map_child(&child, 0x400000, 31, 0x22,
-                             MM_ST_VMO, 1) == -95);
+                             MM_ST_VMO, 1, NULL) == -95);
     assert(map_cls_calls == 0 && map_huge_calls == 1);
     puts("COW_MAP_CLASS: real C bridge PASS 4K/huge backing classes and errors");
     return 0;

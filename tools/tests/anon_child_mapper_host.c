@@ -9,7 +9,7 @@ typedef uint64_t paddr_t;
 typedef uint64_t vaddr_t;
 typedef uint32_t pfn_t;
 typedef pte_t pt_root_t;
-typedef struct { int level; } pt_meta_t;
+typedef struct { int level; void **cache_owner; } pt_meta_t;
 typedef struct {
     paddr_t base, end;
     pfn_t start_pfn, end_pfn;
@@ -49,6 +49,7 @@ struct a20_cow_anon_batch_page {
 };
 /* ANON_BATCH_ABI_ASSERTS */
 static pte_t child_slots[512];
+static void *cache_slots[512];
 static pt_meta_t child_meta = { .level = 0 };
 static size_t walk_calls, installs, status_calls, exec_flushes, frame_puts;
 static int walk_fail, upper_conflict, bad_meta;
@@ -64,6 +65,10 @@ static pte_t *pt_walk_with_owner(pt_root_t *root, vaddr_t va, int alloc,
 }
 static pt_meta_t *mm_pt_meta(pte_t *table) { (void)table; return &child_meta; }
 static int mm_pt_meta_level(const pt_meta_t *meta) { return bad_meta ? 1 : meta->level; }
+static pfn_t pfa_alloc_flags(int order, int can_reclaim) {
+    (void)order; (void)can_reclaim;
+    return PFN_NONE;
+}
 static int arch_pt_vpn(vaddr_t va, int level) { return (int)((va >> (12 + 9 * level)) & 511); }
 static int arch_pt_level_entries(int level) { (void)level; return 512; }
 static int arch_pte_is_leaf(pte_t pte) { return (pte & PTE_V) != 0; }
@@ -80,9 +85,6 @@ static void mm_pt_note_present(pte_t *owner, int level, int idx, uint8_t cls) {
            (cls & 0x7f) == MM_ST_FILE_SHARED); status_calls++;
 }
 static int mm_pt_prot_bits(pte_t flags) { (void)flags; return 0; }
-static void mm_pt_cache_note(pt_root_t *root, vaddr_t va, void *pcp) {
-    (void)root; (void)va; (void)pcp;
-}
 
 /* REAL_LEAF_INSTALL */
 /* REAL_SCALAR_MAPPER */
@@ -96,6 +98,8 @@ static void reset(void) {
     pfa.ranges[1]=(pfa_range_t){.base=0x04000000,.end=0x04020000,
                                .start_pfn=5000,.end_pfn=5032};
     memset(child_slots, 0, sizeof(child_slots));
+    memset(cache_slots, 0, sizeof(cache_slots));
+    child_meta.cache_owner = cache_slots;
     walk_calls=installs=status_calls=exec_flushes=frame_puts=0;
     walk_fail=upper_conflict=bad_meta=0; child_meta.level=0;
 }
@@ -135,10 +139,16 @@ int main(void) {
 
     reset(); fill(pages,16,PTE_U|PTE_X);
     pages[0].class=MM_ST_FILE_PRIVATE;
+    pages[0].kind=2;
+    pages[0].pcp=&pages[0];
     pages[7].class=MM_ST_FILE_PRIVATE;
+    pages[7].kind=2;
+    pages[7].pcp=&pages[7];
     pages[15].class=MM_ST_FILE_PRIVATE;
     assert(pt_map_anon_batch(child_slots,start,pages,16,0)==0);
     assert(walk_calls==1 && installs==16 && status_calls==16 && exec_flushes==16);
+    assert(cache_slots[32] == &pages[0] && cache_slots[39] == &pages[7]);
+    assert(cache_slots[47] == NULL);
 
     reset(); fill(pages,16,PTE_U|PTE_X);
     pages[0].class=MM_ST_ANON_SHARED;

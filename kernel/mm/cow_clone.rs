@@ -120,8 +120,8 @@ unsafe extern "C" {
         flags: usize,
         class: u32,
         level: i32,
+        pcp: *mut c_void,
     ) -> i32;
-    fn a20_cow_note_child_cache(child: *mut c_void, va: usize, pcp: *mut c_void);
     fn a20_cow_share_snapshot(
         parent: *mut c_void,
         va: usize,
@@ -323,7 +323,10 @@ unsafe fn clone_leaf(
             return ENOMEM;
         }
         unsafe { a20_cow_frame_copy(copy, src.pfn, size) };
-        let r = unsafe { a20_cow_map_child(child, va, copy, src.raw_flags, src.class, level) };
+        let r = unsafe {
+            a20_cow_map_child(child, va, copy, src.raw_flags, src.class, level,
+                              core::ptr::null_mut())
+        };
         unsafe { a20_cow_release_ref(&src) };
         if r < 0 {
             unsafe { a20_cow_frame_free(copy, order) };
@@ -360,13 +363,12 @@ unsafe fn clone_leaf(
     }
     unsafe { a20_cow_share_unlock(&snap) };
 
-    let r = unsafe { a20_cow_map_child(child, va, snap.pfn, flags, snap.class, level) };
+    let r = unsafe {
+        a20_cow_map_child(child, va, snap.pfn, flags, snap.class, level, snap.pcp)
+    };
     if r < 0 {
         unsafe { a20_cow_release_ref(&snap) };
         return r;
-    }
-    if !snap.pcp.is_null() {
-        unsafe { a20_cow_note_child_cache(child, va, snap.pcp) };
     }
     unsafe { a20_cow_rss_add(child, size / 4096) };
     0
