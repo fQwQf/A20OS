@@ -324,3 +324,13 @@
 - 最终 15 项 guest 回归 ×3 全部通过（45/45，`final-regression-full15x3-2026-10-26`），覆盖 MM/COW/TLB/swap、SCHED/FUTEX/GS/VFS、文件 fork 与巨页。当前/夹具 host 测试和 procfs 诊断 ASan/UBSan 测试通过。
 - 最终原始基线/累计版本各五轮 APK（各 30 样本，`apk-final-base-2026-10-26-r5` / `apk-final-2026-10-26-r5`）：threads-2 6276.30→7538.55 ev/s（+20.11%，为同轮 Linux 的 57.8%）；switch 330502.06→397401.95 ops/s（+20.24%，Linux 侧范围仍很宽）；fork 891.99→882.15（-1.10%，范围重叠，按持平）。60/60 有效、guest 计数器审计全 0、输入哈希不变。
 - 测量事故记录：默认 UBSAN 构建的首次 fork 对照不用于结论；一次 GS 串口超时保留原始证据，随后同候选/基线各两次复测通过，最终完整回归也通过。未实施 sysret、yield 前移及文件私有页批克隆，不恢复已被否决的 ptshare/相同 PTE 实验。
+
+## 2026-10-26 北京时间（第五轮：双 ABI 公共 MM 批克隆）
+
+- 用户要求继续缩小 fork/exit/wait 差距，并明确优化双 ABI 之下的公共内核实现，而非 Linux/Native 包装层。本轮生产改动仅位于 MM 的 C/Rust 公共路径及对应主机测试。
+- `fd485dc7`：64 页批克隆扩展到稀疏匿名 VMA 和私有文件 VMA。完整 L0 run 一次预检、集中取引用、一次子方映射；空洞保持缺页，私有页保留 COW downgrade 和失败回滚。正式 APK fork 873.30→919.39 ops/s（+5.28%）。
+- `23ec0263`：同一批克隆覆盖 shared 匿名/文件映射；shared 保留可写 PTE 且不 downgrade，private 仍使用 COW flags。诊断 clone 527.43→428.93µs（-18.7%）；正式 APK fork 903.75→1013.35 ops/s（+12.13%），threads-2/switch 基本持平。两项均通过首轮 15 项 guest 回归和真实 C/Rust 主机测试。
+- 退出诊断 `destroy-phase-2026-10-26` 显示 VMA/页面回收约 367µs，页表销毁及 TLB 收尾约 20µs。`munmap` run 内匿名 `frame_put_many()` 候选仅 +0.64% 且逐轮方向不一致；wait 通知改为仅遍历父进程线程组的候选为 -2.12%，均不提交。补丁分别保存为 `build/performance/exit-frame-batch-rejected.patch`、`wait-tg-walk-rejected.patch`，原始 KVM 数据保留在对应 evidence 目录。
+- 最终干净源码 ELF 为 `build/performance/fork-final.elf`（sha256 `50aec13a1e1bfe2ebce80a14cc3b5a889ac60b59f5e2c7734b24e80beb17e5db`），不含临时 `MMDESTROY` 诊断。Linux ABI 最终 15 项×3 回归 45/45 通过；Native ABI 通过 8 次真实 `task_clone(A20_CLONE_COW_VM)` + exit/task_wait 和 1024 个私有字隔离检查。
+- 最终交替微基准（`micro-fork-final-{base,fast}{1,2,3}-2026-10-26`）：touched fork 1062.26→825.53µs（-22.29%），空进程 fork 130.02→135.92µs（+4.54%），稀疏 fork -0.58%；空进程第三轮 fast 173.11µs、稀疏第三轮 198.27µs 为明显离群值，完整保留而不选择性删除。getpid/yield/futex 改善与第四轮基本持平。
+- 最终原始基线/累计版本各五轮 APK（`apk-fork-final-base-2026-10-26-r5` / `apk-fork-final-2026-10-26-r5`）：fork 837.69→898.73 ops/s（+7.29%，最终为同轮 Linux 的 21.41%）、threads-2 6179.83→7338.25 ev/s（+18.75%，61.64%）、switch 316914.35→350859.88 ops/s（+10.71%，Linux 侧波动较大）。60/60 样本有效、guest 计数器审计全 0、输入哈希不变。
