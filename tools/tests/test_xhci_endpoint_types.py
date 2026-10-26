@@ -80,6 +80,11 @@ int main(void){
   assert((ep[4]>>16)==((type==1||type==3)?1024U:0U));
  }
  assert(!xhci_ep_type(255,0x81));
+ uint32_t slot[4]={0x005abcdeU|(1U<<27)};
+ xhci_slot_add_context(slot,4);assert((slot[0]>>27)==4);
+ xhci_slot_add_context(slot,3);assert((slot[0]>>27)==4);
+ xhci_slot_add_context(slot,7);assert((slot[0]>>27)==7);
+ assert((slot[0]&0x07ffffffU)==0x005abcdeU);
  xhci_ep_t bulk={.slot=1,.dci=3};x.eps=&bulk;
  usb_device_t dev={.slot=1};usb_endpoint_t in={.addr=0x81};uint8_t data[64]={0};
  usb_urb_t urb={.ep=&in,.dev=&dev,.buf=data,.len=8};usb_hcd_t hcd={&x};
@@ -99,7 +104,7 @@ class XhciEndpointTypes(unittest.TestCase):
     def test_production_endpoint_and_transfer_encoding(self):
         source = (ROOT / "kernel/drivers/usb/host/xhci.c").read_text()
         bodies = "\n".join(function(source, name) for name in (
-            "xhci_ep_type", "xhci_fill_ep_context", "xhci_find_ep",
+            "xhci_ep_type", "xhci_slot_add_context", "xhci_fill_ep_context", "xhci_find_ep",
             "xhci_op_submit_interrupt", "xhci_op_submit_bulk"))
         with tempfile.TemporaryDirectory(prefix="a20-xhci-types-") as tmp:
             work = Path(tmp)
