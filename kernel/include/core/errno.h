@@ -14,6 +14,7 @@
 #define EINTR        4
 #define EIO          5
 #define EBADF        9
+#define EBADFD       77  /* File descriptor in bad state (PCM state machine). */
 #define ECHILD       10
 #define EAGAIN       11
 #define ESHUTDOWN    108
