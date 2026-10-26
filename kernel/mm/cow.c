@@ -433,9 +433,9 @@ int a20_cow_share_snapshot_at(void *parent_ptr, uintptr_t va, int level,
 #endif
 }
 
-void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
-                             const struct a20_cow_shared_snapshot *snapshot,
-                             uintptr_t flags)
+static void cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
+                                const struct a20_cow_shared_snapshot *snapshot,
+                                uintptr_t flags, pt_meta_t *meta)
 {
     mm_struct_t *parent = parent_ptr;
     pte_t *src_pte = snapshot ? snapshot->slot : NULL;
@@ -452,14 +452,27 @@ void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
 #endif
     mm_tlb_note_change(parent, va, vm_pt_level_size(level));
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    if (snapshot->node)
-        (void)mm_pt_sync_status(snapshot->node, level, arch_pt_vpn(va, level),
-                                (uint8_t)snapshot->class);
+    if (snapshot->node) {
+        int idx = arch_pt_vpn(va, level);
+        if (meta)
+            (void)mm_pt_sync_status_meta(meta, idx,
+                                         (uint8_t)snapshot->class, *src_pte);
+        else
+            (void)mm_pt_sync_status(snapshot->node, level, idx,
+                                    (uint8_t)snapshot->class);
+    }
 #else
     /* No status sidecar to bring in step: the PTE rewrite above is the whole
      * of the parent-side downgrade on the arm32 short-descriptor backend. */
     (void)level;
 #endif
+}
+
+void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
+                             const struct a20_cow_shared_snapshot *snapshot,
+                             uintptr_t flags)
+{
+    cow_share_downgrade(parent_ptr, va, level, snapshot, flags, NULL);
 }
 
 void a20_cow_share_unlock(const struct a20_cow_shared_snapshot *snapshot)
@@ -637,7 +650,8 @@ int a20_cow_share_anon_batch_snapshot(
             snap.cow_flags = mm_cow_flags(source);
             snap.w_or_cow = 1;
             snap.class = out[i].class;
-            a20_cow_share_downgrade(parent, va, 0, &snap, snap.cow_flags);
+            cow_share_downgrade(parent, va, 0, &snap, snap.cow_flags,
+                                node_meta);
         }
     }
     mm_pt_node_unlock(node);

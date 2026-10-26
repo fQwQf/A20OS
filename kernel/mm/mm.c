@@ -398,7 +398,8 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
  * the status sidecar all live in this one operation. `owner` is the table
  * returned with `pte` by the walk; callers retain the existing locking rules. */
 static void pt_install_leaf_cls(pte_t *owner, pte_t *pte, vaddr_t va,
-                                paddr_t pa, pte_t flags, uint8_t cls)
+                                paddr_t pa, pte_t flags, uint8_t cls,
+                                pt_meta_t *meta)
 {
     if (*pte & PTE_V) {
         paddr_t old_pa = arch_pte_addr(*pte);
@@ -421,11 +422,15 @@ static void pt_install_leaf_cls(pte_t *owner, pte_t *pte, vaddr_t va,
 
     /* Record status in the exact table returned with this PTE. Reusing the
      * borrowed owner avoids a second root walk without changing lock rules. */
-    if (owner)
-        mm_pt_note_present(owner, 0, arch_pt_vpn(va, 0),
-                           (uint8_t)(MM_ST_CLS_BYTE(cls) |
-                                     (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
-                                     mm_pt_prot_bits(flags)));
+    if (owner) {
+        uint8_t byte = (uint8_t)(MM_ST_CLS_BYTE(cls) |
+                                 (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
+                                 mm_pt_prot_bits(flags));
+        if (meta)
+            mm_pt_note_present_meta(meta, arch_pt_vpn(va, 0), byte);
+        else
+            mm_pt_note_present(owner, 0, arch_pt_vpn(va, 0), byte);
+    }
 }
 
 static void pt_note_cache_unpublished(pt_meta_t *meta, int idx,
@@ -454,7 +459,7 @@ int pt_map_cache_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
     pte_t *owner = NULL;
     pte_t *pte = pt_walk_with_owner(pgdir, va, 1, &owner);
     if (!pte) return -ENOMEM;
-    pt_install_leaf_cls(owner, pte, va, pa, flags, cls);
+    pt_install_leaf_cls(owner, pte, va, pa, flags, cls, NULL);
     if (page)
         pt_note_cache_unpublished(mm_pt_meta(owner), arch_pt_vpn(va, 0), page);
     return 0;
@@ -466,7 +471,7 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
     pte_t *owner = NULL;
     pte_t *pte = pt_walk_with_owner(pgdir, va, 1, &owner);
     if (!pte) return -ENOMEM;
-    pt_install_leaf_cls(owner, pte, va, pa, flags, cls);
+    pt_install_leaf_cls(owner, pte, va, pa, flags, cls, NULL);
     return 0;
 }
 
@@ -546,7 +551,7 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
         paddr_t pa = pfn_to_phys((pfn_t)pages[i].pfn);
         pt_install_leaf_cls(owner, &owner[first + (int)i], va, pa,
                             (pte_t)pages[i].flags,
-                            (uint8_t)pages[i].class);
+                            (uint8_t)pages[i].class, meta);
         if (pages[i].pcp) {
             if (!meta->cache_owner) {
                 pfn_t owner_pfn = pfa_alloc_flags(0, 0);

@@ -778,6 +778,9 @@ extern uint64_t mm_seg_full_lvl[8];
  * leaf forms.  The AUDIT-only entry point exists so the auditor can compare
  * the two representations without going through a cursor. */
 void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte);
+/* Meta forms require the node lock or an exclusively owned unpublished table. */
+void mm_pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte);
+int mm_pt_sync_status_meta(pt_meta_t *m, int idx, uint8_t cls, pte_t pte);
 void mm_pt_note_absent(pte_t *table, int level, int idx);
 /* Cache annotation does not acquire a reference. The caller already owns the
  * mapping pin. Peek runs under the leaf node lock or on an unpublished table. */
