@@ -75,6 +75,7 @@ int main(void){
   memset(x.contexts,0,sizeof(x.contexts));
   xhci_fill_ep_context(&x,3,&ring,value,1024,0);
   uint32_t*ep=x.contexts[4];assert(((ep[1]>>3)&7)==value);
+  assert(((ep[1]>>1)&3)==(type==1?0U:3U));
   assert((ep[1]>>16)==1024);
   assert((((uint64_t)ep[3]<<32)|ep[2])==(uintptr_t)&ring.trbs[17]);
   assert((ep[4]>>16)==((type==1||type==3)?1024U:0U));
