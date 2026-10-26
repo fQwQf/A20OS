@@ -362,7 +362,8 @@ static mm_struct_t g_mm;
 static task_t g_task={&g_mm,0};
 static task_t *g_current=&g_task;
 static int pins,unpins,gets,put_count,rust_calls,rust_rc;
-static uint32_t rust_bits;
+static int page_calls,page_rc,page_unlocks;
+static uint32_t rust_bits,page_bits;
 task_t *proc_current(void) { return g_current; }
 uint64_t spin_lock_irqsave(int *lock) { (void)lock; pins++; return 0x55; }
 void spin_unlock_irqrestore(int *lock,uint64_t flags) { (void)lock; assert(flags==0x55); unpins++; }
@@ -375,27 +376,44 @@ int a20_usercopy_read_u32_atomic_rust(task_t *t,mm_struct_t *mm,
     if(rust_rc<0) return rust_rc;
     *out=rust_bits; return 0;
 }
+int a20_usercopy_page_access(task_t *t,mm_struct_t *mm,uintptr_t address,int write,
+                             void **word,size_t *chunk,uint64_t *irq,
+                             unsigned *preempt,unsigned *guard) {
+    page_calls++;
+    assert(t==g_current && mm==&g_mm && address==0x4000 && write==0);
+    *word=&page_bits; *chunk=sizeof(page_bits); *irq=0x55; *preempt=0; *guard=0;
+    return page_rc;
+}
+void a20_usercopy_page_unlock(mm_struct_t *mm,uint64_t irq,
+                              unsigned preempt,unsigned guard) {
+    assert(mm==&g_mm && irq==0x55 && preempt==0 && guard==0);
+    page_unlocks++;
+}
 /* REAL_C_BODIES */
 int main(void) {
     int out=0; uint32_t expected=UINT32_C(0xdeadbeef);
-    rust_bits=expected;
+    rust_bits=page_bits=expected;
     assert(a20_futex_preflight_word((const int *)(uintptr_t)0x4000,&out)==0);
     assert(memcmp(&out,&expected,sizeof(out))==0);
-    assert(rust_calls==1 && gets==1 && put_count==1 && pins==1 && unpins==1 && g_mm.refs==0);
-    rust_rc=-EFAULT;
+    assert(page_calls==1 && page_unlocks==1 && rust_calls==0 && gets==0);
+    page_rc=-EFAULT; rust_rc=-EFAULT;
     assert(a20_futex_preflight_word((const int *)(uintptr_t)0x4000,&out)==-EFAULT);
-    assert(rust_calls==2 && gets==2 && put_count==2 && g_mm.refs==0);
+    assert(page_calls==2 && page_unlocks==1 && rust_calls==0 && gets==0);
+    page_rc=1; rust_rc=0;
+    assert(a20_futex_preflight_word((const int *)(uintptr_t)0x4000,&out)==0);
+    assert(memcmp(&out,&expected,sizeof(out))==0);
+    assert(rust_calls==1 && gets==1 && put_count==1 && g_mm.refs==0);
     rust_rc=0;
     assert(a20_futex_preflight_word((const int *)(uintptr_t)0x4001,&out)==-EFAULT);
-    assert(rust_calls==2 && gets==2);
+    assert(rust_calls==1 && gets==1);
     assert(a20_futex_preflight_word((const int *)(uintptr_t)0x4000,NULL)==-EFAULT);
-    assert(rust_calls==2 && gets==2);
+    assert(rust_calls==1 && gets==1);
     assert(user_read_u32_atomic((const uint32_t *)(uintptr_t)USER_VA_LIMIT,&expected)==-EFAULT);
-    assert(rust_calls==2 && gets==2);
+    assert(rust_calls==1 && gets==1);
     g_current=NULL;
     assert(user_read_u32_atomic((const uint32_t *)(uintptr_t)0x4000,&expected)==-EFAULT);
-    assert(rust_calls==2 && gets==2);
-    puts("FUTEX_PREFLIGHT_C_ADAPTER: PASS bit pattern, range/alignment, pin lifetime");
+    assert(rust_calls==1 && gets==1);
+    puts("FUTEX_PREFLIGHT_C_ADAPTER: PASS fast page, fault fallback, bit pattern, range/alignment, pin lifetime");
     return 0;
 }
 '''.replace("/* REAL_C_BODIES */", body)

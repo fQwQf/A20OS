@@ -258,11 +258,48 @@ void *a20_futex_task_mm(void *opaque_task)
     return task ? task->mm : NULL;
 }
 
+extern int a20_usercopy_page_access(task_t *t, mm_struct_t *mm,
+                                    uintptr_t address, int write,
+                                    void **kernel_address, size_t *chunk,
+                                    uint64_t *irq_flags, unsigned *preempt_before,
+                                    unsigned *shared_write_guard_out);
+extern void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq_flags,
+                                     unsigned preempt_before,
+                                     unsigned shared_write_guard);
+
 int a20_futex_preflight_word(const int *addr, int *out)
 {
-    if (!out)
+    if (!out || ((uintptr_t)addr & (sizeof(*addr) - 1)))
         return -EFAULT;
     uint32_t bits;
+#ifndef CONFIG_NOMMU
+    task_t *task = proc_current();
+    mm_struct_t *mm = task ? task->mm : NULL;
+    if (mm) {
+        void *word;
+        size_t chunk;
+        uint64_t irq_flags;
+        unsigned preempt_before, shared_write_guard;
+        int rc = a20_usercopy_page_access(task, mm, (uintptr_t)addr, 0,
+                                          &word, &chunk, &irq_flags,
+                                          &preempt_before, &shared_write_guard);
+        if (rc == 0) {
+            int valid = chunk >= sizeof(bits) &&
+                        ((uintptr_t)word & (sizeof(bits) - 1)) == 0;
+            if (valid)
+                bits = __atomic_load_n((volatile uint32_t *)word,
+                                       __ATOMIC_ACQUIRE);
+            a20_usercopy_page_unlock(mm, irq_flags, preempt_before,
+                                     shared_write_guard);
+            if (!valid)
+                return -EFAULT;
+            memcpy(out, &bits, sizeof(bits));
+            return 0;
+        }
+        if (rc < 0)
+            return -EFAULT;
+    }
+#endif
     if (user_read_u32_atomic((const uint32_t *)(const void *)addr, &bits) < 0)
         return -EFAULT;
     /* Preserve the exact int object representation without a usercopy or an
