@@ -78,7 +78,7 @@ parted -s "$output" set 1 esp on
 if [ -n "$world_image" ]; then
     parted -s "$output" mkpart distro ext4 256MiB "$((world_mb + 256))MiB"
     parted -s "$output" name 2 '"A20OS distro"'
-    dd if="$world_image" of="$output" bs=1M seek=256 conv=notrunc status=none
+    dd if="$world_image" of="$output" bs=1M seek=256 conv=sparse,notrunc status=none
 fi
 
 esp_offset=$((1024 * 1024))

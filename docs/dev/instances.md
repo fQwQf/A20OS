@@ -97,6 +97,7 @@ storage_read_only = false
 external_root = false
 ramfs_user = false           # 支持范围见 components/trim.toml 的 ramfs-user 矩阵
 ramfs_media = false          # 需要 ramfs_user=true；嵌入已有 videoplay/audioplay
+ramfs_distro = false         # 需要 ramfs_user=true、rootfs.world；只接管具名 A20OS GPT 发行版分区
 virtio_console_profile = "throughput" # 默认；compact 减少队列与缓冲区内存
 # virtio_console_rx_slots = 2         # 可单独覆盖预设，必须为 1～16 的 2 次幂
 # virtio_console_tx_slots = 2
@@ -204,6 +205,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `kernel.swap` | `CONFIG_SWAP`（y/n） |
 | `kernel.cooperative_boot` / `storage_read_only` / `external_root` / `ramfs_user` | `COOPERATIVE_BOOT` / `STORAGE_READ_ONLY` / `EXTERNAL_ROOT` / `RAMFS_USER` |
 | `kernel.ramfs_media` | `RAMFS_MEDIA`；仅增加现有播放器，不承诺具体板型的显示/音频硬件可用 |
+| `kernel.ramfs_distro` | `RAMFS_DISTRO`；保留内嵌恢复用户态，挂载唯一有效的 `A20OS distro` GPT Linux 分区，再由现有 init 交给 apk world |
 | `machine.smp` / `memory` / `allow_unverified_smp` | `NR_CPUS` / `QEMU_MEMORY` / `ALLOW_UNVERIFIED_SMP` |
 | `gui.display` / `audio_driver` / `audio_device` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` |
 | `net.hostfwd` | `NET_HOSTFWD`（逗号连接） |
@@ -679,6 +681,13 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 `build/package/flash` 不启动 guest，因此不受 preflight 约束。
 
 ## apk world 镜像实例（用包管理组装用户态）
+
+物理 PC 可复用相同 world：`package.kind="uefi-disk"`、`package.variant="world"`
+将原生 EFI 启动器与 ext4 world 封装到同一 GPT 盘，要求
+`kernel.ramfs_user=true`、`kernel.ramfs_distro=true` 和 `rootfs.world`。
+该路径保留 RAM 恢复环境，只自动挂载唯一有效的 `A20OS distro` Linux-data 分区，
+不依赖 QEMU 的第二块裸 ext4 盘。`build` 构建内核与 world，`package` 生成完整介质；
+具体硬件、写盘和验收步骤见 [华为 CT5100](../platforms/huawei-ct5100.md)。
 
 与宿主 Linux 做性能对比可用 `benchmark-x86_64`：其 `benchmark` world 通过 apk 安装
 sysbench、stress-ng 和 OpenSSL。相同二进制的 KVM / Linux 对照运行方法与实际结果见

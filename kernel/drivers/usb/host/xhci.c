@@ -186,7 +186,7 @@ typedef struct xhci_controller {
     int irq;
     volatile uint64_t irq_events;   /* events the IRQ handler consumed */
     volatile uint64_t poll_events;  /* events the polling fallback consumed */
-    uint64_t reported_irq_events;   /* last value already printed */
+    uint64_t reported_irq_events;   /* nonzero after IRQ progress was announced */
     uint64_t reported_poll_events;
     spinlock_t lock;
 
@@ -1111,8 +1111,10 @@ static int xhci_op_poll(usb_hcd_t *hcd) {
     xhci_ack_event_irq(xhci);
     uint64_t irq_events = xhci->irq_events;
     uint64_t poll_events = xhci->poll_events;
-    if (irq_events != xhci->reported_irq_events ||
-        poll_events != xhci->reported_poll_events) {
+    /* Announce each completion path once. Per-report logging can exhaust a
+     * physical serial console's bandwidth while a USB mouse is moving. */
+    if ((irq_events && !xhci->reported_irq_events) ||
+        (poll_events && !xhci->reported_poll_events)) {
         xhci->reported_irq_events = irq_events;
         xhci->reported_poll_events = poll_events;
         spin_unlock_irqrestore(&xhci->lock, flags);

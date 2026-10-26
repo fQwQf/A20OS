@@ -1,0 +1,30 @@
+# Legacy BIOS alternative; GRUB's multiboot path does not hand off a framebuffer.
+name = "huawei-ct5100-bios"
+description = "Huawei CT5100 legacy BIOS RAM shell through a verified COM1"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ramfs_media = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[package]
+kind = "grub-iso"
+variant = "rescue-usb"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 38400
+boot_timeout = "180s"
+console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/huawei-ct5100/a20os-bios.iso"]
+media_device = "/dev/sdX"
+log = ".kernel-build/console/huawei-ct5100-bios.log"

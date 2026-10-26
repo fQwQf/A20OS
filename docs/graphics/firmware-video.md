@@ -5,6 +5,12 @@
 x86-64 原生 UEFI loader 可以保留固件已经建立的 GOP 显示模式，交给公共
 `simplefb` 驱动发布 `/dev/fb0`。该路径不需要 Intel GPU 模式设置驱动，不访问
 QEMU `fw_cfg`，也不会在 `ExitBootServices` 后调用固件绘图函数。
+固件显示也接入公共 DRM/KMS：现有 apk `xfce` world 可通过 labwc/pixman
+呈现桌面、终端和软件播放器，KMS 的 XRGB8888 缓冲会转换到实际显存 stride
+与 RGB 掩码。具体完整介质与离线媒体部署见
+[华为 CT5100](../platforms/huawei-ct5100.md)。HDA 提供 ALSA 所需的真实队列
+查询及非阻塞提交；其他原生 PCM 后端保留 `/dev/audioN` 接口，在补齐此查询前
+不宣称 ALSA 播放可用。以下 RAMFS 测试程序是独立的轻量诊断入口。
 BIOS/GRUB 路径目前没有同等的 GOP 交接；J1900 应选择
 `instances/j1900-pc-uefi-shell.toml`。
 
@@ -48,7 +54,7 @@ videoplay --test 320 240 30
 
 ## 播放预转换视频
 
-当前播放器接受逐帧、无头部、无行填充的 **RGB24** 字节流，尚未移植 MP4 容器
+下述 `videoplay` 诊断程序接受逐帧、无头部、无行填充的 **RGB24** 字节流，尚未移植 MP4 容器
 与 H.264/HEVC 等压缩视频解码器。先在宿主使用 FFmpeg 解码和缩放：
 
 ```sh
