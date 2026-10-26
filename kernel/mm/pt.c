@@ -617,7 +617,7 @@ void mm_pt_cache_note(pt_root_t *pgdir, vaddr_t va,
     int idx = arch_pt_vpn(va, 0);
     mm_pt_node_lock(table);
     if (!m->cache_owner) {
-        pfn_t owner_pfn = pfa_alloc_page();
+        pfn_t owner_pfn = pfa_alloc_flags(0, 0);
         if (owner_pfn != PFN_NONE) {
             m->cache_owner = pfn_to_virt(owner_pfn);
             memset(m->cache_owner, 0, PAGE_SIZE);
