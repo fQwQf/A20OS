@@ -73,7 +73,7 @@ _Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, flags) == 8,
  * writing any leaf and does not acquire/drop backing references. */
 int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                       const struct a20_cow_anon_batch_page *pages,
-                      size_t nr);
+                      size_t nr, int shared);
 /* cls is the status class the huge leaf carries (MM_ST_ANON_MAPPED for a
  * fresh THP fault, the parent's class across fork, the source's class across
  * mremap).  A huge leaf is ONE entry of its table, so it gets ONE status

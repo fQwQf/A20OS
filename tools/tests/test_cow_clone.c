@@ -221,16 +221,17 @@ int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
 /* The scalar suite does not enter batch mapping; provide its current ABI. */
 int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
                                       uintptr_t start, void *node,
-                                      struct a20_cow_anon_batch_page *out)
+                                      struct a20_cow_anon_batch_page *out,
+                                      int shared)
 {
-    (void)parent; (void)child; (void)start; (void)node; (void)out;
+    (void)parent; (void)child; (void)start; (void)node; (void)out; (void)shared;
     return 0;
 }
 int a20_cow_map_child_anon_batch(void *child, uintptr_t va,
                                  const struct a20_cow_anon_batch_page *pages,
-                                 size_t count)
+                                 size_t count, int shared)
 {
-    (void)child; (void)va; (void)pages; (void)count;
+    (void)child; (void)va; (void)pages; (void)count; (void)shared;
     return -95;
 }
 void frame_put_many(const uint32_t *pfns, size_t count)

@@ -181,12 +181,14 @@ unsafe extern "C" {
         start: usize,
         node: *mut c_void,
         out: *mut AnonBatchPage,
+        shared: i32,
     ) -> i32;
     fn a20_cow_map_child_anon_batch(
         child: *mut c_void,
         va: usize,
         pages: *const AnonBatchPage,
         count: usize,
+        shared: i32,
     ) -> i32;
     fn frame_put_many(pfns: *const u32, count: usize);
     fn page_cache_put(page: *mut c_void);
@@ -225,7 +227,7 @@ impl Drop for AnonBatchGuard {
     }
 }
 
-/// Attempt one all-or-nothing private source snapshot.  Zero means the C
+/// Attempt one all-or-nothing shared or private source snapshot.  Zero means the C
 /// preflight made no changes and the existing scalar walker should proceed;
 /// one means every present child leaf in the window was mapped; negative aborts
 /// this fork after the guard drains every reference not transferred to the child.
@@ -235,6 +237,7 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     parent: *mut c_void,
     va: usize,
     node: *mut c_void,
+    shared: i32,
 ) -> i32 {
     if unsafe { a20_cow_requires_private_copy() } != 0 {
         return 0;
@@ -251,6 +254,7 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
             va,
             node,
             guard.pages.as_mut_ptr(),
+            shared,
         )
     };
     if snapshot <= 0 {
@@ -264,6 +268,7 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
             va,
             guard.pages.as_ptr(),
             ANON_BATCH_PAGES,
+            shared,
         )
     };
     if result < 0 {

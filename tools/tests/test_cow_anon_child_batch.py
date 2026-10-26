@@ -91,7 +91,7 @@ class AnonChildBatch(unittest.TestCase):
         # the synthetic PFA, so executable-cache maintenance is skipped in this
         # negative control; the positive fixture retains the full 64-flush check.
         flush_assert = "assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==64);"
-        self.assertEqual(fixture.count(flush_assert), 2)
+        self.assertEqual(fixture.count(flush_assert), 3)
         fixture = fixture.replace(flush_assert,
                                   "assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==0);", 1)
         header = (TREE / "kernel/include/mm/mm.h").read_text()
@@ -120,9 +120,9 @@ unsafe extern "C" {
     #[link_name="mock_private"] fn a20_cow_requires_private_copy() -> i32;
     #[link_name="mock_snapshot"] fn a20_cow_share_anon_batch_snapshot(
         parent:*mut c_void, child:*mut c_void, start:usize, node:*mut c_void,
-        out:*mut AnonBatchPage) -> i32;
+        out:*mut AnonBatchPage, shared:i32) -> i32;
     #[link_name="mock_map_batch"] fn a20_cow_map_child_anon_batch(
-        child:*mut c_void, va:usize, pages:*const AnonBatchPage, count:usize) -> i32;
+        child:*mut c_void, va:usize, pages:*const AnonBatchPage, count:usize,_shared:i32) -> i32;
     #[link_name="mock_put_many"] fn frame_put_many(pfns:*const u32, count:usize);
     #[link_name="mock_cache_put"] fn page_cache_put(page:*mut c_void);
     #[link_name="mock_rss"] fn a20_cow_rss_add(child:*mut c_void, pages:usize);
@@ -141,7 +141,7 @@ static mut CHILD_REFS:usize=0;
 static mut RSS:usize=0;
 #[no_mangle] unsafe extern "C" fn mock_private()->i32 { unsafe{PRIVATE_COPY} }
 #[no_mangle] unsafe extern "C" fn mock_snapshot(_p:*mut c_void,_c:*mut c_void,_v:usize,_n:*mut c_void,
-                                                   out:*mut AnonBatchPage)->i32 {
+                                                   out:*mut AnonBatchPage,_shared:i32)->i32 {
     unsafe { SNAPSHOTS+=1; if SNAPSHOT_RESULT!=1 { return SNAPSHOT_RESULT; }
         PINS=if SPARSE!=0 {63} else {64}; for i in 0..64 {
             if SPARSE!=0 && i==0 { *out.add(i)=AnonBatchPage::default(); continue; }
@@ -154,7 +154,7 @@ static mut RSS:usize=0;
         1 }
 }
 #[no_mangle] unsafe extern "C" fn mock_map_batch(_c:*mut c_void,va:usize,
-                                                  pages:*const AnonBatchPage,count:usize)->i32 {
+                                                  pages:*const AnonBatchPage,count:usize,_shared:i32)->i32 {
     unsafe { MAP_CALLS+=1; assert_eq!(va,0x20000); assert_eq!(count,64);
         let mut present=0;
         for i in 0..count { let p=*pages.add(i); if p.class==0 { continue; }
@@ -176,22 +176,22 @@ unsafe fn reset() { unsafe { PRIVATE_COPY=0; SNAPSHOT_RESULT=1; MAP_RESULT=0; SP
     SNAPSHOTS=0; MAP_CALLS=0; PINS=0; RELEASED=0; CACHE_RELEASED=0; CHILD_REFS=0; RSS=0; } }
 fn main() { unsafe {
     reset(); PRIVATE_COPY=1;
-    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut()),0);
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),0);
     assert_eq!((SNAPSHOTS,MAP_CALLS),(0,0));
     reset(); SNAPSHOT_RESULT=0;
-    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut()),0);
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),0);
     assert_eq!((PINS,RELEASED,MAP_CALLS,RSS),(0,0,0,0));
     reset();
-    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut()),1);
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),1);
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,64,1,64));
     reset(); SPARSE=1;
-    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut()),1);
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),1);
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,63,1,63));
     reset(); MAP_RESULT=ENOMEM;
-    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut()),ENOMEM);
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),ENOMEM);
     assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,42,22,0,1,0));
     reset(); SNAPSHOT_RESULT=-5;
-    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut()),-5);
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),0),-5);
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,0,0,0));
 } }
 '''.replace("/* ACTUAL_RUST_BATCH_CODE */", code)

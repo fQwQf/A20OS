@@ -33,7 +33,9 @@ static pfa_t pfa;
 #define EEXIST 17
 #define ENOMEM 12
 #define MM_ST_ANON_MAPPED 2u
+#define MM_ST_ANON_SHARED 3u
 #define MM_ST_FILE_PRIVATE 4u
+#define MM_ST_FILE_SHARED 5u
 #define A20_COW_ANON_BATCH_PAGES 64
 #define MM_ST_CLS_BYTE(c) ((uint8_t)(c))
 #define MM_ST_COW_BIT 0x80u
@@ -73,7 +75,9 @@ static pte_t arch_pte_leaf(paddr_t pa, pte_t flags) { installs++; return pa | fl
 static void mm_pt_note_present(pte_t *owner, int level, int idx, uint8_t cls) {
     assert(owner == child_slots); assert(level == 0); assert(idx >= 0 && idx < 512);
     assert((cls & 0x7f) == MM_ST_ANON_MAPPED ||
-           (cls & 0x7f) == MM_ST_FILE_PRIVATE); status_calls++;
+           (cls & 0x7f) == MM_ST_ANON_SHARED ||
+           (cls & 0x7f) == MM_ST_FILE_PRIVATE ||
+           (cls & 0x7f) == MM_ST_FILE_SHARED); status_calls++;
 }
 static int mm_pt_prot_bits(pte_t flags) { (void)flags; return 0; }
 
@@ -110,7 +114,7 @@ int main(void) {
     assert(walk_calls==1 && installs==1 && status_calls==1 && frame_puts==1);
 
     reset();
-    assert(pt_map_anon_batch(child_slots,start,pages,64)==0);
+    assert(pt_map_anon_batch(child_slots,start,pages,64,0)==0);
     assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==64);
     assert(frame_puts==0);
     for(size_t i=0;i<64;i++) {
@@ -130,51 +134,59 @@ int main(void) {
     pages[0].class=MM_ST_FILE_PRIVATE;
     pages[31].class=MM_ST_FILE_PRIVATE;
     pages[63].class=MM_ST_FILE_PRIVATE;
-    assert(pt_map_anon_batch(child_slots,start,pages,64)==0);
+    assert(pt_map_anon_batch(child_slots,start,pages,64,0)==0);
+    assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==64);
+
+    reset(); fill(pages,64,PTE_U|PTE_X);
+    pages[0].class=MM_ST_ANON_SHARED;
+    pages[0].flags|=PTE_W;
+    pages[63].class=MM_ST_FILE_SHARED;
+    pages[63].flags|=PTE_W;
+    assert(pt_map_anon_batch(child_slots,start,pages,64,1)==0);
     assert(walk_calls==1 && installs==64 && status_calls==64 && exec_flushes==64);
 
     reset(); fill(pages,64,PTE_U|PTE_X);
     pages[5]=(struct a20_cow_anon_batch_page){0};
     pages[60]=(struct a20_cow_anon_batch_page){0};
-    assert(pt_map_anon_batch(child_slots,start,pages,64)==0);
+    assert(pt_map_anon_batch(child_slots,start,pages,64,0)==0);
     assert(walk_calls==1 && installs==62 && status_calls==62 && exec_flushes==62);
     assert(child_slots[32+5]==0 && child_slots[32+60]==0);
 
     for (size_t bad_at_i=0; bad_at_i<4; bad_at_i++) {
         reset(); fill(pages,64,PTE_U|PTE_X);
         if (bad_at_i==0) pages[31].pfn=0;
-        if (bad_at_i==1) pages[31].class=3;
+        if (bad_at_i==1) pages[31].class=6;
         if (bad_at_i==2) pages[31].flags=PTE_W|PTE_U;
         if (bad_at_i==3) pages[31].flags=PTE_X;
-        assert(pt_map_anon_batch(child_slots,start,pages,64)<0);
+        assert(pt_map_anon_batch(child_slots,start,pages,64,0)<0);
         assert(walk_calls==0 && installs==0 && status_calls==0 && exec_flushes==0 && frame_puts==0);
     }
 
     reset(); fill(pages,64,PTE_U);
-    assert(pt_map_anon_batch(child_slots,start,pages,0)<0);
-    assert(pt_map_anon_batch(child_slots,start,pages,65)<0);
-    assert(pt_map_anon_batch(child_slots,start+1,pages,64)<0);
-    assert(pt_map_anon_batch(child_slots,USER_VA_LIMIT-PAGE_SIZE,pages,64)<0);
-    assert(pt_map_anon_batch(child_slots,0x1ff000,pages,64)<0); /* crosses L0 */
+    assert(pt_map_anon_batch(child_slots,start,pages,0,0)<0);
+    assert(pt_map_anon_batch(child_slots,start,pages,65,0)<0);
+    assert(pt_map_anon_batch(child_slots,start+1,pages,64,0)<0);
+    assert(pt_map_anon_batch(child_slots,USER_VA_LIMIT-PAGE_SIZE,pages,64,0)<0);
+    assert(pt_map_anon_batch(child_slots,0x1ff000,pages,64,0)<0); /* crosses L0 */
     assert(walk_calls==0 && installs==0);
 
     for (int conflict=0; conflict<3; conflict++) {
         reset(); fill(pages,64,PTE_U);
         child_slots[32+(conflict==0?0:conflict==1?63:17)] =
             conflict==2 ? (0x50000 | 0x200) : (PTE_V|PTE_U);
-        assert(pt_map_anon_batch(child_slots,start,pages,64)==-17);
+        assert(pt_map_anon_batch(child_slots,start,pages,64,0)==-17);
         assert(walk_calls==1 && installs==0 && status_calls==0 && frame_puts==0);
     }
 
     reset(); fill(pages,64,PTE_U); upper_conflict=1; /* huge leaf or swap above L0 */
-    assert(pt_map_anon_batch(child_slots,start,pages,64)==-ENOMEM);
+    assert(pt_map_anon_batch(child_slots,start,pages,64,0)==-ENOMEM);
     assert(walk_calls==1 && installs==0 && status_calls==0 && frame_puts==0);
 
     reset(); fill(pages,64,PTE_U); walk_fail=1;
-    assert(pt_map_anon_batch(child_slots,start,pages,64)<0);
+    assert(pt_map_anon_batch(child_slots,start,pages,64,0)<0);
     assert(walk_calls==1 && installs==0 && status_calls==0 && frame_puts==0);
     reset(); fill(pages,64,PTE_U); bad_meta=1;
-    assert(pt_map_anon_batch(child_slots,start,pages,64)<0);
+    assert(pt_map_anon_batch(child_slots,start,pages,64,0)<0);
     assert(walk_calls==1 && installs==0 && status_calls==0 && frame_puts==0);
     puts("ANON_CHILD_BATCH_C_MAPPER: actual extracted functions, whole-run preflight and install PASS");
     return 0;

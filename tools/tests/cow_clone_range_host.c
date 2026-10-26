@@ -7,7 +7,7 @@
 #include <string.h>
 #define PAGE_SIZE 4096UL
 #define A20_COW_ANON_BATCH_PAGES 64
-static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n) { (void)c; (void)p; (void)va; (void)n; return 0; }
+static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, int shared) { (void)c; (void)p; (void)va; (void)n; (void)shared; return 0; }
 #define ARCH_PT_ROOT_LEVEL 2
 #define ARCH_HAS_PGTABLE_OPS 1
 #define PTE_V 1UL
