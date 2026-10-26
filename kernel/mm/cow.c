@@ -580,13 +580,13 @@ int a20_cow_share_anon_batch_snapshot(
         out[i] = (struct a20_cow_anon_batch_page){0};
         if (!source)
             continue;
-        uint8_t status = mm_pt_peek(node, 0, index);
+        uint8_t status = node_meta->cls[index];
         uint32_t cls = MM_ST_GET_CLASS(status);
         if (!(source & PTE_V) || !arch_pte_is_leaf(source) ||
             (cls != MM_ST_ANON_MAPPED && cls != MM_ST_ANON_SHARED &&
              cls != MM_ST_FILE_PRIVATE && cls != MM_ST_FILE_SHARED) ||
-            mm_pt_safe_test(node, 0, index, MM_SAFE_UFFD) ||
-            mm_pt_safe_test(node, 0, index, MM_SAFE_NO_FA)) {
+            (node_meta->safe[index >> 3] &
+             (MM_SAFE_UFFD | MM_SAFE_NO_FA))) {
             mm_pt_node_unlock(node);
             return 0;
         }
@@ -606,8 +606,9 @@ int a20_cow_share_anon_batch_snapshot(
         if (!out[i].class)
             continue;
         uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
-        page_cache_page_t *pcp = (vma->vm_flags & VM_FILE)
-            ? mm_pt_cache_peek(node, first + (int)i) : NULL;
+        page_cache_page_t *pcp = (vma->vm_flags & VM_FILE) &&
+                                         node_meta->cache_owner
+            ? node_meta->cache_owner[first + (int)i] : NULL;
         if (pcp && page_cache_pfn(pcp) == pfns[i])
             page_cache_pin(pcp);
         else
