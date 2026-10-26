@@ -342,3 +342,10 @@
 - 初版统一销毁让匿名页每叶重复查询元数据，touched fork 回退 19.66%；经 batch16/cache/unified/inline 消融定位并修复。最终三轮微基准：空进程 fork 127.10→122.53µs（-3.59%）、稀疏 123.99→120.19µs（-3.07%）、touched 829.82→851.28µs（+2.59%，不宣称改善）；getpid/yield/futex/mutex 中位变化均在 ±1.5% 内。
 - 最终 ELF `build/performance/fork-mm-final.elf`（sha256 `9878004a6ca57a624596098bf7ea8f4e764452786a104b681d80d166db5a4ca9`）。真实 C/Rust host 测试通过，Linux ABI 15 项×3 共 45/45 通过，Native ABI 8 次 COW clone/exit/wait 与 1024 字隔离检查通过。证据 `fork-mm-final-regression-full15x3-v2-2026-10-27`、`native-lifecycle-final-v2-2026-10-27`、`micro-fork-mm-v2-{base,fast}{1,2,3}-2026-10-27`。
 - 最终原始基线/累计版本各五轮完整 APK（`apk-fork-mm-final-base-2026-10-27-r5` / `apk-fork-mm-final-2026-10-27-r5`）：fork 885.55→1282.33 ops/s（+44.81%，为同轮 Linux 的 27.06%）、threads-2 +19.94%、switch +23.23%、memory-write +2.61%；cpu-1/cpu-2/SHA256 基本持平。合计 140/140 样本有效、guest 计数器审计全 0、输入哈希不变。fork 与 Linux 的差距约 3.70×，switch 不把波动下的比率当固定优势。
+
+## 2026-10-27 北京时间（续：批量 COW 元数据快路径）
+
+- `d1f7ad6b` 在批量快照的节点锁内直接读取已缓存 class/safe/owner，touched 826.31→726.56µs（-12.07%），APK fork 1289.25 ops/s 基本持平。
+- `27836aad` 将 present/sync 和未发布子页表安装改为复用已解析元数据；旧接口仍走同一 helper。独立 touched 633.58→590.05µs（-6.87%），APK fork 1289.25→1346.91 ops/s（+4.47%）。两项均通过相关 host 与 15 项 guest。
+- 最终 ELF `build/performance/cow-batch-meta-final.elf`（sha256 `bbfaf115e4bdb3f10a6c8c358dca056f8840f922788b73f370d81145b813558e`）。Linux ABI 45/45、Native 8 次 COW clone/exit/wait 与 1024 字隔离检查通过。最终三轮微基准：touched -23.75%、sparse -3.69%、空进程 -1.30%，同步原语基本持平；空进程/sparse 离群样本保留。
+- 最终上一版/本次版本各五轮完整 APK（`apk-cow-meta-base-2026-10-27-r5` / `apk-cow-meta-final-2026-10-27-r5`）：fork 1264.79→1361.41 ops/s（+7.64%，为同轮 Linux 的 31.01%），threads-2 +0.21%、switch +0.09%、memory-write +1.24%、cpu-1 +0.16%、cpu-2 +0.25%、SHA256 +0.21%。合计 140/140 样本有效、guest 计数器审计全 0、输入哈希不变；fork 与 Linux 差距约 3.22×。
