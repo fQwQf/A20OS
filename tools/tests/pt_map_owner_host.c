@@ -33,6 +33,7 @@ typedef uintptr_t paddr_t;
 typedef uintptr_t vaddr_t;
 typedef uint32_t pfn_t;
 typedef pte_t pt_root_t;
+typedef struct { int unused; } pt_meta_t;
 
 static _Alignas(PAGE_SIZE) pte_t root[512];
 static _Alignas(PAGE_SIZE) pte_t allocated_tables[4][512];
@@ -87,6 +88,9 @@ static void mm_pt_note_present(pte_t *table, int level, int index, uint8_t cls) 
     last_note_level = level;
     last_note_index = index;
     last_note_class = cls;
+}
+static void mm_pt_note_present_meta(pt_meta_t *meta, int index, uint8_t cls) {
+    (void)meta; (void)index; (void)cls;
 }
 static pfn_t phys_to_pfn(paddr_t pa) { return (pfn_t)(pa / PAGE_SIZE); }
 static void frame_put(pfn_t pfn) {

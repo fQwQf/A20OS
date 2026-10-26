@@ -31,6 +31,7 @@ class PtCacheOwner(unittest.TestCase):
             "struct page_cache_page *mm_pt_cache_peek(",
             "void mm_pt_cache_note(",
             "static void pt_note_present_meta(",
+            "void mm_pt_note_present_meta(",
             "void mm_pt_note_present(",
             "void mm_pt_note_absent(",
         ])

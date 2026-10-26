@@ -22,6 +22,7 @@ typedef uint32_t pfn_t;
 typedef struct { pte_t *pgdir; } mm_struct_t;
 typedef struct { unsigned vm_flags; } mm_seg_t;
 typedef struct { int pin; } page_cache_page_t;
+typedef struct { int unused; } pt_meta_t;
 static pte_t tables[2][512];
 static mm_seg_t vma;
 static page_cache_page_t cache;
@@ -61,9 +62,19 @@ static uint8_t mm_pt_peek(pte_t *table,int level,int idx) {
     status_reads++;return MM_ST_CLS_BYTE(stored_class)|7;
 }
 /* CLASS_HELPER */
+static page_cache_page_t *mm_pt_cache_peek(pte_t *table,int idx) {
+    assert(locked==0&&table==tables[0]&&idx==expected_index);
+    return NULL;
+}
 static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *v,uintptr_t va,pfn_t pfn) {
     (void)v;(void)va;assert(locked==0&&pfn==9);
     if(cache_mode){cache.pin++;return &cache;}return NULL;
+}
+static pfn_t page_cache_pfn(page_cache_page_t *page) {
+    assert(page==&cache);return 9;
+}
+static void page_cache_pin(page_cache_page_t *page) {
+    assert(page==&cache);cache.pin++;
 }
 static void frame_get(pfn_t pfn) {assert(locked==0&&pfn==9);frame_gets++;}
 static void frame_put(pfn_t pfn) {assert(locked==-1&&pfn==9);frame_puts++;}
@@ -83,6 +94,10 @@ static int mm_pt_sync_status(pte_t *table,int level,int idx,unsigned char cls) {
     assert(locked==0&&table==tables[0]&&(level==0||level==1)&&idx==expected_index&&cls==expected_class);
     statuses++;return 0;
 }
+static int mm_pt_sync_status_meta(pt_meta_t *meta,int idx,unsigned char cls,pte_t pte) {
+    (void)meta;(void)idx;(void)cls;(void)pte;
+    return 0;
+}
 /* SNAPSHOT_STRUCT */
 /* SNAPSHOT_FUNCTIONS */
 /* RELEASE_FUNCTION */
@@ -97,7 +112,7 @@ static void reset(void) {
 int main(void) {
     mm_struct_t parent={tables[0]};struct a20_cow_shared_snapshot snap;
     for(int level=0;level<2;level++)for(int kind=0;kind<3;kind++) {
-        reset();if(kind==1)cache_mode=1;if(kind==2)vma.vm_flags=VM_VMO;
+        reset();if(kind==1){cache_mode=1;vma.vm_flags=VM_FILE;}if(kind==2)vma.vm_flags=VM_VMO;
         expected_index=0;expected_va=0;
         tables[0][0]=0x9000|PTE_V|PTE_W|PTE_LEAF;
         assert(a20_cow_share_snapshot(&parent,0,level,&snap)==1);
@@ -122,7 +137,7 @@ int main(void) {
         reset();
         expected_index=level?2:7;
         expected_va=(uintptr_t)expected_index*vm_pt_level_size(level);
-        if(kind==1)cache_mode=1;
+        if(kind==1){cache_mode=1;vma.vm_flags=VM_FILE;}
         if(kind==2)vma.vm_flags=VM_VMO;
         tables[0][expected_index]=0x9000|PTE_V|PTE_W|PTE_LEAF;
         assert(arch_pt_vpn(expected_va,level)==expected_index);

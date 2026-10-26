@@ -802,14 +802,18 @@ static void pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte)
     *slot = cls_byte;
 }
 
-void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
+void mm_pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte)
 {
-    (void)level;
-    pt_meta_t *m = mm_pt_meta(table);
     struct page_cache_page **owner = cache_owner_slot(m, idx);
     if (owner)
         *owner = NULL;
     pt_note_present_meta(m, idx, cls_byte);
+}
+
+void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
+{
+    (void)level;
+    mm_pt_note_present_meta(mm_pt_meta(table), idx, cls_byte);
 }
 
 /*
@@ -833,12 +837,10 @@ void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
  * A table with no metadata (NOMMU, or a page-table page allocated before the
  * model landed) is not an error: there is nothing there to keep in sync.
  */
-int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls)
+int mm_pt_sync_status_meta(pt_meta_t *m, int idx, uint8_t cls, pte_t pte)
 {
-    (void)level;
     if (cls >= MM_ST_CLASS_MAX)
         return -EINVAL;
-    pt_meta_t *m = mm_pt_meta(table);
     if (!m)
         return 0;
     uint8_t *slot = cls_slot(m, idx);
@@ -853,12 +855,19 @@ int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls)
     if (cur == MM_ST_INVALID || cur == MM_ST_PT_NODE)
         return 0;
 
-    pte_t pte = table[idx];
     uint8_t byte = (uint8_t)(MM_ST_CLS_BYTE(cls) |
                              (pte & PTE_COW ? MM_ST_COW_BIT : 0) |
                              mm_pt_prot_bits(pte));
     pt_note_present_meta(m, idx, byte);
     return 0;
+}
+
+int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls)
+{
+    (void)level;
+    if (cls >= MM_ST_CLASS_MAX)
+        return -EINVAL;
+    return mm_pt_sync_status_meta(mm_pt_meta(table), idx, cls, table[idx]);
 }
 
 void mm_pt_note_absent(pte_t *table, int level, int idx)

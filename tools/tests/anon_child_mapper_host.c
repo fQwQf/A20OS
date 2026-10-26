@@ -84,6 +84,10 @@ static void mm_pt_note_present(pte_t *owner, int level, int idx, uint8_t cls) {
            (cls & 0x7f) == MM_ST_FILE_PRIVATE ||
            (cls & 0x7f) == MM_ST_FILE_SHARED); status_calls++;
 }
+static void mm_pt_note_present_meta(pt_meta_t *meta, int idx, uint8_t cls) {
+    (void)meta;
+    mm_pt_note_present(child_slots, 0, idx, cls);
+}
 static int mm_pt_prot_bits(pte_t flags) { (void)flags; return 0; }
 
 /* REAL_LEAF_INSTALL */
