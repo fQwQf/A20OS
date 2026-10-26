@@ -351,11 +351,12 @@ static int a20_cow_share_snapshot_from_slot(
     }
     mm_seg_t *vma = mm_seg_find(parent, va);
     int is_vmo = vma && (vma->vm_flags & VM_VMO);
+    int is_file = vma && (vma->vm_flags & VM_FILE);
     pfn_t pfn = phys_to_pfn(arch_pte_addr(source));
     uint8_t cls = mm_fork_page_class(stab, level, va, vma);
     page_cache_page_t *pcp = NULL;
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    if (!is_vmo && stab) {
+    if (is_file && stab) {
         pcp = mm_pt_cache_peek(stab, arch_pt_vpn(va, level));
         if (pcp && page_cache_pfn(pcp) == pfn)
             page_cache_pin(pcp);
@@ -363,7 +364,7 @@ static int a20_cow_share_snapshot_from_slot(
             pcp = NULL;
     }
 #endif
-    if (!pcp && !is_vmo)
+    if (!pcp && is_file)
         pcp = mm_file_cache_mapping_get(vma, va, pfn);
     if (!pcp && !is_vmo)
         frame_get(pfn);
@@ -605,13 +606,13 @@ int a20_cow_share_anon_batch_snapshot(
         if (!out[i].class)
             continue;
         uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
-        page_cache_page_t *pcp =
-            mm_pt_cache_peek(node, first + (int)i);
+        page_cache_page_t *pcp = (vma->vm_flags & VM_FILE)
+            ? mm_pt_cache_peek(node, first + (int)i) : NULL;
         if (pcp && page_cache_pfn(pcp) == pfns[i])
             page_cache_pin(pcp);
         else
             pcp = NULL;
-        if (!pcp)
+        if (!pcp && (vma->vm_flags & VM_FILE))
             pcp = mm_file_cache_mapping_get(vma, va, pfns[i]);
         if (pcp) {
             out[i].pcp = pcp;

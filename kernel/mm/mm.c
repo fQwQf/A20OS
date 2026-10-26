@@ -1005,6 +1005,7 @@ pte_t *pt_clone(pt_root_t *src_pgdir) {
 static void pt_destroy_user_recursive(mm_struct_t *mm, pte_t *table, int level,
                                       vaddr_t base) {
     if (!table) return;
+    pt_meta_t *meta = mm_pt_meta(table);
     pfn_t put_batch[64];
     size_t put_count = 0;
     /* Only user half (0..255) lives at root; kernel half is shared
@@ -1031,14 +1032,15 @@ static void pt_destroy_user_recursive(mm_struct_t *mm, pte_t *table, int level,
 
         if (is_leaf) {
             pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
-            page_cache_page_t *owner = mm_pt_cache_peek(table, i);
+            page_cache_page_t *owner = meta && meta->cache_owner
+                                           ? meta->cache_owner[i] : NULL;
             if (owner) {
                 page_cache_put(owner);
                 table[i] = 0;
                 continue;
             }
             if (mm) {
-                if (MM_ST_GET_CLASS(mm_pt_peek(table, level, i)) ==
+                if (MM_ST_GET_CLASS(meta ? meta->cls[i] : 0) ==
                     MM_ST_FILE_PRIVATE) {
                     mm_seg_t *vma = mm->mmap;
                     while (vma && (va < vma->start || va >= vma->end))
