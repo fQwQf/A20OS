@@ -31,6 +31,13 @@
 #define AHCI_IS                 0x08U
 #define AHCI_PI                 0x0CU
 #define AHCI_VS                 0x10U
+#define AHCI_CAP2               0x24U
+#define AHCI_BOHC               0x28U
+#define AHCI_CAP_S64A           (1U << 31)
+#define AHCI_CAP2_BOH           (1U << 0)
+#define AHCI_BOHC_BOS           (1U << 0)
+#define AHCI_BOHC_OOS           (1U << 1)
+#define AHCI_BOHC_BB            (1U << 4)
 #define AHCI_PORT_BASE          0x100U
 #define AHCI_PORT_STRIDE        0x80U
 
@@ -576,19 +583,76 @@ static int ahci_identify(ahci_port_t *port) {
     return port->capacity ? 0 : -1;
 }
 
+/* AHCI 1.2 section 10.6: do not reset a controller still owned by firmware.
+ * Older revisions do not define CAP2/BOHC.  A timed-out owner is left intact,
+ * rather than forcing a BIOS SMI handler to race our command lists. */
+static int ahci_take_ownership(uintptr_t regs, uint32_t version)
+{
+    if (version < 0x00010200U ||
+        !(readl(ahci_reg(regs, AHCI_CAP2)) & AHCI_CAP2_BOH))
+        return 0;
+    uint32_t bohc = readl(ahci_reg(regs, AHCI_BOHC));
+    writel(bohc | AHCI_BOHC_OOS, ahci_reg(regs, AHCI_BOHC));
+    for (unsigned ms = 0; ms < AHCI_TIMEOUT_MS; ms++) {
+        bohc = readl(ahci_reg(regs, AHCI_BOHC));
+        if (!(bohc & (AHCI_BOHC_BOS | AHCI_BOHC_BB)))
+            return 0;
+        mdelay(1);
+    }
+    return -ETIMEDOUT;
+}
+
+static int ahci_configure_dma_mask(device_t *dev, uint32_t cap)
+{
+    return dma_set_mask(dev, (cap & AHCI_CAP_S64A) ?
+                        DMA_MASK_64BIT : DMA_MASK_32BIT);
+}
+
+/* Intel's legacy PCS port-enable bits are not the generic AHCI PI register.
+ * Linux v6.17 drivers/ata/ahci.c marks these four IDs with the PCS quirk.
+ * Retain all other PCS fields and never apply it to a platform controller or
+ * an unknown Intel generation.  Firmware supplies the implemented-port map. */
+static void ahci_pci_enable_ports(device_t *dev, uint32_t pi)
+{
+    if (dev->bus != &pci_bus)
+        return;
+    uint32_t id = pci_device_id(dev);
+    uint16_t mask;
+    switch (id) {
+    case 0x80860f22U:
+    case 0x80860f23U:
+        mask = (uint16_t)(pi & 0x0003U);
+        break;
+    case 0x80862922U:
+    case 0x80862829U:
+        mask = (uint16_t)(pi & 0x003fU);
+        break;
+    default:
+        return;
+    }
+    if (!mask)
+        return;
+    uint16_t pcs = pci_cfg_read16(dev, 0x92U);
+    if ((pcs & mask) != mask)
+        pci_cfg_write16(dev, 0x92U, pcs | mask);
+}
+
 static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
                              uint32_t port_map) {
     int ret = 0;
     if (g_ahci_ready)
         return -ENODEV;
 
-    resource_t *abar = device_get_resource(dev, RES_MMIO, 0);
-    if (!abar)
+    int is_pci = dev->bus == &pci_bus;
+    resource_t *abar = is_pci ? pci_get_bar_resource(dev, 5) :
+                               device_get_resource(dev, RES_MMIO, 0);
+    if (!abar || abar->end < abar->start || abar->end - abar->start < 0xffU)
         return -ENODEV;
 
     ahci_port_t *port = &g_ahci_port;
     memset(port, 0, sizeof(*port));
-    port->host_regs = (uintptr_t)device_map_mmio(dev, 0);
+    port->host_regs = (uintptr_t)(is_pci ? pci_map_bar(dev, 5) :
+                                         device_map_mmio(dev, 0));
     if (!port->host_regs) return -EIO;
     port->regs = port->host_regs;
     port->irq = -1;
@@ -601,6 +665,12 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
 
     uint32_t cap = readl(ahci_reg(port->host_regs, AHCI_CAP));
     uint32_t version = readl(ahci_reg(port->host_regs, AHCI_VS));
+    ret = ahci_configure_dma_mask(dev, cap);
+    if (ret < 0)
+        return ret;
+    ret = ahci_take_ownership(port->host_regs, version);
+    if (ret < 0)
+        return ret;
     uint32_t ghc = readl(ahci_reg(port->host_regs, AHCI_GHC));
     if (preserve_firmware_link) {
         /* Some platform PHYs lose link across a generic HBA reset.  Preserve
@@ -627,6 +697,14 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
         writel(pi | port_map, ahci_reg(port->host_regs, AHCI_PI));
         pi = readl(ahci_reg(port->host_regs, AHCI_PI));
     }
+    /* Validate every advertised port before accessing its register bank. */
+    for (uint32_t n = 0; n < AHCI_MAX_PORTS; n++) {
+        if ((pi & (1U << n)) &&
+            abar->end - abar->start <
+                AHCI_PORT_BASE + (n + 1U) * AHCI_PORT_STRIDE - 1U)
+            return -EINVAL;
+    }
+    ahci_pci_enable_ports(dev, pi);
     unsigned ports = 0;
     for (uint32_t n = 0; n < AHCI_MAX_PORTS; n++)
         if (pi & (1U << n))
@@ -741,6 +819,8 @@ fail:
 }
 
 static int ahci_pci_probe(device_t *dev) {
+    if (pci_class_code(dev) != 0x010601U)
+        return -ENODEV;
     if (pci_enable_and_assign_bars(dev) < 0)
         return -ENODEV;
     uint32_t flags = 0;
@@ -834,6 +914,8 @@ static const block_dev_ops_t ahci_class_ops = {
 static const device_id_t ahci_ids[] = {
     { .vendor = 0x8086U, .device = 0x2922U, .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { .vendor = 0x8086U, .device = 0x2829U, .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = 0x8086U, .device = 0x0f22U, .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
+    { .vendor = 0x8086U, .device = 0x0f23U, .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };
 

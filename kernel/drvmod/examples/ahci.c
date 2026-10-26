@@ -4,9 +4,11 @@
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
                       A20_DRIVER_TYPE_BLOCK, "ahci", A20_DRIVER_ABI,
                       A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ | A20_DRIVER_RES_DMA,
-                      0, 2,
+                      0, 4,
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x2922),
-                      A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x2829));
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x2829),
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x0f22),
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x0f23));
 
 /* drivers/block/ahci.c registers two drivers through DRIVER_REGISTER; the
  * ET_REL module ABI allows exactly one DriverEntry per object, so capture

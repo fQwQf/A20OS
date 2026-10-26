@@ -6,6 +6,7 @@
 #include "cpu.h"
 #include "platform.h"
 #include "firmware.h"
+#include "tsc_baytrail.h"
 
 #define TSC_FREQ_MIN       100000000ULL
 #define TSC_FREQ_MAX       10000000000ULL
@@ -25,6 +26,7 @@ static volatile unsigned tsc_freq_state;
 static uint64_t hpet_freq;
 static uintptr_t hpet_base;
 static unsigned use_hpet;
+static unsigned baytrail_tsc_known;
 /*
  * Per-CPU high-water mark. Each CPU owns a distinct cache line so its
  * monotonicity CAS does not invalidate another CPU's slot. With two CPUs this
@@ -51,6 +53,17 @@ static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax,
     __asm__ __volatile__("cpuid"
                          : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
                          : "a"(leaf), "c"(subleaf));
+}
+
+static void tsc_probe_cpuid(void *opaque, uint32_t leaf, uint32_t *eax,
+                            uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
+    (void)opaque;
+    cpuid(leaf, 0, eax, ebx, ecx, edx);
+}
+
+static uint64_t tsc_probe_msr(void *opaque, uint32_t msr) {
+    (void)opaque;
+    return rdmsr(msr);
 }
 
 static uint64_t scale_ticks(uint64_t value, uint64_t from, uint64_t to) {
@@ -225,6 +238,18 @@ static uint64_t discover_tsc_freq(void) {
     uint64_t product;
     uint64_t cpuid_freq = 0;
 
+    const struct x86_tsc_probe_ops atom_ops = {
+        .cpuid = tsc_probe_cpuid, .read_msr = tsc_probe_msr,
+    };
+    uint64_t atom_hz = x86_baytrail_tsc_hz(&atom_ops);
+    if (atom_hz) {
+        /* Bay Trail's PIT/HPET may be absent or nonfunctional. Its TSC and
+         * non-turbo ratio are fixed by the SoC even when CPUID omits the
+         * invariant-TSC flag; do not replace it with an unusable HPET. */
+        baytrail_tsc_known = 1;
+        return atom_hz;
+    }
+
     cpuid(0, 0, &max_leaf, &ebx, &ecx, &edx);
     if (max_leaf >= 0x15) {
         cpuid(0x15, 0, &denominator, &numerator, &crystal, &edx);
@@ -263,7 +288,8 @@ static void ensure_tsc_freq(void) {
     if (__atomic_compare_exchange_n(&tsc_freq_state, &expected, 1, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         tsc_freq = discover_tsc_freq();
-        if (!has_invariant_tsc() && !running_under_kvm() && enable_hpet())
+        if (!baytrail_tsc_known && !has_invariant_tsc() &&
+            !running_under_kvm() && enable_hpet())
             use_hpet = 1;
         timer_update_clk_scale();
         __atomic_store_n(&tsc_freq_state, 2, __ATOMIC_RELEASE);

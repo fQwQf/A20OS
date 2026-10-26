@@ -33,6 +33,7 @@
 
 #define XHCI_VENDOR_INTEL             0x8086U
 #define XHCI_DEVICE_PANTHER_POINT     0x1e31U
+#define XHCI_FIRMWARE_TIMEOUT_MS      1000U
 
 #define XHCI_MAX_SLOTS                32U
 #define XHCI_MAX_PORTS                32U
@@ -157,6 +158,7 @@ typedef struct xhci_controller {
     void *alloc_ptr;            /* raw kmalloc base (for freeing) */
     usb_hcd_t hcd;
     uintptr_t cap;
+    size_t mmio_size;
     uintptr_t op;
     uintptr_t runtime;
     uintptr_t doorbell;
@@ -1124,26 +1126,50 @@ static int xhci_op_poll(usb_hcd_t *hcd) {
     return handled;
 }
 
-static int xhci_op_start(usb_hcd_t *hcd) {
-    xhci_controller_t *xhci = hcd->priv;
-    /* Firmware ownership handoff. */
-    uint32_t hcc = xhci_read32(xhci->cap, 0x10U);
+/* xHCI 1.2 sections 7.1/7.1.1.  Legacy Support is optional, but an owner
+ * which does advertise it must release the controller before we reset it.
+ * Bound the entire extended-capability chain by the actual PCI BAR. */
+static int xhci_take_ownership(uintptr_t cap_base, size_t bar_bytes)
+{
+    uint32_t hcc = xhci_read32(cap_base, 0x10U);
     uint32_t offset = (hcc >> 16) * 4U;
     for (unsigned limit = 0; offset && limit < 64; limit++) {
-        uint32_t cap = xhci_read32(xhci->cap, offset);
+        if (offset < 0x20U || offset > bar_bytes || bar_bytes - offset < 4U)
+            return -EINVAL;
+        uint32_t cap = xhci_read32(cap_base, offset);
         uint8_t id = (uint8_t)cap;
         uint32_t next = ((cap >> 8) & 0xffU) * 4U;
         if (id == 1) {
-            xhci_write32(xhci->cap, offset, cap | (1U << 24));
-            for (uint32_t i = 0; i < XHCI_WAIT_LOOPS; i++) {
-                if (!(xhci_read32(xhci->cap, offset) & (1U << 16)))
+            if (bar_bytes - offset < 8U)
+                return -EINVAL;
+            xhci_write32(cap_base, offset, cap | (1U << 24));
+            unsigned ms;
+            for (ms = 0; ms < XHCI_FIRMWARE_TIMEOUT_MS; ms++) {
+                if (!(xhci_read32(cap_base, offset) & (1U << 16)))
                     break;
-                arch_cpu_relax();
+                mdelay(1);
             }
-            break;
+            if (ms == XHCI_FIRMWARE_TIMEOUT_MS)
+                return -ETIMEDOUT;
+            /* USBLEGCTLSTS: disable the defined SMI enables, acknowledge its
+             * three RW1C event bits, retain the remaining reserved fields.
+             * Layout matches Linux's xhci-ext-caps.h/pci-quirks.c. */
+            uint32_t ctl = xhci_read32(cap_base, offset + 4U);
+            ctl &= (0x7U << 1) | (0xffU << 5) | (0x7U << 17);
+            ctl |= 0x7U << 29;
+            xhci_write32(cap_base, offset + 4U, ctl);
+            return 0;
         }
         offset = next ? offset + next : 0;
     }
+    return offset ? -EINVAL : 0;
+}
+
+static int xhci_op_start(usb_hcd_t *hcd) {
+    xhci_controller_t *xhci = hcd->priv;
+    int owner = xhci_take_ownership(xhci->cap, xhci->mmio_size);
+    if (owner)
+        return owner;
 
     xhci_write32(xhci->op, XHCI_USBCMD,
                  xhci_read32(xhci->op, XHCI_USBCMD) & ~XHCI_CMD_RUN);
@@ -1351,6 +1377,40 @@ static int xhci_cmdline_poll(void)
     return 0;
 }
 
+static int xhci_configure_dma_mask(device_t *dev, uint32_t hcc1)
+{
+    /* HCCPARAMS1.AC64 is readable before allocation.  A 64-bit TRB field
+     * alone does not mean that the host implements 64-bit DMA addresses. */
+    return dma_set_mask(dev, (hcc1 & 1U) ? DMA_MASK_64BIT : DMA_MASK_32BIT);
+}
+
+/* Bay Trail's switchable USB2 wires may still belong to its EHCI companion
+ * after firmware exit.  Follow the firmware routing masks; do not touch the
+ * PHY, GPIOs, port-disable fuses or routing policy of another Intel chipset.
+ * Linux v6.17 pci-quirks.c and coreboot 4.22 baytrail/xhci.c document this
+ * USB3-before-USB2 ordering.  Call only after the new xHC is running. */
+static int xhci_baytrail_route_ports(device_t *dev)
+{
+    if (pci_device_id(dev) != 0x80860f35U)
+        return 0;
+    uint32_t usb3_mask = pci_cfg_read32(dev, 0xdcU);
+    uint32_t usb2_mask = pci_cfg_read32(dev, 0xd4U);
+    if (usb3_mask & ~1U || usb2_mask & ~0xfU)
+        return -EIO;
+    uint32_t usb3 = pci_cfg_read32(dev, 0xd8U);
+    uint32_t usb2 = pci_cfg_read32(dev, 0xd0U);
+    if (usb3 == 0xffffffffU || usb2 == 0xffffffffU)
+        return -EIO;
+    if ((usb3 & usb3_mask) != usb3_mask)
+        pci_cfg_write32(dev, 0xd8U, usb3 | usb3_mask);
+    if ((usb2 & usb2_mask) != usb2_mask)
+        pci_cfg_write32(dev, 0xd0U, usb2 | usb2_mask);
+    if ((pci_cfg_read32(dev, 0xd8U) & usb3_mask) != usb3_mask ||
+        (pci_cfg_read32(dev, 0xd0U) & usb2_mask) != usb2_mask)
+        return -EIO;
+    return 0;
+}
+
 static int xhci_probe(device_t *dev)
 {
     if (pci_enable_and_assign_bars(dev) != 0)
@@ -1359,19 +1419,11 @@ static int xhci_probe(device_t *dev)
     if (!bar || bar->end < bar->start || bar->end - bar->start + 1U < 0x1000U)
         return -ENODEV;
 
-    /* Why 64-bit rather than 32: every structure this driver programs is
-     * described by a 64-bit bus address -- DCBAAP, CRCR, the ERST entry, the
-     * event ring segment and the TRB parameter that carries a context or a
-     * buffer pointer -- and the only bit that could narrow this is HCSPARAML's
-     * "64-bit capable" bit, which no in-tree platform publishes a value for.
-     * Declaring 64-bit says "this driver programs 64-bit pointers" and lets the
-     * allocator constrain the blocks it will hand over; it does not claim to
-     * have verified a hardware capability it cannot read.
-     *
-     * Probe order matters: the window has to be declared before the first
-     * allocation, because that is the only moment at which it can still change
-     * what gets allocated. */
-    int mask = dma_set_mask(dev, DMA_MASK_64BIT);
+    uintptr_t cap = (uintptr_t)pci_map_bar(dev, 0);
+    if (!cap)
+        return -EIO;
+    uint32_t hcc1 = xhci_read32(cap, 0x10U);
+    int mask = xhci_configure_dma_mask(dev, hcc1);
     if (mask < 0)
         return mask;
 
@@ -1380,11 +1432,10 @@ static int xhci_probe(device_t *dev)
     if (alloc)
         return alloc;
     spin_init(&xhci->lock);
-    xhci->cap = (uintptr_t)pci_map_bar(dev, 0);
-    if (!xhci->cap) { kfree(xhci->alloc_ptr); return -EIO; }
+    xhci->cap = cap;
+    xhci->mmio_size = (size_t)(bar->end - bar->start + 1U);
     uint8_t cap_length = readb((const volatile void *)xhci->cap);
     uint32_t hcs1 = xhci_read32(xhci->cap, 0x04U);
-    uint32_t hcc1 = xhci_read32(xhci->cap, 0x10U);
     xhci->max_slots = (uint8_t)(hcs1 & 0xffU);
     xhci->max_ports = (uint8_t)(hcs1 >> 24);
     if (xhci->max_slots > XHCI_MAX_SLOTS)
@@ -1435,6 +1486,9 @@ static int xhci_probe(device_t *dev)
         dev->drv_priv = NULL;
         return result;
     }
+
+    if (xhci_baytrail_route_ports(dev))
+        kerr("[XHCI] Bay Trail port routing incomplete; inspect firmware USB routing\n");
 
 kinfo("[XHCI] controller ready: MMIO=0x%lx slots=%u ports=%u irq=%d "
           "completion=%s\n",
