@@ -312,3 +312,15 @@
 - 测量（5 轮交替 apk）：anon-only 共享 fork 852→842（噪声内）；文件表共享 fork 852→798（0.94×，**否决**），其余用例持平。微基准上小进程 fork 0.85-0.96×（每表固定开销：512 项扫描×表数 + kmalloc + 子 L1 链分配，超过已被 64 页批处理+批处理回收压低的逐页成本）。结论：A20 的逐页克隆已被批处理优化到 ~100ns/页量级，共享的固定开销在该规模下不占优；Linux 当年未合入 4K 共享页表的结构性原因在此得到定量复现。
 - 处置：按测量纪律拒绝合入，工作区回滚到已提交状态（元数据保留为惰性脚手架），补丁与全部测量存档；`a20.ptshare` 债务模型设计与钩子清单保留在补丁内，若未来逐页成本基准变化可复活。
 - 回归状态：实验期间三套内核各通过 15 项 × 3 回归（90/90），证明共享状态机本身的正确性；否决仅基于性能。
+
+## 2026-10-26 北京时间（第四轮：current/futex/syscall 固定开销与退出批回收）
+
+- 用户要求执行性能强化并采用合理 commit 便于回退；仅修改 x86_64 相关路径。基线为 `bfb9580` 和当日 KVM 微基准/APK 数据，候选均使用 `CONFIG_UBSAN=0` 正式构建，构建与测量串行。
+- `fcffd0e4`：x86_64 启用既有 `ARCH_FAST_CURRENT`，`proc_current()` 热路径从 IRQ 保存 + LSL/数组查询变成一次 `%gs:0` 读取，启动期回退不变。交替微基准 getpid -31%、futex-wake -22%、yield -15%；APK threads-2 +19.9%、switch +21.1%，fork 持平。核心回归 27/27。
+- `d1f52068`：futex 已映射页预检复用现有 page-access guard，避免通用 usercopy 的 mm 引用和 Rust 往返；缺页仍回退原路径，加锁后的两次线性化复查不变。mismatch 再降 14.4%，futex-wake/yield/fork 对照持平。核心回归 27/27。
+- `19ad4213`：无 pending 信号时不再调用 Rust deliverable-mask；profiling 仅在 enabled 且 start 有效后读取结束时钟。futex-wake 约再降 4%，诊断启用/禁用语义由 ASan/UBSan 夹具验证。
+- `695c30fa`：匿名最终页表销毁按每层最多 64 PFN 使用现成 `frame_put_many()`，保持 swap、递归页表释放及 TLB 生命周期顺序。16 MiB touched fork 的 wait/回收侧下降约 60%。这直接否定上一轮“该路径难以批处理”的推测，不需要页表级 COW 共享。
+- 最终累计交替微基准（`micro-final-{base,fast}{1,2,3}-2026-10-26`）：getpid 378.24→249.50ns（-34.04%）、yield 1055.02→884.54（-16.16%）、futex-wake 443.70→337.31（-23.98%）、futex-mismatch 688.86→478.87（-30.48%）；普通 fork 128.19→126.81µs（基本持平），16 MiB touched fork 1143.08→814.74µs（-28.72%），其 wait 侧 538.90→216.30µs（-59.86%）。
+- 最终 15 项 guest 回归 ×3 全部通过（45/45，`final-regression-full15x3-2026-10-26`），覆盖 MM/COW/TLB/swap、SCHED/FUTEX/GS/VFS、文件 fork 与巨页。当前/夹具 host 测试和 procfs 诊断 ASan/UBSan 测试通过。
+- 最终原始基线/累计版本各五轮 APK（各 30 样本，`apk-final-base-2026-10-26-r5` / `apk-final-2026-10-26-r5`）：threads-2 6276.30→7538.55 ev/s（+20.11%，为同轮 Linux 的 57.8%）；switch 330502.06→397401.95 ops/s（+20.24%，Linux 侧范围仍很宽）；fork 891.99→882.15（-1.10%，范围重叠，按持平）。60/60 有效、guest 计数器审计全 0、输入哈希不变。
+- 测量事故记录：默认 UBSAN 构建的首次 fork 对照不用于结论；一次 GS 串口超时保留原始证据，随后同候选/基线各两次复测通过，最终完整回归也通过。未实施 sysret、yield 前移及文件私有页批克隆，不恢复已被否决的 ptshare/相同 PTE 实验。
