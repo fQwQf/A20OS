@@ -3,7 +3,11 @@
 #include "core/errno.h"
 #include "core/timekeeping.h"
 #include "core/string.h"
+#include "core/poll.h"
+#include "core/sync.h"
+#include "core/timer.h"
 #include "drivers/audio/audio_core.h"
+#include "drivers/audio/backend.h"
 #include "drivers/core/driver_class.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
@@ -71,7 +75,16 @@ typedef struct {
     uint32_t period_size;
     uint32_t buffer_size;
     uint64_t hw_ptr;
+    uint64_t appl_ptr;
+    uint64_t submitted_frames;
+    uint64_t avail_min;
+    uint64_t start_threshold;
+    uint64_t boundary;
+    uint32_t underruns;
     int tstamp_type;
+    mutex_t lock;
+    class_device_t *device;
+    audio_dev_ops_t *active_ops;
 } alsa_pcm_ctx_t;
 
 /* ALSA wire structs (Linux ABI, 64-bit). */
@@ -182,22 +195,84 @@ struct snd_pcm_sync_ptr {
 };
 
 /* Find the A20 audio device + ops. */
-static int alsa_audio_get(device_t **dev_out, audio_dev_ops_t **ops_out)
+static class_device_t *alsa_audio_select(void)
 {
-    *dev_out = NULL;
-    *ops_out = NULL;
     for (unsigned i = 0; i < 16; i++) {
         class_device_t *cdev = class_device_get_by_type(DEV_CLASS_AUDIO, i);
-        if (!cdev || !cdev->dev)
+        if (!cdev)
             break;
-        audio_dev_ops_t *ops = (audio_dev_ops_t *)cdev->dev->drv->class_ops;
-        if (ops && (ops->caps.flags & A20_AUDIO_CAP_PCM)) {
-            *dev_out = cdev->dev;
-            *ops_out = ops;
-            return 0;
+        const void *table;
+        if (class_device_ops_begin(cdev, DEV_CLASS_AUDIO, &table) == 0) {
+            const audio_dev_ops_t *ops = table;
+            int pcm = ops && (ops->caps.flags & A20_AUDIO_CAP_PCM);
+            class_device_call_end(cdev);
+            if (pcm)
+                return cdev;
         }
+        class_device_put(cdev);
     }
-    return -ENODEV;
+    return NULL;
+}
+
+/* The outer file operation owns both ctx->lock and a live class binding. */
+static int alsa_audio_get(alsa_pcm_ctx_t *ctx, device_t **dev_out,
+                           audio_dev_ops_t **ops_out)
+{
+    if (!ctx->device || !ctx->active_ops)
+        return -ENODEV;
+    *dev_out = ctx->device->dev;
+    *ops_out = ctx->active_ops;
+    return 0;
+}
+
+static int alsa_pcm_snapshot(alsa_pcm_ctx_t *ctx, audio_backend_status_t *status)
+{
+    audio_dev_ops_t *ops = ctx->active_ops;
+    if (!ctx->playback || !ops || !ops->ioctl)
+        return -EOPNOTSUPP;
+    int ret = ops->ioctl(ctx->device->dev, AUDIO_BACKEND_QUERY, status);
+    if (ret < 0)
+        return ret == -ENOTTY ? -EOPNOTSUPP : ret;
+    if (!status->frame_bytes || status->queued_bytes > status->capacity_bytes ||
+        status->queued_bytes % status->frame_bytes)
+        return -EIO;
+    if (!ctx->channels && status->queued_bytes)
+        return -EBUSY;
+    if (ctx->channels) {
+        uint64_t queued = status->queued_bytes / status->frame_bytes;
+        if (status->frame_bytes != ctx->channels * 2 ||
+            queued > ctx->submitted_frames)
+            return -EIO;
+        ctx->appl_ptr = ctx->submitted_frames % ctx->boundary;
+        ctx->hw_ptr = (ctx->submitted_frames - queued) % ctx->boundary;
+        if (ctx->state == SNDRV_PCM_STATE_RUNNING &&
+            status->underruns != ctx->underruns)
+            ctx->state = SNDRV_PCM_STATE_XRUN;
+    }
+    ctx->underruns = status->underruns;
+    return 0;
+}
+
+static uint64_t alsa_pcm_avail(const alsa_pcm_ctx_t *ctx,
+                              const audio_backend_status_t *status)
+{
+    uint64_t queued = status->queued_bytes / status->frame_bytes;
+    uint64_t physical = (status->capacity_bytes - status->queued_bytes) /
+                         status->frame_bytes;
+    uint64_t logical = queued < ctx->buffer_size ? ctx->buffer_size - queued : 0;
+    return physical < logical ? physical : logical;
+}
+
+static int alsa_pcm_limit_buffer(alsa_pcm_ctx_t *ctx, struct snd_pcm_hw_params *hp)
+{
+    audio_backend_status_t status;
+    int ret = alsa_pcm_snapshot(ctx, &status);
+    if (ret < 0)
+        return ret;
+    struct snd_interval *bytes = &hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_BYTES)];
+    if (status.capacity_bytes < bytes->max)
+        bytes->max = (uint32_t)status.capacity_bytes;
+    return bytes->min > bytes->max ? -EINVAL : 0;
 }
 
 /* ---- PCM ioctls ---- */
@@ -416,7 +491,7 @@ static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
     (void)ctx;
     if (copy_from_user(&hp, arg, sizeof(hp)) < 0)
         return -EFAULT;
-    r = alsa_audio_get(&dev, &ops);
+    r = alsa_audio_get(ctx, &dev, &ops);
     if (r < 0)
         return r;
     if (!(ops->caps.flags & A20_AUDIO_CAP_PCM))
@@ -426,7 +501,9 @@ static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
      * hardware supports; replacing them (as an earlier version did) silently
      * widens an exact channel count back to a range and alsa-lib then rejects
      * the object. */
-    r = hw_params_refine_constraints(&hp, ops);
+    r = alsa_pcm_limit_buffer(ctx, &hp);
+    if (r == 0)
+        r = hw_params_refine_constraints(&hp, ops);
     if (r < 0)
         return r;
     hp.flags = 0;
@@ -477,13 +554,15 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
 
     device_t *dev;
     audio_dev_ops_t *ops;
-    int r = alsa_audio_get(&dev, &ops);
+    int r = alsa_audio_get(ctx, &dev, &ops);
     if (r < 0)
         return r;
     if (!(ops->caps.flags & A20_AUDIO_CAP_PCM))
         return -EOPNOTSUPP;
 
-    r = hw_params_refine_constraints(&hp, ops);
+    r = alsa_pcm_limit_buffer(ctx, &hp);
+    if (r == 0)
+        r = hw_params_refine_constraints(&hp, ops);
     if (r < 0)
         return r;
 
@@ -527,6 +606,8 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
     ctx->rate = rate;
     ctx->period_size = period;
     ctx->buffer_size = buffer;
+    ctx->avail_min = period;
+    ctx->start_threshold = 1;
 
     hw_params_mask_set(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
                        SNDRV_PCM_ACCESS_RW_INTERLEAVED);
@@ -579,12 +660,17 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
 
 static int alsa_pcm_sw_params(alsa_pcm_ctx_t *ctx, void *arg)
 {
-    (void)ctx;
     struct snd_pcm_sw_params sp;
     if (copy_from_user(&sp, arg, sizeof(sp)) < 0)
         return -EFAULT;
-    /* Accept and store thresholds; playback is block-transfer driven. */
-    ctx->state = SNDRV_PCM_STATE_SETUP;
+    if (!ctx->buffer_size || !sp.avail_min || sp.avail_min > ctx->buffer_size ||
+        sp.boundary < (uint64_t)ctx->buffer_size * 2 ||
+        sp.boundary > 0x7fffffffffffffffULL || sp.tstamp_type > 2)
+        return -EINVAL;
+    ctx->avail_min = sp.avail_min;
+    ctx->start_threshold = sp.start_threshold;
+    ctx->boundary = sp.boundary;
+    ctx->tstamp_type = sp.tstamp_type;
     return copy_to_user(arg, &sp, sizeof(sp)) < 0 ? -EFAULT : 0;
 }
 
@@ -601,14 +687,19 @@ static void alsa_pcm_now(const alsa_pcm_ctx_t *ctx, struct snd_timespec *ts)
 
 static int alsa_pcm_status(alsa_pcm_ctx_t *ctx, void *arg)
 {
+    audio_backend_status_t status;
+    int ret = alsa_pcm_snapshot(ctx, &status);
+    if (ret < 0)
+        return ret;
     struct snd_pcm_status st;
     memset(&st, 0, sizeof(st));
     st.state = ctx->state;
     alsa_pcm_now(ctx, &st.trigger_tstamp);
     st.tstamp = st.trigger_tstamp;
     st.hw_ptr = ctx->hw_ptr;
-    st.appl_ptr = ctx->hw_ptr;
-    st.avail = ctx->buffer_size;
+    st.appl_ptr = ctx->appl_ptr;
+    st.delay = status.queued_bytes / status.frame_bytes;
+    st.avail = alsa_pcm_avail(ctx, &status);
     st.avail_max = ctx->buffer_size;
     return copy_to_user(arg, &st, sizeof(st)) < 0 ? -EFAULT : 0;
 }
@@ -625,24 +716,49 @@ static int alsa_pcm_writei(alsa_pcm_ctx_t *ctx, void *arg)
 
     device_t *dev;
     audio_dev_ops_t *ops;
-    int r = alsa_audio_get(&dev, &ops);
+    int r = alsa_audio_get(ctx, &dev, &ops);
     if (r < 0)
         return r;
     if (!ops->write)
         return -EOPNOTSUPP;
-
+    if (ctx->state != SNDRV_PCM_STATE_PREPARED &&
+        ctx->state != SNDRV_PCM_STATE_RUNNING)
+        return ctx->state == SNDRV_PCM_STATE_XRUN ? -EPIPE : -EBADFD;
+    audio_backend_status_t status;
+    r = alsa_pcm_snapshot(ctx, &status);
+    if (r < 0)
+        return r;
+    if (ctx->state == SNDRV_PCM_STATE_XRUN)
+        return -EPIPE;
+    uint64_t frames = alsa_pcm_avail(ctx, &status);
+    if (!frames)
+        return -EAGAIN;
+    if (frames > x.frames)
+        frames = x.frames;
     size_t frame_bytes = ctx->channels * (ctx->format == SNDRV_PCM_FORMAT_S16_LE ? 2 : 1);
-    size_t bytes = (size_t)x.frames * frame_bytes;
+    size_t bytes = (size_t)frames * frame_bytes;
     char *kbuf = proc_scratch_buffer(bytes ? bytes : 1);
     if (!kbuf)
         return -ENOMEM;
     if (copy_from_user(kbuf, x.buf, bytes) < 0)
         return -EFAULT;
-    int n = ops->write(dev, kbuf, bytes);
+    audio_backend_write_t write = {.data = kbuf, .bytes = bytes};
+    if (ctx->state == SNDRV_PCM_STATE_PREPARED) {
+        uint64_t need = ctx->submitted_frames < ctx->start_threshold ?
+                        ctx->start_threshold - ctx->submitted_frames : 1;
+        if (need <= bytes / frame_bytes)
+            write.start_after_bytes = (size_t)need * frame_bytes;
+    }
+    int n = ops->ioctl(dev, AUDIO_BACKEND_WRITE_NONBLOCK, &write);
     if (n < 0)
         return n;
-    ctx->hw_ptr += x.frames;
-    x.result = (int64_t)x.frames;
+    if ((size_t)n > bytes || (size_t)n % frame_bytes)
+        return -EIO;
+    ctx->submitted_frames += (size_t)n / frame_bytes;
+    ctx->appl_ptr = ctx->submitted_frames % ctx->boundary;
+    if (write.start_after_bytes && (size_t)n >= write.start_after_bytes)
+        ctx->state = SNDRV_PCM_STATE_RUNNING;
+    x.result = (int64_t)((size_t)n / frame_bytes);
     return copy_to_user(arg, &x, sizeof(x)) < 0 ? -EFAULT : 0;
 }
 
@@ -657,7 +773,7 @@ static int alsa_pcm_readi(alsa_pcm_ctx_t *ctx, void *arg)
     }
     device_t *dev;
     audio_dev_ops_t *ops;
-    int r = alsa_audio_get(&dev, &ops);
+    int r = alsa_audio_get(ctx, &dev, &ops);
     if (r < 0)
         return r;
     if (!ops->read)
@@ -677,7 +793,7 @@ static int alsa_pcm_readi(alsa_pcm_ctx_t *ctx, void *arg)
     return copy_to_user(arg, &x, sizeof(x)) < 0 ? -EFAULT : 0;
 }
 
-static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
+static int alsa_pcm_ioctl_core(vfile_t *vf, unsigned long req, void *arg)
 {
     alsa_pcm_ctx_t *ctx = vf ? vf->priv : NULL;
     if (!ctx)
@@ -707,10 +823,16 @@ static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
             return -EBADF;
         return alsa_pcm_readi(ctx, arg);
     case SNDRV_PCM_IOCTL_PREPARE:
-    case SNDRV_PCM_IOCTL_RESET:
+    case SNDRV_PCM_IOCTL_RESET: {
+        int ret = ctx->active_ops->stop ? ctx->active_ops->stop(ctx->device->dev) : -EOPNOTSUPP;
+        if (ret < 0)
+            return ret;
+        ctx->submitted_frames = ctx->hw_ptr = ctx->appl_ptr = 0;
         ctx->state = SNDRV_PCM_STATE_PREPARED;
-        return 0;
-    case SNDRV_PCM_IOCTL_START:
+        audio_backend_status_t status;
+        return alsa_pcm_snapshot(ctx, &status);
+    }
+    case SNDRV_PCM_IOCTL_START: {
         /* Linux pcm_native.c:snd_pcm_pre_start rejects an empty playback
          * stream without changing PREPARED. SDL3 deliberately attempts this
          * once in ALSA_ThreadInit before its first write. Claiming RUNNING
@@ -718,24 +840,37 @@ static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
          * first buffer from ever reaching the hardware. */
         if (ctx->state != SNDRV_PCM_STATE_PREPARED)
             return -EBADFD;
-        if (ctx->playback && ctx->hw_ptr == 0)
+        if (ctx->playback && ctx->submitted_frames == 0)
             return -EPIPE;
+        int ret = ctx->active_ops->ioctl ?
+            ctx->active_ops->ioctl(ctx->device->dev, AUDIO_BACKEND_START, NULL) : -EOPNOTSUPP;
+        if (ret < 0)
+            return ret;
         ctx->state = SNDRV_PCM_STATE_RUNNING;
         return 0;
+    }
+    case SNDRV_PCM_IOCTL_XRUN:
     case SNDRV_PCM_IOCTL_DROP:
-    case SNDRV_PCM_IOCTL_HW_FREE:
-        ctx->state = SNDRV_PCM_STATE_OPEN;
-        return 0;
-    case SNDRV_PCM_IOCTL_DRAIN:
-        ctx->state = SNDRV_PCM_STATE_DRAINING;
-        return 0;
-    case SNDRV_PCM_IOCTL_PAUSE: {
-        int pause = 0;
-        if (copy_from_user(&pause, arg, sizeof(pause)) < 0)
-            return -EFAULT;
-        ctx->state = pause ? SNDRV_PCM_STATE_PAUSED : SNDRV_PCM_STATE_RUNNING;
+    case SNDRV_PCM_IOCTL_HW_FREE: {
+        int ret = ctx->active_ops->stop ? ctx->active_ops->stop(ctx->device->dev) : -EOPNOTSUPP;
+        if (ret < 0)
+            return ret;
+        ctx->hw_ptr = ctx->appl_ptr = ctx->submitted_frames = 0;
+        ctx->state = req == SNDRV_PCM_IOCTL_XRUN ? SNDRV_PCM_STATE_XRUN :
+            req == SNDRV_PCM_IOCTL_HW_FREE ? SNDRV_PCM_STATE_OPEN : SNDRV_PCM_STATE_SETUP;
         return 0;
     }
+    case SNDRV_PCM_IOCTL_DRAIN: {
+        ctx->state = SNDRV_PCM_STATE_DRAINING;
+        int ret = ctx->active_ops->drain ? ctx->active_ops->drain(ctx->device->dev) : -EOPNOTSUPP;
+        if (ret < 0)
+            return ret;
+        ctx->hw_ptr = ctx->appl_ptr;
+        ctx->state = SNDRV_PCM_STATE_SETUP;
+        return 0;
+    }
+    case SNDRV_PCM_IOCTL_PAUSE:
+        return -EOPNOTSUPP;
     case SNDRV_PCM_IOCTL_TSTAMP: {
         int mode = 0;
         return copy_to_user(arg, &mode, sizeof(mode)) < 0 ? -EFAULT : 0;
@@ -761,24 +896,116 @@ static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         struct snd_pcm_sync_ptr sp;
         if (copy_from_user(&sp, arg, sizeof(sp)) < 0)
             return -EFAULT;
+        if (sp.flags & ~7U)
+            return -EINVAL;
+        /* SYNC_PTR APPL/AVAIL_MIN mean GET, not SET. The RW backend owns
+         * appl_ptr; arbitrary mmap-style cursor changes are unsupported. */
+        if (!(sp.flags & 2U) && sp.c.control.appl_ptr != ctx->appl_ptr)
+            return -EINVAL;
+        if (!(sp.flags & 4U)) {
+            if (!sp.c.control.avail_min ||
+                (ctx->buffer_size && sp.c.control.avail_min > ctx->buffer_size))
+                return -EINVAL;
+            ctx->avail_min = sp.c.control.avail_min;
+        }
+        audio_backend_status_t status;
+        int ret = alsa_pcm_snapshot(ctx, &status);
+        if (ret < 0)
+            return ret;
         sp.s.status.state = ctx->state;
         sp.s.status.hw_ptr = ctx->hw_ptr;
         sp.s.status.suspended_state = 0;
         alsa_pcm_now(ctx, &sp.s.status.tstamp);
         sp.s.status.audio_tstamp = sp.s.status.tstamp;
-        sp.c.control.appl_ptr = ctx->hw_ptr;
-        sp.c.control.avail_min = ctx->buffer_size;
+        sp.c.control.appl_ptr = ctx->appl_ptr;
+        sp.c.control.avail_min = ctx->avail_min;
         return copy_to_user(arg, &sp, sizeof(sp)) < 0 ? -EFAULT : 0;
     }
     case SNDRV_PCM_IOCTL_STATUS_EXT:
         return alsa_pcm_status(ctx, arg);
     case SNDRV_PCM_IOCTL_DELAY: {
-        int64_t delay = 0;
+        audio_backend_status_t status;
+        int ret = alsa_pcm_snapshot(ctx, &status);
+        if (ret < 0)
+            return ret;
+        int64_t delay = (int64_t)(status.queued_bytes / status.frame_bytes);
         return copy_to_user(arg, &delay, sizeof(delay)) < 0 ? -EFAULT : 0;
     }
     default:
         return -EINVAL;
     }
+}
+
+static int alsa_pcm_begin(alsa_pcm_ctx_t *ctx)
+{
+    if (!ctx->device)
+        ctx->device = alsa_audio_select();
+    if (!ctx->device)
+        return -ENODEV;
+    const void *table;
+    int ret = class_device_ops_begin(ctx->device, DEV_CLASS_AUDIO, &table);
+    if (ret == 0)
+        ctx->active_ops = (audio_dev_ops_t *)table;
+    return ret;
+}
+
+static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
+{
+    alsa_pcm_ctx_t *ctx = vf ? vf->priv : NULL;
+    if (!ctx)
+        return -EBADF;
+    mutex_lock(&ctx->lock);
+    int ret = alsa_pcm_begin(ctx);
+    if (ret == 0) {
+        for (;;) {
+            ret = alsa_pcm_ioctl_core(vf, req, arg);
+            if (ret != -EAGAIN || req != SNDRV_PCM_IOCTL_WRITEI_FRAMES ||
+                (vf->flags & O_NONBLOCK))
+                break;
+            uint64_t tick = MS_TO_TICKS(1);
+            proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE,
+                timer_get_ticks() + (tick ? tick : 1));
+            if (!token.task) { ret = -EAGAIN; break; }
+            proc_wake_reason_t reason = proc_park_commit(token);
+            proc_park_finish(token);
+            if (proc_wake_reason_is_task_interrupt(reason)) {
+                ret = -ERESTARTSYS;
+                break;
+            }
+        }
+        ctx->active_ops = NULL;
+        class_device_call_end(ctx->device);
+    }
+    mutex_unlock(&ctx->lock);
+    return ret;
+}
+
+static int alsa_pcm_poll(vfile_t *vf, short events)
+{
+    alsa_pcm_ctx_t *ctx = vf ? vf->priv : NULL;
+    if (!ctx)
+        return POLLERR;
+    if (!mutex_trylock(&ctx->lock))
+        return 0;
+    int ready = 0;
+    int ret = alsa_pcm_begin(ctx);
+    if (ret == 0) {
+        audio_backend_status_t status;
+        ret = alsa_pcm_snapshot(ctx, &status);
+        if (ret == 0) {
+            if (ctx->state == SNDRV_PCM_STATE_XRUN)
+                ready = POLLERR;
+            else if ((events & POLLOUT) && ctx->buffer_size &&
+                     alsa_pcm_avail(ctx, &status) >= ctx->avail_min)
+                ready = POLLOUT;
+        }
+        ctx->active_ops = NULL;
+        class_device_call_end(ctx->device);
+    }
+    if (ret < 0 && ret != -EAGAIN)
+        ready = POLLERR;
+    mutex_unlock(&ctx->lock);
+    return ready;
 }
 
 static int alsa_pcm_read(vfile_t *vf, char *buf, size_t count)
@@ -791,15 +1018,27 @@ static int alsa_pcm_read(vfile_t *vf, char *buf, size_t count)
 
 static int alsa_pcm_write(vfile_t *vf, const char *buf, size_t count)
 {
-    (void)vf;
-    (void)buf;
-    return (int)count;
+    (void)vf; (void)buf; (void)count;
+    /* PCM transfers use WRITEI; never pretend that discarded samples played. */
+    return -EOPNOTSUPP;
 }
 
 static int alsa_pcm_close(vfile_t *vf)
 {
     alsa_pcm_ctx_t *ctx = vf ? vf->priv : NULL;
     if (ctx) {
+        mutex_lock(&ctx->lock);
+        if (ctx->buffer_size && alsa_pcm_begin(ctx) == 0) {
+            if (ctx->active_ops->stop)
+                (void)ctx->active_ops->stop(ctx->device->dev);
+            if (ctx->active_ops->close)
+                (void)ctx->active_ops->close(ctx->device->dev);
+            ctx->active_ops = NULL;
+            class_device_call_end(ctx->device);
+        }
+        if (ctx->device)
+            class_device_put(ctx->device);
+        mutex_unlock(&ctx->lock);
         kfree(ctx);
         vf->priv = NULL;
     }
@@ -811,6 +1050,7 @@ static vfile_ops_t g_alsa_pcm_ops = {
     .write = alsa_pcm_write,
     .ioctl = alsa_pcm_ioctl,
     .close = alsa_pcm_close,
+    .poll = alsa_pcm_poll,
 };
 
 /* ---- control ioctls ---- */
@@ -838,10 +1078,10 @@ static int alsa_control_ioctl(vfile_t *vf, unsigned long req, void *arg)
         int dev;
         if (copy_from_user(&dev, arg, sizeof(dev)) < 0)
             return -EFAULT;
-        device_t *d;
-        audio_dev_ops_t *o;
-        if (alsa_audio_get(&d, &o) < 0)
+        class_device_t *audio = alsa_audio_select();
+        if (!audio)
             return -ENODEV;
+        class_device_put(audio);
         /* One PCM device: -1 starts the scan at 0, any non-negative index
          * ends it. */
         dev = dev < 0 ? 0 : -1;
@@ -909,6 +1149,9 @@ vfile_t *alsa_pcm_create_vfile(int playback)
     }
     ctx->playback = playback;
     ctx->state = SNDRV_PCM_STATE_OPEN;
+    ctx->boundary = 1ULL << 62;
+    ctx->avail_min = 1;
+    mutex_init(&ctx->lock);
     vfile_ref_init(vf, 1);
     vf->flags = playback ? O_WRONLY : O_RDONLY;
     vf->ops = &g_alsa_pcm_ops;

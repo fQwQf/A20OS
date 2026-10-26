@@ -30,7 +30,9 @@ PRELUDE = r'''
 #include <fcntl.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include "uapi/a20/audio.h"
+#include "drivers/audio/backend.h"
 #define DEV_CLASS_AUDIO 6
 struct device;
 typedef struct device device_t;
@@ -39,13 +41,45 @@ typedef struct {void*class_ops;} driver_t;
 struct device {driver_t*drv;};
 typedef struct {device_t*dev;} class_device_t;
 struct vfile;
-typedef struct {int(*read)(struct vfile*,char*,size_t);int(*write)(struct vfile*,const char*,size_t);int(*ioctl)(struct vfile*,unsigned long,void*);int(*close)(struct vfile*);} vfile_ops_t;
+typedef struct {int(*read)(struct vfile*,char*,size_t);int(*write)(struct vfile*,const char*,size_t);int(*ioctl)(struct vfile*,unsigned long,void*);int(*close)(struct vfile*);int(*poll)(struct vfile*,short);} vfile_ops_t;
 typedef struct vfile {void*priv;int flags;vfile_ops_t*ops;} vfile_t;
-static unsigned written;
-static int backend_write(device_t*d,const void*p,size_t n){(void)d;(void)p;written+=n;return n;}
-static audio_dev_ops_t backend={.caps={1,A20_AUDIO_CAP_PCM,48000,48000},.pcm_format={48000,2,1},.write=backend_write};
+static unsigned written,queued,running,drains,refs,active,device_lock;
+static int backend_write(device_t*d,const void*p,size_t n){(void)d;(void)p;(void)n;abort();}
+static int backend_stop(device_t*d){(void)d;queued=running=0;return 0;}
+static int backend_drain(device_t*d){(void)d;queued=running=0;drains++;return 0;}
+static int backend_ioctl(device_t*d,unsigned long req,void*arg){
+ (void)d;assert(active);
+ if(req==AUDIO_BACKEND_QUERY){*(audio_backend_status_t*)arg=(audio_backend_status_t){65536,queued,4,running,0};return 0;}
+ if(req==AUDIO_BACKEND_START){if(!queued)return -EPIPE;running=1;return 0;}
+ if(req==AUDIO_BACKEND_WRITE_NONBLOCK){
+  audio_backend_write_t*w=arg;size_t n=w->bytes<65536-queued?w->bytes:65536-queued;
+  if(!n)return -EAGAIN;queued+=n;written+=n;
+  if(w->start_after_bytes&&n>=w->start_after_bytes)running=1;
+  return (int)n;
+ }
+ return -ENOTTY;
+}
+static audio_dev_ops_t backend={.caps={1,A20_AUDIO_CAP_PCM,48000,48000},.pcm_format={48000,2,1},.write=backend_write,.ioctl=backend_ioctl,.stop=backend_stop,.drain=backend_drain};
 static driver_t drv={&backend};static device_t dev={&drv};static class_device_t cdev={&dev};
-static class_device_t*class_device_get_by_type(int t,unsigned i){(void)t;return i?NULL:&cdev;}
+static class_device_t*class_device_get_by_type(int t,unsigned i){(void)t;if(i)return NULL;refs++;return &cdev;}
+static int class_device_ops_begin(class_device_t*c,uint32_t t,const void**p){(void)t;assert(c==&cdev&&refs);active++;*p=&backend;return 0;}
+static void class_device_call_end(class_device_t*c){assert(c==&cdev&&active);active--;}
+static void class_device_put(class_device_t*c){assert(c==&cdev&&refs);refs--;}
+typedef struct{int held;}mutex_t;
+static void mutex_init(mutex_t*m){m->held=0;}
+static int mutex_trylock(mutex_t*m){if(m->held)return 0;m->held=1;return 1;}
+static void mutex_lock(mutex_t*m){assert(mutex_trylock(m));}
+static void mutex_unlock(mutex_t*m){assert(m->held);m->held=0;}
+typedef struct{void*task;}proc_wait_token_t;
+typedef int proc_wake_reason_t;
+#define PROC_WAIT_INTERRUPTIBLE 1
+#define MS_TO_TICKS(x) (x)
+#define ERESTARTSYS 512
+static uint64_t timer_get_ticks(void){return 1;}
+static proc_wait_token_t proc_park_prepare(int f,uint64_t n){(void)f;(void)n;abort();}
+static proc_wake_reason_t proc_park_commit(proc_wait_token_t t){(void)t;abort();}
+static void proc_park_finish(proc_wait_token_t t){(void)t;abort();}
+static int proc_wake_reason_is_task_interrupt(proc_wake_reason_t r){(void)r;return 0;}
 static void*kcalloc(size_t n,size_t z){return calloc(n,z);}static void kfree(void*p){free(p);}
 static vfile_t*vfile_alloc(void){return calloc(1,sizeof(vfile_t));}static void vfile_free(vfile_t*p){free(p);}
 static void vfile_ref_init(vfile_t*p,int n){(void)p;(void)n;}
@@ -62,6 +96,24 @@ PROBE = r'''
 
 static vfile_t *files[1024];
 static unsigned calls;
+int poll(struct pollfd*f,nfds_t n,int timeout){
+ assert(!device_lock); /* SDL3 WaitDevice is outside its application mutex. */
+ int owned=0;
+ for(nfds_t i=0;i<n;i++)if(f[i].fd>=0&&f[i].fd<1024&&files[f[i].fd])owned=1;
+ if(!owned)return syscall(SYS_poll,f,n,timeout);
+ for(unsigned tick=0;tick<100;tick++){
+  int ready=0;
+  for(nfds_t i=0;i<n;i++){
+   vfile_t*vf=f[i].fd>=0&&f[i].fd<1024?files[f[i].fd]:NULL;
+   f[i].revents=vf&&vf->ops->poll?vf->ops->poll(vf,f[i].events):0;
+   if(f[i].revents)ready++;
+  }
+  if(ready||timeout==0)return ready;
+  /* Hardware retirement happens while the application's poll is waiting. */
+  if(running&&queued)queued-=queued<1024?queued:1024;
+ }
+ return 0;
+}
 int open64(const char*p,int flags,...){
  int fd=syscall(SYS_openat,AT_FDCWD,"/dev/null",flags,0);
  if(!strncmp(p,"/dev/snd/",9))files[fd]=strstr(p,"control")?alsa_control_create_vfile():alsa_pcm_create_vfile(1);
@@ -103,6 +155,9 @@ int snd_pcm_hw_params_get_buffer_size(const void*,unsigned long*);
 int snd_pcm_hw_params(void*,void*);
 int snd_pcm_prepare(void*);
 int snd_pcm_start(void*);
+int snd_pcm_wait(void*,int);
+int snd_pcm_delay(void*,long*);
+int snd_pcm_close(void*);
 long snd_pcm_avail(void*);
 long snd_pcm_writei(void*,const void*,unsigned long);
 static void constraints_regression(void){
@@ -177,7 +232,22 @@ int main(int argc,char**argv){void*pcm,*params;int r,dir=0;unsigned rate=48000,p
  assert(buffer==expected);
  CALL(snd_pcm_prepare(pcm));r=snd_pcm_start(pcm);assert(r==-EPIPE);
  CALL(snd_pcm_avail(pcm));int16_t samples[4096]={0};
- CALL(snd_pcm_writei(pcm,samples,2048));assert(written==8192);return 0;}
+ device_lock=1;CALL(snd_pcm_writei(pcm,samples,period));device_lock=0;
+ assert(written==period*4&&!drains);
+ if(scenario==1){
+  device_lock=1;CALL(snd_pcm_writei(pcm,samples,period));device_lock=0;
+  assert(snd_pcm_avail(pcm)==0);
+  vfile_t*vf=NULL;for(unsigned fd=0;fd<1024;fd++)if(files[fd]&&files[fd]->priv)vf=files[fd];
+  assert(vf);vf->flags|=O_NONBLOCK;
+  struct snd_xferi transfer={.buf=samples,.frames=period};
+  assert(alsa_pcm_ioctl(vf,SNDRV_PCM_IOCTL_WRITEI_FRAMES,&transfer)==-EAGAIN);
+  long delay;CALL(snd_pcm_delay(pcm,&delay));assert(delay==4096);
+  /* The real library waits on actual capacity outside SDL's device lock. */
+  assert(snd_pcm_wait(pcm,100)==1);
+  assert(snd_pcm_avail(pcm)>=2048);
+  CALL(snd_pcm_delay(pcm,&delay));assert(delay<=2048);
+ }
+ CALL(snd_pcm_close(pcm));assert(!refs&&!active&&!drains);return 0;}
 
 '''
 
@@ -194,7 +264,7 @@ class AlsaLibProtocol(unittest.TestCase):
             for name in re.findall(r'^#include "([^"]+)"', source.read_text(), re.M):
                 path = stubs / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                if name == "drivers/audio/alsa.h":
+                if name in ("drivers/audio/alsa.h", "drivers/audio/backend.h"):
                     shutil.copyfile(ROOT / "kernel/include" / name, path)
                 else:
                     path.write_text("")

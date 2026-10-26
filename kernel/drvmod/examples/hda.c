@@ -20,10 +20,12 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #endif
 #include "drivers/audio/audio_core.h"
 #include "drivers/audio/hda_internal.h"
+#include "drivers/audio/backend.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/errno.h"
+#include "core/poll.h"
 #include "core/lock.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -33,6 +35,8 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "proc/proc.h"
 
 #ifndef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
+#undef kinfo
+#undef kerr
 #define kinfo(...) drv_log(__VA_ARGS__)
 #define kerr(...) drv_log(__VA_ARGS__)
 #endif
@@ -484,6 +488,87 @@ static int hda_close(device_t *dev)
     return 0;
 }
 
+/* ALSA waits outside SDL's device lock. Neither the capacity query nor a
+ * subsequent submission may park behind another writer or wait for DMA.
+ * The submission rechecks capacity under this same mutex, closing the race
+ * between poll readiness and another writer consuming the free space. */
+static int hda_backend_ioctl(device_t *dev, unsigned long req, void *arg)
+{
+    hda_controller_t *hda = dev ? dev->drv_priv : NULL;
+    if (!hda)
+        return -ENODEV;
+    if (req != AUDIO_BACKEND_QUERY && req != AUDIO_BACKEND_START &&
+        req != AUDIO_BACKEND_WRITE_NONBLOCK)
+        return -ENOTTY;
+    if (!arg && req != AUDIO_BACKEND_START)
+        return -EINVAL;
+    if (!mutex_trylock(&hda->lock))
+        return -EAGAIN;
+    uint32_t generation = __atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE);
+    int ret = hda_adopt_generation(hda, generation);
+    if (ret == 0)
+        ret = hda_stream_refresh(hda, generation);
+    if (ret < 0)
+        goto out;
+    if (req == AUDIO_BACKEND_QUERY) {
+        audio_backend_status_t *status = arg;
+        *status = (audio_backend_status_t){
+            .capacity_bytes = HDA_DMA_BYTES,
+            .queued_bytes = hda->queued_bytes,
+            .frame_bytes = HDA_PCM_FRAME,
+            .running = hda->stream_running,
+            .underruns = hda->stream_underruns,
+        };
+    } else if (req == AUDIO_BACKEND_START) {
+        if (!hda->queued_bytes)
+            ret = -EPIPE;
+        else if (!hda->stream_running)
+            ret = hda_stream_run(hda, generation);
+    } else {
+        const audio_backend_write_t *write = arg;
+        if (!write->data || !write->bytes || write->bytes % HDA_PCM_FRAME ||
+            hda->pending_len) {
+            ret = -EINVAL;
+            goto out;
+        }
+        size_t available = HDA_DMA_BYTES - hda->queued_bytes;
+        size_t bytes = write->bytes < available ? write->bytes : available;
+        bytes &= ~(size_t)(HDA_PCM_FRAME - 1U);
+        if (!bytes) {
+            ret = -EAGAIN;
+            goto out;
+        }
+        if (!hda->stream_running && !hda->queued_bytes) {
+            ret = hda_stream_prepare(hda);
+            if (ret < 0)
+                goto out;
+        }
+        hda_ring_copy(hda, write->data, bytes);
+        if (write->start_after_bytes && bytes >= write->start_after_bytes &&
+            !hda->stream_running) {
+            ret = hda_stream_run(hda, generation);
+            if (ret < 0)
+                goto out;
+        }
+        ret = (int)bytes;
+    }
+out:
+    mutex_unlock(&hda->lock);
+    return ret;
+}
+
+static int hda_poll(device_t *dev, short events)
+{
+    audio_backend_status_t status;
+    int ret = hda_backend_ioctl(dev, AUDIO_BACKEND_QUERY, &status);
+    if (ret == -EAGAIN)
+        return 0;
+    if (ret < 0)
+        return POLLERR;
+    return (events & POLLOUT) && status.capacity_bytes - status.queued_bytes >=
+            HDA_PCM_FRAME ? POLLOUT : 0;
+}
+
 static int hda_quiesce(hda_controller_t *hda)
 {
     __atomic_add_fetch(&hda->generation, 1U, __ATOMIC_ACQ_REL);
@@ -636,6 +721,8 @@ static const audio_dev_ops_t hda_ops = {
     .stop = hda_stop_device,
     .drain = hda_drain_device,
     .close = hda_close,
+    .ioctl = hda_backend_ioctl,
+    .poll = hda_poll,
 };
 
 static const device_id_t hda_ids[] = {
