@@ -84,6 +84,7 @@ typedef int (*page_cache_writepage_t)(vnode_t *vn, uint64_t index,
 
 int  page_cache_init(void);
 page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create);
+void page_cache_pin(page_cache_page_t *page);
 void page_cache_put(page_cache_page_t *page);
 void *page_cache_data(page_cache_page_t *page);
 void page_cache_mark_uptodate(page_cache_page_t *page);

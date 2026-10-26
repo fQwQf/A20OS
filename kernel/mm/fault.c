@@ -296,6 +296,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
         return -1;
     }
 
+    mm_pt_cache_note(mm->pgdir, page_va, pcp);
     mm_rss_add(mm, 1);
     arch_tlb_flush_page_local(page_va);
     return 0;
@@ -1414,6 +1415,8 @@ retry_mapping_validation:
                            shared ? MM_ST_FILE_SHARED
                                   : MM_ST_FILE_PRIVATE) < 0)
                 break;
+            if (shared || direct_private)
+                mm_pt_cache_note(mm->pgdir, va, window[i]);
             mm_rss_add(mm, 1);
             installed++;
             candidates[i] = PFN_NONE;

@@ -295,9 +295,16 @@ int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
     return pt_map_cls(child->pgdir, va, pa, (pte_t)flags, (uint8_t)class);
 }
 
+void a20_cow_note_child_cache(void *child_ptr, uintptr_t va, void *pcp)
+{
+    mm_struct_t *child = child_ptr;
+    if (child && child->pgdir && pcp)
+        mm_pt_cache_note(child->pgdir, va, pcp);
+}
+
 /* Narrow bridge from the Rust batch transaction to the child page-table
- * mapper.  Its all-or-none contract lets Rust transfer all 64 source pins
- * only after every child leaf is installed. */
+ * mapper.  Its all-or-none contract lets Rust transfer the whole batch's
+ * source pins only after every child leaf is installed. */
 int a20_cow_map_child_anon_batch(
     void *child_ptr, uintptr_t va,
     const struct a20_cow_anon_batch_page *pages, size_t nr, int shared)
@@ -352,8 +359,18 @@ static int a20_cow_share_snapshot_from_slot(
     int is_vmo = vma && (vma->vm_flags & VM_VMO);
     pfn_t pfn = phys_to_pfn(arch_pte_addr(source));
     uint8_t cls = mm_fork_page_class(stab, level, va, vma);
-    page_cache_page_t *pcp =
-        is_vmo ? NULL : mm_file_cache_mapping_get(vma, va, pfn);
+    page_cache_page_t *pcp = NULL;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    if (!is_vmo && stab) {
+        pcp = mm_pt_cache_peek(stab, arch_pt_vpn(va, level));
+        if (pcp && page_cache_pfn(pcp) == pfn)
+            page_cache_pin(pcp);
+        else
+            pcp = NULL;
+    }
+#endif
+    if (!pcp && !is_vmo)
+        pcp = mm_file_cache_mapping_get(vma, va, pfn);
     if (!pcp && !is_vmo)
         frame_get(pfn);
     out->slot = src_pte;
@@ -589,13 +606,19 @@ int a20_cow_share_anon_batch_snapshot(
         out[i].flags = shared ? arch_pte_flags(source) : mm_cow_flags(source);
     }
 
-    /* All 64 entries are validated before any reference or PTE changes. */
+    /* All entries are validated before any reference or PTE changes. */
     for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
         if (!out[i].class)
             continue;
         uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
         page_cache_page_t *pcp =
-            mm_file_cache_mapping_get(vma, va, pfns[i]);
+            mm_pt_cache_peek(node, first + (int)i);
+        if (pcp && page_cache_pfn(pcp) == pfns[i])
+            page_cache_pin(pcp);
+        else
+            pcp = NULL;
+        if (!pcp)
+            pcp = mm_file_cache_mapping_get(vma, va, pfns[i]);
         if (pcp) {
             out[i].pcp = pcp;
             out[i].kind = 2;

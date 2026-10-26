@@ -26,7 +26,7 @@ typedef unsigned long long uint64_t;
 typedef unsigned int pfn_t;
 typedef struct segment mm_seg_t;
 ''' + match.group() + ''';
-typedef void (*expected_release)(mm_seg_t *, uintptr_t, const pfn_t *, size_t, int);
+typedef void (*expected_release)(mm_seg_t *, uintptr_t, const pfn_t *, void *const *, size_t, int);
 _Static_assert(__builtin_types_compatible_p(__typeof__(&a20_vma_free_run_release_rust), expected_release),
                "VMA run release argument widths differ from Rust usize");
 '''

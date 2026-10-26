@@ -578,8 +578,49 @@ static void nommu_releases_the_flat_allocation(void)
     check(account_calls == 1 && last_freed_pages == 2, "nommu: pages are still accounted");
 }
 
+static int run_cache_puts, run_frame_puts;
+
+void *mm_file_cache_mapping_get(void *vma, uintptr_t va, uint32_t pfn)
+{
+    (void)vma; (void)pfn;
+    return (va == 0x1000 || va == 0x3000) ? (void *)0x9000 : NULL;
+}
+void page_cache_put(void *page)
+{
+    check(page == (void *)0x9000, "run release: cache object identity");
+    run_cache_puts++;
+}
+void frame_put(uint32_t pfn)
+{
+    check(pfn == 20 || pfn == 40, "run release: only anonymous frames");
+    run_frame_puts++;
+}
+extern void a20_vma_free_run_release_rust(void *vma, uintptr_t start_va,
+                                          const uint32_t *pfns,
+                                          void *const *owners, size_t count,
+                                          int no_frame_ref);
+static void run_release_mixed(void)
+{
+    uint32_t pfns[] = {10, 20, 30, 40};
+    void *owners[] = {NULL, (void *)0x9000, NULL, NULL};
+    a20_vma_free_run_release_rust(NULL, 0x1000, pfns, owners, 4, 0);
+    check(run_cache_puts == 5,
+          "run release: direct cache page puts once and fallback puts twice");
+    check(run_frame_puts == 1, "run release: anonymous frames release once");
+    run_cache_puts = run_frame_puts = 0;
+    a20_vma_free_run_release_rust(NULL, 0x1000, pfns, owners, 4, 1);
+    check(run_cache_puts == 5 && run_frame_puts == 0,
+          "run release: no-frame-ref skips only frame release");
+    run_cache_puts = run_frame_puts = 0;
+    a20_vma_free_run_release_rust(NULL, 0x1000, pfns, NULL, 4, 0);
+    check(run_cache_puts == 4 && run_frame_puts == 2,
+          "run release: missing owner array preserves the old two-put fallback");
+    run_cache_puts = run_frame_puts = 0;
+}
+
 int main(void)
 {
+    run_release_mixed();
     whole_record();
     partial_cuts();
     refusals_touch_nothing();

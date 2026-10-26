@@ -218,6 +218,11 @@ int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
     return g_map_rc;
 }
 
+void a20_cow_note_child_cache(void *child, uintptr_t va, void *pcp)
+{
+    (void)child; (void)va; (void)pcp;
+}
+
 /* The scalar suite does not enter batch mapping; provide its current ABI. */
 int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
                                       uintptr_t start, void *node,

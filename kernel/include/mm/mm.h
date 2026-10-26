@@ -96,6 +96,8 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
  * the scalar path for whatever the run stopped at). */
 int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
                       paddr_t *pa_out);
+int pt_unmap_leaf_run_owned(struct mm_struct *mm, vaddr_t va, int max_pages,
+                            paddr_t *pa_out, void **owner_out);
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va);
 pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc);
 /* A missing entry also reports the absent subtree span in base/size/level.
@@ -126,6 +128,7 @@ void pt_map_kernel(pt_root_t *pgdir);
 int  pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t flags);
 pte_t *pt_clone(pt_root_t *src_pgdir);
 void pt_destroy_user(pt_root_t *pgdir);
+void pt_destroy_user_mm(struct mm_struct *mm);
 
 /*
  * Kernel-image W^X (KXAN).  arch_kernel_wx_finalize() splits the boot-time

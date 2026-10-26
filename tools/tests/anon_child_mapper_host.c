@@ -80,6 +80,9 @@ static void mm_pt_note_present(pte_t *owner, int level, int idx, uint8_t cls) {
            (cls & 0x7f) == MM_ST_FILE_SHARED); status_calls++;
 }
 static int mm_pt_prot_bits(pte_t flags) { (void)flags; return 0; }
+static void mm_pt_cache_note(pt_root_t *root, vaddr_t va, void *pcp) {
+    (void)root; (void)va; (void)pcp;
+}
 
 /* REAL_LEAF_INSTALL */
 /* REAL_SCALAR_MAPPER */

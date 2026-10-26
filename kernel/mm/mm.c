@@ -18,7 +18,9 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
+#include "mm/vm_internal.h"
 #include "mm/pt.h"
+#include "fs/page_cache.h"
 #include "mm/failinject.h"
 #include "mm/fault.h"
 #include "mm/usercopy.h"
@@ -517,6 +519,8 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
         pt_install_leaf_cls(owner, &owner[first + (int)i], va, pa,
                             (pte_t)pages[i].flags,
                             (uint8_t)pages[i].class);
+        if (pages[i].pcp)
+            mm_pt_cache_note(pgdir, va, pages[i].pcp);
     }
     return 0;
 }
@@ -790,8 +794,8 @@ int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
  * Everything the scalar path treats specially -- swap entries, huge leaves,
  * absent slots, absent upper subtrees -- ends the run and is left for the
  * caller's per-page fallback, so per-page semantics never change. */
-int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
-                      paddr_t *pa_out) {
+int pt_unmap_leaf_run_owned(struct mm_struct *mm, vaddr_t va, int max_pages,
+                            paddr_t *pa_out, void **owner_out) {
     if (!mm || !mm->pgdir || !pa_out || max_pages <= 0) return 0;
     pt_root_t *pgdir = mm->pgdir;
     pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
@@ -838,7 +842,10 @@ int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
 #endif
         if (!(entry & PTE_V) || !arch_pte_is_leaf(entry))
             break;
-        pa_out[count++] = arch_pte_addr(entry);
+        pa_out[count] = arch_pte_addr(entry);
+        if (owner_out)
+            owner_out[count] = mm_pt_cache_peek(path[0], first + i);
+        count++;
         *pte = 0;
         mm_pt_note_absent(path[0], 0, first + i);
     }
@@ -863,6 +870,12 @@ int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
         mm_pt_retire_table(mm, child, l);
     }
     return count;
+}
+
+int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
+                      paddr_t *pa_out)
+{
+    return pt_unmap_leaf_run_owned(mm, va, max_pages, pa_out, NULL);
 }
 
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
@@ -952,7 +965,8 @@ pte_t *pt_clone(pt_root_t *src_pgdir) {
     return pt_clone_level(src_pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
-static void pt_destroy_user_recursive(pte_t *table, int level) {
+static void pt_destroy_user_recursive(mm_struct_t *mm, pte_t *table, int level,
+                                      vaddr_t base) {
     if (!table) return;
     pfn_t put_batch[64];
     size_t put_count = 0;
@@ -976,11 +990,35 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
         if (!(pte & PTE_V)) continue;
 
         int is_leaf = arch_pte_is_leaf(pte);
+        vaddr_t va = base | ((vaddr_t)i << (ARCH_PT_BITS * level));
 
         if (is_leaf) {
+            pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+            page_cache_page_t *owner = mm_pt_cache_peek(table, i);
+            if (owner) {
+                page_cache_put(owner);
+                table[i] = 0;
+                continue;
+            }
+            if (mm) {
+                if (MM_ST_GET_CLASS(mm_pt_peek(table, level, i)) ==
+                    MM_ST_FILE_PRIVATE) {
+                    mm_seg_t *vma = mm->mmap;
+                    while (vma && (va < vma->start || va >= vma->end))
+                        vma = vma->next;
+                    page_cache_page_t *page =
+                        mm_file_cache_mapping_get(vma, va, pfn);
+                    if (page) {
+                        page_cache_put(page);
+                        page_cache_put(page);
+                        table[i] = 0;
+                        continue;
+                    }
+                }
+            }
             /* Ownership follows the user address range, including protected
              * leaves whose user-access permission is temporarily cleared. */
-            put_batch[put_count++] = phys_to_pfn(arch_pte_addr(pte));
+            put_batch[put_count++] = pfn;
             table[i] = 0;
             if (put_count == 64) {
                 frame_put_many(put_batch, put_count);
@@ -1000,7 +1038,7 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
                 continue;
             }
             pte_t *next = arch_pte_to_ptr(pte);
-            pt_destroy_user_recursive(next, level - 1);
+            pt_destroy_user_recursive(mm, next, level - 1, va);
             pt_free_table(next, level - 1);
             table[i] = 0;
             mm_pt_note_absent(table, level, i);
@@ -1012,7 +1050,14 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
 
 void pt_destroy_user(pt_root_t *pgdir) {
     if (!pgdir) return;
-    pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
+    pt_destroy_user_recursive(NULL, pgdir, ARCH_PT_ROOT_LEVEL, 0);
+    pt_free_table(pgdir, ARCH_PT_ROOT_LEVEL);
+}
+
+void pt_destroy_user_mm(mm_struct_t *mm) {
+    if (!mm || !mm->pgdir) return;
+    pt_root_t *pgdir = mm->pgdir;
+    pt_destroy_user_recursive(mm, pgdir, ARCH_PT_ROOT_LEVEL, 0);
     pt_free_table(pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
