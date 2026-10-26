@@ -1,4 +1,5 @@
 #include "drivers/audio/audio_core.h"
+#include "drivers/audio/backend.h"
 #include "core/errno.h"
 #include "sys/usercopy.h"
 
@@ -14,6 +15,11 @@ int audio_device_ioctl(device_t *dev, const audio_dev_ops_t *ops,
 {
     if (!dev || !ops)
         return -ENODEV;
+    /* These requests borrow kernel buffers; never forward a user pointer to
+     * an internal backend handler, including through a native /dev/audioN. */
+    if (req == AUDIO_BACKEND_QUERY || req == AUDIO_BACKEND_START ||
+        req == AUDIO_BACKEND_WRITE_NONBLOCK)
+        return -ENOTTY;
     if (req == A20_AUDIO_IOCTL_STOP)
         return ops->stop ? ops->stop(dev) : -EOPNOTSUPP;
     if (req == A20_AUDIO_IOCTL_DRAIN)

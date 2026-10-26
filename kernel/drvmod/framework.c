@@ -442,6 +442,7 @@ const struct drv_export drv_export_table[] = {
     { "wait_queue_collect_all", (void *)wait_queue_collect_all },
     /* mutex + timer + log + allocator primitives */
     { "mutex_init",          (void *)mutex_init },
+    { "mutex_trylock",       (void *)mutex_trylock },
     { "mutex_lock",          (void *)mutex_lock },
     { "mutex_unlock",        (void *)mutex_unlock },
     { "timer_get_ticks",     (void *)timer_get_ticks },
