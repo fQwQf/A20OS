@@ -285,21 +285,15 @@ void a20_cow_frame_copy(uint32_t dst, uint32_t src, uintptr_t size)
 }
 
 int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
-                      uintptr_t flags, uint32_t class, int level)
+                      uintptr_t flags, uint32_t class, int level, void *pcp)
 {
     mm_struct_t *child = child_ptr;
     paddr_t pa = pfn_to_phys(pfn);
     if (level > 0)
         return pt_map_huge(child, va, pa, (pte_t)flags, (uint8_t)class);
     /* Preserve source backing metadata for both 4K and huge leaves. */
-    return pt_map_cls(child->pgdir, va, pa, (pte_t)flags, (uint8_t)class);
-}
-
-void a20_cow_note_child_cache(void *child_ptr, uintptr_t va, void *pcp)
-{
-    mm_struct_t *child = child_ptr;
-    if (child && child->pgdir && pcp)
-        mm_pt_cache_note(child->pgdir, va, pcp);
+    return pt_map_cache_cls(child->pgdir, va, pa, (pte_t)flags,
+                            (uint8_t)class, pcp);
 }
 
 /* Narrow bridge from the Rust batch transaction to the child page-table

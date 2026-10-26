@@ -428,13 +428,41 @@ static void pt_install_leaf_cls(pte_t *owner, pte_t *pte, vaddr_t va,
                                      mm_pt_prot_bits(flags)));
 }
 
+static void pt_note_cache_unpublished(pt_meta_t *meta, int idx,
+                                      page_cache_page_t *page)
+{
+    if (!meta || !page || mm_pt_meta_level(meta) != 0)
+        return;
+    if (!meta->cache_owner) {
+        pfn_t pfn = pfa_alloc_flags(0, 0);
+        if (pfn == PFN_NONE)
+            return;
+        meta->cache_owner = pfn_to_virt(pfn);
+        memset(meta->cache_owner, 0, PAGE_SIZE);
+    }
+    meta->cache_owner[idx] = page;
+}
+
 /* pt_map_cls is pt_map with an explicit per-page status. The status is the
  * authoritative record of what this page is; the PTE records only the frame
  * and effective permissions. Callers that know more than a private anonymous
  * page (for example, file-backed, fork-shared, or VMO pages) pass that class
  * so a later fault needs no interval lookup. */
+int pt_map_cache_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+                     uint8_t cls, page_cache_page_t *page)
+{
+    pte_t *owner = NULL;
+    pte_t *pte = pt_walk_with_owner(pgdir, va, 1, &owner);
+    if (!pte) return -ENOMEM;
+    pt_install_leaf_cls(owner, pte, va, pa, flags, cls);
+    if (page)
+        pt_note_cache_unpublished(mm_pt_meta(owner), arch_pt_vpn(va, 0), page);
+    return 0;
+}
+
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
-               uint8_t cls) {
+               uint8_t cls)
+{
     pte_t *owner = NULL;
     pte_t *pte = pt_walk_with_owner(pgdir, va, 1, &owner);
     if (!pte) return -ENOMEM;
@@ -519,8 +547,17 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
         pt_install_leaf_cls(owner, &owner[first + (int)i], va, pa,
                             (pte_t)pages[i].flags,
                             (uint8_t)pages[i].class);
-        if (pages[i].pcp)
-            mm_pt_cache_note(pgdir, va, pages[i].pcp);
+        if (pages[i].pcp) {
+            if (!meta->cache_owner) {
+                pfn_t owner_pfn = pfa_alloc_flags(0, 0);
+                if (owner_pfn != PFN_NONE) {
+                    meta->cache_owner = pfn_to_virt(owner_pfn);
+                    memset(meta->cache_owner, 0, PAGE_SIZE);
+                }
+            }
+            if (meta->cache_owner)
+                meta->cache_owner[first + (int)i] = pages[i].pcp;
+        }
     }
     return 0;
 }
