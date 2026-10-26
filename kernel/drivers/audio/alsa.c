@@ -614,6 +614,15 @@ static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         ctx->state = SNDRV_PCM_STATE_PREPARED;
         return 0;
     case SNDRV_PCM_IOCTL_START:
+        /* Linux pcm_native.c:snd_pcm_pre_start rejects an empty playback
+         * stream without changing PREPARED. SDL3 deliberately attempts this
+         * once in ALSA_ThreadInit before its first write. Claiming RUNNING
+         * here makes alsa-lib detect an immediate underrun and prevents that
+         * first buffer from ever reaching the hardware. */
+        if (ctx->state != SNDRV_PCM_STATE_PREPARED)
+            return -EBADFD;
+        if (ctx->playback && ctx->hw_ptr == 0)
+            return -EPIPE;
         ctx->state = SNDRV_PCM_STATE_RUNNING;
         return 0;
     case SNDRV_PCM_IOCTL_DROP:

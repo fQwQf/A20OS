@@ -7,8 +7,8 @@
  * Exposes the standard ALSA PCM/control ioctls on /dev/snd/controlC0 and
  * /dev/snd/pcmC0D0p|c mapped onto the A20 audio_dev_ops_t backend, so
  * ALSA-based userland can open a PCM playback/capture stream.  Supports the
- * ioctl path (SNDRV_PCM_IOCTL_WRITEI_FRAMES / READI_FRAMES); the mmap
- * playback path is provided through a kernel ring buffer.
+ * ioctl path (SNDRV_PCM_IOCTL_WRITEI_FRAMES / READI_FRAMES). mmap PCM and
+ * mmap status/control pages are not implemented; alsa-lib uses SYNC_PTR.
  */
 
 #include "core/types.h"
