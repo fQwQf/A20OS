@@ -14,7 +14,9 @@ export XCURSOR_THEME=Adwaita
 export XCURSOR_SIZE=24
 export XCURSOR_PATH=/usr/share/icons:/usr/share/pixmaps
 export SDL_VIDEODRIVER=wayland
-export SDL_AUDIODRIVER=dummy
+# The existing ALSA default routes to hw:0. Keep failed hardware visible and
+# honour an operator's explicit backend instead of silently discarding sound.
+export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-alsa}"
 # SDL2 没有 GL 可用，强制软件渲染器（ffplay 用它出画）
 export SDL_RENDER_DRIVER=software
 export SEATD_VTBOUND=0
@@ -29,7 +31,8 @@ export XDG_CACHE_HOME="$HOME/.cache"
 # session-start evaluates it when it execs the compositor.
 export LABWC_DEBUG
 
-# A20OS exposes virtio-gpu as /dev/dri/card0 via its kernel devfs; the udev
+# A20OS exposes its selected display (virtio-gpu or retained GOP/DT framebuffer)
+# as /dev/dri/card0 via its kernel devfs; the udev
 # database does not describe it, so pin the KMS device explicitly (wlroots
 # opens WLR_DRM_DEVICES directly instead of relying on udev enumeration).
 export WLR_DRM_DEVICES=/dev/dri/card0
@@ -37,11 +40,14 @@ export WLR_DRM_NO_ATOMIC=1
 export WLR_NO_HARDWARE_CURSORS=1
 
 # Choose GLES when the device negotiated host 3D, otherwise use pixman.
+# Retained firmware displays use the same KMS/dumb-buffer path; they do not
+# need an Intel GPU driver, a separate fbdev terminal, or EGL/GBM rendering.
 # An explicit operator choice remains authoritative.
 if [ -z "${A20_RENDERER:-}" ]; then
     A20_RENDERER=$(/usr/lib/a20/select-renderer) || A20_RENDERER=pixman
 fi
 export WLR_RENDERER="$A20_RENDERER"
+echo "a20: desktop renderer=$WLR_RENDERER device=$WLR_DRM_DEVICES audio=$SDL_AUDIODRIVER" >&2
 
 # Input devices are published as /dev/input/event* with /sys/devices/virtual/
 # input/* nodes, and the uevent stream carries a real per-event SEQNUM so

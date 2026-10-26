@@ -1,5 +1,7 @@
 #include "drivers/gpu/drm.h"
 #include "drivers/gpu/drm_geom.h"
+#include "drivers/gpu/drm_scanout.h"
+#include "drivers/gpu/drm_scanout_mapping.h"
 #include "drivers/gpu/virtio_gpu.h"
 
 #include "core/errno.h"
@@ -250,20 +252,27 @@ static gpu_dev_ops_t *drm_gpu_ops(void)
     return (gpu_dev_ops_t *)dev->drv->class_ops;
 }
 
-/*
- * A20OS exposes a minimal KMS interface while virtio-gpu owns a separate
- * scanout allocation.  Copy a wlroots dumb buffer into that allocation before
- * asking the GPU to transfer it to the host.  Without this bridge, SETCRTC
- * and PAGE_FLIP acknowledge the commit but the host keeps displaying the
- * untouched black primary resource.
- *
- * The buffer may be smaller than the scanout and may be positioned anywhere
- * inside it; the copy is clipped to the scanout and the untouched region is
- * left alone.  Requiring an exact full-screen match, as this used to, turned
- * any smaller framebuffer into -EINVAL -- so a client that allocated for a
- * mode the display later changed could not commit at all, and the failure
- * surfaced as a compositor error rather than as a clipped blit.
- */
+static int drm_scanout_read_vmo(void *opaque, uint64_t offset, void *out, size_t bytes)
+{
+    drm_gem_t *b = opaque;
+    if (offset > b->size || bytes > b->size - offset)
+        return -EINVAL;
+    uint8_t *dst = out;
+    while (bytes) {
+        size_t in_page = offset & (PAGE_SIZE - 1);
+        size_t count = PAGE_SIZE - in_page;
+        if (count > bytes) count = bytes;
+        pfn_t pfn = vmo_peek_page(b->vmo, (uint32_t)(offset / PAGE_SIZE));
+        if (pfn == PFN_NONE) memset(dst, 0, count);
+        else memcpy(dst, (uint8_t *)pfn_to_virt(pfn) + in_page, count);
+        dst += count; offset += count; bytes -= count;
+    }
+    return 0;
+}
+
+/* KMS buffers and the device scanout are separate allocations. Copy and
+ * convert dumb buffers into the driver's actual pitch and pixel layout before
+ * flush; firmware GOP and DT scanouts need this just as virtual GPUs do. */
 static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
 {
     static unsigned int present_count;
@@ -279,8 +288,7 @@ static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
     uintptr_t fb_phys = 0;
     size_t fb_size = 0;
     if (ops->get_info(dev, &width, &height, &bpp) < 0 ||
-        ops->get_fb(dev, &fb_phys, &fb_size) < 0 ||
-        bpp != 32 || fb_size < (size_t)height * width * 4)
+        ops->get_fb(dev, &fb_phys, &fb_size) < 0)
         return -EINVAL;
     if (b->is_virgl) {
         if (!ops->scanout_resource)
@@ -290,49 +298,39 @@ static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
             return -EINVAL;
         return ops->scanout_resource(dev, b->virgl_res_id, x, y, width, height);
     }
-    if (b->width == 0 || b->height == 0 || b->pitch < b->width * 4)
+    if (b->bpp != 32)
         return -EINVAL;
-    if (x >= width || y >= height)
-        return -EINVAL;   /* entirely off-screen */
-
-    uint32_t rows = height - y;
-    if (rows > b->height)
-        rows = b->height;
-    uint32_t cols = width - x;
-    if (cols > b->width)
-        cols = b->width;
-
-    uint8_t *dst = (uint8_t *)pfn_to_virt(phys_to_pfn(fb_phys));
-    if (!dst)
-        return -EFAULT;
-
-    for (uint32_t row = 0; row < rows; row++) {
-        size_t src_offset = (size_t)row * b->pitch;
-        size_t dst_offset = ((size_t)(y + row) * width + x) * 4;
-        size_t remaining = (size_t)cols * 4;
-        while (remaining > 0) {
-            uint32_t page_index = (uint32_t)(src_offset / PAGE_SIZE);
-            size_t page_offset = src_offset & (PAGE_SIZE - 1);
-            size_t count = PAGE_SIZE - page_offset;
-            if (count > remaining)
-                count = remaining;
-
-            pfn_t pfn = vmo_peek_page(b->vmo, page_index);
-            if (pfn == PFN_NONE)
-                memset(dst + dst_offset, 0, count);
-            else
-                memcpy(dst + dst_offset,
-                       (uint8_t *)pfn_to_virt(pfn) + page_offset, count);
-            src_offset += count;
-            dst_offset += count;
-            remaining -= count;
-        }
+    gpu_scanout_layout_t layout = {
+        .stride = width * 4, .red_mask = 0xff0000,
+        .green_mask = 0xff00, .blue_mask = 0xff,
+    };
+    if (ops->get_layout) {
+        int rc = ops->get_layout(dev, &layout);
+        if (rc) return rc;
+    } else if (bpp != 32 || width > (uint32_t)-1 / 4) {
+        return -EINVAL;
+    }
+    drm_scanout_mapping_t mapped;
+    int rc = drm_scanout_acquire(fb_phys, fb_size, &mapped);
+    if (rc) return rc;
+    drm_scanout_t scanout = {
+        .width = width, .height = height, .pitch = layout.stride, .bpp = bpp,
+        .red = layout.red_mask, .green = layout.green_mask, .blue = layout.blue_mask,
+        .bytes = fb_size, .pixels = mapped.address,
+    };
+    uint32_t cols, rows;
+    rc = drm_scanout_blit(&scanout, b->width, b->height, b->pitch, b->size,
+                              x, y, drm_scanout_read_vmo, b, &cols, &rows);
+    if (rc) {
+        drm_scanout_release(&mapped);
+        return rc;
     }
 
     /* Flush only the rectangle that was written.  The rest of the host's copy
      * still holds whatever the previous present left there, which is what a
      * partial present means. */
     int ret = ops->flush(dev, x, y, cols, rows);
+    drm_scanout_release(&mapped);
     if (present_count < 4) {
         kinfo("[DRM] present handle=%u %ux%u at %u,%u pages=%lu flush=%d\n",
               b->handle, cols, rows, x, y,
@@ -1190,9 +1188,11 @@ static int drm_version(drm_context_t *ctx, void *arg)
     if (copy_from_user(&v, arg, sizeof(v)) < 0)
         return -EFAULT;
 
-    const char *name = "virtio_gpu";
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    int virtio = ops && ops->get_features;
+    const char *name = virtio ? "virtio_gpu" : "a20_kms";
     const char *date = "20260810";
-    const char *desc = "A20OS virtio-gpu (virgl 3D)";
+    const char *desc = virtio ? "A20OS virtio-gpu" : "A20OS linear scanout KMS";
     size_t name_len = strlen(name);
     size_t date_len = strlen(date);
     size_t desc_len = strlen(desc);
@@ -1213,7 +1213,7 @@ static int drm_version(drm_context_t *ctx, void *arg)
      * context and the loader silently falls back to software rendering.
      * Measured: with major=1 no VIRTGPU_CONTEXT_INIT is ever issued, with
      * major=0 it is and the renderer becomes virgl. */
-    v.version_major = 0;
+    v.version_major = virtio ? 0 : 1;
     v.version_minor = 1;
     v.version_patchlevel = 0;
     v.name_len = name_len;
