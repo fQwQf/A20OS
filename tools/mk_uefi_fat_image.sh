@@ -8,9 +8,10 @@ efi_image=${1:-}
 output=${2:-}
 rootfs_image=${3:-}
 efi_name=${4:-BOOTAA64.EFI}
+world_image=${5:-}
 
 if [ -z "$efi_image" ] || [ -z "$output" ] || [ -z "$rootfs_image" ]; then
-    echo "Usage: $0 <loader.efi> <output.img> <rootfs-fat32.img|-> [esp-entry-name]" >&2
+    echo "Usage: $0 <loader.efi> <output.img> <rootfs-fat32.img|-> [esp-entry-name] [world-ext4.img]" >&2
     exit 1
 fi
 # BOOTX64.EFI is the x86_64 loader, BOOTAA64.EFI the aarch64 one. The manifest
@@ -29,6 +30,29 @@ if [ "$rootfs_image" != "-" ] && [ ! -s "$rootfs_image" ]; then
     echo "Error: root filesystem image missing or empty: $rootfs_image" >&2
     exit 1
 fi
+world_mb=0
+if [ -n "$world_image" ]; then
+    # A distro remains an ext4 filesystem, not files copied into a FAT root.
+    # Validate before creating/truncating any output.
+    world_mb=$(python3 - "$world_image" <<'PY'
+import os, struct, sys
+path = sys.argv[1]
+size = os.path.getsize(path)
+with open(path, 'rb') as source:
+    source.seek(1024)
+    sb = source.read(1024)
+if len(sb) != 1024 or sb[56:58] != b'\x53\xef':
+    sys.exit('Error: world image is not ext4')
+log = struct.unpack_from('<I', sb, 24)[0]
+blocks = struct.unpack_from('<I', sb, 4)[0]
+if struct.unpack_from('<I', sb, 96)[0] & 0x80:
+    blocks |= struct.unpack_from('<I', sb, 0x150)[0] << 32
+if log > 6 or not blocks or blocks * (1024 << log) > size:
+    sys.exit('Error: world filesystem exceeds its image')
+print((size + 1048575) // 1048576)
+PY
+    )
+fi
 for command_name in parted mformat mmd mcopy sha256sum awk truncate; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "Error: $command_name not found (install parted and mtools)" >&2
@@ -38,7 +62,11 @@ done
 
 mkdir -p "$(dirname "$output")"
 rm -f "$output"
-truncate -s 256M "$output"
+if [ -n "$world_image" ]; then
+    truncate -s "$((world_mb + 257))M" "$output"
+else
+    truncate -s 256M "$output"
+fi
 
 # VirtualBox's ARM UEFI firmware discovers a conventional EFI System
 # Partition more reliably than a whole-disk FAT superfloppy, particularly
@@ -47,6 +75,11 @@ truncate -s 256M "$output"
 parted -s "$output" mklabel gpt
 parted -s "$output" mkpart ESP fat32 1MiB 255MiB
 parted -s "$output" set 1 esp on
+if [ -n "$world_image" ]; then
+    parted -s "$output" mkpart distro ext4 256MiB "$((world_mb + 256))MiB"
+    parted -s "$output" name 2 '"A20OS distro"'
+    dd if="$world_image" of="$output" bs=1M seek=256 conv=notrunc status=none
+fi
 
 esp_offset=$((1024 * 1024))
 esp_sectors=$(((255 - 1) * 1024 * 1024 / 512))
@@ -87,6 +120,12 @@ trap 'rm -f "$tmp_mtoolsrc" "$manifest"' EXIT HUP INT TERM
     else
         printf 'rootfs_sha256='
         sha256sum "$rootfs_image" | awk '{print $1}'
+    fi
+    if [ -n "$world_image" ]; then
+        printf 'distro_partition_name=A20OS distro\n'
+        printf 'distro_offset_bytes=268435456\n'
+        printf 'distro_sha256='
+        sha256sum "$world_image" | awk '{print $1}'
     fi
 } > "$manifest"
 MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$manifest" b:/A20OS.MANIFEST

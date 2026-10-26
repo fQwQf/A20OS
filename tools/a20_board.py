@@ -85,7 +85,10 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # VirtualBox one lives in the per-build directory and is never
             # written to a device.
             if (inst.package.variant or "vbox") == "rescue-usb":
-                exec_make(inst, "pc-rescue-iso", list(make_args), dry_run)
+                extra = list(make_args)
+                if inst.target.boot_media:
+                    extra.append(f"PC_RESCUE_ISO={inst.target.boot_media[0]}")
+                exec_make(inst, "pc-rescue-iso", extra, dry_run)
             else:
                 exec_make(inst, "_vbox_iso_x86_64_impl", list(make_args), dry_run)
         case "grub-disk":
@@ -106,7 +109,8 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             extra = list(make_args)
             if inst.target.boot_media:
                 extra.append(f"PC_UEFI_OUTPUT={inst.target.boot_media[0]}")
-            exec_make(inst, "x86_64-uefi-disk", extra, dry_run)
+            target = "pc-uefi-world-disk" if inst.package.variant == "world" else "x86_64-uefi-disk"
+            exec_make(inst, target, extra, dry_run)
         case "uefi-image":
             variant = inst.package.variant or "default"
             target = {"default": "_vbox_image_aarch64_impl",

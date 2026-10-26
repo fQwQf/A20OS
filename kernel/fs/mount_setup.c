@@ -119,7 +119,7 @@ block_dev_t *mount_setup_block_device(int index)
     return rc ? NULL : &handle->block;
 }
 
-#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY) || defined(CONFIG_RAMFS_MEDIA)
+#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY) || defined(CONFIG_RAMFS_MEDIA) || defined(CONFIG_RAMFS_DISTRO)
 typedef struct {
     block_dev_t block;
     block_dev_t *parent;
@@ -176,57 +176,92 @@ static uint32_t gpt_crc32(uint32_t crc, const uint8_t *data, size_t bytes) {
     }
     return crc;
 }
-/* Validate bounded GPT metadata before using partition offsets. Unsupported
- * logical sector geometry is refused before reading into 512-byte buffers.
- * The complete entry-array CRC prevents a valid header from hiding corrupt
- * partition LBAs. The boot policy examines the first sixteen entries. */
-static block_dev_t *gpt_partition(block_dev_t *parent, int parent_index,
-                                  int ordinal) {
-    static partition_block_dev_t partitions[16][16];
-    uint8_t header[512], sector[512], entry[128];
-    if (!parent || parent_index < 0 || parent_index >= 16 || ordinal < 0 ||
-        ordinal >= 16 || !parent->read_sector || parent->sector_size != 512 ||
-        parent->capacity < 3 || parent->read_sector(parent, 1, header, 1))
-        return NULL;
+/* A validated primary GPT is shared by both media and explicit distro boot.
+ * Keep the complete entry-array CRC: a named partition is never accepted from
+ * a corrupt table, and an entry beyond the legacy first-sixteen media slots
+ * must still participate in uniqueness checks. */
+typedef struct {
+    uint64_t first_usable, last_usable, entries_lba;
+    uint32_t entry_count, entry_size;
+} gpt_table_t;
+
+static int gpt_read_table(block_dev_t *parent, gpt_table_t *table) {
+    uint8_t header[512], sector[512];
+    if (!parent || !table || !parent->read_sector ||
+        parent->sector_size != 512 || parent->capacity < 3 ||
+        parent->read_sector(parent, 1, header, 1)) return -EINVAL;
     if (memcmp(header, "EFI PART", 8) || read_le32(header + 8) != 0x10000)
-        return NULL;
+        return -EINVAL;
     uint32_t header_bytes = read_le32(header + 12), checksum = read_le32(header + 16);
     if (header_bytes < 92 || header_bytes > sizeof(header) ||
         read_le32(header + 20) || read_le64(header + 24) != 1 ||
-        read_le64(header + 32) >= parent->capacity) return NULL;
+        read_le64(header + 32) >= parent->capacity) return -EINVAL;
     memset(header + 16, 0, 4);
-    if (~gpt_crc32(~0U, header, header_bytes) != checksum) return NULL;
-    uint64_t first_usable = read_le64(header + 40), last_usable = read_le64(header + 48);
-    uint64_t entries_lba = read_le64(header + 72);
-    uint32_t entry_count = read_le32(header + 80), entry_size = read_le32(header + 84);
-    if (!entry_count || entry_count > 4096 || (unsigned)ordinal >= entry_count ||
-        (entry_size != 128 && entry_size != 256 && entry_size != 512) ||
-        first_usable < 3 || first_usable > last_usable || last_usable >= parent->capacity ||
-        entries_lba < 2 || entries_lba >= parent->capacity) return NULL;
-    uint64_t bytes = (uint64_t)entry_count * entry_size, sectors = (bytes + 511) / 512;
-    if (sectors > parent->capacity - entries_lba ||
-        entries_lba + sectors > first_usable) return NULL;
+    if (~gpt_crc32(~0U, header, header_bytes) != checksum) return -EINVAL;
+    *table = (gpt_table_t){.first_usable = read_le64(header + 40),
+        .last_usable = read_le64(header + 48), .entries_lba = read_le64(header + 72),
+        .entry_count = read_le32(header + 80), .entry_size = read_le32(header + 84)};
+    if (!table->entry_count || table->entry_count > 4096 ||
+        (table->entry_size != 128 && table->entry_size != 256 && table->entry_size != 512) ||
+        table->first_usable < 3 || table->first_usable > table->last_usable ||
+        table->last_usable >= parent->capacity || table->entries_lba < 2 ||
+        table->entries_lba >= parent->capacity) return -EINVAL;
+    uint64_t bytes = (uint64_t)table->entry_count * table->entry_size;
+    uint64_t sectors = (bytes + 511) / 512;
+    uint64_t backup = read_le64(header + 32);
+    if (sectors > parent->capacity - table->entries_lba ||
+        table->entries_lba + sectors > table->first_usable ||
+        sectors >= backup || table->last_usable >= backup - sectors) return -EINVAL;
     uint32_t crc = ~0U;
     for (uint64_t at = 0; at < sectors; at++) {
-        if (parent->read_sector(parent, entries_lba + at, sector, 1)) return NULL;
+        if (parent->read_sector(parent, table->entries_lba + at, sector, 1)) return -EIO;
         size_t count = bytes > 512 ? 512 : (size_t)bytes;
         crc = gpt_crc32(crc, sector, count);
         bytes -= count;
     }
-    if (~crc != read_le32(header + 88)) return NULL;
-    uint64_t offset = (uint64_t)(unsigned)ordinal * entry_size;
-    if (parent->read_sector(parent, entries_lba + offset / 512, sector, 1)) return NULL;
-    memcpy(entry, sector + offset % 512, sizeof(entry));
-    int used = 0;
+    return ~crc == read_le32(header + 88) ? 0 : -EINVAL;
+}
+
+static int gpt_read_entry(block_dev_t *parent, const gpt_table_t *table,
+                           unsigned ordinal, uint8_t entry[128]) {
+    uint8_t sector[512];
+    if (ordinal >= table->entry_count) return -EINVAL;
+    uint64_t offset = (uint64_t)ordinal * table->entry_size;
+    if (parent->read_sector(parent, table->entries_lba + offset / 512, sector, 1))
+        return -EIO;
+    memcpy(entry, sector + offset % 512, 128);
+    return 0;
+}
+
+static int gpt_entry_used(const uint8_t entry[128]) {
+    unsigned used = 0;
     for (unsigned i = 0; i < 16; i++) used |= entry[i];
+    return used != 0;
+}
+static int gpt_entry_bounds(const gpt_table_t *table, const uint8_t entry[128]) {
     uint64_t first = read_le64(entry + 32), last = read_le64(entry + 40);
-    if (!used || first < first_usable || last < first || last > last_usable) return NULL;
-    partition_block_dev_t *part = &partitions[parent_index][ordinal];
+    return first >= table->first_usable && last >= first && last <= table->last_usable;
+}
+static void partition_init(partition_block_dev_t *part, block_dev_t *parent,
+                            uint64_t first, uint64_t sectors, int read_only) {
     *part = (partition_block_dev_t){.parent = parent, .first_lba = first,
-                                   .sectors = last - first + 1};
+                                  .sectors = sectors, .read_only = read_only};
     part->block = (block_dev_t){.read_sector = partition_read_sector,
         .write_sector = partition_write_sector, .flush = partition_flush,
-        .capacity = part->sectors, .sector_size = parent->sector_size, .priv = part};
+        .capacity = sectors, .sector_size = parent->sector_size, .priv = part};
+}
+static block_dev_t *gpt_partition(block_dev_t *parent, int parent_index,
+                                  int ordinal) {
+    static partition_block_dev_t partitions[16][16];
+    uint8_t entry[128];
+    gpt_table_t table;
+    if (parent_index < 0 || parent_index >= 16 || ordinal < 0 || ordinal >= 16 ||
+        gpt_read_table(parent, &table) ||
+        gpt_read_entry(parent, &table, (unsigned)ordinal, entry) ||
+        !gpt_entry_used(entry) || !gpt_entry_bounds(&table, entry)) return NULL;
+    partition_block_dev_t *part = &partitions[parent_index][ordinal];
+    uint64_t first = read_le64(entry + 32), last = read_le64(entry + 40);
+    partition_init(part, parent, first, last - first + 1, 0);
     return &part->block;
 }
 
@@ -374,6 +409,93 @@ void mount_ramfs_media(void) {
     printf("[MEDIA] no readable FAT32 media; RAM shell continues\n");
 }
 
+#ifdef CONFIG_RAMFS_DISTRO
+static void mount_external_root_pseudo_filesystems(void);
+/* Linux filesystem data GUID, in the mixed-endian GPT wire representation. */
+static const uint8_t distro_type_guid[16] = {
+    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47,
+    0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4
+};
+static int distro_partition_name(const uint8_t entry[128]) {
+    static const char name[] = "A20OS distro";
+    for (unsigned i = 0; i < 36; i++) {
+        unsigned expected = i < sizeof(name) - 1 ? (unsigned char)name[i] : 0;
+        if (entry[56 + i * 2] != expected || entry[57 + i * 2]) return 0;
+    }
+    return 1;
+}
+static int distro_disk_partition(block_dev_t *disk, partition_block_dev_t *selected) {
+    gpt_table_t table;
+    uint8_t entry[128], candidate[128];
+    if (gpt_read_table(disk, &table)) return -EINVAL;
+    unsigned found = 0, candidate_ordinal = 0;
+    /* Scan the complete bounded table, not just the media parser's 16 slots. */
+    for (unsigned ordinal = 0; ordinal < table.entry_count; ordinal++) {
+        if (gpt_read_entry(disk, &table, ordinal, entry)) return -EIO;
+        if (!gpt_entry_used(entry)) continue;
+        if (!gpt_entry_bounds(&table, entry)) return -EINVAL;
+        if (memcmp(entry, distro_type_guid, 16) || !distro_partition_name(entry)) continue;
+        if (++found != 1) return -EEXIST;
+        memcpy(candidate, entry, sizeof(candidate));
+        candidate_ordinal = ordinal;
+    }
+    if (!found) return -ENODEV;
+    /* Respect the Linux data type's read-only and no-auto-mount attributes. */
+    if (read_le64(candidate + 48) & ((1ULL << 60) | (1ULL << 63))) return -EROFS;
+    uint64_t first = read_le64(candidate + 32), last = read_le64(candidate + 40);
+    /* A valid checksum is insufficient if a named entry aliases another
+     * partition. Never expose an overlapping Windows/ESP range as writable. */
+    for (unsigned ordinal = 0; ordinal < table.entry_count; ordinal++) {
+        if (gpt_read_entry(disk, &table, ordinal, entry)) return -EIO;
+        if (!gpt_entry_used(entry)) continue;
+        if (ordinal == candidate_ordinal) continue;
+        uint64_t other_first = read_le64(entry + 32), other_last = read_le64(entry + 40);
+        if (first <= other_last && other_first <= last) return -EINVAL;
+    }
+    partition_init(selected, disk, first, last - first + 1, 0);
+    return 0;
+}
+
+int mount_ramfs_distro(void) {
+    /* Separate ownership from the media parser's reusable views: a later
+     * /media scan must never rewrite a mounted distro's block offsets/flags. */
+    static partition_block_dev_t distro;
+    partition_block_dev_t candidate;
+    int selected_index = -1;
+    for (unsigned index = 0; index < CLASS_BLOCK_HANDLE_BUDGET; index++) {
+        block_dev_t *disk = mount_setup_block_device((int)index);
+        if (!disk) continue;
+        int rc = distro_disk_partition(disk, &candidate);
+        if (rc == -EEXIST) {
+            printf("[DISTRO] ambiguous A20OS GPT partitions; RAM shell continues\n");
+            return rc;
+        }
+        if (rc) continue;
+        if (selected_index >= 0) {
+            printf("[DISTRO] multiple A20OS distro disks; RAM shell continues\n");
+            return -EEXIST;
+        }
+        distro = candidate;
+        distro.block.priv = &distro;
+        selected_index = (int)index;
+    }
+    if (selected_index < 0) {
+        printf("[DISTRO] no unique A20OS distro GPT partition; RAM shell continues\n");
+        return -ENODEV;
+    }
+    int rc = try_mount(&distro.block, "/extra", "ext4");
+    if (rc) {
+        printf("[DISTRO] ext4 mount failed (%d); RAM shell continues\n", rc);
+        return rc;
+    }
+    printf("[DISTRO] disk %d A20OS distro at /extra; embedded /bin retained\n", selected_index);
+    mount_external_root_pseudo_filesystems();
+    return 0;
+}
+#else
+int mount_ramfs_distro(void) { return -EOPNOTSUPP; }
+#endif
+
 void mount_read_only_storage(void) {
     printf("[STORAGE-RO] scanning block devices; writes are disabled\n");
     for (int i = 0; i < 16; i++) {
@@ -487,5 +609,6 @@ void mount_read_only_storage(void)
     printf("[INIT] read-only storage experiment is not enabled\n");
 }
 void mount_ramfs_media(void) { }
+int mount_ramfs_distro(void) { return -EOPNOTSUPP; }
 
 #endif /* !BRINGUP || CONFIG_STORAGE_READ_ONLY */

@@ -248,6 +248,9 @@ void kernel_main(void) {
     /* The boot card contains firmware payloads, not the RAM shell's /bin.
      * Keep embedded executables visible; data disks can be mounted explicitly. */
     printf("[INIT] RAMFS userspace: keeping embedded /bin\n");
+#ifdef CONFIG_RAMFS_DISTRO
+    mount_ramfs_distro();
+#endif
 #ifdef CONFIG_RAMFS_MEDIA
     mount_ramfs_media();
 #endif

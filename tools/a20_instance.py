@@ -84,6 +84,7 @@ class KernelCfg:
     external_root: bool | None = None
     ramfs_user: bool | None = None
     ramfs_media: bool | None = None
+    ramfs_distro: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +330,7 @@ _TOP_SPECS: Final = {"name": "str", "description": "str", "arch": "str", "board"
 _SECTION_SPECS: Final = {
     "kernel": {f: ("bool" if f in {
         "bringup", "nommu", "ubsan", "swap", "werror",
-        "cooperative_boot", "storage_read_only", "external_root", "ramfs_user", "ramfs_media",
+        "cooperative_boot", "storage_read_only", "external_root", "ramfs_user", "ramfs_media", "ramfs_distro",
     } else "int" if f in {
         "virtio_console_rx_slots", "virtio_console_tx_slots",
         "virtio_console_buffer_size", "virtio_console_ring_size",

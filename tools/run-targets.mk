@@ -59,10 +59,11 @@ _vbox_iso_x86_64_impl: dev-build
 # board and variant, so it cannot be written by a manifest that has to commit to
 # one path.  This is the whole deployment route for a thin client: dd this to a
 # USB stick and boot it.
-pc-rescue-iso: $(if $(filter 1,$(BRINGUP)),kernel-only,dev-build)
-	@mkdir -p build/x86_64-pc
-	tools/mk_grub_iso.sh $(KERNEL_ELF) build/x86_64-pc/a20os-rescue.iso
-	@echo "rescue ISO ready: build/x86_64-pc/a20os-rescue.iso"
+PC_RESCUE_ISO ?= build/x86_64-pc/a20os-rescue.iso
+pc-rescue-iso: $(if $(filter 1,$(BRINGUP) $(RAMFS_USER)),kernel-only,dev-build)
+	@mkdir -p "$(dir $(PC_RESCUE_ISO))"
+	tools/mk_grub_iso.sh "$(KERNEL_ELF)" "$(PC_RESCUE_ISO)"
+	@echo "rescue ISO ready: $(PC_RESCUE_ISO)"
 
 # The same content as the ISO, on a real GPT disk, so a VM or a machine boots it
 # as a hard disk instead of as optical media.  This is the shape the aarch64
@@ -90,6 +91,12 @@ x86_64-uefi-disk: $(VBOX_X86_64_IMG)
 	@mkdir -p "$(dir $(PC_UEFI_OUTPUT))"
 	cp -f "$(VBOX_X86_64_IMG)" "$(PC_UEFI_OUTPUT)"
 	@echo "UEFI disk ready: $(PC_UEFI_OUTPUT)"
+
+# Reuse the apk world builder and distro init used by run-world-gui, with the
+# world on an explicitly named GPT partition instead of a QEMU second disk.
+pc-uefi-world-disk: $(VBOX_X86_64_EFI)
+	$(MAKE) PKG_WORLD=$(PKG_WORLD) PKG_SIZE_MB=$(PKG_SIZE_MB_WORLD) image-world
+	tools/mk_uefi_fat_image.sh "$(VBOX_X86_64_EFI)" "$(PC_UEFI_OUTPUT)" - BOOTX64.EFI "$(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img"
 
 # A board with no block driver has no medium to write, so its artifact is the
 # kernel plus the commands that hand it to the boot chain already on the board.
