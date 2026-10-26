@@ -48,6 +48,8 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"RAMFS_USER={_b(k.ramfs_user)}")
     if k.ramfs_media is not None:
         v.append(f"RAMFS_MEDIA={_b(k.ramfs_media)}")
+    if k.ramfs_distro is not None:
+        v.append(f"RAMFS_DISTRO={_b(k.ramfs_distro)}")
     for name in ("profile", "rx_slots", "tx_slots", "buffer_size", "ring_size"):
         value = getattr(k, "virtio_console_" + name)
         if value is not None:

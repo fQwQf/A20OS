@@ -90,6 +90,15 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     k, m, g, n, r, t = inst.kernel, inst.machine, inst.gui, inst.net, inst.rootfs, inst.test
     if k.ramfs_media and k.ramfs_user is not True:
         e.append("kernel.ramfs_media requires kernel.ramfs_user=true")
+    if k.ramfs_distro:
+        if k.ramfs_user is not True:
+            e.append("kernel.ramfs_distro requires kernel.ramfs_user=true")
+        if k.storage_read_only or k.external_root or k.ramfs_media:
+            e.append("kernel.ramfs_distro conflicts with storage_read_only, external_root and ramfs_media")
+        if k.nommu:
+            e.append("kernel.ramfs_distro requires an MMU")
+        if not r.world:
+            e.append("kernel.ramfs_distro requires rootfs.world")
     if inst.arch in RETIRED_ARCHES:
         e.append(f"arch: '{inst.arch}' is retired from active builds; use a clean v0.18 checkout for historical reproduction")
     elif inst.arch not in KNOWN_ARCHES:
@@ -386,8 +395,10 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
         case "uefi-disk":
             if inst.arch != "x86_64":
                 e.append("package.kind uefi-disk: requires arch = \"x86_64\"")
-            if p.variant is not None:
-                e.append("package.variant: not used for uefi-disk")
+            if p.variant not in (None, "world"):
+                e.append("package.variant: uefi-disk supports only world or no variant")
+            if p.variant == "world" and (not inst.kernel.ramfs_distro or not inst.rootfs.world):
+                e.append("package.variant world requires kernel.ramfs_distro=true and rootfs.world")
             # Same reasoning as grub-disk: the artifact is a disk to write, so a
             # manifest that names no device has nothing to do with it.
             if not inst.target.boot_media or not inst.target.media_device:

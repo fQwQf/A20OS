@@ -30,5 +30,8 @@ block_dev_t *mount_setup_block_device(int index);
 void mount_read_only_storage(void);
 /* Optional RAMFS media input: first raw/GPT FAT32 volume, read-only /media. */
 void mount_ramfs_media(void);
+/* CONFIG_RAMFS_DISTRO: uniquely named Linux-data GPT partition at /extra.
+ * The embedded /bin survives a missing, ambiguous or invalid distro image. */
+int mount_ramfs_distro(void);
 
 #endif /* _MOUNT_SETUP_H */

@@ -99,6 +99,8 @@ def build_instance(inst: Instance, extra: list[str], dry_run: bool) -> None:
     """Build the instance: embedded-root and bring-up kernels need no disk images."""
     if inst.board == "m0sense-bl702":
         return exec_make(inst, "m0sense-probe", extra, dry_run)
+    if inst.kernel.ramfs_distro:
+        return exec_make(inst, "image-world", extra, dry_run)
     # armv7m (MCU) has no userspace image; the Makefile forces BRINGUP=1 there.
     if inst.kernel.bringup or inst.kernel.ramfs_user or inst.arch == "armv7m":
         return exec_make(inst, "kernel-only", extra, dry_run)
