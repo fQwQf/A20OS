@@ -36,31 +36,41 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls);
 
-/* Bounded fork-COW record shared by the C and Rust clone transaction. */
+/* Bounded private-fork record shared by the C and Rust clone transaction. */
 #define A20_COW_ANON_BATCH_PAGES 64
 struct a20_cow_anon_batch_page {
     uint32_t pfn;
     uint32_t class;
     uintptr_t flags;
+    void *pcp;
+    uint32_t kind;
 };
 #if __SIZEOF_POINTER__ == 8
-_Static_assert(sizeof(struct a20_cow_anon_batch_page) == 16,
-               "LP64 Rust/C anonymous batch page ABI");
+_Static_assert(sizeof(struct a20_cow_anon_batch_page) == 32,
+               "LP64 Rust/C private batch page ABI");
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, pcp) == 16,
+               "LP64 private batch pcp offset");
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, kind) == 24,
+               "LP64 private batch kind offset");
 #elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_cow_anon_batch_page) == 12,
-               "ILP32 Rust/C anonymous batch page ABI");
+_Static_assert(sizeof(struct a20_cow_anon_batch_page) == 20,
+               "ILP32 Rust/C private batch page ABI");
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, pcp) == 12,
+               "ILP32 private batch pcp offset");
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, kind) == 16,
+               "ILP32 private batch kind offset");
 #endif
 _Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, pfn) == 0,
-               "anonymous batch pfn offset");
+               "private batch pfn offset");
 _Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, class) == 4,
-               "anonymous batch class offset");
+               "private batch class offset");
 _Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, flags) == 8,
-               "anonymous batch flags offset");
+               "private batch flags offset");
 
-/* Map a bounded anonymous fork batch into an unpublished child whose page
- * table is exclusively owned by the caller.  The caller owns the frame pins
- * and updates child RSS; this routine validates the whole run before writing
- * any leaf and does not acquire/drop frame references. */
+/* Map a bounded private fork batch into an unpublished child whose page
+ * table is exclusively owned by the caller.  The caller owns the cache/frame
+ * pins and updates child RSS; this routine validates the whole run before
+ * writing any leaf and does not acquire/drop backing references. */
 int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                       const struct a20_cow_anon_batch_page *pages,
                       size_t nr);
