@@ -190,6 +190,9 @@ static void frame_put(pfn_t pfn) {
     }
     frame_refs[pfn]--;
 }
+static void frame_put_many(const pfn_t *pfns, size_t count) {
+    for (size_t i = 0; i < count; ++i) frame_put(pfns[i]);
+}
 static void swap_free(uint64_t entry) { (void)entry; swap_free_calls++; }
 static void mm_pt_note_absent(pte_t *table, int level, int index) {
     (void)table; (void)level; (void)index;
