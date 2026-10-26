@@ -25,15 +25,15 @@ static inline uint64_t syscall_profile_now(void)
         timer_get_ticks() : 0;
 }
 
-static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t end)
+static inline void syscall_profile_record(uint64_t num, uint64_t start)
 {
-    if (!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED))
-        return;
-    if (num >= SYSCALL_PROFILE_MAX || start == 0)
+    if (num >= SYSCALL_PROFILE_MAX || start == 0 ||
+        !__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED))
         return;
 
     /* A diagnostic read can enable collection inside this syscall. Its zero
      * entry timestamp is the disabled sentinel, not the start of boot time. */
+    uint64_t end = timer_get_ticks();
     uint64_t elapsed = (end >= start) ? (end - start) : 0;
     syscall_prof_t *prof = &sys_prof[num];
     __atomic_fetch_add(&prof->count, 1, __ATOMIC_RELAXED);
@@ -92,7 +92,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         int64_t seccomp_ret = 0;
         if (seccomp_gate(ctx, num, &seccomp_ret)) {
             TRAP_CTX_SET_RET(ctx, seccomp_ret);
-            syscall_profile_record(num, start_time, syscall_profile_now());
+            syscall_profile_record(num, start_time);
             signal_deliver_user(ctx);
             return seccomp_ret;
         }
@@ -131,7 +131,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
          */
         if (!(num == A20_SYS_execve && ret >= 0))
             TRAP_CTX_SET_RET(ctx, ret);
-        syscall_profile_record(num, start_time, syscall_profile_now());
+        syscall_profile_record(num, start_time);
         /*
          * Native tasks use checkpoint-style signal delivery for their own
          * signal API, but core kernel signals (SIGSTOP from a debugger
@@ -223,7 +223,7 @@ int64_t syscall_dispatch(trap_context_t *ctx)
             TRAP_CTX_SET_RET(ctx, ret);
         context_restored = 0;
     }
-    syscall_profile_record(num, start_time, syscall_profile_now());
+    syscall_profile_record(num, start_time);
     if (num != SYS_ptrace && proc_debug_is_traced(cur_task))
         proc_debug_syscall_exit(ctx);
     signal_deliver_user(ctx);

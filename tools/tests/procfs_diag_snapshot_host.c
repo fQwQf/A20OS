@@ -27,7 +27,8 @@ static int generate_content(pf_type_t type,int pid,char *buf,size_t cap) {
     memset(buf,'x',n);buf[n]=0;return (int)n;
 }
 /* PRODUCTION_GROW */
-static uint64_t timer_get_ticks(void) { return 100; }
+static uint64_t mock_ticks=100;
+static uint64_t timer_get_ticks(void) { return mock_ticks; }
 /* PRODUCTION_PROFILE */
 static void reset_allocator(void) {
     assert(live==0);peak=allocs=frees=fail_at=0;
@@ -73,13 +74,14 @@ int main(void) {
     memset(sys_prof,0,sizeof(sys_prof));g_a20_perf_enabled=0;
     assert(syscall_profile_now()==0);
     g_a20_perf_enabled=1;
-    syscall_profile_record(39,0,10000000000ULL);
+    syscall_profile_record(39,0);
     assert(sys_prof[39].count==0&&sys_prof[39].cycles==0);
     assert(syscall_profile_now()==100);
-    syscall_profile_record(39,100,125);
+    mock_ticks=125;
+    syscall_profile_record(39,100);
     assert(sys_prof[39].count==1&&sys_prof[39].cycles==25);
-    syscall_profile_record(SYSCALL_PROFILE_MAX,100,125);
-    g_a20_perf_enabled=0;syscall_profile_record(39,100,150);
+    syscall_profile_record(SYSCALL_PROFILE_MAX,100);
+    g_a20_perf_enabled=0;syscall_profile_record(39,100);
     assert(sys_prof[39].count==1&&sys_prof[39].cycles==25);
     puts("DIAG_GROW: saturation/bounds/ENOMEM/error cleanup + disabled-entry timestamp PASS");
     return 0;
