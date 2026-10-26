@@ -172,6 +172,33 @@ tools/a20 package huawei-ct5100-bios -- -j2
 32 位 UEFI、仅 EHCI 控制的 USB 接口、未覆盖的网卡/存储、主板特定功放、
 HDMI/DP 音频、休眠和 Secure Boot 信任链尚未构成实机支持承诺。
 
+## 已验证的运行范围
+
+自动验收使用 QEMU q35、OVMF x64 UEFI、2 GB 内存、单 CPU，禁用 AVX/AVX2
+与 1 GiB 页；使用 GOP、AHCI 或 xHCI USB 存储、USB 键鼠和 HDA，不使用
+virtio GPU。USB 存储验收从同一块 USB 盘加载 EFI、内核和发行版分区。
+OVMF 的 `X-PciMmio64Mb=0` 将 PCI BAR 留在当前支持的低地址窗口。
+这组设备验证通用 PC 路径，不能代替 Bay Trail 控制器或 CT5100 实机验收。
+
+已有验收覆盖完整发行版挂载、XFCE 终端中的 USB 键盘命令、实际屏幕像素变化，
+以及经内核关机审计的 ACPI S5 退出。镜像使用快照运行，源镜像和固件变量模板的
+哈希在验收前后保持一致。可在具备 QEMU/OVMF 的宿主重复执行：
+
+```sh
+python3 tools/check_uefi_world.py \
+  --image build/huawei-ct5100/a20os-uefi.img \
+  --output .kernel-build/smoke/ct5100/ahci-world
+python3 tools/check_uefi_world.py \
+  --image build/huawei-ct5100/a20os-uefi.img --storage usb \
+  --output .kernel-build/smoke/ct5100/usb-world
+```
+
+媒体验收通过现有 apk `ffplay` 播放 12 秒彩条与 48 kHz 双声道 440 Hz 合成音，
+检测实际 GOP 七色像素和 HDA 输出波形，播放器正常退出。该测试采用软件呈现，
+记录到 300 帧中掉帧 116 帧及两次音频 underrun；尚未达到流畅播放或任意媒体
+兼容性的验收标准。恢复实例另通过只读 FAT 文件、实际 GOP 像素和原生 PCM
+输出检查；BIOS 实例通过串口 shell、文件操作、进程与定时器及关机检查。
+
 ## 公开参考实现与文档
 
 - [华为 FusionAccess 技术资料，原厂文档镜像](https://www.actfornet.com/ueditor/php/upload/file/20190326/1553565775936407.pdf)：CT5100/ST5110/CT6100 的配置区别。
