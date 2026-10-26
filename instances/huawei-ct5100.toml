@@ -1,0 +1,36 @@
+# Intel Bay Trail CT5100; actual firmware bitness and PCI IDs need inventory.
+# Uses the generic PC architecture and firmware enumeration, not SKU addresses.
+name = "huawei-ct5100"
+description = "Huawei CT5100 x64 UEFI, apk XFCE world on a dedicated USB partition"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ramfs_distro = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[package]
+kind = "uefi-disk"
+variant = "world"
+
+[rootfs]
+world = "xfce"
+world_size_mb = 4096
+
+[target]
+# This describes a debugging-host adapter, not a claim CT5100 has COM1.
+serial = "/dev/ttyUSB0"
+baud = 38400
+boot_timeout = "180s"
+console_check = ["[RAM] usable", "System ready", "[INIT] Distro rootfs detected", "[INIT] Chrooted to /extra"]
+boot_media = ["build/huawei-ct5100/a20os-uefi.img"]
+media_device = "/dev/sdX"
+log = ".kernel-build/console/huawei-ct5100.log"
