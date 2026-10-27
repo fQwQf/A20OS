@@ -39,5 +39,7 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
                                 vaddr_t start, vaddr_t end, int shared);
 int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
                                 vaddr_t start, vaddr_t end, int shared);
+int mm_fork_clone_present_range_vma(mm_struct_t *child, mm_struct_t *parent,
+                                    mm_seg_t *vma, int shared);
 
 #endif /* _MM_VM_INTERNAL_H */

@@ -143,11 +143,12 @@ extern int a20_cow_clone_leaf_rust(mm_struct_t *child, mm_struct_t *parent,
                                    vaddr_t va, int level, int shared);
 extern int a20_cow_clone_leaf_at_rust(mm_struct_t *child, mm_struct_t *parent,
                                       vaddr_t va, int level, int shared,
-                                      int checked, pte_t *slot, pte_t *node);
+                                      int checked, pte_t *slot, pte_t *node,
+                                      mm_seg_t *vma);
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 extern int a20_cow_clone_anon_batch_rust(mm_struct_t *child,
                                          mm_struct_t *parent, vaddr_t va,
-                                         pte_t *node, int shared);
+                                         pte_t *node, size_t nr, int shared);
 #endif
 
 struct a20_cow_src {
@@ -335,7 +336,7 @@ int a20_cow_map_child_anon_batch(
  * borrowed address only avoids rediscovering the same leaf from the root. */
 static int a20_cow_share_snapshot_from_slot(
     mm_struct_t *parent, uintptr_t va, int level, pte_t *src_pte, pte_t *stab,
-    struct a20_cow_shared_snapshot *out)
+    mm_seg_t *known_vma, struct a20_cow_shared_snapshot *out)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     if (stab)
@@ -349,7 +350,14 @@ static int a20_cow_share_snapshot_from_slot(
 #endif
         return 0;
     }
-    mm_seg_t *vma = mm_seg_find(parent, va);
+    mm_seg_t *vma = known_vma ? known_vma : mm_seg_find(parent, va);
+    if (known_vma && (va < known_vma->start || va >= known_vma->end)) {
+#if defined(ARCH_HAS_PGTABLE_OPS)
+        if (stab)
+            mm_pt_node_unlock(stab);
+#endif
+        return 0;
+    }
     int is_vmo = vma && (vma->vm_flags & VM_VMO);
     int is_file = vma && (vma->vm_flags & VM_FILE);
     pfn_t pfn = phys_to_pfn(arch_pte_addr(source));
@@ -397,16 +405,16 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     stab = mm_pt_leaf_table(parent->pgdir, va);
 #endif
     return a20_cow_share_snapshot_from_slot(parent, va, level, src_pte, stab,
-                                            out);
+                                            NULL, out);
 }
 
 /* The walker owns parent->lock and lends this leaf location only for the
  * duration of the clone call. Validate its geometry without another root
  * descent, then let the shared snapshot take node exclusion, re-read the PTE,
  * and pin the backing reference before it returns. */
-int a20_cow_share_snapshot_at(void *parent_ptr, uintptr_t va, int level,
-                              pte_t *slot, pte_t *node,
-                              struct a20_cow_shared_snapshot *out)
+int a20_cow_share_snapshot_at_vma(void *parent_ptr, uintptr_t va, int level,
+                                  pte_t *slot, pte_t *node, mm_seg_t *vma,
+                                  struct a20_cow_shared_snapshot *out)
 {
     mm_struct_t *parent = parent_ptr;
     if (!out)
@@ -421,7 +429,7 @@ int a20_cow_share_snapshot_at(void *parent_ptr, uintptr_t va, int level,
     if (!slot || !node || entries <= 0 || index < 0 || index >= entries ||
         slot != &node[index])
         return 0;
-    return a20_cow_share_snapshot_from_slot(parent, va, level, slot, node,
+    return a20_cow_share_snapshot_from_slot(parent, va, level, slot, node, vma,
                                             out);
 #else
     (void)parent;
@@ -429,8 +437,17 @@ int a20_cow_share_snapshot_at(void *parent_ptr, uintptr_t va, int level,
     (void)level;
     (void)slot;
     (void)node;
+    (void)vma;
     return 0;
 #endif
+}
+
+int a20_cow_share_snapshot_at(void *parent_ptr, uintptr_t va, int level,
+                              pte_t *slot, pte_t *node,
+                              struct a20_cow_shared_snapshot *out)
+{
+    return a20_cow_share_snapshot_at_vma(parent_ptr, va, level, slot, node, NULL,
+                                         out);
 }
 
 static void cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
@@ -496,14 +513,15 @@ void a20_cow_share_unlock(const struct a20_cow_shared_snapshot *snapshot)
  * with one non-allocating walk.  A returned leaf (including huge/swap) always
  * declines before taking the source node lock or changing parent references. */
 static int cow_child_batch_empty(mm_struct_t *child, uintptr_t start,
-                                 uintptr_t bytes, int first)
+                                 size_t nr, int first)
 {
-    if (!child || !child->pgdir || bytes == 0 || first < 0)
+    if (!child || !child->pgdir || nr == 0 || first < 0)
         return 0;
     int entries = arch_pt_level_entries(0);
-    if (entries <= 0 || first >= entries ||
-        first > entries - A20_COW_ANON_BATCH_PAGES)
+    if (entries <= 0 || nr > (size_t)entries || first >= entries ||
+        nr > (size_t)(entries - first))
         return 0;
+    uintptr_t bytes = nr * PAGE_SIZE;
 
     int level = -1;
     vaddr_t base = 0;
@@ -524,7 +542,7 @@ static int cow_child_batch_empty(mm_struct_t *child, uintptr_t start,
     pte_t *first_slot = pt_walk(child->pgdir, start, 0);
     if (!first_slot)
         return 0;
-    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+    for (size_t i = 0; i < nr; i++) {
         if (first_slot[i] != 0)
             return 0;
     }
@@ -539,23 +557,22 @@ static int cow_child_batch_empty(mm_struct_t *child, uintptr_t start,
  * Zero is side-effect-free fallback. */
 int a20_cow_share_anon_batch_snapshot(
     void *parent_ptr, void *child_ptr, uintptr_t start, pte_t *node,
-    struct a20_cow_anon_batch_page *out, int shared)
+    struct a20_cow_anon_batch_page *out, size_t nr, int shared)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     mm_struct_t *parent = parent_ptr;
     mm_struct_t *child = child_ptr;
-    const uintptr_t bytes = A20_COW_ANON_BATCH_PAGES * PAGE_SIZE;
-    if (!parent || !child || !parent->pgdir || !child->pgdir || !node || !out)
+    if (!parent || !child || !parent->pgdir || !child->pgdir || !node || !out ||
+        nr == 0 || nr > A20_COW_ANON_BATCH_PAGES ||
+        start > (uintptr_t)-1 - nr * PAGE_SIZE)
         return 0;
-    if ((start & (PAGE_SIZE - 1)) || start > (uintptr_t)-1 - bytes)
+    const uintptr_t bytes = nr * PAGE_SIZE;
+    if (start & (PAGE_SIZE - 1))
         return 0;
 
     int first = arch_pt_vpn(start, 0);
     int entries = arch_pt_level_entries(0);
-    if (first < 0 || entries <= 0)
-        return 0;
-    if (first % A20_COW_ANON_BATCH_PAGES != 0 ||
-        first > entries - A20_COW_ANON_BATCH_PAGES)
+    if (first < 0 || entries <= 0 || nr > (size_t)(entries - first))
         return 0;
     pt_meta_t *node_meta = mm_pt_meta(node);
     if (!node_meta || mm_pt_meta_level(node_meta) != 0)
@@ -575,8 +592,8 @@ int a20_cow_share_anon_batch_snapshot(
 
     /* Inspect the unpublished destination before source pinning/downgrade.
      * An absent upper subtree costs one lookup; an existing empty L0 table
-     * costs one lookup plus one walk instead of 64 repeated root walks. */
-    if (!cow_child_batch_empty(child, start, bytes, first))
+     * costs one lookup plus one walk instead of per-page root walks. */
+    if (!cow_child_batch_empty(child, start, nr, first))
         return 0;
 
     pte_t *slots[A20_COW_ANON_BATCH_PAGES];
@@ -584,7 +601,7 @@ int a20_cow_share_anon_batch_snapshot(
     pfn_t frame_pfns[A20_COW_ANON_BATCH_PAGES];
     size_t frame_count = 0;
     mm_pt_node_lock(node);
-    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+    for (size_t i = 0; i < nr; i++) {
         int index = first + (int)i;
         pte_t *slot = &node[index];
         pte_t source = *slot;
@@ -615,7 +632,7 @@ int a20_cow_share_anon_batch_snapshot(
     }
 
     /* All entries are validated before any reference or PTE changes. */
-    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+    for (size_t i = 0; i < nr; i++) {
         if (!out[i].class)
             continue;
         uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
@@ -637,7 +654,7 @@ int a20_cow_share_anon_batch_snapshot(
         }
     }
     frame_get_many(frame_pfns, frame_count);
-    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+    for (size_t i = 0; i < nr; i++) {
         pte_t source = *slots[i];
         if (!shared && (source & (PTE_W | PTE_COW))) {
             struct a20_cow_shared_snapshot snap = {0};
@@ -662,6 +679,7 @@ int a20_cow_share_anon_batch_snapshot(
     (void)start;
     (void)node;
     (void)out;
+    (void)nr;
     (void)shared;
     return 0;
 #endif /* ARCH_HAS_PGTABLE_OPS */
@@ -696,7 +714,7 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
 static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
                                 pte_t *table, int level, vaddr_t base,
                                 vaddr_t start, vaddr_t end, int shared,
-                                int checked);
+                                int checked, mm_seg_t *vma);
 
 int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
                         vaddr_t start, vaddr_t end, int shared) {
@@ -707,7 +725,7 @@ int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
      * policy/base/destination checks rather than cloning them a second time.
      * The caller holds parent->lock, as for the existing VMA walker. */
     return mm_fork_clone_level(child, parent, parent->pgdir, ARCH_PT_ROOT_LEVEL,
-                              0, start, end, shared, 1);
+                              0, start, end, shared, 1, NULL);
 }
 
 int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
@@ -721,7 +739,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
 static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
                                 pte_t *table, int level, vaddr_t base,
                                 vaddr_t start, vaddr_t end, int shared,
-                                int checked) {
+                                int checked, mm_seg_t *vma) {
     if (!table || start >= end)
         return 0;
 
@@ -736,21 +754,24 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             break;
 
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-        /* Try only a complete aligned run contained in the requested range.
-         * The C snapshot does the all-or-nothing preflight; zero keeps the
-         * existing scalar path untouched, and success skips exactly 64 leaves. */
-        if (level == 0 && i % A20_COW_ANON_BATCH_PAGES == 0 &&
-            entries - i >= A20_COW_ANON_BATCH_PAGES && entry_base >= start &&
-            entry_base <= (vaddr_t)-1 - A20_COW_ANON_BATCH_PAGES * PAGE_SIZE) {
-            vaddr_t batch_end =
-                entry_base + A20_COW_ANON_BATCH_PAGES * PAGE_SIZE;
-            if (batch_end <= end) {
+        if (!checked && vma && level == 0 && entry_base >= start &&
+            entry_base >= vma->start && entry_base < vma->end) {
+            size_t nr = A20_COW_ANON_BATCH_PAGES;
+            size_t range_pages = (end - entry_base) / PAGE_SIZE;
+            size_t vma_pages = (vma->end - entry_base) / PAGE_SIZE;
+            if (nr > (size_t)(entries - i))
+                nr = entries - i;
+            if (nr > range_pages)
+                nr = range_pages;
+            if (nr > vma_pages)
+                nr = vma_pages;
+            if (nr >= 2) {
                 int batch = a20_cow_clone_anon_batch_rust(
-                    child, parent, entry_base, table, shared);
+                    child, parent, entry_base, table, nr, shared);
                 if (batch < 0)
                     return batch;
                 if (batch > 0) {
-                    i += A20_COW_ANON_BATCH_PAGES - 1;
+                    i += (int)nr - 1;
                     continue;
                 }
             }
@@ -783,7 +804,7 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
              * and the C snapshot can validate/pin this exact slot without a
              * second root walk. */
             r = a20_cow_clone_leaf_at_rust(child, parent, entry_base, level,
-                                           shared, checked, pte, table);
+                                           shared, checked, pte, table, vma);
 #else
             r = checked
                     ? mm_fork_clone_page(child, parent, entry_base, shared)
@@ -798,7 +819,7 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
         if (level > 0) {
             int r = mm_fork_clone_level(child, parent, arch_pte_to_ptr(*pte),
                                        level - 1, entry_base, start, end, shared,
-                                       checked);
+                                       checked, vma);
             if (r < 0)
                 return r;
         }
@@ -810,7 +831,15 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
                                 pte_t *table, int level, vaddr_t base,
                                 vaddr_t start, vaddr_t end, int shared) {
     return mm_fork_clone_level(child, parent, table, level, base, start, end,
-                              shared, 0);
+                              shared, 0, NULL);
+}
+
+int mm_fork_clone_present_range_vma(mm_struct_t *child, mm_struct_t *parent,
+                                    mm_seg_t *vma, int shared) {
+    vaddr_t start = ROUND_DOWN(vma->start, PAGE_SIZE);
+    vaddr_t end = ROUND_UP(vma->end, PAGE_SIZE);
+    return mm_fork_clone_level(child, parent, parent->pgdir, ARCH_PT_ROOT_LEVEL,
+                               0, start, end, shared, 0, vma);
 }
 
 int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
@@ -828,9 +857,10 @@ int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
 int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
                                       uintptr_t start, pte_t *node,
                                       struct a20_cow_anon_batch_page *out,
-                                      int shared)
+                                      size_t nr, int shared)
 {
-    (void)parent; (void)child; (void)start; (void)node; (void)out; (void)shared;
+    (void)parent; (void)child; (void)start; (void)node; (void)out; (void)nr;
+    (void)shared;
     return 0;
 }
 
@@ -879,5 +909,9 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
 int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
                                 vaddr_t start, vaddr_t end, int shared)
 { (void)child; (void)parent; (void)start; (void)end; (void)shared; return 0; }
+
+int mm_fork_clone_present_range_vma(mm_struct_t *child, mm_struct_t *parent,
+                                    mm_seg_t *vma, int shared)
+{ (void)child; (void)parent; (void)vma; (void)shared; return 0; }
 
 #endif /* CONFIG_NOMMU */
