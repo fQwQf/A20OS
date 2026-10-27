@@ -28,6 +28,18 @@ class MuslBuildIdentityTests(unittest.TestCase):
             self.assertEqual(before, after)
             self.assertEqual(count_before, count_after)
 
+    def test_submodule_gitdir_file_does_not_change_source_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "musl"
+            source.mkdir()
+            (source / "configure").write_text("source-v1\n")
+            before = musl_build_identity.source_digest(source)
+            metadata = source / ".git"
+            metadata.write_text("gitdir: /checkout-one/.git/modules/musl\n")
+            self.assertEqual(before, musl_build_identity.source_digest(source))
+            metadata.write_text("gitdir: /checkout-two/.git/modules/musl\n")
+            self.assertEqual(before, musl_build_identity.source_digest(source))
+
     def test_source_file_change_changes_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "musl"

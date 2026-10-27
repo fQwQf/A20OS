@@ -57,6 +57,8 @@ def source_digest(root: Path) -> tuple[str, int]:
         files.sort()
         base = Path(current)
         for name in files:
+            if name in EXCLUDED_DIRS:
+                continue
             path = base / name
             relative = path.relative_to(root).as_posix()
             if path.is_symlink():
