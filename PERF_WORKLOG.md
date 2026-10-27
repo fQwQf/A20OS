@@ -349,3 +349,11 @@
 - `27836aad` 将 present/sync 和未发布子页表安装改为复用已解析元数据；旧接口仍走同一 helper。独立 touched 633.58→590.05µs（-6.87%），APK fork 1289.25→1346.91 ops/s（+4.47%）。两项均通过相关 host 与 15 项 guest。
 - 最终 ELF `build/performance/cow-batch-meta-final.elf`（sha256 `bbfaf115e4bdb3f10a6c8c358dca056f8840f922788b73f370d81145b813558e`）。Linux ABI 45/45、Native 8 次 COW clone/exit/wait 与 1024 字隔离检查通过。最终三轮微基准：touched -23.75%、sparse -3.69%、空进程 -1.30%，同步原语基本持平；空进程/sparse 离群样本保留。
 - 最终上一版/本次版本各五轮完整 APK（`apk-cow-meta-base-2026-10-27-r5` / `apk-cow-meta-final-2026-10-27-r5`）：fork 1264.79→1361.41 ops/s（+7.64%，为同轮 Linux 的 31.01%），threads-2 +0.21%、switch +0.09%、memory-write +1.24%、cpu-1 +0.16%、cpu-2 +0.25%、SHA256 +0.21%。合计 140/140 样本有效、guest 计数器审计全 0、输入哈希不变；fork 与 Linux 差距约 3.22×。
+
+## 2026-10-27 北京时间（短 VMA 批克隆与剩余路径实验）
+
+- 新诊断 `lifecycle-remaining-diag-v2-2026-10-27`：stress-ng 每次 fork 的 `mm_fork` 约 267µs、`mm_destroy` 约 320µs，约 467 次 VMA 查找、1650 次页表锁、37 次 COW fault；锁争用/等待为 0。wait ticks 包含父进程睡眠和子进程运行，不作 wait 自身墙钟成本。
+- `76b8d4d3` 将批克隆扩展到同一 VMA 内非对齐的 2..16 页短窗口，并把当前 VMA 传入标量快照；checked brk/stack 第二遍保留原策略。独立三轮 stress-ng fork 1266.88→1344.95 ops/s（+6.16%）。真实 C/Rust host 测试通过，包括短窗口成功/失败引用回滚和已知 VMA 免查找。
+- COW fault owner-table/level 复用候选三轮 APK 1359.19→1375.89 ops/s（+1.23%），且逐轮有回退，未提交；补丁 `build/performance/cow-fault-owner-rejected.patch`。最终销毁 cache `put_many` 候选 APK +0.43%、touched +3.64% 延迟，未提交；补丁 `build/performance/cache-put-batch-rejected.patch`。
+- 最终 ELF `build/performance/short-vma-final.elf`（sha256 `76d285b113353e2eca792dfae864b6a56f47ba27925cdb8dd3595df288345861`）。Linux ABI 15 项×3 共 45/45 通过（`short-vma-final-full15x3-2026-10-27`）；Native 输出 `NATIVE_LIFECYCLE: PASS cow_clone=8 exit_wait=8 cow_isolation=1024`（`short-vma-final-native-2026-10-27`）。
+- 最终上一版/本次版本各三轮完整 APK（`apk-short-vma-final-{base,final}-2026-10-27-r3`）：fork 1352.25→1418.90 ops/s（+4.93%，为同轮 Linux 的 26.52%）；threads-2 +0.24%、switch -0.29%、memory-write +0.12%、cpu-1 +0.14%、cpu-2 -0.07%、SHA256 -1.09%。合计 84/84 样本有效，42 个 A20 样本计数器审计全 0，输入哈希不变。fork 与 Linux 差距约 3.77×；switch 的 Linux 波动较大，不将倍率当固定优势。
