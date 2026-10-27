@@ -202,6 +202,12 @@ endif
 # identity and the complete target/compiler configuration. An explicit
 # MUSL_BUILD override is allowed for a pre-provisioned matching tree, but is
 # never cleaned or repurposed by this makefile.
+USERLAND_REQUIRED_INPUTS := external/musl/configure external/sbase/util.h external/mksh-cvs2git/sh.h external/tlse/tlse.c
+USERLAND_MISSING_INPUTS := $(filter-out $(wildcard $(USERLAND_REQUIRED_INPUTS)),$(USERLAND_REQUIRED_INPUTS))
+ifneq ($(strip $(USERLAND_MISSING_INPUTS)),)
+$(error Missing userland submodules: $(USERLAND_MISSING_INPUTS). Run git submodule update --init --recursive from the repository root)
+endif
+
 MUSL_BUILD_KEY := $(shell $(PYTHON) ../tools/musl_build_identity.py \
 	--source "$(MUSL_BASE)" --target "$(MUSL_TARGET)" --compiler "$(CROSS_COMPILE)gcc" \
 	--cflags="$(MUSL_CONFIG_CFLAGS)" --ldflags="$(MUSL_CONFIG_LDFLAGS)" 2>/dev/null)
@@ -281,8 +287,7 @@ SBASE_CFLAGS := $(CFLAGS) $(SBASE_CPPFLAGS)
 
 TLSE_DIR := external/tlse
 TLSE_OBJ := $(OBJ_DIR)/tlse/tlse.o
-TLSE_ARCH_CFLAGS_aarch64 := -mgeneral-regs-only -DLTC_NO_TABLES -DNO_TLS_FORWARD_SECRECY \
-                             -DA20OS_TLS_NO_GCM -DA20OS_TLS_RSA_CBC_SHA1_ONLY
+TLSE_ARCH_CFLAGS_aarch64 := -mgeneral-regs-only -DLTC_NO_TABLES -DNO_TLS_FORWARD_SECRECY
 TLSE_ARCH_CFLAGS := $(TLSE_ARCH_CFLAGS_$(ARCH))
 TLSE_BASE_CFLAGS := $(filter-out -O0 -O1 -O2 -O3 -Os -Oz,$(CFLAGS))
 TLSE_OPT_aarch64 := -O0
@@ -297,11 +302,7 @@ TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_
                 -DNO_TLS_CLIENT_ECDHE \
                 -DNO_TLS_ECDSA_SUPPORTED \
                 -DNO_TLS_CURVE25519 \
-                -DNO_TLS_ROBOT_MITIGATION \
-                -DA20OS_NO_FAST_MONTGOMERY \
-                -DA20OS_NO_FAST_MUL \
-                -DA20OS_NO_FAST_MUL_HIGH \
-                -DA20OS_NO_FAST_SQR
+                -DNO_TLS_ROBOT_MITIGATION
 
 LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
 LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES) $(basename $(notdir $(ARCH_CMD_SRCS))))
@@ -636,7 +637,9 @@ MKSH_SRCS := $(MKSH_DIR)/edit.c $(MKSH_DIR)/eval.c $(MKSH_DIR)/exec.c $(MKSH_DIR
              $(MKSH_DIR)/syn.c $(MKSH_DIR)/tree.c $(MKSH_DIR)/ulimit.c $(MKSH_DIR)/var.c \
              $(MKSH_DIR)/strlcpy.c
 MKSH_OBJS := $(patsubst $(MKSH_DIR)/%.c,$(OBJ_DIR)/mksh/%.o,$(MKSH_SRCS))
-MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
+MKSH_PORT_HEADERS := $(wildcard ports/mksh/*.h ports/mksh/*.gen ports/mksh/*.inc)
+$(MKSH_OBJS): $(MKSH_PORT_HEADERS)
+MKSH_CFLAGS := $(CFLAGS) -Iports/mksh -I$(MKSH_DIR) \
                -DMKSH_USE_AUTOCONF_H -DMKSH_DISABLE_DEPRECATED \
                -DMKSH_UNEMPLOYED \
                -DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599
@@ -788,6 +791,10 @@ $(OBJ_DIR)/cmds/core/gpu3d_test.o: CFLAGS += -I../kernel/include
 
 $(OBJ_DIR)/cmds/core/vport_test.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/vport_test.o: ../kernel/include/drivers/char/virtio_console.h
+
+$(OBJ_DIR)/sbase/id.o: ports/sbase/id.c Makefile | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(SBASE_CFLAGS) -c $< -o $@
 
 $(OBJ_DIR)/sbase/%.o: $(SBASE_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)

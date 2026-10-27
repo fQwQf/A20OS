@@ -191,9 +191,10 @@ MLIBC_MKSH_OBJS    := $(addprefix $(MLIBC_MKSH_OBJDIR)/,$(addsuffix .o,$(MLIBC_M
 MLIBC_MKSH_CFLAGS  := -O2 -ffreestanding -std=gnu99 -D_GNU_SOURCE \
 	-DMKSH_USE_AUTOCONF_H -DMKSH_DISABLE_DEPRECATED -DMKSH_UNEMPLOYED \
 	-DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599 \
-	$(MLIBC_FAST_TYPE_FLAGS) -I$(MLIBC_MKSH_DIR) -isystem $(MLIBC_SYSROOT)/include
+	$(MLIBC_FAST_TYPE_FLAGS) -Iuser/ports/mksh -I$(MLIBC_MKSH_DIR) -isystem $(MLIBC_SYSROOT)/include
 
-$(MLIBC_MKSH_OBJDIR)/%.o: $(MLIBC_MKSH_DIR)/%.c | $(MLIBC_SYSROOT)/lib/libc.a
+MLIBC_MKSH_PORT_HEADERS := $(wildcard user/ports/mksh/*.h user/ports/mksh/*.gen user/ports/mksh/*.inc)
+$(MLIBC_MKSH_OBJDIR)/%.o: $(MLIBC_MKSH_DIR)/%.c $(MLIBC_MKSH_PORT_HEADERS) | $(MLIBC_SYSROOT)/lib/libc.a
 	@mkdir -p $(dir $@)
 	$(RISCV_ELF_PREFIX)gcc $(MLIBC_MKSH_CFLAGS) -c $< -o $@
 
