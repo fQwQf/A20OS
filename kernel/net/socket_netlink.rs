@@ -32,6 +32,7 @@ const NETLINK_KOBJECT_UEVENT: i32 = 15;
 
 const NLMSG_DONE: u16 = 3;
 const NLM_F_MULTI: u16 = 0x2;
+const NLM_F_DUMP: u16 = 0x300;
 const NLM_F_REPLACE: u16 = 0x100;
 
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
@@ -48,6 +49,7 @@ const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
+const RTM_NEWROUTE: u16 = 24;
 const RTM_GETROUTE: u16 = 26;
 
 const IFLA_ADDRESS: u16 = 1;
@@ -919,7 +921,7 @@ unsafe fn build_linkmsg(buf: &mut [u8], e: &NlrtLink, msg_type: u16, pid: u32,
     let ifi = IfInfoMsg {
         family: AF_UNSPEC as u8,
         pad: 0,
-        type_: 0,
+        type_: if e.loopback != 0 { 772 } else { 1 },
         index: e.index as i32,
         flags: e.flags,
         change: 0xffffffff,
@@ -932,7 +934,7 @@ unsafe fn build_linkmsg(buf: &mut [u8], e: &NlrtLink, msg_type: u16, pid: u32,
     off = put_attr(buf, off, IFLA_ADDRESS, &e.mac);
     off = put_attr(buf, off, IFLA_IFNAME,
                    &e.name[..name_bytes(e).len() + 1]);
-    let total = core::mem::size_of::<NlMsghdr>() + off;
+    let total = off;
     if total > NLRT_MSG_MAX {
         return 0;
     }
@@ -961,7 +963,7 @@ unsafe fn build_addrmsg(buf: &mut [u8], ifindex: u32, addr: &[u8; 4],
         label[..n].copy_from_slice(&name[..n]);
         off = put_attr(buf, off, IFA_LABEL, &label[..n + 1]);
     }
-    let total = core::mem::size_of::<NlMsghdr>() + off;
+    let total = off;
     if total > NLRT_MSG_MAX {
         return 0;
     }
@@ -990,7 +992,7 @@ unsafe fn build_addrmsg6(buf: &mut [u8], ifindex: u32, addr: &[u8; 16],
         label[..n].copy_from_slice(&name[..n]);
         off = put_attr(buf, off, IFA_LABEL, &label[..n + 1]);
     }
-    let total = core::mem::size_of::<NlMsghdr>() + off;
+    let total = off;
     if total > NLRT_MSG_MAX {
         return 0;
     }
@@ -1260,7 +1262,13 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
     let req = ptr::read_unaligned(buf as *const NlMsghdr);
     let payload = len - hdr_size;
     let type_ = req.msg_type;
-    let want = if type_ == RTM_GETLINK || type_ == RTM_NEWLINK {
+    let dump = req.flags & NLM_F_DUMP != 0;
+    let query = type_ == RTM_GETLINK || type_ == RTM_GETADDR || type_ == RTM_GETROUTE;
+    // Linux dump requests may contain only rtgenmsg's family byte, padded
+    // to four bytes by musl. Mutation requests still require their full body.
+    let want = if query && dump {
+        1
+    } else if type_ == RTM_GETLINK || type_ == RTM_NEWLINK {
         core::mem::size_of::<IfInfoMsg>()
     } else if type_ == RTM_GETADDR || type_ == RTM_NEWADDR || type_ == RTM_DELADDR {
         core::mem::size_of::<IfAddrMsg>()
@@ -1273,6 +1281,10 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
         || payload < want
     {
         return -EINVAL;
+    }
+    let family = ptr::read((buf as *const u8).add(hdr_size)) as i32;
+    if query && type_ != RTM_GETLINK && family != AF_UNSPEC && family != AF_INET && family != AF_INET6 {
+        return -EAFNOSUPPORT;
     }
 
     /* Write requests run before any reply is built and hold no lock. */
@@ -1325,15 +1337,15 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
         let e = &links[i as usize];
         i += 1;
         let total = if type_ == RTM_GETLINK {
-            build_linkmsg(&mut msg.0, e, RTM_GETLINK, pid, req.seq)
+            build_linkmsg(&mut msg.0, e, RTM_NEWLINK, pid, req.seq)
         } else if type_ == RTM_GETADDR {
-            if e.has_ip == 0 {
+            if e.has_ip == 0 || family == AF_INET6 {
                 continue;
             }
             build_addrmsg(&mut msg.0, e.index, &e.ip, &e.mask, name_bytes(e),
-                          e.loopback, RTM_GETADDR, pid, req.seq)
+                          e.loopback, RTM_NEWADDR, pid, req.seq)
         } else {
-            if e.has_gw == 0 {
+            if e.has_gw == 0 || family == AF_INET6 {
                 continue;
             }
             let mut off = hdr_size;
@@ -1353,8 +1365,8 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
             off = put_attr(&mut msg.0, off, RTA_GATEWAY, &e.gw);
             let oif = e.index;
             off = put_attr(&mut msg.0, off, RTA_OIF, &oif.to_ne_bytes());
-            let total = hdr_size + off;
-            fill_hdr(&mut msg.0, type_, total as u32, req.seq, pid);
+            let total = off;
+            fill_hdr(&mut msg.0, RTM_NEWROUTE, total as u32, req.seq, pid);
             total
         };
         if total == 0 {
@@ -1654,6 +1666,8 @@ mod tests {
 
     unsafe fn reset() {
         DIAG_SKIP.store(0, core::sync::atomic::Ordering::Relaxed);
+        UEVENT_SEQ.store(0, core::sync::atomic::Ordering::Relaxed);
+        NLRT_NOTIFY_SEQ.store(0, core::sync::atomic::Ordering::Relaxed);
         S_A = Sock::new();
         S_B = Sock::new();
         S_SLOTS = [ptr::null_mut(); 4];
@@ -2502,6 +2516,54 @@ mod tests {
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
                                                      req.len() as usize, ptr::null(),
                                                      0), -EOPNOTSUPP);
+        }
+    }
+
+    #[test]
+    fn musl_dump_requests_and_reply_attributes_follow_linux_wire_layout() {
+        unsafe {
+            let _serial = serial();
+            for (request, reply, body_size) in [
+                (RTM_GETLINK, RTM_NEWLINK, 16usize),
+                (RTM_GETADDR, RTM_NEWADDR, 8usize),
+                (RTM_GETROUTE, RTM_NEWROUTE, 12usize),
+            ] {
+                for payload in [&[0u8][..], &[0u8; 4][..]] {
+                    reset();
+                    let s = sa();
+                    (*s).protocol = NETLINK_ROUTE;
+                    let mut link = NlrtLink::zero();
+                    link.name[..4].copy_from_slice(b"eth0");
+                    link.index = 2;
+                    link.has_ip = 1;
+                    link.has_gw = 1;
+                    link.ip = [10, 0, 2, 15];
+                    link.mask = [255, 255, 255, 0];
+                    link.gw = [10, 0, 2, 2];
+                    T_SNAPSHOT[0] = link;
+                    T_NLINKS = 1;
+                    let req = route_req(request, NLM_F_DUMP | 1, payload);
+                    assert_eq!(a20_net_netlink_route_request(s as *mut c_void,
+                        req.as_ptr() as *const c_void, req.len(), ptr::null(), 0), req.len() as i32);
+                    assert_eq!(T_ENQ_CALLS, 2);
+                    let hdr = ptr::read_unaligned(T_FIRST.as_ptr() as *const NlMsghdr);
+                    assert_eq!(hdr.msg_type, reply);
+                    assert_eq!((hdr.seq, hdr.flags), (3, NLM_F_MULTI));
+                    // A libc walker must reach exactly nlmsg_len, with no
+                    // zero-length trailing attribute or doubled header size.
+                    let mut off = 16 + body_size;
+                    while off < hdr.len as usize {
+                        let attr = ptr::read_unaligned(T_FIRST.as_ptr().add(off) as *const RtAttr);
+                        assert!(attr.len >= 4);
+                        off += (attr.len as usize + 3) & !3;
+                    }
+                    assert_eq!(off, hdr.len as usize);
+                    let done = ptr::read_unaligned(T_ENQ_BYTES.0.as_ptr() as *const DiagDone);
+                    assert_eq!(done.nlh.msg_type, NLMSG_DONE);
+                    assert_eq!(done.nlh.seq, hdr.seq);
+                    assert_eq!(done.error, 0);
+                }
+            }
         }
     }
 

@@ -127,7 +127,7 @@ int64_t sys_settimeofday(void *tv, void *tz) {
 int64_t sys_times(void *buf) {
     task_t *t = proc_current();
     if (t && buf) {
-        uint64_t tm[4];
+        long tm[4];
         memset(tm, 0, sizeof(tm));
         tm[0] = linux_ticks_to_clock_t(t->total_time);
         tm[2] = linux_ticks_to_clock_t(t->child_utime);

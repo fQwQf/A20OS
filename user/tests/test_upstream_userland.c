@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sched.h>
+#include "../cmds/linux_sched.h"
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
@@ -24,9 +25,9 @@ int main(void) {
     freeifaddrs(list);
     if (!found) { puts("UPSTREAM_PROBE: FAIL missing configured interface"); }
     struct sched_param param = { .sched_priority = 0 };
-    errno=0; rc=sched_setscheduler(0,SCHED_OTHER,&param);
+    errno=0; rc=a20_linux_sched_setscheduler(0,SCHED_OTHER,&param);
     printf("UPSTREAM_PROBE: sched_setscheduler rc=%d errno=%d\n",rc,errno);
-    if (rc || sched_getscheduler(0)!=SCHED_OTHER || sched_getparam(0,&param)) return 3;
+    if (rc || a20_linux_sched_getscheduler(0)!=SCHED_OTHER || a20_linux_sched_getparam(0,&param)) return 3;
     if (!found) return 2;
     struct protoent *protocol = getprotobyname("ip");
     if (!protocol || protocol->p_proto != 0) return 4;

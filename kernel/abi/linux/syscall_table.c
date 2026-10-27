@@ -16,6 +16,17 @@ static int64_t linux_sys_clone_call(const linux_syscall_args_t *args)
                      (int *)(uintptr_t)a.arg[4]);
 }
 
+static int64_t linux_sys_lseek_call(const linux_syscall_args_t *args)
+{
+#if defined(CONFIG_RISCV32)
+    /* Linux RV32 slot 62 is _llseek(fd, hi, lo, result64, whence). */
+    return sys_riscv32_llseek((int)A(0), (uint32_t)A(1), (uint32_t)A(2),
+                             (void *)(uintptr_t)A(3), (int)A(4));
+#else
+    return sys_lseek((int)A(0), (int64_t)A(1), (int)A(2));
+#endif
+}
+
 #define LINUX_SYSCALL(name, restores, ...) \
     static int64_t linux_handle_##name(const linux_syscall_args_t *args) \
     { \

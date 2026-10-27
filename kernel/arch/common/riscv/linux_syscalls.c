@@ -83,3 +83,14 @@ int64_t sys_riscv_flush_icache(uint64_t start, uint64_t end, uint64_t flags) {
     arch_flush_icache_range((void *)(uintptr_t)start, (size_t)(end - start));
     return 0;
 }
+
+#if defined(CONFIG_RISCV32)
+int64_t sys_riscv32_llseek(int fd, uint32_t hi, uint32_t lo,
+                          void *result, int whence) {
+    int64_t offset = (int64_t)(((uint64_t)hi << 32) | lo);
+    int64_t value = sys_lseek(fd, offset, whence);
+    if (value < 0) return value;
+    if (copy_to_user(result, &value, sizeof(value)) < 0) return -EFAULT;
+    return 0;
+}
+#endif

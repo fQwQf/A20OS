@@ -62,6 +62,8 @@ const SO_PASSCRED: i32 = 16;
 const SO_PEERCRED: i32 = 17;
 const SO_RCVTIMEO: i32 = 20;
 const SO_SNDTIMEO: i32 = 21;
+const SO_RCVTIMEO_NEW: i32 = 66;
+const SO_SNDTIMEO_NEW: i32 = 67;
 const SO_ACCEPTCONN: i32 = 30;
 const SO_PROTOCOL: i32 = 38;
 const SO_DOMAIN: i32 = 39;
@@ -150,6 +152,7 @@ const REPORT_STRING: i32 = 1;
 const REPORT_CRED: i32 = 2;
 const REPORT_TIMEVAL: i32 = 3;
 const REPORT_PIDFD: i32 = 4;
+const REPORT_TIMEVAL64: i32 = 5;
 
 /// Linux `struct ip_mreqn`: all three members are four bytes wide, so the wire
 /// layout is frozen and can be read without the C type.
@@ -294,6 +297,18 @@ unsafe fn ipopt_byte(optval: *const u8, optlen: usize, lo: i32, hi: i32) -> i32 
         val
     } else {
         -EINVAL
+    }
+}
+
+// OLD timeouts use native long; NEW always uses two 64-bit fields, including
+// on RV32 where musl's time_t is 64-bit. The option number selects the wire ABI.
+fn timeout_layout(optname: i32, long_size: i32) -> Option<(bool, i32)> {
+    match optname {
+        SO_RCVTIMEO => Some((true, long_size)),
+        SO_SNDTIMEO => Some((false, long_size)),
+        SO_RCVTIMEO_NEW => Some((true, 8)),
+        SO_SNDTIMEO_NEW => Some((false, 8)),
+        _ => None,
     }
 }
 
@@ -692,10 +707,11 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
         /* Socket filters have no KEP extension point yet. */
         return -EOPNOTSUPP;
     }
-    if level == SOL_SOCKET && (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO) {
+    if level == SOL_SOCKET && timeout_layout(optname, v.long_size).is_some() {
+        let (receive, width) = timeout_layout(optname, v.long_size).unwrap();
         let mut ticks = 0u64;
         let rc = unsafe {
-            timeval_to_ticks(optval, optlen, v.long_size, v.ticks_per_sec, &mut ticks)
+            timeval_to_ticks(optval, optlen, width, v.ticks_per_sec, &mut ticks)
         };
         if rc < 0 {
             return rc;
@@ -703,7 +719,7 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
         let mut flags = 0u64;
         unsafe {
             a20_net_option_lock(v.s, &mut flags);
-            if optname == SO_RCVTIMEO {
+            if receive {
                 *v.recv_timeout_ticks = ticks;
             } else {
                 *v.send_timeout_ticks = ticks;
@@ -861,8 +877,8 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
             };
             return report_int(rep, optlen, stored.min(in_force) as i32);
         }
-        if optname == SO_RCVTIMEO || optname == SO_SNDTIMEO {
-            let ticks = if optname == SO_RCVTIMEO {
+        if let Some((receive, width)) = timeout_layout(optname, v.long_size) {
+            let ticks = if receive {
                 unsafe { *v.recv_timeout_ticks }
             } else {
                 unsafe { *v.send_timeout_ticks }
@@ -871,10 +887,12 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
             /* The old handler copied min(optlen, sizeof(struct timeval)) bytes
              * and reported that as the new *optlen, so a short buffer gets a
              * truncated answer rather than an error. */
-            let full = (v.long_size as usize) * 2;
+            let full = (width as usize) * 2;
             let len = if optlen < full { optlen } else { full };
             unsafe {
-                (*rep).kind = REPORT_TIMEVAL;
+                (*rep).kind = if optname == SO_RCVTIMEO_NEW || optname == SO_SNDTIMEO_NEW {
+                    REPORT_TIMEVAL64
+                } else { REPORT_TIMEVAL };
                 (*rep).len = len;
                 (*rep).val0 = sec;
                 (*rep).val1 = usec;
@@ -1067,6 +1085,21 @@ mod tests {
         let too_big = 0x0102_0304i32.to_ne_bytes();
         assert_eq!(unsafe { ipopt_byte(too_big.as_ptr(), 4, 0, 0xff) }, -EINVAL);
         assert_eq!(unsafe { ipopt_byte(host_order.as_ptr(), 2, 1, 0xff) }, -EINVAL);
+    }
+
+    #[test]
+    fn time64_socket_options_do_not_use_the_rv32_native_long_width() {
+        assert_eq!(timeout_layout(SO_RCVTIMEO, 4), Some((true, 4)));
+        assert_eq!(timeout_layout(SO_SNDTIMEO, 4), Some((false, 4)));
+        assert_eq!(timeout_layout(SO_RCVTIMEO_NEW, 4), Some((true, 8)));
+        assert_eq!(timeout_layout(SO_SNDTIMEO_NEW, 4), Some((false, 8)));
+        let mut wire = [0u8; 16];
+        wire[..8].copy_from_slice(&2i64.to_ne_bytes());
+        wire[8..].copy_from_slice(&500_000i64.to_ne_bytes());
+        let width = timeout_layout(SO_RCVTIMEO_NEW, 4).unwrap().1;
+        let mut ticks = 0;
+        assert_eq!(unsafe { timeval_to_ticks(wire.as_ptr(), wire.len(), width, 1000, &mut ticks) }, 0);
+        assert_eq!(ticks, 2500);
     }
 
     #[test]
