@@ -7,7 +7,8 @@
 #include <string.h>
 #define PAGE_SIZE 4096UL
 #define A20_COW_ANON_BATCH_PAGES 16
-static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, int shared) { (void)c; (void)p; (void)va; (void)n; (void)shared; return 0; }
+static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, size_t nr, int shared) { (void)c; (void)p; (void)va; (void)n; (void)nr; (void)shared; return 0; }
+typedef struct { uintptr_t start, end; } mm_seg_t;
 #define ARCH_PT_ROOT_LEVEL 2
 #define ARCH_HAS_PGTABLE_OPS 1
 #define PTE_V 1UL
@@ -70,7 +71,8 @@ int a20_cow_clone_leaf_rust(mm_struct_t *c,mm_struct_t *p,uintptr_t va,int level
 }
 int a20_cow_clone_leaf_at_rust(mm_struct_t *c,mm_struct_t *p,uintptr_t va,
                                int level,int shared,int checked,pte_t *slot,
-                               pte_t *node) {
+                               pte_t *node,mm_seg_t *vma) {
+    (void)vma;
     hint_calls++;
     int index=arch_pt_vpn(va,level);
     assert(node!=NULL && index>=0 && index<arch_pt_level_entries(level));

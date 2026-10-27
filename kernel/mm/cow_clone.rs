@@ -128,12 +128,13 @@ unsafe extern "C" {
         level: i32,
         out: *mut SharedSnapshot,
     ) -> i32;
-    fn a20_cow_share_snapshot_at(
+    fn a20_cow_share_snapshot_at_vma(
         parent: *mut c_void,
         va: usize,
         level: i32,
         slot: *mut c_void,
         node: *mut c_void,
+        vma: *mut c_void,
         out: *mut SharedSnapshot,
     ) -> i32;
     fn a20_cow_share_downgrade(
@@ -182,6 +183,7 @@ unsafe extern "C" {
         start: usize,
         node: *mut c_void,
         out: *mut AnonBatchPage,
+        count: usize,
         shared: i32,
     ) -> i32;
     fn a20_cow_map_child_anon_batch(
@@ -200,19 +202,20 @@ unsafe extern "C" {
  * already-mapped prefix belongs to the child and is reclaimed by mm_destroy. */
 struct AnonBatchGuard {
     pages: [AnonBatchPage; ANON_BATCH_PAGES],
+    count: usize,
     pinned: bool,
     transferred: usize,
 }
 
 impl Drop for AnonBatchGuard {
     fn drop(&mut self) {
-        if !self.pinned || self.transferred == ANON_BATCH_PAGES {
+        if !self.pinned || self.transferred == self.count {
             return;
         }
         let mut pfns = [0u32; ANON_BATCH_PAGES];
         let mut frame_count = 0usize;
         let mut frame_out = pfns.iter_mut();
-        for page in self.pages.iter().skip(self.transferred) {
+        for page in self.pages.iter().take(self.count).skip(self.transferred) {
             if page.kind == 2 {
                 unsafe { page_cache_put(page.pcp) };
             } else if page.kind == 1 {
@@ -238,13 +241,16 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     parent: *mut c_void,
     va: usize,
     node: *mut c_void,
+    count: usize,
     shared: i32,
 ) -> i32 {
-    if unsafe { a20_cow_requires_private_copy() } != 0 {
+    if count == 0 || count > ANON_BATCH_PAGES ||
+        unsafe { a20_cow_requires_private_copy() } != 0 {
         return 0;
     }
     let mut guard = AnonBatchGuard {
         pages: [AnonBatchPage::default(); ANON_BATCH_PAGES],
+        count,
         pinned: false,
         transferred: 0,
     };
@@ -255,6 +261,7 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
             va,
             node,
             guard.pages.as_mut_ptr(),
+            count,
             shared,
         )
     };
@@ -268,7 +275,7 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
             child,
             va,
             guard.pages.as_ptr(),
-            ANON_BATCH_PAGES,
+            count,
             shared,
         )
     };
@@ -277,8 +284,8 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     }
     /* The C mapper validates the complete destination and has no failure
      * point after its first PTE write, so ownership and RSS move as one batch. */
-    let mapped = guard.pages.iter().filter(|page| page.class != 0).count();
-    guard.transferred = ANON_BATCH_PAGES;
+    let mapped = guard.pages.iter().take(count).filter(|page| page.class != 0).count();
+    guard.transferred = count;
     unsafe { a20_cow_rss_add(child, mapped) };
     1
 }
@@ -292,6 +299,7 @@ unsafe fn clone_leaf(
     level: i32,
     shared: i32,
     location: Option<LeafLocation>,
+    vma: *mut c_void,
 ) -> i32 {
     let mut size = 0usize;
     let mut pmd_size = 0usize;
@@ -309,8 +317,8 @@ unsafe fn clone_leaf(
         let pinned = match location {
             None => unsafe { a20_cow_share_snapshot(parent, va, level, &mut src) },
             Some(location) => unsafe {
-                a20_cow_share_snapshot_at(parent, va, level, location.slot,
-                                          location.node, &mut src)
+                a20_cow_share_snapshot_at_vma(parent, va, level, location.slot,
+                                              location.node, vma, &mut src)
             },
         };
         if pinned == 0 {
@@ -342,12 +350,13 @@ unsafe fn clone_leaf(
     let snapshot_ok = match location {
         None => unsafe { a20_cow_share_snapshot(parent, va, level, &mut snap) },
         Some(location) => unsafe {
-            a20_cow_share_snapshot_at(
+            a20_cow_share_snapshot_at_vma(
                 parent,
                 va,
                 level,
                 location.slot,
                 location.node,
+                vma,
                 &mut snap,
             )
         },
@@ -403,7 +412,8 @@ pub unsafe extern "C" fn a20_fork_clone_page_rust(
     if unsafe { a20_cow_dst_present(child, va) } != 0 {
         return 0;
     }
-    unsafe { clone_leaf(child, parent, va, src.level, shared, None) }
+    unsafe { clone_leaf(child, parent, va, src.level, shared, None,
+                        core::ptr::null_mut()) }
 }
 
 /// Entry point for the C level walker, which already knows which leaf entry it
@@ -416,7 +426,8 @@ pub unsafe extern "C" fn a20_cow_clone_leaf_rust(
     level: i32,
     shared: i32,
 ) -> i32 {
-    unsafe { clone_leaf(child, parent, va, level, shared, None) }
+    unsafe { clone_leaf(child, parent, va, level, shared, None,
+                        core::ptr::null_mut()) }
 }
 
 /// Clone a leaf supplied by the C page-table walker. `slot` and `node` are
@@ -432,6 +443,7 @@ pub unsafe extern "C" fn a20_cow_clone_leaf_at_rust(
     checked: i32,
     slot: *mut c_void,
     node: *mut c_void,
+    vma: *mut c_void,
 ) -> i32 {
     if checked != 0 {
         let mut present = 0i32;
@@ -451,6 +463,7 @@ pub unsafe extern "C" fn a20_cow_clone_leaf_at_rust(
             level,
             shared,
             Some(LeafLocation { slot, node }),
+            vma,
         )
     }
 }

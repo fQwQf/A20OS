@@ -477,7 +477,7 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
 
 /* Map a complete, bounded child-fork batch after validating every input and
  * destination.  The child is unpublished and exclusively owned by mm_fork;
- * callers retain the 64 frame pins and account RSS only after success.  Empty
+ * callers retain the batch's frame pins and account RSS only after success.  Empty
  * intermediate tables allocated by the one walk belong to that child and are
  * reclaimed by ordinary mm_destroy if preflight fails. */
 int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,

@@ -223,9 +223,10 @@ int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
 int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
                                       uintptr_t start, void *node,
                                       struct a20_cow_anon_batch_page *out,
-                                      int shared)
+                                      size_t count, int shared)
 {
-    (void)parent; (void)child; (void)start; (void)node; (void)out; (void)shared;
+    (void)parent; (void)child; (void)start; (void)node; (void)out; (void)count;
+    (void)shared;
     return 0;
 }
 int a20_cow_map_child_anon_batch(void *child, uintptr_t va,
@@ -273,10 +274,11 @@ int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
     return 1;
 }
 
-int a20_cow_share_snapshot_at(void *parent, uintptr_t va, int level,
-                              void *slot, void *node,
-                              struct a20_cow_shared_snapshot *out)
+int a20_cow_share_snapshot_at_vma(void *parent, uintptr_t va, int level,
+                                  void *slot, void *node, void *vma,
+                                  struct a20_cow_shared_snapshot *out)
 {
+    (void)vma;
     check(slot == &snapshot_slot && node == &snapshot_node,
           "snapshot-at receives the walker-borrowed slot and node");
     snapshot_at_calls++;

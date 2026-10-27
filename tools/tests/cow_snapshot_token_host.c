@@ -20,7 +20,7 @@ typedef uintptr_t paddr_t;
 typedef uintptr_t vaddr_t;
 typedef uint32_t pfn_t;
 typedef struct { pte_t *pgdir; } mm_struct_t;
-typedef struct { unsigned vm_flags; } mm_seg_t;
+typedef struct { unsigned vm_flags; uintptr_t start, end; } mm_seg_t;
 typedef struct { int pin; } page_cache_page_t;
 typedef struct { int unused; } pt_meta_t;
 static pte_t tables[2][512];
@@ -218,6 +218,15 @@ int main(void) {
     reset();present_vma=0;
     assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1&&frame_gets==1);
     a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);assert(frame_puts==1);
+    reset();vma.start=0;vma.end=PAGE_SIZE;
+    assert(a20_cow_share_snapshot_at_vma(&parent,0,0,&tables[0][0],tables[0],
+                                         &vma,&snap)==1);
+    assert(vma_lookups==0&&frame_gets==1&&leaf_walks==0&&node_walks==0);
+    a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
+    reset();vma.start=PAGE_SIZE;vma.end=2*PAGE_SIZE;
+    assert(a20_cow_share_snapshot_at_vma(&parent,0,0,&tables[0][0],tables[0],
+                                         &vma,&snap)==0);
+    assert(vma_lookups==0&&frame_gets==0&&locks==1&&unlocks==1&&locked==-1);
     puts("COW_SNAPSHOT_TOKEN: real C adapters PASS old+walker tokens, no-root-walk, refs, huge/status and vanished leaf");
     return 0;
 }

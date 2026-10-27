@@ -949,8 +949,7 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
              * struct-copied VMA already holds a VMO reference (vma_ref_fork).
              * Clone already-present frames as shared and leave the rest to
              * lazy faults on the same canonical VMO pages. */
-            if (mm_fork_clone_present_range(child, parent, pv->start,
-                                            pv->end, 1) < 0) {
+            if (mm_fork_clone_present_range_vma(child, parent, pv, 1) < 0) {
                 goto fail_locked;
             }
             continue;
@@ -964,8 +963,8 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
                 goto fail_locked;
             }
         }
-        if (mm_fork_clone_present_range(child, parent, pv->start, pv->end,
-                                        (pv->vm_flags & VM_SHARED) != 0) < 0) {
+        if (mm_fork_clone_present_range_vma(
+                child, parent, pv, (pv->vm_flags & VM_SHARED) != 0) < 0) {
             goto fail_locked;
         }
     }
