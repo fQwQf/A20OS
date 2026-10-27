@@ -603,7 +603,7 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
     netif->hwaddr_len = ETH_HWADDR_LEN;
     memcpy(netif->hwaddr, mac, ETH_HWADDR_LEN);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
-                   NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
+                   NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
     if (a20_lwip_device_link_up(st))
         netif->flags |= NETIF_FLAG_LINK_UP;
     return ERR_OK;

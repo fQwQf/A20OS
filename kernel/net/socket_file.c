@@ -361,7 +361,8 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
 
     switch (req) {
     case A20_SIOCGIFHWADDR:
-        return net_ifreq_put_addr(uarg, A20_ARPHRD_ETHER,
+        return net_ifreq_put_addr(uarg, (nif->flags & NETIF_FLAG_ETHERNET) ?
+                                  A20_ARPHRD_ETHER : A20_ARPHRD_LOOPBACK,
                                   nif->hwaddr, nif->hwaddr_len);
     case A20_SIOCGIFADDR:
         return net_ifreq_put_addr(uarg, A20_AF_INET, &nif->ip_addr, 4);
@@ -419,7 +420,8 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
     case A20_SIOCGIFNAME:
         return 0;
     case A20_SIOCGIFFLAGS: {
-        short fl = A20_IFF_BROADCAST;
+        short fl = (nif->flags & NETIF_FLAG_ETHERNET) ?
+                   A20_IFF_BROADCAST : A20_IFF_LOOPBACK;
         if (nif->flags & NETIF_FLAG_UP)
             fl |= A20_IFF_UP;
         if (nif->flags & NETIF_FLAG_LINK_UP)

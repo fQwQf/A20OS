@@ -722,6 +722,11 @@ $(BUILD_DIR)/sh: $(BUILD_DIR)/mksh | build_dir
 	@mkdir -p $(dir $@)
 	cp $< $@
 
+# Optional libc/kernel ABI regression executable; not installed by `all`.
+.PHONY: stock-musl-abi
+stock-musl-abi: tests/test_stock_musl_abi.c cmds/linux_sched.h Makefile | build_dir musl_prepare
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/stock_musl_abi $(CRT_START) tests/test_stock_musl_abi.c $(CRT_END) $(LIBC)
+
 $(BUILD_DIR)/init: $(INIT_OBJ) $(INIT_EXTRA_OBJS) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(CRT_END) $(LIBC)

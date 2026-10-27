@@ -886,9 +886,6 @@ int main(int argc, char **argv)
         return fail("stat");
 
     /* renameat(2): glibc calls it directly; verify the rename + new path. */
-#ifndef SYS_renameat
-#define SYS_renameat 38
-#endif
     char oldpath[64], newpath[64];
     snprintf(oldpath, sizeof(oldpath), "%s.old", path);
     snprintf(newpath, sizeof(newpath), "%s.new", path);
@@ -900,8 +897,13 @@ int main(int argc, char **argv)
     close(ofd);
     /* A four-argument syscall must ignore the unused fifth register.  apk's
      * safe-file commit exercises this with nonzero garbage left in r8. */
+#ifdef SYS_renameat
     if (syscall(SYS_renameat, AT_FDCWD, oldpath, AT_FDCWD, newpath,
                 0x40000000UL) < 0)
+#else
+    /* RV32 Linux omits renameat; libc uses renameat2 with flags zero. */
+    if (renameat(AT_FDCWD, oldpath, AT_FDCWD, newpath) < 0)
+#endif
         return fail("renameat");
     if (stat(newpath, &st) < 0 || st.st_size != (off_t)strlen(msg))
         return fail("renameat-stat");

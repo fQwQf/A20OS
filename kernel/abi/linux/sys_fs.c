@@ -303,7 +303,8 @@ int64_t sys_write(int fd, const char *buf, size_t count) {
     return r;
 }
 
-int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
+int64_t sys_pread64(int fd, char *buf, size_t count, int64_t off) {
+    if ((int64_t)(long)off != off) return -EOVERFLOW;
     if (!buf) return -EFAULT;
     if (count == 0) return 0;
     if (off < 0) return -EINVAL;
@@ -359,7 +360,8 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
     return total;
 }
 
-int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
+int64_t sys_pwrite64(int fd, char *buf, size_t count, int64_t off) {
+    if ((int64_t)(long)off != off) return -EOVERFLOW;
     if (!buf) return -EFAULT;
     if (count == 0) return 0;
     if (off < 0) return -EINVAL;
@@ -568,7 +570,8 @@ int64_t sys_close(int fd) {
     return r;
 }
 
-int64_t sys_lseek(int fd, long offset, int whence) {
+int64_t sys_lseek(int fd, int64_t offset, int whence) {
+    if ((int64_t)(long)offset != offset) return -EOVERFLOW;
     int gfd = fdtable_get_current(fd);
     if (gfd < 0) return -EBADF;
     return vfs_lseek(gfd, offset, whence);
@@ -832,15 +835,17 @@ int64_t sys_syncfs(int fd) {
     return vfs_fsync((int)gfd);
 }
 
-int64_t sys_ftruncate(int fd, long length) {
+int64_t sys_ftruncate(int fd, int64_t length) {
     if (length < 0) return -EINVAL;
+    if ((int64_t)(long)length != length) return -EFBIG;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     return vfs_ftruncate(gfd, (size_t)length);
 }
 
-int64_t sys_truncate(const char *path, long length) {
+int64_t sys_truncate(const char *path, int64_t length) {
     if (length < 0) return -EINVAL;
+    if ((int64_t)(long)length != length) return -EFBIG;
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
     long pr0 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
@@ -1125,7 +1130,10 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
     signal_state_t *saved_ss = NULL;
     uint64_t saved_blocked = 0;
     if (sigmask) {
-        uint64_t data[2];
+        /* pselect6's signal descriptor is two native-width words even on
+         * time64 ABIs. RV32 supplies an eight-byte {pointer, size_t}, not
+         * sixteen bytes; reading uint64_t words consumed adjacent memory. */
+        uintptr_t data[2];
         if (copy_from_user(data, sigmask, sizeof(data)) < 0) return -EFAULT;
         if (data[0] && data[1] != sizeof(uint64_t)) return -EINVAL;
         if (data[0]) {

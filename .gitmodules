@@ -5,7 +5,7 @@
 
 [submodule "user/external/musl"]
 	path = user/external/musl
-	url = https://github.com/fQwQf/musl.git
+	url = https://git.musl-libc.org/git/musl
 
 [submodule "user/external/sbase"]
 	path = user/external/sbase
