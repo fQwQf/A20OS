@@ -127,3 +127,16 @@ bind 被当成端口冲突，以及只保存名字却未执行的 SO_BINDTODEVIC
 
 宿主生产状态机回归：UDP/raw send 13项、BH 14项、INET bind 8项、netlink 23项、
 socket option 6项通过。使用配置、ABI契约及服务未覆盖范围见 `lan-services.md`。
+
+## 规模观测与原版 lwIP 迁移方向
+
+同一 ELF 的全新 guest 连接规模测试通过双方1/64/256条；320条目标中 Linux 通过，
+A20OS 在256条处失败。重复验证CT表容量和占用均256；仅关闭tracking的消融通过320条，
+未把消融当成NAT可用方案。全 guest 内存快照及噪声限制见 `benchmark-method.md`。
+前端大对象的内存成本需要继续拆分，不能全部归因于协议栈本体。
+
+过滤器现按IPv4 total length而非Ethernet填充解析L4，短ICMP不再读取缺失的标识符；
+生产状态机新增边界用例通过。conntrack/NAT失败现在计入最终drop，不再提前计accept。
+
+原版lwIP作为未修改submodule候选固定在2.2.1发布提交，尚未适配运行。长期所有权与
+迁移顺序见 `backend-policy.md`；仍未将FreeBSD/原版候选设为桌面/服务器默认。
