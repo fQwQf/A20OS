@@ -58,8 +58,14 @@ static void server(int udp,int port,int ready) {
         for(;;) { ssize_t n=recv(c,b,sizeof(b),0);if(n<0 && errno==EINTR)continue;if(n<0)die("server recv");if(!n)_exit(0);exact(c,b,n,1); }
     }
 }
-static void client(int udp,const char *ip,int port,size_t size,double seconds) {
-    int s=sock(udp);struct sockaddr_in a=addr(ip,port);if(connect(s,(void*)&a,sizeof(a)))die("connect");
+static void client(int udp,const char *ip,int port,size_t size,double seconds,
+                   const char *source_ip,int source_port) {
+    int s=sock(udp);
+    if(source_ip) {
+        struct sockaddr_in source=addr(source_ip,source_port);
+        if(bind(s,(void*)&source,sizeof(source)))die("client bind");
+    }
+    struct sockaddr_in a=addr(ip,port);if(connect(s,(void*)&a,sizeof(a)))die("connect");
     unsigned char tx[65536],rx[65536];
     for(size_t j=0;j<size;j++)tx[j]=(unsigned char)(j*17+93);
     const size_t cap=1048576;
@@ -82,14 +88,18 @@ int main(int argc,char **argv) {
     if(argc<4) {fprintf(stderr,"server tcp|udp PORT; client/local tcp|udp PORT IP SIZE SECONDS\n");return 2;}
     signal(SIGPIPE,SIG_IGN);int udp=!strcmp(argv[2],"udp"),port=atoi(argv[3]);
     if(!strcmp(argv[1],"server"))server(udp,port,-1);
-    if(argc!=7)return 2;
+    if(argc!=7 && argc!=9)return 2;
+    const char *source_ip=argc==9?argv[7]:NULL;
+    int source_port=argc==9?atoi(argv[8]):0;
+    if(source_ip && (source_port<1 || source_port>65535))return 2;
     size_t size=strtoul(argv[5],0,10);double seconds=atof(argv[6]);
     if(size<8||size>65536||seconds<=0)return 2;
     if(!strcmp(argv[1],"multi")) {
+        if(source_ip)return 2; /* One explicit source tuple cannot own four flows. */
         pid_t children[4];double start=now();int bad=0;
         for(int i=0;i<4;i++) {
             children[i]=fork();if(children[i]<0)die("multi fork");
-            if(!children[i]) {client(udp,argv[4],port,size,seconds);fflush(stdout);_exit(0);}
+            if(!children[i]) {client(udp,argv[4],port,size,seconds,NULL,0);fflush(stdout);_exit(0);}
         }
         for(int i=0;i<4;i++) {int status;if(waitpid(children[i],&status,0)<0)die("wait");if(!WIFEXITED(status)||WEXITSTATUS(status))bad=1;}
         printf("PARALLEL clients=4 wall=%.9f verified=%d\n",now()-start,!bad);
@@ -101,7 +111,7 @@ int main(int argc,char **argv) {
         if(!child) {close(p[0]);server(udp,port,p[1]);_exit(0);}
         close(p[1]);char c;if(read(p[0],&c,1)!=1)die("server start");close(p[0]);
     }
-    client(udp,argv[4],port,size,seconds);
+    client(udp,argv[4],port,size,seconds,source_ip,source_port);
     if(child) {kill(child,SIGTERM);waitpid(child,0,0);}
     return 0;
 }

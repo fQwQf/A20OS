@@ -94,3 +94,16 @@ filter生产hook验证NAT失败会DROP；C与Rust重写实现各通过47项独�
 virtio checksum/segmentation卸载特性，完成3轮交替顺序的宿主Linux/Linux KVM/A20OS KVM
 对照，18个case全部校验通过。数据与方法见 `benchmark-method.md`。连接规模、内存成本
 和BSD运行后端尚未完成；原版lwIP尚未替换，不能宣称整个重构/软路由任务已经验收。
+
+## 双网卡IPv4/IPv6与网关策略
+
+`NET_ROLE=router` 启用IPv4/IPv6跨接口转发，和host使用独立产物目录；默认host不变。
+修复现有lwIP转发代码将软件checksum生成开关错误用来清零transit checksum，以及
+TTL/hop-limit零值下溢。`router-verified-kvm` 运行Linux LAN→A20OS双网卡→Linux WAN，
+IPv4/IPv6 ping、TCP16KiB、同源端口双IP UDP并发、表100网关源策略的正/负例均通过。
+四份pcap校验通过；WAN两NAPT端口41510/53000，IPv4 TTL/IPv6 hop limit为63。
+详见router.md；LAN两客户端为一个Linux guest上的两个显式绑定IP端点。
+
+早期策略UDP回显失败保留：wildcard UDP echo的sendto从WAN主地址回应，而请求目标
+是lo上的测试/32，改变了peer tuple。策略验证改用TCP，其accepted socket保留正确的
+local /32源地址，没有为让测试通过而放宽conntrack匹配。

@@ -153,6 +153,12 @@ endif
 # only together with stage D of docs/net/net-lanes.md; stages A-C
 # compute and report lanes but do not yet route packets by them.
 NET_LANES ?= 1
+# Compile-time capability: hosts do not transit packets. Router builds enable
+# IPv4/IPv6 forwarding; this does not assert that the full router suite passes.
+NET_ROLE ?= host
+ifeq ($(filter $(NET_ROLE),host router),)
+$(error NET_ROLE must be host or router)
+endif
 # Network resource tier, 1..3, consumed by kernel/include/net/profile.h as
 # CONFIG_NET_PROFILE. 2 (DEFAULT) is the historical hosted configuration and
 # stays the default so no existing target changes footprint. 1 (EMBEDDED) is
@@ -351,6 +357,11 @@ endif
 
 # Stack selection is separate from resource budgets and QEMU NET_BACKEND.
 NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,lwip)
+ifeq ($(NET_ROLE),router)
+ifeq ($(NET_STACK),none)
+$(error NET_ROLE=router requires a TCP/IP backend)
+endif
+endif
 ifeq ($(NET_STACK),freebsd)
 $(error NET_STACK=freebsd is not runnable yet; upstream source pin alone is not a backend)
 endif
@@ -1182,6 +1193,7 @@ endif
 BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -1832,6 +1844,7 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _) \
          -DCONFIG_NET_LANES=$(NET_LANES) \
          -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
+         -DCONFIG_NET_ROUTER=$(if $(filter router,$(NET_ROLE)),1,0) \
          -DCONFIG_CLUSTER_PROFILE=$(CLUSTER_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)

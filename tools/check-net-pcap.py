@@ -19,15 +19,13 @@ def valid_checksum(data):
     return total == 0xffff
 
 
-def check(path):
+def ethernet_frames(path):
     data = path.read_bytes()
     endian = {b'\xd4\xc3\xb2\xa1': '<', b'\xa1\xb2\xc3\xd4': '>'}.get(data[:4])
     if endian is None or len(data) < 24:
         raise ValueError('expected microsecond classic pcap')
     if struct.unpack_from(endian + 'I', data, 20)[0] != 1:
         raise ValueError('expected Ethernet link type')
-    result = dict(packets=0, ipv4=0, tcp=0, udp=0, udp_unchecked=0,
-                  fragments_skipped=0, other=0, errors=[])
     pos = 24
     while pos < len(data):
         if pos + 16 > len(data):
@@ -36,8 +34,14 @@ def check(path):
         pos += 16
         if caplen != wirelen or pos + caplen > len(data):
             raise ValueError('truncated captured packet')
-        frame = data[pos:pos + caplen]
+        yield data[pos:pos + caplen]
         pos += caplen
+
+
+def check(path):
+    result = dict(packets=0, ipv4=0, tcp=0, udp=0, udp_unchecked=0,
+                  fragments_skipped=0, other=0, errors=[])
+    for frame in ethernet_frames(path):
         result['packets'] += 1
         try:
             if len(frame) < 14:

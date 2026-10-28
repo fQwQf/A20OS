@@ -421,10 +421,8 @@ ip6_forward(struct pbuf *p, struct ip6_hdr *iphdr, struct netif *inp)
     return;
   }
 
-  /* decrement HL */
-  IP6H_HOPLIM_SET(iphdr, IP6H_HOPLIM(iphdr) - 1);
-  /* send ICMP6 if HL == 0 */
-  if (IP6H_HOPLIM(iphdr) == 0) {
+  /* A zero hop limit must not wrap to 255. */
+  if (IP6H_HOPLIM(iphdr) <= 1) {
 #if LWIP_ICMP6
     /* Don't send ICMP messages in response to ICMP messages */
     if (IP6H_NEXTH(iphdr) != IP6_NEXTH_ICMP6) {
@@ -434,6 +432,7 @@ ip6_forward(struct pbuf *p, struct ip6_hdr *iphdr, struct netif *inp)
     IP6_STATS_INC(ip6.drop);
     return;
   }
+  IP6H_HOPLIM_SET(iphdr, IP6H_HOPLIM(iphdr) - 1);
 
   if (netif->mtu && (p->tot_len > netif->mtu)) {
 #if LWIP_ICMP6

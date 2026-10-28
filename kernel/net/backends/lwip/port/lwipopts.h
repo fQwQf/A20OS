@@ -10,6 +10,11 @@
 
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       1
+#ifndef CONFIG_NET_ROUTER
+#define CONFIG_NET_ROUTER               0
+#endif
+#define IP_FORWARD                      CONFIG_NET_ROUTER
+#define LWIP_IPV6_FORWARD                CONFIG_NET_ROUTER
 #define LWIP_ICMP                       1
 #define LWIP_ICMP6                      1
 #define LWIP_RAW                        1
