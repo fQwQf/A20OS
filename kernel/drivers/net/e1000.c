@@ -85,7 +85,7 @@
  * sake and not because QEMU reads it.
  *
  * This is a receive-side capability only.  The link MTU the stack advertises is
- * NET_PROFILE_NETIF_MTU (kernel/net/net_profile.h), which stays 1500 on every
+ * NET_PROFILE_NETIF_MTU (kernel/include/net/profile.h), which stays 1500 on every
  * profile, so a frame between 1515 and 4074 bytes is reassembled correctly here
  * and then dropped by lwIP as over-long.  Raising the two together needs the
  * profile table and the pbuf sizing in the net stack, not a driver register. */
@@ -168,7 +168,7 @@ static void e1000_poll_mode_init(void)
     const char *cmdline = bootargs_get();
     if (!cmdline)
         return;
-    /* Same token scan as mm/wx.c and net/net_config.c: split on blanks, then
+    /* Same token scan as mm/wx.c and net/control/net_config.c: split on blanks, then
      * match the key and take everything up to the token end as the value. */
     const char *p = cmdline;
     while (*p) {

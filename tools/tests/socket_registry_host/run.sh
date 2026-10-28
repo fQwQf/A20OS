@@ -3,8 +3,8 @@
 #
 # The C reference this harness used to compare against was retired with the
 # Rust takeover (see the "net: retire" commit), so the run is now a golden-
-# transcript check: the exact production kernel/net/socket_registry.c and
-# kernel/net/socket_table.c plus kernel/net/socket_registry.rs are compiled for
+# transcript check: the exact production kernel/net/socket/socket_registry.c and
+# kernel/net/socket/socket_table.c plus kernel/net/socket/socket_registry.rs are compiled for
 # the host, the same scenarios are driven through the production entry points,
 # and the transcript must match tools/tests/socket_registry_host/golden.txt byte
 # for byte.  The golden was recorded while both implementations existed and
@@ -65,7 +65,7 @@ record_exit build-slot 0
 cd "$repo" || { record_exit repository-cd 1; exit 1; }
 
 inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
-      -Ikernel/include -Ikernel -Ikernel/net/lwip_port
+      -Ikernel/include -Ikernel -Ikernel/net/backends/lwip/port
       -Ikernel/external/lwip/src/include -Ikernel/external/littlefs
       -Ikernel/external/littlefs/compat -Ikernel/arch/x86_64/boards/x86_64-pc )
 
@@ -75,8 +75,8 @@ inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
 } > "$out/toolchain.txt" 2>&1
 df -h / > "$out/disk.leased.txt" 2>&1
 
-owned_sources=( kernel/net/socket_registry.c kernel/net/socket_registry.rs
-                kernel/net/socket_table.c kernel/net/socket_internal.h
+owned_sources=( kernel/net/socket/socket_registry.c kernel/net/socket/socket_registry.rs
+                kernel/net/socket/socket_table.c kernel/net/socket/socket_internal.h
                 kernel/include/net/socket_registry_state.h
                 kernel/rust/runtime.rs
                 tools/tests/socket_registry_host/harness.c
@@ -86,7 +86,7 @@ owned_sources=( kernel/net/socket_registry.c kernel/net/socket_registry.rs
 hash_inputs() {
   sha256sum "${owned_sources[@]}" > "$1"
   gcc -std=gnu11 "${inc[@]}" -MM -MT socket_registry_harness \
-    kernel/net/socket_registry.c kernel/net/socket_table.c \
+    kernel/net/socket/socket_registry.c kernel/net/socket/socket_table.c \
     tools/tests/socket_registry_host/harness.c \
     > "$out/dependencies.mk" 2> "$out/dependencies.log"
   awk '{ gsub(/\\/, ""); for (i = 1; i <= NF; i++) if ($i != "socket_registry_harness:") print $i }' \
@@ -100,22 +100,22 @@ if [[ $status -ne 0 ]]; then exit "$status"; fi
 
 run_stage registry-compile gcc -std=gnu11 -O1 -Wall -Wextra -Werror \
   -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
-  "${inc[@]}" -c kernel/net/socket_registry.c -o "$out/socket_registry.o"
+  "${inc[@]}" -c kernel/net/socket/socket_registry.c -o "$out/socket_registry.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage table-compile gcc -std=gnu11 -O1 -Wall -Wextra -Werror \
   -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
-  "${inc[@]}" -c kernel/net/socket_table.c -o "$out/socket_table.o"
+  "${inc[@]}" -c kernel/net/socket/socket_table.c -o "$out/socket_table.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-object rustc --edition=2021 --crate-type lib --emit=obj \
   -C panic=abort -C overflow-checks=off \
-  kernel/net/socket_registry.rs -o "$out/socket_registry_state.o"
+  kernel/net/socket/socket_registry.rs -o "$out/socket_registry_state.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-runtime rustc --edition=2021 --crate-type staticlib \
   -C panic=abort -C overflow-checks=off \
   kernel/rust/runtime.rs -o "$out/liba20_rust_runtime.a"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-tests rustc --edition=2021 --test \
-  kernel/net/socket_registry.rs -o "$out/registry_unit_tests"
+  kernel/net/socket/socket_registry.rs -o "$out/registry_unit_tests"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-run "$out/registry_unit_tests" --test-threads=1
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi

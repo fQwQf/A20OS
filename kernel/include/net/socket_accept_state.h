@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust accept transaction
- * (kernel/net/socket_accept.rs, selected by NET_SOCKET_ACCEPT_IMPL=rust).
+ * (kernel/net/socket/socket_accept.rs, selected by NET_SOCKET_ACCEPT_IMPL=rust).
  *
  * Rust owns the decision surface: the flag validation, the type/domain refusal,
  * the pop-or-block loop with its park and its re-check, the peer address

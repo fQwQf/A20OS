@@ -6,7 +6,7 @@
 > **当前状态（先读这一段；下面是调查过程，含已被推翻的中间结论）**
 >
 > 1. 找到并修掉了一个真的双重释放，位置在 raw socket 接收回调
->    （`kernel/net/socket_inet.c` 的 `raw_recv`）：它先 `pbuf_free(p)`，然后返回 0。
+>    （`kernel/net/backends/lwip/socket_inet.c` 的 `raw_recv`）：它先 `pbuf_free(p)`，然后返回 0。
 >    lwIP 把这个返回值读作"这个包已被吃掉"的标志，非零才表示回调接管了所有权；
 >    返回 0 等于宣称自己没动，于是调用方又释放了一次。`raw_recv` 同时注册在 AF_INET 与
 >    AF_INET6 的 `SOCK_RAW` 上。这是 send 侧那个已修双重释放的接收侧镜像。
@@ -136,7 +136,7 @@ lwIP assertion failed: detected mem underflow in pool PBUF_POOL
 而代码却当作成功继续执行；此时 `ip_data.current_ip_header_tot_len` 已被写成
 `hlen_tot`，`raw_input()` 拿到的是一个 payload 布局与 `hlen_tot` 不符的 pbuf。
 
-A20OS 侧确实存在 raw socket（`kernel/net/socket_packet.c`），且同一区域此前
+A20OS 侧确实存在 raw socket（`kernel/net/socket/socket_packet.c`），且同一区域此前
 修过一次双重释放，与「pool 元素被写坏」的症状方向一致。
 
 **进一步推论（重要）**：`raw_input()` 在没有任何匹配的 raw pcb 时会提前返回，
@@ -144,7 +144,7 @@ A20OS 侧确实存在 raw socket（`kernel/net/socket_packet.c`），且同一�
 绑定了该协议的 raw socket。这正好把嫌疑引向 A20OS 自己的代码：
 `net_packet_rx_defer()` 会在每个收到的帧上喂一次 raw socket 通道，
 与「首次网络活动即损坏」的现象吻合。若该推断成立，真正的越界写发生在
-`kernel/net/socket_packet.c` 消费 raw pbuf 时按（被 force 失败弄脏的）
+`kernel/net/socket/socket_packet.c` 消费 raw pbuf 时按（被 force 失败弄脏的）
 IP 头去算长度的那一段，而不在 lwIP 内。
 
 因此下一步 instrument 应当同时覆盖两处：`ip6_input:1054` 的 force 失败分支，
@@ -251,11 +251,11 @@ pbuf[0..15] = 0600000000000000 98d281000080ffff
   `lwIP assertion failed: pbuf_free: p->ref > 0`；调用链为
   `ip6_input` → `ethernet_input` → `a20_lwip_process_netif_rx_tx_locked`。
   桌面会话因此活不过约 55s。这条是既有问题，rebase 到当前 main 后依旧复现。
-- 已修（调用侧，真实缺陷）：`kernel/net/lwip_stack.c` 的 RX 循环在 `netif->input()`
+- 已修（调用侧，真实缺陷）：`kernel/net/backends/lwip/lwip_stack.c` 的 RX 循环在 `netif->input()`
   返回错误时又 `pbuf_free(p)`，但 lwIP 的 `ethernet_input` 在自己的错误路径上
   「先释放再返回 `ERR_OK`」（源码注释：so the caller doesn't have to free it again），
   这是对已移交所有权的 pbuf 二次释放。已修（`687f8271`）。
-- 已修（可二分性）：`kernel/net/socket_inet.c` 的 UDP/raw 收包回调原先无条件调用
+- 已修（可二分性）：`kernel/net/backends/lwip/socket_inet.c` 的 UDP/raw 收包回调原先无条件调用
   `ip6_current_dest_addr()` / `IP6H_HOPLIM()` 等，导致 `LWIP_IPV6=0` 根本编不过，
   IPv6 路径无法单独二分。已加 `#if LWIP_IPV6` 保护（`0154a7fc`）。
 - 已定位到 IPv6 收包路径：`LWIP_IPV6=0` 时桌面稳定存活 250s+、零 panic。

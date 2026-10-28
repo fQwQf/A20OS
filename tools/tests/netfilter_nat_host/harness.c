@@ -1,10 +1,10 @@
 /*
- * Differential harness for the exact production kernel/net/netfilter_nat.c.
+ * Differential harness for the exact production kernel/net/filter/netfilter_nat.c.
  *
  * Both selector runs compile this same translation unit and drive the same
  * scenarios through the production entry points, so the transcripts must be
  * byte-identical: the C reference under #else and the Rust state machine in
- * kernel/net/netfilter_nat.rs are compared on the real code, not on a
+ * kernel/net/filter/netfilter_nat.rs are compared on the real code, not on a
  * reimplementation of it.
  *
  * What the harness supplies is the primitive half only: a controllable clock
@@ -14,9 +14,9 @@
  * netfilter_rewrite.c, compiled in.
  */
 #include "net/netfilter.h"
-#include "net/netfilter_internal.h"
+#include "net/filter/netfilter_internal.h"
 #include "net/netfilter_rewrite.h"
-#include "net/net_profile.h"
+#include "net/profile.h"
 
 #include "core/stdio.h" /* va_list without <stdarg.h> */
 #include "/usr/include/stdio.h"

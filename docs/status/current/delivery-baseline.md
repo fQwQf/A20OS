@@ -117,7 +117,7 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 
 | 用例 | 根因 | 归属 |
 | --- | --- | --- |
-| ~~`test_tcp_send_backpressure.test_accepted_bytes_and_retry`~~ | 已修复：`tools/tests/test_tcp_send_backpressure.py` 改为编译并运行 `kernel/net/socket_inet_send_tcp.rs` 的宿主 Rust 测试，不再抓 C 源码窗口；保留逐次 `tcp_write` 脚本、部分接受和全部负控 | NET（已修） |
+| ~~`test_tcp_send_backpressure.test_accepted_bytes_and_retry`~~ | 已修复：`tools/tests/test_tcp_send_backpressure.py` 改为编译并运行 `kernel/net/backends/lwip/socket_inet_send_tcp.rs` 的宿主 Rust 测试，不再抓 C 源码窗口；保留逐次 `tcp_write` 脚本、部分接受和全部负控 | NET（已修） |
 
 本表此前记录的 9 个 error（MM 的 usercopy/tlb/process_vm 抽取、NET 的背压、PROC 的 partial-results）
 在 main 的 MM/FS 包并入以及 NET-11 夹具改写后都已通过。非 C locale 下另有 6 个 `test_removed_arch_targets_*` 失败，

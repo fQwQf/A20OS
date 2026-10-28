@@ -18,8 +18,8 @@ struct raw_pcb;
 struct tcp_pcb;
 struct pbuf;
 
-#include "net/net_profile.h"
-/* The registry state machine's C ABI; see kernel/net/socket_registry.rs. */
+#include "net/profile.h"
+/* The registry state machine's C ABI; see kernel/net/socket/socket_registry.rs. */
 #include "net/socket_registry_state.h"
 
 #define NET_MAX_SOCKETS NET_PROFILE_MAX_SOCKETS
@@ -403,7 +403,7 @@ typedef struct net_socket {
     /* AF_ALG algorithm names from bind().  No kernel crypto provider ships,
      * so bind() always fails and these stay diagnostic-only.  Do not attach
      * a data plane or an in-socket buffer here without a real provider —
-     * see kernel/net/socket_alg.c. */
+     * see kernel/net/socket/socket_alg.c. */
     char alg_type[16];
     char alg_name[64];
     struct net_socket *accept_next;
@@ -993,7 +993,7 @@ int net_sock_ref_format(char *buf, size_t bufsz);
  * Reference lifecycle entry points (socket_registry.c).  The state they move is
  * the socket's own `refs` / `ref_magic` pair, and the transitions over it -- the
  * acquire, the CAS release loop, the canary check and the free decision --
- * belong to kernel/net/socket_registry.rs.
+ * belong to kernel/net/socket/socket_registry.rs.
  *
  * net_sock_ref_release() returns 1 when the caller must destroy the object and 0
  * when it must not; a ledger fault (a double free or a non-socket pointer) is
@@ -1387,7 +1387,7 @@ void net_tcp_recved(net_socket_t *s, size_t len);
 
 /* Internal IPC bridge (AF_UNIX socketpair): plain data flows through the
  * internal channel; SCM_RIGHTS messages fall back to the legacy queue.
- * Implemented in socket_unix.c, used by net/socket.c recv path. */
+ * Implemented in socket_unix.c, used by net/socket/socket.c recv path. */
 int unix_ch_recv(net_socket_t *s, void *buf, size_t len);
 int unix_ch_peek(net_socket_t *s, void *buf, size_t len);
 int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len);

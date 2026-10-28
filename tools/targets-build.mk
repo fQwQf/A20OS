@@ -368,11 +368,11 @@ check-concurrency-foundation: smoke-smp-bringup
 # only prove a string exists; these prove a bug cannot come back unnoticed.
 check-honesty-policy:
 	@echo "check-honesty-policy: auditing fail-closed behaviour"
-	@if rg -q '", 1 \},' kernel/net/socket_alg.c; then \
+	@if rg -q '", 1 \},' kernel/net/socket/socket_alg.c; then \
 	  echo "  FAIL AF_ALG advertises an algorithm it cannot compute"; exit 1; fi
-	@if rg -Uq '(?s)level == SOL_SOCKET\)\s*\n\s*return 0;' kernel/net/socket_control.c; then \
+	@if rg -Uq '(?s)level == SOL_SOCKET\)\s*\n\s*return 0;' kernel/net/socket/socket_control.c; then \
 	  echo "  FAIL setsockopt still reports success for discarded SOL_SOCKET options"; exit 1; fi
-	@if rg -q 'congestion\[\] = "cubic"' kernel/net/socket_control.c; then \
+	@if rg -q 'congestion\[\] = "cubic"' kernel/net/socket/socket_control.c; then \
 	  echo "  FAIL TCP_CONGESTION hardcodes an algorithm the stack lacks"; exit 1; fi
 	@if rg -q '0\.00 0\.00 0\.00 1/64' kernel/fs/procfs/procfs_render.c; then \
 	  echo "  FAIL /proc/loadavg is a constant again"; exit 1; fi

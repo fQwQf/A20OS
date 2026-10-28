@@ -7,7 +7,7 @@
  * net lock.  Captures therefore land in a small ring and are delivered from
  * the poll bottom half, which runs with socket locks only.
  */
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/socket_side.h"
 #include "net/lwip_stack.h"
 #include "core/errno.h"
@@ -46,7 +46,7 @@ _Static_assert(sizeof(net_packet_slot_t) == NET_PROFILE_PACKET_SLOT_BYTES,
 #include "net/socket_packet_state.h"
 
 /*
- * The AF_PACKET state machine is Rust (kernel/net/socket_packet.rs).  What is
+ * The AF_PACKET state machine is Rust (kernel/net/socket/socket_packet.rs).  What is
  * left here is the ring's storage and its spinlock, the primitive set the Rust
  * module calls, and the wrappers that keep the C names the rest of the tree
  * uses.
@@ -77,15 +77,15 @@ static volatile unsigned g_pkt_drops;
 _Static_assert(offsetof(net_packet_slot_t, len) == 0 &&
                offsetof(net_packet_slot_t, ifindex) == 2 &&
                offsetof(net_packet_slot_t, frame) == 4,
-               "kernel/net/socket_packet.rs reads the slot at these offsets");
+               "kernel/net/socket/socket_packet.rs reads the slot at these offsets");
 /* The Rust frame buffer is 1536 bytes (the largest rung's frame size). */
 _Static_assert(NET_PACKET_MAX_FRAME <= 1536,
                "the Rust packet frame buffer must cover the profile's frame");
-/* net_sockaddr_ll_t as kernel/net/socket_packet.rs declares it. */
+/* net_sockaddr_ll_t as kernel/net/socket/socket_packet.rs declares it. */
 _Static_assert(sizeof(net_sockaddr_ll_t) == 20 &&
                offsetof(net_sockaddr_ll_t, sll_halen) == 11 &&
                offsetof(net_sockaddr_ll_t, sll_addr) == 12,
-               "kernel/net/socket_packet.rs declares net_sockaddr_ll_t at this layout");
+               "kernel/net/socket/socket_packet.rs declares net_sockaddr_ll_t at this layout");
 
 size_t net_packet_static_bytes(void)
 {

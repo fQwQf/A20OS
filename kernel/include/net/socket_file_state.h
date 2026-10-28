@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust socket-vfile lifecycle
- * (kernel/net/socket_file.rs, selected by NET_SOCKET_FILE_IMPL=rust).
+ * (kernel/net/socket/socket_file.rs, selected by NET_SOCKET_FILE_IMPL=rust).
  *
  * Rust owns the close teardown transaction, the install transaction with its
  * rollback and the fd pin; C owns the primitives they call: the socket lock
@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 /* Borrowed view of the fields the teardown transacts over.  Field order is the
- * contract with `CloseView` in kernel/net/socket_file.rs. */
+ * contract with `CloseView` in kernel/net/socket/socket_file.rs. */
 typedef struct net_close_view {
     void *s;
     int  *closed;

@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust INET socket option and buffer machinery
- * (kernel/net/socket_inet_opt.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_opt.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * Rust owns the congestion-algorithm switch, the per-type buffer ceilings and
  * the value in force, the SO_SNDBUF/SO_RCVBUF application with its clamps and

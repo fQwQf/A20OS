@@ -22,7 +22,7 @@
 #include "fs/fdtable.h"
 #include "fs/xattr.h"
 #include "net/socket.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "fs/fdtable.h"
 #include "sys/usercopy.h"
 

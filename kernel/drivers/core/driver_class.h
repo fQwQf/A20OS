@@ -167,7 +167,7 @@ typedef struct net_iovec {
  *    channel to travel in.  QEMU's virtio-net does not supply it either: it
  *    never sets VIRTIO_NET_HDR_F_DATA_VALID;
  *  - the outbound path rewrites L4 checksums incrementally in place for NAT
- *    (kernel/net/netfilter_nat.c), which is arithmetic on a value that would no
+ *    (kernel/net/filter/netfilter_nat.c), which is arithmetic on a value that would no
  *    longer be a complete checksum.
  *
  * Setting either bit under those conditions would leave lwIP verifying a

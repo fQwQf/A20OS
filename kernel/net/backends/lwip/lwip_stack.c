@@ -3,7 +3,7 @@
 #include "net/tun.h"
 #include "net/lwip_concurrency.h"
 #include "core/bootargs.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/net_config.h"
 #include "net/netfilter.h"
 #include "core/timer.h"
@@ -344,7 +344,7 @@ _Static_assert(sizeof(a20_lwip_link_event_t) == sizeof(nlrt_link_event_t) &&
 
 /*
  * The carrier detector and the deferred link-event flush are Rust
- * (kernel/net/lwip_stack.rs).  What is left here is the device and netif access
+ * (kernel/net/backends/lwip/lwip_stack.rs).  What is left here is the device and netif access
  * they call.
  */
 
@@ -2413,7 +2413,7 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
 
 /*
  * The netif address/flag/MTU transactions and the AF_PACKET transmit entry are
- * Rust (kernel/net/lwip_stack.rs).  What is left here is the lwIP netif access
+ * Rust (kernel/net/backends/lwip/lwip_stack.rs).  What is left here is the lwIP netif access
  * and the device ops they call, and the wrappers that keep the C names the
  * socket and netlink layers use.
  */
@@ -2659,7 +2659,7 @@ int a20_lwip_netif_is_tun(struct netif *n)
     return 0;
 }
 
-/* LWIP_HOOK_IP4_ROUTE_SRC (see net/lwip_port/lwipopts.h).  Called by lwIP with
+/* LWIP_HOOK_IP4_ROUTE_SRC (see net/backends/lwip/port/lwipopts.h).  Called by lwIP with
  * g_lwip_lock held: the route lookup takes only the route table's own lock,
  * and the netif is resolved through the same index walk the netlink write path
  * uses.  NULL means "no prefix route matched", which lets lwIP choose by

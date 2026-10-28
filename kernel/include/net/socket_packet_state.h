@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust AF_PACKET state machine
- * (kernel/net/socket_packet.rs, selected by NET_PACKET_IMPL=rust).
+ * (kernel/net/socket/socket_packet.rs, selected by NET_PACKET_IMPL=rust).
  *
  * Rust owns the capture decision and the ring protocol (full/empty, the drop
  * counter, the pending publication, the drain loop and the flush decision), the
@@ -24,7 +24,7 @@
 #include <stdint.h>
 
 /* Borrowed view of the AF_PACKET fields the transactions read and write.
- * Field order is the contract with `PacketView` in kernel/net/socket_packet.rs.
+ * Field order is the contract with `PacketView` in kernel/net/socket/socket_packet.rs.
  */
 typedef struct net_packet_view {
     void *s;

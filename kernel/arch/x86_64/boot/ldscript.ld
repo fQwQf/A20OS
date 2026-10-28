@@ -65,7 +65,7 @@ SECTIONS
          * label in entry.S, so the BSP ran on a stack that began inside .bss
          * and grew down through all of it.  That was invisible until lwIP's
          * 512 KiB ram_heap landed last in .bss (MEMP_MEM_MALLOC=1,
-         * net/lwip_port/lwipopts.h): mem_init()'s sentinel `struct mem` landed
+         * net/backends/lwip/port/lwipopts.h): mem_init()'s sentinel `struct mem` landed
          * on the live stack of net_init(), and the next printf() returned into
          * the middle of kernel_main's `call *%rax`, faulting at
          * kernel_main+0x1f1.  A stack 64 KiB *below* .bss's top is what every

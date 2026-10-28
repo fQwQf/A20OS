@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust TCP stream send transaction
- * (kernel/net/socket_inet_send_tcp.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_send_tcp.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * Rust owns the early refusals, the local socket-to-socket path (resolve,
  * reference, liveness, blocking enqueue, free) and the retry deadline policy.

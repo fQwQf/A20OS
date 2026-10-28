@@ -61,7 +61,7 @@ unsafe extern "C" {
 const KEY: &[u8] = b"a20.wx=";
 
 /// Scan the cmdline for `a20.wx=off|strip|deny`, in the same token style as
-/// `net/net_config.c`: whitespace-separated tokens, each examined once.
+/// `net/control/net_config.c`: whitespace-separated tokens, each examined once.
 ///
 /// An unrecognised value keeps the previous setting and is reported, rather
 /// than being silently ignored -- a typo in a hardening option must not look

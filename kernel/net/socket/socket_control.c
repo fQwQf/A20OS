@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/tun.h"
 #include "ipc/ipc.h"
 #include "core/klog.h"
@@ -337,7 +337,7 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
 
 
 /*
- * Primitives for the Rust accept transaction (kernel/net/socket_accept.rs).
+ * Primitives for the Rust accept transaction (kernel/net/socket/socket_accept.rs).
  * Each one is a step the Rust decision surface cannot perform itself: the
  * algorithm accept, the queue pop, a lock, the park protocol, a child field
  * read or write, the install, the registry release, a reference or a free, a
@@ -610,7 +610,7 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
  * What stays here is the primitive half: the borrowed view into net_socket_t,
  * the socket lock and lwIP barrier the Rust module decides *when* to take, the
  * buffer-ceiling and IGMP lookups (lwIP state), the live-pcb reads and the raw
- * copyout. What moved to kernel/net/socket_options.rs is every decision: which
+ * copyout. What moved to kernel/net/socket/socket_options.rs is every decision: which
  * option is recognised at which level, its accepted range, the byte-order
  * re-read, the clamp, which field it lands in, which pcb-apply group it
  * invalidates, and what getsockopt reports.
@@ -979,7 +979,7 @@ int net_set_nonblock(int gfd, int nonblock)
 
 /*
  * Primitives for the Rust poll readiness computation
- * (kernel/net/socket_poll.rs).  Each one is a step the Rust decision surface
+ * (kernel/net/socket/socket_poll.rs).  Each one is a step the Rust decision surface
  * cannot perform itself: the vfile-to-socket resolution, a lock, the channel
  * tests, the peer queue depth read and the queue capacity.
  */

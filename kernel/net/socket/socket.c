@@ -1,5 +1,5 @@
 #include "net/socket.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "mm/slab.h"
 #include "ipc/ipc.h"
 #include "fs/vfs.h"
@@ -27,7 +27,7 @@ static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_
  * need different counters to be visible.
  *
  * The ledger itself now lives with the rest of the reference lifecycle in
- * kernel/net/socket_registry.c -- Rust-owned under NET_SOCKET_REGISTRY_IMPL=rust
+ * kernel/net/socket/socket_registry.c -- Rust-owned under NET_SOCKET_REGISTRY_IMPL=rust
  * -- because the counters only mean anything next to the transition that moves
  * them.  What is left here is the socket object itself.
  */
@@ -167,7 +167,7 @@ void net_socket_free(net_socket_t *s) {
      * into obj_cache_free() with a negative count and no signal at all.
      * This was the unverified primitive.  It now
      * belongs to the Rust registry state machine
-     * (kernel/net/socket_registry.rs); what stays here is the destroy sequence,
+     * (kernel/net/socket/socket_registry.rs); what stays here is the destroy sequence,
      * which is primitives rather than state.
      */
     if (!net_sock_ref_release(s))
@@ -371,7 +371,7 @@ void net_init(void) {
      * judged, because the registry locks only exist from
      * net_socket_registry_init() on and no socket has been created yet.  After
      * arming, a violation of the net-lock contract is a panic rather than a
-     * counter -- see kernel/net/net_lock_probe.c. */
+     * counter -- see kernel/net/socket/net_lock_probe.c. */
     net_lock_probe_arm();
 #endif
     printf("[NET] socket layer initialized\n");
@@ -844,7 +844,7 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
 
 
 /*
- * Primitives for the Rust sendto transaction (kernel/net/socket_sendto.rs).
+ * Primitives for the Rust sendto transaction (kernel/net/socket/socket_sendto.rs).
  * Each one is a step the Rust decision surface cannot perform itself: a
  * per-family send entry, the netns test, a lock, the liveness test, the
  * reference and the free, the loopback autobind, the bound-socket scan, the
@@ -1011,7 +1011,7 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
 
 /*
  * Primitives for the Rust blocking-receive transaction
- * (kernel/net/socket_recv.rs).  Each one is a single step the Rust decision
+ * (kernel/net/socket/socket_recv.rs).  Each one is a single step the Rust decision
  * surface cannot perform itself: a lock, a copy out of the queue, a clock read,
  * a signal test, a park, a wake-queue collect or the lwIP receive accounting.
  * The lock discipline is Rust's -- it holds net_sock_lock across the decisions

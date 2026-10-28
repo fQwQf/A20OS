@@ -125,8 +125,8 @@ def main():
     make = ["make", "--no-print-directory", "ARCH=riscv64", "ABI=both", "CLUSTER_PROFILE=3", "BRINGUP=0"]
     sources = ["user/tests/test_native_cluster_load.c", "kernel/cluster/transport.c",
                "kernel/cluster/remote_ep.c", "kernel/cluster/export.c", "kernel/cluster/reliable.c",
-               "kernel/cluster/udp.c", "kernel/net/socket_inet.c", "kernel/net/lwip_compat.c", "kernel/mm/slab.c",
-               "kernel/net/lwip_port/arch/heap.h", "kernel/drivers/net/virtio_net.c",
+               "kernel/cluster/udp.c", "kernel/net/backends/lwip/socket_inet.c", "kernel/net/backends/lwip/lwip_compat.c", "kernel/mm/slab.c",
+               "kernel/net/backends/lwip/port/arch/heap.h", "kernel/drivers/net/virtio_net.c",
                "kernel/include/uapi/a20/cluster_snapshot.h", "kernel/cluster/transport.h",
                "tools/check-cluster-load.py"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sources}

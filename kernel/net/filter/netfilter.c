@@ -22,7 +22,7 @@
  * wait-free, which taking a lock under the global lwIP lock would not be.
  *
  * A packet meets three things here, in this order: the rule table (this file),
- * then conntrack and NAT (kernel/net/netfilter_nat.c).  The order is
+ * then conntrack and NAT (kernel/net/filter/netfilter_nat.c).  The order is
  * deliberate -- a dropped packet must not create flow state or consume a NAT
  * binding -- and it is why the Ethernet/IPv4/L4 walk lives in
  * netfilter_parse_frame() below and is handed to the NAT half rather than
@@ -30,7 +30,7 @@
  */
 
 #include "net/netfilter.h"
-#include "net/netfilter_internal.h"
+#include "net/filter/netfilter_internal.h"
 #include "net/lwip_stack.h"
 #include "core/lock.h"
 #include "core/seqlock.h"

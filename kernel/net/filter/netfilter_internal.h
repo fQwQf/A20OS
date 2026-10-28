@@ -1,6 +1,6 @@
 /*
- * Shared internals of the netfilter module (kernel/net/netfilter.c and
- * kernel/net/netfilter_nat.c).  Not a public header: nothing outside
+ * Shared internals of the netfilter module (kernel/net/filter/netfilter.c and
+ * kernel/net/filter/netfilter_nat.c).  Not a public header: nothing outside
  * kernel/net/ includes this.
  */
 #ifndef _NET_NETFILTER_INTERNAL_H

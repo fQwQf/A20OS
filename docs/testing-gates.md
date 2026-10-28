@@ -344,7 +344,7 @@ Sv39 上一个节点条目是 2 MiB，所以「给一个映射命名」实际上
 
 `make check-io-progress-model` 检查 `KERNEL_PROGRESS_SERVICE_CONTRACT`、progress bottom-half 调用点、`LWIP_NO_THREAD_PROGRESS_CONTRACT`、virtio-net 非阻塞路径；禁止在 `kernel/proc/sched.c` 或 `kernel/proc/proc.c` 中直接调用 `virtio_blk_poll_all` 或 `a20_lwip_poll`。
 
-失败时查 `kernel/core/progress.c`、`kernel/proc/sched.c`、`kernel/include/core/progress.h`、`kernel/net/lwip_stack.c` 中对应契约字符串，确认调度器/进程路径没有直接轮询 virtio-blk 或 lwIP。
+失败时查 `kernel/core/progress.c`、`kernel/proc/sched.c`、`kernel/include/core/progress.h`、`kernel/net/backends/lwip/lwip_stack.c` 中对应契约字符串，确认调度器/进程路径没有直接轮询 virtio-blk 或 lwIP。
 
 #### 这个门禁挡下来的三次真实回归
 
@@ -678,7 +678,7 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 它必须存在，是因为 getifaddrs()、ifconfig 与 busybox `ip` 全部建立在 SIOCGIFCONF 上，而 per-interface getter 在没有枚举手段之前不可达。SIOCGIFCONF 此前是"派发但未实现"（-ENOTTY），该区域没有任何运行门禁，因此下面两个真实缺陷是写这个门禁时才暴露的。
 
-失败时查看 `.kernel-build/smoke/smoke-net-iface.log` 中首个 `NET_IFACE: FAIL` 行，对照 `kernel/net/socket_file.c` 的 `struct a20_ifreq` 与 `net_ifreq_fill` / `net_ifreq_put_addr`。`info` 行会打印用户态 `sizeof(struct ifreq)`、`offsetof(ifr_ifru)` 与每个接口的地址，ABI 不匹配时这三行即可定位。
+失败时查看 `.kernel-build/smoke/smoke-net-iface.log` 中首个 `NET_IFACE: FAIL` 行，对照 `kernel/net/socket/socket_file.c` 的 `struct a20_ifreq` 与 `net_ifreq_fill` / `net_ifreq_put_addr`。`info` 行会打印用户态 `sizeof(struct ifreq)`、`offsetof(ifr_ifru)` 与每个接口的地址，ABI 不匹配时这三行即可定位。
 
 ### TCP accept 路径与 listener 存在性（Linux ABI sockets 区域）
 
@@ -707,8 +707,8 @@ listener；`lwip` 档把已绑定的 PCB 转成真正的 lwIP LISTEN pcb，由�
 **没有任何门禁跑网络区域**，所以这个状态可以一直不被发现。
 
 失败时查看 `.kernel-build/smoke/net-accept-riscv64.log`，对照
-`kernel/net/socket_control.c` 的 `net_listen()`（两档分派）与
-`kernel/net/socket_inet.c` 的 `net_inet_tcp_listen()` / `lwip_tcp_accept_cb()` /
+`kernel/net/socket/socket_control.c` 的 `net_listen()`（两档分派）与
+`kernel/net/backends/lwip/socket_inet.c` 的 `net_inet_tcp_listen()` / `lwip_tcp_accept_cb()` /
 `net_inet_accept_stage_drain()`。门禁会在失败时打印 `passes` 与四个计数器值。
 
 ### network_suite 的判定语义：declared-absent
@@ -726,7 +726,7 @@ smoke-network-suite` 顺序通过。4-lane stress 完成 4 轮、每轮 1 MiB �
 declared-absent（`alg_test`）；对应 `.kernel-build/smoke/*-riscv64.log` 无
 panic。该记录只描述 2026-10-08 本地运行，不代表远端 CI 状态。
 
-AF_ALG 是后者的典型：它刻意不提供任何算法（见 `kernel/net/socket_alg.c`），`bind()` 必然
+AF_ALG 是后者的典型：它刻意不提供任何算法（见 `kernel/net/socket/socket_alg.c`），`bind()` 必然
 失败，`alg_test` 如实返回 78（ABSENT）。此前套件把 ABSENT 一律当失败，于是
 `smoke-network-suite` 在 `main` 上就已经是红的——网络栈无论怎么改都不可能让它变绿，
 一个永远红的门禁等于没有门禁。改为：`known_absent` 的 ABSENT 结果是**被断言的状态**，
@@ -1255,7 +1255,7 @@ in-use 恰好增加 4 页，搬移后 in-use 不变（目标保留一份引用�
 
 netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/netlink.h>`）。独立复述契约才能证明它测的是内核而不是内核的镜像。
 
-失败时查看 `.kernel-build/smoke/netctl-riscv64.log` 中首个 `NETCTL: FAIL`，对照 `kernel/net/socket_file.c`（SIOCGIFCONF 与 `struct a20_ifreq` 线格式）、`kernel/net/socket_netlink.c`（`net_netlink_route_request` 与 `nlrt_snapshot`）、`kernel/net/lwip_stack.c`（`/proc/net` 渲染与 netif 命名）、`kernel/net/socket.c`（`net_msg_flags_check`）。已知边界：本栈无路由表，`/proc/net/route` 与 `RTM_GETROUTE` 只报告各 netif 的默认网关，`RTM_SET*` 与路由增删一律 `-EOPNOTSUPP`；loopback 不经过驱动收发路径，其计数寄存器读零是真实值而非统计缺失；`SIOCSIFMTU`/`SIOCSIFDSTADDR`/`SIOCSIFBRDADDR` 仍是已分发但未实现、返回 `-ENOTTY`，而不是伪造成功；`/proc/net/arp` 仍是空表头，因为 lwIP 没有暴露 ARP 表访问器。
+失败时查看 `.kernel-build/smoke/netctl-riscv64.log` 中首个 `NETCTL: FAIL`，对照 `kernel/net/socket/socket_file.c`（SIOCGIFCONF 与 `struct a20_ifreq` 线格式）、`kernel/net/control/socket_netlink.c`（`net_netlink_route_request` 与 `nlrt_snapshot`）、`kernel/net/backends/lwip/lwip_stack.c`（`/proc/net` 渲染与 netif 命名）、`kernel/net/socket/socket.c`（`net_msg_flags_check`）。已知边界：本栈无路由表，`/proc/net/route` 与 `RTM_GETROUTE` 只报告各 netif 的默认网关，`RTM_SET*` 与路由增删一律 `-EOPNOTSUPP`；loopback 不经过驱动收发路径，其计数寄存器读零是真实值而非统计缺失；`SIOCSIFMTU`/`SIOCSIFDSTADDR`/`SIOCSIFBRDADDR` 仍是已分发但未实现、返回 `-ENOTTY`，而不是伪造成功；`/proc/net/arp` 仍是空表头，因为 lwIP 没有暴露 ARP 表访问器。
 
 ### ext4 JBD2 崩溃一致性
 

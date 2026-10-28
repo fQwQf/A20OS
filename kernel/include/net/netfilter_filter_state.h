@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust IPv4 filter state machine
- * (kernel/net/netfilter_filter.rs, selected by NETFILTER_FILTER_IMPL=rust).
+ * (kernel/net/filter/netfilter_filter.rs, selected by NETFILTER_FILTER_IMPL=rust).
  *
  * Rust owns the rule table transactions, the parser, the frame walk, the
  * matching engine and the hook ordering.  C owns the storage (`g_rules`, its

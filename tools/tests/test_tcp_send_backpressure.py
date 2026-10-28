@@ -1,6 +1,6 @@
 """Exercise the real external TCP send loop with allocation/output failures.
 
-The loop moved from C to kernel/net/socket_inet_send_tcp.rs.  Run that file's
+The loop moved from C to kernel/net/backends/lwip/socket_inet_send_tcp.rs.  Run that file's
 own host tests instead of scraping a function body: the tests script tcp_write
 returns per attempt, so partial acceptance and the retry/backpressure branches
 are distinguished from a plain implementation regression.
@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / 'kernel/net/socket_inet_send_tcp.rs'
+SOURCE = ROOT / 'kernel/net/backends/lwip/socket_inet_send_tcp.rs'
 
 
 class TcpSendBackpressure(unittest.TestCase):

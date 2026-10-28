@@ -17,7 +17,7 @@
 #include "fs/vfs.h"
 #include "net/socket.h"
 #include "net/net_config.h"
-#include "../net/socket_internal.h"
+#include "../net/socket/socket_internal.h"
 #include "sys/syscall.h"
 #include "proc/signal.h"
 

@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 
 #include "core/cpu.h"
 #include "core/panic.h"

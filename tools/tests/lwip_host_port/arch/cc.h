@@ -24,7 +24,7 @@ typedef uintptr_t mem_ptr_t;
 #ifndef CONFIG_NET_LANES
 #define CONFIG_NET_LANES 4
 #endif
-#include "net/lwip_port/arch/heap.h"
+#include "net/backends/lwip/port/arch/heap.h"
 typedef uint64_t sys_prot_t;
 #define LWIP_PLATFORM_DIAG(x) do { fprintf(stderr, x); } while (0)
 #define LWIP_PLATFORM_ASSERT(x) do { \

@@ -4,7 +4,7 @@
  * Register-level implementation of the classic ("non C+") RTL8139 data path,
  * structured exactly like kernel/drivers/net/e1000.c: a PCI id_table, one
  * static instance, and the net_dev_ops_t class interface consumed by
- * kernel/net/lwip_stack.c through device_find_get_by_class(DEV_CLASS_NET, n).
+ * kernel/net/backends/lwip/lwip_stack.c through device_find_get_by_class(DEV_CLASS_NET, n).
  *
  * Why this part is here at all
  * ----------------------------
@@ -178,7 +178,7 @@
  * interrupt-driven.
  *
  * Parsed the same way as a20.wx (kernel/mm/wx.c:79-116) and the a20.ip family
- * (kernel/net/net_config.c:88): scan bootargs_get() for "key=value" tokens.
+ * (kernel/net/control/net_config.c:88): scan bootargs_get() for "key=value" tokens.
  * bootargs_init() runs before driver_core_init() in kernel/main.c, so the
  * command line is already cached by the time probe() runs.
  */

@@ -24,7 +24,7 @@
  *
  * Step 3's wait is a bounded poll rather than one sleep: the sweeper is gated
  * on a one-second interval in a20_lwip_poll_timers_locked
- * (kernel/net/lwip_stack.c) and re-arms the CPU timer from the proc wheel, so
+ * (kernel/net/backends/lwip/lwip_stack.c) and re-arms the CPU timer from the proc wheel, so
  * how many ticks land inside a given wall-clock window is the guest's business.
  * The assertions are on the outcome (reclaimed, counted as a timeout, and a
  * sweep ran) with a deadline, not on the tick count.

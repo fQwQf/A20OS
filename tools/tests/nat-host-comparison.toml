@@ -16,13 +16,13 @@ evidence = "C source is extracted from the fixed v0.18 commit for each isolated 
 
 [versions.cn]
 id = "working-tree-netfilter-rewrite-c"
-revision = "working-tree: kernel/net/netfilter_rewrite.c C reference branch"
+revision = "working-tree: kernel/net/filter/netfilter_rewrite.c C reference branch"
 validated = false
 evidence = "host oracle results are collected below; no complete Cn functional/performance acceptance record yet"
 
 [versions.candidate]
 id = "working-tree-netfilter-rewrite-rust"
-revision = "working-tree: kernel/net/netfilter_rewrite.rs via NETFILTER_REWRITE_IMPL=rust"
+revision = "working-tree: kernel/net/filter/netfilter_rewrite.rs via NETFILTER_REWRITE_IMPL=rust"
 validated = false
 evidence = "candidate under host functional comparison; this case does not validate guest behavior or performance"
 
@@ -41,12 +41,12 @@ env = { CC = "cc" }
 
 [cases.commands.cn]
 argv = ["tools/test-nat-rewrite-host.sh", "c"]
-artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/netfilter_rewrite.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/filter/netfilter_rewrite.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
 cwd = "."
 env = { CC = "cc" }
 
 [cases.commands.candidate]
 argv = ["tools/test-nat-rewrite-host.sh", "rust"]
-artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/netfilter_rewrite.c", "kernel/net/netfilter_rewrite.rs", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/filter/netfilter_rewrite.c", "kernel/net/filter/netfilter_rewrite.rs", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
 cwd = "."
 env = { CC = "cc", RUSTC = "rustc" }

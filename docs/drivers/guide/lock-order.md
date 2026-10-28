@@ -259,7 +259,7 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 已知限制：`a20_lwip_process_netif_irq_locked()` 按 ring 上限一次性排空，没有 NAPI 式的每次
 IRQ 处理预算，所以 ISR 在包量很大时会长时间占用 `g_lwip_lock`。加预算要改
-`kernel/net/lwip_stack.c` 的共享函数（virtio-net 同样调用它），不是驱动内的改动。
+`kernel/net/backends/lwip/lwip_stack.c` 的共享函数（virtio-net 同样调用它），不是驱动内的改动。
 
 ### VMSVGA/SVGAv3
 

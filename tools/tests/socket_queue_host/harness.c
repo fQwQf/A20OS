@@ -1,6 +1,6 @@
-/* Fault-injection harness for the exact production kernel/net/socket_queue.c.
+/* Fault-injection harness for the exact production kernel/net/socket/socket_queue.c.
  * C and Rust selector runs compile this same TU and compare the emitted state. */
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/socket_side.h"
 #include "mm/objcache.h"
 #include "mm/slab.h"

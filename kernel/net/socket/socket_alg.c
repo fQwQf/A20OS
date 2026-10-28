@@ -28,7 +28,7 @@
  *      hand-rolling primitives in the kernel.
  */
 
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "core/string.h"
 
 void net_alg_copy_string(char *dst, size_t dstsz,

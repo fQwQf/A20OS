@@ -1,6 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
 #include "ipc/envelope.h"

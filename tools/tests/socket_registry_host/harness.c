@@ -1,11 +1,11 @@
 /*
- * Differential harness for the exact production kernel/net/socket_registry.c
- * and kernel/net/socket_table.c.
+ * Differential harness for the exact production kernel/net/socket/socket_registry.c
+ * and kernel/net/socket/socket_table.c.
  *
  * Both selector runs compile this same translation unit and drive the same
  * scenarios through the production entry points, so the transcripts must be
  * byte-identical: the C reference bodies under #else and the Rust state machine
- * in kernel/net/socket_registry.rs are compared on the real code, not on a
+ * in kernel/net/socket/socket_registry.rs are compared on the real code, not on a
  * reimplementation of it.
  *
  * Everything the two files reach that is a kernel primitive rather than registry
@@ -18,7 +18,7 @@
  * libc headers are included by absolute path because the kernel's freestanding
  * include directories are searched first and shadow them.
  */
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/socket_side.h"
 
 #include "/usr/include/pthread.h"

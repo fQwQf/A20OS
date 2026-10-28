@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust bottom-half event ring and its per-socket consumer
- * (kernel/net/socket_inet_bh.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_bh.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * This is the second slice of socket_inet.c: the bounded ring lwIP callbacks
  * stage inbound events into, the producer policy of every receive callback, and

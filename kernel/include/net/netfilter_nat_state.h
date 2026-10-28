@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust conntrack/NAT state machine
- * (kernel/net/netfilter_nat.rs, selected by NETFILTER_NAT_IMPL=rust).
+ * (kernel/net/filter/netfilter_nat.rs, selected by NETFILTER_NAT_IMPL=rust).
  *
  * Rust owns the table transitions; C owns the storage, the locks and the real
  * I/O.  Every entry point below runs with g_lwip_lock already held (the hook
@@ -21,7 +21,7 @@
 #include "net/netfilter.h"
 
 /* Borrowed view of the C-side state.  Field order is the contract with
- * `CtView` in kernel/net/netfilter_nat.rs. */
+ * `CtView` in kernel/net/filter/netfilter_nat.rs. */
 typedef struct net_ct_view {
     net_conntrack_entry_t *entries;
     uint32_t max;

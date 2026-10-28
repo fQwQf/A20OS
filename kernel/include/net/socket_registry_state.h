@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust socket-registry state machine
- * (kernel/net/socket_registry.rs, selected by NET_SOCKET_REGISTRY_IMPL=rust).
+ * (kernel/net/socket/socket_registry.rs, selected by NET_SOCKET_REGISTRY_IMPL=rust).
  *
  * The Rust module owns the transitions; C owns the primitives.  Every entry
  * point below therefore runs with whatever lock the caller already holds, takes

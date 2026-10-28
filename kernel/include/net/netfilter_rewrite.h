@@ -2,7 +2,7 @@
  * The pure half of NAT: address and port rewrite, checksum fixup, the reply
  * tuple a translated flow is matched on, and which address MASQUERADE takes.
  *
- * Split out of kernel/net/netfilter_nat.c (which includes this) because these
+ * Split out of kernel/net/filter/netfilter_nat.c (which includes this) because these
  * are the parts that can be wrong in a way no end-to-end gate can see from the
  * QEMU user-net topology: there is no peer on the far side of a SNAT in a
  * user-mode network, so the address rewrite and the reply-direction match had

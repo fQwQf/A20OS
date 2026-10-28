@@ -51,7 +51,7 @@
 
 所以规模必须做成**与资源占用正交的一根轴**：
 
-- 资源轴 = `kernel/net/net_profile.h` 的三档（EMBEDDED / DEFAULT / SERVER），纯编译期常量
+- 资源轴 = `kernel/include/net/profile.h` 的三档（EMBEDDED / DEFAULT / SERVER），纯编译期常量
 - 规模轴 = 本文件的 lane 数，同一个 `CONFIG_NET_LANES` 常量
 
 关键性质：**`CONFIG_NET_LANES == 1` 保持原有单 lane 锁和 IRQ-save 语义。** 它不
@@ -246,7 +246,7 @@ ACTIVE 变体），且表头是**参数**，所以分桶比"重写 TCP 查找"�
 `NET_LANES == 1` 时全部退化为下标 0，行为不变 —— 这是这个补丁能安全落地的依据。
 
 lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:187`）这个代际标志，说明"用代际计数
-替代遍历"在上游被认可。顺带一提：`kernel/net/netfilter.c` 的文件头曾**声称**有同款
+替代遍历"在上游被认可。顺带一提：`kernel/net/filter/netfilter.c` 的文件头曾**声称**有同款
 机制而代码里没有，已在另一提交中补上。
 
 ### 头文件声明审计：第二例，以及一次把自己当骗子的审计
@@ -263,7 +263,7 @@ lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:187`）这个代际标志，�
 | 清扫从 `a20_lwip_poll_timers_locked()` 调用 | 成立。`lwip_stack.c:651`。 |
 | "/proc 读者取同一把锁而非 seqlock" | **成立，但审计者一度判错**。 |
 
-最后一条是这次审计真正的收获。`kernel/net/netfilter.c` 的 `netfilter_format()` 已经取了
+最后一条是这次审计真正的收获。`kernel/net/filter/netfilter.c` 的 `netfilter_format()` 已经取了
 `g_lwip_lock` 再调 `netfilter_nat_format()`，所以 connwalk 并没有漏锁。但当初那次
 grep 只覆盖了 `lwip_stack.c` 和 `procfs.c`，没覆盖 `netfilter.c`，读出来像"缺一把锁"，
 于是加了一把。加锁的后果是自死锁——`spin_lock_irqsave()` 不可重入。
@@ -390,14 +390,14 @@ make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
 已排除的一个候选：socket 与 PCB 的 lane 概念在**通配 bind** 上不一致。telnetd 绑
 `INADDR_ANY`，此时
 
-- `net_socket_lane_of_addr()`（`kernel/net/socket_inet.c:213`）返回
+- `net_socket_lane_of_addr()`（`kernel/net/backends/lwip/socket_inet.c:213`）返回
   `net_lane_of(0, 2323)`，落在某个**真实 lane** 0..N-1；
 - 而 `NET_PCB_LANE_OF_PCB()`（`lwip/priv/pcb_lane.h`）对 `local_ip` 为 any 的 pcb
   返回**哨兵桶** `NET_PCB_LANE_ANY`（= `CONFIG_NET_LANES`，即 N）。
 
 也就是"socket 说 lane 2、PCB 在桶 4"。但它**不是**当前 panic 的原因：
-`net_socket_t::lane` 目前只被写、从不被读——`grep` 全树只有 `kernel/net/socket.c:30` 与
-`kernel/net/socket.c:389` 两处赋值，没有任何 dispatch、锁选择或桶索引用它。阶段 A 只留了字段，
+`net_socket_t::lane` 目前只被写、从不被读——`grep` 全树只有 `kernel/net/socket/socket.c:30` 与
+`kernel/net/socket/socket.c:389` 两处赋值，没有任何 dispatch、锁选择或桶索引用它。阶段 A 只留了字段，
 阶段 D 才会消费它。
 
 留在这里是因为它会在阶段 D 变成真 bug：一旦按 socket 的 lane 选处理 lane，
@@ -435,14 +435,14 @@ LISTEN pcb"两个条件都对得上的路径。
 **已完成的锁审计（结论是"没找到漏锁"，这对下一步是负面但有用的结果）。**
 沿 `tcp_pcb_remove()` / `tcp_listen_closed()` 的调用方逐条查了 `g_lwip_lock`：
 
-- `kernel/net/socket_inet.c` 的 accept 落底路径（`net_inet_accept_stage_drain`）在每一次
+- `kernel/net/backends/lwip/socket_inet.c` 的 accept 落底路径（`net_inet_accept_stage_drain`）在每一次
   `tcp_abort()`、`net_inet_tcp_apply_options()`、子 socket 拆除周围**都**取了
   `a20_lwip_lock()`；整个树里没有一处裸调 `tcp_abort`。
 - RST 生成侧：`tcp_abort()` 的调用点（`tcp_in.c:531,1004`）本身带
   `LWIP_ASSERT_CORE_LOCKED()`，虽然断言是空的，但取锁由上层
   `a20_lwip_process_netif_rx_tx_locked()` 保证。
 - netif 地址变更侧：`a20_lwip_if_set_addr()` 在 `netif_set_ipaddr()` **之前**就取了锁
-  （`kernel/net/lwip_stack.c:1045`），所以会触发 `tcp_listen_pcb_rebucket()` 的跨 lane
+  （`kernel/net/backends/lwip/lwip_stack.c:1045`），所以会触发 `tcp_listen_pcb_rebucket()` 的跨 lane
   搬动是在锁内的。
 - `lwip_tcp_accept_cb()` 生产者用 release fence + acquire load 配对，是正确的 SPSC
   无锁 ring；`net_inet_bottom_half_process_all()` 只持 `g_net_lock` 但它不碰 lwIP core。
@@ -518,7 +518,7 @@ accept 落底之间的时序），这类问题静态审计看不出来。
 
 ### 断言已接线：上面那个前置动作已经做完了（`7d217d3fd`）
 
-`LWIP_ASSERT_CORE_LOCKED()` 现在由 `kernel/net/lwip_port/lwipopts.h:298-304` 映射到
+`LWIP_ASSERT_CORE_LOCKED()` 现在由 `kernel/net/backends/lwip/port/lwipopts.h:298-304` 映射到
 `a20_lwip_assert_core_locked(__builtin_return_address(0))`。细节、开关
 （`CONFIG_NET_LOCK_ASSERT`，`net_profile.h:44-45` 默认 0）与 `/proc/net/stats` 的
 可见性写在 [network-lock-contract.md](network-lock-contract.md)「核心锁断言」一节。
@@ -618,7 +618,7 @@ accept staging（`net_inet_accept_stage_drain`）不是窗口。真正的窗口�
   之间没有窗口。
 - `netif_poll()` 走链找末尾用的是 `while (in_end->len != in_end->tot_len) in_end = in_end->next;`，
   **没有显式 NULL 保护**，只靠 `LWIP_ASSERT("bogus pbuf: len != tot_len but next == NULL!")`。
-- `LWIP_ASSERT` 在本配置下**是活的**（`LWIP_NOASSERT` 未定义，`kernel/net/lwip_port/lwipopts.h`）。
+- `LWIP_ASSERT` 在本配置下**是活的**（`LWIP_NOASSERT` 未定义，`kernel/net/backends/lwip/port/lwipopts.h`）。
 
 **这最后两条合起来是一条真实结论**：既然 assert 没触发（实际发生的是页错不是
 "LWIP_ASSERT" 输出），说明被摘出的那条链 `len == tot_len` 的末端**确实找到了**，
@@ -786,7 +786,7 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 
 第2 条正是本次已经踩过两次的坑：lane 有两套来源。socket 层用绑定地址/端口
 （`NET_PCB_LANE_OF_PCB`，权威值，`socket_inet.c:213`的`net_socket_lane_of_addr()`），
-而 `kernel/net/socket.c:30` 那个 `s->lane = net_lane_of_cpu(cpu_current_id())` 注释明写
+而 `kernel/net/socket/socket.c:30` 那个 `s->lane = net_lane_of_cpu(cpu_current_id())` 注释明写
 "Provisional only"。若 memp 用 `cpu_current_id() % CONFIG_NET_LANES` 选池，
 就会**重新引入"CPU 派生 lane"与"地址派生 lane"两套语义**——那正是
 `16304db8` / `f7f3d670` 两类 bug 的根源。
@@ -802,7 +802,7 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 
 - 新增「当前 lane」上下文 `net_lane_ctx_push/pop/get`（`kernel/include/net/net_lane.h:232`
   / `:239` / `:244`，**只在 `CONFIG_NET_LANES > 1` 下存在**；实体 `a20_net_lane_cur`
-  的 extern 声明在 `net_lane.h:228`，定义在 `kernel/net/net_lane.c:26`）。
+  的 extern 声明在 `net_lane.h:228`，定义在 `kernel/net/backends/lwip/net_lane.c:26`）。
   它是一个上下文，不是一个新的派生式。
 - **没有、也明确禁止 `cpu_current_id()` 选池。** 这不是为了守规矩好看：一旦 memp 里
   出现第二种"lane 是什么"，一条连接的 pcb 与 pbuf 就可能落在两条 lane 上，而那正是
@@ -1111,13 +1111,13 @@ smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv6
 
 | 事实 | 出处 |
 |---|---|
-| `NO_SYS 1` | `kernel/net/lwip_port/lwipopts.h:6` |
+| `NO_SYS 1` | `kernel/net/backends/lwip/port/lwipopts.h:6` |
 | `mem_mutex` 只在 `#if !NO_SYS` 下声明，本配置下根本不编译 | `src/core/mem.c:375-377` |
 | `LWIP_MEM_FREE_PROTECT()` 定义成 `sys_mutex_lock(&mem_mutex)` | `src/core/mem.c:397` |
 | `NO_SYS=1` 时 `sys_mutex_lock(mu)` 展开成空 | `src/include/lwip/sys.h:63` |
 | `LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT` 全树未覆盖 = 0，故走上面这条空互斥而非 `SYS_ARCH_PROTECT` | `src/include/lwip/opt.h:400` |
 | 预处理后 `mem_free()` 里两处 `LWIP_MEM_FREE_PROTECT/UNPROTECT()` 都是裸 `;`，`lfree` 改写与 `plug_holes()` 全程无保护 | `gcc -E -P kernel/external/lwip/src/core/mem.c` |
-| `SYS_ARCH_PROTECT` 也救不了：`arch_local_irq_disable()` 只关本 CPU 的 IRQ | `kernel/net/lwip_compat.c:53-56` |
+| `SYS_ARCH_PROTECT` 也救不了：`arch_local_irq_disable()` 只关本 CPU 的 IRQ | `kernel/net/backends/lwip/lwip_compat.c:53-56` |
 
 于是分片锁之前必须先给堆定归属，两条路都有实质代价：**要么**每条 lane 一块堆（回到
 `!MEMP_MEM_MALLOC` 的静态预留布局，并把 ×N 记进三档 profile 的账——`net_profile.h`
@@ -1457,7 +1457,7 @@ try-claim：若锁外 poller 已持有 lane 并等待全局锁，锁内 poller �
    放在"读者醒来之后"就晚了：阻塞读由 socket bottom-half 唤醒，bottom-half 需要暂存的
    帧已经被处理掉，而只在唤醒后才跑的 poll 在等一个不会到来的事件。门控用的量是
    生产者自己抬起来的"已暂存帧数"计数器（`net_lane_rx_queued_total()`，声明于
-   `kernel/include/net/net_lane.h`，由 `kernel/net/net_lane.c` 实现；lane poll 以该计数
+   `kernel/include/net/net_lane.h`，由 `kernel/net/backends/lwip/net_lane.c` 实现；lane poll 以该计数
    判空），它只可能假阳，假阳的代价是
    一次 relaxed load。位置在 `kernel_progress_net_rx()` **之前**而不是之后：后者是
    CPU 0 排设备 ring 的地方，多 lane 下它排出来的帧只是暂存，放在它之后要等下一趟。

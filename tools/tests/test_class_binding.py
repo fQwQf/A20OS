@@ -119,7 +119,7 @@ class ClassBindingTest(unittest.TestCase):
     def test_production_hotunplug_and_identity(self):
         stubs = dict(STUBS)
         stubs.update({
-            'net/socket_internal.h': '#include "core/types.h"\nvoid netlink_uevent_emit(const char *,const char *,const char *,uint64_t);\n',
+            'net/socket/socket_internal.h': '#include "core/types.h"\nvoid netlink_uevent_emit(const char *,const char *,const char *,uint64_t);\n',
             'fs/vfs.h': '', 'fs/block_cache.h': '',
         })
         with tempfile.TemporaryDirectory(prefix='a20-class-binding-') as name:

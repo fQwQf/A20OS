@@ -134,7 +134,7 @@ def _ordered(body: str, description: str, *needles: str) -> None:
 
 
 def check() -> None:
-    filter_body = _body("kernel/net/lwip_stack.c", "a20_lwip_filter")
+    filter_body = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_filter")
     _ordered(filter_body, "conntrack filter wrapper",
              "a20_lwip_shared_lock(A20_LWIP_SHARED_CT, NULL)",
              "netfilter_input(frame, len, idx)",
@@ -143,21 +143,21 @@ def check() -> None:
     if "a20_lwip_lane_lock" in filter_body or "a20_lwip_lock(" in filter_body:
         raise ContractError("conntrack filter wrapper must not acquire a core lane/global core lock")
 
-    enqueue = _body("kernel/net/lwip_stack.c", "a20_lwip_rx_enqueue_locked")
+    enqueue = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_rx_enqueue_locked")
     _ordered(enqueue, "multi-lane ingress filter/publication",
              "a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1)",
              "NETFILTER_DROP", "a20_lwip_frame_lane(n, st->rx_frame",
              "net_lane_rx_put(lane, n, st->rx_frame")
 
-    legacy_rx = _body("kernel/net/lwip_stack.c", "a20_lwip_process_netif_rx_tx_locked")
+    legacy_rx = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_process_netif_rx_tx_locked")
     _ordered(legacy_rx, "single-lane ingress filter/pbuf delivery",
              "a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1)",
              "NETFILTER_DROP", "pbuf_alloc(PBUF_RAW", "pbuf_take(p, st->rx_frame",
              "n->input(p, n)")
 
-    tx = _body("kernel/net/lwip_stack.c", "a20_lwip_linkoutput")
+    tx = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_linkoutput")
     filter_calls = [m.start() for m in re.finditer(r"a20_lwip_filter\(", tx)]
-    send_calls = [m.start() for m in re.finditer(r"st->ops->send(?:_sg)?\(", tx)]
+    send_calls = [m.start() for m in re.finditer(r"netif_device_send(?:_sg)?\(", tx)]
     if len(filter_calls) != 2 or len(send_calls) != 2 or any(
             f >= s for f, s in zip(filter_calls, send_calls)):
         raise ContractError("both linkoutput paths must filter their staged frame before device send")
@@ -170,11 +170,11 @@ def check() -> None:
     header = (ROOT / "kernel/include/net/lwip_stack.h").read_text(encoding="utf-8")
     if "void a20_lwip_process_netif_irq_locked(int net_idx);" not in header:
         raise ContractError("lwip_stack.h does not export the IRQ ingress API")
-    irq_body = _body("kernel/net/lwip_stack.c", "a20_lwip_process_netif_irq_locked")
+    irq_body = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_process_netif_irq_locked")
     if "a20_lwip_rx_enqueue_locked(n, 0)" not in irq_body:
         raise ContractError("multi-lane IRQ API no longer stages frames on owner queues")
 
-    drain = _body("kernel/net/lwip_stack.c", "a20_lwip_lane_drain")
+    drain = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_lane_drain")
     _ordered(drain, "owner-lane frame processing",
              "net_lane_rx_claim(lane)", "a20_lwip_lane_lock(lane)",
              "net_lane_ctx_push(lane)", "a20_lwip_lane_input_one(lane, n, frame, len)",
@@ -184,13 +184,13 @@ def check() -> None:
     # The callback is now a C wrapper around the Rust publication transaction.
     # Follow the delegation: assert the wrapper's contract, then the real
     # ordering inside a20_net_accept_publish().
-    accept = _body("kernel/net/socket_inet.c", "lwip_tcp_accept_cb")
+    accept = _body("kernel/net/backends/lwip/socket_inet.c", "lwip_tcp_accept_cb")
     if "a20_net_accept_publish(s, newpcb, NET_ACCEPT_STAGE_SIZE)" not in accept:
         raise ContractError("accept callback no longer delegates publication to the stage transaction")
     if "tcp_abort(" in accept:
         raise ContractError("accept callback must return ERR_MEM and leave child aborting to TCP core")
 
-    publish_body = _rust_body("kernel/net/socket_inet_accept.rs", "a20_net_accept_publish")
+    publish_body = _rust_body("kernel/net/backends/lwip/socket_inet_accept.rs", "a20_net_accept_publish")
     lock = publish_body.find("a20_net_accept_stage_lock(listener)")
     head_read = publish_body.find("(*(v.head as *const AtomicU32)).load(Ordering::Relaxed)")
     arm = publish_body.find("a20_net_accept_slot_arm(slot")
@@ -203,13 +203,13 @@ def check() -> None:
     if not (lock < head_read < arm < fence < publish < success_unlock < schedule):
         raise ContractError("accept stage must lock stable PCB, arm the slot, publish head, unlock, then schedule BH")
 
-    stage_lock = _body("kernel/net/socket_inet.c", "a20_net_accept_stage_lock")
+    stage_lock = _body("kernel/net/backends/lwip/socket_inet.c", "a20_net_accept_stage_lock")
     if "a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, s->tcp)" not in stage_lock:
         raise ContractError("accept stage lock no longer binds the stable listener PCB")
-    stage_unlock = _body("kernel/net/socket_inet.c", "a20_net_accept_stage_unlock")
+    stage_unlock = _body("kernel/net/backends/lwip/socket_inet.c", "a20_net_accept_stage_unlock")
     if "a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, s->tcp, flags)" not in stage_unlock:
         raise ContractError("accept stage unlock no longer releases the listener guard")
-    bh_schedule = _body("kernel/net/socket_inet.c", "a20_net_accept_bh_schedule")
+    bh_schedule = _body("kernel/net/backends/lwip/socket_inet.c", "a20_net_accept_bh_schedule")
     if "net_inet_bh_schedule" not in bh_schedule:
         raise ContractError("accept schedule no longer enters the bottom half")
 

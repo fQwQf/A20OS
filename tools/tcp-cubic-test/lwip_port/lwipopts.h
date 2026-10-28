@@ -1,7 +1,7 @@
 /*
  * Host-test lwipopts.h for tools/test-tcp-cubic-host.c.
  *
- * NOT the kernel's: kernel/net/lwip_port/ ships freestanding <stdio.h>,
+ * NOT the kernel's: kernel/net/backends/lwip/port/ ships freestanding <stdio.h>,
  * <stdlib.h> and <string.h> shims that shadow the host libc ones, so pulling it
  * in here would compile the test against the kernel's own printf.  This file
  * declares only what tcp_cubic_priv.h and tcp_cubic.c actually consult, which
@@ -26,7 +26,7 @@
 #define SYS_LIGHTWEIGHT_PROT 1
 
 /* Pin the window geometry to the DEFAULT/SERVER tier of
- * kernel/net/net_profile.h:124-125, which is what kernel/net/lwip_port/lwipopts.h
+ * kernel/include/net/profile.h:124-125, which is what kernel/net/backends/lwip/port/lwipopts.h
  * hands to lwIP in every non-EMBEDDED build.  This is not cosmetic.  lwIP picks
  * tcpwnd_size_t from LWIP_WND_SCALE, not from the value of TCP_WND
  * (lwip/tcpbase.h:49-54), and the kernel turns that on (lwipopts.h:121) so its

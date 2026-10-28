@@ -228,7 +228,7 @@ log_fail_tail() {  # logfile lines...
 alive() { kill -0 "$1" 2>/dev/null; }
 
 # wait_boot PID LOG IP: wait until the guest's lwIP netif reports the static
-# address (printed from kernel/net/lwip_stack.c during boot), or the guest
+# address (printed from kernel/net/backends/lwip/lwip_stack.c during boot), or the guest
 # dies, or the timeout elapses.
 wait_boot() {  # pid log expected_ip
     local pid=$1 logfile=$2 ip=$3 waited=0

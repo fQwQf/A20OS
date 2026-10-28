@@ -123,7 +123,7 @@ class NetCfg:
     # with hostfwd, which only exists on the user backend.
     backend: str | None = None
     # Guest-side static IPv4, handed to the kernel as a20.* boot arguments
-    # (kernel/net/net_config.c).  Only meaningful together with guest_ip, and
+    # (kernel/net/control/net_config.c).  Only meaningful together with guest_ip, and
     # only on architectures with a QEMU -append path.
     guest_ip: str | None = None
     guest_netmask: str | None = None

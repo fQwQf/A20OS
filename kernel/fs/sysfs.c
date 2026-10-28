@@ -26,7 +26,7 @@
 #include "core/errno.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/bus/pci_bus.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "drivers/gpu/gpu_core.h"
 #include "drivers/input/evdev.h"
 #include "drivers/core/driver_core.h"

@@ -3,8 +3,8 @@
 #
 # The C reference this harness used to compare against was retired with the Rust
 # takeover, so the run is now a golden-transcript check: the exact production
-# kernel/net/netfilter_nat.c, kernel/net/netfilter_rewrite.c,
-# kernel/net/netfilter_nat.rs and kernel/net/netfilter_rewrite.rs are compiled
+# kernel/net/filter/netfilter_nat.c, kernel/net/filter/netfilter_rewrite.c,
+# kernel/net/filter/netfilter_nat.rs and kernel/net/filter/netfilter_rewrite.rs are compiled
 # for the host, the same scenarios are driven through the production entry
 # points, and the transcript must match the recorded golden byte for byte.  The
 # goldens were recorded while both implementations existed and their transcripts
@@ -69,7 +69,7 @@ record_exit build-slot 0
 cd "$repo" || { record_exit repository-cd 1; exit 1; }
 
 inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
-      -Ikernel/include -Ikernel -Ikernel/net/lwip_port
+      -Ikernel/include -Ikernel -Ikernel/net/backends/lwip/port
       -Ikernel/external/lwip/src/include -Ikernel/external/littlefs
       -Ikernel/external/littlefs/compat -Ikernel/arch/x86_64/boards/x86_64-pc
       -DARCH_TIMER_FREQ=1000 )
@@ -80,8 +80,8 @@ inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
 } > "$out/toolchain.txt" 2>&1
 df -h / > "$out/disk.leased.txt" 2>&1
 
-owned_sources=( kernel/net/netfilter_nat.c kernel/net/netfilter_nat.rs
-                kernel/net/netfilter_rewrite.c kernel/net/netfilter_rewrite.rs
+owned_sources=( kernel/net/filter/netfilter_nat.c kernel/net/filter/netfilter_nat.rs
+                kernel/net/filter/netfilter_rewrite.c kernel/net/filter/netfilter_rewrite.rs
                 kernel/include/net/netfilter.h kernel/include/net/netfilter_nat_state.h
                 kernel/include/net/netfilter_rewrite.h
                 kernel/rust/runtime.rs
@@ -93,7 +93,7 @@ owned_sources=( kernel/net/netfilter_nat.c kernel/net/netfilter_nat.rs
 hash_inputs() {
   sha256sum "${owned_sources[@]}" > "$1"
   gcc -std=gnu11 "${inc[@]}" -MM -MT nat_harness \
-    kernel/net/netfilter_nat.c kernel/net/netfilter_rewrite.c \
+    kernel/net/filter/netfilter_nat.c kernel/net/filter/netfilter_rewrite.c \
     tools/tests/netfilter_nat_host/harness.c \
     > "$out/dependencies.mk" 2> "$out/dependencies.log"
   awk '{ gsub(/\\/, ""); for (i = 1; i <= NF; i++) if ($i != "nat_harness:") print $i }' \
@@ -107,18 +107,18 @@ if [[ $status -ne 0 ]]; then exit "$status"; fi
 
 run_stage rust-nat-object rustc --edition=2021 --crate-type lib --emit=obj \
   -C panic=abort -C overflow-checks=off \
-  kernel/net/netfilter_nat.rs -o "$out/netfilter_nat_state.o"
+  kernel/net/filter/netfilter_nat.rs -o "$out/netfilter_nat_state.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-rewrite-object rustc --edition=2021 --crate-type lib --emit=obj \
   -C panic=abort -C overflow-checks=off \
-  kernel/net/netfilter_rewrite.rs -o "$out/netfilter_rewrite_state.o"
+  kernel/net/filter/netfilter_rewrite.rs -o "$out/netfilter_rewrite_state.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-runtime rustc --edition=2021 --crate-type staticlib \
   -C panic=abort -C overflow-checks=off \
   kernel/rust/runtime.rs -o "$out/liba20_rust_runtime.a"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-tests rustc --edition=2021 --test \
-  kernel/net/netfilter_nat.rs -o "$out/nat_unit_tests"
+  kernel/net/filter/netfilter_nat.rs -o "$out/nat_unit_tests"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-run "$out/nat_unit_tests" --test-threads=1
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
@@ -135,12 +135,12 @@ for geom in default embedded; do
   run_stage "$tag-nat-compile" gcc -std=gnu11 -O1 -Wall -Wextra -Werror \
     -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
     "${inc[@]}" "${cfg[@]}" \
-    -c kernel/net/netfilter_nat.c -o "$out/${tag}_nat.o"
+    -c kernel/net/filter/netfilter_nat.c -o "$out/${tag}_nat.o"
   status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
   run_stage "$tag-rewrite-compile" gcc -std=gnu11 -O1 -Wall -Wextra -Werror \
     -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
     "${inc[@]}" "${cfg[@]}" \
-    -c kernel/net/netfilter_rewrite.c -o "$out/${tag}_rewrite.o"
+    -c kernel/net/filter/netfilter_rewrite.c -o "$out/${tag}_rewrite.o"
   status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
   run_stage "$tag-harness-compile" gcc -std=gnu11 -O1 -Wall -Wextra \
     -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \

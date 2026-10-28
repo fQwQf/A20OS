@@ -2,7 +2,7 @@
 # Host unit tests for the NAT rewrite half of netfilter.
 #
 # Compiles tools/test-nat-rewrite-host.c together with the real
-# kernel/net/netfilter_rewrite.c, so a passing run exercises the shipped source
+# kernel/net/filter/netfilter_rewrite.c, so a passing run exercises the shipped source
 # rather than a copy of it.  The test supplies its own a20_lwip_netif_ipv4(),
 # which is the only kernel symbol that file needs; everything else in it is
 # pure.
@@ -37,7 +37,7 @@ if [ "$impl" = rust ]; then
     "$rustc" --edition=2021 --crate-type lib --emit=obj \
         --target x86_64-unknown-linux-gnu -C panic=abort -C no-redzone=yes \
         -C opt-level=1 -C codegen-units=1 -C relocation-model=static \
-        kernel/net/netfilter_rewrite.rs -o "$OUT/netfilter_rewrite.o"
+        kernel/net/filter/netfilter_rewrite.rs -o "$OUT/netfilter_rewrite.o"
     objects="$OUT/netfilter_rewrite.o"
     cppflags=-DCONFIG_NETFILTER_REWRITE_RUST
 fi
@@ -49,7 +49,7 @@ ${CC:-cc} -std=gnu99 -O1 -g -Wall -Wextra -Wno-unused-parameter \
     $cppflags -Ikernel/include \
     -o "$OUT/test-nat-rewrite" \
     tools/test-nat-rewrite-host.c \
-    kernel/net/netfilter_rewrite.c $objects
+    kernel/net/filter/netfilter_rewrite.c $objects
 
 echo "NAT_REWRITE_HOST: impl=$impl"
 "$OUT/test-nat-rewrite"

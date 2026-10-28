@@ -36,7 +36,7 @@ sha256sum tools/tests/socket_mmsg_host/run.sh \
     tools/tests/socket_mmsg_host/linux_oracle.c \
     kernel/abi/linux/mmsg_transaction.rs \
     kernel/include/abi/linux/mmsg_transaction.h \
-    kernel/abi/linux/sys_socket_msg.c kernel/net/socket_control.c \
+    kernel/abi/linux/sys_socket_msg.c kernel/net/socket/socket_control.c \
     user/cmds/stress/socket_stress.c >"$out/inputs.before.sha256"
 
 set +e
@@ -84,7 +84,7 @@ sha256sum tools/tests/socket_mmsg_host/run.sh \
     tools/tests/socket_mmsg_host/linux_oracle.c \
     kernel/abi/linux/mmsg_transaction.rs \
     kernel/include/abi/linux/mmsg_transaction.h \
-    kernel/abi/linux/sys_socket_msg.c kernel/net/socket_control.c \
+    kernel/abi/linux/sys_socket_msg.c kernel/net/socket/socket_control.c \
     user/cmds/stress/socket_stress.c >"$out/inputs.after.sha256"
 if [[ -e "$out/mmsg_tests" ]]; then sha256sum "$out/mmsg_tests"; fi >"$out/binaries.sha256"
 if [[ -e "$out/linux_oracle" ]]; then sha256sum "$out/linux_oracle"; fi >>"$out/binaries.sha256"

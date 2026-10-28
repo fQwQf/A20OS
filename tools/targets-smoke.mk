@@ -230,7 +230,7 @@ smoke-netfilter:
 #
 # a20.tcpmode=lwip is load-bearing for the same reason.  Under the default
 # "fast" mode the socket layer never creates a LISTEN pcb (see the comment in
-# kernel/net/socket_control.c:204), so *any* inbound SYN gets an RST from lwIP
+# kernel/net/socket/socket_control.c:204), so *any* inbound SYN gets an RST from lwIP
 # and no port forward can ever complete -- NAT would be exonerated of a failure
 # that is really the listener model.  Same knob smoke-net-accept uses.
 NET_NAT_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NETFILTER_REWRITE_IMPL=$(NETFILTER_REWRITE_IMPL) print-build-dir)

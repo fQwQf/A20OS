@@ -1,14 +1,14 @@
 /*
  * Host-test arch/cc.h for tools/test-tcp-cubic-host.c.
  *
- * The kernel's own arch/cc.h (kernel/net/lwip_port/arch/cc.h) includes
+ * The kernel's own arch/cc.h (kernel/net/backends/lwip/port/arch/cc.h) includes
  * core/types.h, core/stdio.h, core/panic.h and core/random.h -- kernel headers
  * that cannot be compiled by a host cc.  This stand-in provides only what the
  * CUBIC translation unit needs from it: the lwIP scalar typedefs and the
  * handful of feature macros.
  *
  * The typedefs here are the SAME ones the test file declares for itself, and
- * they are deliberately identical to the kernel's (kernel/net/lwip_port/arch/
+ * they are deliberately identical to the kernel's (kernel/net/backends/lwip/port/arch/
  * cc.h:22-30), so the widths the algorithm sees under test are the widths it
  * sees in the kernel.  If that ever stops being true the test is measuring the
  * wrong thing, so the widths are spelled out rather than inherited.

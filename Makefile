@@ -153,7 +153,7 @@ endif
 # only together with stage D of docs/net/net-lanes.md; stages A-C
 # compute and report lanes but do not yet route packets by them.
 NET_LANES ?= 1
-# Network resource tier, 1..3, consumed by kernel/net/net_profile.h as
+# Network resource tier, 1..3, consumed by kernel/include/net/profile.h as
 # CONFIG_NET_PROFILE. 2 (DEFAULT) is the historical hosted configuration and
 # stays the default so no existing target changes footprint. 1 (EMBEDDED) is
 # the small-SRAM ceiling set; 3 (SERVER) is for high-connection-count hosts.
@@ -1343,7 +1343,7 @@ NET_MAC ?=
 # these variables), assembled into the kernel's a20.* boot arguments below.
 # Empty = unchanged behaviour: DHCP against the SLIRP backend, or an
 # unconfigured link.  The key names are the kernel contract in
-# kernel/net/net_config.c; the net smokes in tools/targets-smoke.mk pass the
+# kernel/net/control/net_config.c; the net smokes in tools/targets-smoke.mk pass the
 # same keys by hand.
 NET_GUEST_IP ?=
 NET_GUEST_NETMASK ?=
@@ -1741,7 +1741,7 @@ QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net$(if $(strip $(NET_MA
 # Guest static IPv4, when the instance declares one.  a20.dhcp=0 keeps lwIP
 # from racing a DHCP client against the static address on a link that has no
 # DHCP server (the cluster's UDP tunnel is one).  The a20.* key names are the
-# kernel contract in kernel/net/net_config.c.
+# kernel contract in kernel/net/control/net_config.c.
 ifneq ($(strip $(NET_GUEST_IP)),)
 NET_GUEST_APPEND := a20.dhcp=0 a20.ip=$(NET_GUEST_IP)
 ifneq ($(strip $(NET_GUEST_NETMASK)),)
@@ -1799,7 +1799,7 @@ KERNEL_WERROR ?= 1
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
-         -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
+         -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/backends/lwip/port \
          -I$(KERNEL_DIR)/external/lwip/src/include \
          -I$(KERNEL_DIR)/external/littlefs \
          -I$(KERNEL_DIR)/external/littlefs/compat \
@@ -2357,6 +2357,8 @@ else
 ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/$(ABI)/*.c)
 endif
 
+include $(KERNEL_DIR)/net/sources.mk
+
 ifeq ($(PROFILE),mcu)
 # The curated core of the MCU trim lives in components/trim.toml
 # ([profile.mcu].sources); this is the only place a source enters the MCU
@@ -2387,7 +2389,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \
              $(wildcard $(KERNEL_DIR)/fs/*/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
-             $(wildcard $(KERNEL_DIR)/net/*.c) \
+             $(A20_NET_SRC) \
              $(wildcard $(KERNEL_DIR)/cluster/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
              $(wildcard $(KERNEL_DIR)/ext/*.c) \
@@ -2484,14 +2486,14 @@ KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $
 KERNEL_OBJ += $(RUST_LANDLOCK_OBJECT) $(RUST_SECCOMP_OBJECT)
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/net/netfilter_rewrite.c,$(KERNEL_SRC)),)
-$(error NETFILTER_REWRITE_IMPL=rust requires kernel/net/netfilter_rewrite.c in this profile)
+ifeq ($(filter $(KERNEL_DIR)/net/filter/netfilter_rewrite.c,$(KERNEL_SRC)),)
+$(error NETFILTER_REWRITE_IMPL=rust requires kernel/net/filter/netfilter_rewrite.c in this profile)
 endif
 KERNEL_OBJ += $(RUST_NETFILTER_OBJECT)
 endif
 # The IPv4 filter is Rust and has no C fallback; the object is part of the
 # kernel wherever netfilter.c is, and it brings the Rust runtime archive.
-ifneq ($(filter $(KERNEL_DIR)/net/netfilter.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/filter/netfilter.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the filter Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2501,7 +2503,7 @@ endif
 # The conntrack/NAT state machine is Rust and has no C fallback; the object is
 # part of the kernel wherever the C file that calls into it is, and it brings the
 # Rust runtime archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/netfilter_nat.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/filter/netfilter_nat.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the conntrack/NAT Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2919,14 +2921,14 @@ ifeq ($(NET_SOCKET_QUEUE_IMPL),rust)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error NET_SOCKET_QUEUE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
 endif
-ifeq ($(filter $(KERNEL_DIR)/net/socket_queue.c,$(KERNEL_SRC)),)
-$(error NET_SOCKET_QUEUE_IMPL=rust requires kernel/net/socket_queue.c in this profile)
+ifeq ($(filter $(KERNEL_DIR)/net/socket/socket_queue.c,$(KERNEL_SRC)),)
+$(error NET_SOCKET_QUEUE_IMPL=rust requires kernel/net/socket/socket_queue.c in this profile)
 endif
 KERNEL_OBJ += $(RUST_NET_SOCKET_QUEUE_OBJECT)
 endif
 # The poll readiness computation is Rust and has no C fallback; the object is
 # part of the kernel wherever socket_control.c is.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_control.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_control.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket poll Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2935,7 +2937,7 @@ RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # The accept transaction is Rust and has no C fallback; the object is part of the
 # kernel wherever socket_control.c is, and it brings the Rust runtime archive.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_control.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_control.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket accept Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2944,7 +2946,7 @@ RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # The sendto transaction is Rust and has no C fallback; the object is part of
 # the kernel wherever socket.c is, and it brings the Rust runtime archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket sendto Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2954,7 +2956,7 @@ endif
 # The blocking receive transaction is Rust and has no C fallback; the object is
 # part of the kernel wherever socket.c is, and it brings the Rust runtime archive
 # with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket recv Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2964,7 +2966,7 @@ endif
 # The INET option and buffer machinery is Rust and has no C fallback; the object
 # is part of the kernel wherever socket_inet.c is, and it brings the Rust runtime
 # archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet opt Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2974,7 +2976,7 @@ endif
 # The INET socket lifecycle is Rust and has no C fallback; the object is part of
 # the kernel wherever socket_inet.c is, and it brings the Rust runtime archive
 # with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet life Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2984,7 +2986,7 @@ endif
 # The TCP stream send transaction is Rust and has no C fallback; the object is
 # part of the kernel wherever socket_inet.c is, and it brings the Rust runtime
 # archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet send-tcp Rust object has no target for ARCH=$(ARCH))
 endif
@@ -2994,7 +2996,7 @@ endif
 # The INET bind transaction is Rust and has no C fallback; the object is part of
 # the kernel wherever socket_inet.c is, and it brings the Rust runtime archive
 # with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet bind Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3004,7 +3006,7 @@ endif
 # The netif configuration and link-event machine is Rust and has no C fallback;
 # the object is part of the kernel wherever lwip_stack.c is, and it brings the
 # Rust runtime archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/lwip_stack.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/lwip_stack.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the lwip-stack Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3013,7 +3015,7 @@ RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # AF_NETLINK is Rust and has no C fallback; the object is part of the kernel
 # wherever socket_netlink.c is, and it brings the Rust runtime archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_netlink.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/control/socket_netlink.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the netlink Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3023,7 +3025,7 @@ endif
 # The UDP and raw send transactions are Rust and have no C fallback; the object
 # is part of the kernel wherever socket_inet.c is, and it brings the Rust runtime
 # archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet send Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3033,7 +3035,7 @@ endif
 # The local connect pairing transaction is Rust and has no C fallback; the object
 # is part of the kernel wherever socket_inet.c is, and it brings the Rust runtime
 # archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet connect Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3043,7 +3045,7 @@ endif
 # The bottom-half event ring and its consumer are Rust and have no C fallback;
 # the object is part of the kernel wherever socket_inet.c is, and it brings the
 # Rust runtime archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet bottom-half Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3053,7 +3055,7 @@ endif
 # The staged-accept state machine is Rust and has no C fallback; the object is
 # part of the kernel wherever socket_inet.c is, and it brings the Rust runtime
 # archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_inet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/backends/lwip/socket_inet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-inet Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3063,7 +3065,7 @@ endif
 # The AF_PACKET state machine is Rust and has no C fallback; the object is part
 # of the kernel wherever socket_packet.c is, and it brings the Rust runtime
 # archive with it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_packet.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_packet.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the packet Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3072,7 +3074,7 @@ RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # The AF_UNIX state machine is Rust and has no C fallback; the object is part of
 # the kernel wherever socket_unix.c is, and it brings the Rust runtime archive.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_unix.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_unix.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-unix Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3081,7 +3083,7 @@ RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # The socket-vfile lifecycle is Rust and has no C fallback; the object is part of
 # the kernel wherever socket_file.c is, and it brings the Rust runtime archive.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_file.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_file.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket-file Rust object has no target for ARCH=$(ARCH))
 endif
@@ -3093,14 +3095,14 @@ endif
 # wherever the C file that calls into it is, and it brings the Rust runtime
 # archive (core plus the panic handler) with it.  A profile that trims those
 # files out (the MCU trim) reaches none of it.
-ifneq ($(filter $(KERNEL_DIR)/net/socket_registry.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_registry.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket registry Rust object has no target for ARCH=$(ARCH))
 endif
 KERNEL_OBJ += $(RUST_NET_SOCKET_REGISTRY_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
-ifneq ($(filter $(KERNEL_DIR)/net/socket_control.c,$(KERNEL_SRC)),)
+ifneq ($(filter $(KERNEL_DIR)/net/socket/socket_control.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error the socket options Rust object has no target for ARCH=$(ARCH))
 endif

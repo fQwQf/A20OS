@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust blocking receive transaction
- * (kernel/net/socket_recv.rs, selected by NET_SOCKET_RECV_IMPL=rust).
+ * (kernel/net/socket/socket_recv.rs, selected by NET_SOCKET_RECV_IMPL=rust).
  *
  * Rust owns the decision surface: the MSG_WAITALL / MSG_PEEK / MSG_TRUNC /
  * MSG_DONTWAIT matrix, the channel-versus-legacy-queue choice and its

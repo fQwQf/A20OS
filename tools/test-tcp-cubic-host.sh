@@ -24,7 +24,7 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
 # The include path deliberately puts tools/tcp-cubic-test/lwip_port FIRST and
-# does NOT add kernel/net/lwip_port at all: that directory ships freestanding
+# does NOT add kernel/net/backends/lwip/port at all: that directory ships freestanding
 # <stdio.h>/<stdlib.h>/<string.h> shims which would shadow the host libc ones
 # and compile the test against the kernel's own printf.  See the comment in
 # tools/tcp-cubic-test/lwip_port/lwipopts.h.

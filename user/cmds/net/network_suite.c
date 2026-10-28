@@ -57,7 +57,7 @@ static const test_case_t tests[] = {
     { "icmp_loopback_test","icmp_loopback_test",       0, 0 },
     { "unix_test",         "unix_test",                0, 0 },
     /* AF_ALG ships an empty algorithm registry on purpose (see the AF_ALG note
-     * in kernel/net/socket_alg.c), so alg_test honestly reports ABSENT and the
+     * in kernel/net/socket/socket_alg.c), so alg_test honestly reports ABSENT and the
      * gate has to assert that rather than be defeated by it. */
     { "alg_test",          "alg_test",                 0, 1 },
     { "timeout_test",      "timeout_test",             0, 0 },

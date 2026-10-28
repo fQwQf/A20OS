@@ -315,8 +315,8 @@ $(TMPDIR)/a20-host-test_lwip_allocator_single_lane: \
         kernel/external/lwip/src/core/mem.c \
         kernel/external/lwip/src/core/memp.c \
         kernel/external/lwip/src/core/pbuf.c \
-        kernel/net/lwip_compat.c \
-        kernel/net/lwip_port/arch/heap.h \
+        kernel/net/backends/lwip/lwip_compat.c \
+        kernel/net/backends/lwip/port/arch/heap.h \
         tools/tests/lwip_host_port/core/lock.h \
         tools/tests/lwip_host_port/arch/cc.h \
         tools/tests/lwip_host_port/lwipopts.h \
@@ -331,10 +331,10 @@ $(TMPDIR)/a20-host-test_lwip_allocator_single_lane: \
 
 # Compile the real lane queue implementation, with only CPU identity shimmed.
 $(TMPDIR)/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
-        kernel/net/net_lane.c kernel/include/net/net_lane.h kernel/net/net_profile.h
+        kernel/net/backends/lwip/net_lane.c kernel/include/net/net_lane.h kernel/include/net/profile.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -DCONFIG_NET_LANES=4 -DCONFIG_NR_CPUS=4 \
 	  -Itools/tests/net_lane_host_port -Ikernel/include -Ikernel \
-	  tools/tests/test_net_lane_concurrency.c kernel/net/net_lane.c -o $@
+	  tools/tests/test_net_lane_concurrency.c kernel/net/backends/lwip/net_lane.c -o $@
 
 # Exercise the real spin_lock_at() inline body.  The host exchange seam injects
 # a simulated IRQ at lock acquisition and verifies that preemption was already

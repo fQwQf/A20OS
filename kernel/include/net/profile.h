@@ -43,7 +43,7 @@
  * init-path violations it finds there are expected, not a defect.
  *
  * The same switch now drives the net-lock probe as well
- * (kernel/net/net_lock_probe.c), which is what closes the gap the lwIP half
+ * (kernel/net/socket/net_lock_probe.c), which is what closes the gap the lwIP half
  * never had: the two net-lock rules (address order in net_sock_lock2(), and
  * "never a bucket lock under a socket lock") were prose only.  Values:
  *

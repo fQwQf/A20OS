@@ -1,10 +1,10 @@
 /*
- * Differential harness for the exact production kernel/net/netfilter.c.
+ * Differential harness for the exact production kernel/net/filter/netfilter.c.
  *
  * Both selector runs compile this same translation unit and drive the same
  * scenarios through the production entry points, so the transcripts must be
  * byte-identical: the C reference under #else and the Rust state machine in
- * kernel/net/netfilter_filter.rs are compared on the real code.
+ * kernel/net/filter/netfilter_filter.rs are compared on the real code.
  *
  * The filter's only outside dependency is the conntrack half, which the hook
  * calls for an accepted packet.  Both selectors get a stub that records the
@@ -13,7 +13,7 @@
  * the decisions this migration moved into Rust.
  */
 #include "net/netfilter.h"
-#include "net/netfilter_internal.h"
+#include "net/filter/netfilter_internal.h"
 
 #include "core/stdio.h"
 #include "/usr/include/string.h"

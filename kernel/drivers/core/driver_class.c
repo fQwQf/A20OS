@@ -5,7 +5,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "mm/slab.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 
 /* class_allocate_index() hands out a unique (class_type, index) pair per
  * device in 0..255, so the total number of published class devices is bounded

@@ -24,7 +24,7 @@
 | memfd / memfd_secret | `fs/memfd.c` | 已有 MEMORY handle 等价物（`vm_create_object` + `vm_map`） | — |
 | namespace（mount/pid/user） | `kernel/fs/vfs/mntns.c`、`kernel/proc/pidns.c`、`kernel/proc/userns.c` | 扩 `ns_create`/`ns_apply`（0x0800-0x0801）到 pid/user，发布可降级的 namespace handle（network 无核心 namespace 对象，不在扩展之列） | P1.1 + P2.3：三者在核心已是引用计数对象（`mnt_namespace_t`/`pid_namespace_t`/`user_namespace_t`，fork 时继承并 unshare）。当前 `ns_apply` 走的却是往 target 写 `fs.root_path` 字符串（`ns_ctx.pid_offset` 之类字段全仓无消费者），那正是 P2.3 要拒绝的全局状态投影；对象已经存在，没有理由再以字符串模拟 |
 | mseal | `kernel/mm/mseal.c`（`VM_SEALED`） | 新增区间封存。注意核心 `mm_mseal` 目前拒绝 `VM_VMO` 区间（与 `VM_SYSV_SHM`/`VM_PFNMAP` 一并），而 Native MEMORY 映射正是 `VM_VMO`——包装前要先给 VMO 侧封存语义或放宽该拒绝 | P5.3 sandbox 是原生能力：封存是 VMA 上一次性、单调的属性，不引入全局 ID 也不需要叠加层。拒绝点分层：`mm_munmap`/`mm_mprotect`/`mm_mremap` 在核心检查 `VM_SEALED`，页释放类 advice（DONTNEED/FREE/REMOVE）由 Linux ABI 层拒绝（`kernel/abi/linux/sys_mm.c` 的 `sys_madvise`），核心 madvise 不查；核心另与 `MM_SAFE_NO_FA` 交叉核对，`kernel/mm/mseal.c` 头部自己写明 "future Native ABI paths" |
-| setsockopt / getsockopt | `kernel/net/socket_control.c` | `handle_control` 的版本化 op，按类型发散 | P6：`level`/`optname`/`optval` 三元组是 ioctl 式的大杂烩，数值空间随 Linux 单调增长。03-handle §2.7 已有的类型化控制面（WINSIZE/TCFLUSH/SET_FLAGS）是同一件事的干净形式 |
+| setsockopt / getsockopt | `kernel/net/socket/socket_control.c` | `handle_control` 的版本化 op，按类型发散 | P6：`level`/`optname`/`optval` 三元组是 ioctl 式的大杂烩，数值空间随 Linux 单调增长。03-handle §2.7 已有的类型化控制面（WINSIZE/TCFLUSH/SET_FLAGS）是同一件事的干净形式 |
 
 ### 1.2 应拒绝（A20 反模式，保持 Linux-only，不包装）
 
@@ -253,4 +253,4 @@ typedef struct a20_task_mem_args {
 - [../status/current/native-abi-runtime-status.md §7](../status/current/native-abi-runtime-status.md)（现差距清单）
 - [03-handle.md](03-handle.md)（对象模型）、[04-memory.md](04-memory.md)（VMO/VMAR）
 - [05-ipc.md](05-ipc.md)（EventQ/channel）
-- `kernel/ipc/userfaultfd.c`、`kernel/net/socket_inet.c`、 `kernel/fs/pipe.c`、`kernel/abi/linux/sys_perf.c`、`kernel/mm/process_vm.c`
+- `kernel/ipc/userfaultfd.c`、`kernel/net/backends/lwip/socket_inet.c`、 `kernel/fs/pipe.c`、`kernel/abi/linux/sys_perf.c`、`kernel/mm/process_vm.c`

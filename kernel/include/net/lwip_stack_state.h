@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust netif-configuration and link-event state machine
- * (kernel/net/lwip_stack.rs, selected by NET_LWIP_STACK_IMPL=rust).
+ * (kernel/net/backends/lwip/lwip_stack.rs, selected by NET_LWIP_STACK_IMPL=rust).
  *
  * This slice covers the part of lwip_stack.c that the socket and netlink layers
  * call: the netif address/flag/MTU transactions with their notification

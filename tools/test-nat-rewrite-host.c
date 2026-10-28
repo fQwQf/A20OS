@@ -2,7 +2,7 @@
  * Host-side unit tests for the NAT rewrite half of netfilter.
  *
  * Compiled and run by tools/test-nat-rewrite-host.sh against the real
- * kernel/net/netfilter_rewrite.c, not a copy of it.
+ * kernel/net/filter/netfilter_rewrite.c, not a copy of it.
  *
  * Why this exists.  The end-to-end NAT gate (make smoke-netfilter-nat) can only
  * ever be a DNAT gate: QEMU's user-mode network puts the guest behind a NAT of

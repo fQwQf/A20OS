@@ -2,8 +2,8 @@
 # Host regression evidence for the IPv4 filter state machine.
 #
 # The C reference was retired with the Rust takeover, so the run is a golden-
-# transcript check: the exact production kernel/net/netfilter.c and
-# kernel/net/netfilter_filter.rs are compiled once, the same scenarios are
+# transcript check: the exact production kernel/net/filter/netfilter.c and
+# kernel/net/filter/netfilter_filter.rs are compiled once, the same scenarios are
 # driven through the production entry points, and the transcript must match
 # tools/tests/netfilter_filter_host/golden.txt byte for byte.  The golden was
 # recorded while both implementations existed and their transcripts were
@@ -63,12 +63,12 @@ record_exit build-slot 0
 cd "$repo" || { record_exit repository-cd 1; exit 1; }
 
 inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
-      -Ikernel/include -Ikernel -Ikernel/net/lwip_port
+      -Ikernel/include -Ikernel -Ikernel/net/backends/lwip/port
       -Ikernel/external/lwip/src/include -Ikernel/external/littlefs
       -Ikernel/external/littlefs/compat -Ikernel/arch/x86_64/boards/x86_64-pc
       -DARCH_TIMER_FREQ=1000 )
 
-owned_sources=( kernel/net/netfilter.c kernel/net/netfilter_filter.rs
+owned_sources=( kernel/net/filter/netfilter.c kernel/net/filter/netfilter_filter.rs
                 kernel/include/net/netfilter.h
                 kernel/include/net/netfilter_filter_state.h
                 kernel/rust/runtime.rs
@@ -79,7 +79,7 @@ owned_sources=( kernel/net/netfilter.c kernel/net/netfilter_filter.rs
 hash_inputs() {
   sha256sum "${owned_sources[@]}" > "$1"
   gcc -std=gnu11 "${inc[@]}" -MM -MT filter_harness \
-    kernel/net/netfilter.c tools/tests/netfilter_filter_host/harness.c \
+    kernel/net/filter/netfilter.c tools/tests/netfilter_filter_host/harness.c \
     > "$out/dependencies.mk" 2> "$out/dependencies.log"
   awk '{ gsub(/\\/, ""); for (i = 1; i <= NF; i++) if ($i != "filter_harness:") print $i }' \
     "$out/dependencies.mk" | xargs sha256sum >> "$1"
@@ -92,18 +92,18 @@ if [[ $status -ne 0 ]]; then exit "$status"; fi
 
 run_stage compile gcc -std=gnu11 -O1 -Wall -Wextra -Werror -pthread \
   -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
-  "${inc[@]}" -c kernel/net/netfilter.c -o "$out/netfilter.o"
+  "${inc[@]}" -c kernel/net/filter/netfilter.c -o "$out/netfilter.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-object rustc --edition=2021 --crate-type lib --emit=obj \
   -C panic=abort -C overflow-checks=off \
-  kernel/net/netfilter_filter.rs -o "$out/netfilter_filter_state.o"
+  kernel/net/filter/netfilter_filter.rs -o "$out/netfilter_filter_state.o"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-runtime rustc --edition=2021 --crate-type staticlib \
   -C panic=abort -C overflow-checks=off \
   kernel/rust/runtime.rs -o "$out/liba20_rust_runtime.a"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-tests rustc --edition=2021 --test \
-  kernel/net/netfilter_filter.rs -o "$out/filter_unit_tests"
+  kernel/net/filter/netfilter_filter.rs -o "$out/filter_unit_tests"
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-run "$out/filter_unit_tests" --test-threads=1
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi

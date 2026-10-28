@@ -2090,6 +2090,11 @@ mod tests {
         T_KLOG_DROP += 1;
     }
 
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_route_add(_dst: u32, _prefix: u8, _ifindex: u16) -> i32 { 0 }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_route_del(_dst: u32, _prefix: u8, _ifindex: u16) -> i32 { 0 }
+
     /* ------------------------------------------------------------- bind */
 
     #[test]
@@ -2502,9 +2507,9 @@ mod tests {
                                                      32, ptr::null(), 0),
                        -EOPNOTSUPP);
             /* A body shorter than the type requires. */
-            let req = route_req(RTM_GETLINK, 0, &[0u8; 8]);
+            let req = route_req(RTM_GETLINK, 0, &[]);
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
-                                                     24, ptr::null(), 0), -EINVAL);
+                                                     16, ptr::null(), 0), -EINVAL);
             /* A write without CAP_NET_ADMIN. */
             T_CAPABLE = 0;
             let body = ifi(1, 1, 1);
@@ -2775,7 +2780,7 @@ mod tests {
             T_NLINKS = 1;
 
             let body = ifi(0, 0, 0);
-            let req = route_req(RTM_GETLINK, 0, &body);
+            let req = route_req(RTM_GETLINK, NLM_F_DUMP, &body);
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
                                                      req.len() as usize, ptr::null(),
                                                      0), req.len() as i32);
@@ -2815,7 +2820,7 @@ mod tests {
             T_NLINKS = 1;
 
             let addr_body = ifa(0, 0, 0);
-            let req = route_req(RTM_GETADDR, 0, &addr_body);
+            let req = route_req(RTM_GETADDR, NLM_F_DUMP, &addr_body);
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
                                                      req.len() as usize, ptr::null(),
                                                      0), req.len() as i32);
@@ -2842,7 +2847,7 @@ mod tests {
             T_SNAPSHOT[0] = e;
             T_NLINKS = 1;
             let route_body = [0u8; 12];
-            let req = route_req(RTM_GETROUTE, 0, &route_body);
+            let req = route_req(RTM_GETROUTE, NLM_F_DUMP, &route_body);
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
                                                      req.len() as usize, ptr::null(),
                                                      0), req.len() as i32);

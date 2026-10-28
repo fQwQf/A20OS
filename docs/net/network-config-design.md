@@ -1,6 +1,6 @@
 # 网络配置设计
 
-`kernel/net/lwip_stack.c` 不再直接硬编码地址，但部分板级 `arch_bootargs_get()` 仍返回编译进内核的 `a20.*` 参数；这与由启动器传入 bootargs 是两个不同来源。
+`kernel/net/backends/lwip/lwip_stack.c` 不再直接硬编码地址，但部分板级 `arch_bootargs_get()` 仍返回编译进内核的 `a20.*` 参数；这与由启动器传入 bootargs 是两个不同来源。
 
 ## 设计决策
 
@@ -68,7 +68,7 @@ typedef struct a20_net_config {
 } a20_net_config_t;
 ```
 
-存储位置是 `kernel/net/net_config.c`。该结构体先清零并把 `dhcp_enable` 置为 1，然后从 `bootargs_get()` 的完整字符串解析。`kernel/net/lwip_stack.c` 的 `a20_lwip_register_netifs()` 读取该结构体，不再自行选择 QEMU 地址；板级编译默认仍会以普通 bootargs 的形式进入同一解析器。
+存储位置是 `kernel/net/control/net_config.c`。该结构体先清零并把 `dhcp_enable` 置为 1，然后从 `bootargs_get()` 的完整字符串解析。`kernel/net/backends/lwip/lwip_stack.c` 的 `a20_lwip_register_netifs()` 读取该结构体，不再自行选择 QEMU 地址；板级编译默认仍会以普通 bootargs 的形式进入同一解析器。
 
 ## 回退行为
 
@@ -128,7 +128,7 @@ shell 写入口来不及生效**，所以服务器仍应当用 `a20.tcpmode=lwip
 | 平面 | 载体 | 本轮（`feat/net-strengthening`）新增 |
 |---|---|---|
 | 内核命令行 | `a20.*` 键 | 无 |
-| 编译期档位 | `kernel/net/net_profile.h` + `lwipopts.h` | SACK / 时间戳 / CUBIC 开关、conntrack 表尺寸、静态帧数组尺寸与预算 |
+| 编译期档位 | `kernel/include/net/profile.h` + `lwipopts.h` | SACK / 时间戳 / CUBIC 开关、conntrack 表尺寸、静态帧数组尺寸与预算 |
 | 运行时控制面 | `/proc/net/config`、`/proc/a20/netfilter` | conntrack/NAT 动词 |
 | 套接字选项 | `setsockopt` / `getsockopt` | `TCP_CONGESTION` 真算法名、`SO_SNDBUF` / `SO_RCVBUF` 真生效 |
 
@@ -225,7 +225,7 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 | `SO_RCVBUF` | 被接受然后忽略 | 经 pcb 的 `wnd_limit` 字段约束该连接的接收窗口；`getsockopt` 回读生效值 |
 
 **必须一起说的限制**，否则名字会骗人（理由写在
-`kernel/net/socket_inet.c` 的 `net_inet_tcp_buf_apply()` 函数头注释里，lwIP 侧的
+`kernel/net/backends/lwip/socket_inet.c` 的 `net_inet_tcp_buf_apply()` 函数头注释里，lwIP 侧的
 分歧登记在 `kernel/external/lwip/DIVERGENCE.md` §2.10）：
 
 - `SO_SNDBUF` 只约束**已排队未确认**的字节，**不约束在途飞行字节**——在途由拥塞控制
@@ -311,7 +311,7 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 
 ### RTNETLINK 多播组
 
-`NETLINK_ROUTE` 套接字 bind 时可以选组（`kernel/net/socket_netlink.c`）：
+`NETLINK_ROUTE` 套接字 bind 时可以选组（`kernel/net/control/socket_netlink.c`）：
 
 | 组 | 值 | 收到什么 | 事件源（写入路径） |
 |---|---|---|---|
@@ -322,7 +322,7 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 **表里第三列是本轮新增 `RTNLGRP_IPV6_IFADDR` 的理由**：先有写入路径，才有组。只定义一个
 组号而没有任何内核代码能往里投递，等于给监听者一个可以 bind 却永远收不到东西的承诺——
 那比不定义更糟。所以本轮同时补上了 IPv6 地址写入路径
-（`a20_lwip_if_set_addr6()`，`kernel/net/lwip_stack.c`），`nlrt_apply_addr6()` 把
+（`a20_lwip_if_set_addr6()`，`kernel/net/backends/lwip/lwip_stack.c`），`nlrt_apply_addr6()` 把
 `ifa_family == AF_INET6` 的 `RTM_NEWADDR` 接到它上面，`net_netlink_addr6_notify()` 负责
 投递到 `RTNLGRP_IPV6_IFADDR`。`netlink_test` 的 IPv6 那一节就是钉这一条的：
 它 bind 上这个组、真的收一条事件、并断言 `IFA_ADDRESS` / `IFA_LOCAL` 是 16 字节。
@@ -366,7 +366,7 @@ MTU 是本轮唯一一个**此前只有内核代码、没有任何人跑过**的
 `a20_lwip_if_set_mtu()` 按档位帧缓冲封顶（EMBEDDED 512 B → MTU 上限 498；
 DEFAULT / SERVER 1536 B → 1522），同时校验 RFC 791 下限。**此前这条路径只有
 rtnetlink 走得到**，因为 `net_vfile_ioctl()` 把 `SIOCSIFMTU` 派发到 `socket_file.c`
-却没有对应的 `case`，每个调用者拿到的是 `-ENOTTY`（`kernel/net/socket_file.c:656-683`
+却没有对应的 `case`，每个调用者拿到的是 `-ENOTTY`（`kernel/net/socket/socket_file.c:656-683`
 是本轮补上的那一支）。
 
 范围检查放在 ioctl 这一侧而不是被调方，是因为后者收 `uint16_t`：ifreq 的 `ifr_mtu`
@@ -448,7 +448,7 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
 
 实现该设计时，逐项确认（该设计已实现，`smoke-network-suite` 覆盖）：
 
-- [x] `kernel/net/lwip_stack.c` 不再包含硬编码 QEMU 地址。
+- [x] `kernel/net/backends/lwip/lwip_stack.c` 不再包含硬编码 QEMU 地址。
 - [x] `a20_lwip_register_netifs()` 从 `a20_net_config` 读取配置。
 - [x] 命令行解析器识别全部六个 `a20.*` 键。
 - [x] `a20.dhcp=1` 触发 DHCP 并覆盖静态值。

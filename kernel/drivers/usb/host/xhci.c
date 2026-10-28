@@ -1345,7 +1345,7 @@ static int xhci_pci_match(device_t *dev)
  * absent or request_irq() fails, so the knob only exists to force that same
  * fallback where registration would otherwise succeed.  Read once at probe, so
  * the ready line always names the mode actually in force.  Same token scan as
- * mm/wx.c, net/net_config.c and drivers/net/e1000.c. */
+ * mm/wx.c, net/control/net_config.c and drivers/net/e1000.c. */
 static int xhci_cmdline_poll(void)
 {
     const char *cmdline = bootargs_get();

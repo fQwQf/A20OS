@@ -205,7 +205,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 
 ### 2.1 现状事实
 
-- `g_net_lock` 定义在 `kernel/net/socket.c:20`，只在 `net_init()`（`:164`）里
+- `g_net_lock` 定义在 `kernel/net/socket/socket.c:20`，只在 `net_init()`（`:164`）里
   `spin_init(&g_net_lock)`（`:165`），**从未 `lock_counters_register`**（见 §5.1）。
   全树 **235 处文本引用**
   （`grep -rn g_net_lock kernel/ | wc -l` → 235），其中**真正的取锁点只有 54 处**
@@ -214,9 +214,9 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
   注释、声明、锁序文档放大的数字做——那会让"一轮只动一个数据面结构才能让前后
   测量可归因"的归因前提失效。§0 的"一轮只动一个数据面结构"因此明确为：
   **本轮只分片 socket 表 + slot 分配元数据，不触碰 per-socket 队列**。
-- `kernel/net/socket_table.c` 头注释："Everything in this file runs under
+- `kernel/net/socket/socket_table.c` 头注释："Everything in this file runs under
   g_net_lock and nothing else"，表 + slot 位图。
-- 既有不变量（`kernel/net/socket_packet.c:6`、`socket_table.c:11`）：
+- 既有不变量（`kernel/net/socket/socket_packet.c:6`、`socket_table.c:11`）：
   **g_lwip_lock 与 g_net_lock 永不同时持有**。分片后表述改为
   "g_lwip_lock 与任何 net bucket lock 不同时持有"，语义不变。
 - `NET_MAX_SOCKETS` 是 profile 常量：`net_profile.h:108` 服务器档 65536、
@@ -227,7 +227,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 #### 2.2.1 分桶必须按位图字对齐（本节为复核推翻旧设计的重写）
 
 旧稿写"每桶保护：槽位成员关系、slot 位图中该桶覆盖的位段"，**不可实现**：
-空闲位图 `g_sock_free[(NET_MAX_SOCKETS+31)/32]`（`kernel/net/socket_registry.c:15`）
+空闲位图 `g_sock_free[(NET_MAX_SOCKETS+31)/32]`（`kernel/net/socket/socket_registry.c:15`）
 是按 slot 连续排的 `uint32_t` 字数组，注册（`:46-67`）与注销（`:68-94`）都是对
 整字的 read-modify-write；哈希分桶后同一个字里的 32 个 slot 分属最多 32 个桶，
 两把桶锁会互相踩同一字。
@@ -248,9 +248,9 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 
 旧稿漏了这两处，它们同样隐含"全树只有一把 `g_net_lock`"：
 
-- `kernel/net/socket_packet.c:53` `g_pkt_bound_slots[(NET_MAX_SOCKETS+31)/32]`
+- `kernel/net/socket/socket_packet.c:53` `g_pkt_bound_slots[(NET_MAX_SOCKETS+31)/32]`
   （`:61-72` 的 `net_packet_bound_acquire/release` 做整字 RMW）。
-- `kernel/net/socket_queue.c:32` `g_rxq_tally[NET_MAX_SOCKETS]`
+- `kernel/net/socket/socket_queue.c:32` `g_rxq_tally[NET_MAX_SOCKETS]`
   （`:38`、`:47-57`、`:63-73`、`:85-91` 的 `net_rxq_reset_slot` /
   `net_rxq_bytes_added_locked` / `net_rxq_bytes_removed_locked` / `net_rxq_bytes_locked`）。
 
@@ -350,7 +350,7 @@ interrupted context was holding"），并且 dcache 的解法是**一次一把**
 |---|---|---|
 | proc | `kernel/proc/`、`kernel/core/sync.c`、`kernel/core/lock_counters.c`、`kernel/include/proc/`、`kernel/include/core/lock.h`、`kernel/include/core/sync.h`、`tools/gates.toml` 中 proc 相关 gate、`docs/archive/process-lock-split-audit.md`（追加）、**§4.2 表中 21 个跨边界文件**（含 `kernel/mm/`、`kernel/fs/`、`kernel/ipc/`、`kernel/abi/`、`kernel/include/mm/`、`kernel/include/cg/` 中被点名的那几个） | `kernel/net/`、`kernel/mm/slab.c`、`Makefile`、`tools/lock_bench.py` |
 | net | `kernel/net/`、`kernel/include/net/`、`kernel/drivers/net/`（如需） | `kernel/proc/`、`kernel/core/`、`kernel/mm/slab.c`、`kernel/include/core/lock.h`（走 §4.1 单向授权，不直接编辑） |
-| baseline（先于上两者串行完成） | `tools/lock_bench.py`、`Makefile`（仅追加 `include tools/targets-bench.mk`）、`tools/targets-bench.mk`、`user/cmds/`（如需负载程序）、`docs/status/measurements/`，**外加 §5.1 点名的三个 `lock_counters_register` 调用点**（`kernel/net/socket.c`、`kernel/mm/slab.c`，分片/拆分开始**之前**打） | `kernel/` 其余全部 |
+| baseline（先于上两者串行完成） | `tools/lock_bench.py`、`Makefile`（仅追加 `include tools/targets-bench.mk`）、`tools/targets-bench.mk`、`user/cmds/`（如需负载程序）、`docs/status/measurements/`，**外加 §5.1 点名的三个 `lock_counters_register` 调用点**（`kernel/net/socket/socket.c`、`kernel/mm/slab.c`，分片/拆分开始**之前**打） | `kernel/` 其余全部 |
 
 （slab agent 一行已删除：见 §3。`tools/targets-bench.mk` 与 `Makefile` 的 include 行
 已经由 baseline agent 建好，本轮起点上它们是已存在的未跟踪文件
@@ -398,7 +398,7 @@ interrupted context was holding"），并且 dcache 的解法是**一次一把**
 | `kernel/include/mm/vm.h` | 3 | 0 | 仅 `LOCK_ORDER` 声明，随 `lock.h` 锁序改写同步 |
 | `kernel/include/mm/pt.h` | 1 | 0 | 同上 |
 | `kernel/include/cg/cgroup.h` | 1 | 0 | 同上（`lock.h:11` 的 `cg_node.lock -> proc_lock -> ...` 镜像） |
-| `kernel/net/lwip_stack.c` | 1 | 0 | 注释（`:367` 提到 proc_lock 作为分片判据），不动代码 |
+| `kernel/net/backends/lwip/lwip_stack.c` | 1 | 0 | 注释（`:367` 提到 proc_lock 作为分片判据），不动代码 |
 | `kernel/drivers/core/udriver.c` | 1 | 0 | 注释（oom 路径说明），不动代码 |
 | `kernel/drivers/core/driver_class.c` | 1 | 0 | 注释，同上 |
 | `kernel/drivers/char/pty.c` | 1 | 0 | 注释，同上 |
@@ -444,10 +444,10 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
 
 复核指出本节缺可测性，实测确认：
 
-- `g_net_lock` **从未注册进 lock_counters**：`kernel/net/socket.c:165` 只有
+- `g_net_lock` **从未注册进 lock_counters**：`kernel/net/socket/socket.c:165` 只有
   `spin_init(&g_net_lock)`，全树 `grep -rn lock_counters_register kernel/` 只有
   `kernel/proc/proc.c:365`（`&proc_lock, "proc"`）、`kernel/proc/sched.c:589`
-  （`&sched_runq[i].lock, "runq"`）、`kernel/net/lwip_stack.c:369`
+  （`&sched_runq[i].lock, "runq"`）、`kernel/net/backends/lwip/lwip_stack.c:369`
   （`&g_lwip_lock, "lwip"`）、`kernel/fs/block_cache.c:332`、
   `kernel/fs/page_cache.c:507`、`kernel/fs/vfs/dcache.c:108`，加
   `kernel/core/lock_counters.c:34` 的定义与 `kernel/mcu/mcu_stubs.c:58` 的空桩。
@@ -457,7 +457,7 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
 
 因此 §6 第 1 步（baseline，串行）必须先完成：
 
-1. 在 `kernel/net/socket.c` 注册 `lock_counters_register(&g_net_lock, "net")`；
+1. 在 `kernel/net/socket/socket.c` 注册 `lock_counters_register(&g_net_lock, "net")`；
    分片后改为注册每个 `net_bucket[i]`（名字 `net_bucket0..127`，或注册一把
    `net_bucket_registry` 汇总锁并让每把桶锁在 acquire 失败时把计数累加过去——
    二选一，写进 `docs/net/network-lock-contract.md`）。
@@ -466,7 +466,7 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
 3. 把 `tools/lock_bench.py` 的 `TRACKED_LOCKS` 改成实际注册的名字集合，并新增
    `"net"`。
 4. 上面 1、2 两条**是对 `kernel/` 的修改**，与 §5.2「worktree 在任何分片/拆分
-   修改前是干净的」冲突。处置：把 `kernel/net/socket.c`、`kernel/mm/slab.c`、
+   修改前是干净的」冲突。处置：把 `kernel/net/socket/socket.c`、`kernel/mm/slab.c`、
    `tools/lock_bench.py` 从 "baseline 禁入 `kernel/` 全部"里**开一个具名例外**
    （§4 表已按此改写），并把基线采集拆成两段：
    - **B0（真基线）**：未打补丁的树，`lock_contention` 里没有 `net`/`slab` 行——

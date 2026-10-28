@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust sendto transaction
- * (kernel/net/socket_sendto.rs, selected by NET_SOCKET_SENDTO_IMPL=rust).
+ * (kernel/net/socket/socket_sendto.rs, selected by NET_SOCKET_SENDTO_IMPL=rust).
  *
  * Rust owns the decision surface: the family/type dispatch ladder, the
  * EPIPE-versus-ENOTSOCK rule for a torn-down stream, the destination
