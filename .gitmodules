@@ -27,3 +27,7 @@
 	url = https://github.com/freebsd/freebsd-src.git
 	branch = releng/15.1
 	shallow = true
+[submodule "kernel/external/lwip-upstream"]
+	path = kernel/external/lwip-upstream
+	url = https://github.com/lwip-tcpip/lwip.git
+	shallow = true

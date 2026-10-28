@@ -3,6 +3,7 @@
 本轮目标是一个可裁剪的网络框架：系统接口由 A20OS 持有，TCP/IP 实现由网络域
 选择的后端持有。当前运行后端仍为已有 lwIP 分叉；获取 FreeBSD 源码不等于完成移植。
 服务器和桌面默认后端保持不变，必须完成同一 Linux ELF 的对照验收后才能更换。
+原版 lwIP 的迁移决定和能力归属见 [backend-policy.md](./backend-policy.md)。
 
 ## 分层与所有权
 
@@ -15,6 +16,7 @@
 | `kernel/net/crypto/` | 网络使用的密码辅助 | 不拥有 socket 或协议状态 |
 | `kernel/include/net/` | 子系统契约、ABI 桥和资源定义 | 不暴露新后端的 PCB/mbuf 类型 |
 | `kernel/external/freebsd-src/` | 固定版本上游 submodule | 上游保持只读；适配源码放后端目录 |
+| `kernel/external/lwip-upstream/` | 原版 lwIP 候选 submodule | 不修改上游源码；尚未接入运行 |
 
 源码由 `kernel/net/sources.mk` 显式列举；不递归收集后端目录中的任意 C 文件。
 移动文件仅是分层第一步。`socket_internal.h` 仍含 lwIP 私有字段，清理这些字段属于
