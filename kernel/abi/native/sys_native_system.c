@@ -14,6 +14,8 @@
 #include "core/cpu.h"
 #include "core/smp.h"
 #include "core/random.h"
+#include "core/kexec.h"
+#include "uapi/a20/kexec.h"
 #include "trap_frame.h"
 #include "proc/proc.h"
 #include "mm/mm.h"
@@ -110,15 +112,119 @@ int64_t sys_a20_system_random(const a20_syscall_args_t *args)
     return (int64_t)len;
 }
 
+static int64_t kexec_native_status(int rc)
+{
+    switch (rc) {
+    case 0: return A20_OK;
+    case -EPERM: return -A20_ERR_PERM;
+    case -ESRCH:
+    case -EBADF:
+    case -EINVAL:
+    case -ENOEXEC: return -A20_ERR_INVALID_ARGUMENT;
+    case -EFAULT: return -A20_ERR_FAULT;
+    case -ENOMEM: return -A20_ERR_NO_MEMORY;
+    case -EBUSY: return -A20_ERR_BUSY;
+    case -EIO: return -A20_ERR_IO;
+    case -EADDRNOTAVAIL: return -A20_ERR_ADDRESS_NOT_AVAILABLE;
+    case -ETIMEDOUT: return -A20_ERR_TIMED_OUT;
+    case -ENOSYS:
+    case -EOPNOTSUPP: return -A20_ERR_NOT_SUPPORTED;
+    default: return -A20_ERR_IO;
+    }
+}
+
+int64_t sys_a20_system_kexec(const a20_syscall_args_t *args)
+{
+    uint32_t op = (uint32_t)A20_ARG(0);
+    if (op == A20_KEXEC_STATUS) {
+        a20_kexec_status_t *user = (void *)(uintptr_t)A20_ARG(1);
+        if (!user)
+            return -A20_ERR_FAULT;
+        uint32_t size;
+        if (copy_from_user(&size, &user->size, sizeof(size)) < 0)
+            return -A20_ERR_FAULT;
+        if (size < sizeof(a20_kexec_status_t))
+            return -A20_ERR_INVALID_ARGUMENT;
+        kexec_status_t status;
+        kexec_get_status(&status);
+        a20_kexec_status_t out = {
+            .size = sizeof(out), .struct_version = 1,
+            .state = status.state, .backend = status.backend,
+            .entry = status.entry, .nr_segments = status.nr_segments,
+        };
+        return copy_to_user(user, &out, sizeof(out)) < 0
+               ? -A20_ERR_FAULT : A20_OK;
+    }
+    if (op == A20_KEXEC_EXECUTE)
+        return kexec_native_status(kexec_execute());
+    if (op == A20_KEXEC_DISCARD)
+        return kexec_native_status(kexec_discard());
+    if (op == A20_KEXEC_LOAD_IMAGE) {
+        const void *user = (const void *)(uintptr_t)A20_ARG(1);
+        uint64_t size = A20_ARG(2);
+        if (A20_ARG(3) || !size || size > KEXEC_MAX_IMAGE_SIZE)
+            return -A20_ERR_INVALID_ARGUMENT;
+        if (!user)
+            return -A20_ERR_FAULT;
+        void *image = kmalloc((size_t)size);
+        if (!image)
+            return -A20_ERR_NO_MEMORY;
+        int rc = copy_from_user(image, user, (size_t)size) < 0
+                 ? -EFAULT : kexec_load_image(image, size);
+        kfree(image);
+        return kexec_native_status(rc);
+    }
+    if (op == A20_KEXEC_LOAD_SEGMENTS) {
+        uint64_t entry = A20_ARG(1);
+        const a20_kexec_segment_t *user = (const void *)(uintptr_t)A20_ARG(2);
+        uint64_t count = A20_ARG(3);
+        if (A20_ARG(4) || !count || count > KEXEC_MAX_SEGMENTS)
+            return -A20_ERR_INVALID_ARGUMENT;
+        if (!user)
+            return -A20_ERR_FAULT;
+        a20_kexec_segment_t *wire = kmalloc((size_t)count * sizeof(*wire));
+        kexec_segment_t *segments = kmalloc((size_t)count * sizeof(*segments));
+        if (!wire || !segments) {
+            kfree(wire);
+            kfree(segments);
+            return -A20_ERR_NO_MEMORY;
+        }
+        int rc = copy_from_user(wire, user, (size_t)count * sizeof(*wire)) < 0
+                 ? -EFAULT : 0;
+        for (uint64_t i = 0; !rc && i < count; i++) {
+            segments[i].buf = (const void *)(uintptr_t)wire[i].buf;
+            segments[i].bufsz = (size_t)wire[i].bufsz;
+            segments[i].mem = (const void *)(uintptr_t)wire[i].mem;
+            segments[i].memsz = (size_t)wire[i].memsz;
+            if (wire[i].bufsz > SIZE_MAX || wire[i].memsz > SIZE_MAX)
+                rc = -EINVAL;
+        }
+        if (!rc)
+            rc = kexec_load_segment_array(entry, count, segments);
+        kfree(wire);
+        kfree(segments);
+        return kexec_native_status(rc);
+    }
+    return -A20_ERR_INVALID_ARGUMENT;
+}
+
 int64_t sys_a20_system_reboot(const a20_syscall_args_t *args)
 {
     uint32_t cmd = (uint32_t)A20_ARG(0);
-    (void)A20_ARG(1);
-
-    switch (cmd) {
-    case 0: firmware_shutdown(); break;
-    case 1: firmware_reboot(); break;
-    default: while (1) {} break;
-    }
+    task_t *task = proc_current();
+    if (!task)
+        return -A20_ERR_NO_ENTRY;
+    if (!proc_has_cap(task, CAP_SYS_BOOT) && task->cred.euid != 0)
+        return -A20_ERR_PERM;
+    if (cmd == 2)
+        return kexec_native_status(kexec_execute());
+    if (cmd > 1)
+        return -A20_ERR_INVALID_ARGUMENT;
+    int rc = vfs_system_shutdown();
+    if (rc < 0)
+        return kexec_native_status(rc);
+    if (cmd == 0)
+        firmware_shutdown();
+    firmware_reboot();
     return A20_OK;
 }

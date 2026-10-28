@@ -9,6 +9,8 @@ void firmware_console_putchar(char c);
 int  firmware_console_getchar(void);
 void firmware_set_timer(uint64_t time);
 int64_t firmware_cpu_on(uint64_t target_cpu, uint64_t entry, uint64_t context);
+int64_t firmware_cpu_off(void);
+int64_t firmware_affinity_info(uint64_t target_affinity, uint64_t lowest_level);
 
 void sbi_set_timer(uint64_t time);
 void sbi_console_putchar(char c);

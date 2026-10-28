@@ -314,6 +314,7 @@ int a20_cow_map_child_anon_batch(
     (void)va;
     (void)pages;
     (void)nr;
+    (void)shared;
     return -EOPNOTSUPP;
 #endif
 }
@@ -482,6 +483,7 @@ static void cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
     /* No status sidecar to bring in step: the PTE rewrite above is the whole
      * of the parent-side downgrade on the arm32 short-descriptor backend. */
     (void)level;
+    (void)meta;
 #endif
 }
 

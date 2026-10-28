@@ -1234,6 +1234,7 @@ NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_SPAWN_BIN       := $(NATIVE_BUILD_DIR)/native-spawn-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_DEEPEN_BIN      := $(NATIVE_BUILD_DIR)/native-deepen-$(NATIVE_TAG)
+NATIVE_KEXEC_BIN       := $(NATIVE_BUILD_DIR)/native-kexec-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
 NATIVE_EXT_BIN         := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
 NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
@@ -1296,7 +1297,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_ABI_BEHAVIOR_BIN) \
-                          $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
+                          $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) $(NATIVE_KEXEC_BIN) \
                           $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
                           $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \
                           $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN) $(NATIVE_CLUSTER_INSTANCE_BIN) $(NATIVE_OBJECTD_BIN) $(NATIVE_OBJECT_TEST_BIN) $(NATIVE_APPCTL_BIN) $(NATIVE_APPD_BIN) $(NATIVE_APPEXEC_BIN) $(NATIVE_APP_TEST_BIN) $(NATIVE_APP_CHILD_BIN) $(NATIVE_APP_EXIT_BIN) $(NATIVE_CLUSTER_SUPERVISOR_BIN) $(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN) $(NATIVE_CLUSTER_WORDCOUNT_BIN) $(NATIVE_CLUSTER_WORD8_BIN) $(NATIVE_CLUSTER_BENCH_BIN) $(NATIVE_CLUSTER_LOAD_BIN)
@@ -2333,7 +2334,8 @@ endif
 include tools/driver-sources.mk
 
 # Shared ISA code is selected here, never by architecture tests in core C.
-ARCH_SHARED_SRC_riscv64 := $(KERNEL_DIR)/arch/common/riscv/linux_syscalls.c
+ARCH_SHARED_SRC_riscv64 := $(KERNEL_DIR)/arch/common/riscv/linux_syscalls.c \
+                          $(KERNEL_DIR)/arch/common/riscv/kexec.c
 ARCH_SHARED_SRC_riscv32 := $(ARCH_SHARED_SRC_riscv64)
 
 # ABI-specific source directories
@@ -2601,6 +2603,13 @@ endif
 # calls it.
 ifneq ($(filter $(KERNEL_DIR)/proc/coredump.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_COREDUMP_LAYOUT_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+# The checkpoint image validation and the Rust-owned register-frame mapping
+# are used by the restore path and (through the rv64 trap_frame.h inlines)
+# by every ptrace/coredump regset export/import; the object follows debug.c.
+ifneq ($(filter $(KERNEL_DIR)/proc/debug.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_CKPT_IMAGE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 # The fork/clone transaction is Rust-only now; the object follows fork.c,

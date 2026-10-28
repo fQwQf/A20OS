@@ -333,6 +333,14 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
     return pt_map(pgdir, va, pa, flags);
 }
 
+/* The short-descriptor backend keeps no per-PTE cache-owner sidecar, so the
+ * cache-owner fast path degrades to the plain class map. */
+int pt_map_cache_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+                     uint8_t cls, struct page_cache_page *page) {
+    (void)page;
+    return pt_map_cls(pgdir, va, pa, flags, cls);
+}
+
 int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
                 uint8_t cls) {
     int idx;
@@ -499,6 +507,17 @@ int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
         arm32_sync_descriptor(&mm->pgdir[idx1]);
         pt_free_internal(l2, 0);
     }
+    return count;
+}
+
+int pt_unmap_leaf_run_owned(struct mm_struct *mm, vaddr_t va, int max_pages,
+                            paddr_t *pa_out, void **owner_out) {
+    /* The short-descriptor backend keeps no cache-owner sidecar; report the
+     * run with empty owners, which the release path treats as unpinned. */
+    int count = pt_unmap_leaf_run(mm, va, max_pages, pa_out);
+    if (owner_out)
+        for (int i = 0; i < count; i++)
+            owner_out[i] = NULL;
     return count;
 }
 
@@ -681,6 +700,12 @@ void pt_destroy_user(pt_root_t *pgdir) {
         return;
     pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
     pt_free_internal(pgdir, 2);
+}
+
+void pt_destroy_user_mm(struct mm_struct *mm) {
+    if (!mm)
+        return;
+    pt_destroy_user(mm->pgdir);
 }
 
 #endif /* CONFIG_NOMMU */

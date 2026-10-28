@@ -90,6 +90,19 @@ int64_t sbi_hart_start(uint64_t hart_id, uint64_t start_addr, uint64_t opaque) {
     return (int64_t)sbi_call(SBI_HSM_EID, 0, hart_id, start_addr, opaque);
 }
 
+int64_t sbi_hart_stop(void) {
+    return (int64_t)sbi_call(SBI_HSM_EID, 1, 0, 0, 0);
+}
+
+int64_t sbi_hart_get_status(uint64_t hart_id) {
+    register uint64_t a0 __asm__("a0") = hart_id;
+    register uint64_t a1 __asm__("a1");
+    register uint64_t a6 __asm__("a6") = 2;
+    register uint64_t a7 __asm__("a7") = SBI_HSM_EID;
+    __asm__ __volatile__("ecall" : "+r"(a0), "=r"(a1) : "r"(a6), "r"(a7) : "memory");
+    return a0 ? (int64_t)a0 : (int64_t)a1;
+}
+
 int64_t sbi_remote_sfence_vma(uint64_t hart_mask, uint64_t hart_mask_base,
                               uint64_t start, uint64_t size) {
     return (int64_t)sbi_call4(SBI_RFENCE_EID, SBI_RFENCE_SFENCE_VMA,

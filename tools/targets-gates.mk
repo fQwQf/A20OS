@@ -456,6 +456,7 @@ CHECK_FAST_GATES := \
     check-abi-smoke-gate \
     test-nat-rewrite \
     test-signal-core \
+    test-ckpt-image \
     check-doc-drift
 
 # Recurse per gate instead of listing them as prerequisites.  A single make
@@ -494,6 +495,11 @@ check:
 # match are asserted here, on the host, against the shipped C reference or the
 # selected Rust implementation through its production C ABI shim. In `make
 # check` because it takes about a second and needs no target runtime.
+.PHONY: test-ckpt-image
+test-ckpt-image:
+	@sh tools/test-ckpt-image-host.sh
+	@echo "test-ckpt-image: PASS"
+
 .PHONY: test-nat-rewrite
 test-nat-rewrite:
 	@sh tools/test-nat-rewrite-host.sh $(NETFILTER_REWRITE_IMPL)

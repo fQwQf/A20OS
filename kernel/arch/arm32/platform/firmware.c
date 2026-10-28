@@ -26,6 +26,14 @@ int32_t firmware_cpu_on(uint32_t target, uint32_t entry, uint32_t context) {
     return psci(0x84000003, target, entry, context);
 }
 
+int32_t firmware_cpu_off(void) {
+    return psci(0x84000002, 0, 0, 0);
+}
+
+int32_t firmware_affinity_info(uint32_t target, uint32_t lowest_level) {
+    return psci(0x84000004, target, lowest_level, 0);
+}
+
 void platform_firmware_shutdown(void) __attribute__((weak));
 void platform_firmware_reboot(void) __attribute__((weak));
 

@@ -996,6 +996,34 @@ void driver_progress_class(uint32_t class_type)
     }
 }
 
+int driver_core_kexec_prepare(void)
+{
+    int rc = 0;
+    driver_ops_lock();
+    for (int i = 0; i < g_device_count; i++) {
+        device_t *dev = g_devices[i];
+        if (dev->drv && !dev->drv->shutdown) {
+            kinfo("[KEXEC] driver '%s' has no shutdown callback\n",
+                  dev->drv->name ? dev->drv->name : "?");
+            rc = -EOPNOTSUPP;
+            break;
+        }
+    }
+    driver_ops_unlock();
+    return rc;
+}
+
+void driver_core_shutdown_all(void)
+{
+    driver_ops_lock();
+    for (int i = g_device_count - 1; i >= 0; i--) {
+        device_t *dev = g_devices[i];
+        if (dev->drv && dev->drv->shutdown)
+            dev->drv->shutdown(dev);
+    }
+    driver_ops_unlock();
+}
+
 /* Format the registered drivers for /proc/drivers (Linux format). */
 int driver_core_list_drivers(char *buf, size_t sz)
 {

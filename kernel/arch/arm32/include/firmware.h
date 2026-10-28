@@ -4,6 +4,8 @@
 #include "core/types.h"
 
 int32_t firmware_cpu_on(uint32_t target, uint32_t entry, uint32_t context);
+int32_t firmware_cpu_off(void);
+int32_t firmware_affinity_info(uint32_t target, uint32_t lowest_level);
 void firmware_shutdown(void);
 void firmware_reboot(void);
 void firmware_console_putchar(char c);

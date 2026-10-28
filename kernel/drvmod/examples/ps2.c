@@ -375,6 +375,20 @@ static int ps2_remove(device_t *dev)
     return 0;
 }
 
+static void ps2_driver_shutdown(device_t *dev)
+{
+    (void)dev;
+    if (!g_ps2.initialized)
+        return;
+    uint8_t config;
+    if (ps2_write_cmd(0x20) == 0 && ps2_read_data(&config) == 0) {
+        config &= (uint8_t)~0x03;  /* stop keyboard and mouse IRQs */
+        (void)ps2_write_cmd(0x60);
+        (void)ps2_write_data(config);
+    }
+    ps2_flush_output();
+}
+
 
 /* Publish the ring as an input class device so /dev/event0 (input_mux)
  * drains it: QEMU's monitor/VNC input targets the PS/2 controller by
@@ -440,6 +454,7 @@ static driver_t ps2_driver = {
     .bus = &platform_bus,
     .probe = ps2_probe,
     .remove = ps2_remove,
+    .shutdown = ps2_driver_shutdown,
     .class_ops = &ps2_class_ops,
     .class_type = DEV_CLASS_INPUT,
 };

@@ -122,10 +122,13 @@ def run_gate(case: dict) -> None:
 
 
 def run_build(case: dict) -> None:
+    b = case.get("build")
+    build_dir = resolve_build_dir(case) if b else None
     for cmd in case.get("pre") or []:
+        if build_dir:
+            cmd = cmd.replace("@BUILD_DIR@", build_dir)
         if sh(["bash", "-c", cmd]).returncode != 0:
             raise SystemExit(f"pre-build command failed: {cmd}")
-    b = case.get("build")
     if not b:
         return
     sink = devnull if case.get("quiet") else None

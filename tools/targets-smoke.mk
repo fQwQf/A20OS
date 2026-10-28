@@ -497,6 +497,30 @@ smoke-elf-exec-wx-rust:
 smoke-elf-kexec-rust:
 	$(PYTHON) tools/smoke.py smoke-elf-kexec-rust
 
+smoke-kexec-handoff:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff
+
+smoke-kexec-handoff-native-smp2:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff-native-smp2
+
+smoke-kexec-handoff-x86_64:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff-x86_64
+
+smoke-kexec-handoff-aarch64:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff-aarch64
+
+smoke-kexec-handoff-loongarch64:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff-loongarch64
+
+smoke-kexec-handoff-riscv32:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff-riscv32
+
+smoke-kexec-handoff-arm32:
+	$(PYTHON) tools/smoke.py smoke-kexec-handoff-arm32
+
+smoke-kexec-svc-checkpoint:
+	$(PYTHON) tools/smoke.py smoke-kexec-svc-checkpoint
+
 # Per-phase exec-replacement rollback (test profile with fault injection).
 smoke-elf-exec-fault:
 	$(PYTHON) tools/smoke.py smoke-elf-exec-fault

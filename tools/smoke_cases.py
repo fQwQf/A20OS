@@ -3477,10 +3477,9 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-elf-exec-aarch64: PASS (Rust ELF/exec decision core, AArch64 ABI=both SMP2); log saved to $log',
     },
-    # kexec_load() staging/validation on the real guest call path: the Rust
-    # kexec_wire_ok/kexec_segment_ok verdicts plus the usercopy/staging/rollback
-    # mechanics, proved through reboot(LINUX_REBOOT_CMD_KEXEC) answering
-    # -EINVAL before any image is staged and -ENOSYS once one is.
+    # kexec staging/validation on the real Linux call path: malformed segments,
+    # replacement rollback and unload. Real handoff is exercised separately with
+    # a valid kernel and a Native-personality loader, never these fake pages.
     'smoke-elf-kexec-rust': {
         'gate': {'mem': '1G', 'cpus': '2'},
         'pre': [],
@@ -3504,6 +3503,309 @@ CASES: dict[str, dict] = {
         'require_exit_zero': True,
         'timeout_msg': False,
         'pass_msg': 'smoke-elf-kexec-rust: PASS (Rust kexec staging/bounds, RV64 ABI=both SMP2); log saved to $log',
+    },
+    'smoke-kexec-handoff': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=riscv64 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-linux-smoke.img && '
+                       '(mmd -i build/tmp/kexec-linux-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-linux-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '150s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic',
+                 '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=build/tmp/kexec-linux-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev',
+                 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['kexec: image staged \\(Linux ABI\\)', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff: PASS (Linux file load, SMP2 handoff, persistence); log=$log',
+    },
+    'smoke-kexec-svc-checkpoint': {
+        # Route 2 service continuity: checkpoint a live service, kexec into a
+        # fresh kernel, restore the image and prove the in-memory counter
+        # continues instead of restarting.
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=riscv64 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-svc-ckpt.img && '
+                       '(mmd -i build/tmp/kexec-svc-ckpt.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-svc-ckpt.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-svc-checkpoint.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'svcdemo &'],
+            ['svcdemo tick 3',
+             'svcctl checkpoint $(cat /bin/svcdemo.pid) /bin/svc.ckpt'],
+            ['checkpointed', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'svcctl restore /bin/svc.ckpt &'],
+            ['[CKPT] restored', 'sleep 2 && poweroff']]},
+        'timeout': '150s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic',
+                 '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=build/tmp/kexec-svc-ckpt.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev',
+                 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['svcctl: checkpointed', '\\[KEXEC\\] handoff',
+                   '\\[CKPT\\] restored', 'svcdemo tick'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG|TRAP-STORM',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init|svcctl: restore:'],
+        'post': ['python3 tools/ckpt_svc_verify.py '
+                 '.kernel-build/smoke/kexec-svc-checkpoint.log'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-svc-checkpoint: PASS (checkpoint, kexec, restore, counter continuity); log=$log',
+    },
+    'smoke-kexec-handoff-native-smp2': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=riscv64 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-native-smoke.img && '
+                       '(mmd -i build/tmp/kexec-native-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-native-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff-native-smp2.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'native-kexec-rv'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '150s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic',
+                 '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=build/tmp/kexec-native-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev',
+                 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['NATIVE_KEXEC: LOADED backend=1', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'NATIVE_KEXEC: FAIL|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff-native-smp2.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff-native-smp2: PASS (Native image load/status/execute, SMP2); log=$log',
+    },
+    'smoke-kexec-handoff-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=x86_64 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-x86-smoke.img && '
+                       '(mmd -i build/tmp/kexec-x86-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-x86-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff-x86_64.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '180s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic',
+                 '-smp', '2', '-no-reboot', '-drive',
+                 'file=build/tmp/kexec-x86-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-pci,drive=x0', '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['kexec: image staged \\(Linux ABI\\)', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff-x86_64.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff-x86_64: PASS (Linux file load, SMP2 handoff, persistence); log=$log',
+    },
+    'smoke-kexec-handoff-aarch64': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-aarch64-smoke.img && '
+                       '(mmd -i build/tmp/kexec-aarch64-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-aarch64-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=aarch64', 'BOARD=qemu-virt-aarch64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff-aarch64.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '180s',
+        'qemu': 'qemu-system-aarch64',
+        'argv': ['qemu-system-aarch64', '-machine', 'virt', '-cpu', 'cortex-a57',
+                 '-m', '1G', '-nographic', '-smp', '2', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=build/tmp/kexec-aarch64-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['kexec: image staged \\(Linux ABI\\)', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff-aarch64.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff-aarch64: PASS (Linux file load, SMP2 handoff, persistence); log=$log',
+    },
+    'smoke-kexec-handoff-loongarch64': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-loongarch64-smoke.img && '
+                       '(mmd -i build/tmp/kexec-loongarch64-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-loongarch64-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=loongarch64', 'BOARD=qemu-virt-loongarch64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff-loongarch64.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '180s',
+        'qemu': 'qemu-system-loongarch64',
+        'argv': ['qemu-system-loongarch64', '-machine', 'virt', '-m', '1G',
+                 '-nographic', '-smp', '2', '-drive',
+                 'file=build/tmp/kexec-loongarch64-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-pci,drive=x0',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['kexec: image staged \\(Linux ABI\\)', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff-loongarch64.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff-loongarch64: PASS (Linux file load, SMP2 handoff, persistence); log=$log',
+    },
+    'smoke-kexec-handoff-riscv32': {
+        'gate': {'mem': '512M', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=riscv32 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-rv32-smoke.img && '
+                       '(mmd -i build/tmp/kexec-rv32-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-rv32-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=riscv32', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff-riscv32.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '180s',
+        'qemu': 'qemu-system-riscv32',
+        'argv': ['qemu-system-riscv32', '-machine', 'virt', '-m', '512M',
+                 '-nographic', '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=build/tmp/kexec-rv32-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['kexec: image staged \\(Linux ABI\\)', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff-riscv32.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff-riscv32: PASS (Linux file load, SMP2 handoff, persistence); log=$log',
+    },
+    'smoke-kexec-handoff-arm32': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'post-build': ['BD=$(make -s ARCH=arm32 ABI=both BRINGUP=0 NR_CPUS=2 '
+                       'print-build-dir) && cp $BD/fat32.img '
+                       'build/tmp/kexec-arm32-smoke.img && '
+                       '(mmd -i build/tmp/kexec-arm32-smoke.img ::/boot '
+                       '2>/dev/null || true) && mcopy -o -i '
+                       'build/tmp/kexec-arm32-smoke.img $BD/kernel.elf '
+                       '::/boot/kernel-next.elf'],
+        'build': {'vars': ['ARCH=arm32', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/kexec-handoff-arm32.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ['# ', 'echo KEXEC_BEGIN'],
+            ['KEXEC_BEGIN', 'echo KEXEC_HANDOFF_OK > /bin/kexec-marker'],
+            ['KEXEC_HANDOFF_OK', 'kexec /bin/boot/kernel-next.elf'],
+            ['[init] fork=0, calling execve mksh',
+             'cat /bin/kexec-marker && echo KEXEC_PERSIST_VERIFIED'],
+            ['KEXEC_PERSIST_VERIFIED', 'poweroff']]},
+        'timeout': '120s',
+        'qemu': 'qemu-system-arm',
+        'argv': ['qemu-system-arm', '-machine', 'virt', '-cpu', 'cortex-a15',
+                 '-m', '1G', '-nographic', '-smp', '2', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=build/tmp/kexec-arm32-smoke.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': ['kexec: image staged \\(Linux ABI\\)', '\\[KEXEC\\] handoff',
+                   'KEXEC_PERSIST_VERIFIED', 'System is going down for power-off NOW'],
+        'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG',
+                   'kexec: reboot:|has no shutdown callback|Cannot open /bin/init'],
+        'post': ['python3 -c "s=open(\'.kernel-build/smoke/kexec-handoff-arm32.log\').read(); '
+                 'assert s.count(\'[SMP] 2/2 configured CPUs online\') >= 2"'],
+        # qemu-virt-arm32 的 PSCI 实现不含 SYSTEM_OFF（hvc 返回
+        # NOT_SUPPORTED，无 EL3 可用 smc），poweroff 后 QEMU 不退出；
+        # 验收以日志断言为准，超时会杀掉 QEMU（返回 124，属预期）。
+        'require_exit_zero': False,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-kexec-handoff-arm32: PASS (Linux file load, SMP2 handoff, persistence); log=$log',
     },
     # Every failable exec-replacement phase, injected through the test-profile
     # prctl: the original process must survive with its descriptors and sibling

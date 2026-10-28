@@ -430,4 +430,9 @@
 #ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
 #define SYS_a20_envelope_acquire_race_test 922
 #endif /* CONFIG_ENVELOPE_ACQUIRE_RACE_TEST */
+
+/* A20OS Linux-ABI extensions: service checkpoint/restore
+ * (kernel/proc/checkpoint.c, kernel/proc/ckpt_restore.c). */
+#define SYS_a20_task_checkpoint 923
+#define SYS_a20_task_restore   924
 #endif /* _CORE_SYSCALL_NR_H */

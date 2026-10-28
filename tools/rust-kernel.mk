@@ -3616,6 +3616,40 @@ $(RUST_ELF_CORE_OBJECT): $(RUST_ELF_CORE_SRC) kernel/include/mm/elf_rust.h tools
 		$< -o $@
 
 
+# CKPT_IMAGE owns the A20CKPT1 image validation and the restore trap-frame
+# assembly.  Modeling rv64 frame slot x[0] as the address-space-token scratch
+# (not a GPR) makes the token-clobber ordering bug unrepresentable.  C keeps
+# the ptrace freeze, fd-table walk, VFS I/O and page-table population.
+RUST_CKPT_IMAGE_SRC := kernel/proc/ckpt_image.rs
+RUST_CKPT_IMAGE_TARGET := $(RUST_TASK_LIFECYCLE_TARGET)
+RUST_CKPT_IMAGE_OBJECT := $(BUILD_DIR)/rust/ckpt_image.o
+
+ifeq ($(strip $(RUST_CKPT_IMAGE_TARGET)),)
+$(error kernel/proc/ckpt_image.rs has no Rust target for ARCH=$(ARCH))
+endif
+RUST_CKPT_IMAGE_FLAGS_STAMP := $(BUILD_DIR)/rust/.ckpt-image-flags
+.PHONY: FORCE_RUST_CKPT_IMAGE_FLAGS
+FORCE_RUST_CKPT_IMAGE_FLAGS:
+
+$(RUST_CKPT_IMAGE_FLAGS_STAMP): FORCE_RUST_CKPT_IMAGE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_CKPT_IMAGE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL) $(RUST_TASK_LIFECYCLE_EXTRA) -C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_CKPT_IMAGE_OBJECT): $(RUST_CKPT_IMAGE_SRC) kernel/proc/ckpt_image.h tools/rust-kernel.mk $(RUST_CKPT_IMAGE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_CKPT_IMAGE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_TASK_LIFECYCLE_CODE_MODEL),-C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL)) \
+		$(RUST_TASK_LIFECYCLE_EXTRA) \
+		$(if $(RUST_TASK_LIFECYCLE_FEATURES),-C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES)) \
+		$< -o $@
+
+
 # POSIX_TIMER owns both interval-timer tables and every transition on them:
 # allocation/deletion, arm/disarm, the remaining-time view, drift-free periodic
 # re-arm, overrun accounting and the cpu-time itimers. C supplies the tick

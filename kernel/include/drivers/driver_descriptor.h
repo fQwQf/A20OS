@@ -38,7 +38,7 @@
  * block vtables and are rejected before the kernel can read beyond them. */
 /* 5: firmware nodes and explicit probe state in device_t; MMIO resources
  * uniformly contain CPU physical addresses rather than mapped pointers. */
-#define A20_DRIVER_ABI 6U
+#define A20_DRIVER_ABI 7U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,

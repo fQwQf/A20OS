@@ -145,6 +145,8 @@ void arch_handle_irq(uint64_t irq, int from_user) {
         arch_write_sip(arch_read_sip() & ~SIE_SSIE);
 #ifdef CONFIG_SMP
         extern void rv64_ipi_tlb_flush_handler(void);
+        extern void riscv64_kexec_ipi(void);
+        riscv64_kexec_ipi();
         rv64_ipi_tlb_flush_handler();
         /* The persistent need_resched flag is consumed at a safe return point. */
         proc_sched_handle_reschedule_ipi();

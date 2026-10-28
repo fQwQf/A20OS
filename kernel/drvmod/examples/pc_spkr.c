@@ -151,12 +151,18 @@ static const audio_dev_ops_t pc_speaker_ops = {
 static const firmware_device_id_t firmware_ids[] = {
     {.id = "PNP0800"}, {0}
 };
+static void pc_speaker_shutdown(device_t *dev)
+{
+    (void)pc_speaker_stop(dev);
+}
+
 static driver_t pc_speaker_driver = {
     .name = "pc-speaker",
     .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .probe = pc_speaker_probe,
     .remove = pc_speaker_remove,
+    .shutdown = pc_speaker_shutdown,
     .class_ops = &pc_speaker_ops,
     .class_type = DEV_CLASS_AUDIO,
 };

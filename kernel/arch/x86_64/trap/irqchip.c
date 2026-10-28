@@ -18,6 +18,8 @@
 
 #include "trap_frame.h"
 
+void x86_64_kexec_ipi(void);
+
 #define PS2_MOUSE_IRQ_VECTOR 0x2c
 
 /* Trap cause/epc/tval live in the per-CPU GS area (see cpu.h): the syscall
@@ -828,6 +830,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     (void)from_user;
     if (irq == IRQ_VECTOR_RESCHEDULE) {
         lapic_write(LAPIC_EOI, 0);
+        x86_64_kexec_ipi();
         proc_sched_handle_reschedule_ipi();
         return;
     }

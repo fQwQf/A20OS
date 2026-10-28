@@ -457,6 +457,11 @@ static int uart_driver_remove(device_t *dev) {
     return 0;
 }
 
+static void uart_driver_shutdown(device_t *dev)
+{
+    (void)dev;
+}
+
 static driver_t uart_driver = {
     .name       = "ns16550a-uart",
     .id_table   = NULL,
@@ -464,6 +469,7 @@ static driver_t uart_driver = {
     .match      = uart_driver_match,
     .probe      = uart_driver_probe,
     .remove     = uart_driver_remove,
+    .shutdown   = uart_driver_shutdown,
     .class_ops  = &uart_char_ops,
     .class_type = DEV_CLASS_CHAR,
 };

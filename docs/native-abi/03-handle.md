@@ -477,6 +477,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0213 | `task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 按 handle manifest 克隆当前 task 并安装句柄 |
 | 0x0214 | `execve` | `int64_t execve(const char *path, char **argv, char **envp)` | 原地替换当前 task 的映像，成功不返回 |
 | 0x0216 | `task_adopt` | `int64_t task_adopt(const a20_handle_t handles[6])` | 接管当前 task 的 stdio/root/cwd/self 句柄，顺序固定 |
+| 0x0217 | `task_checkpoint` | `int64_t task_checkpoint(int pid, const char *path, uint32_t path_len, uint32_t flags)` | 冻结单线程 task 并序列化寄存器/地址空间/fd 表为 A20CKPT1 镜像（见 docs/kernel/kexec-hot-update.md） |
+| 0x0218 | `task_restore` | `int64_t task_restore(const char *path, uint32_t path_len)` | restore-as-exec：以检查点镜像替换当前 task，成功不返回 |
 
 ### Memory (0x0300)
 

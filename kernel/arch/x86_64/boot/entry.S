@@ -23,6 +23,31 @@ _start:
     cli
     cld
 
+    /* kexec enters the same ELF entry in long mode.  eax carries a private
+     * handoff magic; ebx/ecx/edx preserve Multiboot info, ACPI RSDP and the
+     * framebuffer address, after which the UEFI path continues without
+     * claiming a firmware reset. */
+    cmpl  $0xA20C0DE, %eax
+    jne   .Lnormal_entry
+    .code64
+    movl  $0x2BADB002, %eax
+    movl  %eax, (g_mb_magic - PAGE_OFFSET)
+    movl  %ebx, (g_mb_info - PAGE_OFFSET)
+    movabsq $x86_boot_acpi_rsdp - PAGE_OFFSET, %rax
+    movq  %rcx, (%rax)
+    movabsq $x86_boot_framebuffer_pa - PAGE_OFFSET, %rax
+    movq  %rdx, (%rax)
+    movabsq $x86_booted_uefi - PAGE_OFFSET, %rax
+    movq  $0, (%rax)
+    /* The register stores above already did everything _start_uefi's prologue
+     * would do; re-entering there would let it re-adopt %rdi/%rsi as loader
+     * registers and clobber g_mb_info with the trampoline's control pointer.
+     * Land after the UEFI register adoption instead. */
+    movl  $(.Lefi_cmd_done - PAGE_OFFSET), %eax
+    jmp   *%rax
+
+.Lnormal_entry:
+    .code32
     /* Multiboot leaves a magic value in EAX and a pointer to its info
      * structure in EBX.  Save both into .data before the BSS clear below
      * zeroes EAX; the info pointer is what lets C size RAM from the real
@@ -369,6 +394,7 @@ _start64:
 boot_pgdir:
     .space 4096
     .align 4096
+    .globl boot_pdpt_id
 boot_pdpt_id:
     .space 4096
     .align 4096

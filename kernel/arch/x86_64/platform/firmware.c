@@ -388,7 +388,7 @@ static void x86_ram_detect(void) {
     int rc=x86_boot_memory_decode(g_mb_magic,g_mb_info,x86_boot_memory_read,NULL,
         PHYS_MEMORY_END,X86_HIGH_RAM_MAP_END,acpi_exclusions,acpi_exclusion_count,
         ranges,PFA_MAX_RANGES,&count,&source);
-    if(rc) panic("x86: malformed or excessive boot memory map");
+    if(rc) { printf("[RAM] decode failed rc=%d magic=0x%x info=0x%x\n", rc, g_mb_magic, g_mb_info); panic("x86: malformed or excessive boot memory map"); }
     /* PFA places metadata after _bss_end and excludes the kernel prefix in
      * this range. A reserved hole through the kernel must never split it. */
     extern char _bss_end[];

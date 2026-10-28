@@ -1534,12 +1534,18 @@ static void virtio_blk_driver_progress(device_t *dev)
     virtio_blk_poll_inst(inst);
 }
 
+static void virtio_blk_driver_shutdown(device_t *dev)
+{
+    (void)virtio_blk_driver_remove(dev);
+}
+
 static driver_t virtio_blk_driver = {
     .name       = "virtio-blk",
     .id_table   = virtio_blk_ids,
     .bus        = NULL,
     .probe      = virtio_blk_driver_probe,
     .remove     = virtio_blk_driver_remove,
+    .shutdown   = virtio_blk_driver_shutdown,
     .progress   = virtio_blk_driver_progress,
     .class_ops  = &virtio_blk_class_ops,
     .class_type = DEV_CLASS_BLOCK,

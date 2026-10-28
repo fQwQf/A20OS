@@ -510,18 +510,86 @@ a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];
 #if defined(__riscv_xlen) && __riscv_xlen == 32
 static volatile uint32_t g_compat_atomic64_lock;
 
+static void compat_atomic64_acquire(void)
+{
+    while (__atomic_exchange_n(&g_compat_atomic64_lock, 1, __ATOMIC_ACQUIRE))
+        ;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+static void compat_atomic64_release(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_compat_atomic64_lock, 0, __ATOMIC_RELEASE);
+}
+
 uint64_t __atomic_fetch_add_8(volatile void *ptr, uint64_t value,
                               int memorder)
 {
     (void)memorder;
     volatile uint64_t *word = (volatile uint64_t *)ptr;
-    while (__atomic_exchange_n(&g_compat_atomic64_lock, 1, __ATOMIC_ACQUIRE))
-        ;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    compat_atomic64_acquire();
     uint64_t previous = *word;
     *word = previous + value;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    __atomic_store_n(&g_compat_atomic64_lock, 0, __ATOMIC_RELEASE);
+    compat_atomic64_release();
     return previous;
+}
+
+uint64_t __atomic_load_8(const volatile void *ptr, int memorder)
+{
+    (void)memorder;
+    compat_atomic64_acquire();
+    uint64_t value = *(const volatile uint64_t *)ptr;
+    compat_atomic64_release();
+    return value;
+}
+
+void __atomic_store_8(volatile void *ptr, uint64_t value, int memorder)
+{
+    (void)memorder;
+    compat_atomic64_acquire();
+    *(volatile uint64_t *)ptr = value;
+    compat_atomic64_release();
+}
+
+uint64_t __atomic_fetch_sub_8(volatile void *ptr, uint64_t value,
+                              int memorder)
+{
+    (void)memorder;
+    volatile uint64_t *word = (volatile uint64_t *)ptr;
+    compat_atomic64_acquire();
+    uint64_t previous = *word;
+    *word = previous - value;
+    compat_atomic64_release();
+    return previous;
+}
+
+uint64_t __atomic_exchange_8(volatile void *ptr, uint64_t value, int memorder)
+{
+    (void)memorder;
+    volatile uint64_t *word = (volatile uint64_t *)ptr;
+    compat_atomic64_acquire();
+    uint64_t previous = *word;
+    *word = value;
+    compat_atomic64_release();
+    return previous;
+}
+
+_Bool __atomic_compare_exchange_8(volatile void *ptr, void *expected,
+                                  uint64_t desired, int weak,
+                                  int success_memorder, int failure_memorder)
+{
+    (void)weak; (void)success_memorder; (void)failure_memorder;
+    volatile uint64_t *word = (volatile uint64_t *)ptr;
+    compat_atomic64_acquire();
+    uint64_t current = *word;
+    if (current == *(uint64_t *)expected) {
+        *word = desired;
+        compat_atomic64_release();
+        return 1;
+    }
+    *(uint64_t *)expected = current;
+    compat_atomic64_release();
+    return 0;
 }
 #endif
