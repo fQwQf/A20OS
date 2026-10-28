@@ -30,7 +30,7 @@ void     a20_netfilter_rule_seq_write_end(void);
 int      a20_netfilter_ipv4_from_str(const uint8_t *s, size_t len,
                                      uint32_t *out);
 /* The conntrack/NAT half, defined in netfilter_nat.c. */
-void     a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
+int      a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
                                        uint8_t dir,
                                        const netfilter_frame_t *pkt);
 

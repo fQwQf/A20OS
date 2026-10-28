@@ -3,11 +3,10 @@
  * (kernel/net/filter/netfilter_nat.rs, selected by NETFILTER_NAT_IMPL=rust).
  *
  * Rust owns the table transitions; C owns the storage, the locks and the real
- * I/O.  Every entry point below runs with g_lwip_lock already held (the hook
- * call sites and the timer path hold it; the procfs entry points take it
- * themselves), and none of them takes a lock of its own except the NAT table's
- * seqlock, which the Rust side brackets explicitly around the table writes and
- * reads.  Nothing here allocates and nothing blocks.
+ * I/O. Rust entry points acquire the independent IRQ-safe CT lock, including
+ * readers and NAT rule changes. No backend lock is required for correctness;
+ * callers must never acquire a backend lock while holding the CT lock.
+ * No transaction allocates, sleeps, or transfers packet ownership.
  *
  * The mirrored structs are declared in net/netfilter.h; netfilter_nat.c
  * static-asserts every offset and size so a layout change there fails the build
@@ -37,10 +36,7 @@ typedef struct net_ct_view {
     uint32_t nat_max;
     uint32_t *nat_count;
     uint32_t *to_ms;        /* three runtime overrides, 0 = compiled default */
-    uint32_t *to_ticks;     /* three lazily derived idle limits in ticks */
-    int32_t  *time_ready;
     uint32_t *sweeps;
-    uint64_t ticks_per_sec; /* TICKS_PER_SEC; a runtime value on riscv64 */
 } net_ct_view_t;
 
 /* Conntrack table. */
@@ -61,7 +57,7 @@ int  a20_netfilter_ct_enabled(const net_ct_view_t *v);
 void a20_netfilter_ct_set_timeouts(const net_ct_view_t *v, uint32_t a,
                                    uint32_t b, uint32_t c);
 uint32_t a20_netfilter_ct_expire(const net_ct_view_t *v, uint32_t max_scan);
-void a20_netfilter_ct_process(const net_ct_view_t *v, uint8_t *frame,
+int a20_netfilter_ct_process(const net_ct_view_t *v, uint8_t *frame,
                               size_t len, int net_idx, uint8_t dir,
                               const netfilter_frame_t *pkt);
 
@@ -78,13 +74,11 @@ int  a20_netfilter_nat_pick(const net_ct_view_t *v,
 
 /*
  * Primitives the Rust module calls back into.  Defined in netfilter_nat.c.
- * The seqlock pair has no arguments because there is exactly one NAT table.
+ * The CT lock protects both rule publication and tuple reservation.
  */
-uint32_t a20_netfilter_now_ticks(void);
-uint32_t a20_netfilter_nat_seq_read_begin(void);
-int      a20_netfilter_nat_seq_read_retry(uint32_t start);
-void     a20_netfilter_nat_seq_write_begin(void);
-void     a20_netfilter_nat_seq_write_end(void);
+uint32_t a20_netfilter_now_ms(void);
+uint64_t a20_netfilter_ct_lock(void);
+void     a20_netfilter_ct_unlock(uint64_t flags);
 void     a20_netfilter_rewrite_set_addr(uint8_t *frame, size_t len,
                                         const netfilter_frame_t *pkt,
                                         uint32_t new_src, uint32_t new_dst);

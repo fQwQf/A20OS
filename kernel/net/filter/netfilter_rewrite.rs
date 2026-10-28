@@ -135,13 +135,14 @@ fn fix_l4(
     let Some(old_ck) = get16(frame, ckoff) else {
         return;
     };
-    // UDP over IPv4 uses zero to mean that no checksum was computed. The C
-    // reference has historically left a zero TCP checksum unchanged too.
-    if old_ck == 0 {
+    // Only IPv4 UDP uses zero to disable checksumming. TCP zero is a valid
+    // computed checksum and must participate in incremental updates.
+    if old_ck == 0 && proto == NETFILTER_PROTO_UDP {
         return;
     }
     let ck = csum_delta(csum_delta(old_ck, old_src, new_src), old_dst, new_dst);
-    let _ = put16(frame, ckoff, ck);
+    let wire_ck = if proto == NETFILTER_PROTO_UDP && ck == 0 { 0xffff } else { ck };
+    let _ = put16(frame, ckoff, wire_ck);
 }
 
 #[no_mangle]
@@ -287,9 +288,10 @@ pub unsafe extern "C" fn a20_rust_netfilter_set_port(
     let Some(old_ck) = get16(bytes, ckoff) else {
         return;
     };
-    if old_ck != 0 {
+    if old_ck != 0 || proto != NETFILTER_PROTO_UDP {
         let ck = csum_delta(old_ck, u32::from(old_port) << 16, u32::from(new_port) << 16);
-        let _ = put16(bytes, ckoff, ck);
+        let wire_ck = if proto == NETFILTER_PROTO_UDP && ck == 0 { 0xffff } else { ck };
+        let _ = put16(bytes, ckoff, wire_ck);
     }
 }
 
@@ -303,14 +305,10 @@ extern "C" {
 /// that lock; calling this entry outside that context would race netif updates.
 #[no_mangle]
 pub unsafe extern "C" fn a20_rust_netfilter_masq_addr(net_idx: i32) -> u32 {
-    // SAFETY: upheld by this entry's caller contract (the NAT hook's lwIP lock).
-    let addr = unsafe { a20_lwip_netif_ipv4(net_idx) };
-    if addr != 0 {
-        addr
-    } else {
-        // SAFETY: the same lwIP lock remains held for the fallback lookup.
-        unsafe { a20_lwip_netif_ipv4(-1) }
-    }
+    // An unnumbered egress cannot borrow another interface's identity. The
+    // transaction rejects zero before touching the packet.
+    if net_idx < 0 { return 0; }
+    unsafe { a20_lwip_netif_ipv4(net_idx) }
 }
 
 #[inline]

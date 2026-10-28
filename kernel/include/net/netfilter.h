@@ -11,7 +11,7 @@
  *   1. An ordered rule table with drop/accept verdicts plus per-rule and
  *      aggregate counters.
  *   2. conntrack: a fixed-size 5-tuple table with TCP/UDP flow state
- *      (NEW/ESTABLISHED), idle-timeout reclamation, LRU eviction at capacity,
+ *      (NEW/ESTABLISHED), idle-timeout reclamation, fail-closed capacity handling,
  *      and counters.  On by default and switchable at runtime with
  *      "cton"/"ctoff"; switching it off stops *new* entries and keeps existing
  *      ones, so a live NAT binding is never broken by turning tracking off.  An
@@ -20,35 +20,12 @@
  *      with the translated tuple remembered in the conntrack entry so the
  *      reply direction is rewritten back.
  *
- * Locking contract: both hooks are called from the lwIP data plane while
- * g_lwip_lock is held (a20_lwip_process_netif_rx_tx_locked for input,
- * a20_lwip_linkoutput for output).  Per docs/net/network-lock-contract.md a
- * hook must not block, sleep, or allocate.  The implementation therefore only
- * reads and rewrites the caller's frame buffer and bumps relaxed counters; it
- * never calls into lwIP and never takes a lock of its own.
- *
- * The conntrack table is protected by g_lwip_lock, not by g_netfilter_lock,
- * and this is the one place where adding a second lock would have been wrong.
- * A dedicated conntrack spinlock looked like the tidier answer, but the packet
- * path already holds g_lwip_lock, so the new lock would have added a second
- * global acquisition per packet today and, once g_lwip_lock is sharded
- * (docs/net/net-lanes.md), become the new serialisation point in its place --
- * the exact outcome the lane work exists to avoid.  So every mutation happens
- * from a context that already holds g_lwip_lock: the two hooks, and the sweep
- * called from a20_lwip_poll_timers_locked().  The /proc entry points are the
- * exception and take g_lwip_lock themselves (a20_lwip_lock): the flush verb
- * because it mutates, and netfilter_format() before it calls
- * netfilter_nat_format(), because the renderer walks both tables while the
- * packet path rewrites them in place.  That is safe because a procfs access is
- * a syscall and never runs under g_lwip_lock; a20_lwip_format_memp() takes the
- * same lock for the same reason one case over in procfs_render.c.
- *
- * The renderer takes the lock rather than a seqlock, which is what the filter
- * rule table uses.  A seqlock suits a table whose only mutations are
- * configuration changes; this one is mutated by every packet (each entry's
- * counters), so a seqlock would put a write section on the packet path and make
- * concurrent /proc readers into writer-starvation candidates on a path that
- * must not block.
+ * Locking contract: hooks borrow the caller's writable frame. They cannot
+ * sleep or allocate. Filter rules retain their own publication mechanism;
+ * conntrack and NAT use an independent IRQ-safe CT lock via the Rust CtGuard.
+ * Backend locks and configuration writer locks may precede the CT lock; CT
+ * transactions never enter a backend or acquire either outer lock. This is
+ * necessary when multiple backend lanes execute concurrently.
  *
  * The frame buffer is what makes NAT possible here at all: the hooks sit
  * below lwIP, on the raw Ethernet frame, so a translation is an in-place
@@ -66,12 +43,12 @@
  *     unreachable, time exceeded, everything else -- is passed through
  *     untracked and untranslated.  Pairing those with a flow means reading the
  *     packet they quote from the original and matching on that, which is an
- *     ALG, so it is not done here.  Path MTU discovery therefore does not work
+ *     a separate error translator, which is not implemented here.  Path MTU discovery therefore does not work
  *     through this: a translated flow that needs a PMTU will black-hole rather
  *     than recover from the fragmentation-needed message.
  *   - ICMP echo is translated by ADDRESS only.  It has no port, so a NAT rule
  *     that asks for a toport= has no field to apply it to and the port is
- *     ignored; and no ICMP payload rewriting happens at all (the embedded
+ *     rejected; and no ICMP payload rewriting happens at all (the embedded
  *     headers inside a quoted packet, for instance).  The echo *identifier* is
  *     never translated, which is what keeps a reply pairable.  Echo is also
  *     exempt from the non-first-fragment rule below, since the parser only
@@ -223,7 +200,7 @@ int netfilter_parse_rule(const char *line, size_t len, netfilter_rule_t *out);
  * (filter first, then conntrack, then NAT) is visible in one place rather than
  * spread across the hooks.
  */
-void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
+int netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
                                  netfilter_dir_t dir,
                                  const netfilter_frame_t *pkt);
 

@@ -64,3 +64,23 @@ netlink状态机测试通过；x86_64/2CPU/4lane内核编译通过。
 含本修复及正在验收的NAT事务改造的 `kernel-napt-bh.elf`，在实际改端口SNAT下完成
 TCP16KiB与UDP64B全部payload校验（`napt-bh-kvm`）。此前修复时钟/校验和之后仍存在
 的长流停滞样本保留；这个集成样本不是隔离的性能A/B实验。
+
+## NAT 绑定、计时与校验和
+
+NAT 状态事务改为子系统自己的 IRQ-safe CT 锁，移除对 lwIP CT shared-domain 和 procfs
+全 lane barrier 的依赖；Rust 表项读写使用值副本，不再生成静态可变别名。先预留完整
+回复元组再改包；动态端口处理客户端冲突，固定端口冲突/表满返回错误并由过滤器丢弃，
+不驱逐活跃绑定。支持 ingress 未转换条目在 egress 附加 SNAT 并重建回复索引。
+
+修复真实 KVM 暴露的两个旧缺陷：超时混用高频原始tick/32位截断，导致活跃NAT过早
+过期；重写把合法TCP零校验和当成禁用校验，改端口后偶发坏包。时间统一为回绕毫秒，
+TCP零值正常更新，UDP计算结果零编码为0xffff。ICMP echo回复索引也已修复。
+
+默认/嵌入式/2GHz时钟三种宿主构建通过生产状态机断言、4线程竞争和转录比较；
+filter生产hook验证NAT失败会DROP；C与Rust重写实现各通过47项独立重算检查。
+新的pcap校验器确实检出旧失败样本中的3个TCP坏包，并通过修复后的抓包。
+
+`napt-release-kvm` 为3次独立启动、每case至少1秒的改端口SNAT：TCP16KiB echo
+10.26/11.76/11.51MiB/s，UDP64B全部payload校验通过；三份完整pcap的IPv4/TCP/UDP
+校验均无错误。CPU口径为全QEMU进程，请勿解释为guest-only周期计数。此处不作严格
+性能非劣性判断，也不以SLIRP结果宣称已完成LAN→WAN转发或成熟软路由。
