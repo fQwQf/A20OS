@@ -6,8 +6,8 @@
 
 A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`、world 镜像（`build/images/*.img`）、ISO、独立可执行文件和共享库一旦提供给第三方，就是需要按其实际内容审查的二进制/资源分发物。因此：
 
-- `kernel/external/lwip` 和 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree；不能称为 submodule。
-- `.gitmodules` 目前只登记 `user/external/apps/fastfetch` 一项；超级项目的 gitlink 条目才固定具体 commit。超级项目只跟踪 gitlink，不等于把该 submodule 的许可证全文作为普通文件跟踪；发布前必须在精确 commit 中核验许可证和 notices。
+- `kernel/external/{lwip,uacpi}` 是普通 tracked tree；`user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 与 fastfetch 是固定 commit 的 submodule。
+- `.gitmodules` 登记六个用户态 submodule 的来源；超级项目的 gitlink 条目固定具体 commit。超级项目只跟踪 gitlink，不等于把该 submodule 的许可证全文作为普通文件跟踪；发布前必须在精确 commit 中核验许可证和 notices。
 - 用户态的第三方程序不再由本仓库编译。原先 vendored 的 `apps/{git,vim}`、`libs/zlib`、`toolchain/{binutils,musl-cross-make}`、`gcc`、`external/rust` 与 `external/toolchain/Lamina1` 已全部删除，改由 world 清单从 Alpine 上游仓库解析（见 [packaging/overview.md](./packaging/overview.md)）。因此 world 镜像的分发边界由 **Alpine 上游包自身的许可证**决定，不由本仓库的源码树决定。
 - 是否需要随附源码、书面 offer、notice、重链接材料或其他内容，取决于实际组件、链接方式和分发形式，不能由“源码可在工作区找到”一概替代。
 
@@ -33,10 +33,10 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 |------|--------|------|
 | musl | MIT | `user/external/musl` |
 | mlibc | MIT | `user/external/mlibc` |
-| mksh | 逐文件混合：MirBSD/MirOS 条款；`strlcpy.c` 为 ISC；`mbsdcc.h`/`mbsdint.h` 为 CC0 OR MirOS；`expr.c` 含 Unicode notice | `user/external/mksh-cvs2git` |
-| sbase | MIT | `user/external/sbase` |
+| mksh | 逐文件混合：MirBSD/MirOS 条款；`strlcpy.c` 为 ISC；`mbsdcc.h`/`mbsdint.h` 为 CC0 OR MirOS；`expr.c` 含 Unicode notice | `user/external/mksh-cvs2git`；构建头文件在 `user/ports/mksh` |
+| sbase | MIT | `user/external/sbase`；额外的 id 实现在 `user/ports/sbase` |
 | TLSe | BSD-2-Clause OR Unlicense | `user/external/tlse` |
-| fastfetch | MIT | `user/external/apps/fastfetch`（唯一的 gitlink） |
+| fastfetch | MIT | `user/external/apps/fastfetch`（gitlink） |
 
 ## 5. 用户态程序、静态链接与镜像
 

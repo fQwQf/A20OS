@@ -24,7 +24,8 @@ int64_t sys_brk(uint64_t addr) {
     return (int64_t)proc_brk(addr);
 }
 
-int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long off) {
+int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, int64_t off) {
+    if (!(flags & MAP_ANONYMOUS) && (int64_t)(long)off != off) return -EOVERFLOW;
     if ((flags & (MAP_SHARED | MAP_PRIVATE)) == 0 ||
         (flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)) {
         return -EINVAL;

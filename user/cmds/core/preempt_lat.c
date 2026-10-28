@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
+#include "../linux_sched.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,8 +176,8 @@ static int rt_main(int result_fd, int pin_cpu)
 {
     int pin_rc = pin_to_cpu(pin_cpu);
     struct sched_param param = { .sched_priority = RT_PRIO };
-    int prio_rc = sched_setscheduler(0, SCHED_FIFO, &param);
-    int policy = sched_getscheduler(0);
+    int prio_rc = a20_linux_sched_setscheduler(0, SCHED_FIFO, &param);
+    int policy = a20_linux_sched_getscheduler(0);
 
     /* Every sample is reported, not just the maximum: a single blown deadline
      * among twenty tells a different story from twenty blown deadlines, and

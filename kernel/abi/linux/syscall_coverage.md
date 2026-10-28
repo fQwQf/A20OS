@@ -442,6 +442,8 @@ strength of a boilerplate note.
 | `lsm_set_self_attr` | security | `full` | `smoke-syscall-ext` | returns -EOPNOTSUPP (restrict via landlock_restrict_self) |
 | `lsm_list_modules` | security | `full` | `smoke-syscall-ext` | lists capability + landlock modules |
 | `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
+| `a20_task_checkpoint` | a20-ckpt | `full` | `smoke-kexec-svc-checkpoint` | A20OS extension (923): freeze a single-threaded task and serialize registers/address space/fd table to an A20CKPT1 image |
+| `a20_task_restore` | a20-ckpt | `full` | `smoke-kexec-svc-checkpoint` | A20OS extension (924): replace the caller with the checkpointed image (restore-as-exec); never returns on success |
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
 | `a20_envelope_create` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: create a capability envelope from a policy struct (docs/research/05) |
 | `a20_envelope_enter` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: attach the calling process to an envelope; monotone, a second enter fails |
@@ -449,8 +451,6 @@ strength of a boilerplate note.
 | `a20_envelope_stats` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: query envelope budget and usage counters |
 | `a20_envelope_audit` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: run the runtime invariant audit over envelope state (E8) |
 | `a20_envelope_acquire_race_test` | a20-envelope | `full` | `envelope_smoke` built with `ENVELOPE_ACQUIRE_RACE_TEST=1` | Test-only build variant (`CONFIG_ENVELOPE_ACQUIRE_RACE_TEST`): arm/cancel/result injection at the descriptor-install mediation boundary; no production dispatch entry |
-| `a20_task_checkpoint` | a20-ckpt | `full` | `smoke-kexec-svc-checkpoint` | A20OS extension (923): freeze a single-threaded task and serialize registers/address space/fd table to an A20CKPT1 image |
-| `a20_task_restore` | a20-ckpt | `full` | `smoke-kexec-svc-checkpoint` | A20OS extension (924): replace the caller with the checkpointed image (restore-as-exec); never returns on success |
 | `hyp_vm_create` | hypervisor | `full` | `smoke-hyp-selftest` | A20OS extension: create a stage-2 address space; -EOPNOTSUPP when the CPU has no H extension |
 | `hyp_vm_load` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: copy bytes into guest RAM, one host page per stage-2 mapping |
 | `hyp_vcpu_create` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: create a vcpu pinned to an entry GPA |

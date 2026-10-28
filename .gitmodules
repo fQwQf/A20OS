@@ -2,18 +2,23 @@
 	path = user/external/apps/fastfetch
 	url = https://github.com/fQwQf/fastfetch.git
 	branch = dev
+
+[submodule "user/external/musl"]
+	path = user/external/musl
+	url = https://git.musl-libc.org/git/musl
+
+[submodule "user/external/sbase"]
+	path = user/external/sbase
+	url = https://git.suckless.org/sbase
+
 [submodule "user/external/mksh-cvs2git"]
 	path = user/external/mksh-cvs2git
-	url = https://github.com/fQwQf/mksh-cvs2git.git
+	url = https://github.com/mirabilos/mksh-cvs2git.git
+
 [submodule "user/external/mlibc"]
 	path = user/external/mlibc
 	url = https://github.com/fQwQf/mlibc.git
-[submodule "user/external/musl"]
-	path = user/external/musl
-	url = https://github.com/fQwQf/musl.git
-[submodule "user/external/sbase"]
-	path = user/external/sbase
-	url = https://github.com/fQwQf/sbase.git
+
 [submodule "user/external/tlse"]
 	path = user/external/tlse
-	url = https://github.com/fQwQf/tlse.git
+	url = https://github.com/eduardsui/tlse.git

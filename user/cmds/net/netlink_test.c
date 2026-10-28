@@ -46,7 +46,7 @@
 
 #define NLM_F_REQUEST   0x001
 #define NLM_F_REPLACE   0x100
-#define NLM_F_MULTI     0x200
+#define NLM_F_MULTI     0x002
 
 #define RTM_NEWLINK     16
 #define RTM_NEWADDR     20

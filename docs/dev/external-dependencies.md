@@ -2,8 +2,8 @@
 
 ## 源码存储形态
 
-- `kernel/external/{lwip,uacpi}` 与 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree。
-- `.gitmodules` 目前只登记 `user/external/apps/fastfetch` 一项；超级项目的 gitlink 条目固定具体 commit；许可证必须对该精确 commit 核验。
+- `kernel/external/{lwip,uacpi}` 是普通 tracked tree；`user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 与 fastfetch 使用固定 commit 的 submodule。
+- `.gitmodules` 登记依赖来源，超级项目的 gitlink 固定具体 commit；许可证必须对该精确 commit 核验。首次检出运行 `git submodule update --init --recursive`。来源、保留适配和版本历史约定见 [userland-submodules.md](userland-submodules.md)。
 - fastfetch 是唯一仍从源码编译进根文件系统的独立第三方程序：它被链接进 FAT32 根，而该根在任何 Alpine world 挂载之前就要启动。
 - 基础 `user/Makefile` 存在静态 musl 链接；分发分析不能把用户程序一概描述为与 musl 分离。
 

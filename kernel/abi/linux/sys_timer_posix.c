@@ -128,6 +128,18 @@ static int fill_getitimer(task_t *t, int which, uint64_t out[4])
     return 0;
 }
 
+/* Legacy itimer uses native-long timeval fields, independently of libc's
+ * 64-bit time_t. Keep the internal timer arithmetic in uint64_t. */
+static int itimerval_to_user(void *dst, const uint64_t value[4])
+{
+    long wire[4];
+    for (int i = 0; i < 4; ++i) {
+        wire[i] = (long)value[i];
+        if (wire[i] < 0 || (uint64_t)wire[i] != value[i]) return -EOVERFLOW;
+    }
+    return copy_to_user(dst, wire, sizeof(wire)) < 0 ? -EFAULT : 0;
+}
+
 int64_t sys_getitimer(int which, void *curr_value)
 {
     if (which < 0 || which >= 3) return -EINVAL;
@@ -136,7 +148,7 @@ int64_t sys_getitimer(int which, void *curr_value)
     uint64_t out[4];
     int r = fill_getitimer(cur, which, out);
     if (r < 0) return r;
-    return copy_to_user(curr_value, out, sizeof(out)) < 0 ? -EFAULT : 0;
+    return itimerval_to_user(curr_value, out);
 }
 
 int64_t sys_setitimer(int which, const void *new_value, void *old_value)
@@ -148,11 +160,14 @@ int64_t sys_setitimer(int which, const void *new_value, void *old_value)
         uint64_t old[4];
         int r = fill_getitimer(cur, which, old);
         if (r < 0) return r;
-        if (copy_to_user(old_value, old, sizeof(old)) < 0) return -EFAULT;
+        int wire_ret = itimerval_to_user(old_value, old);
+        if (wire_ret < 0) return wire_ret;
     }
     if (!new_value) return -EFAULT;
+    long wire[4];
     uint64_t next[4];
-    if (copy_from_user(next, new_value, sizeof(next)) < 0) return -EFAULT;
+    if (copy_from_user(wire, new_value, sizeof(wire)) < 0) return -EFAULT;
+    for (int i = 0; i < 4; ++i) next[i] = (uint64_t)(int64_t)wire[i];
     if ((int64_t)next[0] < 0 || (int64_t)next[1] < 0 || next[1] >= 1000000ULL ||
         (int64_t)next[2] < 0 || (int64_t)next[3] < 0 || next[3] >= 1000000ULL) return -EINVAL;
     if (which != 0) {
@@ -190,21 +205,21 @@ int64_t sys_alarm(unsigned seconds)
 }
 
 /* Linux ABI struct sigevent wire layout (uapi/asm-generic/siginfo.h):
- *   union sigval sigev_value;   // 0..7
- *   int sigev_signo;            // 8
- *   int sigev_notify;           // 12
- *   union { int _tid; ... } ;   // 16
+ *   union sigval sigev_value;   // one native pointer-sized word
+ *   int sigev_signo, sigev_notify;
+ *   union { int _tid; ... };    // remainder of a fixed 64-byte structure
  * SIGEV_SIGNAL == 0, SIGEV_NONE == 1, SIGEV_THREAD == 2, SIGEV_THREAD_ID == 4.
  */
 typedef struct {
-    uint64_t sigev_value;
+    uintptr_t sigev_value;
     int32_t  sigev_signo;
     int32_t  sigev_notify;
     union {
-        int32_t pad[12];
+        int32_t pad[(64 - sizeof(uintptr_t) - 8) / 4];
         int32_t tid;
     } un;
 } kernel_sigevent_t;
+_Static_assert(sizeof(kernel_sigevent_t) == 64, "Linux sigevent wire size");
 
 int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
 {

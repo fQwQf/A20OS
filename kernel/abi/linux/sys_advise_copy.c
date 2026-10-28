@@ -35,13 +35,15 @@ static int64_t vectored_pwrite_at(int fd, const void *iov, int iovcnt, long off)
     return r;
 }
 
-int64_t sys_preadv(int fd, const void *iov, int iovcnt, long off)
+int64_t sys_preadv(int fd, const void *iov, int iovcnt, int64_t off)
 {
+    if ((int64_t)(long)off != off) return -EOVERFLOW;
     return vectored_pread_at(fd, iov, iovcnt, off);
 }
 
-int64_t sys_pwritev(int fd, const void *iov, int iovcnt, long off)
+int64_t sys_pwritev(int fd, const void *iov, int iovcnt, int64_t off)
 {
+    if ((int64_t)(long)off != off) return -EOVERFLOW;
     return vectored_pwrite_at(fd, iov, iovcnt, off);
 }
 

@@ -21,17 +21,18 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ARM EABI exposes time64 timer syscalls under explicit names.  musl uses a
+/* 32-bit Linux exposes time64 timer syscalls under explicit names.  musl uses a
  * 64-bit time_t on this 32-bit target, so call the matching raw ABI directly. */
-#if defined(__arm__) && !defined(__aarch64__)
+#if (defined(__arm__) && !defined(__aarch64__)) || \
+    (defined(__riscv) && __riscv_xlen == 32)
 #ifndef SYS_timer_settime64
-#error "ARM EABI headers must expose timer_settime64"
+#error "32-bit Linux headers must expose timer_settime64"
 #endif
 #ifndef SYS_timer_gettime64
-#error "ARM EABI headers must expose timer_gettime64"
+#error "32-bit Linux headers must expose timer_gettime64"
 #endif
 _Static_assert(sizeof(time_t) == sizeof(int64_t),
-               "ARM timer64 syscall requires 64-bit time_t layout");
+               "timer64 syscall requires 64-bit time_t layout");
 #define A20_SYS_timer_settime SYS_timer_settime64
 #define A20_SYS_timer_gettime SYS_timer_gettime64
 #else
@@ -64,11 +65,11 @@ _Static_assert(sizeof(time_t) == sizeof(int64_t),
 
 /* Linux ABI struct sigevent wire layout (uapi/asm-generic/siginfo.h). */
 typedef struct {
-    uint64_t sigev_value;
+    uintptr_t sigev_value;
     int32_t  sigev_signo;
     int32_t  sigev_notify;
     union {
-        int32_t pad[12];
+        int32_t pad[(64 - sizeof(uintptr_t) - 8) / 4];
         int32_t tid;
     } un;
 } wire_sigevent_t;
