@@ -349,6 +349,25 @@ override BRINGUP := 1
 endif
 endif
 
+# Stack selection is separate from resource budgets and QEMU NET_BACKEND.
+NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,lwip)
+ifeq ($(NET_STACK),freebsd)
+$(error NET_STACK=freebsd is not runnable yet; upstream source pin alone is not a backend)
+endif
+ifeq ($(filter $(NET_STACK),lwip none),)
+$(error NET_STACK must be lwip or none; FreeBSD is source-only)
+endif
+ifeq ($(NET_STACK),none)
+ifeq ($(PROFILE),mcu)
+else
+$(error NET_STACK=none currently requires the MCU profile)
+endif
+else
+ifeq ($(PROFILE),mcu)
+$(error the MCU profile does not have enough runtime services for TCP/IP)
+endif
+endif
+
 # Driver deployment depends on the selected architecture and board.
 include tools/driver-deployment.mk
 

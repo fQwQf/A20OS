@@ -12,6 +12,8 @@ void a20_lwip_init(void);
 void a20_lwip_attach_netifs(void);
 void a20_lwip_poll(void);
 void a20_lwip_poll_waiter(void);
+/* Works through registered netif ops, including dynamically loaded drivers. */
+void a20_lwip_rx_progress(unsigned budget);
 void a20_lwip_poll_locked(void);
 /* Generic timeout/configuration work requires the cold barrier. Multi-lane
  * RX polling requires ingress and stages frames without protocol execution. */

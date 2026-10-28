@@ -17,6 +17,7 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/core/driver_core.h"
 #include "net/lwip_stack.h"
+#include "net/stack.h"
 #include "lwip/tcp.h"
 
 static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_t, 128);
@@ -365,7 +366,7 @@ void net_init(void) {
     net_socket_registry_init();
     /* Bus enumeration and driver core own transport discovery.  Network init
      * only consumes DEV_CLASS_NET; it must never run a second arch scanner. */
-    a20_lwip_init();
+    net_stack_init();
 #if CONFIG_NET_LOCK_ASSERT
     /* Same reasoning as g_lwip_lock_armed: nothing above this line may be
      * judged, because the registry locks only exist from

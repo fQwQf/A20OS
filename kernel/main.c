@@ -39,6 +39,7 @@ extern void acpi_os_start_worker(void);
 #include "drivers/block/loop.h"
 #include "net/socket.h"
 #include "net/lwip_stack.h"
+#include "net/stack.h"
 #include "drivers/core/driver_core.h"
 #include "drvmod/drvmod.h"
 #include "drivers/usb/usb.h"
@@ -384,7 +385,7 @@ void init_kthread(void) {
      * available. Embedded deployments link all drivers into the kernel. */
 #ifdef CONFIG_DRIVER_DEPLOYMENT_GENERIC
     driver_manager_init();
-    a20_lwip_attach_netifs();
+    net_stack_attach_interfaces();
 #endif
 
     const char *init_path = NULL;

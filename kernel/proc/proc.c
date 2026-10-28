@@ -1,3 +1,4 @@
+#include "core/progress.h"
 #include "proc/resource_ns.h"
 /*
  * A20OS — Enhanced Process Management
@@ -367,7 +368,7 @@ void idle_loop(void) {
         } else {
         arch_local_irq_disable();
         a20_perf_count(A20_PERF_IDLE_WAIT_ATTEMPTS);
-        if (proc_sched_idle_prepare()) {
+        if (!kernel_progress_work_pending() && proc_sched_idle_prepare()) {
             a20_perf_count(A20_PERF_IDLE_WAIT_ENTRIES);
             arch_idle_wait();
             a20_perf_count(A20_PERF_IDLE_WAIT_WAKE_RETURNS);

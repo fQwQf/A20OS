@@ -30,5 +30,7 @@ void kernel_progress_note_pending(uint32_t bits);
 void kernel_progress_poll(kernel_progress_reason_t reason);
 void kernel_progress_timer_tick(void);
 void kernel_progress_run_bottom_halves(void);
+/* Called with local IRQs disabled immediately before the idle sleep decision. */
+int kernel_progress_work_pending(void);
 
 #endif /* _CORE_PROGRESS_H */

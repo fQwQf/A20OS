@@ -1230,6 +1230,13 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
             drained = 0;
             break;
         }
+        /* The destination lane is only known after receiving the frame.
+         * Stop while any lane is full: retaining ownership in the device
+         * avoids dropping the rest of a TCP burst into a four-slot queue. */
+        if (!net_lane_rx_all_have_room()) {
+            drained = 0;
+            break;
+        }
         int len = netif_device_recv(st, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
@@ -1525,11 +1532,10 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
  * stack still runs it with interrupts disabled, on whatever CPU took the
  * interrupt, holding the one global lock for the whole burst.
  *
- * Unbounded enqueue, matching what this function did before the split: this
- * interrupt is the primary reason the ring needs draining, so bounding it would
- * only move the work.  What bounds the *processing* is the lane queue depth and
- * the poll point's budget; a frame that finds its lane full is dropped and
- * counted, which for TCP means a retransmission.
+ * Multi-lane enqueue is bounded by both its work budget and every lane's
+ * remaining credit. Unread frames remain in the device and RX pending stays
+ * raised. Process-context progress uses registered netif ops, so this does
+ * not depend on a statically linked virtio-net poll callback.
  */
 void a20_lwip_process_netif_irq_locked(int net_idx)
 {
@@ -1549,7 +1555,7 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
         a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
         if (st->idx == net_idx) {
 #if CONFIG_NET_LANES > 1
-            a20_lwip_rx_enqueue_locked(n, 0);
+            a20_lwip_rx_enqueue_locked(n, CONFIG_NET_RX_IRQ_BUDGET);
 #else
             /* Unbounded: this interrupt is the primary reason the ring needs
              * draining, so deferring here would only move the work. */
@@ -1782,7 +1788,9 @@ void a20_lwip_poll(void) {
  * than g_lwip_lock, and the waiter needs them to drain its own deferred
  * receive data.
  */
-void a20_lwip_poll_waiter(void) {
+void a20_lwip_rx_progress(unsigned budget) {
+    if (!g_lwip_ready)
+        return;
     int need_lock = a20_lwip_rx_pending_any();
     for (int i = 0; i < A20_NET_MAX_DEVS && !need_lock; i++) {
         const a20_lwip_netif_state_t *st = &g_netif_state[i];
@@ -1796,7 +1804,7 @@ void a20_lwip_poll_waiter(void) {
     if (need_lock) {
         uint64_t flags = a20_lwip_ingress_lock();
 #if CONFIG_NET_LANES > 1
-        a20_lwip_poll_rx_locked(CONFIG_NET_RX_IRQ_BUDGET);
+        a20_lwip_poll_rx_locked(budget);
 #else
         a20_lwip_poll_locked();
 #endif
@@ -1804,6 +1812,10 @@ void a20_lwip_poll_waiter(void) {
     } else {
         a20_perf_count(A20_PERF_NET_POLL_SKIPPED);
     }
+}
+
+void a20_lwip_poll_waiter(void) {
+    a20_lwip_rx_progress(CONFIG_NET_RX_IRQ_BUDGET);
     A20_LWIP_LANE_RX_POLL(CONFIG_NET_RX_IRQ_BUDGET);
     net_inet_bottom_half_process_all();
     net_packet_bottom_half_process();

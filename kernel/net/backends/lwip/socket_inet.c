@@ -2526,6 +2526,11 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     }
     a20_lwip_lane_enter(net_socket_lane_load(s));
     err_t e = tcp_connect(s->tcp, &ip, port, lwip_tcp_connected_cb);
+    /* tcp_connect chooses a concrete local address and may rebucket the PCB.
+     * Publish that owner before releasing the all-lane barrier: otherwise the
+     * data-path lock retries between the old socket and new PCB forever. */
+    if (e == ERR_OK)
+        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->tcp));
     a20_lwip_unlock(lwip_flags);
     if (e != ERR_OK) {
         s->tcp_connecting = 0;
@@ -2636,6 +2641,8 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         }
         a20_lwip_lane_enter(net_socket_lane_load(s));
         err_t e = udp_connect(s->udp, &ip, port);
+        if (e == ERR_OK)
+            net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->udp));
         a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }

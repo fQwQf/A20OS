@@ -107,6 +107,18 @@ bool net_lane_rx_put(unsigned lane, struct netif *nif,
     return true;
 }
 
+bool net_lane_rx_all_have_room(void)
+{
+    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++) {
+        const struct net_lane *l = net_lane(lane);
+        uint32_t head = __atomic_load_n(&l->rx_head, __ATOMIC_RELAXED);
+        uint32_t tail = __atomic_load_n(&l->rx_tail, __ATOMIC_ACQUIRE);
+        if (head - tail >= NET_PROFILE_LANE_RXQ_SLOTS)
+            return false;
+    }
+    return true;
+}
+
 unsigned net_lane_rx_queued_total(void)
 {
     return __atomic_load_n(&g_lane_rx_queued_total, __ATOMIC_RELAXED);

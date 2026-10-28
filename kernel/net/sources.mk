@@ -1,5 +1,7 @@
 # Explicit first-party network sources. External stacks have separate manifests.
 A20_NET_SRC := \
+    $(KERNEL_DIR)/net/core/stack.c \
+    $(KERNEL_DIR)/net/backends/lwip/runtime.c \
     $(KERNEL_DIR)/net/socket/net_lock_probe.c \
     $(KERNEL_DIR)/net/socket/socket.c \
     $(KERNEL_DIR)/net/socket/socket_alg.c \

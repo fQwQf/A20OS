@@ -2,17 +2,11 @@
 #include "core/smp_test.h"
 
 #include "core/cpu.h"
-#include "net/lwip_stack.h"
-#include "net/net_config.h"
-#include "net/socket/socket_internal.h"
+#include "net/stack.h"
+#include "net/profile.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/usb/usb.h"
-
-/* virtio-net is optional in generic and is supplied by a .a20drv package.
- * The progress service must not create a link-time dependency on it. */
-extern void virtio_net_poll_rx_all_bounded(unsigned budget)
-    __attribute__((weak));
 
 /*
  * IO_PROGRESS_SERVICE (event-driven model):
@@ -42,7 +36,7 @@ extern void virtio_net_poll_rx_all_bounded(unsigned budget)
  *   re-arms the bit on a bounded cadence, so a producer that misses its
  *   notification delays completion by at most one fallback interval instead of
  *   losing it.  Narrow the fallback once every producer is wired.
- * - The network RX half is deliberately NOT gated.  virtio_net's poll-only
+ * - The network RX half is deliberately NOT gated.  the netif poll-only
  *   transport contract requires kernel_progress_poll() to keep draining on
  *   every pass, and the drain already returns without taking g_lwip_lock
  *   unless a device signalled work.
@@ -76,8 +70,8 @@ static void kernel_progress_devices(void) {
  * CPU under independent owner lane locks; the ingress lock is not a core lock
  * in multi-lane builds. */
 static void kernel_progress_net_rx(void) {
-    if (cpu_current_id() == 0 && virtio_net_poll_rx_all_bounded)
-        virtio_net_poll_rx_all_bounded(0);
+    if (cpu_current_id() == 0)
+        net_stack_receive_progress(CONFIG_NET_RX_IRQ_BUDGET);
 }
 
 void kernel_progress_poll(kernel_progress_reason_t reason) {
@@ -93,13 +87,7 @@ void kernel_progress_timer_tick(void) {
     /* CPU 0 publishes the timer hint; multi-lane work runs in process context. */
     if (cpu_current_id() != 0)
         return;
-#if CONFIG_NET_LANES > 1
-    a20_lwip_signal_timer_pending();
-#else
-    uint64_t flags = a20_lwip_lock();
-    a20_lwip_poll_timers_locked();
-    a20_lwip_unlock(flags);
-#endif
+    net_stack_timer_tick();
     /* The device bit is the liveness floor for completion-polled drivers:
      * re-arm it here so the scheduler hot path can skip the device walk. */
     if (++g_progress_fallback_ticks >= KERNEL_PROGRESS_FALLBACK_TICKS) {
@@ -114,39 +102,21 @@ void kernel_progress_timer_tick(void) {
      * cannot stall even if a device IRQ is ever lost, while keeping the
      * per-context-switch scheduler hot path free of the lock.
      */
-    if (virtio_net_poll_rx_all_bounded)
-        virtio_net_poll_rx_all_bounded(CONFIG_NET_RX_IRQ_BUDGET);
+    net_stack_receive_progress(CONFIG_NET_RX_IRQ_BUDGET);
 }
 
 void kernel_progress_run_bottom_halves(void) {
     if (__atomic_load_n(&g_progress_pending, __ATOMIC_ACQUIRE) &
         KERNEL_PROGRESS_PENDING_DEVICE)
         kernel_progress_devices();
-    net_inet_bottom_half_process_all();
-    /*
-     * Stage D's receive poll point, and the reason it is HERE and not in the
-     * reader path.
-     *
-     * net-lanes.md flags this as a deadlock if it is got wrong: a blocked read is
-     * woken by the socket bottom half, the bottom half needs the staged frames to
-     * have been processed, and a receive poll that only runs after the wake-up is
-     * waiting for an event that will never arrive.  sched() reaches this on every
-     * context switch, on every timer tick that reschedules and on every idle pass,
-     * whether or not any task is waiting on the network -- so "somebody asked for
-     * it" is not part of the condition.
-     *
-     * It runs before kernel_progress_net_rx() rather than after on purpose: that
-     * one is where CPU 0 drains the device ring, and on a multi-lane build draining
-     * stages frames rather than processing them, so the frames it produces are
-     * picked up on the same pass instead of waiting for the next one.
-     *
-     * The call is unconditional above one lane and the work behind it is not: the
-     * function's own first act is one relaxed load of the staged-frame counter, so
-     * an idle system pays a load on the scheduler hot path and nothing else.  At
-     * CONFIG_NET_LANES == 1 the macro expands to a void cast -- there is nothing
-     * staged to poll for, because the interrupt still processes frames directly --
-     * so this line contributes no code at all to a one-lane build.
-     */
-    A20_LWIP_LANE_RX_POLL(CONFIG_NET_RX_IRQ_BUDGET);
+    /* Free software queue credit before polling the device, then deliver
+     * newly staged protocol events before the scheduler chooses a waiter.
+     * Each pass is bounded; idle must not sleep with unfinished network work. */
+    net_stack_protocol_progress(CONFIG_NET_RX_IRQ_BUDGET);
     kernel_progress_net_rx();
+    net_stack_protocol_progress(CONFIG_NET_RX_IRQ_BUDGET);
+}
+
+int kernel_progress_work_pending(void) {
+    return net_stack_work_pending();
 }
