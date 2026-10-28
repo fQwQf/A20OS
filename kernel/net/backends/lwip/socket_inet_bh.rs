@@ -456,6 +456,10 @@ pub unsafe extern "C" fn a20_net_bh_process_socket(s: *mut c_void) {
     let mut accept_pending: i32 = 0;
     let mut irq = 0u64;
     a20_net_bh_socket_lock(s, &mut irq);
+    /* Clear before reading producer state. Publication during the drain must
+     * survive as another pass, including when it follows the last ring peek. */
+    (*(v.bh_pending as *const AtomicI32)).store(0, Ordering::Release);
+    a20_net_bh_slot_clear(s);
     if a20_net_bh_is_live(s) != 0 {
         drain = a20_net_bh_process_locked(s, wake_q.as_mut_ptr(), &mut accept_pending);
         /* The accept drain below runs with no lock held, so the socket needs a
@@ -465,8 +469,6 @@ pub unsafe extern "C" fn a20_net_bh_process_socket(s: *mut c_void) {
             a20_net_bh_socket_ref(s);
         }
     }
-    (*(v.bh_pending as *const AtomicI32)).store(0, Ordering::Release);
-    a20_net_bh_slot_clear(s);
     a20_net_bh_socket_unlock(s, irq);
     a20_net_bh_reclaim_spills(s);
     if accept_pending != 0 && a20_net_bh_accept_drain(s, wake_q.as_mut_ptr()) != 0 {
@@ -613,6 +615,7 @@ mod tests {
     static mut T_SCHEDULE_READY: i32 = 0;
     static mut T_PENDING_CLEARS: i32 = 0;
     static mut T_SLOT_CLEARS: i32 = 0;
+    static mut T_REPUBLISH_ON_EMPTY: bool = false;
     static mut T_REF_CALLS: i32 = 0;
     static mut T_SOCK_FREE_CALLS: i32 = 0;
     static mut T_ACCEPT_DRAIN: i32 = 0;
@@ -692,6 +695,7 @@ mod tests {
         T_SCHEDULE_READY = 0;
         T_PENDING_CLEARS = 0;
         T_SLOT_CLEARS = 0;
+        T_REPUBLISH_ON_EMPTY = false;
         T_REF_CALLS = 0;
         T_SOCK_FREE_CALLS = 0;
         T_ACCEPT_DRAIN = 0;
@@ -796,8 +800,12 @@ mod tests {
     unsafe extern "C" fn a20_net_bh_commit(_s: *mut c_void) {}
 
     #[no_mangle]
-    unsafe extern "C" fn a20_net_bh_consume(_s: *mut c_void) -> *mut c_void {
+    unsafe extern "C" fn a20_net_bh_consume(s: *mut c_void) -> *mut c_void {
         if T_HEAD == T_TAIL {
+            if T_REPUBLISH_ON_EMPTY {
+                T_REPUBLISH_ON_EMPTY = false;
+                a20_net_bh_publish_pending(s);
+            }
             return ptr::null_mut();
         }
         event_ptr((T_TAIL as usize) % RING)
@@ -1261,6 +1269,19 @@ mod tests {
     }
 
     /* ------------------------------------------------ per-socket wrapper */
+
+    #[test]
+    fn publication_after_the_final_peek_survives_the_drain() {
+        unsafe {
+            let _serial = serial();
+            reset();
+            let mut s = Sock::new();
+            s.bh_pending = 1;
+            T_REPUBLISH_ON_EMPTY = true;
+            a20_net_bh_process_socket(s.p());
+            assert_eq!((s.bh_pending, T_PUBLISH, T_SLOT_CLEARS), (1, 1, 1));
+        }
+    }
 
     #[test]
     fn wrapper_skips_a_dead_socket_and_always_clears_the_marks() {
