@@ -25,6 +25,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "net/datagram.h"
 
 /* Borrowed view of the fields the transactions read and write. */
 typedef struct net_inet_send_view {
@@ -101,6 +102,11 @@ void a20_net_inet_send_poll_locked(void);
 /* Entry points. */
 int a20_net_inet_send_udp(void *s, const void *buf, size_t len, int flags,
                           const void *addr, size_t addrlen, int max_queue);
+int a20_net_inet_send_udp_control(void *s, const void *buf, size_t len, int flags,
+    const void *addr, size_t addrlen, int max_queue,
+    const net_datagram_control_t *control);
+int a20_net_inet_send_udp_control_packet(void *pcb, void *p, const void *dest,
+    uint16_t port, uint32_t ifindex, uint32_t source);
 int a20_net_inet_send_raw(void *s, const void *buf, size_t len,
                           const void *addr, size_t addrlen, int max_queue);
 

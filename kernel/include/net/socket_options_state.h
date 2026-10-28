@@ -93,6 +93,7 @@ typedef struct net_option_view {
     uint64_t   *recv_timeout_ticks;
     uint64_t   *send_timeout_ticks;
     int        *passcred;
+    int        *ipv4_recv_pktinfo;
     const int32_t *peer_pid;
     const int32_t *peer_uid;
     const int32_t *peer_gid;

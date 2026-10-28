@@ -1,6 +1,7 @@
 #include "net/socket/socket_internal.h"
 #include "net/tun.h"
 #include "ipc/ipc.h"
+#include "proc/userns.h"
 #include "core/klog.h"
 #include "core/string.h"
 #include "net/lwip_stack.h"
@@ -627,6 +628,10 @@ _Static_assert(__builtin_offsetof(net_socket_t, ipv6_recv_2292_dstopts) -
                "the IPv6 RECV* flags must stay one contiguous run of int: the "
                "Rust option state machine indexes them as such");
 
+int a20_net_option_pmtu(void *sp, int mode, int set) {
+    return net_inet_pmtu_discover((net_socket_t *)sp, mode, set);
+}
+
 static void net_option_view_init(net_socket_t *s, net_option_view_t *v)
 {
     memset(v, 0, sizeof(*v));
@@ -664,6 +669,7 @@ static void net_option_view_init(net_socket_t *s, net_option_view_t *v)
     v->recv_timeout_ticks = &s->recv_timeout_ticks;
     v->send_timeout_ticks = &s->send_timeout_ticks;
     v->passcred = &s->passcred;
+    v->ipv4_recv_pktinfo = &s->ipv4_recv_pktinfo;
     v->peer_pid = &s->peer_pid;
     v->peer_uid = &s->peer_uid;
     v->peer_gid = &s->peer_gid;
@@ -753,17 +759,17 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
 {
     if (!s)
         return -ENOTSOCK;
-    /* SO_BINDTODEVICE is a name, not an integer, so it is handled here rather
-     * than in the integer-option state machine.  The binding is recorded and
-     * reported; egress interface selection is still lwIP's route decision (a
-     * follow-up once there is more than one physical uplink). */
+    /* SO_BINDTODEVICE is a name and restricts native receive and transmit. */
     if (level == SOL_SOCKET && optname == 25 /* SO_BINDTODEVICE */) {
-        if (!optval)
-            return -EFAULT;
-        size_t n = optlen < sizeof(s->bind_dev) ? optlen : sizeof(s->bind_dev) - 1;
-        memset(s->bind_dev, 0, sizeof(s->bind_dev));
-        memcpy(s->bind_dev, optval, n);
-        return 0;
+        if (!userns_capable(proc_current(), s->net_ns->owner, CAP_NET_RAW))
+            return -EPERM;
+        if (!resource_ns_is_initial(s->net_ns)) return -EOPNOTSUPP;
+        if (s->domain != AF_INET && s->domain != AF_INET6) return -EOPNOTSUPP;
+        if (!optval && optlen) return -EFAULT;
+        char name[16] = {0};
+        size_t n = optlen < sizeof(name) - 1 ? optlen : sizeof(name) - 1;
+        if (n) memcpy(name, optval, n);
+        return net_inet_bind_device(s, name);
     }
     net_option_view_t v;
     net_option_view_init(s, &v);
@@ -791,10 +797,12 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
     if (!optval || !optlen)
         return -EINVAL;
     if (level == SOL_SOCKET && optname == 25 /* SO_BINDTODEVICE */) {
-        size_t n = strlen(s->bind_dev) + 1;
-        if (n > *optlen)
-            n = *optlen;
-        memcpy(optval, s->bind_dev, n);
+        char name[16];
+        int result = net_inet_bound_device(s, name);
+        if (result < 0) return result;
+        size_t n = name[0] ? strlen(name) + 1 : 0;
+        if (n > *optlen) return -EINVAL;
+        memcpy(optval, name, n);
         *optlen = n;
         return 0;
     }

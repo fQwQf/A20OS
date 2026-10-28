@@ -4,6 +4,7 @@
 #include "proc/resource_ns.h"
 
 #include "net/socket.h"
+#include "net/datagram.h"
 #include "ipc/ipc.h"
 #include "fs/vfs.h"
 #include "proc/proc.h"
@@ -86,6 +87,13 @@ typedef enum {
     NET_BH_ERROR,
 } net_bh_event_type_t;
 
+/* Value-only packet addressing. IPv4 retains both the wire destination and
+ * the receiving interface's local address (IP_PKTINFO ipi_spec_dst). */
+typedef union net_pktinfo_address {
+    uint8_t ipv6[16];
+    struct { uint8_t destination[4], local[4], reserved[8]; } ipv4;
+} net_pktinfo_address_t;
+
 typedef struct net_bh_event {
     struct net_bh_event *next;
     net_bh_event_type_t type;
@@ -96,9 +104,12 @@ typedef struct net_bh_event {
     uint8_t has_pktinfo;
     uint8_t has_hoplimit;
     uint8_t has_tclass;
-    uint8_t pad;
+    uint8_t pktinfo_family;
     uint32_t pktinfo_ifindex;
-    uint8_t pktinfo_addr[16];
+    union {
+        uint8_t pktinfo_addr[16]; /* Existing IPv6/copy view; no layout change. */
+        net_pktinfo_address_t pktinfo;
+    };
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
@@ -212,9 +223,12 @@ typedef struct net_msg {
     uint8_t has_pktinfo;
     uint8_t has_hoplimit;
     uint8_t has_tclass;
-    uint8_t pad;
+    uint8_t pktinfo_family;
     uint32_t pktinfo_ifindex;
-    uint8_t pktinfo_addr[16];
+    union {
+        uint8_t pktinfo_addr[16]; /* Existing IPv6/copy view; no layout change. */
+        net_pktinfo_address_t pktinfo;
+    };
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
@@ -256,9 +270,12 @@ typedef struct net_recv_meta {
     uint8_t has_pktinfo;
     uint8_t has_hoplimit;
     uint8_t has_tclass;
-    uint8_t pad;
+    uint8_t pktinfo_family;
     uint32_t pktinfo_ifindex;
-    uint8_t pktinfo_addr[16];
+    union {
+        uint8_t pktinfo_addr[16]; /* Existing IPv6/copy view; no layout change. */
+        net_pktinfo_address_t pktinfo;
+    };
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
@@ -344,10 +361,7 @@ typedef struct net_socket {
      * stated a value and autotuning must not quietly exceed it. */
     uint8_t snd_autotune;
     uint8_t rcv_autotune;
-    /* SO_BINDTODEVICE: interface name, empty when unbound.  Recorded so
-     * getsockopt reports it and magicsock's bind control function
-     * (which refuses to start without the option) succeeds. */
-    char bind_dev[16];
+    int ipv4_recv_pktinfo;
     int reuseaddr;
     int reuseport;
     /* SO_BROADCAST: recorded so getsockopt() reports what the caller set.
@@ -1315,6 +1329,12 @@ int      net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_inet_shutdown(net_socket_t *s, int receive, int transmit);
 int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
                           const void *connect_addr, size_t peer_len);
+int net_sendto_control(net_socket_t *s, const void *buf, size_t len, int flags,
+                        const void *addr, size_t addrlen,
+                        const net_datagram_control_t *control);
+int net_inet_send_udp_control(net_socket_t *s, const void *buf, size_t len,
+                              int flags, const void *addr, size_t addrlen,
+                              const net_datagram_control_t *control);
 int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
                          int flags, const void *addr, size_t addrlen);
 void     net_inet_accept_child_ready(net_socket_t *s);
@@ -1327,6 +1347,9 @@ int      net_inet_tcp_listen(net_socket_t *s, int backlog);
  * forward-declared locally: defined in socket_inet.c, called from
  * socket_control.c. */
 void     net_inet_ip_opts_apply(net_socket_t *s);
+int      net_inet_pmtu_discover(net_socket_t *s, int mode, int set);
+int      net_inet_bind_device(net_socket_t *s, const char *name);
+int      net_inet_bound_device(net_socket_t *s, char name[16]);
 uint64_t net_inet_socket_lane_lock(net_socket_t *s);
 void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
                                uint8_t *mc_ttl);

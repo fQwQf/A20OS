@@ -9,9 +9,12 @@ import argparse
 import importlib.util
 import json
 import ipaddress
+import os
 from pathlib import Path
+import select
 import struct
 import subprocess
+import threading
 
 spec = importlib.util.spec_from_file_location('bench', Path(__file__).with_name('bench-net-kvm.py'))
 bench = importlib.util.module_from_spec(spec)
@@ -117,7 +120,10 @@ def verify_wan(path):
             ihl = (ip[0] & 15) * 4
             sport, dport = struct.unpack_from('!HH', ip, ihl)
             if ip[12:16] == public and ip[16:20] in (remote, policy):
-                ttls.add(ip[8])
+                # DNS forwarding originates a new packet on the router (64).
+                # Measure transit TTL only on the benchmark destinations.
+                if dport in (39021, 39022):
+                    ttls.add(ip[8])
                 if ip[9] == 17 and dport == 39022:
                     ports.add(sport)
                 if ip[9] == 6 and ip[16:20] == policy:
@@ -147,17 +153,88 @@ def main():
     parser.add_argument('--router-cpus', default='4,6')
     parser.add_argument('--lan-cpus', default='8,10')
     parser.add_argument('--wan-cpus', default='12,14')
+    parser.add_argument('--services-world', type=Path,
+                        help='private Alpine root image with dnsmasq installed; adds DHCP/DNS tests')
+    parser.add_argument('--trace-prefix', help='A20OS syscall trace comm prefix for diagnostics')
+    parser.add_argument('--socket-probe', type=Path,
+                        help='same static Linux ELF run on the router and Linux WAN')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     out = args.out.resolve()
     base = json.loads(args.baseline.read_text())
     inputs = base['inputs']
+    if args.services_world:
+        inputs['world'] = dict(path=str(args.services_world.resolve()), sha256=bench.apk.sha(args.services_world))
     manifest = dict(inputs=inputs, router_sha256=bench.apk.sha(args.router_kernel),
                     binary_sha256=bench.apk.sha(args.binary), nodes=[])
     init = out / 'linux-init'
     init.write_text(INIT)
     init.chmod(0o755)
     guests = []
+    collectors = []
+
+    def collect_serial(guest):
+        # These nodes receive no further until() calls after their readiness
+        # marker. Drain them throughout LAN tests, including verbose tracing.
+        stop = threading.Event()
+        def collect():
+            while not stop.is_set():
+                if not select.select([guest.p.stdout], [], [], .1)[0]: continue
+                data = os.read(guest.p.stdout.fileno(), 65536)
+                if not data: return
+                guest.log.write(data)
+                guest.log.flush()
+        thread = threading.Thread(target=collect, daemon=True)
+        thread.start()
+        collectors.append((stop, thread))
+
+    def with_service(script, interface, extra, marker):
+        # Initialization remains foreground and its failure is observable.
+        setup = f'''dnsmasq --no-daemon --user=root --no-resolv --no-hosts --bind-interfaces --interface={interface} --pid-file=/tmp/dnsmasq.pid --log-facility=- {extra} > /tmp/dnsmasq.log 2>&1 &
+dns_pid=$!
+ready=0
+for i in $(seq 1 50); do
+  if grep -q 'started, version' /tmp/dnsmasq.log; then ready=1; break; fi
+  if ! kill -0 "$dns_pid"; then cat /tmp/dnsmasq.log; exit 1; fi
+  sleep .1
+done
+cat /tmp/dnsmasq.log
+test "$ready" = 1
+tail -n 0 -f /tmp/dnsmasq.log &
+'''
+        return script.replace(f'echo {marker}', setup + f'echo {marker}')
+
+    wan_script, router_script, lan_script = WAN, ROUTER, LAN
+    if args.socket_probe:
+        manifest['socket_probe_sha256'] = bench.apk.sha(args.socket_probe)
+        wan_script = wan_script.replace('echo WAN_READY',
+            '/usr/bin/net-socket-abi-probe eth0 10.20.0.2\necho WAN_READY')
+        router_script = router_script.replace('echo ROUTER_READY',
+            '/usr/bin/net-socket-abi-probe en2 192.168.10.1\necho ROUTER_READY')
+    if args.services_world:
+        wan_script = with_service(wan_script, 'eth0', '--host-record=upstream.test,203.0.113.9', 'WAN_READY')
+        router_script = with_service(router_script, 'en2', '--server=10.20.0.2 --dhcp-range=192.168.10.50,192.168.10.60,255.255.255.0,1h --dhcp-option=3,192.168.10.1 --dhcp-option=6,192.168.10.1 --dhcp-leasefile=/tmp/dhcp.leases --log-dhcp --log-queries', 'ROUTER_READY')
+        service_tests = '''cat > /tmp/lease.sh <<'LEASE'
+#!/bin/sh
+if [ "$1" = bound ] || [ "$1" = renew ]; then
+  case "$ip" in 192.168.10.5[0-9]|192.168.10.60) ;; *) exit 1;; esac
+  test "$router" = 192.168.10.1 || exit 1
+  test "$dns" = 192.168.10.1 || exit 1
+  echo "DHCP_LEASE_OK ip=$ip router=$router dns=$dns" > /tmp/dhcp-state
+fi
+LEASE
+chmod +x /tmp/lease.sh
+udhcpc -f -q -n -i eth0 -t 3 -T 2 -s /tmp/lease.sh
+cat /tmp/dhcp-state
+if ! timeout 10 nslookup -type=A upstream.test 192.168.10.1 > /tmp/dns-result 2>&1; then
+  cat /tmp/dns-result
+  exit 1
+fi
+cat /tmp/dns-result
+grep -F 203.0.113.9 /tmp/dns-result
+echo LAN_SERVICES_PASS
+'''
+        lan_script = LAN.replace('echo ROUTER_SUITE_PASS', service_tests + 'echo ROUTER_SUITE_PASS')
 
     def boot(name, script_text, affinity, links, linux):
         image = out / f'{name}.img'
@@ -166,6 +243,8 @@ def main():
         script.write_text(script_text)
         bench.install(image, script, '/etc/a20-benchmark.sh')
         bench.install(image, args.binary.resolve(), '/usr/bin/net-microbench')
+        if args.socket_probe:
+            bench.install(image, args.socket_probe.resolve(), '/usr/bin/net-socket-abi-probe')
         if linux:
             bench.install(image, init, '/etc/a20-linux-init')
         argv = ['taskset', '-c', affinity, 'qemu-system-x86_64', '-machine', 'q35',
@@ -185,6 +264,8 @@ def main():
                      'root=/dev/vdb rw init=/etc/a20-linux-init console=ttyS0 quiet net.ifnames=0']
         else:
             argv += ['-append', 'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0 a20.tcpmode=lwip']
+            if args.trace_prefix:
+                argv[-1] += f' trace={args.trace_prefix}'
         manifest['nodes'].append(dict(name=name, argv=argv, script_sha256=bench.apk.sha(script)))
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
         guest = bench.Guest(argv, out / f'{name}-serial.log')
@@ -192,14 +273,19 @@ def main():
         return guest
 
     try:
-        wan = boot('wan', WAN, args.wan_cpus, [f'listen=127.0.0.1:{args.wan_port}'], True)
+        wan = boot('wan', wan_script, args.wan_cpus, [f'listen=127.0.0.1:{args.wan_port}'], True)
         wan.until(rb'(?:^|\n)WAN_READY\r*\n', 30)
-        router = boot('router', ROUTER, args.router_cpus, [f'listen=127.0.0.1:{args.lan_port}', f'connect=127.0.0.1:{args.wan_port}'], False)
+        collect_serial(wan)
+        router = boot('router', router_script, args.router_cpus, [f'listen=127.0.0.1:{args.lan_port}', f'connect=127.0.0.1:{args.wan_port}'], False)
         router.until(rb'(?:^|\n)ROUTER_READY\r*\n', 30)
-        lan = boot('lan', LAN, args.lan_cpus, [f'connect=127.0.0.1:{args.lan_port}'], True)
+        collect_serial(router)
+        lan = boot('lan', lan_script, args.lan_cpus, [f'connect=127.0.0.1:{args.lan_port}'], True)
         lan.until(rb'(?:^|\n)ROUTER_SUITE_PASS\r*\n', 45)
         manifest['protocol_passed'] = True
     finally:
+        for stop, thread in collectors:
+            stop.set()
+            thread.join()
         for guest in reversed(guests):
             guest.close()
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))

@@ -115,6 +115,8 @@ const IPV6_UNICAST_IF: i32 = 76;
 
 const IP_TOS: i32 = 1;
 const IP_TTL: i32 = 2;
+const IP_PKTINFO: i32 = 8;
+const IP_MTU_DISCOVER: i32 = 10;
 const A20_IP_MULTICAST_TTL_WIRE: i32 = 33;
 const A20_IP_MULTICAST_LOOP_WIRE: i32 = 34;
 const IP_ADD_MEMBERSHIP: i32 = 35;
@@ -207,6 +209,7 @@ pub struct NetOptionView {
     pub recv_timeout_ticks: *mut u64,
     pub send_timeout_ticks: *mut u64,
     pub passcred: *mut i32,
+    pub ipv4_recv_pktinfo: *mut i32,
     pub peer_pid: *const i32,
     pub peer_uid: *const i32,
     pub peer_gid: *const i32,
@@ -240,6 +243,7 @@ const LIVE_KEEP_INTVL: i32 = 2;
 const LIVE_KEEP_CNT: i32 = 3;
 
 unsafe extern "C" {
+    fn a20_net_option_pmtu(s: *mut c_void, mode: i32, set: i32) -> i32;
     /// Socket lock primitives; this module decides *when* they are taken.
     fn a20_net_option_lock(s: *mut c_void, flags: *mut u64);
     fn a20_net_option_unlock(s: *mut c_void, flags: u64);
@@ -457,6 +461,21 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
     }
 
     if level == IPPROTO_IP {
+        if optname == IP_MTU_DISCOVER {
+            if optval.is_null() || optlen < 4 { return -EINVAL; }
+            return unsafe { a20_net_option_pmtu(v.s, read_i32(optval), 1) };
+        }
+        if optname == IP_PKTINFO {
+            if domain != AF_INET { return -EOPNOTSUPP; }
+            if optval.is_null() || optlen < 4 { return -EINVAL; }
+            let mut flags = 0;
+            unsafe {
+                a20_net_option_lock(v.s, &mut flags);
+                *v.ipv4_recv_pktinfo = (read_i32(optval) != 0) as i32;
+                a20_net_option_unlock(v.s, flags);
+            }
+            return 0;
+        }
         if optname == MCAST_JOIN_GROUP || optname == MCAST_LEAVE_GROUP
             || optname == IP_ADD_MEMBERSHIP || optname == IP_DROP_MEMBERSHIP
         {
@@ -969,6 +988,21 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
         }
         return -ENOPROTOOPT;
     } else if level == IPPROTO_IP {
+        if optname == IP_MTU_DISCOVER {
+            let mode = unsafe { a20_net_option_pmtu(v.s, 0, 0) };
+            return if mode < 0 { mode } else { report_int(rep, optlen, mode) };
+        }
+        if optname == IP_PKTINFO {
+            if domain != AF_INET { return -EOPNOTSUPP; }
+            let mut flags = 0;
+            let value = unsafe {
+                a20_net_option_lock(v.s, &mut flags);
+                let value = *v.ipv4_recv_pktinfo;
+                a20_net_option_unlock(v.s, flags);
+                value
+            };
+            return report_int(rep, optlen, value);
+        }
         /* Report the effective value, not the stored field: a caller that never
          * set an option must see the TTL/TOS its packets actually carry, which
          * for an unset option is the pcb's value and not the stored zero. */

@@ -241,6 +241,7 @@ static int net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
     }
     if (meta) {
         m->has_pktinfo = meta->has_pktinfo;
+        m->pktinfo_family = meta->pktinfo_family;
         m->has_hoplimit = meta->has_hoplimit;
         m->has_tclass = meta->has_tclass;
         m->pktinfo_ifindex = meta->pktinfo_ifindex;
@@ -580,6 +581,7 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
     }
     if (meta) {
         meta->has_pktinfo = m->has_pktinfo;
+        meta->pktinfo_family = m->pktinfo_family;
         meta->has_hoplimit = m->has_hoplimit;
         meta->has_tclass = m->has_tclass;
         meta->pktinfo_ifindex = m->pktinfo_ifindex;

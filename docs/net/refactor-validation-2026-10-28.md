@@ -107,3 +107,23 @@ IPv4/IPv6 ping、TCP16KiB、同源端口双IP UDP并发、表100网关源策略�
 早期策略UDP回显失败保留：wildcard UDP echo的sendto从WAN主地址回应，而请求目标
 是lo上的测试/32，改变了peer tuple。策略验证改用TCP，其accepted socket保留正确的
 local /32源地址，没有为让测试通过而放宽conntrack匹配。
+
+## 实际 LAN 服务与 Linux socket ABI
+
+Alpine dnsmasq 2.91-r1/BusyBox udhcpc 1.37.0 在三节点拓扑完成 DHCPv4 租约与 DNS A
+转发。`router-services-buckets-kvm` 和 `router-services-single-kvm` 分别运行4/1 lane、
+2 vCPU 的 router；同一个静态 Linux socket ABI ELF 在 Linux WAN/A20OS 上均通过，
+两个拓扑的四份抓包校验和均无错误，原有转发/NAPT/策略正负例保持通过。
+
+修复了 IP_PKTINFO 缺失、空 iovec 丢弃 UDP、SIOCGIFNAME 误用输入名字、具体地址 TCP
+bind 被当成端口冲突，以及只保存名字却未执行的 SO_BINDTODEVICE。每报文发送参数
+不临时覆盖 PCB。新增有权限检查和正常老化的动态邻居更新，支持 dnsmasq 的 DHCP
+单播回复；PMTU 尚未实现的模式明确返回错误。
+
+功能探针还复现了 wildcard UDP connect 被重复登记产生 PCB 链表自环：udp.c 的三个
+全表循环漏掉 sentinel bucket，现统一按实际桶数遍历。修复前超时/锁停滞的样本保留。
+物理域 UDP 停用按端口寻找本地 socket 的快捷路径，修复 DNS 发往外部端口53却被
+本机截获形成转发循环的问题。
+
+宿主生产状态机回归：UDP/raw send 13项、BH 14项、INET bind 8项、netlink 23项、
+socket option 6项通过。使用配置、ABI契约及服务未覆盖范围见 `lan-services.md`。

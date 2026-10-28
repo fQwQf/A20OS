@@ -48,6 +48,7 @@
 对照测量口径见 [benchmark-method.md](./benchmark-method.md)。
 `NET_ROLE=host/router` 独立选择是否编入IPv4/IPv6 transit转发，默认host；使用与
 真实三节点验证见 [router.md](./router.md)，不能据此宣称完整软路由已经成熟。
+LAN 服务及每报文元数据契约见 [lan-services.md](./lan-services.md)。
 
 ## 上游依赖策略
 

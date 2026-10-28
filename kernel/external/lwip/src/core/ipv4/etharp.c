@@ -519,6 +519,16 @@ etharp_update_arp_entry(struct netif *netif, const ip4_addr_t *ipaddr, struct et
   return ERR_OK;
 }
 
+/* A20OS port extension: privileged control-plane dynamic neighbor update.
+ * Reuse normal cache bounds, pending-packet release and aging; DHCP leases
+ * must not create permanent entries. The caller holds the control barrier. */
+err_t
+a20_etharp_update_dynamic(struct netif *netif, const ip4_addr_t *ipaddr,
+                         struct eth_addr *ethaddr)
+{
+  return etharp_update_arp_entry(netif, ipaddr, ethaddr, ETHARP_FLAG_TRY_HARD);
+}
+
 #if ETHARP_SUPPORT_STATIC_ENTRIES
 /** Add a new static entry to the ARP table. If an entry exists for the
  * specified IP address, this entry is overwritten.

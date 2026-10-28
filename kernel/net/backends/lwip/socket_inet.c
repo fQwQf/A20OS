@@ -690,8 +690,19 @@ void a20_net_bh_addr_from_ip(void *event, const void *ip, uint16_t port)
 void a20_net_bh_pktinfo(void *event)
 {
     net_bh_event_t *e = (net_bh_event_t *)event;
+    if (!ip_current_is_v6()) {
+        e->has_pktinfo = 1;
+        e->pktinfo_family = AF_INET;
+        struct netif *input = ip_current_input_netif();
+        e->pktinfo_ifindex = input ? netif_get_index(input) : 0;
+        memset(e->pktinfo_addr,0,sizeof(e->pktinfo_addr));
+        memcpy(e->pktinfo.ipv4.destination,ip4_current_dest_addr(),4);
+        if (input) memcpy(e->pktinfo.ipv4.local,netif_ip4_addr(input),4);
+        return;
+    }
 #if LWIP_IPV6
     if (ip_current_is_v6()) {
+        e->pktinfo_family = AF_INET6;
         e->has_pktinfo = 1;
         e->pktinfo_ifindex = ip_current_input_netif() ?
             (uint32_t)netif_get_index(ip_current_input_netif()) : 0;
@@ -2950,6 +2961,41 @@ int a20_net_inet_send_udp_send(void *pcb, void *p)
     return (int)udp_send((struct udp_pcb *)pcb, (struct pbuf *)p);
 }
 
+/* Per-call metadata never changes a shared PCB. Lane/config exclusion keeps
+ * netif identities stable for the duration of this synchronous library call. */
+int a20_net_inet_send_udp_control_packet(void *upcb, void *p, const void *dest,
+    uint16_t port, uint32_t ifindex, uint32_t source)
+{
+    struct udp_pcb *pcb = upcb;
+    const ip_addr_t *target = dest;
+    if (!target) {
+        if (!(pcb->flags & UDP_FLAGS_CONNECTED)) return -EDESTADDRREQ;
+        target = &pcb->remote_ip;
+        port = pcb->remote_port;
+    }
+    if (!IP_IS_V4(target)) return -EAFNOSUPPORT;
+    if (ifindex > 255) return -ENODEV;
+    if (pcb->netif_idx != NETIF_NO_INDEX) {
+        if (ifindex && ifindex != pcb->netif_idx) return -EINVAL;
+        ifindex = pcb->netif_idx;
+    }
+    ip4_addr_t src4 = {.addr = source};
+    struct netif *n = ifindex ? netif_get_by_index((u8_t)ifindex) :
+        ip4_route_src(source ? &src4 : NULL, ip_2_ip4(target));
+    if (!n) return ifindex ? -ENODEV : -ENETUNREACH;
+    if (source && !ip4_addr_cmp(&src4, netif_ip4_addr(n))) return -EADDRNOTAVAIL;
+    if (!source) {
+        if (IP_IS_V4(&pcb->local_ip) && !ip4_addr_isany(ip_2_ip4(&pcb->local_ip)))
+            src4 = *ip_2_ip4(&pcb->local_ip);
+        else src4 = *netif_ip4_addr(n);
+    }
+    ip_addr_t src;
+    ip_addr_copy_from_ip4(src, src4);
+    err_t e = udp_sendto_if_src(pcb, p, target, port, n, &src);
+    return e == ERR_OK ? 0 : e == ERR_MEM ? -ENOMEM :
+        e == ERR_RTE ? -ENETUNREACH : -EIO;
+}
+
 int a20_net_inet_send_udp_connected(void *pcb)
 {
     return (((struct udp_pcb *)pcb)->flags & UDP_FLAGS_CONNECTED) ? 1 : 0;
@@ -2995,6 +3041,14 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
 {
     return a20_net_inet_send_udp(s, buf, len, flags, addr, addrlen,
                                  NET_MAX_QUEUE);
+}
+
+int net_inet_send_udp_control(net_socket_t *s, const void *buf, size_t len,
+    int flags, const void *addr, size_t addrlen,
+    const net_datagram_control_t *control)
+{
+    return a20_net_inet_send_udp_control(s, buf, len, flags, addr, addrlen,
+                                        NET_MAX_QUEUE, control);
 }
 
 static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
@@ -3226,6 +3280,55 @@ void a20_net_inet_send_tcp_packet_bottom_half(void)
 static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
 {
     return a20_net_inet_send_tcp(s, buf, len);
+}
+
+/* Interface binding lives in the native PCB. Accepted TCP PCBs inherit this
+ * index in tcp_in; keeping a second name cache on the frontend would diverge
+ * after accept or a concurrent setter. The cold barrier serializes setters,
+ * close, interface removal and all protocol users. */
+int net_inet_bind_device(net_socket_t *s, const char *name)
+{
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = NULL;
+    if (name[0]) {
+        n = netif_find(name);
+        if (!n) n = a20_tun_netif_by_name(name);
+        if (!n) { a20_lwip_unlock(flags); return -ENODEV; }
+    }
+    u8_t index = n ? netif_get_index(n) : NETIF_NO_INDEX;
+    int result = 0;
+    if (s->udp) s->udp->netif_idx = index;
+    else if (s->raw) s->raw->netif_idx = index;
+    else if (s->tcp) s->tcp->netif_idx = index;
+    else result = -EOPNOTSUPP;
+    a20_lwip_unlock(flags);
+    return result;
+}
+
+int net_inet_bound_device(net_socket_t *s, char name[16])
+{
+    memset(name, 0, 16);
+    uint64_t flags = a20_lwip_lock();
+    u8_t index = s->udp ? s->udp->netif_idx : s->raw ? s->raw->netif_idx :
+        s->tcp ? s->tcp->netif_idx : NETIF_NO_INDEX;
+    struct netif *n = index ? netif_get_by_index(index) : NULL;
+    if (n && !a20_tun_netif_name(n, name, 16))
+        snprintf(name, 16, "%c%c%u", n->name[0], n->name[1], n->num);
+    a20_lwip_unlock(flags);
+    return index && !n ? -ENODEV : 0;
+}
+
+/* lwIP's current output permits IPv4 fragmentation (DF clear). Expose that
+ * actual mode; WANT/DO/PROBE require PMTU/DF plumbing and must not fake success. */
+int net_inet_pmtu_discover(net_socket_t *s, int mode, int set)
+{
+    if (!s || s->domain != AF_INET) return -EOPNOTSUPP;
+#if IP_FRAG
+    return !set || mode == 0 ? 0 : -EOPNOTSUPP;
+#else
+    (void)mode; (void)set;
+    return -EOPNOTSUPP;
+#endif
 }
 
 int net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
