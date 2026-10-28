@@ -1127,7 +1127,7 @@ udp_bind(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
 
   rebind = 0;
   /* Check for double bind and rebind of the same pcb */
-  for (l = 0; l < CONFIG_NET_LANES; l++) {
+  for (l = 0; l < NET_PCB_LANE_BUCKETS; l++) {
     for (ipcb = udp_pcbs[l]; ipcb != NULL; ipcb = ipcb->next) {
       /* is this UDP PCB already on active list? */
       if (pcb == ipcb) {
@@ -1161,7 +1161,7 @@ udp_bind(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
       return ERR_USE;
     }
   } else {
-    for (l = 0; l < CONFIG_NET_LANES; l++) {
+    for (l = 0; l < NET_PCB_LANE_BUCKETS; l++) {
       for (ipcb = udp_pcbs[l]; ipcb != NULL; ipcb = ipcb->next) {
         if (pcb != ipcb) {
           /* By default, we don't allow to bind to a port that any other udp
@@ -1288,7 +1288,9 @@ udp_connect(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
   LWIP_DEBUGF(UDP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE, (", port %"U16_F")\n", pcb->remote_port));
 
   /* Insert UDP PCB into the list of active UDP PCBs. */
-  for (int l = 0; l < CONFIG_NET_LANES; l++) {
+  /* Include wildcard PCBs. Skipping the sentinel re-registers an already
+   * bound PCB and can link it to itself, hanging receive and close forever. */
+  for (int l = 0; l < NET_PCB_LANE_BUCKETS; l++) {
     for (ipcb = udp_pcbs[l]; ipcb != NULL; ipcb = ipcb->next) {
       if (pcb == ipcb) {
         /* already on the list, just return */

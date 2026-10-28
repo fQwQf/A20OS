@@ -2,6 +2,24 @@
 
 最后核实：2026-10-03（`644b3c76`）。
 
+## 2026-10-29 增量修正
+
+以下是网络分层重构后的新增审计记录；下文旧的行数统计保留其原始日期，不能作为
+当前树的完整差异统计。
+
+- `udp.c` 的临时端口查重、显式绑定查重和 `udp_connect` 已登记检查统一遍历
+  `NET_PCB_LANE_BUCKETS`，包括 wildcard sentinel。原来的 `CONFIG_NET_LANES`
+  遍历会漏查 wildcard，重复登记可产生 `pcb->next == pcb` 自环。
+  同一个 Linux socket ABI 探针在 Linux KVM/A20OS KVM 验证 wildcard UDP 的
+  sendmsg → connect → sendmsg → close，首次失败的日志和修复后的结果均保留在
+  `build/evidence/net-refactor-20261028/router-services-*-kvm/`。
+- 转发校验和与 TTL/hop-limit 修正见 [router.md](../../../docs/net/router.md)。
+- 动态邻居写入端口扩展见 [lan-services.md](../../../docs/net/lan-services.md)。
+  复用正常有界缓存和老化，不把 DHCP 临时客户端做成永久 ARP 表项。
+
+这些修正不改变“当前仍是分叉”的事实。原版候选必须单独引入并验收，不能悄悄替换
+正在使用的树，也不能把这些差异改称上游能力。
+
 本文件记录 `kernel/external/lwip` 与上游 lwIP 的**可证明**差异。它存在的唯一目的
 是让"外部依赖"这个标签不再误导读者，并让重新同步上游成为一件机械可执行的事。
 
