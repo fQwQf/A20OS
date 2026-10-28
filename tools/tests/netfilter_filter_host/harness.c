@@ -124,6 +124,8 @@ static size_t build(uint8_t *f, uint16_t ethertype, int vlan, uint8_t proto,
     }
     uint8_t *ip = f + off;
     ip[0] = (uint8_t)(0x40 | (ihl_words & 0x0f));
+    ip[2] = (uint8_t)((total - off) >> 8);
+    ip[3] = (uint8_t)(total - off);
     ip[6] = (uint8_t)(frag >> 8);
     ip[7] = (uint8_t)frag;
     ip[9] = proto;

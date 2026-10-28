@@ -8,7 +8,7 @@ frame arp ok=0
 frame truncated ok=0
 frame options ok=1 src=0a000202 dst=0a00020f sport=40000 dport=80 proto=6 ports=1 ip_off=14 l4_off=38 flags=18 icmp_off=0 type=0 id=0
 frame fragment ok=1 src=0a000202 dst=0a00020f sport=65535 dport=65535 proto=6 ports=0 ip_off=14 l4_off=0 flags=0 icmp_off=0 type=0 id=0
-frame short-l4 ok=1
+frame short-l4 ok=0
 rule 0 rc=0 dir=0 proto=6 action=1 src=ffffffff dst=0a00020f sport=65535 dport=80
 rule 1 rc=0 dir=1 proto=17 action=0 src=0a000202 dst=ffffffff sport=5353 dport=65535
 rule 2 rc=0 dir=0 proto=1 action=1 src=ffffffff dst=ffffffff sport=65535 dport=65535

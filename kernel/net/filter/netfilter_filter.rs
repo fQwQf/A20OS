@@ -496,6 +496,14 @@ pub unsafe extern "C" fn a20_netfilter_parse_frame(f: *const u8, len: usize,
     if ihl < 20 || len < off + ihl {
         return 0;
     }
+    let total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+    if total < ihl || total > ip.len() || off > u16::MAX as usize {
+        return 0;
+    }
+    /* Ethernet padding is not transport data. In particular it cannot supply
+     * an otherwise truncated ICMP identifier or a port for a filtering rule. */
+    let ip = &ip[..total];
+    let transport = &ip[ihl..];
     let frag = (((ip[6] as u16) << 8) | ip[7] as u16) & 0x1fff;
     let mut pkt = Frame {
         src_addr: ((ip[12] as u32) << 24) | ((ip[13] as u32) << 16)
@@ -517,18 +525,19 @@ pub unsafe extern "C" fn a20_netfilter_parse_frame(f: *const u8, len: usize,
     if frag != 0 {
         return 1;
     }
-    if (pkt.proto == PROTO_TCP || pkt.proto == PROTO_UDP) && len >= off + ihl + 4 {
-        let l4 = &ip[ihl..];
+    let minimum = if pkt.proto == PROTO_TCP { 20 } else { 8 };
+    if (pkt.proto == PROTO_TCP || pkt.proto == PROTO_UDP) && transport.len() >= minimum {
+        let l4 = transport;
         pkt.src_port = ((l4[0] as u16) << 8) | l4[1] as u16;
         pkt.dst_port = ((l4[2] as u16) << 8) | l4[3] as u16;
         pkt.l4_off = (off + ihl) as u16;
         pkt.has_ports = 1;
-        if pkt.proto == PROTO_TCP && len >= off + ihl + 14 {
+        if pkt.proto == PROTO_TCP {
             pkt.tcp_flags = l4[13] as u16;
         }
         unsafe { *out = pkt };
-    } else if pkt.proto == PROTO_ICMP && len >= off + ihl + 4 {
-        let l4 = &ip[ihl..];
+    } else if pkt.proto == PROTO_ICMP && transport.len() >= 8 {
+        let l4 = transport;
         let ty = l4[0];
         if ty == ICMP_ECHO_REQUEST || ty == ICMP_ECHO_REPLY {
             pkt.icmp_type = ty;
@@ -706,6 +715,44 @@ unsafe fn ipv4_from_str(s: *const u8, len: usize, out: *mut u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_bounds_use_ip_length_and_short_echo_never_panics() {
+        for payload in 0..=8 {
+            let mut frame = [0u8; 64];
+            frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+            frame[14] = 0x45;
+            frame[16..18].copy_from_slice(&((20 + payload) as u16).to_be_bytes());
+            frame[23] = PROTO_ICMP;
+            frame[34] = ICMP_ECHO_REQUEST;
+            frame[38..40].copy_from_slice(&0x1234u16.to_be_bytes());
+            let mut parsed = unsafe { core::mem::zeroed::<Frame>() };
+            assert_eq!(unsafe { a20_netfilter_parse_frame(
+                frame.as_ptr(), 34 + payload, &mut parsed,
+            ) }, 1);
+            assert_eq!(parsed.icmp_off != 0, payload == 8);
+            /* Keeping Ethernet padding must not change the parsed result. */
+            assert_eq!(unsafe { a20_netfilter_parse_frame(
+                frame.as_ptr(), frame.len(), &mut parsed,
+            ) }, 1);
+            assert_eq!(parsed.icmp_off != 0, payload == 8);
+        }
+    }
+
+    #[test]
+    fn truncated_ipv4_and_padding_cannot_invent_ports() {
+        let mut frame = [0u8; 64];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[23] = PROTO_UDP;
+        frame[34..38].copy_from_slice(&[0, 53, 0x12, 0x34]);
+        let mut parsed = unsafe { core::mem::zeroed::<Frame>() };
+        frame[16..18].copy_from_slice(&20u16.to_be_bytes());
+        assert_eq!(unsafe { a20_netfilter_parse_frame(frame.as_ptr(), 64, &mut parsed) }, 1);
+        assert_eq!(parsed.has_ports, 0);
+        frame[16..18].copy_from_slice(&60u16.to_be_bytes());
+        assert_eq!(unsafe { a20_netfilter_parse_frame(frame.as_ptr(), 64, &mut parsed) }, 0);
+    }
 
     #[test]
     fn parser_refuses_unknown_keys_and_bad_values() {
