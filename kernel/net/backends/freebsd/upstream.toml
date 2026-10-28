@@ -1,0 +1,6 @@
+# Source provenance only. This does not advertise a runnable backend.
+repository = "https://github.com/freebsd/freebsd-src.git"
+path = "kernel/external/freebsd-src"
+branch = "releng/15.1"
+revision = "95719d8a895bf8170851e9844d9b4092b1d2b6fe"
+status = "source-only"

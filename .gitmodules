@@ -22,3 +22,8 @@
 [submodule "user/external/tlse"]
 	path = user/external/tlse
 	url = https://github.com/eduardsui/tlse.git
+[submodule "kernel/external/freebsd-src"]
+	path = kernel/external/freebsd-src
+	url = https://github.com/freebsd/freebsd-src.git
+	branch = releng/15.1
+	shallow = true
