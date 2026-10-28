@@ -497,9 +497,19 @@ static void scenario_tracking_failure(void)
     size_t n = build(f, 0x0800, 0, NETFILTER_PROTO_TCP, 0x0a000202,
                      0x0a00020f, 40000, 80, 0, 0, 5, 0, 54);
     g_tail_rc = -28;
-    if (netfilter_output(f, n, 1) != NETFILTER_DROP) {
-        g_fail = 1;
-        say("hook: NAT exhaustion incorrectly accepted");
+    for (int output = 0; output <= 1; ++output) {
+        netfilter_stats_t before, after;
+        netfilter_get_stats(&before);
+        int verdict = output ? netfilter_output(f, n, 1) : netfilter_input(f, n, 1);
+        netfilter_get_stats(&after);
+        uint64_t drops = output ? after.out_dropped - before.out_dropped :
+                                  after.in_dropped - before.in_dropped;
+        uint64_t accepted = output ? after.out_accepted - before.out_accepted :
+                                     after.in_accepted - before.in_accepted;
+        if (verdict != NETFILTER_DROP || drops != 1 || accepted != 0) {
+            g_fail = 1;
+            say("hook: NAT exhaustion verdict/counters disagree");
+        }
     }
     g_tail_rc = 0;
 }

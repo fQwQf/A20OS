@@ -577,9 +577,8 @@ fn rule_matches(r: &FilterRule, pkt: &Frame, dir: u8) -> bool {
 
 /// Verdict only.  `pkt` is None when the frame did not parse as IPv4, in which
 /// case no rule can match it and the answer is the default policy.
-#[no_mangle]
-pub unsafe extern "C" fn a20_netfilter_eval(v: *const FilterView, len: usize,
-                                            dir: u8, pkt: *const Frame) -> i32 {
+unsafe fn eval_filter(v: *const FilterView, len: usize, dir: u8,
+                      pkt: *const Frame) -> i32 {
     if v.is_null() {
         return ACCEPT;
     }
@@ -589,8 +588,6 @@ pub unsafe extern "C" fn a20_netfilter_eval(v: *const FilterView, len: usize,
     bump(packets, 1);
 
     if pkt.is_null() {
-        let accepted = stat_field(stats, if dir == DIR_IN { 4 } else { 5 });
-        bump(accepted, 1);
         return ACCEPT;
     }
     let pkt = unsafe { &*pkt };
@@ -632,13 +629,26 @@ pub unsafe extern "C" fn a20_netfilter_eval(v: *const FilterView, len: usize,
     }
 
     if hit.is_some() && action == DROP {
-        let dropped = stat_field(stats, if dir == DIR_IN { 2 } else { 3 });
-        bump(dropped, 1);
         return DROP;
     }
-    let accepted = stat_field(stats, if dir == DIR_IN { 4 } else { 5 });
-    bump(accepted, 1);
     ACCEPT
+}
+
+unsafe fn record_verdict(v: *const FilterView, dir: u8, verdict: i32) {
+    if v.is_null() { return; }
+    let view = unsafe { view(v) };
+    let stats = if dir == DIR_IN { view.0.stats_in } else { view.0.stats_out };
+    let base = if verdict == DROP { 2 } else { 4 };
+    let field = base + if dir == DIR_OUT { 1 } else { 0 };
+    bump(stat_field(stats, field), 1);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn a20_netfilter_eval(v: *const FilterView, len: usize,
+                                            dir: u8, pkt: *const Frame) -> i32 {
+    let verdict = unsafe { eval_filter(v, len, dir, pkt) };
+    unsafe { record_verdict(v, dir, verdict) };
+    verdict
 }
 
 /// The hook: filter first, conntrack and NAT only for an accepted packet.  A
@@ -658,15 +668,16 @@ pub unsafe extern "C" fn a20_netfilter_process(v: *const FilterView,
     };
     let parsed = unsafe { a20_netfilter_parse_frame(frame, len, &mut pkt) } != 0;
     let verdict = unsafe {
-        a20_netfilter_eval(v, len, dir, if parsed { &pkt } else { ptr::null() })
+        eval_filter(v, len, dir, if parsed { &pkt } else { ptr::null() })
     };
-    if verdict == DROP || !parsed {
-        return verdict;
-    }
-    if unsafe { a20_netfilter_ct_process_tail(frame, len, net_idx, dir, &pkt) } < 0 {
-        return DROP;
-    }
-    ACCEPT
+    /* Acceptance is final only after conntrack/NAT. Charging it before the
+     * tail made a full state table drop packets while reporting zero drops. */
+    let final_verdict = if verdict != DROP && parsed &&
+        unsafe { a20_netfilter_ct_process_tail(frame, len, net_idx, dir, &pkt) } < 0 {
+        DROP
+    } else { verdict };
+    unsafe { record_verdict(v, dir, final_verdict) };
+    final_verdict
 }
 
 #[cfg(not(test))]
