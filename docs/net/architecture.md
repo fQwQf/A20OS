@@ -46,6 +46,8 @@
 执行并发度，`NET_PROFILE=1/2/3` 选择资源预算；它们均不是 QEMU 的网络拓扑选项。
 公共路由事务见 [routing.md](./routing.md)，NAT 所有权与限制见 [nat.md](./nat.md)，
 对照测量口径见 [benchmark-method.md](./benchmark-method.md)。
+`NET_ROLE=host/router` 独立选择是否编入IPv4/IPv6 transit转发，默认host；使用与
+真实三节点验证见 [router.md](./router.md)，不能据此宣称完整软路由已经成熟。
 
 ## 上游依赖策略
 

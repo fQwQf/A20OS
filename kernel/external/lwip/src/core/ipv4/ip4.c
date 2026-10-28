@@ -315,10 +315,8 @@ ip4_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
   }
 #endif /* IP_FORWARD_ALLOW_TX_ON_RX_NETIF */
 
-  /* decrement TTL */
-  IPH_TTL_SET(iphdr, IPH_TTL(iphdr) - 1);
-  /* send ICMP if TTL == 0 */
-  if (IPH_TTL(iphdr) == 0) {
+  /* A zero TTL must not underflow and become routable again. */
+  if (IPH_TTL(iphdr) <= 1) {
     MIB2_STATS_INC(mib2.ipinhdrerrors);
 #if LWIP_ICMP
     /* Don't send ICMP messages in response to ICMP messages */
@@ -328,6 +326,7 @@ ip4_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
 #endif /* LWIP_ICMP */
     return;
   }
+  IPH_TTL_SET(iphdr, IPH_TTL(iphdr) - 1);
 
   /* Incrementally update the IP checksum. */
   if (IPH_CHKSUM(iphdr) >= PP_HTONS(0xffffU - 0x100)) {
@@ -336,39 +335,10 @@ ip4_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
     IPH_CHKSUM_SET(iphdr, (u16_t)(IPH_CHKSUM(iphdr) + PP_HTONS(0x100)));
   }
 
-  /* Take care of setting checksums to 0 for checksum offload netifs */
-  if (CHECKSUM_GEN_IP || NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_GEN_IP)) {
-    IPH_CHKSUM_SET(iphdr, 0);
-  }
-  switch (IPH_PROTO(iphdr)) {
-#if LWIP_UDP
-#if LWIP_UDPLITE
-  case IP_PROTO_UDPLITE:
-#endif
-  case IP_PROTO_UDP:
-    if (CHECKSUM_GEN_UDP || NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_GEN_UDP)) {
-      ((struct udp_hdr *)((u8_t *)iphdr + IPH_HL_BYTES(iphdr)))->chksum = 0;
-    }
-    break;
-#endif
-#if LWIP_TCP
-  case IP_PROTO_TCP:
-    if (CHECKSUM_GEN_TCP || NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_GEN_TCP)) {
-      ((struct tcp_hdr *)((u8_t *)iphdr + IPH_HL_BYTES(iphdr)))->chksum = 0;
-    }
-    break;
-#endif
-#if LWIP_ICMP
-  case IP_PROTO_ICMP:
-    if (CHECKSUM_GEN_ICMP || NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_GEN_ICMP)) {
-      ((struct icmp_hdr *)((u8_t *)iphdr + IPH_HL_BYTES(iphdr)))->chksum = 0;
-    }
-    break;
-#endif
-  default:
-    /* there's really nothing to do here other than satisfying 'switch-default' */
-    break;
-  }
+  /* Forwarding changes TTL, not the transport pseudo-header. Preserve L4
+   * checksums and the adjusted IPv4 checksum: Ethernet output does not run a
+   * checksum generator. CHECKSUM_GEN_* denotes software generation for local
+   * output, not permission to erase a transit packet's checksums. */
 
   LWIP_DEBUGF(IP_DEBUG, ("ip4_forward: forwarding packet to %"U16_F".%"U16_F".%"U16_F".%"U16_F"\n",
                          ip4_addr1_16(ip4_current_dest_addr()), ip4_addr2_16(ip4_current_dest_addr()),
