@@ -894,12 +894,8 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         memcpy(tmp, buf, n);
         tmp[n] = '\0';
         procfs_chomp(tmp);
-        /*
-         * The conntrack verbs below take g_lwip_lock.  That is safe here and
-         * only here: this runs from a procfs write, i.e. a syscall, and no
-         * procfs write is issued from under g_lwip_lock.  See the locking note
-         * at the top of kernel/include/net/netfilter.h.
-         */
+        /* Conntrack transactions own their IRQ-safe lock. Procfs must not
+         * depend on the active protocol backend's synchronization. */
         if (strcmp(tmp, "reset") == 0) {
             netfilter_reset();
             netfilter_nat_reset();
@@ -914,9 +910,7 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
          * would mean a test that wants a clean NAT binding has to destroy the
          * rules it is about to exercise. */
         if (strcmp(tmp, "ctflush") == 0) {
-            uint64_t lf = a20_lwip_lock();
             netfilter_conntrack_flush();
-            a20_lwip_unlock(lf);
             return (int)count;
         }
         if (strcmp(tmp, "cton") == 0) {
@@ -952,9 +946,7 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
                 d++;
             if (*d != '\0')
                 return -EINVAL;
-            uint64_t lf = a20_lwip_lock();
             netfilter_conntrack_set_timeouts(ms[0], ms[1], ms[2]);
-            a20_lwip_unlock(lf);
             return (int)count;
         }
         /* Synthetic flow insertion: ctinject <src> <dst> <sport> <dport>
@@ -1008,13 +1000,11 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
                     return -EINVAL;
                 num[i] = v;
             }
-            uint64_t lf = a20_lwip_lock();
             int r = netfilter_conntrack_inject(addr[0], addr[1],
                                                (uint16_t)num[0],
                                                (uint16_t)num[1],
                                                (uint8_t)num[2],
                                                (uint8_t)num[3]);
-            a20_lwip_unlock(lf);
             return r < 0 ? r : (int)count;
         }
         if (strncmp(tmp, "add ", 4) == 0) {

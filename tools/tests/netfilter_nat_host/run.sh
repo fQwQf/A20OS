@@ -1,19 +1,13 @@
 #!/bin/bash
 # Host regression evidence for the conntrack/NAT state machine.
 #
-# The C reference this harness used to compare against was retired with the Rust
-# takeover, so the run is now a golden-transcript check: the exact production
-# kernel/net/filter/netfilter_nat.c, kernel/net/filter/netfilter_rewrite.c,
-# kernel/net/filter/netfilter_nat.rs and kernel/net/filter/netfilter_rewrite.rs are compiled
-# for the host, the same scenarios are driven through the production entry
-# points, and the transcript must match the recorded golden byte for byte.  The
-# goldens were recorded while both implementations existed and their transcripts
-# were byte-identical, so they are the C behaviour frozen as an expectation --
-# not a copy of the C code.
-#
-# Two geometries are checked: the default profile's 256-entry conntrack table
-# and the embedded profile's 32-entry one, which is the only geometry that also
-# compiles the profile's static filter-budget assertion.
+# Production C storage/rewrite adapters and Rust state machines are linked
+# together. Explicit assertions cover collision allocation, stable reply owners,
+# forwarded ingress/egress, exhaustion without packet mutation, and four-thread
+# contention. Goldens specify intentional behavior, including refusing live
+# eviction and correcting reverse translation; they no longer freeze C bugs.
+# Default and embedded capacities are checked, plus a 2 GHz timer build that
+# catches narrowing raw ticks or multiplying before division in timeout code.
 #
 # Inputs are hashed before and after, so the comparison cannot be made across two
 # source revisions by accident.
@@ -72,7 +66,7 @@ inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
       -Ikernel/include -Ikernel -Ikernel/net/backends/lwip/port
       -Ikernel/external/lwip/src/include -Ikernel/external/littlefs
       -Ikernel/external/littlefs/compat -Ikernel/arch/x86_64/boards/x86_64-pc
-      -DARCH_TIMER_FREQ=1000 )
+      )
 
 {
   gcc --version
@@ -123,8 +117,8 @@ status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 run_stage rust-unit-run "$out/nat_unit_tests" --test-threads=1
 status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
 
-for geom in default embedded; do
-  cfg=()
+for geom in default embedded highclock; do
+  cfg=( -DARCH_TIMER_FREQ=1000 )
   golden=tools/tests/netfilter_nat_host/golden.txt
   tag=$geom
   if [[ "$geom" == embedded ]]; then
@@ -132,22 +126,25 @@ for geom in default embedded; do
     golden=tools/tests/netfilter_nat_host/golden-embedded.txt
     tag=emb
   fi
-  run_stage "$tag-nat-compile" gcc -std=gnu11 -O1 -Wall -Wextra -Werror \
+  if [[ "$geom" == highclock ]]; then
+    cfg=( -DARCH_TIMER_FREQ=2000000000 )
+  fi
+  run_stage "$tag-nat-compile" gcc -pthread -std=gnu11 -O1 -Wall -Wextra -Werror \
     -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
     "${inc[@]}" "${cfg[@]}" \
     -c kernel/net/filter/netfilter_nat.c -o "$out/${tag}_nat.o"
   status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
-  run_stage "$tag-rewrite-compile" gcc -std=gnu11 -O1 -Wall -Wextra -Werror \
+  run_stage "$tag-rewrite-compile" gcc -pthread -std=gnu11 -O1 -Wall -Wextra -Werror \
     -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
     "${inc[@]}" "${cfg[@]}" \
     -c kernel/net/filter/netfilter_rewrite.c -o "$out/${tag}_rewrite.o"
   status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
-  run_stage "$tag-harness-compile" gcc -std=gnu11 -O1 -Wall -Wextra \
+  run_stage "$tag-harness-compile" gcc -pthread -std=gnu11 -O1 -Wall -Wextra \
     -Wno-builtin-declaration-mismatch -ffunction-sections -fdata-sections \
     "${inc[@]}" "${cfg[@]}" \
     -c tools/tests/netfilter_nat_host/harness.c -o "$out/${tag}_harness.o"
   status=$?; if [[ $status -ne 0 ]]; then exit "$status"; fi
-  run_stage "$tag-link" gcc -Wl,--gc-sections "$out/${tag}_harness.o" \
+  run_stage "$tag-link" gcc -pthread -Wl,--gc-sections "$out/${tag}_harness.o" \
     "$out/${tag}_nat.o" "$out/${tag}_rewrite.o" \
     "$out/netfilter_nat_state.o" "$out/netfilter_rewrite_state.o" \
     "$out/liba20_rust_runtime.a" -o "$out/${tag}_host"

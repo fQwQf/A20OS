@@ -15,10 +15,9 @@
  *      a correct header and a stale IP or pseudo-header checksum is dropped by
  *      the peer, which is indistinguishable from "the NAT rule did not match".
  *   2. The port rewrite, including the `toport=0` convention (keep the
- *      original).  There is no dynamic port allocation in this NAT -- a
- *      masquerade keeps the client's source port unless a rule pins one -- and
- *      the tests assert exactly that, rather than implying an allocator that
- *      does not exist.
+ *      original). Allocation itself is tested by the conntrack/NAT harness;
+ *      these tests isolate the packet rewrite and checksum invariants, which
+ *      can fail independently of state allocation.
  *   3. The reply-direction match: the tuple a translated reply arrives with,
  *      which is not the reverse of the entry's tuple and is the one thing that
  *      makes a reply findable at all.
@@ -144,7 +143,8 @@ static void l4_checksum(uint8_t *frame, size_t len, uint8_t proto,
     while (seed >> 16)
         seed = (seed & 0xffffu) + (seed >> 16);
     put16(frame + ckoff, 0);
-    put16(frame + ckoff, full_sum(frame + l4_off, l4_len, seed));
+    uint16_t sum = full_sum(frame + l4_off, l4_len, seed);
+    put16(frame + ckoff, proto == 17 && sum == 0 ? 0xffff : sum);
     (void)len;
 }
 
@@ -344,14 +344,6 @@ static void test_boundaries(void) {
     CHK(netfilter_l4_ckoff(f, len, &pkt) == pkt.l4_off + 16,
         "tcp: checksum remains before options at the exact header boundary");
 
-    put16(f + pkt.l4_off + 16, 0);
-    netfilter_set_addr(f, len, &pkt, ip4(GATEWAY), pkt.dst_addr);
-    CHK(get16(f + pkt.l4_off + 16) == 0,
-        "tcp: a zero checksum is preserved as the historical invalid-packet behavior");
-    netfilter_set_port(f, len, &pkt, 1, 40000);
-    CHK(get16(f + pkt.l4_off + 16) == 0,
-        "tcp: a zero checksum remains zero after a port rewrite");
-
     memset(f, 0, sizeof(f));
     memset(&pkt, 0, sizeof(pkt));
     len = IP_OFF + IP_HDR;
@@ -411,8 +403,8 @@ static void test_masq_addr(void) {
     g_netif_addr[0] = 0;
     g_netif_addr[1] = 0;
     CHK(netfilter_masq_addr(1) == 0,
-        "masquerade: an interface with no address falls back to the primary");
-    CHK(g_netif_queries == 2, "masquerade: exactly one fallback lookup");
+        "masquerade: an interface with no address has no translation identity");
+    CHK(g_netif_queries == 1, "masquerade: only the actual egress is queried");
 
     g_netif_addr[0] = ip4(GATEWAY);
     g_netif_addr[1] = ip4("192.168.77.1");
@@ -422,8 +414,8 @@ static void test_masq_addr(void) {
         "masquerade: does not keep the client's own address");
 
     g_netif_addr[1] = 0;
-    CHK(netfilter_masq_addr(1) == ip4(GATEWAY),
-        "masquerade: an unnumbered interface falls back to the primary");
+    CHK(netfilter_masq_addr(1) == 0,
+        "masquerade: unnumbered egress cannot borrow the primary address");
 }
 
 /* 6. The reply tuple, which is what makes a translated reply findable. */
@@ -542,11 +534,44 @@ static void test_reply_tuple(void) {
         "reply alias: shared address output follows C write order");
 }
 
+static void test_zero_checksums(void) {
+    uint8_t f[256];
+    netfilter_frame_t pkt;
+    size_t len = build_frame(f, &pkt, 6, CLIENT, SERVER, 12345, 80);
+    // The window starts at zero. Adding the original checksum to it makes
+    // this a valid TCP packet whose computed checksum is exactly zero.
+    put16(f + L4_OFF + 14, get16(f + L4_OFF + 16));
+    l4_checksum(f, len, 6, L4_OFF, TCP_HDR);
+    CHK(get16(f + L4_OFF + 16) == 0 && checksums_valid(f, len, &pkt),
+        "TCP computed zero is a valid input checksum");
+    netfilter_set_port(f, len, &pkt, 1, 43000);
+    CHK(checksums_valid(f, len, &pkt), "TCP zero checksum follows port translation");
+    // Restore zero, then separately exercise the pseudo-header adjustment.
+    put16(f + L4_OFF, 12345);
+    l4_checksum(f, len, 6, L4_OFF, TCP_HDR);
+    netfilter_set_addr(f, len, &pkt, ip4(GATEWAY), pkt.dst_addr);
+    CHK(checksums_valid(f, len, &pkt), "TCP zero checksum follows address translation");
+
+    len = build_frame(f, &pkt, 17, CLIENT, SERVER, 12345, 53);
+    uint16_t old = get16(f + L4_OFF + 6), target = 0;
+    for (unsigned port = 1; port <= 65535; port++) {
+        if (netfilter_csum_delta(old, (uint32_t)12345 << 16, port << 16) == 0) {
+            target = (uint16_t)port;
+            break;
+        }
+    }
+    CHK(target != 0, "construct UDP translation whose computed checksum is zero");
+    netfilter_set_port(f, len, &pkt, 1, target);
+    CHK(get16(f + L4_OFF + 6) == 0xffff && checksums_valid(f, len, &pkt),
+        "UDP computed zero is encoded as all ones, not checksum disabled");
+}
+
 int main(void) {
     test_snat_addr();
     test_dnat_addr();
     test_udp_checksum();
     test_ports();
+    test_zero_checksums();
     test_boundaries();
     test_masq_addr();
     test_reply_tuple();

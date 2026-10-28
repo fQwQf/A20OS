@@ -492,11 +492,9 @@ u32_t sys_now(void) {
 static netfilter_action_t a20_lwip_filter(uint8_t *frame, size_t len,
                                          int idx, int input)
 {
-    uint64_t flags = a20_lwip_shared_lock(A20_LWIP_SHARED_CT, NULL);
-    netfilter_action_t result = input ? netfilter_input(frame, len, idx) :
+    /* Conntrack owns its synchronization independently of protocol lanes. */
+    return input ? netfilter_input(frame, len, idx) :
         netfilter_output(frame, len, idx);
-    a20_lwip_shared_unlock(A20_LWIP_SHARED_CT, NULL, flags);
-    return result;
 }
 
 static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
@@ -1873,7 +1871,8 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         "lwip: ready=%d if=%s state=%s ip=%s mask=%s gw=%s dns=%s\n"
         "protocols: ipv4 ipv6 tcp udp raw icmp icmp6 dhcp dhcp6 dns arp igmp mld loopif\n"
         "pcbs: udp=%u tcp_active=%u tcp_listen=%u raw=%u\n"
-        "link: xmit=%u recv=%u drop=%u chkerr=%u memerr=%u\n",
+        "link: xmit=%u recv=%u drop=%u chkerr=%u memerr=%u\n"
+        "tcp: xmit=%u recv=%u drop=%u chkerr=%u memerr=%u\n",
         g_lwip_ready, ifname, state, ipbuf, maskbuf, gwbuf, dnsbuf,
         (unsigned)__atomic_load_n(&lwip_stats.memp[MEMP_UDP_PCB]->used, __ATOMIC_RELAXED),
         (unsigned)__atomic_load_n(&lwip_stats.memp[MEMP_TCP_PCB]->used, __ATOMIC_RELAXED),
@@ -1883,7 +1882,12 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         (unsigned)__atomic_load_n(&lwip_stats.link.recv, __ATOMIC_RELAXED),
         (unsigned)__atomic_load_n(&lwip_stats.link.drop, __ATOMIC_RELAXED),
         (unsigned)__atomic_load_n(&lwip_stats.link.chkerr, __ATOMIC_RELAXED),
-        (unsigned)__atomic_load_n(&lwip_stats.link.memerr, __ATOMIC_RELAXED));
+        (unsigned)__atomic_load_n(&lwip_stats.link.memerr, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.tcp.xmit, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.tcp.recv, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.tcp.drop, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.tcp.chkerr, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.tcp.memerr, __ATOMIC_RELAXED));
     /* TCP timer firings.  tcp_ticks advances exactly once per tcp_tmr() call, so
      * at TCP_TMR_INTERVAL it directly witnesses how often the TCP timer ran.
      * Reported because the cadence is an invariant a caller can break with no

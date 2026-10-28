@@ -45,12 +45,13 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off)
 /* ------------------------------------------------------- conntrack tail stub */
 
 static int g_tail_calls;
+static int g_tail_rc;
 static uint32_t g_tail_src, g_tail_dst;
 static uint16_t g_tail_sport, g_tail_dport;
 static int g_tail_dir;
 
 #ifdef CONFIG_NETFILTER_FILTER_RUST
-void a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
+int a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
                                    uint8_t dir, const netfilter_frame_t *pkt)
 {
     (void)frame;
@@ -64,9 +65,10 @@ void a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
         g_tail_sport = pkt->src_port;
         g_tail_dport = pkt->dst_port;
     }
+    return g_tail_rc;
 }
 #else
-void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
+int netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
                                  netfilter_dir_t dir,
                                  const netfilter_frame_t *pkt)
 {
@@ -81,6 +83,7 @@ void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
         g_tail_sport = pkt->src_port;
         g_tail_dport = pkt->dst_port;
     }
+    return g_tail_rc;
 }
 #endif
 
@@ -485,6 +488,20 @@ static void scenario_concurrency(void)
         (adds + dels) > 0, reader.evals > 0, netfilter_rule_count());
 }
 
+static void scenario_tracking_failure(void)
+{
+    uint8_t f[64];
+    netfilter_reset();
+    size_t n = build(f, 0x0800, 0, NETFILTER_PROTO_TCP, 0x0a000202,
+                     0x0a00020f, 40000, 80, 0, 0, 5, 0, 54);
+    g_tail_rc = -28;
+    if (netfilter_output(f, n, 1) != NETFILTER_DROP) {
+        g_fail = 1;
+        say("hook: NAT exhaustion incorrectly accepted");
+    }
+    g_tail_rc = 0;
+}
+
 int main(void)
 {
     scenario_parse_frame();
@@ -504,6 +521,7 @@ int main(void)
         (unsigned long long)st.out_accepted,
         (unsigned long long)st.in_dropped,
         (unsigned long long)st.out_dropped);
+    scenario_tracking_failure();
     scenario_concurrency();
     say("HARNESS %s", g_fail ? "FAIL" : "OK");
     return g_fail ? 1 : 0;

@@ -170,7 +170,7 @@ static void netfilter_fix_l4(uint8_t *frame, size_t len,
     if (!ckoff)
         return;
     uint16_t old_ck = netfilter_get16(frame + ckoff);
-    if (old_ck == 0) {
+    if (old_ck == 0 && pkt->proto == NETFILTER_PROTO_UDP) {
         /* UDP over IPv4 may legitimately carry a zero checksum, which means
          * "not computed".  Applying a delta with no base would produce a
          * checksum that is wrong rather than merely stale, so the field is left
@@ -179,6 +179,7 @@ static void netfilter_fix_l4(uint8_t *frame, size_t len,
     }
     uint16_t sum = netfilter_csum_delta(old_ck, old_src, new_src);
     sum = netfilter_csum_delta(sum, old_dst, new_dst);
+    if (pkt->proto == NETFILTER_PROTO_UDP && sum == 0) sum = 0xffff;
     netfilter_put16(frame + ckoff, sum);
 }
 
@@ -242,26 +243,17 @@ void netfilter_set_port(uint8_t *frame, size_t len,
     if (!ckoff)
         return;
     uint16_t old_ck = netfilter_get16(frame + ckoff);
-    if (!old_ck)
+    if (!old_ck && pkt->proto == NETFILTER_PROTO_UDP)
         return;
-    netfilter_put16(frame + ckoff,
-                    netfilter_csum_delta(old_ck, (uint32_t)old_port << 16,
-                                         (uint32_t)new_port << 16));
+    uint16_t ck = netfilter_csum_delta(old_ck, (uint32_t)old_port << 16,
+                                      (uint32_t)new_port << 16);
+    if (pkt->proto == NETFILTER_PROTO_UDP && ck == 0) ck = 0xffff;
+    netfilter_put16(frame + ckoff, ck);
 }
 
 uint32_t netfilter_masq_addr(int net_idx) {
-    /*
-     * MASQUERADE means "the address of the interface we are leaving", not "the
-     * address this stack happened to put in the header".  Those differ exactly
-     * when the kernel forwards, which is the case the feature exists for.  A
-     * netif with no IPv4 address yet falls back to the primary netif, so a rule
-     * installed before DHCP completes still translates rather than silently
-     * passing traffic through untranslated.
-     */
-    uint32_t addr = a20_lwip_netif_ipv4(net_idx);
-    if (addr)
-        return addr;
-    return a20_lwip_netif_ipv4(-1);
+    /* An unnumbered egress has no usable source identity. */
+    return net_idx < 0 ? 0 : a20_lwip_netif_ipv4(net_idx);
 }
 
 /* ---------------------------------------------------------------- conntrack */

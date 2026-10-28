@@ -1,25 +1,8 @@
-/*
- * conntrack and NAT for the IPv4 data plane.
- *
- * See kernel/include/net/netfilter.h for the file header, the locking contract
- * and the HONEST BOUNDARIES.  The short version of the locking story: every
- * function in this file requires g_lwip_lock to be held.  That is already true
- * of both hook call sites and of a20_lwip_poll_timers_locked(), which is where
- * the sweeper runs from; the /proc entry points take the lock themselves
- * because a procfs access is a syscall and never runs under it.  That includes
- * this file's renderer: netfilter_format() acquires the lock before calling
- * netfilter_nat_format(), so nothing in this file may take it again.  A second
- * acquisition here self-deadlocks -- spin_lock_irqsave() is not recursive --
- * and it does so quietly enough to be mistaken for contention: the report is a
- * [LOCK-STALL] in netfilter_nat_format with owner=-1, because g_lwip_lock's
- * owner field is only maintained when CONFIG_NET_LOCK_ASSERT=1.
- *
- * Nothing here allocates either.  The table is a static array sized by
- * NET_PROFILE_CONNTRACK_ENTRIES and the translation is an in-place rewrite of
- * the frame the caller is already holding, so the whole module fits the
- * "no kmalloc under g_lwip_lock" rule in docs/net/network-lock-contract.md
- * without needing an escape hatch.
- */
+/* IPv4 conntrack/NAT storage and kernel primitives. Rust transactions acquire
+ * g_ct_lock through CtGuard, independently of any protocol backend's locking.
+ * Ordering: backend lock or rule-writer lock -> CT lock; never the reverse.
+ * No allocation, backend lock acquisition, blocking waits or external pointer ownership
+ * transfers occur while holding the CT lock. */
 
 #include "net/netfilter.h"
 #include "net/filter/netfilter_internal.h"
@@ -27,13 +10,19 @@
 #include "net/profile.h"
 #include "net/lwip_stack.h"
 #include "core/lock.h"
-#include "core/seqlock.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/errno.h"
 #include "core/timer.h"
 
 #include "net/netfilter_nat_state.h"
+
+static spinlock_t g_ct_lock = SPINLOCK_INIT;
+
+uint64_t a20_netfilter_ct_lock(void) { return spin_lock_irqsave(&g_ct_lock); }
+void a20_netfilter_ct_unlock(uint64_t flags) {
+    spin_unlock_irqrestore(&g_ct_lock, flags);
+}
 
 /*
  * The Rust mirror of these three structs is field-for-field, so every offset is
@@ -108,13 +97,11 @@ static uint32_t g_ct_sweep; /* sweeper resume point */
 static int32_t g_ct_enabled = 1;
 
 /*
- * NAT table storage.  Shared by both implementations: the Rust state machine
- * transacts over it through the view, the C reference below transacts over it
- * directly, and the /proc renderer reads it either way.
+ * Bounded NAT storage; Rust transacts through the guarded view and the C
+ * renderer copies values under the same CT lock.
  */
 static net_nat_rule_t g_nat[NETFILTER_MAX_NAT_RULES];
 static uint32_t g_nat_count;
-static seqlock_t g_nat_seq = SEQLOCK_INIT;
 
 #if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
 /*
@@ -165,31 +152,9 @@ static net_conntrack_stats_bank_t g_ct_dir_stats[2];
  * the heads are initialised explicitly, once, from a20_lwip_init().
  */
 
-/* ---------------------------------------------------------------------- time */
-
-/*
- * Idle timeouts are written in milliseconds because that is how they are
- * specified, but the packet path must not pay a 64-bit divide per packet to
- * convert ticks.  The conversion is done once per timeout, lazily, and cached;
- * after that reading the clock is a plain tick read and every comparison is an
- * integer subtract.  Racing initialisers are harmless: both threads compute the
- * same value from the same constants, and the one writer that can change those
- * constants (netfilter_conntrack_set_timeouts) runs under g_lwip_lock, which
- * every reader here already holds.
- */
-static uint32_t g_to_ticks[3]; /* TCP new, TCP established, UDP */
-static int32_t g_time_ready;
-
-/*
- * Runtime overrides for the three millisecond constants, 0 = use the compiled-in
- * default.  They exist for the idle-timeout gate and nothing else: the shortest
- * compiled-in timeout is 30 seconds, which no test can afford to wait out, and
- * changing the constants per build would mean a second kernel image whose timeouts
- * are not the ones shipped.  Set from a procfs write under g_lwip_lock, so there
- * is no window in which the packet path sees a half-updated set.
- */
+/* Millisecond overrides; zero selects the compiled protocol default. State
+ * timestamps are wrapping milliseconds, never truncated architecture ticks. */
 static uint32_t g_to_ms[3];
-
 
 /* -------------------------------------------------------------------- format */
 
@@ -229,7 +194,13 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
     net_conntrack_stats_t cs;
     netfilter_conntrack_get_stats(&cs);
 
-    NETFILTER_EMIT("conntrack: %s\n", g_ct_enabled ? "on" : "off");
+    net_nat_rule_t rules[NETFILTER_MAX_NAT_RULES];
+    uint64_t ct_flags = a20_netfilter_ct_lock();
+    unsigned rule_count = g_nat_count;
+    int enabled = g_ct_enabled;
+    memcpy(rules, g_nat, sizeof(rules));
+    a20_netfilter_ct_unlock(ct_flags);
+    NETFILTER_EMIT("conntrack: %s\n", enabled ? "on" : "off");
     NETFILTER_EMIT("ct_capacity: %u\n", (unsigned)NET_CONNTRACK_MAX);
     NETFILTER_EMIT("ct_tracked: %llu\n", (unsigned long long)cs.tracked);
     NETFILTER_EMIT("ct_created: %llu\n", (unsigned long long)cs.created);
@@ -238,10 +209,10 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
     NETFILTER_EMIT("ct_lru_victim: %d\n", netfilter_conntrack_lru_victim());
     NETFILTER_EMIT("ct_sweeps: %u\n", (unsigned)netfilter_conntrack_sweeps());
     NETFILTER_EMIT("ct_packets: %llu\n", (unsigned long long)cs.packets);
-    NETFILTER_EMIT("nat_rules: %u\n", (unsigned)g_nat_count);
+    NETFILTER_EMIT("nat_rules: %u\n", rule_count);
 
-    for (unsigned i = 0; i < g_nat_count && off < bufsz; i++) {
-        const net_nat_rule_t *r = &g_nat[i];
+    for (unsigned i = 0; i < rule_count && off < bufsz; i++) {
+        const net_nat_rule_t *r = &rules[i];
         char na[16] = "-";
         if (r->nat != NET_NAT_MASQUERADE)
             netfilter_ipv4_to_str(r->nat_addr, na, sizeof(na));
@@ -297,8 +268,8 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
             e->state == NET_CONNTRACK_ESTABLISHED ? "established" : "new",
             netfilter_nat_name(e->nat), (unsigned long long)e->packets);
     }
-    if (g_ct_used > (unsigned)n)
-        NETFILTER_EMIT("ct ... %u more\n", g_ct_used - (unsigned)n);
+    if (cs.tracked > (unsigned)n)
+        NETFILTER_EMIT("ct ... %u more\n", (unsigned)cs.tracked - (unsigned)n);
 }
 
 #undef NETFILTER_EMIT
@@ -307,8 +278,7 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
  * Rust state machine.
  *
  * What is left here is the storage and the primitives: the two static tables
- * and their counters (the /proc renderer and the C reference read the same
- * memory), the view that hands them to Rust, the NAT table's seqlock and the
+ * and their counters, the guarded view that hands them to Rust, and the
  * frame-rewrite entry points.  The translations, the chains, the LRU victim,
  * the idle sweep and every NAT decision are in kernel/net/filter/netfilter_nat.rs.
  */
@@ -328,50 +298,28 @@ static net_ct_view_t g_ct_view = {
     .nat_max = NETFILTER_MAX_NAT_RULES,
     .nat_count = (uint32_t *)&g_nat_count,
     .to_ms = g_to_ms,
-    .to_ticks = g_to_ticks,
-    .time_ready = (int32_t *)&g_time_ready,
     .sweeps = (uint32_t *)&g_ct_sweeps,
-    .ticks_per_sec = 0, /* a runtime value on riscv64; filled on first use */
 };
 
 static const net_ct_view_t *net_ct_view(void)
 {
-    if (!g_ct_view.ticks_per_sec)
-        g_ct_view.ticks_per_sec = (uint64_t)TICKS_PER_SEC;
     return &g_ct_view;
 }
 
 /* The filter half's hook calls this for an accepted packet: conntrack and NAT
  * run after the verdict, never before it. */
-void a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
+int a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
                                    uint8_t dir, const netfilter_frame_t *pkt)
 {
-    a20_netfilter_ct_process(net_ct_view(), frame, len, net_idx, dir, pkt);
+    return a20_netfilter_ct_process(net_ct_view(), frame, len, net_idx, dir, pkt);
 }
 
-uint32_t a20_netfilter_now_ticks(void)
+uint32_t a20_netfilter_now_ms(void)
 {
-    return (uint32_t)timer_get_ticks();
-}
-
-uint32_t a20_netfilter_nat_seq_read_begin(void)
-{
-    return seqlock_read_begin(&g_nat_seq);
-}
-
-int a20_netfilter_nat_seq_read_retry(uint32_t start)
-{
-    return seqlock_read_retry(&g_nat_seq, start) ? 1 : 0;
-}
-
-void a20_netfilter_nat_seq_write_begin(void)
-{
-    seqlock_write_begin(&g_nat_seq);
-}
-
-void a20_netfilter_nat_seq_write_end(void)
-{
-    seqlock_write_end(&g_nat_seq);
+    uint64_t ticks = timer_get_ticks(), hz = TICKS_PER_SEC;
+    /* Divide before narrowing. Splitting seconds/remainder also avoids a
+     * ticks*1000 overflow on long-running high-frequency platforms. */
+    return (uint32_t)((ticks / hz) * 1000 + (ticks % hz) * 1000 / hz);
 }
 
 void a20_netfilter_rewrite_set_addr(uint8_t *frame, size_t len,
@@ -456,11 +404,11 @@ unsigned netfilter_conntrack_expire(unsigned max_scan)
     return a20_netfilter_ct_expire(net_ct_view(), max_scan);
 }
 
-void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
+int netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
                                  netfilter_dir_t dir,
                                  const netfilter_frame_t *pkt)
 {
-    a20_netfilter_ct_process(net_ct_view(), frame, len, net_idx, (uint8_t)dir,
+    return a20_netfilter_ct_process(net_ct_view(), frame, len, net_idx, (uint8_t)dir,
                              pkt);
 }
 
@@ -473,8 +421,7 @@ int netfilter_nat_add_rule(const net_nat_rule_t *rule)
 {
     if (!rule)
         return -EINVAL;
-    /* Validation happens inside the Rust transaction, under this lock and the
-     * table's seqlock, so a rule is validated and published as one step. */
+    /* Serialize configuration writers, then publish under the CT guard. */
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     int r = a20_netfilter_nat_add(net_ct_view(), rule);
     spin_unlock_irqrestore(&g_netfilter_lock, flags);

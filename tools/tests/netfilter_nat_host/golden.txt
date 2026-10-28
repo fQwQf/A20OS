@@ -13,15 +13,15 @@ nat: dnat_reply src=0a00020f sport=18082
 nat: dnat_retrans dst=0a00020f dport=18082
 nat: add_masq=0 count=1
 nat: masq_fwd src=0a00020f sport=5353
-nat: masq_reply dst=0a00020f dport=0
+nat: masq_reply dst=0a000202 dport=5353
 nat: after_del count=0
 nat: after_del_fwd src=0a00020f sport=5353
 icmp: n=1 proto=1 sport=8 dport=4660 nat=1
-icmp: reply_entries=2
-icmp: reply_state=0 packets=1 nat=1
+icmp: reply_entries=1
+icmp: reply_state=1 packets=2 nat=1
 cap: capacity=256
-cap: full count=256 created=263 evicted=0
-cap: overflow r=0 count=256 evicted=1 lru_victim=1001
+cap: full count=256 created=261 evicted=0
+cap: overflow r=-28 count=256 evicted=0 lru_victim=1000
 cap: bad_proto=-22 bad_state=-22
 expire: t=60 freed=1 count=2 timeout=1 sweeps=1
 expire: t=115 freed=1 count=1 timeout=2
@@ -44,5 +44,7 @@ rules: del0=0
 rules: count_after_del=1
 rules: del_oob=-22
 rules: reset count=0
-final: tracked=4 created=272 evicted=1 timeout=2
+final: tracked=4 created=269 evicted=0 timeout=2
+NAPT ASSERTIONS OK
+NAPT CONCURRENCY OK
 HARNESS OK

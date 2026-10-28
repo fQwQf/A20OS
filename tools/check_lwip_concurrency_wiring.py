@@ -136,10 +136,13 @@ def _ordered(body: str, description: str, *needles: str) -> None:
 def check() -> None:
     filter_body = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_filter")
     _ordered(filter_body, "conntrack filter wrapper",
-             "a20_lwip_shared_lock(A20_LWIP_SHARED_CT, NULL)",
              "netfilter_input(frame, len, idx)",
-             "netfilter_output(frame, len, idx)",
-             "a20_lwip_shared_unlock(A20_LWIP_SHARED_CT, NULL, flags)")
+             "netfilter_output(frame, len, idx)")
+    nat = (ROOT / "kernel/net/filter/netfilter_nat.rs").read_text()
+    if "let _guard = CtGuard::acquire();" not in nat or "&'static mut" in nat:
+        raise ContractError("conntrack must own exclusion and cannot manufacture static mutable aliases")
+    if "a20_lwip_shared_lock" in filter_body:
+        raise ContractError("conntrack synchronization must not depend on a backend lock")
     if "a20_lwip_lane_lock" in filter_body or "a20_lwip_lock(" in filter_body:
         raise ContractError("conntrack filter wrapper must not acquire a core lane/global core lock")
 

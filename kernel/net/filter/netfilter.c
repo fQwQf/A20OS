@@ -1,8 +1,8 @@
 /*
  * IPv4 packet filter -- rule evaluation, rule table and counters.
  *
- * See kernel/include/net/netfilter.h for the locking contract: the hooks run
- * under g_lwip_lock, so nothing here allocates, blocks, or calls into lwIP.
+ * See kernel/include/net/netfilter.h for the locking contract: hooks borrow a
+ * caller-owned frame and never allocate, block, or enter the protocol stack.
  * Evaluation is a linear scan over a small fixed table of already-parsed
  * rules, which is bounded and allocation-free.
  *
@@ -31,7 +31,6 @@
 
 #include "net/netfilter.h"
 #include "net/filter/netfilter_internal.h"
-#include "net/lwip_stack.h"
 #include "core/lock.h"
 #include "core/seqlock.h"
 #include "core/string.h"
@@ -256,16 +255,8 @@ void netfilter_format(char *buf, size_t bufsz)
         }
     }
 
-    /*
-     * The conntrack and NAT sections are snapshots of state the packet path
-     * mutates in place, so they are taken under g_lwip_lock -- the lock the
-     * packet path holds.  The filter section above is not: its table is read
-     * through a seqlock precisely so no lock is needed.  Safe from here
-     * because procfs rendering runs from a read(), never under g_lwip_lock.
-     */
-    uint64_t flags = a20_lwip_lock();
+    /* Each CT/NAT snapshot owns its synchronization; no backend barrier. */
     netfilter_nat_format(buf, bufsz, off);
-    a20_lwip_unlock(flags);
 }
 
 

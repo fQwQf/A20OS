@@ -1,5 +1,10 @@
 # 网络锁契约
 
+> **2026-10-29 更新**：conntrack/NAT 由独立 CT 锁和 Rust `CtGuard` 保护，已移除
+> lwIP 的 `A20_LWIP_SHARED_CT` 包装及 procfs 的全 lane barrier。下文 CT guard 指这一
+> 子系统自己的锁，见 [NAT 事务契约](./nat.md)。Bottom half 在读取 producer 状态前
+> 消费 pending，保留 drain 期间的新发布；socket 引用必须覆盖最后一次 wait queue 唤醒。
+
 > **多 lane 核心并发契约（2026-10-08）**：本节优先于下文历史阶段记录中把
 > `g_lwip_lock` 描述为“保护全部 lwIP 核心状态”的旧表述。`CONFIG_NET_LANES=1`
 > 仍走单 lane/IRQ-save 的原有串行语义；多 lane 时热数据路径按 lane 锁保护，跨 lane

@@ -23,6 +23,7 @@
 #include "/usr/include/stdlib.h"
 #include "/usr/include/string.h"
 #include <unistd.h>
+#include <pthread.h>
 
 /* netfilter.c owns the global writer lock the NAT entry points take; the
  * harness defines it so the production paths link unmodified. */
@@ -34,7 +35,7 @@ static uint32_t g_now;
 
 uint64_t timer_get_ticks(void)
 {
-    return g_now;
+    return (uint64_t)g_now * ARCH_TIMER_FREQ / 1000;
 }
 
 /* The MASQUERADE source address: a fixed interface address so the transcript
@@ -417,7 +418,7 @@ static void scenario_capacity(void)
     say("cap: full count=%d created=%llu evicted=%llu", netfilter_conntrack_count(),
         (unsigned long long)st.created, (unsigned long long)st.evicted);
 
-    /* One more flow evicts the least recently used (the first one). */
+    /* A full state table refuses new flows and preserves every live binding. */
     g_now = 20000;
     int r = netfilter_conntrack_inject(0x0a000201, 0x0a000202, 65535, 80,
                                        NETFILTER_PROTO_TCP, NET_CONNTRACK_NEW);
@@ -569,6 +570,157 @@ static void scenario_rules(void)
     say("rules: reset count=%d", netfilter_nat_rule_count());
 }
 
+/* Assertions cover behavior that the old golden transcript could not certify.
+ * Keep them independent of lifetime counter output and of dynamic port choice. */
+static void require(int ok, const char *what)
+{
+    if (!ok) {
+        say("NAPT assertion failed: %s", what);
+        exit(1);
+    }
+}
+
+static void scenario_napt(void)
+{
+    uint8_t f[64], before[64];
+    size_t len;
+    netfilter_frame_t pkt;
+    net_nat_rule_t rule = {0};
+    uint32_t clients[2] = {0x0a000a02, 0x0a000a03};
+    uint16_t ports[2];
+    const uint32_t remote = 0x08080808, public_ip = 0x0a00020f;
+    netfilter_conntrack_flush();
+    netfilter_nat_reset();
+    netfilter_conntrack_set_enabled(1);
+    rule.dir = NETFILTER_DIR_OUT;
+    rule.proto = NETFILTER_PROTO_UDP;
+    rule.nat = NET_NAT_MASQUERADE;
+    rule.src_addr = rule.dst_addr = rule.nat_addr = NO_ADDR;
+    rule.src_port = rule.dst_port = NO_PORT;
+    require(netfilter_nat_add_rule(&rule) == 0, "install masquerade");
+    for (int i = 0; i < 2; i++) {
+        build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, clients[i], remote, 53000, 53);
+        require(netfilter_conntrack_process(f, len, 1, NETFILTER_DIR_IN, &pkt) == 0,
+                "track ingress before SNAT");
+        require(frame_ip_src(f) == clients[i], "SNAT waits for egress");
+        require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == 0,
+                "reserve egress binding on existing entry");
+        require(frame_ip_src(f) == public_ip, "masquerade address");
+        ports[i] = frame_sport(f);
+    }
+    require(ports[0] == 53000, "preserve source port when free");
+    require(ports[1] >= 1024 && ports[1] != ports[0], "resolve client collision");
+    require(netfilter_conntrack_count() == 2, "one entry per forwarded flow");
+    require(netfilter_conntrack_inject(public_ip, remote, ports[0], 53,
+                NETFILTER_PROTO_UDP, NET_CONNTRACK_NEW) == -28,
+            "an untranslated tuple cannot steal an existing translated reply");
+    for (int i = 0; i < 2; i++) {
+        build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, clients[i], remote, 53000, 53);
+        require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == 0,
+                "retransmission accepted");
+        require(frame_sport(f) == ports[i], "stable reserved port");
+        build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, remote, public_ip, 53, ports[i]);
+        require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_IN, &pkt) == 0,
+                "reverse binding found");
+        require(frame_ip_dst(f) == clients[i] && frame_dport(f) == 53000,
+                "reply delivered to its original client");
+        build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, remote, clients[i], 53, 53000);
+        require(netfilter_conntrack_process(f, len, 1, NETFILTER_DIR_OUT, &pkt) == 0,
+                "reply traverses egress");
+        require(frame_ip_dst(f) == clients[i] && frame_sport(f) == 53,
+                "reverse reply is not translated twice");
+    }
+    for (int i = 2; i < NET_PROFILE_CONNTRACK_ENTRIES; i++)
+        require(netfilter_conntrack_inject(1, 2, (uint16_t)i, 80,
+                    NETFILTER_PROTO_TCP, NET_CONNTRACK_NEW) == 0, "fill unused slots");
+    build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, 0x0a000a04, remote, 53000, 53);
+    memcpy(before, f, len);
+    require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == -28,
+            "full table refuses mapping");
+    require(memcmp(before, f, len) == 0, "failed transaction leaves packet unchanged");
+    net_conntrack_stats_t stats;
+    netfilter_conntrack_get_stats(&stats);
+    require(stats.evicted == 0, "live flows never evicted");
+    build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, remote, public_ip, 53, ports[0]);
+    require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_IN, &pkt) == 0,
+            "full table still serves existing mappings");
+    require(frame_ip_dst(f) == clients[0], "full table retains reply ownership");
+
+    netfilter_conntrack_flush();
+    netfilter_nat_reset();
+    rule.nat = NET_NAT_SNAT;
+    rule.nat_addr = public_ip;
+    rule.nat_port = 41000;
+    require(netfilter_nat_add_rule(&rule) == 0, "install fixed SNAT");
+    for (int i = 0; i < 2; i++) {
+        build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, clients[i], remote, 53000, 53);
+        memcpy(before, f, len);
+        int rc = netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt);
+        require(rc == (i == 0 ? 0 : -28), "fixed port collision fails closed");
+        if (i == 0) require(frame_sport(f) == 41000, "fixed port honored");
+        else require(memcmp(before, f, len) == 0, "fixed collision no mutation");
+    }
+    netfilter_conntrack_flush();
+    netfilter_conntrack_set_enabled(0);
+    build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, clients[0], remote, 53000, 53);
+    require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == -28,
+            "disabled conntrack cannot bypass NAT policy");
+    netfilter_conntrack_set_enabled(1);
+    netfilter_nat_reset();
+    say("NAPT ASSERTIONS OK");
+}
+
+#define NAPT_WORKERS 4
+#define NAPT_FLOWS 4
+static uint16_t concurrent_ports[NAPT_WORKERS][NAPT_FLOWS];
+static void *napt_worker(void *arg)
+{
+    unsigned worker = (unsigned)(uintptr_t)arg;
+    uint8_t f[64];
+    size_t len;
+    netfilter_frame_t pkt;
+    for (int repeat = 0; repeat < 128; repeat++) {
+        for (unsigned i = 0; i < NAPT_FLOWS; i++) {
+            uint32_t client = 0x0a001000 + worker * NAPT_FLOWS + i;
+            build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, client, 0x08080808, 53000, 53);
+            require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == 0,
+                    "parallel binding transaction");
+            uint16_t port = frame_sport(f);
+            if (repeat == 0) concurrent_ports[worker][i] = port;
+            else require(port == concurrent_ports[worker][i], "parallel binding stays stable");
+        }
+    }
+    return NULL;
+}
+static void scenario_napt_concurrency(void)
+{
+    pthread_t threads[NAPT_WORKERS];
+    netfilter_conntrack_flush();
+    net_nat_rule_t rule = {0};
+    rule.dir = NETFILTER_DIR_OUT;
+    rule.proto = NETFILTER_PROTO_UDP;
+    rule.nat = NET_NAT_MASQUERADE;
+    rule.src_addr = rule.dst_addr = rule.nat_addr = NO_ADDR;
+    rule.src_port = rule.dst_port = NO_PORT;
+    require(netfilter_nat_add_rule(&rule) == 0, "parallel rule installed");
+    for (uintptr_t i = 0; i < NAPT_WORKERS; i++)
+        require(pthread_create(&threads[i], NULL, napt_worker, (void *)i) == 0,
+                "start parallel worker");
+    for (unsigned i = 0; i < NAPT_WORKERS; i++)
+        require(pthread_join(threads[i], NULL) == 0, "join parallel worker");
+    for (unsigned a = 0; a < NAPT_WORKERS * NAPT_FLOWS; a++)
+        for (unsigned b = a + 1; b < NAPT_WORKERS * NAPT_FLOWS; b++)
+            require(concurrent_ports[a / NAPT_FLOWS][a % NAPT_FLOWS] !=
+                    concurrent_ports[b / NAPT_FLOWS][b % NAPT_FLOWS],
+                    "parallel reply tuples have unique owners");
+    require(netfilter_conntrack_count() == NAPT_WORKERS * NAPT_FLOWS,
+            "parallel transactions do not leak entries");
+    netfilter_conntrack_flush();
+    require(netfilter_conntrack_count() == 0, "all parallel state reclaimed");
+    netfilter_nat_reset();
+    say("NAPT CONCURRENCY OK");
+}
+
 int main(void)
 {
     netfilter_conntrack_init();
@@ -586,6 +738,8 @@ int main(void)
     say("final: tracked=%llu created=%llu evicted=%llu timeout=%llu",
         (unsigned long long)st.tracked, (unsigned long long)st.created,
         (unsigned long long)st.evicted, (unsigned long long)st.timeout);
+    scenario_napt();
+    scenario_napt_concurrency();
     say("HARNESS OK");
     return g_fail ? 1 : 0;
 }

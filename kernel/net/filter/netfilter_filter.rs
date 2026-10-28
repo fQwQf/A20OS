@@ -115,7 +115,7 @@ unsafe extern "C" {
     fn a20_netfilter_ipv4_from_str(s: *const u8, len: usize, out: *mut u32) -> i32;
     /// The conntrack/NAT half's entry point; the filter decides *when* it runs.
     fn a20_netfilter_ct_process_tail(frame: *mut u8, len: usize, net_idx: i32,
-                                     dir: u8, pkt: *const Frame);
+                                     dir: u8, pkt: *const Frame) -> i32;
 }
 
 struct View(&'static FilterView);
@@ -654,7 +654,9 @@ pub unsafe extern "C" fn a20_netfilter_process(v: *const FilterView,
     if verdict == DROP || !parsed {
         return verdict;
     }
-    unsafe { a20_netfilter_ct_process_tail(frame, len, net_idx, dir, &pkt) };
+    if unsafe { a20_netfilter_ct_process_tail(frame, len, net_idx, dir, &pkt) } < 0 {
+        return DROP;
+    }
     ACCEPT
 }
 
