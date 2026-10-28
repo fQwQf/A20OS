@@ -51,6 +51,7 @@ int main(void) {
     memset(bytes, 0x5a, sizeof(bytes));
     for (unsigned i = 0; i < NET_PROFILE_LANE_RXQ_SLOTS; i++)
         assert(net_lane_rx_put(0, (struct netif *)1, bytes, sizeof(bytes)));
+    assert(!net_lane_rx_all_have_room());
     assert(net_lane_rx_claim(0));
     const uint8_t *held;
     unsigned len;
@@ -63,6 +64,7 @@ int main(void) {
         net_lane_rx_consume(0);
     net_lane_rx_release(0);
     assert(net_lane_rx_queued_total() == 0);
+    assert(net_lane_rx_all_have_room());
     memset(g_net_lanes, 0, sizeof(g_net_lanes));
 
     pthread_t threads[CONFIG_NET_LANES];

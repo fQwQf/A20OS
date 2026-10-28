@@ -145,6 +145,7 @@ def check() -> None:
 
     enqueue = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_rx_enqueue_locked")
     _ordered(enqueue, "multi-lane ingress filter/publication",
+             "net_lane_rx_all_have_room()", "netif_device_recv(",
              "a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1)",
              "NETFILTER_DROP", "a20_lwip_frame_lane(n, st->rx_frame",
              "net_lane_rx_put(lane, n, st->rx_frame")
@@ -162,6 +163,12 @@ def check() -> None:
             f >= s for f, s in zip(filter_calls, send_calls)):
         raise ContractError("both linkoutput paths must filter their staged frame before device send")
 
+    connect = _body("kernel/net/backends/lwip/socket_inet.c", "net_inet_connect_stream")
+    connect = connect[connect.index("err_t e = tcp_connect"): ]
+    _ordered(connect, "active open publishes rebucketed PCB ownership",
+             "tcp_connect(s->tcp", "net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->tcp))",
+             "a20_lwip_unlock(lwip_flags)")
+
     virtio = _body("kernel/drivers/net/virtio_net.c", "virtio_net_irq_handler")
     _ordered(virtio, "virtio IRQ ingress bridge",
              "a20_lwip_ingress_lock()",
@@ -171,7 +178,7 @@ def check() -> None:
     if "void a20_lwip_process_netif_irq_locked(int net_idx);" not in header:
         raise ContractError("lwip_stack.h does not export the IRQ ingress API")
     irq_body = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_process_netif_irq_locked")
-    if "a20_lwip_rx_enqueue_locked(n, 0)" not in irq_body:
+    if "a20_lwip_rx_enqueue_locked(n, CONFIG_NET_RX_IRQ_BUDGET)" not in irq_body:
         raise ContractError("multi-lane IRQ API no longer stages frames on owner queues")
 
     drain = _body("kernel/net/backends/lwip/lwip_stack.c", "a20_lwip_lane_drain")

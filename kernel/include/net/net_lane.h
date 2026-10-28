@@ -310,6 +310,9 @@ void net_lane_rx_count_processed(unsigned lane);
  * by the event a blocked reader is waiting for -- see the liveness note in
  * docs/net/net-lanes.md, stage D. */
 unsigned net_lane_rx_queued_total(void);
+/* Ingress must reserve room before removing a frame whose owner is unknown.
+ * The single producer holds ingress; consumers can only increase this room. */
+bool net_lane_rx_all_have_room(void);
 
 /* Counters for /proc.  Monotonic and read without the claim: a torn read of a
  * 64-bit counter is not a value any gate keys on, and taking the claim here
