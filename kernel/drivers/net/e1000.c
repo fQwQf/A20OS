@@ -1115,12 +1115,18 @@ static const device_id_t e1000_ids[] = {
     { 0 },
 };
 
+static void e1000_shutdown(device_t *dev)
+{
+    (void)e1000_remove(dev);
+}
+
 static driver_t e1000_driver = {
     .name = "e1000",
     .id_table = e1000_ids,
     .bus = &pci_bus,
     .probe = e1000_probe,
     .remove = e1000_remove,
+    .shutdown = e1000_shutdown,
     .class_ops = &e1000_ops,
     .class_type = DEV_CLASS_NET,
 };

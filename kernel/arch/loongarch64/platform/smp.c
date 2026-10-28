@@ -91,14 +91,18 @@ int arch_smp_secondary_prepare(const smp_cpu_desc_t *cpu)
     return 0;
 }
 
+void loongarch64_kexec_ipi(void);
+
 void loongarch64_smp_handle_ipi(int from_user)
 {
     uint32_t action = iocsr_read32(IOCSR_IPI_STATUS);
     iocsr_write32(action, IOCSR_IPI_CLEAR);
     arch_mb();
 
-    if (action & IPI_RESCHEDULE)
+    if (action & IPI_RESCHEDULE) {
+        loongarch64_kexec_ipi();
         proc_sched_handle_reschedule_ipi();
+    }
     if (action & IPI_TLB_FLUSH)
         loongarch64_ipi_tlb_flush_handler();
     (void)from_user;

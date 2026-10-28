@@ -262,6 +262,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_system_info 0x0A00
 #define A20_SYS_system_random 0x0A01
 #define A20_SYS_system_reboot 0x0A02
+#define A20_SYS_system_kexec 0x0A04
 
 /* ===== Sync (0x0B00) ===== */
 #define A20_SYS_futex_wait 0x0B00

@@ -315,6 +315,12 @@ static int cmos_rtc_remove(device_t *dev)
 }
 
 
+static void cmos_rtc_shutdown(device_t *dev)
+{
+    /* No IRQ is wired and nothing is mapped; the CMOS keeps counting. */
+    (void)dev;
+}
+
 static const firmware_device_id_t firmware_ids[] = {
     {.id = "PNP0B00"}, {0}
 };
@@ -324,6 +330,7 @@ static driver_t cmos_rtc_driver = {
     .bus = &platform_bus,
     .probe = cmos_rtc_probe,
     .remove = cmos_rtc_remove,
+    .shutdown = cmos_rtc_shutdown,
     /* No RTC class ops exist in the unified model yet (driver_class.h defines
      * char/block/net/input/display/audio only), so this binds as a platform
      * device with no class device, exactly like the goldfish RTC module.

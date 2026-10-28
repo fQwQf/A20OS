@@ -213,6 +213,7 @@ pub struct Phdr {
     pub p_flags: u32,
     pub p_offset: u64,
     pub p_vaddr: u64,
+    pub p_paddr: u64,
     pub p_filesz: u64,
     pub p_memsz: u64,
     pub p_align: u64,
@@ -229,6 +230,7 @@ fn parse_phdr(b: &[u8], index: usize, entsize: usize, elf32: bool) -> Option<Phd
             p_type: rd_u32(b, off)?,
             p_offset: rd_u32(b, off + 4)? as u64,
             p_vaddr: rd_u32(b, off + 8)? as u64,
+            p_paddr: rd_u32(b, off + 12)? as u64,
             p_filesz: rd_u32(b, off + 16)? as u64,
             p_memsz: rd_u32(b, off + 20)? as u64,
             p_flags: rd_u32(b, off + 24)?,
@@ -240,6 +242,7 @@ fn parse_phdr(b: &[u8], index: usize, entsize: usize, elf32: bool) -> Option<Phd
             p_flags: rd_u32(b, off + 4)?,
             p_offset: rd_u64(b, off + 8)?,
             p_vaddr: rd_u64(b, off + 16)?,
+            p_paddr: rd_u64(b, off + 24)?,
             p_filesz: rd_u64(b, off + 32)?,
             p_memsz: rd_u64(b, off + 40)?,
             p_align: rd_u64(b, off + 48)?,
@@ -2499,26 +2502,19 @@ pub fn kexec_wire_ok(nr_segments: u64, max_segments: u64) -> bool {
     nr_segments >= 1 && nr_segments <= max_segments
 }
 
-/// Validate one kexec segment against the running kernel's physical extent
-/// and every segment staged so far. Mirrors `kexec_load_segments()`'s
-/// checks with wrap-safe arithmetic: `-EINVAL` for an impossible segment,
-/// `-EADDRNOTAVAIL` for an overlap (with the kernel image or a predecessor).
-/// The C adapter copies the bytes and stages the pages; it feeds each
-/// accepted segment back in via `staged` so the pairwise overlap decision
-/// stays here.
+/// Validate one kexec segment with wrap-safe arithmetic. Replacing the running
+/// kernel at the same physical address is expected; the architecture backend
+/// protects the delayed-copy sources instead of rejecting that overlap here.
 pub fn kexec_segment_ok(
     seg: &KexecSegmentWire,
-    kstart: u64,
-    kend: u64,
+    _kstart: u64,
+    _kend: u64,
     staged: &[KexecSegmentWire],
 ) -> Result<(), i32> {
     if seg.bufsz > seg.memsz {
         return Err(-EINVAL);
     }
     let end = seg.mem.checked_add(seg.memsz).ok_or(-EINVAL)?;
-    if seg.mem < kend && kstart < end {
-        return Err(-EADDRNOTAVAIL);
-    }
     for prev in staged {
         // Predecessors were accepted, so their mem+memsz addition is sound.
         let pstart = prev.mem;
@@ -2640,10 +2636,9 @@ fn kx_overlaps(l: &KexecLedger, mem: u64, end: u64) -> bool {
     false
 }
 
-/// Validate one user segment against the running-kernel extent and every
-/// already-staged predecessor, then reserve the next slot. Returns the slot
-/// index. `buf` is a user pointer the adapter copies from; it is carried, not
-/// dereferenced.
+/// Validate one segment against every already-staged predecessor, then reserve
+/// the next slot. `buf` is carried as an adapter offset or pointer, never
+/// dereferenced by the ledger.
 pub fn kx_stage_check(
     l: &mut KexecLedger,
     buf: u64,
@@ -2662,7 +2657,8 @@ pub fn kx_stage_check(
         mem,
         memsz,
     };
-    // Wire rules (bufsz <= memsz) and the running-kernel overlap.
+    // Size/wrap rules; same-address replacement is checked by the backend's
+    // delayed-copy source protection rather than rejected here.
     kexec_segment_ok(&seg, kstart, kend, &[])?;
     let end = mem.checked_add(memsz).ok_or(-EINVAL)?;
     if kx_overlaps(l, mem, end) {
@@ -3744,17 +3740,6 @@ pub struct KexecLoadOps {
     pub free_pages: Option<unsafe extern "C" fn(*mut core::ffi::c_void, u64)>,
 }
 
-#[repr(C)]
-pub struct KexecFileOps {
-    pub context: *mut core::ffi::c_void,
-    pub read_file: Option<unsafe extern "C" fn(*mut core::ffi::c_void, *mut *const u8, *mut u64) -> i32>,
-    pub stage_file: Option<unsafe extern "C" fn(*mut core::ffi::c_void, *const u8, u64, *mut u64, *mut u64) -> i32>,
-    pub free_buffer: Option<unsafe extern "C" fn(*mut core::ffi::c_void, *const u8)>,
-    pub lock: Option<unsafe extern "C" fn(*mut core::ffi::c_void) -> u64>,
-    pub unlock: Option<unsafe extern "C" fn(*mut core::ffi::c_void, u64)>,
-    pub free_pages: Option<unsafe extern "C" fn(*mut core::ffi::c_void, u64)>,
-}
-
 unsafe fn kx_drain_with(l: &mut KexecLedger, free_pages: unsafe extern "C" fn(*mut core::ffi::c_void, u64), context: *mut core::ffi::c_void) {
     while let Some((pages, _)) = kx_release_next(l) {
         if pages != 0 { free_pages(context, pages); }
@@ -3827,31 +3812,107 @@ pub unsafe extern "C" fn a20_elf_kexec_discard_transaction(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn a20_elf_kexec_file_transaction(
-    dst: *mut KexecLedger, ops: *const KexecFileOps,
+pub unsafe extern "C" fn a20_elf_kexec_image_transaction(
+    dst: *mut KexecLedger, buffer: *const u8, size: u64,
+    expect_class: u8, expect_machine: u16, ops: *const KexecLoadOps,
 ) -> i32 {
-    if dst.is_null() || ops.is_null() { return -EFAULT; }
+    if dst.is_null() || buffer.is_null() || ops.is_null() { return -EFAULT; }
     let o = &*ops;
-    let (Some(read_file), Some(stage_file), Some(free_buffer), Some(lock), Some(unlock), Some(free_pages)) =
-        (o.read_file, o.stage_file, o.free_buffer, o.lock, o.unlock, o.free_pages) else { return -EINVAL; };
-    let mut buffer: *const u8 = core::ptr::null();
-    let mut size = 0u64;
-    let mut rc = read_file(o.context, &mut buffer, &mut size);
-    if rc == 0 && (buffer.is_null() || size < 4 || size > 64 * 1024 * 1024) { rc = -EINVAL; }
-    if rc == 0 && !is_elf_image(core::slice::from_raw_parts(buffer, 4)) { rc = -ENOEXEC; }
+    let (Some(stage_segment), Some(lock), Some(unlock), Some(free_pages)) =
+        (o.stage_segment, o.lock, o.unlock, o.free_pages) else { return -EINVAL; };
+    let size_usize = match usize::try_from(size) { Ok(v) => v, Err(_) => return -EINVAL };
+    let bytes = core::slice::from_raw_parts(buffer, size_usize);
+    let eh = match parse_ehdr(bytes) { Some(v) => v, None => return -ENOEXEC };
+    if let Err(e) = validate_ehdr(&eh, expect_class, expect_machine) { return e; }
+    let phoff = match usize::try_from(eh.e_phoff) { Ok(v) => v, Err(_) => return -ENOEXEC };
+    let table_len = match (eh.e_phnum as usize).checked_mul(eh.e_phentsize as usize) {
+        Some(v) => v, None => return -ENOEXEC,
+    };
+    let table_end = match phoff.checked_add(table_len) { Some(v) => v, None => return -ENOEXEC };
+    let phbytes = match bytes.get(phoff..table_end) { Some(v) => v, None => return -ENOEXEC };
+    let mut wires = [KexecSegmentWire::default(); KEXEC_MAX_SEGMENTS];
+    let (nr, entry) = match kx_plan_load_wires(&eh, phbytes, size, &mut wires) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    kx_stage_publish(dst, entry, &wires[..nr], o, stage_segment, lock, unlock, free_pages)
+}
+
+/// Turn a parsed program-header table into physical kexec wire segments and
+/// translate the entry point from virtual to physical. `size` bounds every
+/// file extent a segment claims. `wire.buf` carries the source *offset* the
+/// adapter reads the payload from (an image-buffer offset or a file offset).
+fn kx_plan_load_wires(
+    eh: &Ehdr, phbytes: &[u8], size: u64,
+    wires: &mut [KexecSegmentWire; KEXEC_MAX_SEGMENTS],
+) -> Result<(usize, u64), i32> {
+    let mut nr = 0usize;
+    let mut entry = 0u64;
+    for i in 0..eh.e_phnum as usize {
+        let ph = match parse_phdr(phbytes, i, eh.e_phentsize as usize, eh.class == ELFCLASS32) {
+            Some(v) => v, None => return Err(-ENOEXEC),
+        };
+        if ph.p_type != PT_LOAD { continue; }
+        if nr == KEXEC_MAX_SEGMENTS || ph.p_filesz > ph.p_memsz { return Err(-ENOEXEC); }
+        let file_end = match ph.p_offset.checked_add(ph.p_filesz) { Some(v) => v, None => return Err(-ENOEXEC) };
+        if file_end > size || ph.p_paddr.checked_add(ph.p_memsz).is_none() { return Err(-ENOEXEC); }
+        let vend = match ph.p_vaddr.checked_add(ph.p_memsz) { Some(v) => v, None => return Err(-ENOEXEC) };
+        if eh.e_entry >= ph.p_vaddr && eh.e_entry < vend {
+            entry = match ph.p_paddr.checked_add(eh.e_entry - ph.p_vaddr) {
+                Some(v) => v, None => return Err(-ENOEXEC),
+            };
+        }
+        /* Some architectures link the kernel at its VA but hand QEMU a
+         * physical ELF entry (AArch64 starts with the MMU off), so an entry
+         * that already names a physical load address is valid as-is. */
+        if entry == 0 && eh.e_entry >= ph.p_paddr && eh.e_entry < ph.p_paddr + ph.p_memsz {
+            entry = eh.e_entry;
+        }
+        wires[nr] = KexecSegmentWire {
+            buf: ph.p_offset, bufsz: ph.p_filesz, mem: ph.p_paddr, memsz: ph.p_memsz,
+        };
+        nr += 1;
+    }
+    if nr == 0 || entry == 0 { return Err(-ENOEXEC); }
+    Ok((nr, entry))
+}
+
+/// Shared tail of the in-memory and file-backed image loads: validate and
+/// stage every planned segment, then atomically publish the completed image
+/// over `dst`. A failure drains the private staging ledger through
+/// `free_pages` and leaves `dst` untouched.
+#[allow(clippy::too_many_arguments)]
+unsafe fn kx_stage_publish(
+    dst: *mut KexecLedger,
+    entry: u64,
+    wires: &[KexecSegmentWire],
+    o: &KexecLoadOps,
+    stage_segment: unsafe extern "C" fn(*mut core::ffi::c_void, *const KexecSegmentWire, *mut u64, *mut u64) -> i32,
+    lock: unsafe extern "C" fn(*mut core::ffi::c_void) -> u64,
+    unlock: unsafe extern "C" fn(*mut core::ffi::c_void, u64),
+    free_pages: unsafe extern "C" fn(*mut core::ffi::c_void, u64),
+) -> i32 {
     let mut staged = kx_init();
-    if rc == 0 { rc = kx_stage_open(&mut staged, 0, 1, KEXEC_MAX_SEGMENTS as u64, true).err().unwrap_or(0); }
-    let mut index = 0;
-    if rc == 0 { match kx_stage_file(&mut staged, size) { Ok(v) => index = v, Err(e) => rc = e } }
-    let mut pages = 0u64;
-    let mut pages_bytes = 0u64;
-    if rc == 0 { rc = stage_file(o.context, buffer, size, &mut pages, &mut pages_bytes); }
-    if !buffer.is_null() { free_buffer(o.context, buffer); }
-    if rc == 0 { if let Err(e) = kx_stage_pages(&mut staged, index, pages, pages_bytes) { rc = e; } }
-    if rc != 0 {
-        if pages != 0 { free_pages(o.context, pages); }
-        kx_drain_with(&mut staged, free_pages, o.context);
-        return rc;
+    if let Err(e) = kx_stage_open(&mut staged, entry, wires.len() as u64, KEXEC_MAX_SEGMENTS as u64, false) { return e; }
+    for wire in wires {
+        let index = match kx_stage_check(&mut staged, wire.buf, wire.bufsz, wire.mem, wire.memsz, 0, 0) {
+            Ok(v) => v,
+            Err(e) => {
+                kx_drain_with(&mut staged, free_pages, o.context);
+                return e;
+            }
+        };
+        let mut pages = 0u64;
+        let mut pages_bytes = 0u64;
+        let mut rc = stage_segment(o.context, wire, &mut pages, &mut pages_bytes);
+        if rc == 0 {
+            if let Err(e) = kx_stage_pages(&mut staged, index, pages, pages_bytes) { rc = e; }
+        }
+        if rc != 0 {
+            if pages != 0 { free_pages(o.context, pages); }
+            kx_drain_with(&mut staged, free_pages, o.context);
+            return rc;
+        }
     }
     let mut replacement = kx_init();
     if let Err(e) = kx_publish(&mut replacement, &mut staged) {
@@ -3863,6 +3924,45 @@ pub unsafe extern "C" fn a20_elf_kexec_file_transaction(
     unlock(o.context, flags);
     kx_drain_with(&mut replacement, free_pages, o.context);
     0
+}
+
+/// File-backed kexec load: the same planning as the in-memory image
+/// transaction, but the header bytes are pulled through the adapter's
+/// `read_at` callback and each PT_LOAD payload is streamed from the file by
+/// the adapter's stage_segment (wire.buf carries the file offset). A large
+/// kernel never needs one contiguous staging buffer.
+#[no_mangle]
+pub unsafe extern "C" fn a20_elf_kexec_file_transaction(
+    dst: *mut KexecLedger, file_size: u64,
+    expect_class: u8, expect_machine: u16,
+    read_at: Option<unsafe extern "C" fn(*mut core::ffi::c_void, u64, *mut u8, usize) -> i32>,
+    ops: *const KexecLoadOps,
+) -> i32 {
+    if dst.is_null() || ops.is_null() { return -EFAULT; }
+    let o = &*ops;
+    let (Some(stage_segment), Some(lock), Some(unlock), Some(free_pages), Some(read_at)) =
+        (o.stage_segment, o.lock, o.unlock, o.free_pages, read_at) else { return -EINVAL; };
+    let head = match usize::try_from(file_size.min(EHDR64_SIZE as u64)) {
+        Ok(v) => v, Err(_) => return -EINVAL,
+    };
+    let mut ehdr_bytes = [0u8; EHDR64_SIZE];
+    let rc = read_at(o.context, 0, ehdr_bytes.as_mut_ptr(), head);
+    if rc < 0 { return rc; }
+    let eh = match parse_ehdr(&ehdr_bytes[..head]) { Some(v) => v, None => return -ENOEXEC };
+    if let Err(e) = validate_ehdr(&eh, expect_class, expect_machine) { return e; }
+    let table_len = match (eh.e_phnum as usize).checked_mul(eh.e_phentsize as usize) {
+        Some(v) => v, None => return -ENOEXEC,
+    };
+    if table_len > MAX_PHDRS * 64 { return -ENOEXEC; }
+    let mut phdr_bytes = [0u8; MAX_PHDRS * 64];
+    let rc = read_at(o.context, eh.e_phoff, phdr_bytes.as_mut_ptr(), table_len);
+    if rc < 0 { return rc; }
+    let mut wires = [KexecSegmentWire::default(); KEXEC_MAX_SEGMENTS];
+    let (nr, entry) = match kx_plan_load_wires(&eh, &phdr_bytes[..table_len], file_size, &mut wires) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    kx_stage_publish(dst, entry, &wires[..nr], o, stage_segment, lock, unlock, free_pages)
 }
 
 /// The kexec_file_load four-byte ELF signature gate.
@@ -4264,40 +4364,176 @@ mod tests {
         assert_eq!(&trace.freed[..trace.nfree], &[0x1110]); assert_eq!(trace.locks, 1);
     }
 
-    struct KxFileTrace { bytes: [u8; 4], fail_stage: bool, freed: [u64; 4], nfree: usize, buffers_freed: usize, locks: u32 }
-    unsafe extern "C" fn kxf_read(p: *mut core::ffi::c_void, buf: *mut *const u8, size: *mut u64) -> i32 {
-        let t = &mut *(p as *mut KxFileTrace); *buf = t.bytes.as_ptr(); *size = 4; 0
-    }
-    unsafe extern "C" fn kxf_stage(p: *mut core::ffi::c_void, _: *const u8, _: u64, pages: *mut u64, bytes: *mut u64) -> i32 {
-        let t = &mut *(p as *mut KxFileTrace); if t.fail_stage { return -ENOMEM; }
-        *pages = 0x3330; *bytes = 0x1000; 0
-    }
-    unsafe extern "C" fn kxf_free_buffer(p: *mut core::ffi::c_void, _: *const u8) { (*(p as *mut KxFileTrace)).buffers_freed += 1; }
-    unsafe extern "C" fn kxf_lock(p: *mut core::ffi::c_void) -> u64 { (*(p as *mut KxFileTrace)).locks += 1; 0 }
-    unsafe extern "C" fn kxf_unlock(_: *mut core::ffi::c_void, _: u64) {}
-    unsafe extern "C" fn kxf_free(p: *mut core::ffi::c_void, pages: u64) { let t=&mut *(p as *mut KxFileTrace); t.freed[t.nfree]=pages; t.nfree+=1; }
-    fn kxf_ops(t: &mut KxFileTrace) -> KexecFileOps { KexecFileOps { context:t as *mut _ as *mut _, read_file:Some(kxf_read),
-        stage_file:Some(kxf_stage), free_buffer:Some(kxf_free_buffer), lock:Some(kxf_lock),
-        unlock:Some(kxf_unlock), free_pages:Some(kxf_free) } }
-
-    #[test]
-    fn kexec_file_transaction_pins_old_until_replacement_and_frees_buffer() {
-        let mut old = kx_test_loaded(0x1110);
-        let mut t = KxFileTrace { bytes:[0x7f,b'E',b'L',b'F'], fail_stage:false, freed:[0;4], nfree:0, buffers_freed:0, locks:0 };
-        let ops = kxf_ops(&mut t);
-        assert_eq!(unsafe { a20_elf_kexec_file_transaction(&mut old,&ops) },0);
-        assert_eq!(old.seg[0].pages,0x3330); assert_eq!(t.buffers_freed,1);
-        assert_eq!(&t.freed[..t.nfree],&[0x1110]); assert_eq!(t.locks,1);
+    fn kx_test_image() -> Vec<u8> {
+        let mut image = ehdr64(ET_EXEC, EM_RISCV, 0x1000, EHDR64_SIZE as u64, 1, PHDR64_SIZE as u16);
+        image.resize(EHDR64_SIZE + PHDR64_SIZE + 4, 0x5a);
+        let ph = EHDR64_SIZE;
+        image[ph..ph + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        image[ph + 8..ph + 16].copy_from_slice(&120u64.to_le_bytes());
+        image[ph + 16..ph + 24].copy_from_slice(&0x1000u64.to_le_bytes());
+        image[ph + 24..ph + 32].copy_from_slice(&0x8000u64.to_le_bytes());
+        image[ph + 32..ph + 40].copy_from_slice(&4u64.to_le_bytes());
+        image[ph + 40..ph + 48].copy_from_slice(&8u64.to_le_bytes());
+        image
     }
 
     #[test]
-    fn kexec_file_transaction_refusal_preserves_old_image() {
+    fn kexec_image_transaction_stages_physical_segments_and_translates_entry() {
         let mut old = kx_test_loaded(0x1110);
-        let mut t = KxFileTrace { bytes:[0x7f,b'E',b'L',b'F'], fail_stage:true, freed:[0;4], nfree:0, buffers_freed:0, locks:0 };
-        let ops = kxf_ops(&mut t);
-        assert_eq!(unsafe { a20_elf_kexec_file_transaction(&mut old,&ops) },-ENOMEM);
-        assert_eq!(old.seg[0].pages,0x1110); assert_eq!(t.buffers_freed,1);
-        assert_eq!(t.nfree,0); assert_eq!(t.locks,0);
+        let image = kx_test_image();
+        let mut t = KxTrace { wire: KexecSegmentWire::default(), fail_stage: false,
+            freed: [0;4], nfree: 0, locks: 0 };
+        let ops = kx_test_ops(&mut t);
+        assert_eq!(unsafe { a20_elf_kexec_image_transaction(&mut old, image.as_ptr(),
+            image.len() as u64, ELFCLASS64, EM_RISCV, &ops) }, 0);
+        assert_eq!(old.entry, 0x8000);
+        assert_eq!(old.seg[0].mem, 0x8000);
+        assert_eq!(old.seg[0].bufsz, 4);
+        assert_eq!(old.seg[0].memsz, 8);
+        assert_eq!(old.seg[0].pages, 0x2220);
+        assert_eq!(&t.freed[..t.nfree], &[0x1110]);
+    }
+
+    #[test]
+    fn kexec_image_transaction_accepts_physical_entry_outside_vaddr_range() {
+        /* AArch64 hands QEMU a physical ELF entry while the kernel is linked
+         * at its VA: e_entry matches a paddr range, not a vaddr range. */
+        let mut old = kx_test_loaded(0x1110);
+        let mut image = ehdr64(ET_EXEC, EM_AARCH64, 0x8004, EHDR64_SIZE as u64, 1, PHDR64_SIZE as u16);
+        image.resize(EHDR64_SIZE + PHDR64_SIZE + 4, 0x5a);
+        let ph = EHDR64_SIZE;
+        image[ph..ph + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        image[ph + 8..ph + 16].copy_from_slice(&120u64.to_le_bytes());
+        image[ph + 16..ph + 24].copy_from_slice(&0x9000u64.to_le_bytes());
+        image[ph + 24..ph + 32].copy_from_slice(&0x8000u64.to_le_bytes());
+        image[ph + 32..ph + 40].copy_from_slice(&4u64.to_le_bytes());
+        image[ph + 40..ph + 48].copy_from_slice(&8u64.to_le_bytes());
+        let mut t = KxTrace { wire: KexecSegmentWire::default(), fail_stage: false,
+            freed: [0;4], nfree: 0, locks: 0 };
+        let ops = kx_test_ops(&mut t);
+        assert_eq!(unsafe { a20_elf_kexec_image_transaction(&mut old, image.as_ptr(),
+            image.len() as u64, ELFCLASS64, EM_AARCH64, &ops) }, 0);
+        assert_eq!(old.entry, 0x8004);
+        assert_eq!(old.seg[0].mem, 0x8000);
+        assert_eq!(&t.freed[..t.nfree], &[0x1110]);
+    }
+
+    #[test]
+    fn kexec_image_transaction_refusal_preserves_old_image() {
+        let mut old = kx_test_loaded(0x1110);
+        let image = kx_test_image();
+        let mut t = KxTrace { wire: KexecSegmentWire::default(), fail_stage: true,
+            freed: [0;4], nfree: 0, locks: 0 };
+        let ops = kx_test_ops(&mut t);
+        assert_eq!(unsafe { a20_elf_kexec_image_transaction(&mut old, image.as_ptr(),
+            image.len() as u64, ELFCLASS64, EM_RISCV, &ops) }, -ENOMEM);
+        assert_eq!(old.seg[0].pages, 0x1110);
+        assert_eq!(t.nfree, 0);
+    }
+
+    #[test]
+    fn kexec_image_transaction_rejects_malformed_headers_and_segments() {
+        let mut t = KxTrace { wire: KexecSegmentWire::default(), fail_stage: false,
+            freed: [0;4], nfree: 0, locks: 0 };
+        let ops = kx_test_ops(&mut t);
+        let valid = kx_test_image();
+        let mut wrong_machine = valid.clone();
+        wrong_machine[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        let truncated = valid[..EHDR64_SIZE + 8].to_vec();
+        let mut bad_sizes = valid.clone();
+        bad_sizes[EHDR64_SIZE + 32..EHDR64_SIZE + 40].copy_from_slice(&16u64.to_le_bytes());
+        let mut bad_entry = valid.clone();
+        bad_entry[24..32].copy_from_slice(&0x5000u64.to_le_bytes());
+        for image in [&wrong_machine, &truncated, &bad_sizes, &bad_entry] {
+            let mut dst = kx_init();
+            assert!(unsafe { a20_elf_kexec_image_transaction(&mut dst, image.as_ptr(),
+                image.len() as u64, ELFCLASS64, EM_RISCV, &ops) } < 0);
+            assert!(!kx_loaded(&dst));
+        }
+        assert_eq!(t.nfree, 0);
+    }
+
+    struct KxFileTrace {
+        file: Vec<u8>, short_reads: bool, fail_stage: bool,
+        freed: [u64; 4], nfree: usize, locks: u32,
+    }
+    unsafe extern "C" fn kx_file_read_at(p: *mut core::ffi::c_void, off: u64, dst: *mut u8, len: usize) -> i32 {
+        let t = &mut *(p as *mut KxFileTrace);
+        let off = match usize::try_from(off) { Ok(v) => v, Err(_) => return -EIO };
+        if t.short_reads || off > t.file.len() || len > t.file.len() - off { return -EIO; }
+        core::ptr::copy_nonoverlapping(t.file.as_ptr().add(off), dst, len);
+        0
+    }
+    unsafe extern "C" fn kx_file_stage(p: *mut core::ffi::c_void, wire: *const KexecSegmentWire, pages: *mut u64, bytes: *mut u64) -> i32 {
+        let t = &mut *(p as *mut KxFileTrace);
+        if t.fail_stage { return -ENOMEM; }
+        let (off, n) = ((*wire).buf as usize, (*wire).bufsz as usize);
+        if off > t.file.len() || n > t.file.len() - off { return -EIO; }
+        *pages = 0x3330; *bytes = (*wire).memsz; 0
+    }
+    unsafe extern "C" fn kx_file_lock(p: *mut core::ffi::c_void) -> u64 { (*(p as *mut KxFileTrace)).locks += 1; 0 }
+    unsafe extern "C" fn kx_file_unlock(_: *mut core::ffi::c_void, _: u64) {}
+    unsafe extern "C" fn kx_file_free(p: *mut core::ffi::c_void, pages: u64) {
+        let t = &mut *(p as *mut KxFileTrace); t.freed[t.nfree] = pages; t.nfree += 1;
+    }
+    fn kx_file_ops(t: &mut KxFileTrace) -> KexecLoadOps {
+        KexecLoadOps { context: t as *mut _ as *mut _, read_segment: None,
+            stage_segment: Some(kx_file_stage), lock: Some(kx_file_lock),
+            unlock: Some(kx_file_unlock), free_pages: Some(kx_file_free) }
+    }
+    fn kx_file_trace(file: Vec<u8>) -> KxFileTrace {
+        KxFileTrace { file, short_reads: false, fail_stage: false, freed: [0;4], nfree: 0, locks: 0 }
+    }
+
+    #[test]
+    fn kexec_file_transaction_streams_segments_without_image_buffer() {
+        let mut old = kx_test_loaded(0x1110);
+        let mut t = kx_file_trace(kx_test_image());
+        let ops = kx_file_ops(&mut t);
+        let size = t.file.len() as u64;
+        assert_eq!(unsafe { a20_elf_kexec_file_transaction(&mut old, size,
+            ELFCLASS64, EM_RISCV, Some(kx_file_read_at), &ops) }, 0);
+        assert_eq!(old.entry, 0x8000);
+        assert_eq!(old.seg[0].mem, 0x8000);
+        assert_eq!(old.seg[0].bufsz, 4);
+        assert_eq!(old.seg[0].memsz, 8);
+        assert_eq!(old.seg[0].pages, 0x3330);
+        assert_eq!(&t.freed[..t.nfree], &[0x1110]);
+        assert_eq!(t.locks, 1);
+    }
+
+    #[test]
+    fn kexec_file_transaction_failures_preserve_old_image() {
+        let image = kx_test_image();
+        let mut wrong_machine = image.clone();
+        wrong_machine[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        let mut bad_entry = image.clone();
+        bad_entry[24..32].copy_from_slice(&0x5000u64.to_le_bytes());
+        let mut t = kx_file_trace(wrong_machine);
+        let ops = kx_file_ops(&mut t);
+        let mut dst = kx_init();
+        assert!(unsafe { a20_elf_kexec_file_transaction(&mut dst, t.file.len() as u64,
+            ELFCLASS64, EM_RISCV, Some(kx_file_read_at), &ops) } < 0);
+        assert!(!kx_loaded(&dst));
+        let mut t = kx_file_trace(bad_entry);
+        let ops = kx_file_ops(&mut t);
+        assert!(unsafe { a20_elf_kexec_file_transaction(&mut dst, t.file.len() as u64,
+            ELFCLASS64, EM_RISCV, Some(kx_file_read_at), &ops) } < 0);
+        assert!(!kx_loaded(&dst));
+        let mut t = kx_file_trace(image);
+        t.short_reads = true;
+        let ops = kx_file_ops(&mut t);
+        assert_eq!(unsafe { a20_elf_kexec_file_transaction(&mut dst, t.file.len() as u64,
+            ELFCLASS64, EM_RISCV, Some(kx_file_read_at), &ops) }, -EIO);
+        assert!(!kx_loaded(&dst));
+        let mut old = kx_test_loaded(0x1110);
+        let mut t = kx_file_trace(kx_test_image());
+        t.fail_stage = true;
+        let ops = kx_file_ops(&mut t);
+        assert_eq!(unsafe { a20_elf_kexec_file_transaction(&mut old, t.file.len() as u64,
+            ELFCLASS64, EM_RISCV, Some(kx_file_read_at), &ops) }, -ENOMEM);
+        assert_eq!(old.seg[0].pages, 0x1110);
+        assert_eq!(t.nfree, 0);
     }
 
     const CLASS: u8 = ELFCLASS64;
@@ -4899,9 +5135,10 @@ mod tests {
         // mem + memsz wraps.
         let wrap = KexecSegmentWire { mem: u64::MAX - 0x800, memsz: 0x1000, bufsz: 0, buf: 0 };
         assert_eq!(kexec_segment_ok(&wrap, kernel.0, kernel.1, &[]), Err(-EINVAL));
-        // Overlap with the running kernel.
+        // Replacing the running kernel at the same address is valid; the
+        // architecture backend protects the delayed-copy sources instead.
         let over_k = KexecSegmentWire { buf: 0, bufsz: 0, mem: 0x1F_0000, memsz: 0x40_000 };
-        assert_eq!(kexec_segment_ok(&over_k, kernel.0, kernel.1, &[]), Err(-EADDRNOTAVAIL));
+        assert!(kexec_segment_ok(&over_k, kernel.0, kernel.1, &[]).is_ok());
         // Overlap with a staged predecessor.
         let s1 = KexecSegmentWire { buf: 0, bufsz: 0, mem: 0x100_0000 + 0x800, memsz: 0x1000 };
         assert_eq!(kexec_segment_ok(&s1, kernel.0, kernel.1, &[s0]), Err(-EADDRNOTAVAIL));

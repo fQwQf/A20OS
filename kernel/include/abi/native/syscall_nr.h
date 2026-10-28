@@ -52,6 +52,8 @@
 #define A20_SYS_task_clone 0x0213
 #define A20_SYS_execve 0x0214
 #define A20_SYS_task_adopt 0x0216
+#define A20_SYS_task_checkpoint 0x0217
+#define A20_SYS_task_restore 0x0218
 
 /* Memory (0x0300) */
 #define A20_SYS_vm_alloc 0x0300
@@ -158,6 +160,7 @@
 #define A20_SYS_system_random 0x0A01
 #define A20_SYS_system_reboot 0x0A02
 #define A20_SYS_registry_claim 0x0A03
+#define A20_SYS_system_kexec 0x0A04
 
 /* Sync (0x0B00) */
 #define A20_SYS_futex_wait 0x0B00

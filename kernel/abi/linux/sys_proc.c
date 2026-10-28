@@ -13,7 +13,7 @@
 #include "fs/vfs/mount.h"
 #include "fs/vfs.h"
 #include "fs/vfs/stat_perm.h"
-#include "ipc/kexec.h"
+#include "core/kexec.h"
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
@@ -1105,10 +1105,7 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
          (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
           magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
          cmd == LINUX_REBOOT_CMD_KEXEC)) {
-        /* A staged image exists but no architecture provides the
-         * machine_kexec MMU-teardown trampoline yet; Linux reports the
-         * same way on boards without a kexec backend. */
-        return kexec_is_loaded() ? -ENOSYS : -EINVAL;
+        return kexec_execute();
     } else if (magic1 == LINUX_REBOOT_CMD ||
         (magic1 == LINUX_REBOOT_MAGIC1 &&
          (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||

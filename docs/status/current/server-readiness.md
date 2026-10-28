@@ -1006,11 +1006,10 @@ RT 选择，普通任务可以竞争剩余时间；下一周期恢复。计量�
   输出被丢弃。
 - panic 文本不进 klog 环（直接调 `printf`/`uart_puts`），控制台卡死时
   dump 全丢。
-- kexec 只有 staging，**无执行后端**（`sys_proc.c:760-764` 返回 `-ENOSYS`）
-  → 无 kdump。
+- RV64 QEMU virt 已有 kexec handoff；其他架构和真机仍无执行后端，且没有 kdump。
 - 无 watchdog（仅 STM32 MCU 的 IWDG），无 softlockup/hung-task 检测
   → 内核挂死即永久挂死。
-- **无 A/B 分区、无 dm-verity、无回滚**。升级 = 重刷。
+- **无 A/B 分区、无 dm-verity、无自动回滚**。热切换失败后的恢复仍依赖旧启动介质。
 - 无节点级自愈：没有 fencing、quorum，也没有监管 `svcmgr` 自身的东西，
   它挂了所有服务变孤儿。
 

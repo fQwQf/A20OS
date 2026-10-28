@@ -127,9 +127,11 @@ int64_t syscall_dispatch(trap_context_t *ctx)
          * execve replaces the whole user context (including a0, which the
          * native startup protocol uses to pass a20_start_info_t) inside
          * proc_exec; writing the return value back to a0 would clobber it.
+         * task_restore does the same with the checkpointed register file.
          * Mirror the Linux path's restores_context handling.
          */
-        if (!(num == A20_SYS_execve && ret >= 0))
+        if (!((num == A20_SYS_execve || num == A20_SYS_task_restore) &&
+              ret >= 0))
             TRAP_CTX_SET_RET(ctx, ret);
         syscall_profile_record(num, start_time);
         /*

@@ -1248,12 +1248,18 @@ static int virtio_net_driver_remove(device_t *dev) {
     return 0;
 }
 
+static void virtio_net_driver_shutdown(device_t *dev)
+{
+    (void)virtio_net_driver_remove(dev);
+}
+
 static driver_t virtio_net_driver = {
     .name       = "virtio-net",
     .id_table   = virtio_net_ids,
     .bus        = NULL,
     .probe      = virtio_net_driver_probe,
     .remove     = virtio_net_driver_remove,
+    .shutdown   = virtio_net_driver_shutdown,
     .class_ops  = &virtio_net_class_ops,
     .class_type = DEV_CLASS_NET,
 };

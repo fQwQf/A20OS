@@ -32,7 +32,7 @@ NATIVE_CC_riscv64     := $(RISCV_ELF_PREFIX)gcc
 NATIVE_CC_loongarch64 := loongarch64-linux-gnu-gcc
 NATIVE_CC_aarch64     := aarch64-linux-gnu-gcc
 NATIVE_CC_x86_64      := x86_64-linux-gnu-gcc
-NATIVE_CC_arm32       := arm-none-eabi-gcc
+NATIVE_CC_arm32       := $(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-gcc,arm-linux-gnueabihf-gcc)
 NATIVE_CC_riscv32     := $(CROSS_PREFIX_riscv32)gcc
 NATIVE_CC_ppc64le     := powerpc64le-linux-gnu-gcc
 NATIVE_CC := $(CCACHE_PREFIX)$(NATIVE_CC_$(ARCH))
@@ -711,3 +711,7 @@ $(NATIVE_APPCTL_BIN): user/svc/appctl_run.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(N
 $(NATIVE_SPAWN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/native-spawn-child.c user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-runtime-contract.h user/tests/native-object-contract.h $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	@mkdir -p $(@D)
 	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -Iuser -Iuser/liba20rt -T$(NATIVE_LD) $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/native-spawn-child.c $(NATIVE_LIBS) -o $@
+
+$(NATIVE_KEXEC_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_kexec.c $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	@mkdir -p $(@D)
+	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -Iuser -Iuser/liba20rt -Iuser/liba20c/include -T$(NATIVE_LD) $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_LIBC_SRC) user/tests/test_native_kexec.c $(NATIVE_LIBS) -o $@

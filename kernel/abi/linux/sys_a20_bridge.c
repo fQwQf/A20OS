@@ -19,6 +19,7 @@
 #include "ipc/envelope_acquire_race_test.h"
 #include "ipc/ipc.h"
 #include "ipc/channel_fd.h"
+#include "proc/checkpoint.h"
 #include "proc/proc.h"
 #include "mm/slab.h"
 #include "hyp/hyp.h"
@@ -729,4 +730,23 @@ int64_t sys_hyp_vm_smp(const linux_syscall_args_t *args)
              hyp_vm_configure_smp(vm, (unsigned)args->arg[1]);
     hyp_vm_put(vm);
     return rc;
+}
+
+/*
+ * SYS_a20_task_checkpoint(int pid, int out_fd, unsigned flags) — freeze the
+ * single-threaded task @pid and serialize its registers, address space and
+ * fd table to @out_fd (A20CKPT1 image).  SYS_a20_task_restore(int in_fd)
+ * replaces the caller with the checkpointed image and never returns on
+ * success.  Both are thin wrappers over kernel/proc/checkpoint.c and
+ * kernel/proc/ckpt_restore.c.
+ */
+int64_t sys_linux_task_checkpoint(const linux_syscall_args_t *args)
+{
+    return proc_ckpt_checkpoint((int)args->arg[0], (int)args->arg[1],
+                                (uint32_t)args->arg[2]);
+}
+
+int64_t sys_linux_task_restore(const linux_syscall_args_t *args)
+{
+    return proc_ckpt_restore((int)args->arg[0]);
 }

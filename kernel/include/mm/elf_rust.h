@@ -372,15 +372,6 @@ typedef struct {
     void (*unlock)(void *, uint64_t);
     void (*free_pages)(void *, uint64_t);
 } a20_elf_kexec_load_ops_t;
-typedef struct {
-    void *context;
-    int32_t (*read_file)(void *, const uint8_t **, uint64_t *);
-    int32_t (*stage_file)(void *, const uint8_t *, uint64_t, uint64_t *, uint64_t *);
-    void (*free_buffer)(void *, const uint8_t *);
-    uint64_t (*lock)(void *);
-    void (*unlock)(void *, uint64_t);
-    void (*free_pages)(void *, uint64_t);
-} a20_elf_kexec_file_ops_t;
 
 #define A20_ELF_KX_EMPTY   0
 #define A20_ELF_KX_STAGING 1
@@ -549,8 +540,15 @@ int32_t a20_elf_kexec_load_transaction(a20_elf_kexec_ledger_t *dst,
                                        const a20_elf_kexec_load_ops_t *ops);
 int32_t a20_elf_kexec_discard_transaction(a20_elf_kexec_ledger_t *dst,
                                           const a20_elf_kexec_load_ops_t *ops);
+int32_t a20_elf_kexec_image_transaction(a20_elf_kexec_ledger_t *dst,
+                                        const uint8_t *buffer, uint64_t size,
+                                        uint8_t expect_class, uint16_t expect_machine,
+                                        const a20_elf_kexec_load_ops_t *ops);
 int32_t a20_elf_kexec_file_transaction(a20_elf_kexec_ledger_t *dst,
-                                       const a20_elf_kexec_file_ops_t *ops);
+                                       uint64_t file_size,
+                                       uint8_t expect_class, uint16_t expect_machine,
+                                       int32_t (*read_at)(void *, uint64_t, uint8_t *, size_t),
+                                       const a20_elf_kexec_load_ops_t *ops);
 int32_t a20_elf_kexec_publish(a20_elf_kexec_ledger_t *dst,
                               a20_elf_kexec_ledger_t *src);
 bool a20_elf_kexec_release_next(a20_elf_kexec_ledger_t *l, uint64_t *pages_out,

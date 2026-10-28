@@ -12,6 +12,8 @@
 #include "core/smp.h"
 
 volatile uint64_t aarch64_trap_flags[CONFIG_NR_CPUS];
+
+void aarch64_kexec_ipi(void);
 #ifndef CONFIG_AARCH64_GICV3
 static uint32_t aarch64_gic_iar[CONFIG_NR_CPUS];
 #endif
@@ -259,6 +261,7 @@ void arch_handle_irq(uint64_t irq, int from_user) {
 
     if (irq == GIC_RESCHEDULE_SGI) {
         gic_eoi(GIC_RESCHEDULE_SGI);
+        aarch64_kexec_ipi();
         proc_sched_handle_reschedule_ipi();
         return;
     }

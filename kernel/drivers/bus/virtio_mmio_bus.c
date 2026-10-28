@@ -127,10 +127,12 @@ static int firmware_transport_probe(device_t *dev) {
 }
 static const firmware_device_id_t firmware_ids[] = {
     {.id = "virtio,mmio"}, {.id = "LNRO0005"}, {0}};
+static void firmware_transport_shutdown(device_t *dev) { (void)dev; }
 static driver_t firmware_transport = {.name = "virtio-mmio-transport",
                                       .bus = &platform_bus,
                                       .firmware_ids = firmware_ids,
-                                      .probe = firmware_transport_probe};
+                                      .probe = firmware_transport_probe,
+                                      .shutdown = firmware_transport_shutdown};
 DRIVER_REGISTER(firmware_transport);
 
 void virtio_mmio_enumerate(uintptr_t physical, int max_slots, int irq_base) {

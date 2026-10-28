@@ -30,6 +30,8 @@ void sbi_shutdown(void);
 void sbi_reboot(void);
 void sbi_send_ipi(uint64_t hart_mask, uint64_t hart_mask_base);
 int64_t sbi_hart_start(uint64_t hart_id, uint64_t start_addr, uint64_t opaque);
+int64_t sbi_hart_stop(void);
+int64_t sbi_hart_get_status(uint64_t hart_id);
 int64_t sbi_remote_sfence_vma(uint64_t hart_mask, uint64_t hart_mask_base,
                               uint64_t start, uint64_t size);
 

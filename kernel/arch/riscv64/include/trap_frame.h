@@ -213,30 +213,27 @@ static inline void arch_ptrace_set_step(trap_context_t *ctx) {
  * This is NOT the Linux user_regs_struct layout.  The ABI reordering
  * (pc + regs[1..31], dropping x[0]) happens in linux_arch_regs_export(),
  * kernel/arch/riscv64/platform/arch_hooks.c. */
+/* The mapping is Rust-owned (kernel/proc/ckpt_image.rs), which models the
+ * frame as { addrspace_token, gprs[31] } rather than a flat x[32]: slot x[0]
+ * is NOT a GPR but the address-space-token scratch the return path reloads
+ * satp from.  Export reports hardware semantics (x[0] == 0), so a kernel
+ * token never leaks into ptrace results, coredumps or checkpoint images;
+ * import writes only the architectural register file and leaves the token
+ * slot alone, so a crafted regset cannot steer a task onto a foreign
+ * address space (the checkpoint/restore token-clobber bug class). */
+extern void a20_regs_frame_export_rv64(const void *ctx,
+                                       proc_debug_regs_t *out);
+extern void a20_regs_frame_import_rv64(void *ctx,
+                                       const proc_debug_regs_t *in);
+
 static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
                                            proc_debug_regs_t *out) {
-    for (int i = 0; i < 32; i++)
-        out->regs[i] = ctx->x[i];
-    out->pc = ctx->sepc;
-    out->sp = ctx->x[2];
-    out->status = ctx->sstatus;
-    out->orig_syscall = ctx->x[17];
-    for (int i = 0; i < 32; i++)
-        out->fp[i] = ctx->f[i];
-    out->fcsr = ctx->fcsr;
+    a20_regs_frame_export_rv64(ctx, out);
 }
 
 static inline void arch_ptrace_import_regs(trap_context_t *ctx,
                                            const proc_debug_regs_t *in) {
-    for (int i = 0; i < 32; i++)
-        ctx->x[i] = in->regs[i];
-    ctx->sepc = in->pc;
-    ctx->x[2] = in->sp;
-    ctx->sstatus = in->status;
-    ctx->x[17] = in->orig_syscall;
-    for (int i = 0; i < 32; i++)
-        ctx->f[i] = in->fp[i];
-    ctx->fcsr = in->fcsr;
+    a20_regs_frame_import_rv64(ctx, in);
 }
 
 #endif

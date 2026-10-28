@@ -928,6 +928,15 @@ int  frame_is_lent_to_guest(pfn_t pfn);
  * looking for a member that does not exist. */
 int mm_s2_audit(pte_t *root, int root_level, mm_pt_audit_report_t *out);
 
+#else /* !(ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU) */
+/* Backends without the managed page-table layer (arm32 short descriptors)
+ * keep no per-PTE cache-owner annotation; the annotation call is a no-op
+ * there because there is nothing to annotate. */
+static inline void mm_pt_cache_note(pt_root_t *pgdir, vaddr_t va,
+                                    struct page_cache_page *page) {
+    (void)pgdir; (void)va; (void)page;
+}
+
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
 /* Native stage-2 metadata is also available when the host uses a private

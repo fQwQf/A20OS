@@ -54,6 +54,7 @@ static int rtc_remove(device_t *dev)
 static const firmware_device_id_t firmware_ids[] = {
     {.id = "google,goldfish-rtc"}, {0}
 };
+static void rtc_shutdown(device_t *dev) { (void)dev; }
 static driver_t rtc_driver = {
     .name = "goldfish-rtc",
     .firmware_ids = firmware_ids,
@@ -61,6 +62,7 @@ static driver_t rtc_driver = {
     .read_only_probe = 1,   /* user service rtcd owns the device */
     .probe = rtc_probe,
     .remove = rtc_remove,
+    .shutdown = rtc_shutdown,
     .class_type = DEV_CLASS_NONE,
 };
 

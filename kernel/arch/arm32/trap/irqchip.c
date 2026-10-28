@@ -10,6 +10,8 @@ volatile uint32_t arm32_trap_flags[CONFIG_NR_CPUS];
 volatile uint32_t arm32_fault_addr[CONFIG_NR_CPUS];
 volatile uint32_t arm32_fault_pc[CONFIG_NR_CPUS];
 
+void arm32_kexec_ipi(void);
+
 static inline volatile uint32_t *gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
 }
@@ -90,8 +92,9 @@ void arch_handle_irq(reg_t irq, int from_user) {
     if (irq >= 1020)
         return;
     if (irq == IRQ_S_SOFT) {
-        proc_sched_handle_reschedule_ipi();
         gic_eoi(IRQ_S_SOFT);
+        arm32_kexec_ipi();
+        proc_sched_handle_reschedule_ipi();
         return;
     }
     if (irq == IRQ_S_TIMER) {

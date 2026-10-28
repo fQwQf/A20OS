@@ -81,23 +81,17 @@ make smoke-elf-exec-rust   # exec 继承矩阵 + 负路径 + auxv
 make smoke-mlibc-dynamic   # 动态 $ORIGIN / dlopen / TLS
 ```
 
-## 3. kexec：staging 不是 handoff
+## 3. kexec：事务暂存与真实 handoff
 
-`kexec_load_segments()` / `kexec_load_file()` 完成校验、分页拷贝、替换与回滚，
-`smoke-elf-kexec-rust` 在 guest 内证明：
+`kexec_load_segments()` / `kexec_load_file()` 完成 ELF 物理段校验、分页拷贝、替换与回滚；
+`smoke-elf-kexec-rust` 覆盖畸形段、失败替换保留旧镜像和 Linux unload；Native 状态查询由人格内的 handoff 用例覆盖。
+真实执行由 `smoke-kexec-handoff`（Linux 文件加载）和
+`smoke-kexec-handoff-native-smp2`（Native 内存加载）分别验收：同一 QEMU 进程完成
+SMP 停核、VFS 关闭、设备复位、物理复制和第二次 init，并检查持久标记。
 
-```text
-KEXEC: ok refusal-keeps-image-b (errno=22)
-KEXEC: ok reboot-kexec-after-refusals (errno=38)
-KEXEC: ok two-segment-replace (staged)
-KEXEC: ok reboot-kexec-after-replace (errno=38)
-KEXEC: PASS
-```
-
-`reboot(LINUX_REBOOT_CMD_KEXEC)` 在已 staged 时返回 `-ENOSYS`：当前没有任何架构提供
-`machine_kexec` 的 MMU 拆除/跳转 trampoline。因此本项目**没有**真实 machine handoff
-的运行证据，也不把 staging 称为 handoff。这是平台限制，不是待修的 staging 缺陷；
-新增后端时必须实现并单独验收 trampoline。
+当前 handoff 后端仅承诺 `riscv64 + qemu-virt-riscv64 + MMU`。其他架构、NOMMU 和
+物理板型仍返回不支持；最终跳转后没有 A/B 自动回滚。设计与操作见
+[内核热切换](../../kernel/kexec-hot-update.md)。
 
 ## 4. NOMMU / 平台矩阵
 

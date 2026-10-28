@@ -7,6 +7,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "core/progress.h"
 #include "core/smp.h"
+#include "kexec.h"
 
 static void plic_init_hart(void) {
     const smp_cpu_desc_t *cpu = smp_cpu_desc(cpu_current_id());
@@ -106,6 +107,7 @@ void arch_handle_irq(reg_t irq, int from_user) {
          * current hart's register, so the hart consumes its own pending software
          * interrupt and no other hart's IPI is lost. */
         arch_write_sip(arch_read_sip() & ~SIE_SSIE);
+        riscv64_kexec_ipi();
         smp_membarrier_ipi_ack(cpu_current_id());
         timer_set_interval(proc_next_timer_interval(timer_get_ticks()));
         proc_sched_request_current();
