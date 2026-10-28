@@ -428,6 +428,24 @@ def ensure_alpine_keys(mirror: str, dest: Path) -> None:
         die(f"{names[-1]} contained no *.rsa.pub keys")
 
 
+def install_drivers(staging: Path, drivers: list[Path], sudo: list[str]) -> None:
+    """Copy runtime .a20drv packages into <staging>/lib/drivers.
+
+    The kernel DriverStore scans /bin/lib/drivers when the classic FAT32
+    userland disk is mounted, and /extra/lib/drivers when a distro root is
+    mounted there instead.  Filling this directory is what makes a distro
+    image self-sufficient: without it the network driver (a Runtime
+    DriverStore member, not embedded) never loads and the guest has no eth0.
+    """
+    dest = staging / "lib" / "drivers"
+    for d in drivers:
+        src = d.resolve()
+        if not src.is_file():
+            die(f"--driver {src} is not a file; run `make dev-build` first")
+        run(["mkdir", "-p", str(dest)], sudo)
+        run(["install", "-m", "0644", str(src), str(dest / src.name)], sudo)
+
+
 def install_apk_keys(staging: Path, keys_dir: Path | None,
                      sudo: list[str]) -> None:
     """Keep the image's apk client able to verify the repositories we used."""
@@ -459,6 +477,9 @@ def main() -> None:
                     help="do not add Alpine repositories")
     ap.add_argument("--overlay", type=Path, action="append", default=[],
                     help="directory copied over the staged rootfs; repeatable")
+    ap.add_argument("--driver", type=Path, action="append", default=[],
+                    help="runtime .a20drv package installed into /lib/drivers; "
+                         "repeatable (the kernel scans it from the distro root)")
     ap.add_argument("--output", type=Path, default=None,
                     help="output image (default: build/images/<world>-<arch>.img "
                          "or directory with --format dir)")
@@ -607,6 +628,9 @@ def main() -> None:
             apply_overlay(overlay, staging, sudo, keep_account_files=True)
 
         install_apk_keys(staging, keys_dir, sudo)
+
+        if args.driver:
+            install_drivers(staging, args.driver, sudo)
 
         if args.ssh_pubkey:
             keys = [pk.resolve() for pk in args.ssh_pubkey]

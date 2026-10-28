@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/tun.h"
 #include "net/socket_file_state.h"
 #include "proc/userns.h"
 #include "ipc/ipc.h"
@@ -269,8 +270,12 @@ struct a20_ifconf {
 static void net_ifreq_fill(struct a20_ifreq *ifr, const struct netif *nif)
 {
     memset(ifr, 0, sizeof(*ifr));
-    snprintf(ifr->ifr_name, sizeof(ifr->ifr_name), "%c%c%u",
-             nif->name[0], nif->name[1], nif->num);
+    /* A TUN netif carries a real interface name ("tailscale0"); the lwIP
+     * two-char plus number spelling would hide it from if_nametoindex(). */
+    if (!a20_tun_netif_name((struct netif *)nif, ifr->ifr_name,
+                            sizeof(ifr->ifr_name)))
+        snprintf(ifr->ifr_name, sizeof(ifr->ifr_name), "%c%c%u",
+                 nif->name[0], nif->name[1], nif->num);
 
     /* The row carries a `struct sockaddr_in`.  sin_family is a raw host-order
      * constant -- Linux code writes `sin_family = AF_INET` and every libc
@@ -321,6 +326,11 @@ static struct netif *net_ifreq_lookup(const char *name)
     if (!name[0])
         return netif_default;
     struct netif *n = netif_find(name);
+    if (n)
+        return n;
+    /* TUN names are not expressible in lwIP's name scheme, so ask the service
+     * before falling through to the default-interface aliases. */
+    n = a20_tun_netif_by_name(name);
     if (n)
         return n;
     /* A20OS names its lwIP netif "en0" while the device node users see is
@@ -420,8 +430,15 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
     case A20_SIOCGIFNAME:
         return 0;
     case A20_SIOCGIFFLAGS: {
-        short fl = (nif->flags & NETIF_FLAG_ETHERNET) ?
-                   A20_IFF_BROADCAST : A20_IFF_LOOPBACK;
+        /* Only the 127.0.0.1 netif is a loopback.  Reporting every
+         * non-Ethernet interface as IFF_LOOPBACK made a TUN look like "lo"
+         * (ifconfig printed "Link encap:Local Loopback"), and netmon users
+         * discard loopback links when choosing a default route. */
+        short fl = 0;
+        if (nif->flags & NETIF_FLAG_ETHERNET)
+            fl |= A20_IFF_BROADCAST;
+        if (netif_ip4_addr(nif)->addr == 0x0100007fU)
+            fl |= A20_IFF_LOOPBACK;
         if (nif->flags & NETIF_FLAG_UP)
             fl |= A20_IFF_UP;
         if (nif->flags & NETIF_FLAG_LINK_UP)

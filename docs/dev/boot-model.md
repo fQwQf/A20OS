@@ -80,7 +80,7 @@ platform 驱动使用 `driver_t.firmware_ids` 声明稳定硬件 ID；DT compati
 
 probe 可以通过 `device_add_resource_action()` 登记回收动作。映射 helper 已自动登记；probe 失败或 remove 后，核心逆序释放受管资源和依赖。驱动仍须停止 DMA、撤销 IRQ、释放未登记的分配；不能在硬件仍活动时依赖回收器直接释放内存。
 
-内核模块驱动 ABI 为 **6**，包含显式 framebuffer 布局接口；旧 ABI 包会被拒绝，必须与当前内核一起重建。没有保留按旧 compatible 查找驱动再反向创建设备的路径。
+内核模块驱动 ABI 为 **7**，包含显式 framebuffer 布局接口和 terminal shutdown 回调；旧 ABI 包会被拒绝，必须与当前内核一起重建。没有保留按旧 compatible 查找驱动再反向创建设备的路径。
 
 设备发现完全由固件和原生总线发布。旧的 `arch_virtio_blk_probe`、`arch_virtio_net_probe` 以及驱动内自行扫描并发布已初始化实例的入口均已移除。
 

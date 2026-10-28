@@ -136,7 +136,8 @@ image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
 	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)" \
-	--ssh-pubkey "$(SSH_PUBKEY)"
+	--ssh-pubkey "$(SSH_PUBKEY)" \
+	--drivers "$(addprefix $(USER_BUILD_DIR)/,$(DRIVER_SELECTION))"
 # GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
 # but with the virtio-gpu display stack and audio.  The image is built here (in
 # its own make invocation) rather than as a prerequisite so that the desktop

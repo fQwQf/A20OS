@@ -1,0 +1,19 @@
+# Go 工具链 + tailscale 兼容性测试实例（riscv64 变体，TCG）：
+# 与 gotest-x86_64 同一 world 清单与 overlay，第二架构验证用。
+#
+#   tools/a20 run gotest-riscv64
+name = "gotest-riscv64"
+description = "Go toolchain + tailscale userspace-networking compatibility probe (riscv64, TCG)"
+arch = "riscv64"
+
+[machine]
+memory = "3G"
+smp = 4
+
+[rootfs]
+world = "gotest"
+world_size_mb = 2048
+# 运行时驱动子集：virtio-net 不是 early 模块（不编进内核），必须由
+# mkrootfs 装进镜像 /lib/drivers，内核才能在 distro 启动时从
+# /extra/lib/drivers 加载它并拉起 eth0（DHCP 默认开启）。
+drivers = ["virtio-net"]

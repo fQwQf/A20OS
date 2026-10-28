@@ -31,8 +31,9 @@ const NETLINK_SOCK_DIAG: i32 = 4;
 const NETLINK_KOBJECT_UEVENT: i32 = 15;
 
 const NLMSG_DONE: u16 = 3;
-const NLM_F_MULTI: u16 = 0x2;
+const NLM_F_ACK: u16 = 0x04;
 const NLM_F_DUMP: u16 = 0x300;
+const NLM_F_MULTI: u16 = 0x2;
 const NLM_F_REPLACE: u16 = 0x100;
 
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
@@ -44,12 +45,16 @@ const TCP_ESTABLISHED: u8 = 1;
 const TCP_CLOSE: u8 = 7;
 const TCP_LISTEN: u8 = 10;
 
+const NLMSG_ERROR: u16 = 2;
 const RTM_NEWLINK: u16 = 16;
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
+const RTM_NEWRULE: u16 = 32;
+const RTM_DELRULE: u16 = 33;
 const RTM_GETROUTE: u16 = 26;
 
 const IFLA_ADDRESS: u16 = 1;
@@ -61,6 +66,7 @@ const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
 const IFA_LABEL: u16 = 3;
 
+const RTA_DST: u16 = 1;
 const RTA_GATEWAY: u16 = 3;
 const RTA_OIF: u16 = 4;
 
@@ -274,6 +280,8 @@ unsafe extern "C" {
     fn a20_net_netlink_class_devt(cdev: *mut c_void) -> u64;
     fn a20_net_netlink_class_put(cdev: *mut c_void);
     fn a20_net_netlink_snapshot(ns: *mut c_void, out: *mut NlrtLink, max: i32) -> i32;
+    fn a20_net_route_add(dst: u32, prefix: u8, ifindex: u16) -> i32;
+    fn a20_net_route_del(dst: u32, prefix: u8, ifindex: u16) -> i32;
     fn a20_net_netlink_event_index(events: *const c_void, i: i32) -> u32;
     fn a20_net_netlink_if_set_mtu(ifindex: u32, mtu: u16) -> i32;
     fn a20_net_netlink_if_set_flags(ifindex: u32, value: u32, mask: u32) -> i32;
@@ -898,13 +906,18 @@ unsafe fn put_attr(buf: &mut [u8], off: usize, type_: u16, data: &[u8]) -> usize
     off + padded
 }
 
-fn fill_hdr(buf: &mut [u8], type_: u16, total: u32, seq: u32, pid: u32) {
+fn fill_hdr_flags(buf: &mut [u8], type_: u16, total: u32, seq: u32, pid: u32,
+                   flags: u16) {
     unsafe {
         ptr::write_unaligned(
             buf.as_mut_ptr() as *mut NlMsghdr,
-            NlMsghdr { len: total, msg_type: type_, flags: NLM_F_MULTI, seq, pid },
+            NlMsghdr { len: total, msg_type: type_, flags, seq, pid },
         );
     }
+}
+
+fn fill_hdr(buf: &mut [u8], type_: u16, total: u32, seq: u32, pid: u32) {
+    fill_hdr_flags(buf, type_, total, seq, pid, NLM_F_MULTI);
 }
 
 fn name_bytes(e: &NlrtLink) -> &[u8] {
@@ -934,6 +947,11 @@ unsafe fn build_linkmsg(buf: &mut [u8], e: &NlrtLink, msg_type: u16, pid: u32,
     off = put_attr(buf, off, IFLA_ADDRESS, &e.mac);
     off = put_attr(buf, off, IFLA_IFNAME,
                    &e.name[..name_bytes(e).len() + 1]);
+    /* `off` already counts from the nlmsghdr: the header is the first thing
+     * it spans.  Adding sizeof(NlMsghdr) again made the message 16 bytes
+     * longer than the bytes actually written, so every parser walked past the
+     * last attribute into stale buffer and failed with EINVAL
+     * (Go: parsenetlinkrouteattr; tailscale's netmon.New died on it). */
     let total = off;
     if total > NLRT_MSG_MAX {
         return 0;
@@ -963,6 +981,11 @@ unsafe fn build_addrmsg(buf: &mut [u8], ifindex: u32, addr: &[u8; 4],
         label[..n].copy_from_slice(&name[..n]);
         off = put_attr(buf, off, IFA_LABEL, &label[..n + 1]);
     }
+    /* `off` already counts from the nlmsghdr: the header is the first thing
+     * it spans.  Adding sizeof(NlMsghdr) again made the message 16 bytes
+     * longer than the bytes actually written, so every parser walked past the
+     * last attribute into stale buffer and failed with EINVAL
+     * (Go: parsenetlinkrouteattr; tailscale's netmon.New died on it). */
     let total = off;
     if total > NLRT_MSG_MAX {
         return 0;
@@ -992,6 +1015,11 @@ unsafe fn build_addrmsg6(buf: &mut [u8], ifindex: u32, addr: &[u8; 16],
         label[..n].copy_from_slice(&name[..n]);
         off = put_attr(buf, off, IFA_LABEL, &label[..n + 1]);
     }
+    /* `off` already counts from the nlmsghdr: the header is the first thing
+     * it spans.  Adding sizeof(NlMsghdr) again made the message 16 bytes
+     * longer than the bytes actually written, so every parser walked past the
+     * last attribute into stale buffer and failed with EINVAL
+     * (Go: parsenetlinkrouteattr; tailscale's netmon.New died on it). */
     let total = off;
     if total > NLRT_MSG_MAX {
         return 0;
@@ -1039,6 +1067,74 @@ impl<'a> AttrIter<'a> {
 
 fn ip4_isany(a: &[u8; 4]) -> bool {
     a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 0
+}
+
+/* Linux route writes.  Only device routes are expressible: the kernel has one
+ * routing table and no gateways of its own, so RTA_GATEWAY is ignored and an
+ * entry is (prefix, oif).  RTM_NEWRULE/DELRULE are accepted as no-ops by the
+ * caller because tailscale installs its rule before its routes. */
+unsafe fn apply_route(msg_type: u16, body: *const u8, attrs: &[u8]) -> i32 {
+    let rt = ptr::read_unaligned(body as *const RtMsg);
+    if rt.family as i32 != AF_INET {
+        return -EAFNOSUPPORT;
+    }
+    if rt.dst_len > 32 {
+        return -EINVAL;
+    }
+    let mut dst = [0u8; 4];
+    let mut oif = 0u32;
+    let mut it = AttrIter::new(attrs);
+    while let Some((type_, payload)) = it.next() {
+        if type_ == RTA_DST {
+            if payload.len() != 4 {
+                return -EINVAL;
+            }
+            dst.copy_from_slice(payload);
+        } else if type_ == RTA_OIF {
+            if payload.len() != 4 {
+                return -EINVAL;
+            }
+            oif = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        }
+    }
+    if it.bad {
+        return -EINVAL;
+    }
+    if oif == 0 || oif > 0xffff {
+        return -EINVAL;
+    }
+    let d = u32::from_ne_bytes(dst);
+    if msg_type == RTM_NEWROUTE {
+        a20_net_route_add(d, rt.dst_len, oif as u16)
+    } else {
+        a20_net_route_del(d, rt.dst_len, oif as u16)
+    }
+}
+
+/* NLM_F_ACK: the request asked for a status message.  Clients that wait for
+ * one (tailscale's netlink helpers do) would otherwise block until their own
+ * timeout, so a successful write is acknowledged with NLMSG_ERROR{0}. */
+/// `portid` is the requesting socket's own netlink port id (its bound
+/// nl_pid), which is what Linux puts in the reply header.  The nlmsg_pid field
+/// of a userspace request is 0 and must not be echoed: vishvananda/netlink
+/// (used by tailscale) drops any message whose header pid differs from its own
+/// port id, so an echoed 0 makes the ACK invisible and the caller waits out its
+/// 60 s receive timeout (EAGAIN) instead of seeing success.
+unsafe fn enqueue_ack(requester: *mut c_void, req: &NlMsghdr, portid: u32) {
+    let hdr_size = core::mem::size_of::<NlMsghdr>();
+    let total = hdr_size + 4 + hdr_size;
+    let mut msg = MsgBuf::new();
+    let pid = if portid != 0 { portid } else { req.pid };
+    /* NLMSG_ERROR is an ordinary (non-dump) reply: NLM_F_MULTI would make the
+     * caller keep waiting for messages that never come. */
+    fill_hdr_flags(&mut msg.0, NLMSG_ERROR, total as u32, req.seq, pid, 0);
+    ptr::write_unaligned(msg.0.as_mut_ptr().add(hdr_size) as *mut i32, 0);
+    ptr::write_unaligned(msg.0.as_mut_ptr().add(hdr_size + 4) as *mut NlMsghdr, *req);
+    let mut from = [0u8; NET_SOCKADDR_NL_SIZE];
+    ptr::write_unaligned(from.as_mut_ptr() as *mut u16, AF_NETLINK);
+    a20_net_netlink_enqueue(requester, msg.0.as_ptr(), total,
+                            from.as_ptr() as *const c_void,
+                            NET_SOCKADDR_NL_SIZE);
 }
 
 unsafe fn apply_newlink(ns: *mut c_void, ifi: &IfInfoMsg, attrs: &[u8]) -> i32 {
@@ -1262,18 +1358,25 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
     let req = ptr::read_unaligned(buf as *const NlMsghdr);
     let payload = len - hdr_size;
     let type_ = req.msg_type;
-    let dump = req.flags & NLM_F_DUMP != 0;
     let query = type_ == RTM_GETLINK || type_ == RTM_GETADDR || type_ == RTM_GETROUTE;
-    // Linux dump requests may contain only rtgenmsg's family byte, padded
-    // to four bytes by musl. Mutation requests still require their full body.
-    let want = if query && dump {
-        1
-    } else if type_ == RTM_GETLINK || type_ == RTM_NEWLINK {
+    /* Write forms carry the full attribute struct; the dump forms (RTM_GET*)
+     * only require a struct rtgenmsg -- one family byte -- exactly as Linux's
+     * rtnl_msg_min_size[] defines them.  Both shapes occur in the wild:
+     * iproute2 sends the larger one, while Go's syscall.NetlinkRIB sends the
+     * 17-byte rtgenmsg form.  The dump replies below are built from the
+     * interface snapshot, never from these request fields, so accepting the
+     * short form loses nothing. */
+    let want = if type_ == RTM_NEWLINK {
         core::mem::size_of::<IfInfoMsg>()
-    } else if type_ == RTM_GETADDR || type_ == RTM_NEWADDR || type_ == RTM_DELADDR {
+    } else if type_ == RTM_NEWADDR || type_ == RTM_DELADDR {
         core::mem::size_of::<IfAddrMsg>()
-    } else if type_ == RTM_GETROUTE {
+    } else if type_ == RTM_NEWROUTE || type_ == RTM_DELROUTE
+        || type_ == RTM_NEWRULE || type_ == RTM_DELRULE
+    {
+        /* fib_rule_hdr is also 12 bytes, so the minimum body is the same. */
         core::mem::size_of::<RtMsg>()
+    } else if type_ == RTM_GETLINK || type_ == RTM_GETADDR || type_ == RTM_GETROUTE {
+        1
     } else {
         return -EOPNOTSUPP;
     };
@@ -1288,7 +1391,10 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
     }
 
     /* Write requests run before any reply is built and hold no lock. */
-    if type_ == RTM_NEWLINK || type_ == RTM_NEWADDR || type_ == RTM_DELADDR {
+    if type_ == RTM_NEWLINK || type_ == RTM_NEWADDR || type_ == RTM_DELADDR
+        || type_ == RTM_NEWROUTE || type_ == RTM_DELROUTE
+        || type_ == RTM_NEWRULE || type_ == RTM_DELRULE
+    {
         if a20_net_netlink_capable(*rv.net_ns) == 0 {
             return -EPERM;
         }
@@ -1298,15 +1404,33 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
         let body = (buf as *const u8).add(hdr_size);
         let blen = req.len as usize - hdr_size - want;
         let attrs = core::slice::from_raw_parts(body.add(want), blen);
-        if type_ == RTM_NEWLINK {
+        let rc = if type_ == RTM_NEWLINK {
             let ifi = ptr::read_unaligned(body as *const IfInfoMsg);
-            return apply_newlink(*rv.net_ns, &ifi, attrs);
+            apply_newlink(*rv.net_ns, &ifi, attrs)
+        } else if type_ == RTM_NEWADDR || type_ == RTM_DELADDR {
+            if a20_net_netlink_ns_initial(*rv.net_ns) == 0 {
+                -EOPNOTSUPP
+            } else {
+                let ifa = ptr::read_unaligned(body as *const IfAddrMsg);
+                apply_addr(type_, req.flags, &ifa, attrs)
+            }
+        } else if type_ == RTM_NEWROUTE || type_ == RTM_DELROUTE {
+            apply_route(type_, body, attrs)
+        } else {
+            /* RTM_NEWRULE / RTM_DELRULE: one routing table; policy rules have
+             * no meaning here, and rejecting them would make tailscale abort
+             * its router setup before it ever installs a route. */
+            0
+        };
+        if rc >= 0 && (req.flags & NLM_F_ACK) != 0 {
+            let ack_pid = if *rv.local_len >= NET_SOCKADDR_NL_SIZE {
+                a20_net_netlink_local_pid(requester)
+            } else {
+                0
+            };
+            enqueue_ack(requester, &req, ack_pid);
         }
-        if a20_net_netlink_ns_initial(*rv.net_ns) == 0 {
-            return -EOPNOTSUPP;
-        }
-        let ifa = ptr::read_unaligned(body as *const IfAddrMsg);
-        return apply_addr(type_, req.flags, &ifa, attrs);
+        return rc;
     }
 
     let mut links = [NlrtLink::zero(); NLRT_MAX_LINKS];
@@ -1330,20 +1454,70 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
         0
     };
 
+    /* A GET without NLM_F_DUMP asks about one link (or one address), named by
+     * ifi_index or an IFLA_IFNAME attribute; answering with the whole list made
+     * tailscale's LinkByName report "more than one link found". */
+    let is_dump = (req.flags & NLM_F_DUMP) != 0;
+    let mut want_index = 0u32;
+    let mut want_name = [0u8; 16];
+    let mut have_name = false;
+    if !is_dump
+        && (type_ == RTM_GETLINK || type_ == RTM_GETADDR)
+        && payload >= core::mem::size_of::<IfInfoMsg>()
+    {
+        let body = (buf as *const u8).add(hdr_size);
+        let ifi = ptr::read_unaligned(body as *const IfInfoMsg);
+        want_index = ifi.index as u32;
+        let attrs = core::slice::from_raw_parts(body.add(core::mem::size_of::<IfInfoMsg>()),
+                                                payload - core::mem::size_of::<IfInfoMsg>());
+        let mut it = AttrIter::new(attrs);
+        while let Some((type_, pl)) = it.next() {
+            if type_ == IFLA_IFNAME && !pl.is_empty() {
+                let n = if pl.len() > 15 { 15 } else { pl.len() };
+                want_name[..n].copy_from_slice(&pl[..n]);
+                have_name = true;
+            }
+        }
+    }
     let mut msg = MsgBuf::new();
     let mut rc = 0;
     let mut i = 0;
+    /* A dump answers in the NEW form -- RTM_NEWLINK / RTM_NEWADDR /
+     * RTM_NEWROUTE -- never with the GET type it was asked with.  Reply
+     * parsers dispatch on the NEW type (Go's netlinkRIB looks for
+     * syscall.RTM_NEWLINK, iproute2 does the same), so echoing the request
+     * type made every dump look empty: net.Interfaces() returned zero
+     * interfaces while ifconfig, which does not use netlink, showed them. */
+    let reply_type = if type_ == RTM_GETLINK {
+        RTM_NEWLINK
+    } else if type_ == RTM_GETADDR {
+        RTM_NEWADDR
+    } else {
+        RTM_NEWROUTE
+    };
     while i < nlinks && rc >= 0 {
         let e = &links[i as usize];
         i += 1;
+        if !is_dump {
+            if want_index != 0 && e.index != want_index {
+                continue;
+            }
+            if want_index == 0 && have_name {
+                let n = name_bytes(e);
+                let want = &want_name[..want_name.iter().position(|&b| b == 0).unwrap_or(16)];
+                if n != want {
+                    continue;
+                }
+            }
+        }
         let total = if type_ == RTM_GETLINK {
-            build_linkmsg(&mut msg.0, e, RTM_NEWLINK, pid, req.seq)
+            build_linkmsg(&mut msg.0, e, reply_type, pid, req.seq)
         } else if type_ == RTM_GETADDR {
             if e.has_ip == 0 || family == AF_INET6 {
                 continue;
             }
             build_addrmsg(&mut msg.0, e.index, &e.ip, &e.mask, name_bytes(e),
-                          e.loopback, RTM_NEWADDR, pid, req.seq)
+                          e.loopback, reply_type, pid, req.seq)
         } else {
             if e.has_gw == 0 || family == AF_INET6 {
                 continue;
@@ -1366,18 +1540,27 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
             let oif = e.index;
             off = put_attr(&mut msg.0, off, RTA_OIF, &oif.to_ne_bytes());
             let total = off;
-            fill_hdr(&mut msg.0, RTM_NEWROUTE, total as u32, req.seq, pid);
+            fill_hdr(&mut msg.0, reply_type, total as u32, req.seq, pid);
             total
         };
         if total == 0 {
             continue;
+        }
+        if !is_dump {
+            /* A dump is a MULTI stream terminated by NLMSG_DONE; a lookup is
+             * one message and must not carry MULTI, or the caller waits for
+             * the rest of a stream that does not exist.  flags sits at offset
+             * 6 in struct nlmsghdr (len:u32, type:u16, flags:u16). */
+            ptr::write_unaligned(msg.0.as_mut_ptr().add(6) as *mut u16, 0);
         }
         rc = a20_net_netlink_enqueue(requester, msg.0.as_ptr(), total,
                                      from.as_ptr() as *const c_void,
                                      NET_SOCKADDR_NL_SIZE);
     }
 
-    if rc >= 0 {
+    /* The dump terminator is part of the dump protocol; a single-object GET
+     * answers with exactly one message, as Linux does. */
+    if rc >= 0 && is_dump {
         let mut done = MsgBuf::new();
         fill_hdr(&mut done.0, NLMSG_DONE, core::mem::size_of::<DiagDone>() as u32,
                  req.seq, pid);
@@ -1385,6 +1568,13 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
                                      core::mem::size_of::<DiagDone>(),
                                      from.as_ptr() as *const c_void,
                                      NET_SOCKADDR_NL_SIZE);
+    }
+    /* NLM_F_ACK applies to single-object GETs too: tailscale's LinkByName
+     * sends RTM_GETLINK with NLM_F_REQUEST|NLM_F_ACK and waits for the status
+     * message, so replying with only the link leaves it blocked until its
+     * lookup deadline (observed as a 60 s stall ending in EAGAIN). */
+    if rc >= 0 && (req.flags & NLM_F_ACK) != 0 {
+        enqueue_ack(requester, &req, pid);
     }
     a20_net_netlink_unlock(requester, irq);
     if rc < 0 { rc } else { len as i32 }

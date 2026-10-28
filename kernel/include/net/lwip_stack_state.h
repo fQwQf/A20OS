@@ -30,6 +30,14 @@ typedef struct a20_lwip_link_event {
 void a20_lwip_stack_lock(uint64_t *flags);
 void a20_lwip_stack_unlock(uint64_t flags);
 void *a20_lwip_stack_netif_by_index(unsigned ifindex);
+
+/* Prefix routes maintained by the Rust decision surface in lwip_stack.rs
+ * (RTM_NEWROUTE).  Addresses are network byte order; 0 from lookup means
+ * "no match", which is the signal for lwIP's own selection to run. */
+int      a20_net_route_add(uint32_t dst, uint8_t prefix, uint16_t ifindex);
+int      a20_net_route_del(uint32_t dst, uint8_t prefix, uint16_t ifindex);
+void     a20_net_route_flush_if(uint16_t ifindex);
+uint32_t a20_net_route_lookup(uint32_t dst);
 int  a20_lwip_stack_netif_has_state(void *n);
 void a20_lwip_stack_netif_hwaddr(void *n, uint8_t out[8]);
 int  a20_lwip_stack_netif_is_up(void *n);

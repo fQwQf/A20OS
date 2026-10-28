@@ -1,0 +1,117 @@
+#!/bin/sh
+# tuncheck —— /dev/net/tun 冒烟：创建接口、回读名字/flags、确认 netlink 能看到。
+# 完整数据面验收是 tailscaled TUN 模式（docs/drivers/classes/tun.md §7），
+# 这里只证明设备节点、TUNSETIFF、netif 注册与 netlink 可见性。
+
+export HOME=/root
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export TMPDIR=/tmp
+
+D=/tmp/tuncheck
+rm -rf "$D" && mkdir -p "$D" || exit 1
+cd "$D" || exit 1
+fails=0
+note() { echo "TUNCHECK: $*"; }
+
+cat > go.mod <<'EOF'
+module a20tun
+
+go 1.25
+EOF
+
+cat > main.go <<'EOF'
+package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"syscall"
+	"unsafe"
+)
+
+const (
+	IFF_TUN        = 0x0001
+	IFF_NO_PI      = 0x1000
+	TUNSETIFF      = 0x400454ca
+	TUNGETIFF      = 0x800454d2
+	TUNGETFEATURES = 0x800454cf
+)
+
+func main() {
+	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Println("TUNCHECK: OPEN ERR", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	feat := uint32(0)
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), TUNGETFEATURES,
+		uintptr(unsafe.Pointer(&feat))); e != 0 {
+		fmt.Println("TUNCHECK: FEATURES ERR", e)
+		os.Exit(1)
+	}
+	fmt.Printf("TUNCHECK: features=0x%x\n", feat)
+
+	var ifr [40]byte
+	copy(ifr[:16], []byte("tunSMK"))
+	*(*int16)(unsafe.Pointer(&ifr[16])) = IFF_TUN | IFF_NO_PI
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), TUNSETIFF,
+		uintptr(unsafe.Pointer(&ifr[0]))); e != 0 {
+		fmt.Println("TUNCHECK: SETIFF ERR", e)
+		os.Exit(1)
+	}
+	name := string(ifr[:16])
+	for len(name) > 0 && name[len(name)-1] == 0 {
+		name = name[:len(name)-1]
+	}
+	fmt.Println("TUNCHECK: SETIFF OK name=", name)
+
+	var got [40]byte
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), TUNGETIFF,
+		uintptr(unsafe.Pointer(&got[0]))); e != 0 {
+		fmt.Println("TUNCHECK: GETIFF ERR", e)
+		os.Exit(1)
+	}
+	gn := string(got[:16])
+	for len(gn) > 0 && gn[len(gn)-1] == 0 {
+		gn = gn[:len(gn)-1]
+	}
+	fmt.Println("TUNCHECK: GETIFF name=", gn)
+
+	ifs, err := net.Interfaces()
+	if err != nil {
+		fmt.Println("TUNCHECK: INTERFACES ERR", err)
+		os.Exit(1)
+	}
+	found := false
+	for _, ifc := range ifs {
+		fmt.Printf("TUNCHECK: IFACE %s flags=%s mtu=%d\n", ifc.Name, ifc.Flags, ifc.MTU)
+		if ifc.Name == gn {
+			found = true
+		}
+	}
+	if !found {
+		fmt.Println("TUNCHECK: interface not in net.Interfaces()")
+		os.Exit(1)
+	}
+	fmt.Println("TUNCHECK: OK")
+}
+EOF
+
+if go build -o tuncheck . 2> build.err; then
+    ./tuncheck
+    [ $? -eq 0 ] || fails=$((fails+1))
+else
+    cat build.err
+    note "FAIL go build"
+    fails=$((fails+1))
+fi
+
+if [ $fails -eq 0 ]; then
+    echo "TUNCHECK_RESULT: PASS"
+else
+    echo "TUNCHECK_RESULT: FAIL ($fails)"
+fi
+exit $fails

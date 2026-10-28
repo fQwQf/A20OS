@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/tun.h"
 #include "net/lwip_stack.h"
 #include "net/lwip_concurrency.h"
 #include "net/net_config.h"
@@ -177,7 +178,11 @@ int net_sockaddr_in_local(const net_sockaddr_in_t *in)
     uint64_t flags = a20_lwip_lock();
     int local = 0;
     for (struct netif *n = netif_list; n; n = n->next) {
-        if (n->state && netif_ip4_addr(n)->addr == addr) {
+        /* A TUN netif keeps state == NULL on purpose, but its address is as
+         * local as any other: bind(), connect()'s local-target test and the
+         * fast loopback path all ask this question. */
+        if ((n->state || a20_lwip_netif_is_tun(n)) &&
+            netif_ip4_addr(n)->addr == addr) {
             local = 1;
             break;
         }
@@ -382,10 +387,28 @@ int net_sockaddr_to_lwip_ip(const void *addr, size_t len,
         if (len < sizeof(net_sockaddr_in6_t))
             return -EINVAL;
         const net_sockaddr_in6_t *in6 = (const net_sockaddr_in6_t *)addr;
-        ip6_addr_t a6;
-        memcpy(a6.addr, in6->sin6_addr, sizeof(a6.addr));
-        a6.zone = 0;
-        ip_addr_copy_from_ip6(*ip, a6);
+        int all_zero = 1;
+        for (size_t i = 0; i < sizeof(in6->sin6_addr); i++) {
+            if (in6->sin6_addr[i] != 0) {
+                all_zero = 0;
+                break;
+            }
+        }
+        if (all_zero) {
+            /* `::` is the dual-stack wildcard that a LISTEN on AF_INET6 gets
+             * by default (Go binds every wildcard listener this way, and
+             * Linux's IPV6_V6ONLY defaults to 0).  lwIP only accepts an IPv4
+             * packet for a listener whose local address has type
+             * IPADDR_TYPE_ANY; an IPV6-typed zero address matches IPv6 alone,
+             * so an IPv4 SYN to the tailnet address was answered with RST. */
+            ip_addr_set_zero(ip);
+            IP_SET_TYPE(ip, IPADDR_TYPE_ANY);
+        } else {
+            ip6_addr_t a6;
+            memcpy(a6.addr, in6->sin6_addr, sizeof(a6.addr));
+            a6.zone = 0;
+            ip_addr_copy_from_ip6(*ip, a6);
+        }
         if (port)
             *port = net_ntohs(in6->sin6_port);
         return 0;

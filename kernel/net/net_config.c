@@ -234,7 +234,13 @@ int a20_net_config_format(char *buf, size_t bufsz)
     return (int)off;
 }
 
-a20_tcp_path_t g_a20_tcp_path = A20_TCP_PATH_FAST;
+/* Default to a real lwIP LISTEN pcb.  The fast mode keeps the listener out of
+ * the protocol stack entirely, which makes the port reachable only from other
+ * processes in this kernel: an inbound connection from another machine (a TUN
+ * peer, the LAN, a tailnet) is answered with RST.  A general-purpose system
+ * must accept off-box connections, so lwip is the default; a20.tcpmode=fast
+ * remains available for the accept-semantics tests that predate this. */
+a20_tcp_path_t g_a20_tcp_path = A20_TCP_PATH_LWIP;
 
 int a20_net_config_write(const char *buf, size_t count)
 {

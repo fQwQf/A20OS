@@ -524,8 +524,15 @@ _Static_assert(NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE,
  * loopback interface.  Measured at 368 B on riscv64 LP64; 384 leaves room for
  * alignment growth and is checked against the real sizeof in lwip_stack.c. */
 #define NET_PROFILE_NETIF_STRUCT_BYTES 384
+/* TUN netifs are kernel-service netifs rather than driver-bound ones, but
+ * their struct netif storage is still .bss and still has to be accounted for
+ * here or the per-tier ceiling stops meaning anything. */
+#ifndef NET_PROFILE_TUN_MAX_DEVS
+#define NET_PROFILE_TUN_MAX_DEVS 2
+#endif
 #define NET_PROFILE_NETIF_STRUCT_BUDGET \
-    ((NET_PROFILE_NETIF_MAX_DEVS + 1) * NET_PROFILE_NETIF_STRUCT_BYTES)
+    ((NET_PROFILE_NETIF_MAX_DEVS + 1 + NET_PROFILE_TUN_MAX_DEVS) * \
+     NET_PROFILE_NETIF_STRUCT_BYTES)
 
 /* A max-size frame is one Ethernet header plus the MTU, and it has to fit both
  * the device scratch buffer and a single pbuf-pool element -- otherwise the

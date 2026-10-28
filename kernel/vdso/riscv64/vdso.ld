@@ -3,11 +3,30 @@
  * The image is linked at vaddr 0 with the ELF header and program headers
  * inside the first (and only) PT_LOAD, so file offset == virtual offset
  * and the raw binary can be mapped verbatim.  A PT_DYNAMIC segment is
- * required by musl's vDSO parser; symbols are unversioned, which musl
- * accepts (a missing verdef disables its version check).
+ * required by musl's vDSO parser.
+ *
+ * The exported symbols carry a LINUX_4.15 version definition (man 7 vdso:
+ * riscv), like the real kernel's vDSO.  Go's runtime (runtime/vdso_linux.go,
+ * vdsoFindVersion) dereferences the verdef pointer unconditionally, so a
+ * vDSO without DT_VERDEF segfaults every dynamically linked Go binary at
+ * startup; with the definition present musl's __vdsosym matches the
+ * versioned symbols through DT_VERSYM and Go matches LINUX_4.15, and on a
+ * mismatch either side falls back to plain syscalls instead of failing.
  */
 OUTPUT_FORMAT("elf64-littleriscv")
 OUTPUT_ARCH(riscv)
+
+VERSION
+{
+    LINUX_4.15
+    {
+        global:
+            __vdso_clock_gettime;
+            __vdso_gettimeofday;
+            __vdso_getcpu;
+        local: *;
+    };
+}
 
 PHDRS
 {

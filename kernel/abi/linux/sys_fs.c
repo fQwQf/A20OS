@@ -155,6 +155,11 @@ static int64_t read_into_user(vfile_t *vf, char *buf, size_t count, int locked)
      * therefore never covers a user access.  `locked` is set when the caller
      * (pread64) already holds offset_lock for a fixed-offset read.
      */
+    if (count == 0)
+        /* Still a real operation: cf. the zero-length write TUN uses to report
+         * carrier state.  A no-op here would swallow that probe. */
+        return vfs_write_file(vf, "", 0);
+
     int lock_offset = !locked && linux_vfile_uses_shared_offset(vf);
     int64_t total = 0;
     while ((size_t)total < count) {
@@ -287,8 +292,16 @@ int64_t sys_read(int fd, char *buf, size_t count) {
 }
 
 int64_t sys_write(int fd, const char *buf, size_t count) {
-    if (!buf) return -EFAULT;
-    if (count == 0) return 0;
+    /* write(fd, NULL, 0) is legal on Linux and has to reach the file: TUN
+     * uses a zero-length write as its up/down probe (EINVAL while the tunnel
+     * is up, ENETDOWN while it is down), and wireguard-go's status listener
+     * does exactly that.  Only a non-empty write with a NULL buffer is EFAULT. */
+    static const char empty_buf;
+    if (!buf) {
+        if (count != 0) return -EFAULT;
+        buf = &empty_buf;
+    }
+    if (count == 0 && !buf) return 0;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     if (env_active(proc_current())) {
@@ -440,9 +453,92 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
         if (mr) return mr;
     }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
+    if (!vf)
+        return -EBADF;
     struct iovec { char *base; size_t len; };
-    int64_t total = 0;
     int lock_offset = linux_vfile_uses_shared_offset(vf);
+
+    /* writev is ONE write operation, not one per segment.  Devices depend on
+     * it: TUN delivers exactly one packet per write, and wireguard-go submits
+     * a packet as writev([virtio_net_hdr, packet]).  Issuing the header and
+     * the packet as two writes made the driver see a zero-length packet
+     * followed by an IP packet whose first ten bytes were then parsed as a
+     * virtio header -- rejected with EINVAL, so no packet ever entered the
+     * tunnel.  Datagram sockets have the same rule: one sendmsg is one
+     * datagram.
+     *
+     * Pipes keep the segment-by-segment path below (it carries their partial
+     * write and PIPE_BUF atomicity handling), and O_DIRECT files are left
+     * alone because a coalesced kernel buffer would break their alignment. */
+    if (!vfs_is_pipe_vfile(vf) && !(vf->flags & O_DIRECT)) {
+        size_t total_len = 0;
+        int bad = 0;
+        for (int i = 0; i < iovcnt; i++) {
+            struct iovec v;
+            if (copy_from_user(&v, (const char *)iov + (size_t)i * sizeof(v),
+                               sizeof(v)) < 0) {
+                vfs_put_file_ref((int)gfd, vf);
+                return -EFAULT;
+            }
+            if (!v.base || v.len == 0)
+                continue;
+            if (v.len > (size_t)-1 - total_len) {
+                bad = 1;
+                break;
+            }
+            total_len += v.len;
+        }
+        if (bad) {
+            vfs_put_file_ref((int)gfd, vf);
+            return -EINVAL;
+        }
+        if (total_len == 0) {
+            /* Same zero-length semantics as write(2): still reaches the file,
+             * which is how TUN reports carrier state. */
+            if (lock_offset)
+                mutex_lock(&vf->offset_lock);
+            int64_t r = vfs_write_file(vf, "", 0);
+            if (lock_offset)
+                mutex_unlock(&vf->offset_lock);
+            vfs_put_file_ref((int)gfd, vf);
+            return r;
+        }
+        /* 1 MiB covers any device write; larger writes fall through to the
+         * segmented path (regular files tolerate that; Linux never requires
+         * cross-segment atomicity there). */
+        if (total_len <= (1u << 20)) {
+            char *kbuf = proc_scratch_buffer(total_len);
+            { static int wv_dbg; if (wv_dbg < 12) { kinfo("[WV] cnt=%d total=%u kbuf=%d\n", iovcnt, (unsigned)total_len, kbuf != NULL); wv_dbg++; } }
+            if (kbuf) {
+                size_t off = 0;
+                for (int i = 0; i < iovcnt; i++) {
+                    struct iovec v;
+                    if (copy_from_user(&v,
+                            (const char *)iov + (size_t)i * sizeof(v),
+                            sizeof(v)) < 0) {
+                        vfs_put_file_ref((int)gfd, vf);
+                        return -EFAULT;
+                    }
+                    if (!v.base || v.len == 0)
+                        continue;
+                    if (copy_from_user(kbuf + off, v.base, v.len) < 0) {
+                        vfs_put_file_ref((int)gfd, vf);
+                        return -EFAULT;
+                    }
+                    off += v.len;
+                }
+                if (lock_offset)
+                    mutex_lock(&vf->offset_lock);
+                int64_t r = vfs_write_file(vf, kbuf, total_len);
+                if (lock_offset)
+                    mutex_unlock(&vf->offset_lock);
+                vfs_put_file_ref((int)gfd, vf);
+                return r;
+            }
+        }
+    }
+
+    int64_t total = 0;
     if (lock_offset)
         mutex_lock(&vf->offset_lock);
     for (int i = 0; i < iovcnt; i++) {
