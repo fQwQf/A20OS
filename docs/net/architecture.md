@@ -41,6 +41,12 @@
 资源档位与后端选择独立。`NET_PROFILE` 定义预算；后端功能定义能力。不能以增加预算
 或关闭 SMP 冒充不回退。后端未实现的选项返回准确错误；默认值变化属于可观察行为变化。
 
+当前可用构建选择为 hosted 的 `NET_STACK=lwip`，以及 MCU 的 `NET_STACK=none`。
+`NET_STACK=freebsd` 明确报错，不能回退后冒称 BSD 测试成功。`NET_LANES` 选择 lwIP
+执行并发度，`NET_PROFILE=1/2/3` 选择资源预算；它们均不是 QEMU 的网络拓扑选项。
+公共路由事务见 [routing.md](./routing.md)，NAT 所有权与限制见 [nat.md](./nat.md)，
+对照测量口径见 [benchmark-method.md](./benchmark-method.md)。
+
 ## 上游依赖策略
 
 FreeBSD 固定于 `.gitmodules` 所登记仓库中的 gitlink 提交，分支仅作为更新来源。
