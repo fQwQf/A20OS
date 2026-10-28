@@ -365,8 +365,11 @@ endif
 ifeq ($(NET_STACK),freebsd)
 $(error NET_STACK=freebsd is not runnable yet; upstream source pin alone is not a backend)
 endif
+ifeq ($(NET_STACK),lwip-upstream)
+$(error NET_STACK=lwip-upstream is source-pinned only; the pristine adapter is not runnable yet)
+endif
 ifeq ($(filter $(NET_STACK),lwip none),)
-$(error NET_STACK must be lwip or none; FreeBSD is source-only)
+$(error NET_STACK must be lwip or none; pristine lwIP and FreeBSD are source-only)
 endif
 ifeq ($(NET_STACK),none)
 ifeq ($(PROFILE),mcu)
