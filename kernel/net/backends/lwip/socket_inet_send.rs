@@ -94,6 +94,10 @@ impl SendPair {
 }
 
 unsafe extern "C" {
+    fn a20_net_inet_send_udp_control_packet(
+        pcb: *mut c_void, p: *mut c_void, dest: *const c_void,
+        port: u16, ifindex: u32, source: u32,
+    ) -> i32;
     fn a20_net_inet_send_view_init(s: *mut c_void, out: *mut SendView);
     fn a20_net_inet_send_lock(s: *mut c_void, flags: *mut u64);
     fn a20_net_inet_send_unlock(s: *mut c_void, flags: u64);
@@ -169,12 +173,40 @@ unsafe fn view_of(s: *mut c_void) -> SendView {
     v
 }
 
-/// The UDP send transaction.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DatagramControl {
+    ifindex: u32,
+    source_v4: u32,
+}
+
+/// Existing sendto callers carry no per-packet override.
 #[no_mangle]
-pub unsafe extern "C" fn a20_net_inet_send_udp(s: *mut c_void, buf: *const c_void,
-                                               len: usize, flags: i32,
-                                               addr: *const c_void, addrlen: usize,
-                                               max_queue: i32) -> i32 {
+pub unsafe extern "C" fn a20_net_inet_send_udp(
+    s: *mut c_void, buf: *const c_void, len: usize, flags: i32,
+    addr: *const c_void, addrlen: usize, max_queue: i32,
+) -> i32 {
+    send_udp(s, buf, len, flags, addr, addrlen, max_queue, ptr::null())
+}
+#[no_mangle]
+pub unsafe extern "C" fn a20_net_inet_send_udp_control(
+    s: *mut c_void, buf: *const c_void, len: usize, flags: i32,
+    addr: *const c_void, addrlen: usize, max_queue: i32,
+    control: *const DatagramControl,
+) -> i32 {
+    send_udp(s, buf, len, flags, addr, addrlen, max_queue, control)
+}
+unsafe fn send_udp(
+    s: *mut c_void, buf: *const c_void, len: usize, flags: i32,
+    addr: *const c_void, addrlen: usize, max_queue: i32,
+    control: *const DatagramControl,
+) -> i32 {
+    let control = if control.is_null() { None } else { Some(ptr::read(control)) };
+    /* Physical-domain UDP must use backend address/interface demultiplexing.
+     * A port-only shortcut previously intercepted external DNS forwards and
+     * fed them back into a local port 53 socket. Only isolated namespaces,
+     * which currently expose software loopback, use frontend delivery. */
+    let software_delivery = control.is_none() && a20_net_inet_send_ns_initial(s) == 0;
     let v = view_of(s);
     /* The one datagram this socket will hand on is the only send-side buffer a
      * datagram socket has, and the number that rejects it is the number
@@ -219,7 +251,7 @@ pub unsafe extern "C" fn a20_net_inet_send_udp(s: *mut c_void, buf: *const c_voi
         ptr::copy_nonoverlapping(v.local, src_local.as_mut_ptr(), src_len);
         let peer = *v.peer;
         had_peer = !peer.is_null();
-        if had_peer && a20_net_inet_send_is_live(peer) != 0 {
+        if software_delivery && had_peer && a20_net_inet_send_is_live(peer) != 0 {
             a20_net_inet_send_ref(peer);
             local_dst = peer;
         }
@@ -227,7 +259,7 @@ pub unsafe extern "C" fn a20_net_inet_send_udp(s: *mut c_void, buf: *const c_voi
         send_timeout = *v.send_timeout_ticks;
         a20_net_inet_send_unlock(s, sf);
     }
-    if local_dst.is_null() && had_peer {
+    if software_delivery && local_dst.is_null() && had_peer {
         /* The back-pointer is stale: drop it and fall back to a lookup. */
         let mut sf = 0u64;
         a20_net_inet_send_lock(s, &mut sf);
@@ -236,7 +268,7 @@ pub unsafe extern "C" fn a20_net_inet_send_udp(s: *mut c_void, buf: *const c_voi
         }
         a20_net_inet_send_unlock(s, sf);
     }
-    if local_dst.is_null() && !dst_addr.is_null() {
+    if software_delivery && local_dst.is_null() && !dst_addr.is_null() {
         local_dst = a20_net_inet_send_find_udp_dst(s, dst_addr as *const c_void,
                                                    dst_len);
     }
@@ -311,7 +343,12 @@ pub unsafe extern "C" fn a20_net_inet_send_udp(s: *mut c_void, buf: *const c_voi
     let shared = a20_net_inet_send_shared_lock(SHARED_UDP, pcb);
     a20_net_inet_send_ip_opts_apply(s, opts.as_mut_ptr());
     let e: i32;
-    if !addr.is_null() {
+    if let Some(c) = control {
+        let destination = if addr.is_null() { ptr::null() } else { ip.as_mut_ptr().cast_const() };
+        e = a20_net_inet_send_udp_control_packet(
+            pcb, p, destination, port, c.ifindex, c.source_v4,
+        );
+    } else if !addr.is_null() {
         e = a20_net_inet_send_udp_sendto(pcb, p, ip.as_mut_ptr(), port);
     } else if a20_net_inet_send_udp_connected(pcb) != 0 {
         e = a20_net_inet_send_udp_send(pcb, p);
@@ -327,7 +364,7 @@ pub unsafe extern "C" fn a20_net_inet_send_udp(s: *mut c_void, buf: *const c_voi
     a20_net_inet_send_poll_locked();
     a20_net_inet_send_shared_unlock(SHARED_UDP, pcb, shared);
     a20_net_inet_send_lane_unlock(lwip_flags);
-    if e == 0 { len as i32 } else { -EIO }
+    if e == 0 { len as i32 } else if control.is_some() { e } else { -EIO }
 }
 
 /// The raw send transaction.
@@ -482,6 +519,9 @@ mod tests {
     static mut T_SENDTO_CALLS: i32 = 0;
     static mut T_CONNECTED_FLAG: i32 = 0;
     static mut T_SEND_CALLS: i32 = 0;
+    static mut T_CONTROL_CALLS: i32 = 0;
+    static mut T_CONTROL_IFINDEX: u32 = 0;
+    static mut T_CONTROL_SOURCE: u32 = 0;
     static mut T_POLL: i32 = 0;
     static mut T_TRACE: [u8; 32] = [0; 32];
     static mut T_TRACE_N: usize = 0;
@@ -539,6 +579,9 @@ mod tests {
         T_SEND_RC = 0;
         T_SENDTO_CALLS = 0;
         T_SEND_CALLS = 0;
+        T_CONTROL_CALLS = 0;
+        T_CONTROL_IFINDEX = 0;
+        T_CONTROL_SOURCE = 0;
         T_CONNECTED_FLAG = 0;
         T_POLL = 0;
         T_TRACE = [0; 32];
@@ -704,6 +747,17 @@ mod tests {
         trace(b'O');
     }
     #[no_mangle]
+    unsafe extern "C" fn a20_net_inet_send_udp_control_packet(
+        _pcb: *mut c_void, _p: *mut c_void, _dest: *const c_void,
+        _port: u16, ifindex: u32, source: u32,
+    ) -> i32 {
+        T_CONTROL_CALLS += 1;
+        T_CONTROL_IFINDEX = ifindex;
+        T_CONTROL_SOURCE = source;
+        T_SEND_RC
+    }
+
+    #[no_mangle]
     unsafe extern "C" fn a20_net_inet_send_udp_sendto(_p: *mut c_void,
                                                       _b: *mut c_void,
                                                       _ip: *const c_void,
@@ -771,6 +825,49 @@ mod tests {
     }
 
     #[test]
+    fn packet_control_bypasses_local_shortcut_and_releases_on_error() {
+        unsafe {
+            let _serial = serial();
+            for result in [0, -19, -99] {
+                reset();
+                let s = udp_src();
+                let mut peer = Sock::new();
+                (*s).peer = &mut peer;
+                (*s).connected = 1;
+                let control = DatagramControl { ifindex: 4, source_v4: 0x0100140a };
+                T_SEND_RC = result;
+                assert_eq!(a20_net_inet_send_udp_control(
+                    s.cast(), ptr::null(), 17, 0, ptr::null(), 0, 4, &control,
+                ), if result == 0 { 17 } else { result });
+                assert_eq!((T_CONTROL_CALLS, T_CONTROL_IFINDEX, T_CONTROL_SOURCE),
+                           (1, 4, 0x0100140a));
+                assert_eq!((T_SEND_CALLS, T_SENDTO_CALLS, T_FIND, T_ENQ_LOCKED),
+                           (0, 0, 0, 0));
+                assert_eq!((T_PBUF_ALLOC, T_PBUF_FREE, T_LANE_UNLOCK,
+                            T_SHARED_UNLOCK), (1, 1, 1, 1));
+                assert_eq!((*s).peer, &mut peer as *mut Sock);
+            }
+        }
+    }
+
+    #[test]
+    fn physical_domain_uses_native_demultiplexing_despite_cached_peer() {
+        unsafe {
+            let _serial = serial();
+            reset();
+            let s = udp_src();
+            let mut peer = Sock::new();
+            (*s).peer = &mut peer;
+            (*s).connected = 1;
+            T_CONNECTED_FLAG = 1;
+            assert_eq!(a20_net_inet_send_udp(
+                s.cast(), ptr::null(), 12, 0, ptr::null(), 0, 4,
+            ), 12);
+            assert_eq!((T_SEND_CALLS, T_FIND, T_ENQ_LOCKED), (1, 0, 0));
+        }
+    }
+
+    #[test]
     fn the_send_ceiling_is_checked_before_anything_else() {
         unsafe {
             let _serial = serial();
@@ -810,6 +907,7 @@ mod tests {
         unsafe {
             let _serial = serial();
             reset();
+            T_NS_INITIAL = 0;
             let s = udp_src();
             let mut peer = Sock::new();
             T_PEER = &mut peer;
@@ -823,6 +921,7 @@ mod tests {
 
             /* A dead peer is dropped and the table is consulted. */
             reset();
+            T_NS_INITIAL = 0;
             let s = udp_src();
             let mut peer = Sock::new();
             peer.live = 0;
@@ -842,6 +941,7 @@ mod tests {
         unsafe {
             let _serial = serial();
             reset();
+            T_NS_INITIAL = 0;
             let s = udp_src();
             let mut peer = Sock::new();
             peer.rx_count = 4;
@@ -855,6 +955,7 @@ mod tests {
 
             /* With MSG_DONTWAIT the immediate enqueue is used instead. */
             reset();
+            T_NS_INITIAL = 0;
             let s = udp_src();
             let mut peer = Sock::new();
             peer.rx_count = 4;
@@ -873,6 +974,7 @@ mod tests {
         unsafe {
             let _serial = serial();
             reset();
+            T_NS_INITIAL = 0;
             let s = udp_src();
             let mut peer = Sock::new();
             peer.live = 0;

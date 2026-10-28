@@ -237,6 +237,8 @@ typedef struct {
     net_socket_t  *found;
 } net_find_arg_t;
 
+static int net_bind_sockets_overlap(const net_find_arg_t *, const net_socket_t *);
+
 static int net_find_port_bound(const net_socket_t *s, int domain, int type,
                                uint16_t port)
 {
@@ -270,6 +272,8 @@ static bool net_find_bound_slot(net_socket_t *s, int idx, void *arg)
             return false;
         if (!net_find_port_bound(s, d, a->type, a->port))
             return false;
+        if (!net_bind_sockets_overlap(a, s))
+            return false;
     }
     a->found = net_socket_ref(s);
     return true;
@@ -288,19 +292,49 @@ net_socket_t *net_find_bound_socket(resource_namespace_t *ns, int domain, int ty
     return a.found;
 }
 
+static int net_address_is_zero(const uint8_t *ip, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (ip[i]) return 0;
+    return 1;
+}
+
+/* Port reuse only matters when the local address spaces overlap. Distinct
+ * concrete addresses may own the same TCP port without SO_REUSEPORT; DNS
+ * servers bind separate listeners on each configured interface this way. */
 static int net_bind_sockets_overlap(const net_find_arg_t *a,
                                     const net_socket_t *b)
 {
-    int domain = a->want->domain;
-    if (domain == b->domain)
+    int left_family = a->domain, right_family = b->domain;
+    const uint8_t *left = a->addr, *right = b->local;
+    if ((left_family == AF_INET && a->addrlen < sizeof(net_sockaddr_in_t)) ||
+        (left_family == AF_INET6 && a->addrlen < sizeof(net_sockaddr_in6_t)) ||
+        (right_family == AF_INET && b->local_len < sizeof(net_sockaddr_in_t)) ||
+        (right_family == AF_INET6 && b->local_len < sizeof(net_sockaddr_in6_t)))
         return 1;
-    /* IPv4 vs IPv6 only conflicts when the IPv6 side is dual-stack.
-     * A v6-only (IPV6_V6ONLY) listener shares the port with IPv4. */
-    if (domain == AF_INET && b->domain == AF_INET6)
-        return !b->ipv6_v6only;
-    if (domain == AF_INET6 && b->domain == AF_INET)
-        return !a->want_v6only;
-    return 0;
+    if (left_family == AF_INET && right_family == AF_INET) {
+        return net_address_is_zero(left + 4, 4) || net_address_is_zero(right + 4, 4)
+            || !memcmp(left + 4, right + 4, 4);
+    }
+    if (left_family == AF_INET6 && right_family == AF_INET6) {
+        if (net_address_is_zero(left + 8, 16) || net_address_is_zero(right + 8, 16))
+            return 1;
+        if (memcmp(left + 8, right + 8, 16)) return 0;
+        uint32_t lscope, rscope;
+        memcpy(&lscope, left + 24, 4);
+        memcpy(&rscope, right + 24, 4);
+        return !lscope || !rscope || lscope == rscope;
+    }
+    if (!((left_family == AF_INET && right_family == AF_INET6)
+          || (left_family == AF_INET6 && right_family == AF_INET))) return 0;
+    if ((left_family == AF_INET6 && a->want_v6only)
+        || (right_family == AF_INET6 && b->ipv6_v6only)) return 0;
+    const uint8_t *v6 = left_family == AF_INET6 ? left + 8 : right + 8;
+    const uint8_t *v4 = left_family == AF_INET ? left + 4 : right + 4;
+    if (net_address_is_zero(v6, 16)) return 1;
+    /* A concrete native IPv6 address never occupies IPv4 local addresses. */
+    if (!net_address_is_zero(v6, 10) || v6[10] != 255 || v6[11] != 255) return 0;
+    return net_address_is_zero(v4, 4) || !memcmp(v6 + 12, v4, 4);
 }
 
 static int net_bind_reuse_allowed(const net_find_arg_t *a,
@@ -881,6 +915,19 @@ void a20_net_sendto_view_init(void *sp, net_sendto_view_t *out) {
     out->peer_addr = s->peer_addr;
     out->peer_len = &s->peer_len;
     out->send_timeout_ticks = &s->send_timeout_ticks;
+}
+
+int net_sendto_control(net_socket_t *s, const void *buf, size_t len, int flags,
+                        const void *addr, size_t addrlen,
+                        const net_datagram_control_t *control)
+{
+    if (!s) return -ENOTSOCK;
+    if (!control) return net_sendto_sock(s, (void *)buf, len, flags, addr, addrlen);
+    if (s->domain != AF_INET || s->type != SOCK_DGRAM) return -EOPNOTSUPP;
+    int rc = net_msg_flags_check(flags);
+    if (rc) return rc;
+    if (len > NET_MAX_PAYLOAD) return -EMSGSIZE;
+    return net_inet_send_udp_control(s, buf, len, flags, addr, addrlen, control);
 }
 
 int a20_net_sendto_flags_check(int flags) { return net_msg_flags_check(flags); }

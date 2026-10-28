@@ -64,6 +64,13 @@ typedef struct {
 } socket_in6_pktinfo_t;
 
 typedef struct {
+    int32_t ifindex;
+    uint8_t spec_dst[4];
+    uint8_t addr[4];
+} socket_in_pktinfo_t;
+
+typedef struct {
+    int has_ipv4_pktinfo;
     int has_pktinfo;
     int has_hoplimit;
     int has_tclass;
@@ -276,7 +283,8 @@ static socket_cmsghdr_t *cmsg_nxthdr(const socket_msghdr_t *mh,
     return (socket_cmsghdr_t *)((uint8_t *)cmsg + step);
 }
 
-static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
+static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass,
+    net_datagram_control_t *control, int *have_control)
 {
     if (!mh->msg_control || mh->msg_controllen == 0)
         return 0;
@@ -287,7 +295,15 @@ static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
         size_t need = cmsg_len(0);
         if (cmsg->cmsg_len < need || cmsg->cmsg_len > cmsg_remaining(mh, cmsg))
             return -EINVAL;
-        if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT) {
+        if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == 8 /* IP_PKTINFO */) {
+            if (cmsg->cmsg_len != cmsg_len(sizeof(socket_in_pktinfo_t))) return -EINVAL;
+            socket_in_pktinfo_t info;
+            memcpy(&info, cmsg_data_const(cmsg), sizeof(info));
+            if (info.ifindex < 0) return -EINVAL;
+            control->ifindex = (uint32_t)info.ifindex;
+            memcpy(&control->source_v4, info.spec_dst, 4);
+            *have_control = 1;
+        } else if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT) {
             if (cmsg->cmsg_len < cmsg_len(sizeof(int)))
                 return -EINVAL;
             memcpy(ttl, cmsg_data_const(cmsg), sizeof(int));
@@ -375,6 +391,17 @@ static int parse_send_rights(const socket_msghdr_t *mh, scm_rights_t *out)
 }
 #endif
 
+static void pktinfo6_address(uint8_t *out, const net_recv_meta_t *meta)
+{
+    if (meta->pktinfo_family == AF_INET) {
+        memset(out, 0, 16);
+        out[10] = out[11] = 0xff;
+        memcpy(out + 12, meta->pktinfo.ipv4.destination, 4);
+    } else {
+        memcpy(out, meta->pktinfo_addr, 16);
+    }
+}
+
 static size_t build_recv_control(const socket_msghdr_t *mh,
                                  const net_recv_meta_t *meta,
                                  socket_recv_meta_t *out)
@@ -386,6 +413,24 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
     if (!dst || mh->msg_controllen < sizeof(socket_cmsghdr_t))
         return 0;
 
+    if (out->has_ipv4_pktinfo) {
+        size_t need = cmsg_space(sizeof(socket_in_pktinfo_t));
+        if (used + need > mh->msg_controllen)
+            return used;
+        cmsg = (socket_cmsghdr_t *)(dst + used);
+        cmsg->cmsg_level = IPPROTO_IP;
+        cmsg->cmsg_type = 8; /* IP_PKTINFO */
+        cmsg->cmsg_len = cmsg_len(sizeof(socket_in_pktinfo_t));
+        socket_in_pktinfo_t info = {0};
+        if (meta->has_pktinfo && meta->pktinfo_family == AF_INET) {
+            info.ifindex = (int32_t)meta->pktinfo_ifindex;
+            memcpy(info.spec_dst, meta->pktinfo.ipv4.local, 4);
+            memcpy(info.addr, meta->pktinfo.ipv4.destination, 4);
+        }
+        memcpy(cmsg_data(cmsg), &info, sizeof(info));
+        used += need;
+    }
+
     if (out->has_pktinfo) {
         size_t need = cmsg_space(sizeof(socket_in6_pktinfo_t));
         if (used + need > mh->msg_controllen)
@@ -396,7 +441,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg->cmsg_len = cmsg_len(sizeof(socket_in6_pktinfo_t));
         socket_in6_pktinfo_t pktinfo = {0};
         if (meta->has_pktinfo) {
-            memcpy(pktinfo.ipi6_addr, meta->pktinfo_addr, sizeof(pktinfo.ipi6_addr));
+            pktinfo6_address(pktinfo.ipi6_addr, meta);
             pktinfo.ipi6_ifindex = meta->pktinfo_ifindex;
         }
         memcpy(cmsg_data(cmsg), &pktinfo, sizeof(pktinfo));
@@ -442,7 +487,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg->cmsg_len = cmsg_len(sizeof(socket_in6_pktinfo_t));
         socket_in6_pktinfo_t pktinfo = {0};
         if (meta->has_pktinfo) {
-            memcpy(pktinfo.ipi6_addr, meta->pktinfo_addr, sizeof(pktinfo.ipi6_addr));
+            pktinfo6_address(pktinfo.ipi6_addr, meta);
             pktinfo.ipi6_ifindex = meta->pktinfo_ifindex;
         }
         memcpy(cmsg_data(cmsg), &pktinfo, sizeof(pktinfo));
@@ -685,7 +730,6 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
                                          vfile_t *pinned_vf)
 {
     if (!mh) return -EFAULT;
-    if (mh->msg_iovlen == 0) return 0;
     vfile_t *sock_vf = pinned_vf;
     net_socket_t *sock = pinned_sock;
     if (sock && sock_vf) {
@@ -702,10 +746,10 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
         return linux_socket_unpin_result(sock, sock_vf, -EMSGSIZE);
 
     size_t iov_bytes = (size_t)mh->msg_iovlen * sizeof(socket_iovec_t);
-    socket_iovec_t *iov = (socket_iovec_t *)kmalloc(iov_bytes);
-    if (!iov)
+    socket_iovec_t *iov = iov_bytes ? (socket_iovec_t *)kmalloc(iov_bytes) : NULL;
+    if (iov_bytes && !iov)
         return linux_socket_unpin_result(sock, sock_vf, -ENOMEM);
-    if (copy_from_user(iov, mh->msg_iov, iov_bytes) < 0) {
+    if (iov_bytes && copy_from_user(iov, mh->msg_iov, iov_bytes) < 0) {
         kfree(iov);
         return linux_socket_unpin_result(sock, sock_vf, -EFAULT);
     }
@@ -718,36 +762,8 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
         }
         total += iov[i].len;
     }
-    if (total == 0) {
-        kfree(iov);
-        /* The former zero-byte branch called sys_sendto(), which performs
-         * this one envelope charge before entering the socket engine. */
-        if (env_active(proc_current())) {
-            int64_t gfd = fdtable_get_current(fd);
-            if (gfd < 0)
-                return linux_socket_unpin_result(sock, sock_vf, gfd);
-            int mr = env_mediate_use_dir((int)gfd, 0, 1);
-            if (mr)
-                return linux_socket_unpin_result(sock, sock_vf, mr);
-        }
-        uint8_t kaddr[NET_SOCKADDR_MAX];
-        const void *ka = NULL;
-        if (mh->msg_name) {
-            if (!mh->msg_namelen || mh->msg_namelen > sizeof(kaddr))
-                return linux_socket_unpin_result(sock, sock_vf, -EINVAL);
-            if (copy_from_user(kaddr, mh->msg_name, mh->msg_namelen) < 0)
-                return linux_socket_unpin_result(sock, sock_vf, -EFAULT);
-            ka = kaddr;
-        }
-        return linux_socket_unpin_result(
-            sock, sock_vf,
-            net_sendto_sock(sock, "", 0, flags, ka, mh->msg_namelen));
-    }
-
-    /* data-plane charge: total iov bytes, write direction (05 §2.5.1).
-     * Zero-length sends fall through sys_sendto above and are charged
-     * there -- this site must stay AFTER that branch to avoid double
-     * op-charging. */
+    /* One data-plane charge for the complete send, including empty UDP
+     * datagrams. Zero payload still carries ancillary and destination state. */
     if (env_active(proc_current())) {
         int64_t sgfd = fdtable_get_current(fd);
         if (sgfd < 0) {
@@ -761,7 +777,7 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
         }
     }
 
-    uint8_t *buf = (uint8_t *)proc_scratch_buffer(total);
+    uint8_t *buf = total ? (uint8_t *)proc_scratch_buffer(total) : (uint8_t *)"";
     if (!buf) {
         kfree(iov);
         return linux_socket_unpin_result(sock, sock_vf, -ENOMEM);
@@ -788,6 +804,8 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
     int old_ttl = 0;
     int old_tclass = 0;
     int have_override = 0;
+    int have_ipv4_control = 0;
+    net_datagram_control_t ipv4_control = {0};
     socket_msghdr_t cmh = *mh;
     void *cbuf = NULL;
 #ifndef CONFIG_LINUX_SCM_RIGHTS_RUST
@@ -805,7 +823,7 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
         cmh.msg_control = cbuf;
         int ttl = 0;
         int tclass = 0;
-        int pr = parse_send_control(&cmh, &ttl, &tclass);
+        int pr = parse_send_control(&cmh, &ttl, &tclass, &ipv4_control, &have_ipv4_control);
         if (pr < 0) {
             kfree(cbuf);
             return linux_socket_unpin_result(sock, sock_vf, pr);
@@ -880,8 +898,8 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
     }
 #endif
     {
-        int64_t r = net_sendto_sock(sock, buf, total, flags, ka,
-                                    mh->msg_namelen);
+        int64_t r = net_sendto_control(sock,buf,total,flags,ka,mh->msg_namelen,
+                                        have_ipv4_control ? &ipv4_control : NULL);
         if (have_override && sock && sock->raw) {
             sock->raw->ttl = old_ttl;
             sock->raw->tos = old_tclass;
@@ -1001,6 +1019,7 @@ static int64_t linux_recvmsg_with_socket_header(
     int sock_domain = sock->domain;
     int sock_passcred = sock->passcred;
     int sock_recv_pktinfo = sock->ipv6_recv_pktinfo;
+    int sock_recv_ipv4_pktinfo = sock->ipv4_recv_pktinfo;
     int sock_recv_hoplimit = sock->ipv6_recv_hoplimit;
     int sock_recv_tclass = sock->ipv6_recv_tclass;
     int sock_recv_2292_pktinfo = sock->ipv6_recv_2292_pktinfo;
@@ -1054,6 +1073,10 @@ static int64_t linux_recvmsg_with_socket_header(
             int want_control = meta.scm_nfiles > 0;
             if (sock_passcred && meta.has_cred)
                 want_control = 1;
+            if (sock_domain == AF_INET && sock_recv_ipv4_pktinfo) {
+                recv_meta.has_ipv4_pktinfo = 1;
+                want_control = 1;
+            }
             if (sock_domain == AF_INET6 &&
                 (sock_recv_pktinfo || sock_recv_hoplimit ||
                  sock_recv_tclass || sock_recv_2292_pktinfo ||
@@ -1103,7 +1126,7 @@ static int64_t linux_recvmsg_with_socket_header(
                 /* Ancillary headers use native size_t on the Linux wire.
                  * Clear alignment padding as well as initializing every field. */
                 memset(cbuf, 0, mh.msg_controllen);
-                if (recv_meta.has_pktinfo || recv_meta.has_hoplimit ||
+                if (recv_meta.has_ipv4_pktinfo || recv_meta.has_pktinfo || recv_meta.has_hoplimit ||
                     recv_meta.has_tclass || recv_meta.has_2292_pktinfo ||
                     recv_meta.has_2292_hoplimit || recv_meta.has_cred) {
                     socket_msghdr_t cmh = mh;

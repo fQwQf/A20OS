@@ -1,8 +1,9 @@
 # IPv4 NAT 状态与使用边界
 
 本轮提供 TCP/UDP 的冲突检测及动态源端口分配、事务式绑定和独立同步。
-这不是软路由整体验收：跨网卡转发、分片 NAT、ICMP 差错翻译、PMTU、LAN DHCP/DNS
-服务仍需后续实现及多节点验证，不能把单网卡 SLIRP 测试当成这些功能的证据。
+这不是软路由整体验收：分片 NAT、ICMP 差错翻译、PMTU 仍未完成。
+跨网卡转发见 [router.md](./router.md)，LAN DHCPv4/DNS A 转发见
+[lan-services.md](./lan-services.md)；各自有独立的多节点功能证据。
 
 ## 配置
 
@@ -59,6 +60,7 @@ python3 tools/check-net-pcap.py <完整、已完成软件校验的Ethernet抓包
 重写测试独立重算校验和：TCP 的零值仍是合法计算结果，必须更新；IPv4 UDP 的原始
 零值表示未启用校验，但变换计算出的零必须编码成 0xffff。
 
-仍未覆盖真实双网卡拓扑、组合 DNAT+SNAT/hairpin、分片、ICMP 差错/PMTU、完整 TCP
+三节点 KVM 已覆盖双网卡拓扑及两个客户端的同源端口冲突。仍未覆盖组合
+DNAT+SNAT/hairpin、分片、ICMP 差错/PMTU、完整 TCP
 状态检查、独立网络域和与本地 socket 端口分配器的统一预留。当前能力不足以承诺
 生产软路由。不要为这些未完成项编写声称可用的部署配置。

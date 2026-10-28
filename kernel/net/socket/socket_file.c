@@ -4,6 +4,7 @@
 #include "proc/userns.h"
 #include "ipc/ipc.h"
 #include "net/lwip_stack.h"
+#include "net/stack.h"
 #include "core/consts.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -368,6 +369,28 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
     struct a20_ifreq ifr;
     if (copy_from_user(&ifr, uarg, sizeof(ifr)) < 0)
         return -EFAULT;
+    ifr.ifr_name[A20_IFNAMSIZ - 1] = 0;
+
+    /* SIOCGIFNAME is indexed by ifr_ifindex; ifr_name is output and may be
+     * uninitialized. Looking it up as an input name broke libc if_indextoname
+     * and applications enumerating rtnetlink address records. Copy a value
+     * under the configuration barrier, then release it before usercopy. */
+    if (req == A20_SIOCGIFNAME) {
+        int index;
+        memcpy(&index, ifr.ifr_ifru.raw, sizeof(index));
+        char name[A20_IFNAMSIZ] = {0};
+        uint64_t lf = a20_lwip_lock();
+        for (struct netif *n = netif_list; n; n = n->next) {
+            if ((int)netif_get_index(n) != index) continue;
+            if (!a20_tun_netif_name(n, name, sizeof(name)))
+                snprintf(name,sizeof(name),"%c%c%u",n->name[0],n->name[1],n->num);
+            break;
+        }
+        a20_lwip_unlock(lf);
+        if (!name[0]) return -ENODEV;
+        memcpy(ifr.ifr_name,name,sizeof(name));
+        return copy_to_user(uarg,&ifr,sizeof(ifr)) < 0 ? -EFAULT : 0;
+    }
 
     struct netif *nif = net_ifreq_lookup(ifr.ifr_name);
     if (!nif)
@@ -431,8 +454,6 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
         return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &idx, sizeof(idx)) < 0
                ? -EFAULT : 0;
     }
-    case A20_SIOCGIFNAME:
-        return 0;
     case A20_SIOCGIFFLAGS: {
         /* Only the 127.0.0.1 netif is a loopback.  Reporting every
          * non-Ethernet interface as IFF_LOOPBACK made a TUN look like "lo"
@@ -538,6 +559,37 @@ static int net_namespace_ioctl(resource_namespace_t *ns, unsigned long req, void
 static int net_vfile_ioctl(vfile_t *vf, unsigned long req, void *arg)
 {
     net_socket_t *s = vf ? vf->priv : NULL;
+    if (req == 0x8955 /* SIOCSARP */) {
+        /* Linux arpreq: three sockaddr values, flags and IFNAMSIZ name.
+         * Support complete dynamic Ethernet neighbors, not permanent/proxy
+         * entries. Names are resolved to values before calling the backend. */
+        struct {
+            uint8_t protocol[16], hardware[16];
+            int flags;
+            uint8_t netmask[16];
+            char device[A20_IFNAMSIZ];
+        } request;
+        if (!s) return -ENOTSOCK;
+        if (!userns_capable(proc_current(), s->net_ns->owner, CAP_NET_ADMIN))
+            return -EPERM;
+        if (!resource_ns_is_initial(s->net_ns)) return -EOPNOTSUPP;
+        if (copy_from_user(&request, arg, sizeof(request)) < 0) return -EFAULT;
+        uint16_t family, hardware;
+        uint32_t address;
+        memcpy(&family, request.protocol, sizeof(family));
+        memcpy(&hardware, request.hardware, sizeof(hardware));
+        memcpy(&address, request.protocol + 4, sizeof(address));
+        if (family != AF_INET || hardware != A20_ARPHRD_ETHER) return -EINVAL;
+        if (request.flags != 2 /* ATF_COM */) return -EOPNOTSUPP;
+        request.device[A20_IFNAMSIZ - 1] = 0;
+        if (!request.device[0]) return -ENODEV;
+        uint64_t lf = a20_lwip_lock();
+        struct netif *n = net_ifreq_lookup(request.device);
+        uint32_t index = n ? netif_get_index(n) : 0;
+        a20_lwip_unlock(lf);
+        if (!index) return -ENODEV;
+        return net_stack_neighbor_update_v4(index, address, request.hardware + 2);
+    }
     if (s && !resource_ns_is_initial(s->net_ns))
         return net_namespace_ioctl(s->net_ns, req, arg);
     if (req == A20_SIOCGIFCONF)

@@ -13,6 +13,10 @@ typedef struct net_stack_ops {
     void (*protocol_progress)(unsigned budget);
     void (*timer_tick)(void);
     int (*work_pending)(void);
+    /* Wire-order IPv4 address, public interface index, Ethernet address.
+     * Dynamic entries use the backend's ordinary neighbor expiry policy. */
+    int (*neighbor_update_v4)(uint32_t ifindex, uint32_t address,
+                              const uint8_t mac[6]);
 } net_stack_ops_t;
 
 /* The selected backend is immutable for this kernel's initial network domain.
@@ -25,5 +29,7 @@ void net_stack_receive_progress(unsigned budget);
 void net_stack_protocol_progress(unsigned budget);
 void net_stack_timer_tick(void);
 int net_stack_work_pending(void);
+int net_stack_neighbor_update_v4(uint32_t ifindex, uint32_t address,
+                                  const uint8_t mac[6]);
 
 #endif

@@ -1,8 +1,41 @@
 /* lwIP owns its execution model. A20OS scheduling only sees bounded protocol
  * progress and pending work, including socket events published by callbacks. */
 #include "net/stack.h"
+#include "core/string.h"
 #include "net/lwip_stack.h"
 #include "net/socket/socket_internal.h"
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
+
+/* Isolated port extension; upstream exposes only permanent insertion. */
+extern err_t a20_etharp_update_dynamic(struct netif *, const ip4_addr_t *,
+                                      struct eth_addr *);
+
+static int neighbor_update_v4(uint32_t ifindex, uint32_t address,
+                               const uint8_t mac[6]) {
+    if (!ifindex || ifindex > 255 || !address || (mac[0] & 1))
+        return -EINVAL;
+    uint8_t any = 0;
+    for (unsigned i = 0; i < 6; ++i) any |= mac[i];
+    if (!any) return -EINVAL;
+    ip4_addr_t ip = { .addr = address };
+    struct eth_addr ethernet;
+    memcpy(ethernet.addr, mac, sizeof(ethernet.addr));
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = netif_get_by_index((u8_t)ifindex);
+    int result = -ENODEV;
+    if (n) {
+        if (!(n->flags & NETIF_FLAG_ETHARP) ||
+            !ip4_addr_net_eq(&ip, netif_ip4_addr(n), netif_ip4_netmask(n)))
+            result = -EINVAL;
+        else {
+            err_t err = a20_etharp_update_dynamic(n, &ip, &ethernet);
+            result = err == ERR_OK ? 0 : err == ERR_MEM ? -ENOMEM : -EINVAL;
+        }
+    }
+    a20_lwip_unlock(flags);
+    return result;
+}
 
 static void protocol_progress(unsigned budget) {
     (void)budget;
@@ -32,4 +65,5 @@ const net_stack_ops_t a20_lwip_stack_ops = {
     .protocol_progress = protocol_progress,
     .timer_tick = timer_tick,
     .work_pending = work_pending,
+    .neighbor_update_v4 = neighbor_update_v4,
 };
