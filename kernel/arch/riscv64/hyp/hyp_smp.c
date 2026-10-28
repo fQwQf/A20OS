@@ -58,3 +58,10 @@ void hyp_riscv_reset(hyp_vcpu_t *vcpu, uint64_t entry, uint64_t hart, uint64_t o
     vcpu->timer_deadline = (uint64_t)-1;
     vcpu->exit = HYP_EXIT_NONE;
 }
+
+/* A guest SFENCE targets VS translations, never the host's satp. */
+void hyp_riscv_local_fence(unsigned kind)
+{
+    if (kind == 0) __asm__ volatile(".word 0x0000100f" ::: "memory");
+    else hyp_arch_host_tlb_fence();
+}

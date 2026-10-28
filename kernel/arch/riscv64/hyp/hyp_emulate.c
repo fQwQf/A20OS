@@ -1,50 +1,17 @@
 /* RISC-V guest instruction, SBI and fault decoding. */
 #include "hyp/hyp_vcpu.h"
+#include "hyp/hyp_sbi.h"
 #include "mm/frame.h"
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/stdio.h"
 #include "core/string.h"
-/*
- * RISC-V H exception codes the run loop acts on.  They are named here rather
- * than taken from kernel/<arch>/include/platform.h because that header
- * publishes the generic ECALL-from-U code but not the VS-mode one, and the
- * guest enters VS-mode with hstatus.SPV=1 (S5), so which of the two it
- * issues is a run-shape decision, not a per-arch header fact.
- *
- * All three ECALL codes are accepted because which one the guest issues
- * depends on the privilege half of the entry, and this run shape enters at
- * privilege S: hyp_vcpu_asm.S sets sstatus.SPP, and SPP is what an ECALL
- * reports against, so a guest entered this way raises 10 (from S-mode) and not
- * 9.  8 (from U-mode) and 9 (from VS-mode proper, i.e. an SPP=0 entry) stay
- * in the table so a guest entered the other way round is still served.
- *
- * The second-stage codes below are the H extension's own, and note what they
- * are NOT: 20 is the instruction guest page fault, 21 the load/AMO one, 22 is
- * the VIRTUAL INSTRUCTION fault and 23 is the store/AMO guest page fault
- * (target/riscv/cpu_bits.h, RISCV_EXCP_*_GUEST_*; QEMU composes htval for all
- * of them in raise_mmu_exception, cpu_helper.c:1773-1810).  A v2 brief that
- * calls 22 a guest page fault would send every trapped guest CSR access --
- * which is what hstatus.VTVM makes of the guest's satp write -- into the
- * demand-fill path and fault it there instead.
- *
- * 22 is the number this platform actually delivers, measured rather than
- * assumed: the boot smoke logs "scause=16" -- which the trace prints with
- * %lx, so that is 0x16 = 22 -- together with stval carrying the instruction
- * encoding (.kernel-build/smoke/hyp-a20os-riscv64.log, trap #0/#1).  stval
- * holds env->bins for exactly two causes in QEMU, illegal instruction and
- * virtual instruction fault (cpu_helper.c:2405-2407), and cause 2 is not
- * what was logged.  Read "16" out of that line as decimal and you would
- * route the guest's satp write nowhere; it is the other half of 0x16.
- *
- * Codes 12/13/15 (the guest's OWN stage-1 faults) are delegated to VS-mode in
- * v2 and therefore cannot reach this loop; they stay below only so that a
- * guest whose delegation is not in force still exits with a recorded cause
- * instead of falling through to "unhandled".
- */
-#define HYP_SCAUSE_ECALL_VU   8ULL
-#define HYP_SCAUSE_ECALL_VS   9ULL
-#define HYP_SCAUSE_ECALL_S   10ULL
+/* Architectural ECALL causes: U=8, HS=9, VS=10. Only VS supervisor
+ * calls are SBI; VU system calls belong to the guest kernel. Guest stage-1
+ * faults are delegated, while G-stage and virtual-instruction traps are ours. */
+#define HYP_SCAUSE_ECALL_U   8ULL
+#define HYP_SCAUSE_ECALL_HS   9ULL
+#define HYP_SCAUSE_ECALL_VS   10ULL
 #define HYP_SCAUSE_FETCH_PF  12ULL
 #define HYP_SCAUSE_LOAD_PF   13ULL
 #define HYP_SCAUSE_STORE_PF  15ULL
@@ -61,206 +28,6 @@ static void hyp_vcpu_record_fault(hyp_vcpu_t *vcpu, uint64_t scause,
     vcpu->exit_stval  = stval;
     vcpu->exit_htval  = htval;
     vcpu->exit        = HYP_EXIT_FAULT;
-}
-
-/* ---- SBI: the closed list of calls this slice serves ----
- *
- * Enumerated from the guest side, not guessed: the riscv64 firmware shim
- * (kernel/arch/riscv64/platform/firmware.c) is the only thing that issues an
- * ecall, and it issues exactly these seven.
- *
- *   a7=0x00 legacy set_timer      firmware.c:39   -> Sstc on this platform,
- *                                                      served through vstimecmp
- *   a7=0x01 console_putchar       firmware.c:43   -> host console
- *   a7=0x02 console_getchar       firmware.c:47   -> never called on riscv64
- *                                                      (only the aarch64
- *                                                      console reads it)
- *   a7=0x08 legacy shutdown       firmware.c:51 is SRST, so this one is dead
- *                                                      code on this platform but
- *                                                      stays for an older guest
- *   a7=0x53525354 SRST shutdown   firmware.c:51 (board poweroff, kernel/main.c)
- *   a7=0x53525354 SRST reset      firmware.c:58
- *   a7=0x735049 IPI / 0x48534d HSM hart_start
- *                                  firmware.c:86/90, called only from
- *                                  CONFIG_NR_CPUS > 1 board code
- *
- * There is NO base-extension probe anywhere in the tree: no sbi_get_version /
- * get_spec_version / get_impl_id, and firmware.h declares no base EID, so the
- * SBI spec version the guest believes it is talking to is whatever the guest
- * assumes.  Nothing to implement, and nothing to advertise.
- */
-#define HYP_SBI_EID_SRST     0x53525354ULL
-#define HYP_SBI_EID_HSM      0x48534dULL
-#define HYP_SBI_EID_IPI      0x735049ULL
-#define HYP_SBI_FID_SRST_RESET 1ULL
-/* SBI error return values (SBI v2.0 spec, the errors a v1 hypervisor may
- * report); delivered in a0 like every SBI return. */
-#define HYP_SBI_ERR_NOT_SUPPORTED (-2)
-
-/* ---- the legacy / v0.2 split, which is a7 and nothing else ----
- *
- * Both conventions put the call selector in a7 and pass their arguments in
- * a0.., and BOTH are issued by the same firmware shim (firmware.c:4-15 builds
- * one ecall for all of them).  They are told apart by the VALUE of a7 alone:
- * the legacy (v0.1) EIDs are the single digits 0x00..0x0F, while every v0.2+
- * extension id is a large ASCII-derived constant -- 0x10 or above -- because
- * the spec reserves the whole 0x10..0x1F band for the base extension and
- * builds everything else out of four characters.
- *
- * This is the split the first version of this dispatcher did not make, and
- * getting it wrong is silent in the worst way: a legacy console_putchar is
- * a7=1/a6=0, which read as a v0.2 call is "extension 1, function 0" -- and
- * extension 1 IS the base extension (putchar is base fid 0x01, not 0), so
- * the guest's very first printchar fell through the whole v0.2 table and
- * exited the run with "guest SBI call eid=1 fid=0 is not implemented"
- * (.kernel-build/smoke/hyp-vcpu-riscv64.log, before this table).
- *
- * So a7 < HYP_SBI_EID_V02_BASE is legacy and takes its argument in a0 with
- * a6 MEANINGLESS (the shim passes fid=0 there for every legacy call too --
- * firmware.c:43, sbi_call(SBI_CONSOLE_PUTCHAR_EID, 0, c, 0, 0)), and only
- * a7 >= HYP_SBI_EID_V02_BASE is a v0.2 extension id whose function is a6. */
-#define HYP_SBI_EID_V02_BASE 0x10ULL
-#define HYP_SBI_LEGACY_SET_TIMER 0x0ULL
-#define HYP_SBI_CONSOLE_GETCHAR  0x02ULL
-
-/* The guest's copy of the Sstc comparator.  Writing it from HS-mode is what
- * "inject VSTIP" means on this platform: QEMU arms the hart's timer against
- * vstimecmp and raises mip.VSTIP when it expires (write_vstimecmp ->
- * riscv_timer_write_timecmp), and with hideleg's STI bit set that is the
- * guest's vsip.STIP, so the interrupt is delivered to VS-mode by hardware and
- * the guest's own trap handler runs it.  The register and its number are the
- * arch half's (hyp_arch_vstimecmp_*), because a generic file cannot hold a CSR
- * number: 0x24d means nothing to an architecture that has no Sstc.
- *
- * This write is only ever reached on a hart that HAS Sstc: the guest reaches
- * legacy set_timer precisely because the DTB it was handed did not advertise
- * sstc (kernel/arch/riscv64/platform/timer.c:30), and the platform that
- * publishes a DTB is the one this hypervisor runs on.  On a hart without Sstc
- * the write below would raise an illegal instruction in HS-mode, which is why
- * this is documented rather than assumed away.
- *
- * The register itself belongs to the arch half: the number 0x24d and the fact
- * that this is the VIRTUAL comparator are RISC-V facts, and a file that has to
- * assemble for architectures with no such CSR cannot hold them. */
-static void hyp_write_vstimecmp(uint64_t deadline)
-{
-    hyp_arch_vstimecmp_set(deadline);
-}
-
-/* Dispatch table.  The legacy half is keyed on a7 alone (a0 is the only
- * argument, a6 is not a function id there); the v0.2 half is keyed on the
- * (a7, a6) pair.  See the split above HYP_SBI_EID_V02_BASE for why a7 alone
- * decides which half a call belongs to.
- *
- *   legacy a7=0x00 set_timer(a0)   arm vstimecmp, return 0, resume
- *   legacy a7=0x01 putchar(a0)      host console, resume
- *   legacy a7=0x02 getchar()        -2, resume (never called on riscv64)
- *   legacy a7=0x08 shutdown()       HYP_EXIT_SHUTDOWN
- *   eid=SRST fid=0  shutdown()      HYP_EXIT_SHUTDOWN
- *   eid=SRST fid=1  reset()         no host reboot hook in this slice: a
- *                                     recorded fault, not a silent success
- *   eid=HSM  fid=0  hart_start()    -2 (see below)
- *   eid=IPI  fid=0  send_ipi()      -2 (see below)
- * Everything else is HYP_EXIT_FAULT with the extension id recorded.
- *
- * hart_start and send_ipi are answered with SBI_ERR_NOT_SUPPORTED rather than
- * faulting because they are reachable only from CONFIG_NR_CPUS > 1 board code
- * (kernel/core/smp.c guards the whole secondary path on it, and the default is
- * 1); a spec error keeps a multi-cpu guest booting single-cpu with the failure
- * printed, where a fault would kill a run that is otherwise fine.  legacy
- * getchar gets the same answer for the same kind of reason: the aarch64
- * console reads it, the riscv64 one does not, and a guest that did call it
- * has to be told "no such call" rather than killed for asking.
- */
-static int hyp_guest_ecall(hyp_vcpu_t *vcpu, uint64_t scause)
-{
-    uint64_t eid = vcpu->regs[17];   /* a7 */
-    uint64_t fid = vcpu->regs[16];   /* a6 -- a function id in v0.2 only */
-
-    if (eid < HYP_SBI_EID_V02_BASE) {
-        switch (eid) {
-        case HYP_SBI_LEGACY_SET_TIMER:
-            hyp_write_vstimecmp(vcpu->regs[10]);
-            vcpu->regs[10] = 0;
-            break;
-        case HYP_SBI_CONSOLE_PUTCHAR:
-            if (hyp_console_putchar(vcpu->vm, (uint8_t)vcpu->regs[10]) == -EAGAIN) {
-                vcpu->exit = HYP_EXIT_YIELD;
-                return 0; /* retry the same ecall after host drains output */
-            }
-            vcpu->regs[10] = 0;    /* the legacy convention's success value */
-            break;
-        case HYP_SBI_CONSOLE_GETCHAR:
-            vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
-            break;
-        case HYP_SBI_SHUTDOWN:
-            vcpu->exit_scause = scause;
-            hyp_vm_shutdown(vcpu->vm);
-            vcpu->exit = HYP_EXIT_SHUTDOWN;
-            return 0;
-        default:
-            /* The legacy list is closed for the same reason the v0.2 one is:
-             * an unknown call is a guest bug, not the next feature here. */
-            kerr("hyp: legacy SBI call %lu is not implemented\n",
-                 (unsigned long)eid);
-            hyp_vcpu_record_fault(vcpu, scause, eid, 0);
-            return 0;
-        }
-        vcpu->pc += 4;   /* sepc past the ecall; arch writes pc back on resume */
-        return 1;
-    }
-
-    if (eid == HYP_SBI_EID_SRST) {
-        if (fid == 0 && vcpu->regs[10] == 0) {
-            vcpu->exit_scause = scause;
-            hyp_vm_shutdown(vcpu->vm);
-            vcpu->exit = HYP_EXIT_SHUTDOWN;
-            return 0;
-        }
-    }
-    int rc = -EOPNOTSUPP;
-    uint64_t result = 0;
-    if (eid == 0x10) {
-        rc = 0;
-        switch (fid) {
-        case 0: result = 2; break; /* SBI 0.2: no unsupported newer HSM promises */
-        case 1: result = 0xa20; break; /* experimental A20 implementation ID */
-        case 2: result = 1; break;
-        case 3: {
-            uint64_t ext = vcpu->regs[10];
-            result = ext == 0x10 || ext == 0x54494d45 || ext == HYP_SBI_EID_IPI ||
-                     ext == HYP_SBI_EID_HSM || ext == 0x52464e43 || ext == HYP_SBI_EID_SRST;
-            break;
-        }
-        case 4: case 5: case 6: result = 0; break;
-        default: rc = -EOPNOTSUPP;
-        }
-    } else if (eid == 0x54494d45 && fid == 0) {
-        hyp_write_vstimecmp(vcpu->regs[10]); rc = 0;
-    } else if (eid == HYP_SBI_EID_HSM) {
-        if (fid == 0)
-            rc = hyp_vm_hart_start(vcpu->vm, vcpu->regs[10], vcpu->regs[11], vcpu->regs[12]);
-        else if (fid == 1) {
-            __atomic_store_n(&vcpu->hart_state, HYP_HART_STOP_PENDING, __ATOMIC_RELEASE);
-            vcpu->exit = HYP_EXIT_HART_STOPPED;
-            return 0;
-        } else if (fid == 2) {
-            rc = hyp_vm_hart_status(vcpu->vm, vcpu->regs[10]);
-            if (rc >= 0) { result = (uint64_t)rc; rc = 0; }
-        }
-    } else if (eid == HYP_SBI_EID_IPI && fid == 0) {
-        rc = hyp_vm_ipi(vcpu->vm, vcpu->regs[10], vcpu->regs[11]);
-    } else if (eid == 0x52464e43 && fid <= 2) {
-        if (fid == 0) __asm__ volatile("fence.i" ::: "memory");
-        else hyp_arch_host_tlb_fence();
-        rc = hyp_vm_fence(vcpu->vm, vcpu->regs[10], vcpu->regs[11], fid == 0 ? 0 : 1);
-    }
-    int64_t error = !rc ? 0 : rc == -EOPNOTSUPP ? -2 : rc == -EINVAL ? -3 :
-                    rc == -EALREADY ? -6 : -1;
-    vcpu->regs[10] = (uint64_t)error;
-    vcpu->regs[11] = result;
-    vcpu->pc += 4;
-    return 1;
 }
 
 /* ---- second-stage faults: what a guest memory access that leaves stage-1
@@ -921,7 +688,7 @@ static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
             old = 0;
         }
         next = src;
-        hyp_write_vstimecmp(next);
+        hyp_arch_vstimecmp_set(next);
     } else {
         /* Every other CSR is a recorded fault, never a silent pass-through:
          * the alternative is to let the guest believe a VS-mode CSR write
@@ -1003,9 +770,9 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
      * ecall causes stay out of both counters below.  Everything else -- page
      * faults, virtual instructions, unhandled causes -- is still traced. */
     uint64_t cause = scause & ~HYP_SCAUSE_INTR_BIT;
-    int traced = (cause != HYP_SCAUSE_ECALL_VU &&
-                  cause != HYP_SCAUSE_ECALL_VS &&
-                  cause != HYP_SCAUSE_ECALL_S);
+    int traced = (cause != HYP_SCAUSE_ECALL_U &&
+                  cause != HYP_SCAUSE_ECALL_HS &&
+                  cause != HYP_SCAUSE_ECALL_VS);
 
     if (traced && vcpu->trap_seen < HYP_TRAP_TRACE_HEAD) {
         kerr("hyp: trap #%lu scause=%lx pc=%lx stval=%lx htval=%lx\n",
@@ -1030,10 +797,8 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
     }
 
     switch (scause & ~HYP_SCAUSE_INTR_BIT) {
-    case HYP_SCAUSE_ECALL_VU:
     case HYP_SCAUSE_ECALL_VS:
-    case HYP_SCAUSE_ECALL_S:
-        return hyp_guest_ecall(vcpu, scause);
+        return hyp_riscv_sbi_ecall(vcpu, scause);
 
     case HYP_SCAUSE_GPF_INST:
     case HYP_SCAUSE_GPF_LOAD:

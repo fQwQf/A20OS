@@ -141,6 +141,8 @@ int hyp_console_write(hyp_vm_t *vm, const uint8_t *data, unsigned len);
 int hyp_console_read(hyp_vm_t *vm, uint8_t *data, unsigned len);
 int hyp_console_pending(hyp_vm_t *vm);
 int hyp_console_putchar(hyp_vm_t *vm, uint8_t ch);
+/* Guest-side input; -EAGAIN when empty. Shared by UART and virtual SBI. */
+int hyp_console_getchar(hyp_vm_t *vm);
 
 /* Feature probe: 1 when the CPU implements the virtualization extension and
  * the arch layer can drive it.  Cheap enough to call per syscall. */

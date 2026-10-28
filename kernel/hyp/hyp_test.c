@@ -149,6 +149,17 @@ fail:
         return;
     }
     printf("HYP_ARCH_TEST: NX+RO PASS\n");
+#ifdef ARCH_HAS_HYP_SBI
+    if (payload->abi_selftest) {
+        if (payload->abi_selftest()) return;
+        hyp_stats_get(&after);
+        if (before.vms != after.vms || before.vcpus != after.vcpus ||
+            before.mapped_pages != after.mapped_pages || before.table_pages != after.table_pages) {
+            printf("HYP_ARCH_TEST: FAIL guest ABI accounting\n");
+            return;
+        }
+    }
+#endif
     /* No voluntary traps: the host timer must preempt a masked guest. */
     if (payload->spin) {
         hyp_vm_t *spin_vm = hyp_vm_create(2ULL << 20);
@@ -300,6 +311,18 @@ static void smp_controller(void)
         if (status || smp_workers[i].rc || vcpu[i]->exit != HYP_EXIT_HART_STOPPED)
             ok = 0;
     }
+#ifdef ARCH_HAS_HYP_SBI
+    if (p->smp_check_offset) {
+        uint32_t value = 0;
+        if (hyp_vm_copy_from_guest(vm, &value, b->ram_base + p->smp_check_offset,
+                                   sizeof(value)) || value != p->smp_check_value) {
+            step = "guest-smp-check";
+            ok = 0;
+            goto out;
+        }
+        printf("HYP_SBI_SMP_TEST: PASS remote-ipi+rfence+hsm\n");
+    }
+#endif
     step = "stopped";
 out:
     for (unsigned i = 0; i < 2; i++) if (vcpu[i]) hyp_vcpu_control(vcpu[i], HYP_CONTROL_STOP);

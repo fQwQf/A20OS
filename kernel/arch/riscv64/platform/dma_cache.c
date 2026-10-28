@@ -20,6 +20,12 @@ extern char riscv_cmo_probe_sync[], riscv_cmo_probe_resume[];
 /* Called only by the architecture's kernel trap entry before generic dispatch.
  * All other illegal instructions, user traps and arbitrary PCs remain fatal. */
 int riscv_c906_cache_probe_fixup(trap_context_t *ctx) {
+#if defined(CONFIG_NR_CPUS) && CONFIG_NR_CPUS != 1
+    /* prepare() disables this single-hart probe in SMP builds, so its inline
+     * assembly labels are not emitted. Do not reference them from the fixup. */
+    (void)ctx;
+    return 0;
+#else
     if (!probe_active || !(ctx->sstatus & (1UL << 8)) || arch_read_cause() != 2)
         return 0;
     uint64_t expected;
@@ -37,6 +43,7 @@ int riscv_c906_cache_probe_fixup(trap_context_t *ctx) {
     probe_failed = 1;
     ctx->sepc = (uintptr_t)riscv_cmo_probe_resume;
     return 1;
+#endif
 }
 
 static int current_cpu_is_c906(const fw_node_t *root) {

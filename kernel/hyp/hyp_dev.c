@@ -367,6 +367,16 @@ static int hyp_uart_pop_rx(hyp_vm_t *vm)
     return c;
 }
 
+#ifdef ARCH_HAS_HYP_SBI
+/* The SBI interface distinguishes empty input from a byte value. Keep the
+ * UART's existing internal return convention and polling path unchanged. */
+int hyp_console_getchar(hyp_vm_t *vm)
+{
+    int c = hyp_uart_pop_rx(vm);
+    return c < 0 ? -EAGAIN : c;
+}
+#endif
+
 /* ---- UART ---- */
 
 static uint8_t hyp_uart_read_reg(hyp_vm_t *vm, uint64_t off, int byte_index)

@@ -2,15 +2,16 @@
  * use Sv32 uint32 descriptors, interrupt scause bit is XLEN-1. Reads use
  * four-byte chunks to avoid crossing a page while decoding the last PTE. */
 #include "hyp/hyp_vcpu.h"
+#include "hyp/hyp_sbi.h"
 #include "mm/frame.h"
 #include "core/cpu.h"
 #include "core/klog.h"
 #include "core/stdio.h"
 #include "core/string.h"
 
-#define HYP_SCAUSE_ECALL_VU   8ULL
-#define HYP_SCAUSE_ECALL_VS   9ULL
-#define HYP_SCAUSE_ECALL_S   10ULL
+#define HYP_SCAUSE_ECALL_U   8ULL
+#define HYP_SCAUSE_ECALL_HS   9ULL
+#define HYP_SCAUSE_ECALL_VS   10ULL
 #define HYP_SCAUSE_FETCH_PF  12ULL
 #define HYP_SCAUSE_LOAD_PF   13ULL
 #define HYP_SCAUSE_STORE_PF  15ULL
@@ -27,112 +28,6 @@ static void hyp_vcpu_record_fault(hyp_vcpu_t *vcpu, uint64_t scause,
     vcpu->exit_stval  = stval;
     vcpu->exit_htval  = htval;
     vcpu->exit        = HYP_EXIT_FAULT;
-}
-
-#define HYP_SBI_EID_SRST     0x53525354ULL
-#define HYP_SBI_EID_HSM      0x48534dULL
-#define HYP_SBI_EID_IPI      0x735049ULL
-#define HYP_SBI_FID_SRST_RESET 1ULL
-
-#define HYP_SBI_ERR_NOT_SUPPORTED (-2)
-
-#define HYP_SBI_EID_V02_BASE 0x10ULL
-#define HYP_SBI_LEGACY_SET_TIMER 0x0ULL
-#define HYP_SBI_CONSOLE_GETCHAR  0x02ULL
-
-static void hyp_write_vstimecmp(uint64_t deadline)
-{
-    hyp_arch_vstimecmp_set(deadline);
-}
-
-static int hyp_guest_ecall(hyp_vcpu_t *vcpu, uint64_t scause)
-{
-    uint64_t eid = vcpu->regs[17];
-    uint64_t fid = vcpu->regs[16];
-
-    if (eid < HYP_SBI_EID_V02_BASE) {
-        switch (eid) {
-        case HYP_SBI_LEGACY_SET_TIMER:
-            hyp_write_vstimecmp((uint32_t)vcpu->regs[10] | ((uint64_t)(uint32_t)vcpu->regs[11] << 32));
-            vcpu->regs[10] = 0;
-            break;
-        case HYP_SBI_CONSOLE_PUTCHAR:
-            if (hyp_console_putchar(vcpu->vm, (uint8_t)vcpu->regs[10]) == -EAGAIN) {
-                vcpu->exit = HYP_EXIT_YIELD;
-                return 0;
-            }
-            vcpu->regs[10] = 0;
-            break;
-        case HYP_SBI_CONSOLE_GETCHAR:
-            vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
-            break;
-        case HYP_SBI_SHUTDOWN:
-            vcpu->exit_scause = scause;
-            hyp_vm_shutdown(vcpu->vm);
-            vcpu->exit = HYP_EXIT_SHUTDOWN;
-            return 0;
-        default:
-
-            kerr("hyp: legacy SBI call %lu is not implemented\n",
-                 (unsigned long)eid);
-            hyp_vcpu_record_fault(vcpu, scause, eid, 0);
-            return 0;
-        }
-        vcpu->pc += 4;
-        return 1;
-    }
-
-    if (eid == HYP_SBI_EID_SRST) {
-        if (fid == 0 && vcpu->regs[10] == 0) {
-            vcpu->exit_scause = scause;
-            hyp_vm_shutdown(vcpu->vm);
-            vcpu->exit = HYP_EXIT_SHUTDOWN;
-            return 0;
-        }
-    }
-    int rc = -EOPNOTSUPP;
-    uint64_t result = 0;
-    if (eid == 0x10) {
-        rc = 0;
-        switch (fid) {
-        case 0: result = 2; break;
-        case 1: result = 0xa20; break;
-        case 2: result = 1; break;
-        case 3: {
-            uint64_t ext = vcpu->regs[10];
-            result = ext == 0x10 || ext == 0x54494d45 || ext == HYP_SBI_EID_IPI ||
-                     ext == HYP_SBI_EID_HSM || ext == 0x52464e43 || ext == HYP_SBI_EID_SRST;
-            break;
-        }
-        case 4: case 5: case 6: result = 0; break;
-        default: rc = -EOPNOTSUPP;
-        }
-    } else if (eid == 0x54494d45 && fid == 0) {
-        hyp_write_vstimecmp((uint32_t)vcpu->regs[10] | ((uint64_t)(uint32_t)vcpu->regs[11] << 32)); rc = 0;
-    } else if (eid == HYP_SBI_EID_HSM) {
-        if (fid == 0)
-            rc = hyp_vm_hart_start(vcpu->vm, vcpu->regs[10], vcpu->regs[11], vcpu->regs[12]);
-        else if (fid == 1) {
-            __atomic_store_n(&vcpu->hart_state, HYP_HART_STOP_PENDING, __ATOMIC_RELEASE);
-            vcpu->exit = HYP_EXIT_HART_STOPPED;
-            return 0;
-        } else if (fid == 2) {
-            rc = hyp_vm_hart_status(vcpu->vm, vcpu->regs[10]);
-            if (rc >= 0) { result = (uint64_t)rc; rc = 0; }
-        }
-    } else if (eid == HYP_SBI_EID_IPI && fid == 0) {
-        rc = hyp_vm_ipi(vcpu->vm, vcpu->regs[10], (uint32_t)vcpu->regs[11] == 0xffffffffU ? (uint64_t)-1 : vcpu->regs[11]);
-    } else if (eid == 0x52464e43 && fid <= 2) {
-        if (fid == 0) __asm__ volatile(".word 0x0000100f" ::: "memory");
-        else hyp_arch_host_tlb_fence();
-        rc = hyp_vm_fence(vcpu->vm, vcpu->regs[10], (uint32_t)vcpu->regs[11] == 0xffffffffU ? (uint64_t)-1 : vcpu->regs[11], fid == 0 ? 0 : 1);
-    }
-    int64_t error = !rc ? 0 : rc == -EOPNOTSUPP ? -2 : rc == -EINVAL ? -3 :
-                    rc == -EALREADY ? -6 : -1;
-    vcpu->regs[10] = (uint64_t)error;
-    vcpu->regs[11] = result;
-    vcpu->pc += 4;
-    return 1;
 }
 
 static int hyp_guest_read_gpa(hyp_vcpu_t *vcpu, uint64_t gpa, uint64_t *out, unsigned count)
@@ -590,7 +485,7 @@ static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
         uint64_t full = hyp_arch_vstimecmp_get();
         next = csr == 0x15d ? ((uint64_t)(uint32_t)src << 32) | (uint32_t)full
                            : (full & 0xffffffff00000000ULL) | (uint32_t)src;
-        hyp_write_vstimecmp(next);
+        hyp_arch_vstimecmp_set(next);
     } else {
 
         kerr("hyp: guest virtual instruction wrote CSR 0x%03x, which this "
@@ -621,9 +516,9 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
         return 1;
 
     uint64_t cause = scause & ~HYP_SCAUSE_INTR_BIT;
-    int traced = (cause != HYP_SCAUSE_ECALL_VU &&
-                  cause != HYP_SCAUSE_ECALL_VS &&
-                  cause != HYP_SCAUSE_ECALL_S);
+    int traced = (cause != HYP_SCAUSE_ECALL_U &&
+                  cause != HYP_SCAUSE_ECALL_HS &&
+                  cause != HYP_SCAUSE_ECALL_VS);
 
     if (traced && vcpu->trap_seen < HYP_TRAP_TRACE_HEAD) {
         kerr("hyp: trap #%lu scause=%lx pc=%lx stval=%lx htval=%lx\n",
@@ -648,10 +543,8 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
     }
 
     switch (scause & ~HYP_SCAUSE_INTR_BIT) {
-    case HYP_SCAUSE_ECALL_VU:
     case HYP_SCAUSE_ECALL_VS:
-    case HYP_SCAUSE_ECALL_S:
-        return hyp_guest_ecall(vcpu, scause);
+        return hyp_riscv_sbi_ecall(vcpu, scause);
 
     case HYP_SCAUSE_GPF_INST:
     case HYP_SCAUSE_GPF_LOAD:

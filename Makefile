@@ -1199,6 +1199,9 @@ BOARD_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)
 # boards or standalone EFI applications now owned by this same arch tree.
 ARCH_KERNEL_C_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -path '*/mcu' -prune -o -type f -name '*.c' -print | sort)
 ARCH_KERNEL_ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -path '*/mcu' -prune -o -type f -name '*.S' -print | sort)
+ifneq ($(filter riscv32 riscv64,$(ARCH)),)
+ARCH_KERNEL_ASM_SRC += $(KERNEL_DIR)/arch/common/riscv/hyp_sbi_payload.S
+endif
 BOARD_DRIVER_DIR = $(BOARD_INCLUDE_DIR)/drivers
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
@@ -2335,7 +2338,14 @@ endif
 include tools/driver-sources.mk
 
 # Shared ISA code is selected here, never by architecture tests in core C.
+ifneq ($(filter riscv32 riscv64,$(ARCH)),)
+ifneq ($(PROFILE),mcu)
+CFLAGS += -DARCH_HAS_HYP_SBI
+endif
+endif
 ARCH_SHARED_SRC_riscv64 := $(KERNEL_DIR)/arch/common/riscv/linux_syscalls.c \
+                          $(KERNEL_DIR)/arch/common/riscv/hyp_sbi.c \
+                          $(KERNEL_DIR)/arch/common/riscv/hyp_sbi_test.c \
                           $(KERNEL_DIR)/arch/common/riscv/kexec.c
 ARCH_SHARED_SRC_riscv32 := $(if $(filter-out mcu,$(PROFILE)),$(ARCH_SHARED_SRC_riscv64))
 
