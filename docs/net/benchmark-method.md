@@ -42,4 +42,41 @@ offload 的相同 virtio 配置。
 TCP路径仍有明显CPU/吞吐和尾延迟差距。这些结果不足以将成本归因于lwIP本体：收发
 复制、socket桥、调度/进展、锁、驱动和VMM都在测量范围内。短UDP的尾延迟比较也不能
 推广到其他负载。该矩阵是后续定位参照，尚缺连接规模、内存回收成本和可运行的BSD
-后端，不能用它提前决定桌面/服务器默认栈。
+后端，不能用它提前决定桌面/服务器默认栈。初步连接规模观测见下文。
+
+## 连接规模与内存观测
+
+`tools/net-connection-probe.c` 编译成同一 Linux ELF，由
+`tools/bench-net-scale-kvm.py` 在 Linux/A20OS KVM 上运行。每个规模重新启动2 vCPU/2GiB
+guest，相同 affinity、virtio 特性、SLIRP 与宿主事件循环 echo peer；没有每连接 fork。
+所有连接保持打开，每条在最终连接数下再次校验唯一 token。分别保存 baseline、held、
+closed、closed_2s 的 guest 内存和网络状态。`--a20-setup` 支持有副本/哈希的配置消融。
+未能保持指定规模时记录已建立数与 errno，整体非零退出，不把部分成功算成通过。
+
+第一轮证据 `build/evidence/net-refactor-20261028/connection-scale2-kvm/`：
+
+| 请求规模 | Linux KVM 校验连接数 | A20OS KVM 校验连接数 | Linux MemFree 减少 KiB | A20OS MemFree 减少 KiB |
+|---:|---:|---:|---:|---:|
+| 64 | 64 | 64 | 296 | 2068 |
+| 256 | 256 | 256 | 1192 | 8608 |
+| 320 | 320 | 256，达到目标失败 | 1632 | 8640 |
+
+这是单次全 guest 内存观测，含启动后台活动与缓存，不能直接除以连接数当作协议栈
+精确分配成本。Linux 个别样本关闭后 MemFree 超过 baseline，说明噪声不可忽略。
+runner 后续默认增加3秒启动等待；上述首轮没有该等待，不将新方法倒写成旧结果。
+2秒关闭观测包含 TIME_WAIT 和 slab 缓存，不能据此宣布泄漏或完全回收。
+
+A20OS 默认配置在256处达到 conntrack 容量。重复样本
+`connection-scale-ct-evidence-kvm` 显示 `ct_capacity=256`、`ct_tracked=256`，第257个连接
+超时；无活跃条目驱逐。同一 ELF/内核/链路，仅 `ctoff`、不配置NAT的消融
+`connection-scale-no-ct2-kvm` 达到并校验320条，说明这个限制来自公共状态表配置，
+不能归因于 lwIP 的 TCP 最大能力。关闭 tracking 不可用作 NAT 软路由的解决方案。
+
+持有256条时 lwIP heap约96KiB，但前端 `net_socket_t` 本身为30624字节，内含16个
+1600字节的 BH inline payload 槽。32KiB级前端对象是需要继续改造的内存成本；切换
+原版 lwIP 不会自动消除它。未来应在明确有界所有权及释放上下文后拆出按需包存储，
+并复测复制成本与低内存背压，而不是为通过规模测试静默放大资源表。
+
+规模失败还暴露出旧统计把 conntrack/NAT 丢包计为 accepted。本轮已改为最终 verdict
+确定后只计一次，并由生产 hook 的进出方向失败用例验证。上述冻结内核在修正前，
+其 accepted/drop 行不可用于推导最终报文损失；原始失败证据保留。
