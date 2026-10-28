@@ -12,7 +12,11 @@
 #define heap_unlock(flags) arch_irq_restore(flags)
 #endif
 
-typedef struct mcu_heap_block {
+#ifndef CONFIG_MCU_HEAP_ALIGNMENT
+#define CONFIG_MCU_HEAP_ALIGNMENT 8U
+#endif
+/* The header and every split must preserve the task stack ABI alignment. */
+typedef struct __attribute__((aligned(CONFIG_MCU_HEAP_ALIGNMENT))) mcu_heap_block {
     size_t size;
     struct mcu_heap_block *next;
     uint32_t free;
@@ -25,13 +29,14 @@ static mcu_heap_block_t *heap_head;
 static uintptr_t heap_start_addr;
 static uintptr_t heap_end_addr;
 
-static size_t align8(size_t value) {
-    return (value + 7U) & ~(size_t)7U;
+static size_t align_heap(size_t value) {
+    return (value + CONFIG_MCU_HEAP_ALIGNMENT - 1U) &
+           ~(size_t)(CONFIG_MCU_HEAP_ALIGNMENT - 1U);
 }
 
 void mcu_heap_init(void) {
-    uintptr_t start = align8((uintptr_t)_heap_start);
-    uintptr_t end = (uintptr_t)_heap_end & ~(uintptr_t)7U;
+    uintptr_t start = align_heap((uintptr_t)_heap_start);
+    uintptr_t end = (uintptr_t)_heap_end & ~(uintptr_t)(CONFIG_MCU_HEAP_ALIGNMENT - 1U);
     heap_start_addr = start;
     heap_end_addr = end;
     heap_head = NULL;
@@ -75,14 +80,14 @@ void mcu_heap_get_stats(mcu_heap_stats_t *stats) {
 }
 
 void *kmalloc(size_t size) {
-    if (size == 0)
+    if (size == 0 || size > SIZE_MAX - (CONFIG_MCU_HEAP_ALIGNMENT - 1U))
         return NULL;
-    size = align8(size);
+    size = align_heap(size);
     uint32_t flags = heap_lock();
     for (mcu_heap_block_t *b = heap_head; b; b = b->next) {
         if (!b->free || b->size < size)
             continue;
-        if (b->size >= size + sizeof(*b) + 8U) {
+        if (b->size >= size + sizeof(*b) + CONFIG_MCU_HEAP_ALIGNMENT) {
             mcu_heap_block_t *tail =
                 (mcu_heap_block_t *)((char *)(b + 1) + size);
             tail->size = b->size - size - sizeof(*tail);

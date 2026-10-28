@@ -127,6 +127,11 @@ def _candidates(inst: Instance, vars_: dict[str, str]) -> list[tuple[str, str]]:
                    ("usb-app-bin", f"{folder}/probe-app.bin"),
                    ("usb-deployer", f"{folder}/deploy-uf2.py"),
                    ("bundle-readme", f"{folder}/README.md")]
+        elif inst.board == "esp32-c3":
+            out += [("rom-image", f"{folder}/a20os.bin"),
+                    ("rom-manifest", f"{folder}/image.json"),
+                    ("bundle-kernel", f"{folder}/kernel.elf"),
+                    ("bundle-readme", f"{folder}/README.md")]
         elif inst.board == "ls2k0300":
             out += [("bundle-kernel", f"{folder}/kernel.elf"),
                     ("bundle-manifest", f"{folder}/image.json"),

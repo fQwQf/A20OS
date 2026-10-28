@@ -46,7 +46,8 @@ PREPARE_TARGETS: Final = {"pine-a64": "pine-a64-prepare",
                           "lichee-pi-zero": "lichee-pi-zero-prepare",
                           "quartz64-zero": "quartz64-zero-prepare",
                           "ox64": "ox64-prepare",
-                          "m0sense-bl702": "m0sense-recovery-assets"}
+                          "m0sense-bl702": "m0sense-recovery-assets",
+                          "esp32-c3": "esp32-c3-prepare"}
 RELEASE_ARCH_ARTIFACTS: Final = {
     "riscv64": ("kernel-rv", "disk.img"),
     "loongarch64": ("kernel-la", "disk-la.img"),
@@ -485,7 +486,7 @@ def applicable_actions(inst: Instance) -> tuple[str, ...]:
         # medium, or a boot chain to hand the kernel to.  Advertising deploy
         # with neither is what left the storage-less SBC ports with a command
         # that built the kernel and then attached to a dead console.
-        if ((inst.target.boot_media and inst.target.media_device)
+        if (inst.flash.tool or (inst.target.boot_media and inst.target.media_device)
                 or (inst.handoff and inst.handoff.commands)
                 or (inst.board == "m0sense-bl702" and inst.package.kind == "kernel-bundle")):
             acts.append("deploy")

@@ -134,7 +134,8 @@ def derive_make_vars(inst: Instance) -> list[str]:
     if fl.adapter_khz is not None:
         v.append(f"STM32_OPENOCD_ADAPTER_KHZ={fl.adapter_khz}")
     if fl.serial is not None:
-        v.append(f"STM32_CMSIS_DAP_SERIAL={fl.serial}")
+        variable = "ESPTOOL_PORT" if fl.tool == "esptool" else "STM32_CMSIS_DAP_SERIAL"
+        v.append(f"{variable}={fl.serial}")
     v.extend(_target_vars(inst.target))
     return v
 

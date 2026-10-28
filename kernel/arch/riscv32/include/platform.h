@@ -1,6 +1,10 @@
 #ifndef _ARCH_RISCV32_PLATFORM_H
 #define _ARCH_RISCV32_PLATFORM_H
 
+#ifdef CONFIG_RISCV_MMODE
+#include "mcu_platform.h"
+#else
+
 #include "core/types.h"
 
 #define PHYS_MEMORY_BASE 0x80000000UL
@@ -89,4 +93,5 @@ extern uint32_t boot_pgdir[1024];
 static inline void arch_unmap_boot_identity(void) {
 }
 
+#endif /* CONFIG_RISCV_MMODE */
 #endif

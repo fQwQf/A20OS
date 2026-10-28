@@ -1,7 +1,11 @@
 #include "drivers/char/uart.h"
 #include "console.h"
 #include "core/arch.h"
+#ifdef CONFIG_MCU_SHARED_KERNEL
 #include "shared_kernel.h"
+#else
+#define MCU_PRIVATE_BSS
+#endif
 
 #define MCU_UART_RX_SIZE 128U
 
@@ -16,6 +20,9 @@ void uart_init(void) {
 }
 
 void uart_putc(char c) { arch_uart_putc(c); }
+void uart_write(const char *data, size_t length) {
+    for (size_t i = 0; i < length; i++) arch_uart_putc(data[i]);
+}
 
 void uart_receive_char(char c) {
     unsigned next = (uart_rx_head + 1U) % MCU_UART_RX_SIZE;

@@ -1,6 +1,10 @@
 #ifndef _ARCH_RISCV32_CPU_H
 #define _ARCH_RISCV32_CPU_H
 
+#ifdef CONFIG_RISCV_MMODE
+#include "mcu_cpu.h"
+#else
+
 #include "core/types.h"
 #include "platform.h"
 
@@ -188,4 +192,5 @@ static inline int arch_unwind_frames(uint64_t fp, struct backtrace_frame *frames
     }
     return n;
 }
+#endif /* CONFIG_RISCV_MMODE */
 #endif

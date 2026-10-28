@@ -18,6 +18,8 @@
 #define A20_EXEC_ABI_LA64_DOUBLE 7u
 #define A20_EXEC_ABI_LA32_SOFT 8u
 #define A20_EXEC_ABI_PPC64_ELFV2 9u
+#define A20_EXEC_ABI_RV32_SOFT 10u
+#define A20_EXEC_ABI_MAX A20_EXEC_ABI_RV32_SOFT
 #define A20_EXEC_THREAD_BASIC 1u
 #define A20_EXEC_NATIVE_IMAGE 2u
 #define A20_EXEC_HANDLES 4u
@@ -50,7 +52,7 @@ static inline int a20_execution_valid(const a20_execution_info_t *i) {
         (i->pointer_bits != 32 && i->pointer_bits != 64) ||
         (i->byte_order != A20_EXEC_LITTLE_ENDIAN &&
          i->byte_order != A20_EXEC_BIG_ENDIAN) ||
-        !i->calling_abi || i->calling_abi > A20_EXEC_ABI_PPC64_ELFV2 ||
+        !i->calling_abi || i->calling_abi > A20_EXEC_ABI_MAX ||
         !i->native_major || i->features & ~A20_EXEC_FEATURE_MASK ||
         (i->memory_model != A20_EXEC_MEMORY_FLAT &&
          i->memory_model != A20_EXEC_MEMORY_PRIVATE_VM) ||
@@ -58,8 +60,8 @@ static inline int a20_execution_valid(const a20_execution_info_t *i) {
          i->atomic_model != A20_EXEC_ATOMIC_FABRIC_GATE))
         return 0;
     static const uint32_t machines[] = {0,  62, 183, 243, 243,
-                                        40, 40, 258, 258, 21};
-    static const uint32_t widths[] = {0, 64, 64, 64, 32, 32, 32, 64, 32, 64};
+                                        40, 40, 258, 258, 21, 243};
+    static const uint32_t widths[] = {0, 64, 64, 64, 32, 32, 32, 64, 32, 64, 32};
     if (i->elf_machine != machines[i->calling_abi] ||
         i->pointer_bits != widths[i->calling_abi] ||
         ((i->features & A20_EXEC_WIDE_ARGS) && i->pointer_bits != 64))

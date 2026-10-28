@@ -89,7 +89,7 @@ static inline int a20_app_manifest_header(char *line,
         a20_app_decimal(words[5], &v->byte_order) ||
         (v->byte_order != 1 && v->byte_order != 2) ||
         a20_app_decimal(words[6], &v->calling_abi) || !v->calling_abi ||
-        v->calling_abi > A20_EXEC_ABI_PPC64_ELFV2 ||
+        v->calling_abi > A20_EXEC_ABI_MAX ||
         a20_app_decimal(words[7], &v->required_features) ||
         v->required_features & ~A20_EXEC_FEATURE_MASK)
         return -1;

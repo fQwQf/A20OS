@@ -27,3 +27,9 @@ boards = ["stm32f103"]
 flash_kb = 512
 ram_kb = 64
 make_target = "flash-xuanwu-openocd"
+
+[[backend]]
+name = "esptool"
+description = "ESP32-C3 ROM serial programmer with detected flash geometry"
+boards = ["esp32-c3"]
+make_target = "flash-esp32-c3"

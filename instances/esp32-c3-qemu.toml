@@ -1,0 +1,17 @@
+name = "esp32-c3-qemu"
+description = "ESP32-C3 SoC emulation with Espressif QEMU; direct ELF kernel regression"
+arch = "riscv32"
+board = "esp32-c3"
+abi = "native"
+[kernel]
+profile = "mcu"
+nommu = true
+bringup = true
+[machine]
+smp = 1
+memory = "400K"
+[test]
+timeout = "5s"
+input_delay = 1
+commands = ["info", "heap", "ticks", "test"]
+expect = ["preemption=irq-return", "A20OS MCU READY", "board=esp32-c3 arch=riscv32 mode=M", "heap free=", "hz=1000", "[MCU TEST] PASS"]
