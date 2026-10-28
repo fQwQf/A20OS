@@ -1545,16 +1545,17 @@ void net_inet_bottom_half_process_all(void)
              * own lock.  Before, one pending socket's wake drain held the whole
              * 512-slot bucket, so every other socket in it queued behind it. */
             uint64_t irq = net_sock_lock(s);
+            /* Consume the notification before observing producer state. A
+             * callback racing with the drain must leave a new mark behind;
+             * clearing afterwards could strand the final receive forever. */
+            __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
+            net_bh_slot_clear(i);
             if (net_socket_is_live(s)) {
                 drain = net_inet_bottom_half_process_socket_locked(
                     s, &wake_q, &accept_pending);
                 if (accept_pending)
                     net_socket_ref(s);
-                __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
-            } else {
-                __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
             }
-            net_bh_slot_clear(i);
             net_sock_unlock(s, irq);
         }
         a20_net_bh_reclaim_spills(s);
@@ -1564,7 +1565,6 @@ void net_inet_bottom_half_process_all(void)
             drain |= NET_BH_DRAIN_ACCEPT;
         if (accept_pending)
             net_socket_free(s);
-        net_socket_free(s);
         (void)proc_wake_q_flush(&wake_q);
         if (drain & NET_BH_DRAIN_READ)
             (void)wait_queue_wake_all(
@@ -1575,6 +1575,8 @@ void net_inet_bottom_half_process_all(void)
         if (drain & NET_BH_DRAIN_ACCEPT)
             (void)wait_queue_wake_all(
                 &s->accept_waitq, 0, PROC_WAKE_EVENT);
+        /* Wait queues belong to s; retain our walk reference through wakeup. */
+        net_socket_free(s);
     }
 }
 

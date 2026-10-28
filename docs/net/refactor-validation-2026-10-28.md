@@ -54,3 +54,13 @@ netlink状态机测试通过；x86_64/2CPU/4lane内核编译通过。
 路由/规则的新增、dump、策略查询、删除，串口有 `NET_CONTROL_KVM_PASS`。此前3个
 失败候选保留，分别暴露write路径、规则删除、路由删除的ABI差异。此为控制面验证，
 不代表双网卡转发、IPv6路由或NAT的验收。使用和限制见 `routing.md`。
+
+## bottom half 通知与引用生命周期
+
+新增确定性用例在最终空队列观察后模拟一次并发发布，验证 pending 必须保留到下一轮；
+14项 socket INET bottom-half 宿主测试通过。消费通知提前到 drain 前，避免抹掉并发
+发布；全表 drain 的 walk 引用延后到所有 wait_queue 唤醒之后释放。
+
+含本修复及正在验收的NAT事务改造的 `kernel-napt-bh.elf`，在实际改端口SNAT下完成
+TCP16KiB与UDP64B全部payload校验（`napt-bh-kvm`）。此前修复时钟/校验和之后仍存在
+的长流停滞样本保留；这个集成样本不是隔离的性能A/B实验。
