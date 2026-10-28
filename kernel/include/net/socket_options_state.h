@@ -40,6 +40,7 @@
 #define NET_OPT_REPORT_CRED    2
 #define NET_OPT_REPORT_TIMEVAL 3
 #define NET_OPT_REPORT_PIDFD   4
+#define NET_OPT_REPORT_TIMEVAL64 5
 
 typedef struct net_opt_report {
     int32_t  kind;

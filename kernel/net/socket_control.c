@@ -809,6 +809,12 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         *optlen = sizeof(cred);
         return 0;
     }
+    case NET_OPT_REPORT_TIMEVAL64: {
+        int64_t tv[2] = { rep.val0, rep.val1 };
+        if (rep.len) memcpy(optval, tv, rep.len);
+        *optlen = rep.len;
+        return 0;
+    }
     case NET_OPT_REPORT_TIMEVAL: {
         long tv[2] = { (long)rep.val0, (long)rep.val1 };
         if (rep.len)

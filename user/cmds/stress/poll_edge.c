@@ -17,6 +17,17 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+
+#if defined(SYS_pselect6_time64) && !defined(SYS_pselect6)
+#define A20_SYS_pselect6 SYS_pselect6_time64
+#else
+#define A20_SYS_pselect6 SYS_pselect6
+#endif
+#if defined(SYS_ppoll_time64) && !defined(SYS_ppoll)
+#define A20_SYS_ppoll SYS_ppoll_time64
+#else
+#define A20_SYS_ppoll SYS_ppoll
+#endif
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -162,12 +173,12 @@ static int test_select_semantics(void)
         return fail("select negative tv_sec", errno);
 
     struct timespec nts = { .tv_sec = -1, .tv_nsec = 0 };
-    long r = syscall(SYS_pselect6, 0, NULL, NULL, NULL, &nts, NULL);
+    long r = syscall(A20_SYS_pselect6, 0, NULL, NULL, NULL, &nts, NULL);
     if (r != -1 || errno != EINVAL)
         return fail("pselect6 negative tv_sec", r);
     nts.tv_sec = 0;
     nts.tv_nsec = 1000000000L;
-    r = syscall(SYS_pselect6, 0, NULL, NULL, NULL, &nts, NULL);
+    r = syscall(A20_SYS_pselect6, 0, NULL, NULL, NULL, &nts, NULL);
     if (r != -1 || errno != EINVAL)
         return fail("pselect6 tv_nsec=1e9", r);
 
@@ -176,14 +187,14 @@ static int test_select_semantics(void)
     sigemptyset(&mask);
     struct { void *ss; size_t ss_len; } blob = { &mask, 4 };
     struct timespec zts = { .tv_sec = 0, .tv_nsec = 0 };
-    r = syscall(SYS_pselect6, 0, NULL, NULL, NULL, &zts, &blob);
+    r = syscall(A20_SYS_pselect6, 0, NULL, NULL, NULL, &zts, &blob);
     if (r != -1 || errno != EINVAL)
         return fail("pselect6 sigsetsize", r);
 
-    r = syscall(SYS_ppoll, NULL, 0, &nts, &mask, 8);
+    r = syscall(A20_SYS_ppoll, NULL, 0, &nts, &mask, 8);
     if (r != -1 || errno != EINVAL)
         return fail("ppoll negative tv_sec", r);
-    r = syscall(SYS_ppoll, NULL, 0, &zts, &mask, 4);
+    r = syscall(A20_SYS_ppoll, NULL, 0, &zts, &mask, 4);
     if (r != -1 || errno != EINVAL)
         return fail("ppoll sigsetsize", r);
 

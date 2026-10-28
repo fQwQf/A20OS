@@ -3,6 +3,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include "../linux_sched.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -214,7 +215,7 @@ static int rt_permission_limits(void)
         if (setrlimit(RLIMIT_RTPRIO, &limit) || setuid(1000))
             _exit(fail("rt-limit-setup"));
         errno = 0;
-        if (sched_setscheduler(0, SCHED_FIFO, &param) != -1 || errno != EPERM)
+        if (a20_linux_sched_setscheduler(0, SCHED_FIFO, &param) != -1 || errno != EPERM)
             _exit(fail("rt-zero-limit-entry"));
         limit.rlim_cur = 10;
         if (setrlimit(RLIMIT_RTPRIO, &limit))
@@ -229,13 +230,13 @@ static int rt_permission_limits(void)
             _exit(fail("rt-hard-raise"));
         param.sched_priority = 11;
         errno = 0;
-        if (sched_setscheduler(0, SCHED_FIFO, &param) != -1 || errno != EPERM)
+        if (a20_linux_sched_setscheduler(0, SCHED_FIFO, &param) != -1 || errno != EPERM)
             _exit(fail("rt-over-limit"));
         param.sched_priority = 10;
-        if (sched_setscheduler(0, SCHED_FIFO, &param))
+        if (a20_linux_sched_setscheduler(0, SCHED_FIFO, &param))
             _exit(fail("rt-within-limit"));
         param.sched_priority = 0;
-        if (sched_setscheduler(0, SCHED_OTHER, &param))
+        if (a20_linux_sched_setscheduler(0, SCHED_OTHER, &param))
             _exit(fail("rt-limit-restore"));
         _exit(0);
     }
