@@ -1802,11 +1802,10 @@ void a20_lwip_rx_progress(unsigned budget) {
     }
     if (need_lock) {
         uint64_t flags = a20_lwip_ingress_lock();
-#if CONFIG_NET_LANES > 1
-        a20_lwip_poll_rx_locked(budget);
-#else
-        a20_lwip_poll_locked();
+#if CONFIG_NET_LANES == 1
+        a20_lwip_poll_timers_locked();
 #endif
+        a20_lwip_poll_rx_locked(budget);
         a20_lwip_ingress_unlock(flags);
     } else {
         a20_perf_count(A20_PERF_NET_POLL_SKIPPED);
