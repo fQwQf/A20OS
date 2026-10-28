@@ -84,3 +84,13 @@ filter生产hook验证NAT失败会DROP；C与Rust重写实现各通过47项独�
 10.26/11.76/11.51MiB/s，UDP64B全部payload校验通过；三份完整pcap的IPv4/TCP/UDP
 校验均无错误。CPU口径为全QEMU进程，请勿解释为guest-only周期计数。此处不作严格
 性能非劣性判断，也不以SLIRP结果宣称已完成LAN→WAN转发或成熟软路由。
+
+## 配置与基线复测
+
+`NET_LANES=1/4`、`NR_CPUS=2`均编译通过。单lane进展入口现在保留timer推进且实际
+传递RX预算，修复此前budget未使用的编译错误；`single-lane-kvm`改端口TCP/UDP校验通过。
+
+补齐CPU成本口径、配置脚本副本/哈希、pcap和失败case非零退出后，又显式统一关闭双方
+virtio checksum/segmentation卸载特性，完成3轮交替顺序的宿主Linux/Linux KVM/A20OS KVM
+对照，18个case全部校验通过。数据与方法见 `benchmark-method.md`。连接规模、内存成本
+和BSD运行后端尚未完成；原版lwIP尚未替换，不能宣称整个重构/软路由任务已经验收。
