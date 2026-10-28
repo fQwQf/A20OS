@@ -368,7 +368,7 @@ def cross_check_flash_targets(entries: tuple[FlashBackend, ...], repo_root: Path
 # ---------------------------------------------------------------------------
 
 _TRIM_PROFILE_KEYS: Final = {"description": "str", "arches": "str_list",
-                             "opt": "str", "cppflags": "str_list",
+                             "boards": "str_list", "opt": "str", "cppflags": "str_list",
                              "nommu": "bool", "bringup": "bool",
                              "sources": "str_list"}
 _TRIM_CAPABILITY_KEYS: Final = {"description": "str", "arches": "str_list",
@@ -396,12 +396,16 @@ A20_VALIDATED_ONLY_CAPABILITIES: Final = ("ramfs-user",)
 class TrimProfile:
     name: str
     arches: tuple[str, ...]
+    boards: tuple[str, ...]
     opt: str | None
     cppflags: tuple[str, ...]
     sources: tuple[str, ...]
     nommu: bool
     bringup: bool
     description: str | None
+
+    def matches(self, arch: str, board: str) -> bool:
+        return arch in self.arches or f"{arch}/{board}" in self.boards
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,6 +535,7 @@ def load_trim_registry(repo_root: Path) -> TrimRegistry:
         profiles[name] = TrimProfile(
             name=name,
             arches=_str_list(fields, "arches"),
+            boards=_str_list(fields, "boards"),
             opt=_str(fields, "opt"),
             cppflags=_str_list(fields, "cppflags"),
             sources=_str_list(fields, "sources"),
@@ -562,8 +567,14 @@ def validate_trim_registry(reg: TrimRegistry, repo_root: Path) -> list[str]:
             e.append(f"capability '{name}': required by the Makefile's gates but not declared")
 
     for p in reg.profiles.values():
-        if not p.arches:
-            e.append(f"profile '{p.name}': arches must be a non-empty string list")
+        if not p.arches and not p.boards:
+            e.append(f"profile '{p.name}': arches or boards must be a non-empty string list")
+        for board in p.boards:
+            parts = board.split("/")
+            if (len(parts) != 2 or parts[0] not in KNOWN_ARCHES or
+                    any(part in ("", ".", "..") for part in parts) or
+                    not (repo_root / "kernel/arch" / board.replace("/", "/boards/", 1)).is_dir()):
+                e.append(f"profile '{p.name}': invalid arch/board selector '{board}'")
         for arch in p.arches:
             if arch not in KNOWN_ARCHES:
                 e.append(f"profile '{p.name}': unknown arch '{arch}'")
@@ -622,6 +633,7 @@ def render_trim_fragment(reg: TrimRegistry) -> str:
         p = reg.profiles[name]
         n = _make_symbol(name)
         lines.append(f"TRIM_PROFILE_{n}_ARCHES := {' '.join(p.arches)}")
+        lines.append(f"TRIM_PROFILE_{n}_BOARDS := {' '.join(p.boards)}")
         lines.append(f"TRIM_PROFILE_{n}_OPT := {p.opt or ''}")
         lines.append(f"TRIM_PROFILE_{n}_CPPFLAGS := {' '.join(p.cppflags)}")
         lines.append(f"TRIM_PROFILE_{n}_SOURCES := {' '.join(p.sources)}")
@@ -672,6 +684,8 @@ def cross_check_trim_consumers(reg: TrimRegistry, repo_root: Path) -> list[str]:
         n = _make_symbol(name)
         required = [f"TRIM_PROFILE_{n}_ARCHES", f"TRIM_PROFILE_{n}_OPT",
                     f"TRIM_PROFILE_{n}_CPPFLAGS", f"TRIM_PROFILE_{n}_SOURCES"]
+        if p.boards:
+            required.append(f"TRIM_PROFILE_{n}_BOARDS")
         if p.nommu:
             required.append(f"TRIM_PROFILE_{n}_FORCE_NOMMU")
         if p.bringup:
@@ -702,11 +716,10 @@ def plan_trim(inst: Instance, reg: TrimRegistry) -> list[TrimDecision]:
     k = inst.kernel
 
     mcu = reg.profiles.get("mcu")
-    mcu_arches = mcu.arches if mcu else ()
-    profile_forced = inst.arch in mcu_arches
+    profile_forced = bool(mcu and mcu.matches(inst.arch, inst.board))
     if profile_forced:
         profile_name = "mcu"
-        detail = f"implied by arch {inst.arch} ([profile.mcu].arches)"
+        detail = f"implied by platform {inst.arch}/{inst.board} ([profile.mcu] selectors)"
     else:
         profile_name = k.profile or "full"
         detail = "instance default" if k.profile is None else "requested by kernel.profile"

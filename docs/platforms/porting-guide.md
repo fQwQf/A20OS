@@ -22,7 +22,7 @@ const board_config_t *const current_board;
 
 架构入口会使用 `board_boot.h`、`board_console.h` 等可选板级头文件。添加板配置时必须核对 Image header、链接地址、初始映射、UART 协议和固件参数是否真正被启动代码采用；不能只看 `board.c` 中的设备表。
 
-若目标属于新的构建档位，在 `components/trim.toml` 中调整 `[profile.mcu].arches` 或 `[capability.*]` 矩阵，再执行 `make regen-trim-fragment` 和 `make check-trim-registry`。该注册表描述裁剪能力，不代替引脚、时钟和内存布局。
+若目标属于新的构建档位，在 `components/trim.toml` 中调整 `[profile.mcu].arches`（整架构）、`.boards`（`arch/board` 单板选择）或 `[capability.*]` 矩阵，再执行 `make regen-trim-fragment` 和 `make check-trim-registry`。该注册表描述裁剪能力，不代替引脚、时钟和内存布局。
 
 `board_config_t` 当前包含 RAM 描述、irqchip、timer、SMP、early init、电源控制和设备枚举。新增字段必须确认存在真实调用方，不能只增加未接通的操作表。
 
@@ -103,3 +103,16 @@ make check-concurrency-foundation
 5. 恢复方法、缺失驱动与操作限制；尚不可部署时，明确列出阻断和当前可运行的构建/检查入口。
 
 正文记录操作系统的现状与可重复操作，不记录工作过程、某位开发者的主机路径、逐日进度或一次性跑测叙述。源码链接和通用指南是补充材料，不能代替本页的必要命令。运行日志留在构建输出，动态产物哈希由实例账本生成；平台页只说明如何获得和判断它们。
+
+## RV32 MCU 执行环境
+
+已有 RV32 MCU 板可以复用 `kernel/arch/riscv32/mcu/` 和 `tools/riscv-mcu.mk`，
+由板级 `board.mk` 显式选择这组入口，不能把 hosted S-mode 启动或 SBI/PLIC 路径混入固件。
+板级提供 `board_config.h`、链接布局及 `mcu.h` 声明的定时/IRQ/复位接口；共享设备寄存器
+协议放在 `kernel/drivers/`。`.boards` 裁剪选择不会把同架构下的 QEMU hosted 内核强制成 MCU。
+软原子运行时仅适用于单核，任务栈及堆须满足 RV32 的 16 字节 ABI 对齐。
+RV32 MCU 可以复用通用 IRQ 返回点抢占机制；ARMv7-M 继续使用其 PendSV 机制。
+
+新 MCU 板的验收应包括不主动 yield 的忙循环与另一个任务同时取得进展，
+以及从实际部署格式经 ROM/固件加载的启动测试。只有计数器增长或一个内核打印不能证明调度中断有效。
+参考 [ESP32-C3](esp32-c3.md) 的完整构建、打包、模拟与实机验收流程。

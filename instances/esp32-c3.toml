@@ -1,0 +1,23 @@
+name = "esp32-c3"
+description = "ESP32-C3 RV32IMC M-mode MCU kernel; UART0 console; hardware validation pending"
+arch = "riscv32"
+board = "esp32-c3"
+abi = "native"
+[kernel]
+profile = "mcu"
+bringup = true
+nommu = true
+[machine]
+smp = 1
+[package]
+kind = "kernel-bundle"
+[flash]
+tool = "esptool"
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_timeout = "20s"
+console_check = ["A20OS MCU READY"]
+commands = ["info", "heap", "test"]
+expect = ["board=esp32-c3", "heap free=", "[MCU TEST] PASS"]
+log = ".kernel-build/esp32-c3/console.log"

@@ -30,9 +30,11 @@
 # ARCH in this list gets PROFILE forced to the profile name, and each
 # `nommu` / `bringup` implication is forced on with it.  Adding a second
 # MCU-class architecture is therefore one TOML edit, not a Makefile patch.
+# `boards` selects individual arch/board pairs without forcing sibling boards.
 [profile.mcu]
-description = "Small-memory NOMMU firmware profile (STM32-class Cortex-M)"
+description = "Small-memory NOMMU firmware profile (Cortex-M and RV32 M-mode)"
 arches = ["armv7m"]
+boards = ["riscv32/esp32-c3", "riscv32/qemu-virt-riscv32-mcu"]
 opt = "-Os"
 cppflags = ["-DCONFIG_MCU", "-DCONFIG_KLOG_BUF_SIZE=256"]
 nommu = true
@@ -40,12 +42,14 @@ bringup = true
 sources = [
     "kernel/mcu/uart.c",
     "kernel/mcu/heap.c",
+    "kernel/mcu/heap_default.c",
     "kernel/mcu/mcu_stubs.c",
     "kernel/mcu/leaf.c",
     "kernel/core/printf.c",
     "kernel/core/string.c",
     "kernel/core/panic.c",
     "kernel/core/sync.c",
+    "kernel/core/preempt.c",
     "kernel/core/smp.c",
     "kernel/core/shared_fabric.c",
     "kernel/core/fabric_atomics.c",

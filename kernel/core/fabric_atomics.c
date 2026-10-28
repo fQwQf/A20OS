@@ -1,4 +1,12 @@
-#ifdef CONFIG_SHARED_FABRIC_ATOMICS
+#if defined(CONFIG_SHARED_FABRIC_ATOMICS) || defined(CONFIG_UP_SOFT_ATOMICS)
+#ifdef CONFIG_UP_SOFT_ATOMICS
+#include "core/cpu.h"
+#if CONFIG_NR_CPUS != 1
+#error Software IRQ atomics require exactly one CPU
+#endif
+static uintptr_t atomic_begin(void) { return arch_irq_save(); }
+static void atomic_end(uintptr_t token) { arch_irq_restore(token); }
+#else
 #include "core/shared_fabric.h"
 
 static uintptr_t atomic_begin(void) {
@@ -13,6 +21,8 @@ static void atomic_end(uintptr_t token) {
                                token))
         arch_shared_fabric_stop();
 }
+
+#endif
 
 /* GCC's intrinsic CAS takes weak, but its size-specific runtime libcall ABI
  * omits that argument. Bind a separate C name to the ABI symbol to avoid the

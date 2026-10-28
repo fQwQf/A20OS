@@ -83,7 +83,7 @@ board = "qemu-virt-riscv64"  # 可选；默认 qemu-virt-<arch>（armv7m 默认 
 abi = "both"                 # linux | native | both
 
 [kernel]
-profile = "full"             # full | benchmark | mcu（mcu 仅限 [profile.mcu].arches 里的架构，现即 armv7m）
+profile = "full"             # full | benchmark | mcu（mcu 按 [profile.mcu].arches 或 .boards 选择）
 opt = "-O3"
 user_opt = "-O3"
 bringup = false              # true = 只编译内核，不组文件系统镜像
@@ -216,7 +216,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `rootfs.drivers` | `DRIVER_SELECTION`（自动补 `.a20drv` 后缀） |
 | `test.timeout` / `input_delay` | `SMOKE_TIMEOUT` / `SMOKE_INPUT_DELAY` |
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
-| `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
+| `flash.interface` / `transport` / `adapter_khz` / `serial` | OpenOCD：`STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL`；esptool 的 `serial` → `ESPTOOL_PORT` |
 | `target.serial` / `boot_media` / `media_device` | `TARGET_SERIAL` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` |
 
 `kernel.virtio_console_*` 是驱动构建配置：`throughput` 默认保持吞吐配置，
@@ -638,7 +638,8 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 
 ```toml
 [profile.mcu]                # MCU 级构建 profile
-arches = ["armv7m"]          # 列在里面的 ARCH 会被强制进该 profile（含下面的隐含开关）
+arches = ["armv7m"]          # 整架构强制选择
+boards = ["riscv32/esp32-c3", "riscv32/qemu-virt-riscv32-mcu"] # 仅这些板选择 MCU；其他 RV32 保持完整档位
 opt = "-Os"
 cppflags = ["-DCONFIG_MCU", "-DCONFIG_KLOG_BUF_SIZE=256"]
 nommu = true                 # profile 隐含 NOMMU=1

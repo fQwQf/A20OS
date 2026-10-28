@@ -14,9 +14,9 @@ RUST_DEBUG_INFO := $(if $(findstring -g,$(OPT)),2,0)
 # a matching soft-float core to keep NEON out of kernel Rust code. These
 # custom core builds are opt-in with their Rust selectors; C-only profiles do
 # not require rust-src or Cargo.
-RUST_RV32_TARGET := $(abspath tools/rust-targets/riscv32imafdc-a20.json)
+RUST_RV32_TARGET_NAME := $(if $(filter mcu,$(PROFILE)),riscv32imc-a20,riscv32imafdc-a20)
+RUST_RV32_TARGET := $(abspath tools/rust-targets/$(RUST_RV32_TARGET_NAME).json)
 RUST_RV32_SYSROOT := $(BUILD_DIR)/rust/rv32-sysroot
-RUST_RV32_TARGET_NAME := riscv32imafdc-a20
 RUST_RV32_CARGO_TARGET_DIR := $(BUILD_DIR)/rust/rv32-core-cargo
 RUST_RV32_CORE_LIBDIR := $(RUST_RV32_SYSROOT)/lib/rustlib/$(RUST_RV32_TARGET_NAME)/lib
 RUST_RV32_CORE_FLAGS := $(BUILD_DIR)/rust/.rv32-core-flags

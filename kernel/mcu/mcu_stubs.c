@@ -285,7 +285,7 @@ void vfile_free(vfile_t *vf) {
 }
 #endif
 
-#ifndef CONFIG_MCU_SHARED_KERNEL
+#if !defined(CONFIG_MCU_SHARED_KERNEL) && !defined(CONFIG_UP_SOFT_ATOMICS)
 /* 64-bit atomic helpers required by Cortex-M3 (no native 8-byte atomics). */
 uint64_t __atomic_load_8(const volatile void *ptr, int memorder) {
     (void)memorder;

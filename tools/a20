@@ -30,6 +30,7 @@ See docs/dev/instances.md for the manifest reference.
 from __future__ import annotations
 
 import argparse
+import shlex
 import difflib
 import re
 import sys
@@ -357,6 +358,9 @@ def cmd_console(args: argparse.Namespace) -> int:
                             "commands and expect")
     if getattr(args, "serial", None):
         inst = replace(inst, target=replace(inst.target, serial=args.serial))
+    if inst.board == "esp32-c3" and not args.no_reset and not inst.target.reset:
+        inst = replace(inst, target=replace(inst.target, reset=
+            "python3 tools/esp32c3.py reset --port " + shlex.quote(inst.target.serial or "auto")))
     if args.no_reset:
         inst = replace(inst, target=replace(inst.target, reset=None))
     auto_handoff = getattr(args, "auto_handoff", False)
@@ -457,7 +461,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     if no_build:
         print(f"{inst.name}: using existing deployment artifacts (--no-build)")
     elif not args.no_flash and section_is_set(inst.flash):
-        run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
+        flash_args = list(args.make_args)
+        if inst.board == "esp32-c3" and getattr(args, "serial", None):
+            flash_args.append(f"ESPTOOL_PORT={args.serial}")
+        run_flash(inst, _flash_backends(), flash_args, args.dry_run)
     elif section_is_set(inst.flash):
         pass
     elif inst.package.kind and (inst.handoff or inst.target.boot_media):

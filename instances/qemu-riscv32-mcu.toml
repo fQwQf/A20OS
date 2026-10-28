@@ -1,0 +1,15 @@
+name = "qemu-riscv32-mcu"
+description = "RV32IMC M-mode MCU kernel regression (QEMU virt, not ESP32-C3 emulation)"
+arch = "riscv32"
+board = "qemu-virt-riscv32-mcu"
+abi = "native"
+[kernel]
+profile = "mcu"
+nommu = true
+bringup = true
+[machine]
+smp = 1
+memory = "16M"
+[test]
+timeout = "5s"
+expect = ["[MCU TEST] PASS", "A20OS MCU READY"]

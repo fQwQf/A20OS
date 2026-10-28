@@ -1,6 +1,10 @@
 #ifndef _ARCH_RISCV32_CONSOLE_H
 #define _ARCH_RISCV32_CONSOLE_H
 
+#ifdef CONFIG_RISCV_MMODE
+#include "mcu_console.h"
+#else
+
 #include "core/types.h"
 #include "platform.h"
 
@@ -39,4 +43,5 @@ static inline void arch_uart_flush(void) {
 static inline void arch_uart_ack_irq(void) {
 }
 
+#endif /* CONFIG_RISCV_MMODE */
 #endif /* _ARCH_RISCV32_CONSOLE_H */

@@ -270,12 +270,21 @@ def _validate_capabilities(inst: Instance, trim: TrimRegistry, e: list[str]) -> 
     k = inst.kernel
     mcu = trim.profiles.get("mcu")
     mcu_arches = mcu.arches if mcu else ()
-    if k.profile == "mcu" and inst.arch not in mcu_arches:
+    mcu_selected = bool(mcu and mcu.matches(inst.arch, inst.board))
+    if k.profile == "mcu" and not mcu_selected:
         e.append(f"kernel.profile: mcu is only supported for {', '.join(mcu_arches)} "
-                 f"([profile.mcu].arches in components/trim.toml), not {inst.arch}")
-    if inst.arch in mcu_arches and k.profile is not None and k.profile != "mcu":
+                 f"or declared [profile.mcu].boards in components/trim.toml, not {inst.arch}/{inst.board}")
+    if mcu_selected and k.profile is not None and k.profile != "mcu":
         e.append(f"kernel.profile: '{k.profile}' would be ignored -- arch {inst.arch} is "
-                 "forced to profile mcu by [profile.mcu].arches in components/trim.toml")
+                 "forced to profile mcu by [profile.mcu] selectors in components/trim.toml")
+    if mcu_selected:
+        if k.nommu is False or k.bringup is False:
+            e.append("MCU profile forces kernel.nommu=true and kernel.bringup=true")
+        if inst.arch == "riscv32":
+            if inst.abi != "native":
+                e.append("RV32 M-mode MCU requires abi=native")
+            if (inst.machine.smp or 1) != 1:
+                e.append("RV32 M-mode MCU requires machine.smp=1")
     if k.nommu and inst.arch not in _cap_arches(trim, "nommu"):
         e.append(f"kernel.nommu: unsupported for {inst.arch}; supported: "
                  f"{', '.join(_cap_arches(trim, 'nommu'))}")
@@ -354,6 +363,8 @@ def _validate_flash(inst: Instance, e: list[str], repo_root: Path) -> None:
         e.append(f"flash.tool: backend '{tool}' is not validated for board "
                  f"'{inst.board}'; it covers {', '.join(backend.boards)}")
         return
+    if tool == "esptool" and any(getattr(inst.flash, field) is not None for field in ("interface", "transport", "adapter_khz")):
+        e.append("flash: esptool uses serial; interface/transport/adapter_khz belong to OpenOCD")
     mismatch = backend.geometry_mismatch(inst.stm32.flash_kb, inst.stm32.ram_kb)
     if mismatch:
         e.append(f"flash.tool: backend '{tool}' is written for a different flash geometry "

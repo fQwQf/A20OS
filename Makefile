@@ -338,13 +338,14 @@ endif
 # kernel source list and imply a NOMMU, kernel-only bring-up.  An ARCH listed
 # in a profile's arches gets that profile forced on, so adding a second
 # MCU-class architecture is one TOML edit.
-ifneq ($(filter $(ARCH),$(TRIM_PROFILE_MCU_ARCHES)),)
-PROFILE := mcu
+MCU_PROFILE_SELECTED := $(strip $(filter $(ARCH),$(TRIM_PROFILE_MCU_ARCHES)) $(filter $(ARCH)/$(BOARD),$(TRIM_PROFILE_MCU_BOARDS)))
+ifneq ($(MCU_PROFILE_SELECTED),)
+override PROFILE := mcu
 ifneq (,$(TRIM_PROFILE_MCU_FORCE_NOMMU))
-NOMMU := 1
+override NOMMU := 1
 endif
 ifneq (,$(TRIM_PROFILE_MCU_FORCE_BRINGUP))
-BRINGUP := 1
+override BRINGUP := 1
 endif
 endif
 
@@ -547,8 +548,8 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 NET_RUST_ARCHES := x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m
 # netfilter_rewrite has no riscv32 Rust target (see RUST_NETFILTER_TARGET_*).
 NETFILTER_RUST_ARCHES := x86_64 aarch64 loongarch64 riscv64 arm32 armv7m
-NET_RUST_OK := $(filter-out $(TRIM_PROFILE_MCU_ARCHES),$(NET_RUST_ARCHES))
-NETFILTER_RUST_OK := $(filter-out $(TRIM_PROFILE_MCU_ARCHES),$(NETFILTER_RUST_ARCHES))
+NET_RUST_OK := $(if $(MCU_PROFILE_SELECTED),,$(filter-out $(TRIM_PROFILE_MCU_ARCHES),$(NET_RUST_ARCHES)))
+NETFILTER_RUST_OK := $(if $(MCU_PROFILE_SELECTED),,$(filter-out $(TRIM_PROFILE_MCU_ARCHES),$(NETFILTER_RUST_ARCHES)))
 
 NETFILTER_REWRITE_IMPL ?= $(if $(filter $(ARCH),$(NETFILTER_RUST_OK)),rust,c)
 ifeq ($(filter $(NETFILTER_REWRITE_IMPL),c rust),)
@@ -1196,8 +1197,8 @@ ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
 BOARD_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)
 # Select exactly one board. Architecture recursion must not collect sibling
 # boards or standalone EFI applications now owned by this same arch tree.
-ARCH_KERNEL_C_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -type f -name '*.c' -print | sort)
-ARCH_KERNEL_ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -type f -name '*.S' -print | sort)
+ARCH_KERNEL_C_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -path '*/mcu' -prune -o -type f -name '*.c' -print | sort)
+ARCH_KERNEL_ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -path '*/mcu' -prune -o -type f -name '*.S' -print | sort)
 BOARD_DRIVER_DIR = $(BOARD_INCLUDE_DIR)/drivers
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
@@ -1445,7 +1446,7 @@ ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=
 ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only -fno-omit-frame-pointer \
                            -mstack-protector-guard=global
 ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static -mno-unaligned-access -fno-omit-frame-pointer
-ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-pic -static \
+ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-short-enums -fno-pic -static \
                            -ffunction-sections -fdata-sections -fno-unwind-tables \
                            -fno-asynchronous-unwind-tables
 ARCH_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-pic -static
@@ -2038,10 +2039,10 @@ endif
 ifeq ($(STORAGE_READ_ONLY),1)
 CFLAGS += -DCONFIG_STORAGE_READ_ONLY -DCONFIG_AHCI
 endif
-# 内核抢占（CONFIG_KERNEL_PREEMPT）：hosted 架构默认开，MCU profile 保持协作式。
+# 内核抢占（CONFIG_KERNEL_PREEMPT）：hosted 与 RV32 M-mode 默认使用 IRQ 返回点。
 # armv7m 用 PendSV 建模切换点，preempt 计数/tick 驱动的内核抢占模型与之不兼容；
 # 该 profile 的切换点必须由 PendSV 触发，不能由 IRQ 尾声触发。
-ifeq ($(filter $(ARCH),$(TRIM_PROFILE_MCU_ARCHES)),)
+ifneq ($(ARCH),armv7m)
 ifeq ($(filter 1,$(CONFIG_KERNEL_PREEMPT)),1)
 CFLAGS += -DCONFIG_KERNEL_PREEMPT
 endif
@@ -2117,7 +2118,7 @@ ELF_CLASS_armv7m        := 1
 NATIVE_CALL_ABI_x86_64 := A20_EXEC_ABI_X86_64
 NATIVE_CALL_ABI_aarch64 := A20_EXEC_ABI_AARCH64
 NATIVE_CALL_ABI_riscv64 := A20_EXEC_ABI_RV64_DOUBLE
-NATIVE_CALL_ABI_riscv32 := A20_EXEC_ABI_RV32_DOUBLE
+NATIVE_CALL_ABI_riscv32 := $(if $(filter mcu,$(PROFILE)),A20_EXEC_ABI_RV32_SOFT,A20_EXEC_ABI_RV32_DOUBLE)
 NATIVE_CALL_ABI_arm32 := A20_EXEC_ABI_ARM_HARD
 NATIVE_CALL_ABI_armv7m := A20_EXEC_ABI_THUMB_SOFT
 NATIVE_CALL_ABI_loongarch64 := A20_EXEC_ABI_LA64_DOUBLE
@@ -2336,7 +2337,7 @@ include tools/driver-sources.mk
 # Shared ISA code is selected here, never by architecture tests in core C.
 ARCH_SHARED_SRC_riscv64 := $(KERNEL_DIR)/arch/common/riscv/linux_syscalls.c \
                           $(KERNEL_DIR)/arch/common/riscv/kexec.c
-ARCH_SHARED_SRC_riscv32 := $(ARCH_SHARED_SRC_riscv64)
+ARCH_SHARED_SRC_riscv32 := $(if $(filter-out mcu,$(PROFILE)),$(ARCH_SHARED_SRC_riscv64))
 
 # ABI-specific source directories
 ifeq ($(ABI),both)
@@ -3365,3 +3366,4 @@ NATIVE_BINS := $(NATIVE_OUTPUTS)
 
 # LS2K0300 RAM bring-up (vendor firmware is preserved).
 include tools/ls2k0300.mk
+include tools/esp32c3.mk
