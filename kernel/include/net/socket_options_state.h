@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust socket option state machine
- * (kernel/net/socket_options.rs, selected by NET_SOCKET_OPTIONS_IMPL=rust).
+ * (kernel/net/socket/socket_options.rs, selected by NET_SOCKET_OPTIONS_IMPL=rust).
  *
  * Rust owns the option policy and the per-option state transitions; C owns the
  * primitives it calls (the socket lock, the lwIP control barrier, usercopy, the
@@ -53,7 +53,7 @@ typedef struct net_opt_report {
 
 /*
  * Borrowed view of the option-bearing fields of net_socket_t.  The layout must
- * match `NetOptionView` in kernel/net/socket_options.rs field for field; the
+ * match `NetOptionView` in kernel/net/socket/socket_options.rs field for field; the
  * order is the reason both are written out rather than derived.
  */
 typedef struct net_option_view {
@@ -108,7 +108,7 @@ typedef struct net_option_view {
 #define NET_OPT_APPLY_IP_OPTS  (1 << 9)
 
 /* Primitives the Rust module calls back into.  Defined next to the option state
- * machine in kernel/net/socket_control.c, so the lock discipline they encode
+ * machine in kernel/net/socket/socket_control.c, so the lock discipline they encode
  * stays with the code that used to open-code it. */
 void     a20_net_option_lock(void *s, uint64_t *flags);
 void     a20_net_option_unlock(void *s, uint64_t flags);

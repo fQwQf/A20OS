@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/tun.h"
 #include "net/lwip_stack.h"
 #include "net/lwip_concurrency.h"
@@ -522,7 +522,7 @@ void net_inet_tcp_apply_options(net_socket_t *s, struct tcp_pcb *pcb);
 
 /*
  * The bottom-half event ring and its per-socket consumer are Rust
- * (kernel/net/socket_inet_bh.rs).  What is left here is the ring's storage and
+ * (kernel/net/backends/lwip/socket_inet_bh.rs).  What is left here is the ring's storage and
  * its index arithmetic, the event fields, the pbuf copy/ref/free, the socket
  * address and pktinfo fill, the receive-queue enqueue, the wait-queue
  * collect/wake, the event notify, the socket lock, the registry slot mark and
@@ -1090,7 +1090,7 @@ static void lwip_tcp_stage_err_cb(void *arg, err_t err)
 #include "net/socket_inet_accept_state.h"
 
 /*
- * The staged-accept state machine is Rust (kernel/net/socket_inet_accept.rs).
+ * The staged-accept state machine is Rust (kernel/net/backends/lwip/socket_inet_accept.rs).
  * What is left here is the primitive set it calls, the lwIP callback that
  * publishes into the ring, and the wrappers that keep the names the rest of this
  * file calls.
@@ -1605,7 +1605,7 @@ _Static_assert(sizeof(net_inet_opt_snapshot_t) ==
                "the Rust snapshot must mirror net_inet_ip_options_snapshot_t");
 
 /*
- * The option and buffer machinery is Rust (kernel/net/socket_inet_opt.rs).
+ * The option and buffer machinery is Rust (kernel/net/backends/lwip/socket_inet_opt.rs).
  * What is left here is the primitive set it calls.
  */
 
@@ -2016,7 +2016,7 @@ void net_inet_tcp_apply_options(net_socket_t *s, struct tcp_pcb *pcb)
 #include "net/socket_inet_life_state.h"
 
 /*
- * The INET socket lifecycle is Rust (kernel/net/socket_inet_life.rs): pcb
+ * The INET socket lifecycle is Rust (kernel/net/backends/lwip/socket_inet_life.rs): pcb
  * creation per type with its callback wiring, the listen conversion, and the
  * teardown.  What is left here is the primitive set it calls and the wrappers.
  */
@@ -2204,7 +2204,7 @@ void net_inet_socket_destroy(net_socket_t *s)
 #include "net/socket_inet_bind_state.h"
 
 /*
- * The INET bind transaction is Rust (kernel/net/socket_inet_bind.rs).  What is
+ * The INET bind transaction is Rust (kernel/net/backends/lwip/socket_inet_bind.rs).  What is
  * left here is the primitive set it calls and the wrapper that keeps the C name.
  */
 
@@ -2314,7 +2314,7 @@ static int net_namespace_target(net_socket_t *s, const void *addr, size_t len)
 
 /*
  * The local TCP connect pairing transaction is Rust
- * (kernel/net/socket_inet_connect.rs).  What is left here is the primitive set
+ * (kernel/net/backends/lwip/socket_inet_connect.rs).  What is left here is the primitive set
  * it calls; the stack path below it stays C, because it ends in a loop that
  * parks the task until the handshake completes and scheduling is not this
  * module's to own.
@@ -2731,7 +2731,7 @@ void net_inet_ip_opts_apply(net_socket_t *s)
 
 /*
  * The UDP and raw send transactions are Rust
- * (kernel/net/socket_inet_send.rs).  What is left here is the primitive set it
+ * (kernel/net/backends/lwip/socket_inet_send.rs).  What is left here is the primitive set it
  * calls, and the two wrappers that keep the names the dispatcher uses.
  *
  * Rust owns the datagram ceiling, the lazy bind, the destination resolution and
@@ -2743,9 +2743,9 @@ void net_inet_ip_opts_apply(net_socket_t *s)
 
 /* The opaque buffers Rust carries: the ip address and the option snapshot. */
 _Static_assert(sizeof(ip_addr_t) <= 32,
-               "kernel/net/socket_inet_send.rs sizes its ip buffer for ip_addr_t");
+               "kernel/net/backends/lwip/socket_inet_send.rs sizes its ip buffer for ip_addr_t");
 _Static_assert(sizeof(net_inet_ip_options_snapshot_t) <= 32,
-               "kernel/net/socket_inet_send.rs sizes its snapshot buffer");
+               "kernel/net/backends/lwip/socket_inet_send.rs sizes its snapshot buffer");
 
 void a20_net_inet_send_view_init(void *sp, net_inet_send_view_t *out)
 {
@@ -2999,7 +2999,7 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
 
 /*
  * The TCP stream send transaction is Rust
- * (kernel/net/socket_inet_send_tcp.rs): the early refusals, the local
+ * (kernel/net/backends/lwip/socket_inet_send_tcp.rs): the early refusals, the local
  * socket-to-socket path, and the stack-path retry loop.  What is left here is
  * the primitive set it calls -- including the blocking wait, which is the
  * scheduler's protocol and stays in one piece -- and the wrapper.

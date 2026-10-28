@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust AF_NETLINK state machines
- * (kernel/net/socket_netlink.rs, selected by NET_SOCKET_NETLINK_IMPL=rust).
+ * (kernel/net/control/socket_netlink.rs, selected by NET_SOCKET_NETLINK_IMPL=rust).
  *
  * Rust owns the bind transaction, the sock_diag request/response, the
  * kobject-uevent emitter and sender, the rtnetlink request/response and

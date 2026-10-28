@@ -6,7 +6,7 @@
 # into .kernel-build, so several units can check their own files concurrently
 # without racing on the shared object directory.
 #
-# Usage: tools/net-check.sh kernel/net/socket_control.c [more.c ...]
+# Usage: tools/net-check.sh kernel/net/socket/socket_control.c [more.c ...]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,7 +20,7 @@ for src in "$@"; do
             -Wall -Wextra -O3 -ffreestanding -nostdlib -fno-builtin -fno-common \
             -std=gnu99 \
             -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel \
-            -Ikernel/net/lwip_port -Ikernel/external/lwip/src/include \
+            -Ikernel/net/backends/lwip/port -Ikernel/external/lwip/src/include \
             -Ikernel/arch/riscv64/boards/qemu-virt-riscv64 \
             -I"$build_dir/generated" \
             -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany \

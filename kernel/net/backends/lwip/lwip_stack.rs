@@ -407,7 +407,7 @@ pub unsafe extern "C" fn a20_lwip_packet_tx(ifindex: u32, frame: *const u8,
  * Prefix routes behind the Linux RTM_NEWROUTE ABI.  lwIP has no route table:
  * ip4_route selects by netmask or the default netif, which cannot express
  * "100.64.0.0/10 dev tun0" (tailscale) or an exit-node 0.0.0.0/1 +
- * 128.0.0.0/1 pair.  LWIP_HOOK_IP4_ROUTE_SRC (net/lwip_port/lwipopts.h) asks
+ * 128.0.0.0/1 pair.  LWIP_HOOK_IP4_ROUTE_SRC (net/backends/lwip/port/lwipopts.h) asks
  * this table first and returns NULL when nothing matches, so lwIP's own
  * selection stays the fallback.
  *

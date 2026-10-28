@@ -22,7 +22,7 @@
  */
 
 #include "core/types.h"
-#include "net/net_profile.h"
+#include "net/profile.h"
 
 /*
  * Ownership hash.

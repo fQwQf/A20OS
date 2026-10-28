@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust local TCP connect pairing transaction
- * (kernel/net/socket_inet_connect.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_connect.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * This is the third slice of socket_inet.c: the shortcut that pairs a
  * connecting stream socket with a listening one through the accept queue

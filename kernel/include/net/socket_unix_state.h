@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust AF_UNIX state machine
- * (kernel/net/socket_unix.rs, selected by NET_SOCKET_UNIX_IMPL=rust).
+ * (kernel/net/socket/socket_unix.rs, selected by NET_SOCKET_UNIX_IMPL=rust).
  *
  * Rust owns the address preparation, the bind transaction with its rollback,
  * the connect transaction that allocates and wires the accepted child, the
@@ -29,7 +29,7 @@
 
 /*
  * Borrowed view of the fields the transactions read and write.  Field order is
- * the contract with `UnixView` in kernel/net/socket_unix.rs; the same view type
+ * the contract with `UnixView` in kernel/net/socket/socket_unix.rs; the same view type
  * is used for the socket under operation, the listener and the accepted child,
  * because all three are net_socket_t.
  */

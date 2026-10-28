@@ -9,7 +9,7 @@
  * The case it exists for is a reader on a hot path that already holds a
  * different lock and cannot take the writer's. Taking a lock there would
  * serialise the packet path behind configuration edits; a seqlock leaves the
- * reader wait-free instead. kernel/net/netfilter.c is the worked example: the
+ * reader wait-free instead. kernel/net/filter/netfilter.c is the worked example: the
  * rule table is written under g_netfilter_lock while the packet path scans it
  * holding g_lwip_lock.
  *

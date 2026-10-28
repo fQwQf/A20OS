@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust UDP and raw send transactions
- * (kernel/net/socket_inet_send.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_send.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * This is the fourth slice of socket_inet.c: the two datagram send paths.  The
  * stream send and the sendto dispatcher stay C.

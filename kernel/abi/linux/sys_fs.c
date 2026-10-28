@@ -5,7 +5,7 @@
 #include "ipc/ipc.h"
 #include "drivers/char/uart.h"
 #include "fs/pipe.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "fs/readiness.h"
 #include "fs/vfs/file.h"
 #include "fs/devfs.h"

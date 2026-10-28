@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust poll readiness computation
- * (kernel/net/socket_poll.rs, linked whenever the network sources are built).
+ * (kernel/net/socket/socket_poll.rs, linked whenever the network sources are built).
  *
  * Rust owns the readiness decision: the two arms (channel-backed and legacy),
  * the HUP precedence over IN and OUT, the ERR precedence inside OUT, the

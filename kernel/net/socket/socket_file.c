@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/tun.h"
 #include "net/socket_file_state.h"
 #include "proc/userns.h"

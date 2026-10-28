@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust INET bind transaction
- * (kernel/net/socket_inet_bind.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_bind.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * Rust owns the per-type dispatch, the address conversion call, the pcb-present
  * check, the lane entry and the lane-store decisions on success, and the status

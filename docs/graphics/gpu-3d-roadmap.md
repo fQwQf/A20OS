@@ -766,7 +766,7 @@ x86_64 挂起）。这让唯一快的环境失去多核，建议单独立项排�
    `bo_handles`（§4.2）
 4. `virtio_gpu.c`：`CONTEXT_INIT` 真正协商、`GET_DISPLAY_INFO` 真正查询（§4.2）
 5. UAPI ABI 缺陷修复 + `tools/check-drm-abi.sh` 门禁（§6）
-6. lwIP raw RX 路径双重释放修复（`kernel/net/socket_inet.c`，见
+6. lwIP raw RX 路径双重释放修复（`kernel/net/backends/lwip/socket_inet.c`，见
    [IPv6 pbuf 诊断](../status/gaps/notes/net-ipv6-pbuf.md)）
 7. Minecraft 切到 Wayland 后端（§9.1）
 8. `tools/build-virglrenderer.sh` 与宿主资源预检落地（§5.1 / §10；预检现居 `tools/a20_resource.py`）

@@ -7,7 +7,7 @@
 #include "core/errno.h"
 #include "core/random.h"
 #include "fs/fdtable.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 
 #ifndef CONFIG_MCU
 

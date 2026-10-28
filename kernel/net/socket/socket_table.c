@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/socket_side.h"
 #include "core/consts.h"
 
@@ -34,7 +34,7 @@
  * net_table_claims() or the row renderer drops it), but a socket whose slot has
  * already been released can never be.
  */
-/* The membership rule is a20_net_table_claims() in kernel/net/socket_registry.rs:
+/* The membership rule is a20_net_table_claims() in kernel/net/socket/socket_registry.rs:
  * domain and type, not "does this socket still own a pcb".  A loopback connect()
  * drops both lwIP pcbs while the connection is live, so a pcb test would hide
  * exactly the connections a loopback-only stack makes. */

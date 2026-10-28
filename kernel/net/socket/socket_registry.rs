@@ -31,7 +31,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 /// Canary written into a live socket's `ref_magic`. Mirrors
-/// `NET_SOCK_REF_MAGIC` in net/socket_internal.h.
+/// `NET_SOCK_REF_MAGIC` in net/socket/socket_internal.h.
 pub const NET_SOCK_REF_MAGIC: u32 = 0x4e53_4f4b; /* 'N','S','O','K' */
 
 /// Reference-ledger fault reasons; mirrors `NET_SOCK_REF_FAULT_REASONS`.

@@ -292,7 +292,7 @@ DEFAULT 与 SERVER 两档的同名符号字节不变（`0x6040` / `0x3180`），
 按要求报出来而非上调上限 —— 这说明"tier 1 可运行"这个说法需要限定。
 
 **现已改为显式 SKIP**：`net_stress_test` 在起跑前从 `/proc/net/status` 读档位上限
-（`syscall-sockets: ... max=N`，为此在 `kernel/net/socket.c` 的该行末尾追加了
+（`syscall-sockets: ... max=N`，为此在 `kernel/net/socket/socket.c` 的该行末尾追加了
 `max=`），算不出 `WORKERS * 3 < 上限` 时输出
 
 ```
@@ -320,13 +320,13 @@ workload, upper limits left as configured
 
 | 项 | 字节 | 断言位置 |
 |---|---|---|
-| socket 表 `8 × sizeof(net_socket_t)` | **19,520** | `kernel/net/socket_internal.h:457`，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB（余 960 B） |
-| 帧数组（netif 状态 + AF_PACKET 环） | 4,100 | `kernel/net/socket_packet.c` 与 `kernel/net/lwip_stack.c` 各自的 `sizeof()` |
-| filter 表（conntrack + NAT 规则） | 3,328 | `kernel/net/netfilter_nat.c:130` 的 `sizeof()` 断言，**正好等于** `NET_PROFILE_FILTER_BUDGET` = 3,328 B，余量归零（条目在 `810e9e431` 后由 56 B 涨到 64 B；`netfilter_nat.c:118-131` 的注释仍写旧的 3,072 B，已过期） |
+| socket 表 `8 × sizeof(net_socket_t)` | **19,520** | `kernel/net/socket/socket_internal.h:457`，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB（余 960 B） |
+| 帧数组（netif 状态 + AF_PACKET 环） | 4,100 | `kernel/net/socket/socket_packet.c` 与 `kernel/net/backends/lwip/lwip_stack.c` 各自的 `sizeof()` |
+| filter 表（conntrack + NAT 规则） | 3,328 | `kernel/net/filter/netfilter_nat.c:130` 的 `sizeof()` 断言，**正好等于** `NET_PROFILE_FILTER_BUDGET` = 3,328 B，余量归零（条目在 `810e9e431` 后由 56 B 涨到 64 B；`netfilter_nat.c:118-131` 的注释仍写旧的 3,072 B，已过期） |
 | lwIP 堆 `MEM_SIZE` | 16,384 | `memp/mem.c` 里就是这么大一个静态数组 |
 | 合计 | **43,796 B（LP64，约 42.8 KiB；ILP32 41,364 B）** | 上限 `NET_PROFILE_TOTAL_BUDGET` = 44 KiB。求和项：socket 表、`(ring 槽 + drain 槽) × slot`、每设备 netif state、`g_netifs + g_loopif`（384 B/个预算）、filter 表、heap、per-lane memp 表 |
 
-运行期可读：`/proc/a20/netmem` 在池表之后多两行（`kernel/net/lwip_stack.c:1947`）。EMBEDDED
+运行期可读：`/proc/a20/netmem` 在池表之后多两行（`kernel/net/backends/lwip/lwip_stack.c:1947`）。EMBEDDED
 档实测：
 
 ```
@@ -349,7 +349,7 @@ ring 深度与内联载荷与改动前逐字节一致。
 `MEM_SIZE`：13,332 B 对 16,384 B，余 3,052 B 给 `memp` 不服务的那些分配
 （`pbuf_custom` 链、netconn、DNS 表、lwIP 自身）。`MEMP_NUM_ND6_QUEUE` /
 `MEMP_NUM_MLD6_GROUP` 原来根本没走 profile，直接吃 lwIP `opt.h` 的默认值 20 / 4 —— 那是
-给另一个部件定的数，现在进 profile（`kernel/net/lwip_port/lwipopts.h:117-118`）。
+给另一个部件定的数，现在进 profile（`kernel/net/backends/lwip/port/lwipopts.h:117-118`）。
 
 **因此减少的能力，逐条**（这是档位定义，不是回归）：
 
@@ -557,7 +557,7 @@ UDP/RAW 侧的 `SO_SNDBUF` / `SO_RCVBUF` **本轮也从 `-EOPNOTSUPP` 变成接�
 
 **IPv6 地址组本轮补上了**（`f7524bb32`），此前"只覆盖 IPv4 地址组"那句已失效。
 补的是两件必须一起做的事：`RTNLGRP_IPV6_IFADDR` 组号，以及能往里投递的写入路径
-（`a20_lwip_if_set_addr6()`，`kernel/net/lwip_stack.c:2132`），`nlrt_apply_addr6()`
+（`a20_lwip_if_set_addr6()`，`kernel/net/backends/lwip/lwip_stack.c:2132`），`nlrt_apply_addr6()`
 把 `ifa_family == AF_INET6` 的 `RTM_NEWADDR` 接到它上面。只定义组号而没有任何内核代码
 能往里投递，等于给监听者一个可以 bind 却永远收不到东西的承诺——那比不定义更糟。
 `netlink_test` 的 IPv6 一节钉这一条：bind 上这个组、真的收一条事件、并断言
@@ -661,7 +661,7 @@ socket 注入，一个数据报即一帧（slirp 无 mtu 选项、本机无 raw 
   `netfilter_ct_insert` 插入合成流，`cttimeout` 运行期覆盖三个毫秒常量（0 恢复默认）。
   它们不新增内核状态，只是让断言不必靠 256 条真实流和 30 秒等待达成。
 - **SNAT/MASQUERADE 的地址与端口改写有主机侧单元门禁**：`test-nat-rewrite` 直接编译
-  出货源码（`kernel/net/netfilter_rewrite.c`），校验和用独立的一次性重算 oracle 对拍；
+  出货源码（`kernel/net/filter/netfilter_rewrite.c`），校验和用独立的一次性重算 oracle 对拍；
   出站 SNAT 另有 `smoke-netfilter-snat` 的端到端回程场景。
 
 **ICMP 跟踪本轮落地**（`810e9e431`），此前"无 ICMP 跟踪"那句**已失效**，但失效得
@@ -702,7 +702,7 @@ reentrancy，别先读 owner 字段。
 （排查用，不进常规构建）。同时给 7 个此前完全没有断言的裸入口补上断言，把探针盲区
 变成覆盖区。
 
-**net 锁侧**（`2dd28758c`）：新增 `kernel/net/net_lock_probe.c` 的 per-CPU 持锁集合
+**net 锁侧**（`2dd28758c`）：新增 `kernel/net/socket/net_lock_probe.c` 的 per-CPU 持锁集合
 探针，逐次取锁检查重复取锁、socket 锁地址乱序、第三把 socket 锁、桶锁取在 socket 锁
 之下、第二把桶锁。开关复用同一个 `CONFIG_NET_LOCK_ASSERT`，并新增第三档 `=2`
 （只计数不 abort，供长跑取最终计数）。`/proc/net/stats` 上与 lwip 行并排打印
@@ -711,7 +711,7 @@ reentrancy，别先读 owner 字段。
 **配套的一条**（`067d0eb96`）：`lock_counters_register()` 超出 `LOCK_COUNTERS_MAX`
 此前是**静默丢弃**，于是 `/proc/a20/lock_contention` 会对一把从未被观测的锁报
 "干净"。现在有被拒计数，且 `net_socket_registry_init()` 自己核对注册循环前后的
-差值是否等于 `NET_SOCK_BUCKETS`（`kernel/net/socket_registry.c:109-122`），不足就报
+差值是否等于 `NET_SOCK_BUCKETS`（`kernel/net/socket/socket_registry.c:109-122`），不足就报
 "contention 审计已经半盲"，`=1` 下直接 panic。实测：DEFAULT 档
 `registered=48 capacity=192 dropped=0`，server 档（128 个桶锁）
 `registered=141 capacity=192 dropped=0`，余量 51。
@@ -1406,7 +1406,7 @@ CI 的 `smoke` job 会因为这一行而红**。本文件不把它记为通过�
 | ~~P0~~ | ~~`g_net_lock` 分片~~ | **已完成**（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）：`g_net_lock` 已删除，socket 表分片为桶锁，桶锁又被 `net_socket_t.lock` 取代，现在只管 slot 表。SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的 `recv` 要和同桶另外 511 个互斥。**残留**：`2f17a5ba8` 自陈的三项运行期验证（引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口）**本轮已全部跑起来**——引用计数账本在 4 CPU + 4 lane 下 20 次引导全部 `live=1 faults=0`（`allocs` 159–167、`frees` 恒为 `allocs-1`），`LOCK_COUNTERS_MAX=192` 在 DEFAULT 档（48）与 server 档（141）都够且 `dropped=0`；`-ENOTCONN` 侧做成了按 reason 归因（`total=0 window=0 reasons=13`，`reasons=` 是已登记的 reason 个数不是命中次数），**20 次引导里该窗口一次未命中**。该窗口现已按代码核实排除：四个 window reason 里 `NET_NOTCONN_SEND_TCP_NO_PEER` 与 `_PEER_GONE` 只有名字表与计数分支、**没有任何调用点**；仍可达的两个（`BLOCKING_PRE_PARK_RACE` / `_POST_PARK_RACE`）都在 `net_sock_lock2()` 之后由 `!net_socket_is_live(s) || !net_socket_is_live(dst)` 判定，而这两个 socket 都由调用方的引用钉住，所以 `is_live` 只可能在另一个任务真的 `close()` 了它时变假——那时返回 ENOTCONN 正是 Linux 语义，不是活连接上的假错误；post-park 那一处还在同一个窗口后重新验一遍同一谓词并先 `proc_park_cancel()`，不会把唤醒留在错误返回之后。当前提交上再测一次：`net_stress_test`（4 路并行 × 4 轮 × 1 MiB 环回 TCP）之后 `/proc/net/status` 为 `net_notconn: total=0 window=0 reasons=13`。原始 2% connect flake 是另一条信号（连接失败而非 send 的 ENOTCONN），仍按 [NET-02](../gaps/net.md) 跟踪，本条不声称它已修。**仍未做的**：ASAN 压力测试与合并后全量回归 |
 | ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
 | ~~P0~~ | ~~ext4 可写 journal + 崩溃注入测试~~ | **已完成**：运行时 metadata 写入走 JBD2 ordered commit，commit 指针按事务大小推进，数据 checksum 记在 descriptor tag 内（不再写进块尾污染 bitmap），挂载时以日志 `s_start` 为权威判据；`make smoke-ext4-journal` 做四点崩溃—重启往返并用 `e2fsck -fn` 双向把关，x86_64/riscv64/aarch64/ppc64le/loongarch64 五架构 5/5 PASS |
-| ~~P0~~ | ~~net 锁一侧的运行期探针~~ | **已完成**（`2dd28758c` + `067d0eb96`）：per-CPU 持锁集合探针 `kernel/net/net_lock_probe.c` 检查重复取锁、socket 锁地址乱序、第三把 socket 锁、桶锁取在 socket 锁之下、第二把桶锁；开关复用 `CONFIG_NET_LOCK_ASSERT` 并新增第三档 `=2`（只计数不 abort），`/proc/net/stats` 上 `net_lock:` 与 lwip 行并排。配套把 `lock_counters_register()` 超出 `LOCK_COUNTERS_MAX` 的静默丢弃变成可见计数 + `net_socket_registry_init()` 自核对。**残留**：仍然没有"当前 CPU 是否持有 socket X"的**正向**查询原语，lane claim 一侧也没有探针；七条上报分支里只有两条做过故意注入的对照；ASAN 与全量回归未跑 |
+| ~~P0~~ | ~~net 锁一侧的运行期探针~~ | **已完成**（`2dd28758c` + `067d0eb96`）：per-CPU 持锁集合探针 `kernel/net/socket/net_lock_probe.c` 检查重复取锁、socket 锁地址乱序、第三把 socket 锁、桶锁取在 socket 锁之下、第二把桶锁；开关复用 `CONFIG_NET_LOCK_ASSERT` 并新增第三档 `=2`（只计数不 abort），`/proc/net/stats` 上 `net_lock:` 与 lwip 行并排。配套把 `lock_counters_register()` 超出 `LOCK_COUNTERS_MAX` 的静默丢弃变成可见计数 + `net_socket_registry_init()` 自核对。**残留**：仍然没有"当前 CPU 是否持有 socket X"的**正向**查询原语，lane claim 一侧也没有探针；七条上报分支里只有两条做过故意注入的对照；ASAN 与全量回归未跑 |
 | ~~P1~~ | ~~conntrack + NAT~~ | **已实现**：五元组哈希表（按档位 32/256/1024）、NEW/ESTABLISHED、按状态超时、满表 LRU、SNAT/MASQUERADE（output）与 DNAT（input）、RFC 1624 增量校验和、ICMP echo 跟踪；规则方向与 hook 不匹配时返回 `EINVAL`。门禁：`smoke-netfilter`、`smoke-netfilter-nat`（DNAT/TCP）、`smoke-netfilter-snat`（出站 SNAT/TCP + 回程 + 阴性对照）、`smoke-ct-capacity`、`test-nat-rewrite`。**设计边界**：无 ALG；不跟踪 ICMP 差错（vendored lwIP 也丢弃入站差错，PMTU 不可用）；分片只翻首片；无 IPv6 NAT；无动态端口分配。详见 [net/conntrack-nat.md](../../net/conntrack-nat.md) |
 | ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
 

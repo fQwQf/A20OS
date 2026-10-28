@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust INET socket lifecycle
- * (kernel/net/socket_inet_life.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_life.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * Rust owns the per-type pcb creation and its callback wiring, the listen
  * conversion and its re-wiring, the teardown decision per pcb type (a listener

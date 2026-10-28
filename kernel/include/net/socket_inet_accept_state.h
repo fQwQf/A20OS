@@ -1,6 +1,6 @@
 /*
  * C ABI of the Rust accept-staging state machine
- * (kernel/net/socket_inet_accept.rs, selected by NET_SOCKET_INET_IMPL=rust).
+ * (kernel/net/backends/lwip/socket_inet_accept.rs, selected by NET_SOCKET_INET_IMPL=rust).
  *
  * This is the first slice of socket_inet.c: the staged-accept ring, the publish
  * transaction the lwIP accept callback runs, the bottom half's drain that turns
@@ -32,7 +32,7 @@
 #include <stdint.h>
 
 /* Borrowed view of the fields the transactions read and write.  Field order is
- * the contract with `AcceptView` in kernel/net/socket_inet_accept.rs; the same
+ * the contract with `AcceptView` in kernel/net/backends/lwip/socket_inet_accept.rs; the same
  * view type is used for the listener and for the child. */
 typedef struct net_accept_view {
     void *s;

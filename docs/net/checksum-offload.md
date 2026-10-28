@@ -31,7 +31,7 @@
 
 ### 1.1 接收
 
-`kernel/net/lwip_stack.c:1165` 从驱动 `recv()` 拿到一块**扁平帧**，经
+`kernel/net/backends/lwip/lwip_stack.c:1165` 从驱动 `recv()` 拿到一块**扁平帧**，经
 `netfilter_input()` 后 `pbuf_alloc(PBUF_RAW, len, PBUF_POOL)` 再 `pbuf_take()`
 拷进 pbuf，然后交给 `netif->input()`。驱动到协议栈之间**只有一个返回长度**，
 没有任何 "这个帧的校验和设备已经验过了" 的通道。
@@ -46,7 +46,7 @@
 
 ### 1.2 发送
 
-`a20_lwip_linkoutput()`（`kernel/net/lwip_stack.c:340`）把 pbuf 拷进
+`a20_lwip_linkoutput()`（`kernel/net/backends/lwip/lwip_stack.c:340`）把 pbuf 拷进
 `st->tx_frame`（或走 `send_sg` 快路径），经 `netfilter_output()` 后交给
 `ops->send()` / `ops->send_sg()`。驱动侧 `virtio_net_send_iov()` 把
 `virtio_net_hdr` 区域**清零**后填帧（`virtio_net.c:803-810`），
@@ -67,7 +67,7 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 
 ### 1.3 编译期现状
 
-`kernel/net/lwip_port/lwipopts.h` 里**没有任何 `CHECKSUM*` 定义**，全部取上游默认：
+`kernel/net/backends/lwip/port/lwipopts.h` 里**没有任何 `CHECKSUM*` 定义**，全部取上游默认：
 
 | 选项 | 默认 | 位置 |
 |---|---|---|
@@ -89,7 +89,7 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 | lwIP 在 `netif->linkoutput` 之前把 L4 校验和降级成伪首部部分和 | `src/core/tcp_out.c:1587-1596`（TCP）、`src/core/udp.c:942-960`（UDP） | **改上游文件**：TCP 那处没有任何 `IF__NETIF_CHECKSUM_ENABLED` 包裹，必须新增 |
 | 一个把 `csum_start` / `csum_offset` 从栈传给驱动的通道 | `net_dev_ops_t::send` / `send_sg`（`driver_class.h:167`、`:190`）目前只有 `(dev, pkt, len)` | **改驱动 ABI**：要么给 `net_iovec_t` 加头字段并升 `A20_DRIVER_ABI`，要么加一个 `send_offload()` 回调 |
 | 驱动据此填 `hdr.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM`、`gso_type`、`csum_start`、`csum_offset` | `kernel/drivers/net/virtio_net.c:803-810` | 本树内 |
-| netif 上置 `NETIF_CHECKSUM_GEN_IP/UDP/TCP` | `kernel/net/lwip_stack.c` 建 netif 处 | 本树内 |
+| netif 上置 `NETIF_CHECKSUM_GEN_IP/UDP/TCP` | `kernel/net/backends/lwip/lwip_stack.c` 建 netif 处 | 本树内 |
 
 ### 2.2 接收侧（`VIRTIO_NET_F_CSUM`）
 
@@ -152,7 +152,7 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 |---|---|
 | per-netif 校验和位存在于 vendored lwIP 2.2.2 | `kernel/external/lwip/src/include/lwip/netif.h:140-153` |
 | 该机制被编译开关关着 | `opt.h:2371-2373`（`LWIP_CHECKSUM_CTRL_PER_NETIF 0`）；`netif.h:408-417` 展开为空语句 |
-| 本树未覆盖任何 CHECKSUM 默认值 | `kernel/net/lwip_port/lwipopts.h` 全文无 `CHECKSUM` 字样 |
+| 本树未覆盖任何 CHECKSUM 默认值 | `kernel/net/backends/lwip/port/lwipopts.h` 全文无 `CHECKSUM` 字样 |
 | `pbuf_take()` 与校验和无关 | `src/core/pbuf.c:1254-1295` |
 | 接收侧三层校验和 | `src/core/ipv4/ip4.c:531-546`、`src/core/udp.c:419-450`、`src/core/tcp_in.c:166-177` |
 | 发送侧 TCP 校验和不受开关控制 | `src/core/tcp_out.c:1587-1596` |
@@ -160,4 +160,4 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 | 驱动 RX 只读 num_buffers，不读 flags | `kernel/drivers/net/virtio_net.c:929-947` |
 | QEMU virtio-net 不用 `DATA_VALID` | 外部 Debian QEMU 10.0.13+ds：`hw/net/virtio-net.c` 全文无该宏；定义在 `include/standard-headers/linux/virtio_net.h:132`，来源见[外部 QEMU 源码定位](../dev/external-dependencies.md) |
 | QEMU 会补算 TX 校验和 | 外部 Debian QEMU 10.0.13+ds：`hw/net/net_tx_pkt.c:833-838`，来源见[外部 QEMU 源码定位](../dev/external-dependencies.md) |
-| NAT 增量修正 L4 校验和 | `kernel/net/netfilter_rewrite.c`（`netfilter_set_addr` / `netfilter_set_port`） |
+| NAT 增量修正 L4 校验和 | `kernel/net/filter/netfilter_rewrite.c`（`netfilter_set_addr` / `netfilter_set_port`） |

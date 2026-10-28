@@ -41,7 +41,7 @@
 #include "core/stdio.h"
 #include "core/version.h"
 #include "net/socket.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/net_config.h"
 #include "net/lwip_stack.h"
 #include "drivers/core/riscv_iommu.h"

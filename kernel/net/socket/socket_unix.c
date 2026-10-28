@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "ipc/ipc.h"
 #include "fs/vfs.h"
 #include "core/stdio.h"
@@ -8,7 +8,7 @@
 #include "net/socket_unix_state.h"
 
 /*
- * The AF_UNIX state machine is Rust (kernel/net/socket_unix.rs).  What is left
+ * The AF_UNIX state machine is Rust (kernel/net/socket/socket_unix.rs).  What is left
  * here is the primitive set it calls, and the wrappers that keep the C names
  * the rest of the tree uses.
  *

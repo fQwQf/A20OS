@@ -1,5 +1,5 @@
 #include "proc/userns.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/tun.h"
 
 #include "core/klog.h"
@@ -85,7 +85,7 @@ typedef struct netlink_done {
 #define NLRT_IF_FLAGS_RUNNING  0x40
 
 /*
- * The AF_NETLINK state machines are Rust (kernel/net/socket_netlink.rs): the
+ * The AF_NETLINK state machines are Rust (kernel/net/control/socket_netlink.rs): the
  * bind transaction, sock_diag, the kobject-uevent emitter and sender, and the
  * rtnetlink request/response and multicast paths.  What is left here is the
  * primitive set they call, the snapshot the rtnetlink replies are built from,
@@ -116,7 +116,7 @@ _Static_assert(sizeof(nl_link_out_t) == 52 &&
                offsetof(nl_link_out_t, ip) == 37 &&
                offsetof(nl_link_out_t, mask) == 41 &&
                offsetof(nl_link_out_t, gw) == 45,
-               "kernel/net/socket_netlink.rs declares NlrtLink at this layout");
+               "kernel/net/control/socket_netlink.rs declares NlrtLink at this layout");
 
 void a20_net_netlink_view_init(void *sp, net_netlink_view_t *out)
 {

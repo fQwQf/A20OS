@@ -5,7 +5,7 @@
 #include "core/stdio.h"
 #include "core/panic.h"
 #include "core/random.h"
-#include "net/net_profile.h"
+#include "net/profile.h"
 
 #define LWIP_NO_STDDEF_H    1
 #define LWIP_NO_STDINT_H    1
@@ -55,7 +55,7 @@ typedef intptr_t  ptrdiff_t;
 
 /* NO_SYS has one global heap free list. Socket callers can allocate outside
  * the lwIP core lock on every CPU, independently of the network lane count. */
-#include "net/lwip_port/arch/heap.h"
+#include "net/backends/lwip/port/arch/heap.h"
 
 #endif /* A20_LWIP_ARCH_CC_H */
 

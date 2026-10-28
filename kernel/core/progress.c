@@ -4,7 +4,7 @@
 #include "core/cpu.h"
 #include "net/lwip_stack.h"
 #include "net/net_config.h"
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/usb/usb.h"

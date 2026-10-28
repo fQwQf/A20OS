@@ -1,4 +1,4 @@
-#include "net/socket_internal.h"
+#include "net/socket/socket_internal.h"
 #include "net/socket_side.h"
 
 #include "core/cpu.h"
@@ -275,7 +275,7 @@ int net_register_socket_locked(net_socket_t *s) {
  * two teardown paths (net_socket_close_file() and the accept() install-failure
  * rollback), because an AF_UNIX accepted child is never registered: see
  * net_unix_socket_connect(), which is why `grep -rn net_register_socket_locked
- * kernel/net/socket_unix.c` has no hits.  A teardown that unconditionally drops
+ * kernel/net/socket/socket_unix.c` has no hits.  A teardown that unconditionally drops
  * "the registry's reference" therefore drops one reference too many for every
  * AF_UNIX connection, which frees the socket in the middle of its own teardown
  * and then keeps dereferencing it.

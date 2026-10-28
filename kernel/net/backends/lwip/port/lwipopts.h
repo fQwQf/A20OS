@@ -1,7 +1,7 @@
 #ifndef A20_LWIPOPTS_H
 #define A20_LWIPOPTS_H
 
-#include "net/net_profile.h"
+#include "net/profile.h"
 
 #define NO_SYS                          1
 #define SYS_LIGHTWEIGHT_PROT            1
@@ -348,7 +348,7 @@ int a20_lwip_control_is_held(void);
 #define LWIP_RAND()                     ((u32_t)random_u64())
 
 
-/* Prefix routes from the Linux RTM_NEWROUTE ABI (kernel/net/lwip_stack.rs).
+/* Prefix routes from the Linux RTM_NEWROUTE ABI (kernel/net/backends/lwip/lwip_stack.rs).
  * Declared before lwIP's own types exist, hence the incomplete struct and
  * void-pointer parameters; the implementation casts them back. */
 struct netif;

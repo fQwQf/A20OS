@@ -92,7 +92,7 @@ NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定�
   ICMP echo 跟踪是本轮补上的（`810e9e431`）：类型归一化进 `src_port`、标识符进 `dst_port`，
   回程匹配只交换地址。**端到端门禁只覆盖 DNAT**：QEMU user-net 自己在宿主侧做 NAT，
   guest 外面没有第二个对端，回程包不存在，SNAT/MASQUERADE 不可能有端到端门禁——它由
-  主机侧单元门禁 `test-nat-rewrite` 直接编译并断言出货源码（`kernel/net/netfilter_rewrite.c`）
+  主机侧单元门禁 `test-nat-rewrite` 直接编译并断言出货源码（`kernel/net/filter/netfilter_rewrite.c`）
   覆盖。LRU 淘汰与空闲超时有门禁 `smoke-ct-capacity`，但它经 `ctinject` 造流量，而注入器
   只接受 TCP/UDP，**ICMP 条目的淘汰与超时因此没有门禁**。运行时动词挂在
   `/proc/a20/netfilter`。
@@ -111,7 +111,7 @@ NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定�
   而打开它要和 NAT 的原地校验和修正互相打架。依据见
   [docs/net/checksum-offload.md](docs/net/checksum-offload.md)。
 * **锁契约两侧现在都可执行**：`LWIP_ASSERT_CORE_LOCKED()` 接到 `g_lwip_lock` 的持有者
-  CPU 上，net 锁一侧有 per-CPU 持锁集合探针（`kernel/net/net_lock_probe.c`，`2dd28758c`），
+  CPU 上，net 锁一侧有 per-CPU 持锁集合探针（`kernel/net/socket/net_lock_probe.c`，`2dd28758c`），
   逐次取锁检查锁序与嵌套深度。**仍未做**：正向查询原语（"当前 CPU 是否持有 socket X 的
   锁"）与 lane claim 一侧探针——两项都在
   [docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 文末的未勾选项里；

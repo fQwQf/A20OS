@@ -131,7 +131,7 @@ mac = "52:54:00:12:34:01"
 # 不写 = -netdev user,id=net[,hostfwd...]，全部既有实例走这条路。
 backend = "socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121"
 # guest 侧静态 IPv4，经 -append 以 a20.dhcp=0 / a20.ip / a20.netmask /
-# a20.gateway 注入内核（kernel/net/net_config.c 解析）。设置 guest_ip 后
+# a20.gateway 注入内核（kernel/net/control/net_config.c 解析）。设置 guest_ip 后
 # Makefile 自动关 DHCP，netmask/gateway 可选；只在有 QEMU -append 通路的
 # 架构上有意义。用法见 docs/cluster/02-udp-demo.md。
 guest_ip = "10.0.3.2"

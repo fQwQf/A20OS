@@ -18,7 +18,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE_PATH = "kernel/net/netfilter_rewrite.c"
+SOURCE_PATH = "kernel/net/filter/netfilter_rewrite.c"
 FIXTURE_PATH = "tools/test-nat-rewrite-host.c"
 HEADER_SUFFIXES = {".h", ".inc", ".def"}
 

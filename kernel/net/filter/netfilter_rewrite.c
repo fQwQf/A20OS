@@ -99,7 +99,7 @@ void netfilter_ct_reply_tuple(const net_conntrack_entry_t *e, uint32_t *rsrc,
 
 #else
 
-/* Implemented in kernel/net/lwip_stack.c; the host test supplies its own. */
+/* Implemented in kernel/net/backends/lwip/lwip_stack.c; the host test supplies its own. */
 uint32_t a20_lwip_netif_ipv4(int net_idx);
 
 /* ------------------------------------------------------------------ checksum */

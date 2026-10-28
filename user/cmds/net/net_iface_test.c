@@ -7,7 +7,7 @@
  * path the way a caller actually uses it: size query, fill, then feed a
  * discovered name back into the per-interface getter.
  *
- * Wire format, per the kernel side (kernel/net/socket_file.c):
+ * Wire format, per the kernel side (kernel/net/socket/socket_file.c):
  *   struct ifconf { int ifc_len; void *ifc_buf; }
  *   struct ifreq  { char ifr_name[16]; union { ... } }   -- 40 bytes on LP64
  * User space walks the buffer in whole-entry strides, so the layout has to match

@@ -7,7 +7,7 @@
 
 ## 1. netfilter / 防火墙（第一切片已落地）
 
-- 现状：已实现可用的 IPv4 包过滤（`kernel/net/netfilter.c`）。hook 挂在
+- 现状：已实现可用的 IPv4 包过滤（`kernel/net/filter/netfilter.c`）。hook 挂在
   `a20_lwip_process_netif_rx_tx_locked`（进）与 `a20_lwip_linkoutput`（出），
   即 `next-horizon.md` 当初评估的两个数据面点位。规则表 32 条，按方向、
   协议、源/目的地址、源/目的端口匹配，每条独立可通配；accept/drop 判决；

@@ -22,9 +22,9 @@
  */
 
 #include "net/netfilter.h"
-#include "net/netfilter_internal.h"
+#include "net/filter/netfilter_internal.h"
 #include "net/netfilter_rewrite.h"
-#include "net/net_profile.h"
+#include "net/profile.h"
 #include "net/lwip_stack.h"
 #include "core/lock.h"
 #include "core/seqlock.h"
@@ -310,7 +310,7 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
  * and their counters (the /proc renderer and the C reference read the same
  * memory), the view that hands them to Rust, the NAT table's seqlock and the
  * frame-rewrite entry points.  The translations, the chains, the LRU victim,
- * the idle sweep and every NAT decision are in kernel/net/netfilter_nat.rs.
+ * the idle sweep and every NAT decision are in kernel/net/filter/netfilter_nat.rs.
  */
 
 static net_ct_view_t g_ct_view = {
