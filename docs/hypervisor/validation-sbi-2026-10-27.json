@@ -1,0 +1,227 @@
+{
+  "date": "2026-10-27",
+  "timezone": "Asia/Shanghai",
+  "source_commit": "27836aade315d4c3b4d26835698c5cdfdfe0dfe5",
+  "dirty_worktree": true,
+  "scope": "Virtual SBI on RV32/RV64; QEMU TCG 10.0.13, GCC 14.2.0; not a full OS guest or SBI certification claim.",
+  "source_files": [
+    {
+      "path": "Makefile",
+      "sha256": "8506e70bf2b6eb05af35a8af1e60ec5ebc411418bc315b680c69f401ff9554f6"
+    },
+    {
+      "path": "kernel/include/hyp/hyp.h",
+      "sha256": "519df7aed135cb312ca7ca11d13db3bad3a659af8051c6b34b7de8b03563259f"
+    },
+    {
+      "path": "kernel/include/hyp/hyp_test.h",
+      "sha256": "c0ccfb47537b2d15ec396967fde88ee68877c69a192b0f3afd107f36bc3993dc"
+    },
+    {
+      "path": "kernel/include/hyp/hyp_sbi.h",
+      "sha256": "10f2e571dfd842b5dc7497be18ea8f9b4ccc5afb73337bdc9f511f8f1f76699d"
+    },
+    {
+      "path": "kernel/arch/common/riscv/hyp_sbi.c",
+      "sha256": "4c7e9b7241876a56bf76577b17655b51023633751b54e39da391009ef0491374"
+    },
+    {
+      "path": "kernel/arch/common/riscv/hyp_sbi_test.c",
+      "sha256": "40260735a82cd883e1ee5c3068253efa4923feb6a8c0b8bd12df8d049013a0ab"
+    },
+    {
+      "path": "kernel/arch/common/riscv/hyp_sbi_payload.S",
+      "sha256": "28481fe2119cac18eba2a9efb38eacc2e9b60c9574f7419a3f501842a849afe7"
+    },
+    {
+      "path": "kernel/hyp/hyp_dev.c",
+      "sha256": "e3a63542eeb292d4b6f2e5ed553a36d35f4f2a4c2f06e4905eb430bc1fa3e1e5"
+    },
+    {
+      "path": "kernel/hyp/hyp_test.c",
+      "sha256": "ecdfb7daf4fb7339189dda8f09afd1004ef3ef6db7345cfec15e4f467a5a32ae"
+    },
+    {
+      "path": "tools/check_hyp_multiarch.py",
+      "sha256": "1ed80418ff757fe60fc3daf46b68837260770bc0fe39b9bb8789fe8431ced0ee"
+    },
+    {
+      "path": "tools/tests/test_hyp_sbi.py",
+      "sha256": "326ccd025fe163dfdd77f7a00129ce4b3be255643b0e72326999c3abb1fd6c3e"
+    },
+    {
+      "path": "tools/tests/hyp_sbi_host.c",
+      "sha256": "1a95119a7a26fdcfcf8dc13a2285334615f37677aff8e71d0ef46fcba54c25bb"
+    },
+    {
+      "path": "tools/tests/test_riscv_hyp_nommu.py",
+      "sha256": "3d71938550b3d67f6497f2444a1c15b932b496505a56ca0ab776a2824e4c6fe8"
+    },
+    {
+      "path": "kernel/arch/riscv64/platform/dma_cache.c",
+      "sha256": "623753c5e07ef3c60bbbb70aa5206af47e99db3ddbef3349252c6bd19999ce09"
+    },
+    {
+      "path": "kernel/arch/riscv64/hyp/hyp_emulate.c",
+      "sha256": "98590e3e72de7875bf105ef7427567ac8d41490106b7090ba83285c12bdb5ea6"
+    },
+    {
+      "path": "kernel/arch/riscv64/hyp/hyp_s2.c",
+      "sha256": "b668a0ccb22b91860a16e07f921cbf8838537479d2c878d64e805b15adc4ba00"
+    },
+    {
+      "path": "kernel/arch/riscv64/hyp/hyp_smp.c",
+      "sha256": "459c3fb22738e8ce9237898ac9cae6119d8bfe7bdd2e61f75b890f57307c1614"
+    },
+    {
+      "path": "kernel/arch/riscv64/hyp/hyp_test_guest.c",
+      "sha256": "bf18d118dede4a00741814263b30866c0e532f1b0e0b1542bf629199abb9b533"
+    },
+    {
+      "path": "kernel/arch/riscv32/hyp/hyp_emulate.c",
+      "sha256": "3190c3f616a471c12a8d188e3183b2d73f6f93e31da5237d80d29b676c3707ae"
+    },
+    {
+      "path": "kernel/arch/riscv32/hyp/hyp_s2.c",
+      "sha256": "b8581c5c713d9e38e615e9867c372a0f7466c527ea4735b13d20400fcc8cff2c"
+    },
+    {
+      "path": "kernel/arch/riscv32/hyp/hyp_smp.c",
+      "sha256": "5a5223b48ab86380729142a3e0d8405b893695ee6be06a64cb5c41258c81515d"
+    },
+    {
+      "path": "kernel/arch/riscv32/hyp/hyp_test_guest.c",
+      "sha256": "bf3c58d8d689be17ce3a72d7c72e4c6887680c84e99e10fbe8c0436d93597e74"
+    }
+  ],
+  "runs": [
+    {
+      "arch": "riscv64",
+      "cpus": 2,
+      "result": "PASS",
+      "case": "virtual-sbi-positive",
+      "kernel": {
+        "path": ".kernel-build/riscv64-qemu-virt-riscv64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "36b461fedb6d519fc01d112c4548a7c73322f4c10682ea63716d6011c3289811"
+      },
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/riscv64-virtual-sbi-positive.txt",
+        "sha256": "9c5efe6bd353ec07ca22bd679efa82a4ffbbbb2cd9d95e401cfe609f1709cf1f"
+      },
+      "markers": [
+        "HYP_SBI_TEST: PASS xlen=64 checks=40",
+        "HYP_ARCH_TEST: PASS backend=riscv-h rounds=3",
+        "HYP_SBI_SMP_TEST: PASS remote-ipi+rfence+hsm",
+        "HYP_SMP_TEST: PASS backend=riscv-h cpus=0,1 peak=2 step=stopped"
+      ]
+    },
+    {
+      "arch": "riscv64",
+      "cpus": 2,
+      "result": "PASS",
+      "case": "H-disabled-negative",
+      "kernel": {
+        "path": ".kernel-build/riscv64-qemu-virt-riscv64-both-4cbb0d6c90f2421d/kernel.elf",
+        "sha256": "36b461fedb6d519fc01d112c4548a7c73322f4c10682ea63716d6011c3289811"
+      },
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/riscv64-H-disabled-negative.txt",
+        "sha256": "c055d21a5b608c0d89bfffb8278874306e850a703f0b31ba681e3f4a4e1c3811"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)"
+      ]
+    },
+    {
+      "arch": "riscv32",
+      "cpus": 2,
+      "result": "PASS",
+      "case": "virtual-sbi-positive",
+      "kernel": {
+        "path": ".kernel-build/riscv32-qemu-virt-riscv32-both-53d8e12d2de00b0a/kernel.elf",
+        "sha256": "d1e7ea52356a5e8e8cde23aa3f3550caa68331fa5a96eb24f0d825fe07b91e9e"
+      },
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/riscv32-virtual-sbi-positive.txt",
+        "sha256": "730659d085b14c7018802c0e544b4d1404536d00e5b31bcdf3f19815d0de4f5c"
+      },
+      "markers": [
+        "HYP_SBI_TEST: PASS xlen=32 checks=40",
+        "HYP_ARCH_TEST: PASS backend=riscv32-h rounds=3",
+        "HYP_SBI_SMP_TEST: PASS remote-ipi+rfence+hsm",
+        "HYP_SMP_TEST: PASS backend=riscv32-h cpus=0,1 peak=2 step=stopped"
+      ]
+    },
+    {
+      "arch": "riscv32",
+      "cpus": 2,
+      "result": "PASS",
+      "case": "H-disabled-negative",
+      "kernel": {
+        "path": ".kernel-build/riscv32-qemu-virt-riscv32-both-53d8e12d2de00b0a/kernel.elf",
+        "sha256": "d1e7ea52356a5e8e8cde23aa3f3550caa68331fa5a96eb24f0d825fe07b91e9e"
+      },
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/riscv32-H-disabled-negative.txt",
+        "sha256": "c9a342daa988adaa2b79dfb226e680d722da4675e1051ed807045df72730d57d"
+      },
+      "markers": [
+        "HYP_ARCH_TEST: SKIP (backend unavailable)"
+      ]
+    }
+  ],
+  "host_tests": {
+    "result": "PASS",
+    "methods": 6,
+    "guest_xlens": [
+      32,
+      64
+    ],
+    "log": {
+      "path": "docs/hypervisor/validation/sbi-2026-10-27/host-tests.txt",
+      "sha256": "239f04fa41a3e7a2d72f7271b993bdbd60b0c1852821149a1184432679858c37"
+    }
+  },
+  "additional_checks": [
+    {
+      "arch": "arm32",
+      "result": "NOT_RUN",
+      "reason": "Cross compiler arm-linux-gnueabihf-gcc missing",
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/arm32-missing-compiler.txt",
+        "sha256": "d974ea60196f359d1bcf44192c9902c5681b1a6bc1e36641f44250998ad0b3a0"
+      }
+    },
+    {
+      "arch": "x86_64",
+      "result": "FAIL",
+      "reason": "Single-vCPU/NX/RO/preemption passed; dual-vCPU rendezvous timed out with ready=0,1 peak=1",
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/x86-smp-failure.txt",
+        "sha256": "8d0f474c52e663f7676894a85bcae083134c038c303cce58c560e63c7bdebc0d"
+      }
+    },
+    {
+      "arch": "x86_64",
+      "result": "TIMEOUT",
+      "case": "partial-source-control",
+      "restored_sources": [
+        "kernel/hyp/hyp_test.c",
+        "kernel/hyp/hyp_dev.c"
+      ],
+      "reason": "HEAD copies of two shared files compiled and relinked with remaining workspace objects. Earlier control passed, latest timed out. Concurrent unrelated MM/COW edits exist; not a clean-HEAD whole-tree baseline or a root-cause attribution.",
+      "log": {
+        "path": "docs/hypervisor/validation/sbi-2026-10-27/x86-partial-control-timeout.txt",
+        "sha256": "2d2eacb76618b0d06ed5ae96cd23f6845af42c20afe30d823e07f01ca4599add"
+      }
+    }
+  ],
+  "remaining_gaps": [
+    "HSM suspend/resume",
+    "guest cold/warm reboot",
+    "PMU",
+    "nested H/RFENCE 3-6",
+    "full guest OS and long-run conformance validation",
+    "upstream implementation ID allocation"
+  ]
+}

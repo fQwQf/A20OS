@@ -1,6 +1,7 @@
 /* RISC-V Sv39x4 stage-2 implementation. The upper three quarters of the
  * mandatory 16 KiB root remain zero until metadata supports 2048 entries. */
-#include "hyp/hyp_vcpu.h"
+#include "hyp/hyp_sbi.h"
+#include "core/errno.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "core/string.h"
@@ -165,7 +166,7 @@ int hyp_riscv_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
 
 /* The caller owns the returned frame reference even if a concurrent loader
  * rollback unmaps the GPA. Holding a VM reference keeps table nodes alive. */
-int hyp_riscv_s2_pin(hyp_vm_t *vm, uint64_t gpa, pfn_t *out)
+int hyp_riscv_s2_pin_access(hyp_vm_t *vm, uint64_t gpa, pte_t need, pfn_t *out)
 {
     pte_t *table = hyp_s2_walk(vm, gpa, 0);
     if (!table) return -EFAULT;
@@ -174,10 +175,16 @@ int hyp_riscv_s2_pin(hyp_vm_t *vm, uint64_t gpa, pfn_t *out)
     int rc = -EFAULT;
     if ((pte & PTE_V) && arch_pte_is_leaf(pte)) {
         pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
-        if (pfn_valid(pfn)) { frame_get(pfn); *out = pfn; rc = 0; }
+        if ((pte & need) != need) rc = -EACCES;
+        else if (pfn_valid(pfn)) { frame_get(pfn); *out = pfn; rc = 0; }
     }
     mm_pt_node_unlock(table);
     return rc;
+}
+
+int hyp_riscv_s2_pin(hyp_vm_t *vm, uint64_t gpa, pfn_t *out)
+{
+    return hyp_riscv_s2_pin_access(vm, gpa, 0, out);
 }
 
 int hyp_riscv_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
@@ -247,6 +254,12 @@ int hyp_riscv_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
 }
 
 #else
+int hyp_riscv_s2_pin_access(hyp_vm_t *vm, uint64_t gpa, pte_t need, pfn_t *out)
+{
+    (void)vm; (void)gpa; (void)need; (void)out;
+    return -EOPNOTSUPP;
+}
+
 /* This query is also used by the trap decoder in NoMMU builds, where no
  * stage-2 backend is registered. Zero means no valid mapping/permissions;
  * it must never advertise an accessible guest page without a stage-2. */

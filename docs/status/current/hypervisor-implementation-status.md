@@ -1,4 +1,4 @@
-# VM 平台状态与目标（2026-10-25）
+# VM 平台状态与目标（2026-10-27）
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
@@ -8,6 +8,16 @@
 发布还须满足 [功能与性能对照](../../releases/v1.0-validation.md)，本页当前失败记录不因此改变。
 
 **当前为实验平台，尚不能认定为稳定可投入使用。** 新源码已全量构建，并完成单次双 guest 和终端交互验证；同一宿主重复创建、暂停恢复后的退出，以及 SMP 场景仍有失败。操作入口见 [使用指南](../../hypervisor/03-usage.md)。1.0 只验收既有 RISC-V H 后端生命周期；其它架构、A20 `/dev/kvm`、用户态设备与完整 Linux guest 已由 [发布计划 §2.2](../../releases/v1.0.md) 移出 1.0 范围。
+
+## RISC-V SBI 增补（2026-10-27）
+
+RV32/RV64 已共享虚拟 SBI 分发器，补齐 legacy getchar、未知调用错误返回、
+HSM 启动地址权限检查、TIME 清 pending 与 SRST 参数校验，并新增 DBCN 批量
+控制台收发。两种架构在 QEMU 下各通过 40 项 VS/VU 调用检查、双 vCPU 的
+远程 IPI/RFENCE/HSM 检查及无 H 负控；资源计数回到基线。接口限制、复现和
+证据见 [RISC-V SBI](../../hypervisor/10-riscv-sbi.md)。仍报告 SBI 0.2，ID `0xa20`
+未获上游分配，HSM suspend 与 guest reboot 未实现；完整 OS guest 的既有阻塞项
+不因这些小载荷检查通过而关闭。
 
 ## 当前实现
 

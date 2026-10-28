@@ -27,9 +27,11 @@ typedef struct { unsigned state; } spinlock_t;
 }
 HARNESS = r'''
 #include "hyp/hyp_vcpu.h"
+#include "core/errno.h"
 #include <assert.h>
 #include <string.h>
 extern pte_t hyp_riscv_s2_prot(hyp_vm_t *, uint64_t);
+extern int hyp_riscv_s2_pin_access(hyp_vm_t *, uint64_t, pte_t, pfn_t *);
 int main(void) {
     hyp_vm_t vm, before;
     memset(&vm, 0xa5, sizeof(vm));
@@ -38,6 +40,9 @@ int main(void) {
     assert(hyp_riscv_s2_prot(NULL, 0) == 0);
     assert(hyp_riscv_s2_prot(&vm, 0x80000000) == 0);
     assert(hyp_riscv_s2_prot(&vm, ~(uint64_t)0) == 0);
+    pfn_t pinned = 123;
+    assert(hyp_riscv_s2_pin_access(&vm, 0x80000000, 0, &pinned) == -EOPNOTSUPP);
+    assert(pinned == 123);
     assert(memcmp(&vm, &before, sizeof(vm)) == 0);
     return 0;
 }

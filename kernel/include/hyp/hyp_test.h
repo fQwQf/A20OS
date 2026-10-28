@@ -11,6 +11,11 @@ typedef struct hyp_test_payload {
     uint32_t check_value;
     const void *smp_code;
     size_t smp_size;
+#ifdef ARCH_HAS_HYP_SBI
+    uint64_t smp_check_offset;
+    uint32_t smp_check_value;
+    int (*abi_selftest)(void);
+#endif
 } hyp_test_payload_t;
 const hyp_test_payload_t *hyp_arch_test_payload(void);
 #endif

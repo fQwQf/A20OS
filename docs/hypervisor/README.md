@@ -6,6 +6,8 @@ AArch64 EL2、ARM32 HYP、AMD SVM 和 Intel VMX；LoongArch LVZ 为默认关闭�
 
 - [使用指南](03-usage.md)：依赖、构建、QEMU / Bochs 运行、输出判据、用户态
   `hyp_test`、VMM/SMP 调用顺序、RISC-V 管理器、排查与清理。
+- [RISC-V 虚拟 SBI](10-riscv-sbi.md)：RV32/RV64 统一分发、扩展边界、DBCN、
+  错误处理和真实调用验证。
 - [后端能力](08-multiarch-backends.md)：guest 模式、内存与架构接口边界。
 - [运行验证](09-smp-validation.md)：本轮实际执行矩阵、SMP 方法、限制与复现。
 - [验证证据](validation-2026-10-25.json)、[main 复测](validation-main-2026-10-25.json)：

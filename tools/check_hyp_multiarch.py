@@ -109,13 +109,17 @@ def main():
         required += ["HYP_ARCH_TEST: SKIP (backend unavailable)"]
     else:
         required += ["HYP_ARCH_TEST: NX+RO PASS", "HYP_SELFTEST: PASS", f"HYP_ARCH_TEST: PASS backend={backend} rounds=3"]
+        if args.arch in ("riscv32", "riscv64"):
+            required += ["HYP_SBI_TEST: PASS"]
         if args.arch != "riscv64":
             required += ["HYP_ARCH_TEST: preemption+stop PASS"]
+        if args.cpus > 1 and args.arch in ("riscv32", "riscv64"):
+            required += ["HYP_SBI_SMP_TEST: PASS remote-ipi+rfence+hsm"]
         if args.cpus > 1:
             required += [f"HYP_SMP_TEST: PASS backend={backend} cpus=0,1 peak=2 step=stopped"]
-    forbidden = ["HYP_SMP_TEST: FAIL", "HYP_ARCH_TEST: FAIL", "HYP_SELFTEST: FAIL", "PANIC", "Kernel Panic"]
+    forbidden = ["HYP_SBI_TEST: FAIL", "HYP_SMP_TEST: FAIL", "HYP_ARCH_TEST: FAIL", "HYP_SELFTEST: FAIL", "PANIC", "Kernel Panic"]
     if args.without_virtualization:
-        forbidden += ["HYP_ARCH_TEST: PASS"]
+        forbidden += ["HYP_ARCH_TEST: PASS", "HYP_SBI_TEST: PASS", "HYP_SBI_SMP_TEST: PASS"]
     missing = [marker for marker in required if marker not in text]
     found = [marker for marker in forbidden if marker in text]
     if result.returncode or missing or found:
