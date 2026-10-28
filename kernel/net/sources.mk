@@ -12,6 +12,7 @@ A20_NET_SRC := \
     $(KERNEL_DIR)/net/socket/socket_registry.c \
     $(KERNEL_DIR)/net/socket/socket_table.c \
     $(KERNEL_DIR)/net/socket/socket_unix.c \
+    $(KERNEL_DIR)/net/control/route.c \
     $(KERNEL_DIR)/net/control/net_config.c \
     $(KERNEL_DIR)/net/control/socket_netlink.c \
     $(KERNEL_DIR)/net/filter/netfilter.c \

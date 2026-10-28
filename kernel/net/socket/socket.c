@@ -900,8 +900,12 @@ int a20_net_sendto_netlink(void *sp, const void *buf, size_t len,
     net_socket_t *s = (net_socket_t *)sp;
     if (s->protocol == NETLINK_SOCK_DIAG)
         return net_netlink_diag_request(s, buf, len, addr, addrlen);
-    if (s->protocol == NETLINK_ROUTE)
-        return net_netlink_route_request(s, buf, len, addr, addrlen);
+    if (s->protocol == NETLINK_ROUTE) {
+        int rc = net_netlink_route_request(s, buf, len, addr, addrlen);
+        /* A successful configuration transaction returns zero internally;
+         * send/write report the consumed datagram length to Linux programs. */
+        return rc == 0 ? (int)len : rc;
+    }
     if (s->protocol == NETLINK_KOBJECT_UEVENT || s->protocol == NETLINK_GENERIC)
         return net_netlink_uevent_send(s, buf, len, addr, addrlen);
     return -EPROTONOSUPPORT;

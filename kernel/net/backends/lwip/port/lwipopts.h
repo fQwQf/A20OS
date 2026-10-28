@@ -354,5 +354,12 @@ int a20_lwip_control_is_held(void);
 struct netif;
 struct netif *a20_lwip_route_hook_v4(const void *src, const void *dest);
 #define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) a20_lwip_route_hook_v4((src), (dest))
+/* ethARP's q starts at the contiguous IPv4 header here. Passing its source
+ * avoids losing source-policy routing between route selection and ARP. The
+ * pinned-source compile gate also checks this hook's lexical q contract. */
+const void *a20_lwip_route_gateway_v4(struct netif *netif, const void *dest,
+                                      const void *ipv4);
+#define LWIP_HOOK_ETHARP_GET_GW(netif, dest) \
+    a20_lwip_route_gateway_v4((netif), (dest), q->payload)
 
 #endif /* A20_LWIPOPTS_H */
