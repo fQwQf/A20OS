@@ -21,6 +21,7 @@ DRIVER_CORE_SRCS := \
 GENERIC_KERNEL_SERVICE_SRCS := \
     $(KERNEL_DIR)/drivers/block/loop.c \
     $(KERNEL_DIR)/drivers/block/udisk.c \
+    $(KERNEL_DIR)/drivers/net/tun.c \
     $(KERNEL_DIR)/drivers/char/pty.c \
     $(KERNEL_DIR)/drivers/char/uart.c \
     $(KERNEL_DIR)/drivers/gpu/framebuffer.c \

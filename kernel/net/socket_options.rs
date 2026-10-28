@@ -54,6 +54,7 @@ const IPPROTO_ICMPV6: i32 = 58;
 const SO_REUSEADDR: i32 = 2;
 const SO_TYPE: i32 = 3;
 const SO_ERROR: i32 = 4;
+const SO_BROADCAST: i32 = 6;
 const SO_SNDBUF: i32 = 7;
 const SO_RCVBUF: i32 = 8;
 const SO_KEEPALIVE: i32 = 9;
@@ -202,6 +203,7 @@ pub struct NetOptionView {
     pub rcv_buf: *mut u32,
     pub reuseaddr: *mut i32,
     pub reuseport: *mut i32,
+    pub broadcast: *mut i32,
     pub recv_timeout_ticks: *mut u64,
     pub send_timeout_ticks: *mut u64,
     pub passcred: *mut i32,
@@ -772,6 +774,26 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
         }
         return APPLY_KEEPALIVE;
     }
+    if level == SOL_SOCKET && optname == SO_BROADCAST {
+        if optval.is_null() || optlen < 4 {
+            return -EINVAL;
+        }
+        let val = unsafe { read_i32(optval) };
+        let mut flags = 0u64;
+        unsafe {
+            a20_net_option_lock(v.s, &mut flags);
+            *v.broadcast = (val != 0) as i32;
+            a20_net_option_unlock(v.s, flags);
+        }
+        /* Nothing to apply to a pcb: on Linux SO_BROADCAST authorises sends to
+         * broadcast addresses, and lwIP's raw UDP path (udp_sendto) already
+         * permits them -- unlike lwIP's socket API there is no SOF_BROADCAST
+         * gate to set here.  The value is still recorded so getsockopt()
+         * reports what the caller set, as Linux does.  Go's net package sets
+         * this on every INET SOCK_DGRAM socket it creates, so refusing it
+         * would break every Go UDP dial (DNS included). */
+        return 0;
+    }
     if level == SOL_SOCKET && (optname == SO_SNDBUF || optname == SO_RCVBUF) {
         if optval.is_null() || optlen < 4 {
             return -EINVAL;
@@ -907,6 +929,9 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
         }
         if optname == SO_KEEPALIVE {
             return report_int(rep, optlen, unsafe { *v.keepalive });
+        }
+        if optname == SO_BROADCAST {
+            return report_int(rep, optlen, unsafe { *v.broadcast });
         }
         if optname == SO_PASSCRED {
             return report_int(rep, optlen, unsafe { *v.passcred });

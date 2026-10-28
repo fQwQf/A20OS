@@ -43,6 +43,11 @@ enum {
     DEVFS_ALSA_PCM,
     DEVFS_BLOCK_DIR,
     DEVFS_CHAR_DIR,
+    /* /dev/net/tun: a fixed service node, not a dynamic class node.  TUN is a
+     * kernel service (docs/drivers/classes/tun.md), so it is enumerated like
+     * ptmx rather than published through the driver class registry. */
+    DEVFS_NET_DIR,
+    DEVFS_TUN,
     /* udev-created writable entries (devtmpfs semantics): directories and
      * symlinks created at runtime under /dev. */
     DEVFS_DYN_DIR,

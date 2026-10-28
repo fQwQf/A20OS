@@ -344,8 +344,16 @@ typedef struct net_socket {
      * stated a value and autotuning must not quietly exceed it. */
     uint8_t snd_autotune;
     uint8_t rcv_autotune;
+    /* SO_BINDTODEVICE: interface name, empty when unbound.  Recorded so
+     * getsockopt reports it and magicsock's bind control function
+     * (which refuses to start without the option) succeeds. */
+    char bind_dev[16];
     int reuseaddr;
     int reuseport;
+    /* SO_BROADCAST: recorded so getsockopt() reports what the caller set.
+     * Linux uses it to authorise broadcast sends; lwIP's raw UDP path has no
+     * per-pcb gate for that, so there is nothing else to apply it to. */
+    int broadcast;
     int ipv6_v6only;
     int keepalive;
     int keep_idle;

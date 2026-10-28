@@ -1,0 +1,24 @@
+# gotest profile —— Go 工具链 + tailscale 兼容性评估（纯 Alpine 上游包）
+#
+# 配套 packages/overlay/gotest/（a20-distro 标记 + stage-2 init + guest 测试脚本），
+# 启动后由 init 自动 chroot 接管，guest 直接落在本 rootfs。
+# 用途：验证 A20OS Linux ABI 兼容层能否运行 Go 编译器/运行时（goroutine 调度、
+# netlink、loopback TCP、cgo、TLS），以及 tailscale 用户态组网
+# （tailscaled --tun=userspace-networking，内核无 TUN 驱动）。
+#
+#   tools/a20 run gotest-x86_64
+#
+# 首次组镜像需要网络拉取上游包（官方源；本环境 USTC 源 403），之后走
+# build/cache/apk 缓存：
+#   ALPINE_MIRROR_ROOT=https://dl-cdn.alpinelinux.org/alpine \
+#       make ARCH=x86_64 PKG_WORLD=gotest PKG_SIZE_MB=2048 image-world
+#
+# 注意：go 包自带依赖 binutils/gcc/musl-dev（cgo 用），tailscale 依赖 openresolv。
+
+musl
+busybox
+ca-certificates
+curl
+git
+go
+tailscale

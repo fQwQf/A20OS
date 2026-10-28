@@ -502,8 +502,21 @@ pub unsafe extern "C" fn a20_net_unix_socket_connect(s: *mut c_void,
                     ptr::copy_nonoverlapping(lv.local, cv.local, ll);
                     *cv.local_len = ll;
                     let sl = *v.local_len;
-                    ptr::copy_nonoverlapping(v.local, cv.peer_addr, sl);
-                    *cv.peer_len = sl;
+                    if sl >= 2 {
+                        ptr::copy_nonoverlapping(v.local, cv.peer_addr, sl);
+                        *cv.peer_len = sl;
+                    } else {
+                        /* The connector never bound a pathname.  Linux still
+                         * reports such a peer as a sockaddr_un carrying only
+                         * the family, with addrlen 2; handing back addrlen 0
+                         * makes Go's syscall.Accept4 convert a zeroed
+                         * sockaddr (family 0) and fail with EAFNOSUPPORT,
+                         * which kills any Go unix-socket server on its first
+                         * accept. */
+                        ptr::write_unaligned(cv.peer_addr as *mut u16,
+                                             AF_UNIX as u16);
+                        *cv.peer_len = 2;
+                    }
                     let qr = a20_net_unix_accept_push(listener, child);
                     if qr < 0 {
                         if !(*v.ch_ep).is_null() {

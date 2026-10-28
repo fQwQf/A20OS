@@ -6,8 +6,10 @@ A Linux kernel/initramfs with virtio-blk and ext4 support must be supplied.
 """
 from __future__ import annotations
 import argparse
+import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -55,6 +57,7 @@ def main():
     ap.add_argument('--linux-kernel', type=Path, required=True)
     ap.add_argument('--linux-initrd', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--host-root', type=Path, help='also interleave native host runs using this identical APK rootfs')
     ap.add_argument('--runs', type=int, default=3)
     ap.add_argument('--seconds', type=int, default=5)
     ap.add_argument('--timeout', type=int, default=90)
@@ -80,6 +83,18 @@ def main():
     for path in inputs:
         if not path.is_file():
             ap.error(f'missing input: {path}')
+    if args.host_root:
+        if args.fileio:
+            ap.error('--host-root does not support fileio; host and guest storage semantics differ')
+        host_root = args.host_root.resolve()
+        for path, expected in source['binary_sha256'].items():
+            local = host_root / path.lstrip('/')
+            if not local.is_file() or bench.sha(local) != expected:
+                ap.error(f'host executable/library fingerprint mismatch: {local}')
+        host_prefix = ['taskset', '-c', source['cpu_affinity'],
+                       str(host_root / 'lib/ld-musl-x86_64.so.1'), '--library-path',
+                       f'{host_root}/lib:{host_root}/usr/lib']
+        host_env = dict(os.environ, LC_ALL='C', OPENSSL_CONF='/dev/null', OPENSSL_ia32cap='0')
     args.out.mkdir(parents=True, exist_ok=False)
     out = args.out.resolve()
     init = out / 'linux-init';init.write_text(LINUX_INIT)
@@ -90,6 +105,15 @@ def main():
                     input_sha256={str(p): bench.sha(p) for p in inputs},
                     binary_sha256=source['binary_sha256'], runner_sha256=bench.sha(__file__),
                     samples=[], boots=[], counter_policy='A20 disable each case and audit; Linux has no A20 counters')
+    if args.host_root:
+        manifest.update(host_root=str(host_root), host_prefix=host_prefix,
+                        uname=bench.command(['uname', '-a']),
+                        git_head_at_run=bench.command(['git', 'rev-parse', 'HEAD']),
+                        git_status_at_run=bench.command(['git', 'status', '--short']),
+                        cpu_affinity=source['cpu_affinity'],
+                        host_clocksource=Path('/sys/devices/system/clocksource/clocksource0/current_clocksource').read_text().strip(),
+                        host_governor=Path(f"/sys/devices/system/cpu/cpu{source['cpu_affinity'].split(',')[0]}/cpufreq/scaling_governor").read_text().strip())
+    manifest['order'] = []
     (out / 'runner.py.txt').write_text(Path(__file__).read_text())
     if args.fileio:
         (out / 'fileio-wrapper.sh.txt').write_text((ROOT / 'tools/bottleneck-sysbench-fileio.sh').read_text())
@@ -97,7 +121,38 @@ def main():
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     save()
     for run in range(1, args.runs + 1):
-        for side in (['linux-kvm', 'a20-kvm'] if run % 2 else ['a20-kvm', 'linux-kvm']):
+        orders = [
+            ['linux-host', 'linux-kvm', 'a20-kvm'],
+            ['linux-kvm', 'a20-kvm', 'linux-host'],
+            ['a20-kvm', 'linux-host', 'linux-kvm'],
+            ['linux-host', 'a20-kvm', 'linux-kvm'],
+            ['a20-kvm', 'linux-kvm', 'linux-host'],
+            ['linux-kvm', 'linux-host', 'a20-kvm'],
+        ]
+        order = orders[(run - 1) % len(orders)] if args.host_root else (
+            ['linux-kvm', 'a20-kvm'] if run % 2 else ['a20-kvm', 'linux-kvm'])
+        for side in order:
+            manifest['order'].append([run, side]);save()
+            if side == 'linux-host':
+                for case, (case_argv, unit) in chosen.items():
+                    argv = host_prefix + [str(host_root / 'usr/bin' / case_argv[0]), *case_argv[1:]]
+                    started = time.monotonic()
+                    proc = subprocess.run(argv, env=host_env, capture_output=True, text=True, timeout=args.timeout)
+                    wall = time.monotonic() - started
+                    output = proc.stdout + proc.stderr
+                    value = bench.metric(case, output, args.seconds)
+                    row = dict(run=run, side=side, case=case, argv=argv, unit=unit,
+                               exit_code=proc.returncode, wall_seconds=wall, output=output,
+                               value=value, status='ok' if proc.returncode == 0 and value is not None and value > 0 else 'failed')
+                    elapsed = re.search(r'total time:\s*([\d.]+)s', output)
+                    if elapsed:
+                        row['reported_seconds'] = float(elapsed[1])
+                        if abs(wall - float(elapsed[1])) > max(1, args.seconds * 0.25):
+                            row.update(status='invalid-clock', value=None)
+                    manifest['samples'].append(row)
+                    (out / f'{run}-{side}-{case}.log').write_text(output)
+                    save();print(f"{run} {side} {case}: {row['status']} {row['value']} {unit}", flush=True)
+                continue
             private = out / f'{run}-{side}.img'
             subprocess.run(['cp', '--reflink=auto', '--sparse=always', str(base), str(private)], check=True)
             lines = ['#!/bin/sh', 'export LC_ALL=C OPENSSL_CONF=/dev/null OPENSSL_ia32cap=0',
@@ -145,6 +200,8 @@ def main():
                     else:
                         value = bench.metric(case, output, args.seconds)
                     row.update(value=value, status='ok' if rc == 0 and value is not None and value > 0 else 'failed')
+                    if side == 'a20-kvm' and row['collection_enabled_after_case'] != 0:
+                        row.update(status='invalid-counter-state', value=None)
                     elapsed = re.search(r'total time:\s*([\d.]+)s', output)
                     if elapsed and not case.startswith('fileio-'):
                         row['reported_seconds'] = float(elapsed[1])
@@ -157,10 +214,14 @@ def main():
             finally:
                 guest.close()
     manifest['inputs_unchanged'] = all(bench.sha(p) == h for p, h in manifest['input_sha256'].items())
+    if args.host_root:
+        manifest['host_binaries_unchanged'] = all(
+            bench.sha(host_root / p.lstrip('/')) == h for p, h in source['binary_sha256'].items())
     summary = {}
+    sides = ['linux-host', 'linux-kvm', 'a20-kvm'] if args.host_root else ['linux-kvm', 'a20-kvm']
     for case in chosen:
         entry = {}
-        for side in ['linux-kvm', 'a20-kvm']:
+        for side in sides:
             rows = [s for s in manifest['samples'] if s['side'] == side and s['case'] == case]
             values = [s['value'] for s in rows if s['status'] == 'ok']
             entry[side] = dict(values=values, complete=len(values) == args.runs,
@@ -168,9 +229,16 @@ def main():
                                min=min(values) if values else None, max=max(values) if values else None)
         if all(entry[s]['complete'] for s in ['linux-kvm', 'a20-kvm']):
             entry['a20_over_linux_kvm'] = entry['a20-kvm']['median'] / entry['linux-kvm']['median']
+        if args.host_root and all(entry[s]['complete'] for s in sides):
+            entry['linux_kvm_over_host'] = entry['linux-kvm']['median'] / entry['linux-host']['median']
+            entry['a20_over_host'] = entry['a20-kvm']['median'] / entry['linux-host']['median']
         summary[case] = entry
     manifest['summary'] = summary;save();print(json.dumps(summary, indent=2), flush=True)
-    return 0 if manifest['inputs_unchanged'] and all(s['status'] == 'ok' for s in manifest['samples']) else 1
+    with (out / 'samples.csv').open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['run', 'side', 'case', 'status', 'value', 'unit', 'wall_seconds'], extrasaction='ignore')
+        writer.writeheader();writer.writerows(manifest['samples'])
+    return 0 if (manifest['inputs_unchanged'] and manifest.get('host_binaries_unchanged', True)
+                 and all(s['status'] == 'ok' for s in manifest['samples'])) else 1
 
 
 if __name__ == '__main__':

@@ -46,9 +46,16 @@
 /* Generic keeps the root-device substrate built in until an initramfs exists.
  * Once present, /boot/drivers is the early package store; /bin/lib/drivers is
  * the runtime store. Both are ordinary .a20drv directories and are scanned by
- * this manager, so there is no second manifest or activation path. */
+ * this manager, so there is no second manifest or activation path.
+ *
+ * A distro boot (an Alpine/Debian root mounted at /extra) has no FAT32
+ * userland disk, so there is no /bin/lib/drivers: the same-named directory
+ * inside that root is the runtime store instead.  The two are alternatives,
+ * not layers -- only one is scanned, because loading the same module from
+ * both would register its drivers twice. */
 #define DRIVER_STORE_EARLY    "/boot/drivers"
 #define DRIVER_STORE_RUNTIME  "/bin/lib/drivers"
+#define DRIVER_STORE_DISTRO   "/extra/lib/drivers"
 #define DRIVER_STORE_MAX      64
 
 /* ------------------------------------------------------------------ */
@@ -362,14 +369,14 @@ int driver_manager_activate(const char *store_path)
     return 0;
 }
 
-static void manager_scan_store(const char *store, int optional,
-                               int allow_user_services)
+static int manager_scan_store(const char *store, int optional,
+                              int allow_user_services)
 {
     int dfd = vfs_open(store, O_RDONLY, 0);
     if (dfd < 0) {
         if (!optional)
             kinfo("[DRIVERMGR] store %s not found (%d)\n", store, dfd);
-        return;
+        return 0;
     }
     char dents[512];
     int scanned = 0;
@@ -396,6 +403,7 @@ static void manager_scan_store(const char *store, int optional,
     }
 out:
     vfs_close(dfd);
+    return 1;
 }
 
 void driver_manager_early_init(void)
@@ -409,7 +417,14 @@ void driver_manager_early_init(void)
 void driver_manager_init(void)
 {
     kinfo("[DRIVERMGR] runtime driver manager init\n");
-    manager_scan_store(DRIVER_STORE_RUNTIME, 0, 1);
+    /* The classic layout mounts the FAT32 userland disk at /bin and its store
+     * is the only one.  A distro boot has no such disk, so fall back to the
+     * same path inside the distro root at /extra.  First store that exists
+     * wins, for the reason in the DRIVER_STORE_DISTRO comment above. */
+    if (manager_scan_store(DRIVER_STORE_RUNTIME, 1, 1))
+        kinfo("[DRIVERMGR] runtime store: %s\n", DRIVER_STORE_RUNTIME);
+    else if (manager_scan_store(DRIVER_STORE_DISTRO, 1, 1))
+        kinfo("[DRIVERMGR] runtime store: %s\n", DRIVER_STORE_DISTRO);
     drvmod_init_all();
     kinfo("[DRIVERMGR] runtime driver manager init done\n");
 }

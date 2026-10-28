@@ -208,6 +208,8 @@ def cmd_image_world(a) -> int:
         cmd += ["--no-alpine"]
     for pk in (a.ssh_pubkey.split() if a.ssh_pubkey else []):
         cmd += ["--ssh-pubkey", pk]
+    for d in (a.drivers.split() if a.drivers else []):
+        cmd += ["--driver", d]
     if hasattr(__import__("os"), "getuid") and __import__("os").getuid() != 0:
         cmd += ["--usermode"]
     cmd += ["--output", f"{a.image_dir}/{a.world}-{a.arch}.img",
@@ -231,6 +233,7 @@ def main() -> int:
                  ("size-mb", "image size in MiB"), ("alpine", "1 or 0"),
                  ("media", "GUI_MEDIA paths"), ("media-dir", "media dir in image"),
                  ("media-overlay", "media overlay dir"),
+                 ("drivers", "space-separated .a20drv paths for /lib/drivers"),
                  ("ssh-pubkey", "space-separated public key files")):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()

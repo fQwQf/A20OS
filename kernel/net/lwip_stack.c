@@ -1,5 +1,6 @@
 #include "proc/resource_ns.h"
 #include "net/lwip_stack.h"
+#include "net/tun.h"
 #include "net/lwip_concurrency.h"
 #include "core/bootargs.h"
 #include "net/socket_internal.h"
@@ -203,11 +204,15 @@ static void a20_lwip_clear_rx_pending(void)
 
 static struct netif g_netifs[A20_NET_MAX_DEVS];
 static struct netif g_loopif;
+/* TUN netifs live in their own slots so a software interface never consumes a
+ * physical driver's index, and so remove() can be a plain slot reset. */
+static struct netif g_tun_netifs[NET_PROFILE_TUN_MAX_DEVS];
+static uint8_t g_tun_netif_used[NET_PROFILE_TUN_MAX_DEVS];
 
 /* The tier budget in net_profile.h is a ceiling; this is the measurement it
  * stands for.  Both arrays are unconditional .bss, so drift here is a silent
  * cost on every boot unless it is a compile-time failure. */
-_Static_assert(sizeof(g_netifs) + sizeof(g_loopif) <=
+_Static_assert(sizeof(g_netifs) + sizeof(g_loopif) + sizeof(g_tun_netifs) <=
                    NET_PROFILE_NETIF_STRUCT_BUDGET,
                "struct netif grew past the per-tier budget; update "
                "NET_PROFILE_NETIF_STRUCT_BYTES and the embedded total");
@@ -2413,10 +2418,18 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
  * socket and netlink layers use.
  */
 
+/* Forward: defined with the other TUN helpers at the end of this file. */
+int a20_lwip_netif_is_tun(struct netif *n);
+
 void *a20_lwip_stack_netif_by_index(unsigned ifindex)
 {
     for (struct netif *n = netif_list; n; n = n->next) {
-        if (n->state && (unsigned)netif_get_index(n) == ifindex)
+        /* A TUN netif deliberately keeps state == NULL (the polling paths would
+         * read it as a driver state), but netlink MTU/flags/address writes and
+         * the route hook all resolve through this walk, so it has to count as
+         * addressable too. */
+        if ((n->state || a20_lwip_netif_is_tun(n)) &&
+            (unsigned)netif_get_index(n) == ifindex)
             return n;
     }
     return NULL;
@@ -2563,4 +2576,101 @@ void a20_lwip_stack_notify_addr6(unsigned ifindex, const uint8_t addr[16],
                                  uint8_t prefixlen, uint16_t msg_type)
 {
     net_netlink_addr6_notify(ifindex, addr, prefixlen, msg_type);
+}
+
+
+/* ------------------------------------------------------------- TUN netifs
+ *
+ * A TUN netif is a kernel-service interface: no driver binding, no hardware
+ * probe, and the "link" is whatever the character device queues.  The netif
+ * object itself lives here because this file owns the per-profile .bss
+ * accounting; the instance state, queues and ABI live in drivers/net/tun.c
+ * (see docs/drivers/classes/tun.md).
+ */
+
+static err_t a20_lwip_tun_init_cb(struct netif *netif)
+{
+    netif->name[0] = 't';
+    netif->name[1] = 'u';
+    netif->mtu = NET_PROFILE_NETIF_MTU;
+    /* No NETIF_FLAG_ETHERNET: netif_input() then hands packets straight to
+     * ip_input(), which is the L3-only contract a TUN has. */
+    netif->flags = NETIF_FLAG_LINK_UP;
+    return ERR_OK;
+}
+
+struct netif *a20_lwip_tun_add(void)
+{
+    uint64_t flags = a20_lwip_lock();
+    int slot = -1;
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; i++) {
+        if (!g_tun_netif_used[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        a20_lwip_unlock(flags);
+        return NULL;
+    }
+    ip4_addr_t any, mask, gw;
+    ip4_addr_set_zero(&any);
+    ip4_addr_set_zero(&mask);
+    ip4_addr_set_zero(&gw);
+    /* state stays NULL: the polling paths treat a non-NULL state as an
+     * a20_lwip_netif_state_t and would read the tun instance as one.  The
+     * instance is found from the netif pointer instead (see tun.c). */
+    struct netif *n = netif_add(&g_tun_netifs[slot], &any, &mask, &gw, NULL,
+                                a20_lwip_tun_init_cb, netif_input);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return NULL;
+    }
+    g_tun_netif_used[slot] = 1;
+    netif_set_up(n);
+    netif_set_link_up(n);
+    a20_lwip_unlock(flags);
+    return n;
+}
+
+void a20_lwip_tun_remove(struct netif *n)
+{
+    if (!n)
+        return;
+    uint64_t flags = a20_lwip_lock();
+    netif_set_down(n);
+    netif_set_link_down(n);
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; i++) {
+        if (&g_tun_netifs[i] == n) {
+            netif_remove(n);
+            g_tun_netif_used[i] = 0;
+            break;
+        }
+    }
+    a20_lwip_unlock(flags);
+}
+
+int a20_lwip_netif_is_tun(struct netif *n)
+{
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; i++) {
+        if (g_tun_netif_used[i] && &g_tun_netifs[i] == n)
+            return 1;
+    }
+    return 0;
+}
+
+/* LWIP_HOOK_IP4_ROUTE_SRC (see net/lwip_port/lwipopts.h).  Called by lwIP with
+ * g_lwip_lock held: the route lookup takes only the route table's own lock,
+ * and the netif is resolved through the same index walk the netlink write path
+ * uses.  NULL means "no prefix route matched", which lets lwIP choose by
+ * netmask/default as before. */
+struct netif *a20_lwip_route_hook_v4(const void *src, const void *dest)
+{
+    (void)src;
+    if (!dest)
+        return NULL;
+    uint32_t ifindex = a20_net_route_lookup(((const ip4_addr_t *)dest)->addr);
+    if (ifindex == 0 || ifindex > 0xffff)
+        return NULL;
+    return (struct netif *)a20_lwip_stack_netif_by_index((unsigned)ifindex);
 }

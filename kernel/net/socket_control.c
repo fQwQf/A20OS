@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/tun.h"
 #include "ipc/ipc.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -196,7 +197,8 @@ static struct netif *net_ip_group_netif(const net_ip_mreqn_t *mreq)
     }
     if (mreq->imr_address) {
         for (struct netif *n = netif_list; n; n = n->next)
-            if (n->state && netif_ip4_addr(n)->addr == mreq->imr_address)
+            if ((n->state || a20_lwip_netif_is_tun(n)) &&
+                netif_ip4_addr(n)->addr == mreq->imr_address)
                 return n;
         return NULL;
     }
@@ -658,6 +660,7 @@ static void net_option_view_init(net_socket_t *s, net_option_view_t *v)
     v->rcv_buf = &s->rcv_buf;
     v->reuseaddr = &s->reuseaddr;
     v->reuseport = &s->reuseport;
+    v->broadcast = &s->broadcast;
     v->recv_timeout_ticks = &s->recv_timeout_ticks;
     v->send_timeout_ticks = &s->send_timeout_ticks;
     v->passcred = &s->passcred;
@@ -750,6 +753,18 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
 {
     if (!s)
         return -ENOTSOCK;
+    /* SO_BINDTODEVICE is a name, not an integer, so it is handled here rather
+     * than in the integer-option state machine.  The binding is recorded and
+     * reported; egress interface selection is still lwIP's route decision (a
+     * follow-up once there is more than one physical uplink). */
+    if (level == SOL_SOCKET && optname == 25 /* SO_BINDTODEVICE */) {
+        if (!optval)
+            return -EFAULT;
+        size_t n = optlen < sizeof(s->bind_dev) ? optlen : sizeof(s->bind_dev) - 1;
+        memset(s->bind_dev, 0, sizeof(s->bind_dev));
+        memcpy(s->bind_dev, optval, n);
+        return 0;
+    }
     net_option_view_t v;
     net_option_view_init(s, &v);
     int r = a20_net_setsockopt_state(&v, level, optname, optval, optlen);
@@ -775,6 +790,14 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         return -ENOTSOCK;
     if (!optval || !optlen)
         return -EINVAL;
+    if (level == SOL_SOCKET && optname == 25 /* SO_BINDTODEVICE */) {
+        size_t n = strlen(s->bind_dev) + 1;
+        if (n > *optlen)
+            n = *optlen;
+        memcpy(optval, s->bind_dev, n);
+        *optlen = n;
+        return 0;
+    }
     net_option_view_t v;
     net_option_view_init(s, &v);
     net_opt_report_t rep;

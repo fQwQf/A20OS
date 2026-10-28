@@ -292,6 +292,8 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_BLOCK_DIR, "block", 0),
     STATIC_NODE(DEVFS_CHAR_DIR, "char", 0),
     STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
+    STATIC_NODE(DEVFS_NET_DIR, "net", 0),
+    STATIC_NODE(DEVFS_TUN, "tun", 0x0ac8),
     STATIC_NODE(DEVFS_DRI_DIR, "dri", 0),
     STATIC_NODE(DEVFS_DRM, "card0", 0xe200),
     STATIC_NODE(DEVFS_DRM, "renderD128", 0xe280),
@@ -404,6 +406,7 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         { "loop6", DT_BLK }, { "loop7", DT_BLK },
     { "loop-control", DT_CHR },
     { "ptmx", DT_CHR },
+        { "net", DT_DIR },
     { "pts", DT_DIR },
         { "block", DT_DIR },
         { "char", DT_DIR },
@@ -425,6 +428,12 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         { ".", DT_DIR }, { "..", DT_DIR },
         { "0", DT_CHR }, { "1", DT_CHR }, { "2", DT_CHR }, { "3", DT_CHR },
         { "4", DT_CHR }, { "5", DT_CHR }, { "6", DT_CHR }, { "7", DT_CHR },
+    };
+    static const struct {
+        const char *name;
+        uint8_t type;
+    } net_entries[] = {
+        { ".", DT_DIR }, { "..", DT_DIR }, { "tun", DT_CHR },
     };
     static const struct {
         const char *name;
@@ -458,6 +467,9 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     } else if (kind == DEVFS_MISC) {
         entries_void = misc_entries;
         nentries = sizeof(misc_entries) / sizeof(misc_entries[0]);
+    } else if (kind == DEVFS_NET_DIR) {
+        entries_void = net_entries;
+        nentries = sizeof(net_entries) / sizeof(net_entries[0]);
     } else if (kind == DEVFS_PTS_DIR) {
         entries_void = pts_entries;
         nentries = sizeof(pts_entries) / sizeof(pts_entries[0]);
@@ -621,6 +633,8 @@ extern int  loop_dev_read(int idx, char *buf, size_t count, size_t offset);
 extern int  loop_dev_write(int idx, const char *buf, size_t count, size_t offset);
 extern int  loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg);
 extern int  loop_control_ioctl(unsigned long req, void *arg);
+extern int  tun_file_open(vfile_t *vf);
+extern vfile_ops_t g_tun_ops;
 extern int  pty_alloc_and_open(void);
 extern int  pty_master_read(int idx, char *buf, size_t count, int nonblock);
 extern int  pty_master_write(int idx, const char *buf, size_t count);
@@ -1019,6 +1033,13 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             return 0;
         }
         class_device_put(cdev);
+    } else if (node->kind == DEVFS_NET_DIR && strcmp(name, "tun") == 0) {
+        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+            if (g_nodes[i].kind == DEVFS_TUN) {
+                *out = node_to_vnode(i);
+                return 0;
+            }
+        }
     } else if (node->kind == DEVFS_MISC && strcmp(name, "rtc") == 0) {
         for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
             if (g_nodes[i].kind == DEVFS_RTC && strcmp(g_nodes[i].name, "rtc") == 0) {
@@ -1281,6 +1302,14 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_FB:
         vf->ops = &g_devfs_fb_ops;
         break;
+    case DEVFS_TUN:
+        vf->ops = &g_tun_ops;
+        if (tun_file_open(vf) < 0) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        break;
     case DEVFS_INPUT:
         if (input_file_open(vf, node->class_dev) < 0) {
             vnode_put(vf->vnode);
@@ -1325,6 +1354,9 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
         vf->ops = &g_devfs_dir_ops;
         break;
     case DEVFS_INPUT_DIR:
+        vf->ops = &g_devfs_dir_ops;
+        break;
+    case DEVFS_NET_DIR:
         vf->ops = &g_devfs_dir_ops;
         break;
     case DEVFS_BLOCK_DIR:
@@ -1501,6 +1533,10 @@ vnode_t *devfs_mount(void) {
     for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
         if (g_nodes[i].kind == DEVFS_SND_DIR) { snd_dir_idx = i; break; }
     }
+    size_t net_dir_idx = 0;
+    for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
+        if (g_nodes[i].kind == DEVFS_NET_DIR) { net_dir_idx = i; break; }
+    }
     for (size_t i = 0; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
         memset(&g_vnodes[i], 0, sizeof(g_vnodes[i]));
         g_vnodes[i].ino = i + 1;
@@ -1509,7 +1545,8 @@ vnode_t *devfs_mount(void) {
                          || g_nodes[i].kind == DEVFS_DRI_DIR || g_nodes[i].kind == DEVFS_SND_DIR
                          || g_nodes[i].kind == DEVFS_INPUT_DIR
                          || g_nodes[i].kind == DEVFS_BLOCK_DIR
-                         || g_nodes[i].kind == DEVFS_CHAR_DIR)
+                         || g_nodes[i].kind == DEVFS_CHAR_DIR
+                         || g_nodes[i].kind == DEVFS_NET_DIR)
                      ? VFS_FT_DIR : VFS_FT_REGULAR;
         g_vnodes[i].mode = (g_vnodes[i].type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFCHR | 0666);
         vnode_ref_init(&g_vnodes[i], 1);
@@ -1518,6 +1555,8 @@ vnode_t *devfs_mount(void) {
             g_vnodes[i].parent = &g_vnodes[1];
         if (g_nodes[i].kind == DEVFS_PTS)
             g_vnodes[i].parent = &g_vnodes[pts_dir_idx];
+        if (g_nodes[i].kind == DEVFS_TUN)
+            g_vnodes[i].parent = &g_vnodes[net_dir_idx];
         if (g_nodes[i].kind == DEVFS_DRM)
             g_vnodes[i].parent = &g_vnodes[dri_dir_idx];
         if (g_nodes[i].kind == DEVFS_ALSA_CTL || g_nodes[i].kind == DEVFS_ALSA_PCM)

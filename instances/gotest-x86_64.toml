@@ -1,0 +1,25 @@
+# Go 工具链 + tailscale 兼容性测试实例（apk world 'gotest'，distro 模式）：
+# Alpine v3.23 上游包（go/gcc/tailscale）由 mkrootfs 组进
+# build/images/gotest-x86_64.img，启动时作第二块盘挂载并由 init chroot 接管
+# （与 pynode / devtools world 同一模式）。
+#
+#   tools/a20 build gotest-x86_64     # 组镜像
+#   tools/a20 run gotest-x86_64       # 组镜像并启动（交互串口）
+#
+# 自动化评估脚本在 overlay 里：guest 侧跑 `gotest`（Go 工具链门禁）与
+# `tstest <login-server> <authkey> <peer-ip>`（tailscale 用户态组网）。
+name = "gotest-x86_64"
+description = "Go toolchain + tailscale userspace-networking compatibility probe via apk world 'gotest' (Alpine upstream packages)"
+arch = "x86_64"
+
+[machine]
+memory = "3G"
+smp = 4
+
+[rootfs]
+world = "gotest"
+world_size_mb = 2048
+# 运行时驱动子集：virtio-net 不是 early 模块（不编进内核），必须由
+# mkrootfs 装进镜像 /lib/drivers，内核才能在 distro 启动时从
+# /extra/lib/drivers 加载它并拉起 eth0（DHCP 默认开启）。
+drivers = ["virtio-net"]

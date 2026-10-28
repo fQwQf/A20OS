@@ -1,5 +1,6 @@
 #include "proc/userns.h"
 #include "net/socket_internal.h"
+#include "net/tun.h"
 
 #include "core/klog.h"
 #include "core/stdio.h"
@@ -277,8 +278,15 @@ int a20_net_netlink_snapshot(void *nsp, void *outp, int max)
     for (struct netif *ni = netif_list; ni && n < max; ni = ni->next) {
         nl_link_out_t *e = &out[n++];
         memset(e, 0, sizeof(*e));
-        snprintf(e->name, sizeof(e->name), "%c%c%u",
-                 ni->name[0], ni->name[1], ni->num);
+        /* A TUN netif carries a user-chosen name ("tailscale0"), which does
+         * not fit lwIP's 2-char + num scheme; ask the service for it. */
+        char tun_name[16];
+        int is_tun = a20_tun_netif_name(ni, tun_name, sizeof(tun_name));
+        if (is_tun)
+            snprintf(e->name, sizeof(e->name), "%s", tun_name);
+        else
+            snprintf(e->name, sizeof(e->name), "%c%c%u",
+                     ni->name[0], ni->name[1], ni->num);
         e->index = (uint32_t)netif_get_index(ni);
         e->mtu = ni->mtu;
         e->flags = NLRT_IF_FLAGS_LOOPBACK;
@@ -286,10 +294,16 @@ int a20_net_netlink_snapshot(void *nsp, void *outp, int max)
             e->flags |= NLRT_IF_FLAGS_UP;
         if (netif_is_link_up(ni))
             e->flags |= NLRT_IF_FLAGS_RUNNING;
-        if (ni->flags & NETIF_FLAG_ETHERNET)
+        if (ni->flags & NETIF_FLAG_ETHERNET) {
             e->loopback = 0, e->flags &= ~(uint32_t)NLRT_IF_FLAGS_LOOPBACK;
-        else
+        } else if (is_tun) {
+            /* TUN is an L3 point-to-point interface, never the loopback one:
+             * leaving IFF_LOOPBACK set makes net.Interfaces() (and therefore
+             * tailscale's netmon) treat the tunnel as lo. */
+            e->loopback = 0, e->flags &= ~(uint32_t)NLRT_IF_FLAGS_LOOPBACK;
+        } else {
             e->loopback = 1;
+        }
         memcpy(e->mac, ni->hwaddr, 6);
         const ip4_addr_t *ip = netif_ip4_addr(ni);
         const ip4_addr_t *mask = netif_ip4_netmask(ni);

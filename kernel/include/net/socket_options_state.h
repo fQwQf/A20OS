@@ -89,6 +89,7 @@ typedef struct net_option_view {
     uint32_t   *rcv_buf;
     int        *reuseaddr;
     int        *reuseport;
+    int        *broadcast;
     uint64_t   *recv_timeout_ticks;
     uint64_t   *send_timeout_ticks;
     int        *passcred;
