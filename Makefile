@@ -2468,6 +2468,10 @@ KERNEL_SRC += $(KERNEL_DIR)/ipc/keyring_rust_bridge.c
 endif
 endif
 
+ifneq ($(filter $(KERNEL_DIR)/net/control/route.c,$(KERNEL_SRC)),)
+KERNEL_ROUTE_OBJECT = $(RUST_NET_ROUTE_OBJECT)
+endif
+
 include tools/driver-modules.mk
 
 # Object files
@@ -2499,7 +2503,7 @@ check-cluster-ssi:
 	$(PYTHON) tools/check-cluster-ssi.py
 check-cluster-ssi-network:
 	$(PYTHON) tools/check-cluster-ssi-network.py
-KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
+KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
 KERNEL_OBJ += $(RUST_LANDLOCK_OBJECT) $(RUST_SECCOMP_OBJECT)

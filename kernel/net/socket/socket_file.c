@@ -36,6 +36,10 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
     if (!s)
         return -ENOTSOCK;
+    /* Linux netlink tools also use write(2), with the kernel as the implicit
+     * destination. Share sendto's protocol dispatch and request validation. */
+    if (s->domain == AF_NETLINK)
+        return net_sendto_sock(s, (void *)buf, count, 0, NULL, 0);
     if (count > NET_MAX_PAYLOAD && s->type != SOCK_STREAM)
         return -EMSGSIZE;
     if (s->domain == AF_ALG)

@@ -1,5 +1,6 @@
 #include "proc/resource_ns.h"
 #include "net/lwip_stack.h"
+#include "net/route.h"
 #include "net/tun.h"
 #include "net/lwip_concurrency.h"
 #include "core/bootargs.h"
@@ -2678,11 +2679,35 @@ int a20_lwip_netif_is_tun(struct netif *n)
  * netmask/default as before. */
 struct netif *a20_lwip_route_hook_v4(const void *src, const void *dest)
 {
-    (void)src;
     if (!dest)
         return NULL;
-    uint32_t ifindex = a20_net_route_lookup(((const ip4_addr_t *)dest)->addr);
-    if (ifindex == 0 || ifindex > 0xffff)
+    net_route_v4_t route;
+    uint32_t source = src ? ((const ip4_addr_t *)src)->addr : 0;
+    if (a20_net_route_query_v4(source, ((const ip4_addr_t *)dest)->addr,
+                              0, &route) != 1)
         return NULL;
-    return (struct netif *)a20_lwip_stack_netif_by_index((unsigned)ifindex);
+    return (struct netif *)a20_lwip_stack_netif_by_index(route.ifindex);
+}
+
+/* lwIP consumes this pointer synchronously under an IRQ-off core lock.
+ * CPU-local value storage cannot expose a concurrently deleted FIB entry. */
+const void *a20_lwip_route_gateway_v4(struct netif *netif, const void *dest,
+                                       const void *ipv4)
+{
+    static ip4_addr_t gateway[CONFIG_NR_CPUS];
+    if (!netif || !dest)
+        return NULL;
+    net_route_v4_t route;
+    uint32_t source = 0;
+    if (ipv4)
+        memcpy(&source, (const uint8_t *)ipv4 + 12, sizeof(source));
+    if (a20_net_route_query_v4(source, ((const ip4_addr_t *)dest)->addr, 0,
+                              &route) != 1 || route.gateway == 0 ||
+        route.ifindex != (uint32_t)netif_get_index(netif))
+        return NULL;
+    unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return NULL;
+    gateway[cpu].addr = route.gateway;
+    return &gateway[cpu];
 }

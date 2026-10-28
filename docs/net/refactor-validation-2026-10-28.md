@@ -43,3 +43,14 @@ TCP16KiB、UDP64B完成全部payload校验。此为功能预检，不是严格�
 本机证据：`build/evidence/net-refactor-20261028/`，含路径映射、宿主日志、冻结ELF、
 QEMU参数、结果manifest和完整串口。早期不完整候选的超时/接收失败原样保留，没有
 作为成功样本或从最终矩阵中悄悄剔除。正式BSD/lwIP/Linux后端矩阵尚未执行。
+
+## IPv4 FIB 与 Linux 控制工具（10月29日）
+
+路由状态移至独立 Rust 模块，修正小端前缀掩码和 RTA_GATEWAY 常量，保存下一跳、
+表号及 metric，执行源/目标策略规则。正常/嵌入式预算各4项生产FIB单元测试及23项
+netlink状态机测试通过；x86_64/2CPU/4lane内核编译通过。
+
+`control-complete-kvm` 使用冻结的 `kernel-route-control.elf` 和实际 Alpine `ip` 完成
+路由/规则的新增、dump、策略查询、删除，串口有 `NET_CONTROL_KVM_PASS`。此前3个
+失败候选保留，分别暴露write路径、规则删除、路由删除的ABI差异。此为控制面验证，
+不代表双网卡转发、IPv6路由或NAT的验收。使用和限制见 `routing.md`。
