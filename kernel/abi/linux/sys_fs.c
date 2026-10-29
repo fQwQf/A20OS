@@ -1,3 +1,4 @@
+#include <limits.h>
 #include "syscall_impl.h"
 #include "abi/linux/ioctl.h"
 #include "ipc/envelope.h"

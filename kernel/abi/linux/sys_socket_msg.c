@@ -7,7 +7,6 @@
 #ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
 #include "ipc/envelope_acquire_race_test.h"
 #endif
-#include "lwip/raw.h"
 #include "abi/linux/scm_rights.h"
 #ifdef CONFIG_LINUX_MMSG_TXN_RUST
 #include "abi/linux/mmsg_transaction.h"
@@ -321,6 +320,10 @@ static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass,
         }
         cmsg = cmsg_nxthdr(mh, cmsg);
     }
+    if (*ttl < -1 || *ttl > 255 || *tclass < -1 || *tclass > 255)
+        return -EINVAL;
+    if (*have_control && (*ttl >= 0 || *tclass >= 0))
+        return -EINVAL;
     return 0;
 }
 
@@ -801,9 +804,8 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0)
         return linux_socket_unpin_result(sock, sock_vf, gfd);
-    int old_ttl = 0;
-    int old_tclass = 0;
-    int have_override = 0;
+    int packet_hop_limit = -1;
+    int packet_tclass = -1;
     int have_ipv4_control = 0;
     net_datagram_control_t ipv4_control = {0};
     socket_msghdr_t cmh = *mh;
@@ -821,9 +823,7 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
             return linux_socket_unpin_result(sock, sock_vf, -EFAULT);
         }
         cmh.msg_control = cbuf;
-        int ttl = 0;
-        int tclass = 0;
-        int pr = parse_send_control(&cmh, &ttl, &tclass, &ipv4_control, &have_ipv4_control);
+        int pr = parse_send_control(&cmh, &packet_hop_limit, &packet_tclass, &ipv4_control, &have_ipv4_control);
         if (pr < 0) {
             kfree(cbuf);
             return linux_socket_unpin_result(sock, sock_vf, pr);
@@ -835,13 +835,7 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
             return linux_socket_unpin_result(sock, sock_vf, pr);
         }
 #endif
-        if (sock && sock->domain == AF_INET6 && sock->raw) {
-            old_ttl = sock->raw->ttl;
-            old_tclass = sock->raw->tos;
-            sock->raw->ttl = ttl ? ttl : sock->raw->ttl;
-            sock->raw->tos = tclass ? tclass : sock->raw->tos;
-            have_override = 1;
-        }
+
     }
 
     uint8_t kaddr[NET_SOCKADDR_MAX];
@@ -864,10 +858,6 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
             linux_scm_acquire_send_fd, linux_scm_release_file,
             linux_scm_enqueue_send);
         if (r != LINUX_SCM_RIGHTS_NO_RIGHTS) {
-            if (have_override && sock && sock->raw) {
-                sock->raw->ttl = old_ttl;
-                sock->raw->tos = old_tclass;
-            }
             kfree(cbuf);
             return linux_socket_unpin_result(sock, sock_vf, r);
         }
@@ -877,10 +867,6 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
         /* SCM_RIGHTS is only defined for AF_UNIX sockets. */
         if (!sock || sock->domain != AF_UNIX) {
             scm_rights_clear(&scm);
-            if (have_override && sock && sock->raw) {
-                sock->raw->ttl = old_ttl;
-                sock->raw->tos = old_tclass;
-            }
             kfree(cbuf);
             return linux_socket_unpin_result(sock, sock_vf, -EOPNOTSUPP);
         }
@@ -889,21 +875,18 @@ static int64_t linux_sendmsg_with_socket(int fd, const socket_msghdr_t *mh,
                                                scm.files, scm.nfiles);
         if (r < 0)
             scm_rights_clear(&scm);
-        if (have_override && sock && sock->raw) {
-            sock->raw->ttl = old_ttl;
-            sock->raw->tos = old_tclass;
-        }
         kfree(cbuf);
         return linux_socket_unpin_result(sock, sock_vf, r);
     }
 #endif
     {
-        int64_t r = net_sendto_control(sock,buf,total,flags,ka,mh->msg_namelen,
-                                        have_ipv4_control ? &ipv4_control : NULL);
-        if (have_override && sock && sock->raw) {
-            sock->raw->ttl = old_ttl;
-            sock->raw->tos = old_tclass;
-        }
+        int64_t r;
+        if (packet_hop_limit >= 0 || packet_tclass >= 0)
+            r = net_inet_send_raw_packet(sock, buf, total, ka, mh->msg_namelen,
+                                         packet_hop_limit, packet_tclass);
+        else
+            r = net_sendto_control(sock, buf, total, flags, ka, mh->msg_namelen,
+                                     have_ipv4_control ? &ipv4_control : NULL);
         kfree(cbuf);
         return linux_socket_unpin_result(sock, sock_vf, r);
     }
@@ -913,10 +896,6 @@ out_send:
     if (scm.nfiles > 0)
         scm_rights_clear(&scm);
 #endif
-    if (have_override && sock && sock->raw) {
-        sock->raw->ttl = old_ttl;
-        sock->raw->tos = old_tclass;
-    }
     kfree(cbuf);
     return linux_socket_unpin_result(sock, sock_vf, -EINVAL);
 }

@@ -4,6 +4,12 @@
 #include "net/profile.h"
 
 #define NO_SYS                          1
+#ifdef CONFIG_LWIP_UPSTREAM
+int a20_lwip_input_guard4(void *, void *);
+int a20_lwip_input_guard6(void *, void *);
+#define LWIP_HOOK_IP4_INPUT(p, n) a20_lwip_input_guard4((p), (n))
+#define LWIP_HOOK_IP6_INPUT(p, n) a20_lwip_input_guard6((p), (n))
+#endif
 #define SYS_LIGHTWEIGHT_PROT            1
 #define LWIP_TIMERS                     1
 #define LWIP_TIMERS_CUSTOM              0
@@ -195,7 +201,11 @@ _Static_assert(MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB,
  * Not an upstream option -- see kernel/external/lwip/DIVERGENCE.md 2.5.  It
  * adds ~28 B to every tcp_pcb and ~4 KB of .text; EMBEDDED leaves it off for
  * the same reason it leaves the options off. */
+#ifdef CONFIG_LWIP_UPSTREAM
+#define LWIP_TCP_CUBIC                  0
+#else
 #define LWIP_TCP_CUBIC                  NET_PROFILE_TCP_CUBIC
+#endif
 
 /* init.c rejects SACK_OUT without the ooseq queue, and SACK is only meaningful
  * with somewhere to record the ranges it reports. */

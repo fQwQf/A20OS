@@ -1,3 +1,4 @@
+#include "native.h"
 #include "proc/resource_ns.h"
 #include "net/lwip_stack.h"
 #include "net/route.h"
@@ -489,10 +490,16 @@ u32_t sys_now(void) {
     return (u32_t)(timer_get_ticks() * 1000UL / TICKS_PER_SEC);
 }
 
+extern int a20_lwip_complete_software_tx(uint8_t *, size_t);
+
 static netfilter_action_t a20_lwip_filter(uint8_t *frame, size_t len,
                                          int idx, int input)
 {
     /* Conntrack owns its synchronization independently of protocol lanes. */
+#ifdef CONFIG_LWIP_UPSTREAM
+    if (!input && a20_lwip_complete_software_tx(frame, len) < 0)
+        return NETFILTER_DROP;
+#endif
     return input ? netfilter_input(frame, len, idx) :
         netfilter_output(frame, len, idx);
 }
@@ -2419,6 +2426,10 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         a20_lwip_append(buf, bufsz, &off, sock_row);
     }
 
+    snprintf(row, sizeof(row), "backend socket state: frontend=%u private=%u combined=%u\n",
+             (unsigned)sizeof(net_socket_t), (unsigned)sizeof(lwip_socket_t),
+             (unsigned)(sizeof(net_socket_t) + sizeof(lwip_socket_t)));
+    a20_lwip_append(buf, bufsz, &off, row);
     a20_lwip_unlock(flags);
     return (int)off;
 }

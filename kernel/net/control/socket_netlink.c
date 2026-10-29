@@ -7,10 +7,9 @@
 #include "core/string.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_class.h"
-#include "net/lwip_stack.h"
 
-#include "lwip/netif.h"
-#include "lwip/ip4_addr.h"
+#include "net/interface.h"
+#include "net/stack.h"
 
 #define NLMSG_DONE              3
 #define NLM_F_MULTI             0x2
@@ -94,22 +93,6 @@ typedef struct netlink_done {
  * The per-bucket table walks live in Rust because their filter is a decision;
  * only reaching the slot and taking its locks is C's.
  */
-
-/* The Rust `NlrtLink`, filled by the snapshot primitive.  Same layout as the
- * Rust struct; the offsets the Rust side reads are pinned below. */
-typedef struct {
-    char     name[16];
-    uint32_t index;
-    uint32_t mtu;
-    uint32_t flags;
-    uint8_t  mac[6];
-    uint8_t  loopback;
-    uint8_t  has_ip;
-    uint8_t  has_gw;
-    uint8_t  ip[4];
-    uint8_t  mask[4];
-    uint8_t  gw[4];
-} nl_link_out_t;
 
 _Static_assert(sizeof(nl_link_out_t) == 52 &&
                offsetof(nl_link_out_t, index) == 16 &&
@@ -273,58 +256,7 @@ int a20_net_netlink_snapshot(void *nsp, void *outp, int max)
         e->has_ip = 1; e->ip[0] = 127; e->ip[3] = 1; e->mask[0] = 255;
         return 1;
     }
-    uint64_t lf = a20_lwip_lock();
-    int n = 0;
-    for (struct netif *ni = netif_list; ni && n < max; ni = ni->next) {
-        nl_link_out_t *e = &out[n++];
-        memset(e, 0, sizeof(*e));
-        /* A TUN netif carries a user-chosen name ("tailscale0"), which does
-         * not fit lwIP's 2-char + num scheme; ask the service for it. */
-        char tun_name[16];
-        int is_tun = a20_tun_netif_name(ni, tun_name, sizeof(tun_name));
-        if (is_tun)
-            snprintf(e->name, sizeof(e->name), "%s", tun_name);
-        else
-            snprintf(e->name, sizeof(e->name), "%c%c%u",
-                     ni->name[0], ni->name[1], ni->num);
-        e->index = (uint32_t)netif_get_index(ni);
-        e->mtu = ni->mtu;
-        e->flags = NLRT_IF_FLAGS_LOOPBACK;
-        if (netif_is_up(ni))
-            e->flags |= NLRT_IF_FLAGS_UP;
-        if (netif_is_link_up(ni))
-            e->flags |= NLRT_IF_FLAGS_RUNNING;
-        if (ni->flags & NETIF_FLAG_ETHERNET) {
-            e->loopback = 0, e->flags &= ~(uint32_t)NLRT_IF_FLAGS_LOOPBACK;
-        } else if (is_tun) {
-            /* TUN is an L3 point-to-point interface, never the loopback one:
-             * leaving IFF_LOOPBACK set makes net.Interfaces() (and therefore
-             * tailscale's netmon) treat the tunnel as lo. */
-            e->loopback = 0, e->flags &= ~(uint32_t)NLRT_IF_FLAGS_LOOPBACK;
-        } else {
-            e->loopback = 1;
-        }
-        memcpy(e->mac, ni->hwaddr, 6);
-        const ip4_addr_t *ip = netif_ip4_addr(ni);
-        const ip4_addr_t *mask = netif_ip4_netmask(ni);
-        const ip4_addr_t *gw = netif_ip4_gw(ni);
-        if (ip && !ip4_addr_isany_val(*ip)) {
-            e->has_ip = 1;
-            e->ip[0] = ip4_addr1(ip); e->ip[1] = ip4_addr2(ip);
-            e->ip[2] = ip4_addr3(ip); e->ip[3] = ip4_addr4(ip);
-        }
-        if (mask) {
-            e->mask[0] = ip4_addr1(mask); e->mask[1] = ip4_addr2(mask);
-            e->mask[2] = ip4_addr3(mask); e->mask[3] = ip4_addr4(mask);
-        }
-        if (gw && !ip4_addr_isany_val(*gw)) {
-            e->has_gw = 1;
-            e->gw[0] = ip4_addr1(gw); e->gw[1] = ip4_addr2(gw);
-            e->gw[2] = ip4_addr3(gw); e->gw[3] = ip4_addr4(gw);
-        }
-    }
-    a20_lwip_unlock(lf);
-    return n;
+    return net_stack_interface_snapshot(outp, max);
 }
 
 uint32_t a20_net_netlink_event_index(const void *eventsp, int i)
@@ -335,35 +267,35 @@ uint32_t a20_net_netlink_event_index(const void *eventsp, int i)
 
 int a20_net_netlink_if_set_mtu(uint32_t ifindex, uint16_t mtu)
 {
-    return a20_lwip_if_set_mtu((unsigned)ifindex, mtu);
+    return net_stack_if_set_mtu((unsigned)ifindex, mtu);
 }
 
 int a20_net_netlink_if_set_flags(uint32_t ifindex, uint32_t value, uint32_t mask)
 {
-    return a20_lwip_if_set_flags((unsigned)ifindex, value, mask);
+    return net_stack_if_set_flags((unsigned)ifindex, value, mask);
 }
 
 int a20_net_netlink_if_get_addr(uint32_t ifindex, uint8_t *ip, uint8_t *mask,
                                 uint8_t *gw)
 {
-    return a20_lwip_if_get_addr((unsigned)ifindex, ip, mask, gw);
+    return net_stack_if_get_addr((unsigned)ifindex, ip, mask, gw);
 }
 
 int a20_net_netlink_if_set_addr(uint32_t ifindex, const uint8_t *ip,
                                 const uint8_t *mask, const uint8_t *gw)
 {
-    return a20_lwip_if_set_addr((unsigned)ifindex, ip, mask, gw);
+    return net_stack_if_set_addr((unsigned)ifindex, ip, mask, gw);
 }
 
 int a20_net_netlink_if_set_addr6(uint32_t ifindex, const uint8_t *addr,
                                  uint8_t prefixlen)
 {
-    return a20_lwip_if_set_addr6((unsigned)ifindex, addr, prefixlen);
+    return net_stack_if_set_addr6((unsigned)ifindex, addr, prefixlen);
 }
 
 int a20_net_netlink_if_del_addr6(uint32_t ifindex, const uint8_t *addr)
 {
-    return a20_lwip_if_del_addr6((unsigned)ifindex, addr);
+    return net_stack_if_del_addr6((unsigned)ifindex, addr);
 }
 
 uint32_t a20_net_netlink_loopback_mtu(void *ns, uint32_t value, int set)

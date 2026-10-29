@@ -16,9 +16,7 @@
 #include "core/timer.h"
 #include "drivers/net/virtio_net.h"
 #include "drivers/core/driver_core.h"
-#include "net/lwip_stack.h"
 #include "net/stack.h"
-#include "lwip/tcp.h"
 
 static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_t, 128);
 
@@ -122,9 +120,8 @@ net_socket_t *net_socket_alloc(void) {
          * than being inferred from zero later.  These are the stack's own
          * compile-time limits, which is the honest default: a caller that never
          * asks gets exactly the window lwIP would have given it anyway. */
-        s->snd_buf = NET_PROFILE_TCP_BUF_INIT < TCP_SND_BUF
-                         ? NET_PROFILE_TCP_BUF_INIT : TCP_SND_BUF;
-        s->rcv_buf = TCP_WND;
+        s->snd_buf = net_inet_buffer_default(1);
+        s->rcv_buf = net_inet_buffer_default(0);
         s->snd_autotune = 1;
         s->rcv_autotune = 1;
         /* The creator's reference.  A socket that also reaches the registry
@@ -133,7 +130,7 @@ net_socket_t *net_socket_alloc(void) {
         net_sock_ref_init(s);
         /* Provisional only: the authoritative lane comes from the bound address
          * and port, which net_inet_bind_pcb() recomputes. */
-        net_socket_lane_store(s, net_lane_of_cpu(cpu_current_id()));
+
         wait_queue_init(&s->accept_waitq);
         wait_queue_init(&s->read_waitq);
         wait_queue_init(&s->write_waitq);
@@ -177,6 +174,7 @@ void net_socket_free(net_socket_t *s) {
         kfree(s->ch_buf);
         s->ch_buf = NULL;
     }
+    net_inet_state_release(s);
     resource_ns_put(s->net_ns);
     obj_cache_free(&g_net_socket_cache, s);
 }
@@ -430,7 +428,7 @@ static bool net_status_slot(net_socket_t *s, int idx, void *arg)
 }
 
 int net_format_status(char *buf, size_t bufsz) {
-    int n = a20_lwip_format_status(buf, bufsz);
+    int n = net_stack_status(buf, bufsz);
     if (!buf || bufsz == 0)
         return 0;
     if (n < 0)
@@ -558,9 +556,8 @@ int net_socket_create(int domain, int type, int protocol) {
      * no-op against the message-count cap that already exists.
      */
     if (base_type == SOCK_STREAM || base_type == SOCK_SEQPACKET) {
-        s->snd_buf = NET_PROFILE_TCP_BUF_INIT < TCP_SND_BUF
-                         ? NET_PROFILE_TCP_BUF_INIT : TCP_SND_BUF;
-        s->rcv_buf = TCP_WND;
+        s->snd_buf = net_inet_buffer_default(1);
+        s->rcv_buf = net_inet_buffer_default(0);
         s->snd_autotune = 1;
         s->rcv_autotune = 1;
     } else {
@@ -906,9 +903,10 @@ void a20_net_sendto_view_init(void *sp, net_sendto_view_t *out) {
     out->connected = &s->connected;
     out->ever_connected = &s->ever_connected;
     out->local_tcp = &s->local_tcp;
-    out->tcp = (void **)&s->tcp;
-    out->udp = (void **)&s->udp;
-    out->raw = (void **)&s->raw;
+    unsigned transports = net_inet_transport_flags(s);
+    out->has_tcp = !!(transports & 1);
+    out->has_udp = !!(transports & 2);
+    out->has_raw = !!(transports & 4);
     out->peer = (void **)&s->peer;
     out->local = s->local;
     out->local_len = &s->local_len;
@@ -1099,7 +1097,7 @@ int a20_net_recv_alg(void *sp, void *buf, size_t len) {
 
 uint64_t a20_net_recv_now(void) { return timer_get_ticks(); }
 
-void a20_net_recv_poll_waiter(void) { a20_lwip_poll_waiter(); }
+void a20_net_recv_poll_waiter(void) { net_stack_poll_waiter(); }
 
 uint64_t a20_net_recv_lock(void *sp) { return net_sock_lock((net_socket_t *)sp); }
 

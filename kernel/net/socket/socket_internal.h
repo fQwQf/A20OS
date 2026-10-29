@@ -11,13 +11,7 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "core/timer.h"
-#include "lwip/ip_addr.h"
-#include "net/net_lane.h"
 
-struct udp_pcb;
-struct raw_pcb;
-struct tcp_pcb;
-struct pbuf;
 
 #include "net/profile.h"
 /* The registry state machine's C ABI; see kernel/net/socket/socket_registry.rs. */
@@ -80,139 +74,12 @@ _Static_assert((NET_BH_RING_SIZE & (NET_BH_RING_SIZE - 1)) == 0,
                "the bottom-half ring size must be a power of two");
 #define NET_MSG_INLINE_PAYLOAD 1024
 
-typedef enum {
-    NET_BH_RECV = 0,
-    NET_BH_CONNECTED,
-    NET_BH_CLOSED,
-    NET_BH_ERROR,
-} net_bh_event_type_t;
-
 /* Value-only packet addressing. IPv4 retains both the wire destination and
  * the receiving interface's local address (IP_PKTINFO ipi_spec_dst). */
 typedef union net_pktinfo_address {
     uint8_t ipv6[16];
     struct { uint8_t destination[4], local[4], reserved[8]; } ipv4;
 } net_pktinfo_address_t;
-
-typedef struct net_bh_event {
-    struct net_bh_event *next;
-    net_bh_event_type_t type;
-    int err;
-    size_t len;
-    uint8_t addr[NET_SOCKADDR_MAX];
-    size_t addrlen;
-    uint8_t has_pktinfo;
-    uint8_t has_hoplimit;
-    uint8_t has_tclass;
-    uint8_t pktinfo_family;
-    uint32_t pktinfo_ifindex;
-    union {
-        uint8_t pktinfo_addr[16]; /* Existing IPv6/copy view; no layout change. */
-        net_pktinfo_address_t pktinfo;
-    };
-    uint8_t hoplimit;
-    uint8_t tclass;
-    uint16_t __pad_meta;
-    /*
-     * Set instead of using `data` when the payload exceeds
-     * NET_BH_INLINE_PAYLOAD: a large datagram or lwIP's coalesced TCP chain.
-     * `spill` is a pbuf the ring has taken a
-     * reference to and `spill_off` is where this event's slice starts in it.
-     * The ring frees consumed references under its producer's lane lock, so
-     * the pbuf is never released outside the lwIP critical section -- memp has
-     * no internal locking and today every memp call happens under
-     * g_lwip_lock.
-     */
-    struct pbuf *spill;
-    uint32_t spill_off;
-    uint8_t data[NET_BH_INLINE_PAYLOAD];
-} net_bh_event_t;
-
-typedef struct net_bh_ring {
-    net_bh_event_t events[NET_BH_RING_SIZE];
-    /*
-     * Spill references owned per slot, indexed the same way as `events`.
-     * The bottom-half tail reclaims consumed slots after releasing the socket
-     * lock; producer reuse and socket teardown also drain their references.
-     */
-    struct pbuf *owned[NET_BH_RING_SIZE];
-    uint32_t head;
-    uint32_t tail;
-} net_bh_ring_t;
-
-/*
- * One staged inbound connection.
- *
- * The accept callback cannot finish the handoff, so it parks the pcb here with
- * the socket layer's own callbacks already installed on it (see
- * net_inet_tcp_stage_* in socket_inet.c).  Until the bottom half adopts the
- * pcb, that context -- not the listener's net_socket_t -- is what those
- * callbacks see, and it has to carry everything they may observe in the
- * meantime.
- *
- * `pcb` is the identity check.  lwIP can still destroy a pcb behind our back
- * (an RST abandons it outright), so a staged pcb is not guaranteed to survive
- * until adoption; when it does not, `dead` is set and `pcb` is stale from
- * then on and must never be dereferenced.
- *
- * The slot address is what identifies the entry, so it may not be recycled
- * while a pcb can still be pointing at it.  The bottom half therefore hands the
- * pcb over to its child -- re-arging it to the child socket and clearing `pcb`
- * -- before it advances tail past this slot.
- */
-typedef struct net_accept_stage_slot {
-    struct net_socket *listener;
-    struct tcp_pcb *pcb;
-    /* Payload the peer sent before the handshake was adopted.  Held by
-     * reference: pbuf_free() is only safe under g_lwip_lock, so these are
-     * released either in the callback that discovers the pcb died or in the
-     * bottom half's g_lwip_lock section. */
-    struct pbuf *pending;
-    /* Peer sent a FIN while staged.  The connection is still ours to hand to
-     * accept(), so this is recorded and replayed onto the child instead of
-     * being closed out from under it. */
-    uint32_t fin;
-    uint32_t dead;
-    int error;
-} net_accept_stage_slot_t;
-
-/*
- * Accepted-pcb staging for a real lwIP listening socket.
- *
- * lwIP hands a completed handshake to tcp_accept() with g_lwip_lock already
- * held and the new pcb in ESTABLISHED.  The bookkeeping that has to follow --
- * allocating a net_socket_t, installing its callbacks, registering it, pushing
- * it on the listener's accept queue and waking accept_waitq -- needs
- * a socket lock and the allocator, and
- * docs/net/network-lock-contract.md forbids
- * both inside an lwIP callback.  So the callback only parks the pcb here and
- * the bottom half finishes the job, which is the same split the receive path
- * already uses.
- *
- * Bounded and lock-free in the shape of net_bh_ring_t: the producer runs with
- * local interrupts off under g_lwip_lock and publishes head with a release
- * fence, the consumer runs later under the listener's own lock.  `dropped`
- * is a correctness counter, not a statistic -- a non-zero value means a completed handshake was
- * discarded, and the pcb has to be aborted rather than leaked.
- */
-#define NET_ACCEPT_STAGE_SIZE 8
-
-typedef struct net_accept_stage {
-    net_accept_stage_slot_t slots[NET_ACCEPT_STAGE_SIZE];
-    uint32_t head;
-    uint32_t tail;
-    volatile int dropped;
-    /*
-     * Single-consumer guard for the drain, guarded by the listener's own lock.
-     * The ring has exactly one consumer because a slot's ownership hands over
-     * when tail moves, and two drains reading the same tail would both release
-     * the same slot.  The single g_net_lock used to provide that exclusion
-     * implicitly; the drain now has to drop the listener's lock to register the
-     * children (which takes a bucket of its own), so the exclusion is explicit
-     * here and the flag is what stands in for the lock in that window.
-     */
-    int drain_active;
-} net_accept_stage_t;
 
 typedef struct net_msg {
     struct net_msg *next;
@@ -289,24 +156,7 @@ typedef struct net_recv_meta {
 
 typedef struct net_socket {
     resource_namespace_t *net_ns;
-    /*
-     * Lane this socket's PCB belongs to, and which never changes for the life of
-     * the connection.  Recomputed at bind from the bound (ip, port) because that
-     * is the pair an inbound packet can reproduce: the packet's destination
-     * address and port are this connection's local address and port.  Before bind
-     * it is only a provisional assignment from the creating CPU, which is why
-     * nothing may rely on it until the socket is bound -- and the accept path,
-     * which never binds, overwrites it with the adopted pcb's owning lane
-     * instead (net_inet_accept_stage_drain).
-     *
-     * The value is always a real lane in 0..CONFIG_NET_LANES-1, wildcard binds
-     * included: for bind(0.0.0.0) it is net_lane_of(0, port), which is what lwIP
-     * calls the owning lane of the matching wildcard pcb.  It is NOT the same
-     * index as that pcb's *bucket*, which for a wildcard bind is the sentinel;
-     * see NET_PCB_LANE_OWNER_OF_PCB() and NET_PCB_LANE_OF_PCB() in
-     * lwip/priv/pcb_lane.h.
-     */
-    unsigned lane;
+    void *transport_private; /* Owned by the selected INET backend until final release. */
     int domain;
     int type;
     int protocol;
@@ -336,16 +186,13 @@ typedef struct net_socket {
     wait_queue_t accept_waitq;
     wait_queue_t read_waitq;
     wait_queue_t write_waitq;
-    struct udp_pcb *udp;
-    struct raw_pcb *raw;
-    struct tcp_pcb *tcp;
     int local_tcp;
     int tcp_connecting;
     int tcp_err;
     int pending_error; /* positive errno, consumed by SO_ERROR under socket lock */
     int tcp_nodelay;
     /* Congestion control requested via TCP_CONGESTION, as a TCP_CONG_*
-     * value from lwip/priv/tcp_cubic_priv.h.  TCP_CONG_RENO is the default
+     * backend algorithm identifier.  TCP_CONG_RENO is the default
      * and is also what getsockopt reports for a socket that never set it. */
     uint8_t tcp_congestion;
     /* SO_SNDBUF / SO_RCVBUF, in bytes, as the caller asked for them.
@@ -424,7 +271,6 @@ typedef struct net_socket {
     struct net_socket *accept_head;
     struct net_socket *accept_tail;
     int accept_count;
-    net_accept_stage_t accept_stage;
     /* AF_PACKET: bound L2 filter.  pkt_protocol is host order. */
     int pkt_ifindex;
     uint16_t pkt_protocol;
@@ -483,7 +329,6 @@ typedef struct net_socket {
      * which no longer exists.
      */
     spinlock_t lock;
-    net_bh_ring_t bh_ring;
     volatile int bh_connected;
     volatile int bh_closed;
     volatile int bh_error;
@@ -492,94 +337,12 @@ typedef struct net_socket {
     volatile int bh_pending;
 } net_socket_t;
 
-/* s->lane is published while bind/PCB rebucket operations may race with
- * packet-side snapshots, so all post-publication accesses use atomics. */
-static inline unsigned net_socket_lane_load(const net_socket_t *s)
-{
-    return __atomic_load_n(&s->lane, __ATOMIC_ACQUIRE);
-}
 
-static inline void net_socket_lane_store(net_socket_t *s, unsigned lane)
-{
-    __atomic_store_n(&s->lane, lane, __ATOMIC_RELEASE);
-}
-
-/*
- * One net_socket_t exists per open socket and up to a hundred of them are kept
- * alive by the socket obj_cache, so its size is a per-socket memory cost that
- * no runtime counter would show.  It used to embed 16 bottom-half events of
- * 64 KiB each, about 1.05 MiB per socket; the inline staging split in
- * net_bh_event_t brought the default profile to about 30 KiB.
- *
- * The bound is per profile rather than one global number so a profile with a
- * smaller ring or buffer is not forced to pay for the largest one, and it
- * exists so putting a fixed NET_MAX_PAYLOAD-sized member back fails the build
- * instead of quietly costing a megabyte per descriptor.
- */
+/* Frontend storage has no protocol rings or native control blocks. Each
+ * backend also asserts its private attachment plus this frontend against the
+ * selected profile's combined and embedded whole-network budgets. */
 _Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
-               "net_socket_t exceeds the profile's per-socket budget; a fixed "
-               "NET_MAX_PAYLOAD-sized staging member has crept back in");
-
-#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
-
-/*
- * The embedded tier's whole accounting, asserted here because this is the first
- * point in the include chain where net_socket_t is a complete type.
- *
- * The other terms are checked against real sizeof() in the files that own
- * them -- socket_packet.c for the AF_PACKET ring, lwip_stack.c for the netif
- * state, netfilter_nat.c for the filter tables -- and the heap is a static
- * array of exactly NET_PROFILE_MEM_SIZE bytes in memp/mem.c.  What only this
- * file can check is the socket table, and it was the one term that overran the
- * part: eight net_socket_t at the old ring-4 / payload-320 geometry were 29120 B
- * against a 20 KiB device, which is the number docs/status/current/server-readiness.md kept
- * quoting as the reason the tier could not fit.
- *
- * With the per-tier ring depth and inline payload the socket table is
- * 8 x 2448 = 19584 B, inside NET_PROFILE_SOCKET_BUDGET (20 KiB) with 896 B to
- * spare.
- *
- * Re-measured by sizing a char[] probe of this assert's own expression rather
- * than trusting the numbers written here.  The terms at one lane:
- *
- *   socket table    19584   LP64 8 x 2448 (17152 on ILP32)
- *   frame arrays     2580   (4 ring slots + 1 drain slot) x (4 + 1536)
- *   netif state      1152   1 dev x (2 x 512 + 128)
- *   netif structs     768   g_netifs + g_loopif, 384 B budget each
- *   filter tables    3328   32 x 64 + 1280
- *   lwIP heap       16384   NET_PROFILE_MEM_SIZE, a static array in mem.c
- *                    -----
- *                    43796   LP64 at one lane, against a 45056 ceiling
- *
- * The frame term now includes the AF_PACKET drain slot (socket_packet.c has
- * RING_SLOTS ring entries plus g_pkt_drain); the netif structs are the two
- * struct netif arrays in lwip_stack.c, which the earlier accounting omitted.
- * Both additions still leave about 1.2 KiB inside the 44 KiB ceiling.
- *
- * The per-lane memp tables are 0 at CONFIG_NET_LANES == 1, which is how the
- * embedded tier ships.  At four lanes they add 1904 B, leaving about 380 B of
- * headroom on LP64: an embedded build that also wants four lanes is a
- * legitimate thing to compile, and it still fits.
- */
-_Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) <= NET_PROFILE_SOCKET_BUDGET,
-               "the embedded profile's whole socket table does not fit the "
-               "budget the profile declares for it; shrink the bottom-half ring "
-               "depth or the inline payload rather than raising the ceiling");
-
-_Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) +
-                   (NET_PROFILE_PACKET_RING_SLOTS + 1) * NET_PROFILE_PACKET_SLOT_BYTES +
-                   NET_PROFILE_NETIF_MAX_DEVS * NET_PROFILE_NETIF_STATE_BYTES +
-                   NET_PROFILE_NETIF_STRUCT_BUDGET +
-                   NET_PROFILE_FILTER_BUDGET +
-                   NET_PROFILE_MEM_SIZE +
-                   NET_PROFILE_MEMP_LANE_TABLE_BYTES
-               <= NET_PROFILE_TOTAL_BUDGET,
-               "the embedded profile's total RAM -- socket table, frame arrays, "
-               "filter tables, the lwIP heap and the per-lane memp tables -- "
-               "exceeds the ceiling the profile declares for itself; one of the "
-               "five terms grew and the tier no longer fits the part it names");
-
-#endif /* CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED */
+               "frontend exceeds the profile socket budget");
 
 typedef struct sockaddr_alg_kernel {
     uint16_t family;
@@ -1119,13 +882,6 @@ void     net_sockaddr_loopback(net_socket_t *s, uint16_t port);
 int      net_sockaddr_port(const void *addr, size_t len, uint16_t *port);
 void     net_sockaddr_set_port(void *addr, size_t len, uint16_t port);
 int      net_sockaddr_in_local(const net_sockaddr_in_t *in);
-int      net_sockaddr_to_lwip_ip(const void *addr, size_t len,
-                                 ip_addr_t *ip, uint16_t *port);
-unsigned net_socket_lane_of_addr(const void *addr, size_t len,
-                                 unsigned fallback);
-int      net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
-                                 uint8_t out[NET_SOCKADDR_MAX],
-                                 size_t *outlen);
 net_socket_t *net_find_bound_socket(resource_namespace_t *ns, int domain, int type,
                                     const void *addr, size_t addrlen);
 /*
@@ -1213,11 +969,12 @@ int      net_enqueue_msg_locked_fds(net_socket_t *dst, const void *buf,
                                     vfile_t **files, int nfiles);
 int      net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                      const void *addr, size_t addrlen,
-                                     const net_bh_event_t *meta);
-int      net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
+                                     const net_recv_meta_t *meta);
+int      net_enqueue_msg_locked_reader(net_socket_t *dst, const void *p,
                                      uint32_t off, size_t len,
                                      const void *addr, size_t addrlen,
-                                     const net_bh_event_t *meta);
+                                     const net_recv_meta_t *meta,
+                                   int (*read)(const void *, void *, size_t, uint32_t));
 int      net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
                                   const void *addr, size_t addrlen,
                                   int dontwait, uint64_t timeout_ticks);
@@ -1347,6 +1104,15 @@ int      net_inet_tcp_listen(net_socket_t *s, int backlog);
  * forward-declared locally: defined in socket_inet.c, called from
  * socket_control.c. */
 void     net_inet_ip_opts_apply(net_socket_t *s);
+int net_inet_send_raw_packet(net_socket_t *, const void *, size_t, const void *, size_t, int, int);
+int      net_inet_has_transport(const net_socket_t *);
+int      net_inet_has_tcp(const net_socket_t *);
+void     net_inet_state_release(net_socket_t *);
+unsigned net_inet_transport_flags(const net_socket_t *);
+int      net_inet_interface_ioctl(net_socket_t *, unsigned long, void *);
+void     net_inet_options_apply(net_socket_t *s, unsigned mask);
+uint32_t net_inet_buffer_default(int send);
+int      net_inet_option_validate(net_socket_t *, int, int, const void *, size_t);
 int      net_inet_pmtu_discover(net_socket_t *s, int mode, int set);
 int      net_inet_bind_device(net_socket_t *s, const char *name);
 int      net_inet_bound_device(net_socket_t *s, char name[16]);
@@ -1371,7 +1137,7 @@ void net_inet_ip_opts_apply_snapshot_locked(
  * so an established connection can switch algorithms without the socket's
  * other options being reapplied.  Takes g_lwip_lock.  `alg` is a TCP_CONG_*
  * value; with LWIP_TCP_CUBIC off only the default is reachable. */
-void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
+
 
 /* Re-apply the socket's SO_SNDBUF / SO_RCVBUF ceilings to an lwIP pcb.
  * Defined in socket_inet.c next to the doc comment that explains what each
@@ -1379,8 +1145,7 @@ void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
  * socket_control.c's setsockopt handler, from net_inet_tcp_apply_options() on
  * connect and on the accept path, so one code path owns the clamping for all
  * three entry points. */
-void     net_inet_tcp_buf_apply(uint32_t snd_buf, uint32_t rcv_buf,
-                               struct tcp_pcb *pcb);
+
 
 /* The largest SO_SNDBUF / SO_RCVBUF this socket could honour, ignoring what it
  * currently has.  `is_snd` selects which of the two.

@@ -2,14 +2,14 @@
 #define _NET_NET_CONFIG_H
 
 #include "core/types.h"
-#include "lwip/ip4_addr.h"
-#include "lwip/dns.h"
+typedef struct net_ipv4_addr { uint32_t addr; } net_ipv4_addr_t;
+#define A20_NET_DNS_SERVERS 2
 
 typedef struct a20_net_config {
-    ip4_addr_t ip;
-    ip4_addr_t netmask;
-    ip4_addr_t gateway;
-    ip4_addr_t dns[DNS_MAX_SERVERS];
+    net_ipv4_addr_t ip;
+    net_ipv4_addr_t netmask;
+    net_ipv4_addr_t gateway;
+    net_ipv4_addr_t dns[A20_NET_DNS_SERVERS];
     int        dns_count;
     int        dhcp_enable;
     char       hostname[64];
@@ -25,9 +25,6 @@ void a20_net_config_init(void);
 /* Format the effective runtime configuration into a key=value text buffer. */
 int a20_net_config_format(char *buf, size_t bufsz);
 
-/* Synchronize g_a20_net_config from current lwIP netif/DNS state.  Caller must
- * hold g_lwip_lock (via a20_lwip_lock()). */
-void a20_net_config_sync_from_lwip(void);
 
 /*
  * Which path a TCP connection to a local address takes.

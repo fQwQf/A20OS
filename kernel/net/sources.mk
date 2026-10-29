@@ -1,7 +1,7 @@
-# Explicit first-party network sources. External stacks have separate manifests.
-A20_NET_SRC := \
+# Explicit ownership manifests; never recursively collect backend sources.
+A20_NET_COMMON_SRC := \
     $(KERNEL_DIR)/net/core/stack.c \
-    $(KERNEL_DIR)/net/backends/lwip/runtime.c \
+    $(KERNEL_DIR)/net/core/transport.c \
     $(KERNEL_DIR)/net/socket/net_lock_probe.c \
     $(KERNEL_DIR)/net/socket/socket.c \
     $(KERNEL_DIR)/net/socket/socket_alg.c \
@@ -18,9 +18,24 @@ A20_NET_SRC := \
     $(KERNEL_DIR)/net/filter/netfilter.c \
     $(KERNEL_DIR)/net/filter/netfilter_nat.c \
     $(KERNEL_DIR)/net/filter/netfilter_rewrite.c \
-    $(KERNEL_DIR)/net/crypto/md5.c \
+    $(KERNEL_DIR)/net/crypto/md5.c
+
+A20_NET_BACKEND_SRC :=
+ifneq ($(filter lwip lwip-upstream,$(NET_STACK)),)
+A20_NET_BACKEND_SRC := \
+    $(KERNEL_DIR)/net/backends/lwip/input_guard.c \
+    $(KERNEL_DIR)/net/backends/lwip/transport.c \
+    $(KERNEL_DIR)/net/backends/lwip/runtime.c \
+    $(KERNEL_DIR)/net/backends/lwip/socket_options.c \
+    $(KERNEL_DIR)/net/backends/lwip/socket_state.c \
+    $(KERNEL_DIR)/net/backends/lwip/interfaces.c \
+    $(KERNEL_DIR)/net/backends/lwip/config.c \
+    $(KERNEL_DIR)/net/backends/lwip/software_tx.c \
     $(KERNEL_DIR)/net/backends/lwip/lwip_compat.c \
     $(KERNEL_DIR)/net/backends/lwip/lwip_concurrency.c \
     $(KERNEL_DIR)/net/backends/lwip/lwip_stack.c \
     $(KERNEL_DIR)/net/backends/lwip/net_lane.c \
     $(KERNEL_DIR)/net/backends/lwip/socket_inet.c
+endif
+
+A20_NET_SRC := $(A20_NET_COMMON_SRC) $(A20_NET_BACKEND_SRC)

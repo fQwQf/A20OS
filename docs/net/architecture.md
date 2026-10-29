@@ -19,8 +19,8 @@
 | `kernel/external/lwip-upstream/` | 原版 lwIP 候选 submodule | 不修改上游源码；尚未接入运行 |
 
 源码由 `kernel/net/sources.mk` 显式列举；不递归收集后端目录中的任意 C 文件。
-移动文件仅是分层第一步。`socket_internal.h` 仍含 lwIP 私有字段，清理这些字段属于
-真实后端接入的一部分，不能把当前布局宣称为已经完成的可插拔 socket 架构。
+公共 `socket_internal.h` 已移除 PCB、lane、BH ring 与 accept 暂存。它们由后端
+attachment 独立拥有，操作经 `net/transport.h` 分派；设备 IRQ/TUN 的旧后端桥仍待拆分。
 
 网络域为接口、地址、路由、端口空间和协议状态的所有权边界。一个域选择一个后端，
 存活连接不迁移。初期编译/启动时选择后端，不按每个包或每个 socket 任意混用栈。
@@ -43,7 +43,8 @@
 资源档位与后端选择独立。`NET_PROFILE` 定义预算；后端功能定义能力。不能以增加预算
 或关闭 SMP 冒充不回退。后端未实现的选项返回准确错误；默认值变化属于可观察行为变化。
 
-当前可用构建选择为 hosted 的 `NET_STACK=lwip`，以及 MCU 的 `NET_STACK=none`。
+当前 hosted 可选择 `NET_STACK=lwip` 或 `NET_STACK=lwip-upstream`，MCU 为 `NET_STACK=none`。
+原版适配及能力差异见 [lwip-upstream.md](./lwip-upstream.md)。
 `NET_STACK=freebsd` 明确报错，不能回退后冒称 BSD 测试成功。`NET_LANES` 选择 lwIP
 执行并发度，`NET_PROFILE=1/2/3` 选择资源预算；它们均不是 QEMU 的网络拓扑选项。
 公共路由事务见 [routing.md](./routing.md)，NAT 所有权与限制见 [nat.md](./nat.md)，

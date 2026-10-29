@@ -58,9 +58,9 @@ pub struct SendtoView {
     pub connected: *mut i32,
     pub ever_connected: *mut i32,
     pub local_tcp: *mut i32,
-    pub tcp: *mut *mut c_void,
-    pub udp: *mut *mut c_void,
-    pub raw: *mut *mut c_void,
+    pub has_tcp: i32,
+    pub has_udp: i32,
+    pub has_raw: i32,
     pub peer: *mut *mut c_void,
     pub local: *mut u8,
     pub local_len: *mut usize,
@@ -129,9 +129,9 @@ fn zero_view() -> SendtoView {
         connected: ptr::null_mut(),
         ever_connected: ptr::null_mut(),
         local_tcp: ptr::null_mut(),
-        tcp: ptr::null_mut(),
-        udp: ptr::null_mut(),
-        raw: ptr::null_mut(),
+        has_tcp: 0,
+        has_udp: 0,
+        has_raw: 0,
         peer: ptr::null_mut(),
         local: ptr::null_mut(),
         local_len: ptr::null_mut(),
@@ -194,8 +194,8 @@ pub unsafe extern "C" fn a20_net_sendto_sock(
         return a20_net_sendto_raw_ipv6(s, buf, len, addr, addrlen);
     }
     if (*v.domain == AF_INET || *v.domain == AF_INET6)
-        && (*v.sock_type == SOCK_DGRAM || !(*v.udp).is_null()
-            || !(*v.raw).is_null() || !(*v.tcp).is_null())
+        && (*v.sock_type == SOCK_DGRAM || v.has_udp != 0
+            || v.has_raw != 0 || v.has_tcp != 0)
     {
         return a20_net_sendto_inet(s, buf, len, flags, addr, addrlen);
     }
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn a20_net_sendto_sock(
      * error), not a socket that never had one, so it owes EPIPE.  local_tcp is
      * what keeps this off the fast path: a fast-mode socket drops its pcb by
      * design and is served by the inet dispatch above. */
-    if *v.sock_type == SOCK_STREAM && *v.local_tcp == 0 && (*v.tcp).is_null()
+    if *v.sock_type == SOCK_STREAM && *v.local_tcp == 0 && v.has_tcp == 0
         && (*v.domain == AF_INET || *v.domain == AF_INET6)
     {
         return if *v.ever_connected != 0 {
@@ -533,9 +533,9 @@ mod tests {
             connected: &mut k.connected,
             ever_connected: &mut k.ever_connected,
             local_tcp: &mut k.local_tcp,
-            tcp: &mut k.tcp,
-            udp: &mut k.udp,
-            raw: &mut k.raw,
+            has_tcp: if k.tcp.is_null() { 0 } else { 1 },
+            has_udp: if k.udp.is_null() { 0 } else { 1 },
+            has_raw: if k.raw.is_null() { 0 } else { 1 },
             peer: &mut k.peer,
             local: k.local.as_mut_ptr(),
             local_len: &mut k.local_len,

@@ -357,6 +357,13 @@ endif
 
 # Stack selection is separate from resource budgets and QEMU NET_BACKEND.
 NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,lwip)
+.PHONY: check-net-backend-boundary
+check-net-backend-boundary:
+	$(PYTHON) tools/check-network-backend-boundary.py $(if $(filter lwip-upstream,$(NET_STACK)),--check-upstream,)
+ifeq ($(NET_STACK),lwip-upstream)
+kernel-only: check-net-backend-boundary
+endif
+LWIP_SOURCE_ROOT = $(KERNEL_DIR)/external/$(if $(filter lwip-upstream,$(NET_STACK)),lwip-upstream,lwip)
 ifeq ($(NET_ROLE),router)
 ifeq ($(NET_STACK),none)
 $(error NET_ROLE=router requires a TCP/IP backend)
@@ -366,10 +373,12 @@ ifeq ($(NET_STACK),freebsd)
 $(error NET_STACK=freebsd is not runnable yet; upstream source pin alone is not a backend)
 endif
 ifeq ($(NET_STACK),lwip-upstream)
-$(error NET_STACK=lwip-upstream is source-pinned only; the pristine adapter is not runnable yet)
+ifneq ($(NET_LANES),1)
+$(error pristine lwIP requires NET_LANES=1; its core is serialized independently of NR_CPUS)
 endif
-ifeq ($(filter $(NET_STACK),lwip none),)
-$(error NET_STACK must be lwip or none; pristine lwIP and FreeBSD are source-only)
+endif
+ifeq ($(filter $(NET_STACK),lwip lwip-upstream none),)
+$(error NET_STACK must be lwip, lwip-upstream or none; FreeBSD is not runnable)
 endif
 ifeq ($(NET_STACK),none)
 ifeq ($(PROFILE),mcu)
@@ -1196,7 +1205,7 @@ endif
 BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
-BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)$(if $(filter lwip-upstream,$(NET_STACK)),-lwip-upstream,)
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -1830,11 +1839,11 @@ CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,$(if $(filter benchmark,$(PROFILE)
 # is a regression.  Unverified arches that still carry warnings can build with
 # KERNEL_WERROR=0 while they are cleaned up.
 KERNEL_WERROR ?= 1
-CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
+CFLAGS = $(if $(filter lwip-upstream,$(NET_STACK)),-DCONFIG_LWIP_UPSTREAM=1,) -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/backends/lwip/port \
-         -I$(KERNEL_DIR)/external/lwip/src/include \
+         -I$(LWIP_SOURCE_ROOT)/src/include \
          -I$(KERNEL_DIR)/external/littlefs \
          -I$(KERNEL_DIR)/external/littlefs/compat \
          -DLFS_MALLOC=lfs_kmalloc -DLFS_FREE=lfs_kfree \
@@ -2464,7 +2473,7 @@ ifeq ($(VMO_PAGE_TEST),1)
 KERNEL_SRC += $(KERNEL_DIR)/mm/vmo_page_selftest.c
 endif
 
-include $(KERNEL_DIR)/external/lwip/sources.mk
+include $(KERNEL_DIR)/net/backends/lwip/sources.mk
 include $(KERNEL_DIR)/external/littlefs/sources.mk
 endif
 
@@ -2491,7 +2500,7 @@ endif
 include tools/driver-modules.mk
 
 # Object files
-LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
+LWIP_KERNEL_SRC := $(filter $(LWIP_SOURCE_ROOT)/src/%.c,$(KERNEL_SRC))
 LFS_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/littlefs/%.c,$(KERNEL_SRC))
 # KERNEL_SRC is complete here, so source-bound Rust modules count as active
 # runtime-test selectors for the profile actually being built.
@@ -2519,8 +2528,8 @@ check-cluster-ssi:
 	$(PYTHON) tools/check-cluster-ssi.py
 check-cluster-ssi-network:
 	$(PYTHON) tools/check-cluster-ssi-network.py
-KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
-              $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
+KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(LWIP_SOURCE_ROOT)/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
+              $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
 KERNEL_OBJ += $(RUST_LANDLOCK_OBJECT) $(RUST_SECCOMP_OBJECT)
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
