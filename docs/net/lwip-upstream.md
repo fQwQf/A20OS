@@ -30,8 +30,8 @@ accept 暂存位于 `backends/lwip/native.h` 的私有结构；仅 INET socket/a
 
 地址配置为 A20OS 值类型；netlink 接口快照、地址/MTU 控制、packet socket、状态显示
 与等待推进经公共执行器分派。`socket/`、`control/` 与公共 socket 内部头不包含 lwIP
-头或私有字段，由 `check-network-backend-boundary.py` 检查。TUN 与硬件 IRQ 的现有
-lwIP 专用桥仍在，后续 BSD 接入还需替换设备侧桥；不能把这一阶段称为任意后端已可运行。
+头或私有字段，由 `check-network-backend-boundary.py` 检查。virtio/e1000/rtl8139 IRQ 与 procfs 已通过公共执行器分派；
+TUN 的 lwIP 专用桥仍在，后续 BSD 接入还需完成包/设备侧适配；不能把这一阶段称为任意后端已可运行。
 
 ## 原版适配的能力差异
 
@@ -63,3 +63,14 @@ SO_REUSEADDR。较早的 marker 被 shell xtrace 插入导致失败，已保留�
 15组 Rust 状态机宿主测试通过；真实 C 队列的分配/复制失败回滚、C registry 并发测试
 通过。软件 checksum 完成器、旧分叉并发 wiring 与公共边界检查通过。
 性能与连接规模数据另见 [benchmark-method.md](./benchmark-method.md)。
+
+## 驱动/诊断边界的后续提交
+
+virtio、e1000、rtl8139 的 IRQ 统一传递借用的设备身份，不再包含 lwIP 头、取得协议
+锁或假定驱动 slot 等于协议接口索引。所选后端解析绑定并负责入口序列化；virtio
+兼容 poll 入口也委托给公共进展接口。e1000/rtl8139 的 TX 描述符回收仍由驱动拥有，
+队列锁在通知后端前释放。procfs 的内存、设备与路由输出亦经后端表分派。
+
+`lwip-driver-bridge-services-kvm` 与 `native-driver-bridge-services-kvm` 在上述最终
+驱动接口构建上均再次通过三节点服务回归；KVM 中 virtio IRQ 已注册。e1000/rtl8139
+本轮仅构建与边界检查，未进行对应硬件/模拟设备运行验证。TUN 尚保留私有 netif 桥。

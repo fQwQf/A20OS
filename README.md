@@ -82,44 +82,25 @@ README 不维护设备清单、价格或统一的“已支持”标签。
 NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定某块板已经具备该移植。
 
 ## 网络栈的当前边界
-按名字读大这份能力是最容易出错的地方，所以把边界写在 README 而不是只留在设计文档里：
+- `NET_STACK=lwip` 默认使用未修改的上游 lwIP 2.2.1 submodule，核心串行执行，
+  `NET_LANES=1`；SMP 仍可用于应用与 I/O。`NET_STACK=native` 是从旧分叉提取并由
+  A20OS 维护的 lwIP 衍生实现，保留 lane/CUBIC 等扩展与原始版权。
+- BSD 候选使用独立 F-Stack 项目的固定版本 submodule，尚未完成内核运行时与设备
+  适配；`NET_STACK=bsd` 明确报错。没有独立 legacy 后端，也不会静默回退。
+- TCP 默认走真实协议 LISTEN/连接路径。`a20.tcpmode=fast` 是历史测试用的本地
+  socket 配对捷径，不用于协议性能或外部服务验收。
+- `NET_ROLE=router` 开启 IPv4/IPv6 转发。真实 KVM 三节点已覆盖双网卡、动态 NAPT
+  源端口冲突、网关/源策略路由及 Linux dnsmasq DHCP/DNS。原版 DHCP 使用
+  `--dhcp-broadcast`；其动态 SIOCSARP 尚不支持。
+- 完整分片 NAT、ICMP 差错翻译与 PMTU 仍未完成，当前不能宣称生产软路由成熟。
+  默认 conntrack=256 是已实测的连接容量限制，服务器档原版在保持跟踪开启时通过
+  320连接；固定 INET 暂存区仍有约30 KiB/连接的成本。
+- 原版提供 Reno，CUBIC 和部分 per-socket TCP 缓冲调整属于 native 能力；不支持
+  的选项返回错误。NIC checksum offload 目前关闭，原版转发由端口层完成软件校验和。
 
-* **入站 TCP 默认不通。** `a20.tcpmode` 默认 `fast`，此时 listener 只存在于 socket 层，
-  任何入站 SYN 都会被 lwIP 回 RST。服务器必须显式传 `a20.tcpmode=lwip`，端口才真正在
-  协议栈上 listen。命令行的优先级高于 `/proc/net/config` 写入口。
-* **conntrack + NAT 已实现**，但只覆盖 IPv4：无 ALG、**只跟踪 TCP / UDP / ICMP echo，
-  不跟踪任何 ICMP 差错报文**（所以依赖 PMTU 发现的路径在这条路径上不工作）、不分片 NAT。
-  ICMP echo 跟踪是本轮补上的（`810e9e431`）：类型归一化进 `src_port`、标识符进 `dst_port`，
-  回程匹配只交换地址。**端到端门禁只覆盖 DNAT**：QEMU user-net 自己在宿主侧做 NAT，
-  guest 外面没有第二个对端，回程包不存在，SNAT/MASQUERADE 不可能有端到端门禁——它由
-  主机侧单元门禁 `test-nat-rewrite` 直接编译并断言出货源码（`kernel/net/filter/netfilter_rewrite.c`）
-  覆盖。LRU 淘汰与空闲超时有门禁 `smoke-ct-capacity`，但它经 `ctinject` 造流量，而注入器
-  只接受 TCP/UDP，**ICMP 条目的淘汰与超时因此没有门禁**。运行时动词挂在
-  `/proc/a20/netfilter`。
-* **TCP 选项按档位**：`SACK` / 时间戳 / `CUBIC`（RFC 8312 核心条款）默认与服务器档
-  开启、嵌入式档关闭。CUBIC **已经实现 §4.2 的 TCP-friendly 目标**（取 `W_cubic` 与
-  `W_est` 中较大者），未做的是 HyStart / TCP-AQ / DCTCP / Prague / ECN，以及 `W_max` 的
-  跨 RTT 持久化——lwIP 2.2.x 的 `struct tcp_pcb` 没有 `rtt` 字段，本树以
-  `TCP_SLOW_INTERVAL` 里的 `pcb->sa` 近似 RTT，因此 §4.2 只在 `W_max` ≳ 3.25 个报文段
-  时才真正起作用。`SO_SNDBUF` / `SO_RCVBUF` 真的生效，**抬高 `SO_SNDBUF` 现在对既有连接
-  也立即生效**（`272c80a2f`），UDP / RAW 同样接受并执行（`92b399e5d`），
-  但**仍然没有自动调优**：没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈。
-* **驱动校验和卸载刻意不做**：`/proc/net/stats` 里 `tx_csum_offload` / `rx_csum_offload`
-  恒为 `off`，`virtio_net` 也从不协商 `VIRTIO_NET_F_CSUM`。这是设计结果，**不是**"上游
-  没有这套机制"：lwIP 2.2.2 有承载它的字段与宏（`netif->chksum_flags`、
-  `NETIF_SET_CHECKSUM_CTRL()`），只是被 `LWIP_CHECKSUM_CTRL_PER_NETIF`（默认 0）关着，
-  而打开它要和 NAT 的原地校验和修正互相打架。依据见
-  [docs/net/checksum-offload.md](docs/net/checksum-offload.md)。
-* **锁契约两侧现在都可执行**：`LWIP_ASSERT_CORE_LOCKED()` 接到 `g_lwip_lock` 的持有者
-  CPU 上，net 锁一侧有 per-CPU 持锁集合探针（`kernel/net/socket/net_lock_probe.c`，`2dd28758c`），
-  逐次取锁检查锁序与嵌套深度。**仍未做**：正向查询原语（"当前 CPU 是否持有 socket X 的
-  锁"）与 lane claim 一侧探针——两项都在
-  [docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 文末的未勾选项里；
-  探针是 per-CPU 而非 per-task，抓不到"取用顺序与释放顺序不一致"。
-
-逐条见 [docs/net/network-config-design.md](docs/net/network-config-design.md)、
-[docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 与
-[docs/status/current/server-readiness.md](docs/status/current/server-readiness.md) §二。
+架构、构建选项和剩余工作见 [网络架构](docs/net/architecture.md)、
+[原版适配](docs/net/lwip-upstream.md)、[BSD 接入](docs/net/bsd-port.md) 与
+[对照方法及数据](docs/net/benchmark-method.md)。
 
 ## 构建与运行
 

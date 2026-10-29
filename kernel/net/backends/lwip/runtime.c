@@ -47,6 +47,18 @@ static int neighbor_update_v4(uint32_t ifindex, uint32_t address,
 #endif
 }
 
+/* The IRQ caller owns a live device through its registered handler. Resolve
+ * backend identity rather than assuming driver slot == protocol interface. */
+static void device_interrupt(const struct device *dev) {
+    uint64_t flags = a20_lwip_ingress_lock();
+    int index = a20_lwip_netif_index_for_device(dev);
+    if (index >= 0)
+        a20_lwip_process_netif_irq_locked(index);
+    else
+        a20_lwip_signal_rx_pending();
+    a20_lwip_ingress_unlock(flags);
+}
+
 static void protocol_progress(unsigned budget) {
     (void)budget;
     A20_LWIP_LANE_RX_POLL(budget);
@@ -78,11 +90,15 @@ const net_stack_ops_t a20_network_stack_ops = {
     .init = a20_lwip_init,
     .attach_interfaces = a20_lwip_attach_netifs,
     .receive_progress = a20_lwip_rx_progress,
+    .device_interrupt = device_interrupt,
     .protocol_progress = protocol_progress,
     .timer_tick = timer_tick,
     .work_pending = work_pending,
     .neighbor_update_v4 = neighbor_update_v4,
     .status = a20_lwip_format_status,
+    .format_memory = a20_lwip_format_memp,
+    .format_devices = a20_lwip_format_net_dev,
+    .format_routes = a20_lwip_format_route,
     .poll_waiter = a20_lwip_poll_waiter,
     .if_up = a20_lwip_if_up,
     .if_default_index = a20_lwip_if_default_index,

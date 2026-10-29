@@ -129,3 +129,35 @@ faults=0。整机 MemFree 的持有前后差约9600 KiB，关闭后恢复大部�
 
 `native-three-scale-kvm` 在 native lane=4 的相同默认预算下也在64/256通过、320只建立256。
 这进一步表明该限制属于共有跟踪容量，不能归因于原版 lwIP 性能下降。
+
+`lwip-three-server-scale-kvm` 在 `NET_PROFILE=3`、原版 lane=1、NR_CPUS=2 下，
+保持 conntrack 开启通过320连接（320/320，verified=1）。这证明提高资源档位可越过
+默认档上限，不等于已解决压力控制、动态容量规划或大规模服务器验收。
+
+## 驱动桥解耦后的最终构建对照
+
+`matched-lwip-driver-bridge` / `matched-native-driver-bridge` 对应已通过最新服务回归的
+冻结内核。仍使用同一个 Linux ELF、2 vCPU/2 GiB、virtio、卸载关闭、SLIRP、affinity
+`0,2`，每项3次×2秒。原版 lane=1，native lane=4；分组先后运行，保留原始次序。
+Linux host/KVM 与原版共18样本，native 6样本，全部 verified=1、invalid_samples=[]。
+本轮协议核心和新驱动入口一起参与测量，不能把跨轮差异单独归因于驱动接口。
+
+| 最终构建 | TCP16KiB MiB/s | TCP p99 µs | TCP ns/B | UDP64B MiB/s | UDP p99 µs | UDP ns/B |
+|---|---:|---:|---:|---:|---:|---:|
+| Linux KVM | 33.709 | 1052.346 | 22.207 | 0.349942 | 635.377 | 2370.934 |
+| A20OS lwip | 21.494 | 3129.021 | 28.832 | 0.299974 | 257.651 | 2431.968 |
+| A20OS native | 14.440 | 5955.064 | 48.029 | 0.305182 | 259.233 | 2517.550 |
+| 宿主 Linux 回环参考 | 358.091 | 56.991 | 0.704 | 2.741840 | 30.870 | 69.079 |
+
+数值口径同前表（各指标分别取中位数、CPU含整个QEMU、payload双向计数）。当前证据
+没有证明“原版一定不如魔改版”；也没有证明原版普遍更快。TCP 与 Linux KVM 仍有明显
+差距，UDP 小包受请求/应答链路影响很大，需要进一步使用受控直连、多流、批量和真正的
+CPU 采样定位瓶颈；不以这个短测决定所有场景默认。
+
+独立追踪轮位于 `trace-lwip-driver-bridge` / `trace-native-driver-bridge`，每项1次×2秒，
+不混入上表。四个样本均 verified=1，且每个 snapshot 的
+`collection_enabled_before_snapshot=1`，不把未启用的零计数当证据。TCP 样本中原版
+BH events=35284、native=21980；二者 `net_bh_overflow=0`、`net_alloc_fail=0`。
+这轮未观察到暂存溢出/分配失败，不能据此排除长期压力问题。锁探针有实际争用记录，
+但各后端工作量与覆盖点不同，不能仅用累计等待值判定锁是主导瓶颈；计数器不是完整
+CPU 调用栈采样。原始 per-site 记录留在各 manifest 的 profile 字段。

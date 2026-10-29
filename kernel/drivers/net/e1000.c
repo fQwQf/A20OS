@@ -5,7 +5,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
-#include "net/lwip_stack.h"
+#include "net/stack.h"
 #include "core/bootargs.h"
 #include "core/cpu.h"
 #include "core/defs.h"
@@ -477,14 +477,7 @@ static int e1000_irq_handler(int irq, void *priv) {
         spin_unlock_irqrestore(&nic->lock, lf);
     }
 
-    int net_idx = a20_lwip_netif_index_for_device(dev);
-
-    uint64_t flags = a20_lwip_lock();
-    if (net_idx >= 0)
-        a20_lwip_process_netif_irq_locked(net_idx);
-    else
-        a20_lwip_signal_rx_pending();
-    a20_lwip_unlock(flags);
+    net_stack_device_interrupt(dev);
     return 0;
 }
 

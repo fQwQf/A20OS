@@ -6,7 +6,7 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
-#include "net/lwip_stack.h"
+#include "net/stack.h"
 #include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -145,6 +145,7 @@ typedef struct {
 
 typedef struct {
     virtio_transport_t vt;
+    device_t *device; /* Borrowed until IRQ unregistration during removal. */
     virtio_net_queue_t rxq;
     virtio_net_queue_t txq;
     /* Owns every ring, buffer and side table below, in one piece.  Must be the
@@ -960,8 +961,8 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
  * (e.g. PCI virtio on platforms without MSI/INTx routing), and an event-driven
  * bottom-half for IRQ-capable transports.
  *
- * - IRQ-capable: the IRQ top-half raises the lwIP RX pending flag, so the
- *   scheduler/idle hook only drains (acquiring g_lwip_lock) when a device
+ * - IRQ-capable: the backend tracks RX pending, so the
+ *   scheduler/idle hook only enters the backend when a device
  *   actually signalled work.  With no network traffic the hot path acquires
  *   no lock at all.
  * - Poll-only: at least one live instance has no IRQ line, so every
@@ -969,19 +970,7 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
  *   never progress.
  */
 void virtio_net_poll_rx_all_bounded(unsigned budget) {
-    int poll_only = 0;
-    for (int i = 0; i < g_nnet; i++) {
-        if (g_net[i].valid && !g_net[i].irq_registered) {
-            poll_only = 1;
-            break;
-        }
-    }
-    if (!poll_only && !a20_lwip_rx_pending_any())
-        return;
-
-    uint64_t flags = a20_lwip_ingress_lock();
-    a20_lwip_poll_rx_locked(budget);
-    a20_lwip_ingress_unlock(flags);
+    net_stack_receive_progress(budget);
 }
 
 void virtio_net_poll_rx_all(void) {
@@ -991,11 +980,9 @@ void virtio_net_poll_rx_all(void) {
 /*
  * VIRTIO_NET_IRQ_MODEL:
  * - The device raises an IRQ on RX packet arrival and TX completion.
- * - The handler is a minimal top-half: it runs under g_lwip_lock, acks the
- *   device, drains the RX used ring into lwIP input (which copies pbuf data
- *   into the preallocated per-PCB bottom-half ring), schedules the bottom-half,
- *   and returns.  It never calls kmalloc or acquires a socket-table bucket
- *   lock.
+ * - The handler acknowledges the device before notifying the selected backend.
+ *   It holds no queue lock across that boundary. The backend owns ingress
+ *   staging, receive credits and scheduling; the driver owns DMA descriptors.
  */
 static int virtio_net_irq_handler(int irq, void *priv) {
     (void)irq;
@@ -1009,9 +996,7 @@ static int virtio_net_irq_handler(int irq, void *priv) {
      * interrupt line asserted otherwise.  Matches virtio_blk_irq_handler. */
     net->vt.write32(&net->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
-    uint64_t flags = a20_lwip_ingress_lock();
-    a20_lwip_process_netif_irq_locked(net->slot);
-    a20_lwip_ingress_unlock(flags);
+    net_stack_device_interrupt(net->device);
     return 0;
 }
 
@@ -1051,6 +1036,7 @@ static int virtio_net_driver_probe(device_t *dev) {
         if (mmio_irq)
             net->vt.irq = (int)mmio_irq->start;
     }
+    net->device     = dev;
     net->slot       = idx;
     net->legacy     = (net->vt.read32(&net->vt, VIRTIO_MMIO_VERSION) == 1);
     spin_init(&net->lock);
