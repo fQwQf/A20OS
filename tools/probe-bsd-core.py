@@ -8,6 +8,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import tomllib
@@ -17,6 +18,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--cc', default='x86_64-linux-gnu-gcc')
+    parser.add_argument('--emulated-tls', action='store_true',
+                        help='require a compiler with -femulated-tls; never access user FS/TLS')
+    parser.add_argument('--net-profile', type=int, choices=[1, 2, 3], default=2)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     port = root / 'kernel/net/backends/bsd'
@@ -28,7 +32,7 @@ def main():
     git = lambda *a: subprocess.check_output(['git', '-C', str(upstream), *a], text=True).strip()
     if git('rev-parse', 'HEAD') != pin['revision'] or git('status', '--porcelain', '--untracked-files=all'):
         parser.error('F-Stack revision must be pinned and clean')
-    if len(sources) != len(set(sources)):
+    if len(sources) != len(set(sources)) or len(port_sources) != len(set(port_sources)):
         parser.error('duplicate BSD source entries')
     for source in sources:
         if not (upstream/source).is_file() or not (upstream/source).resolve().is_relative_to(upstream.resolve()):
@@ -48,8 +52,11 @@ def main():
     flags = ['-O2', '-std=gnu99', '-ffreestanding', '-fno-builtin', '-fno-common',
              '-fno-stack-protector', '-mno-red-zone', '-mgeneral-regs-only', '-mcmodel=large', '-fno-pie', '-nostdinc',
              '-U__linux__', '-U__linux', '-Ulinux', '-U__gnu_linux__',
-             '-D_KERNEL', '-DFSTACK', '-D__FreeBSD__=14', '-DINET', '-DINET6',
+             '-D_KERNEL', '-DFSTACK', f"-D__FreeBSD__={pin.get('freebsd_major', 14)}", '-DINET', '-DINET6',
              '-DHAVE_KERNEL_OPTION_HEADERS', '-include', str(upstream/'lib/opt/opt_global.h')]
+    if args.emulated_tls:
+        flags += ['-femulated-tls']
+    flags += ['-ffunction-sections', '-fdata-sections']
     for directory in ['lib/include', 'lib', 'freebsd', 'lib/opt', 'freebsd/contrib/ck/include']:
         flags += ['-I' + str(upstream / directory)]
     generated = out / 'generated'
@@ -62,7 +69,10 @@ def main():
     port_flags = ['-O2', '-std=gnu99', '-ffreestanding', '-fno-builtin',
                   '-fno-common', '-fno-stack-protector', '-mno-red-zone',
                   '-mgeneral-regs-only', '-mcmodel=large', '-fno-pie', '-nostdinc',
+                  '-I' + str(root/'kernel/arch/x86_64/include'),
                   '-I' + str(root/'kernel/include'), '-I' + str(upstream/'lib')]
+
+    port_flags += [f'-DCONFIG_NET_PROFILE={args.net_profile}']
 
     def compile_one(entry):
         source, owner = entry
@@ -92,10 +102,17 @@ def main():
             # similarly named A20OS symbols with different signatures. Prefix
             # both defined and unresolved symbols; only explicit host imports
             # cross the namespace. This remains a partial object, not a boot.
-            bridge = ['timekeeping_get_monotonic', 'timekeeping_get_realtime',
-                      '_GLOBAL_OFFSET_TABLE_']
+            bridge = {
+                'timekeeping_get_monotonic': 'timekeeping_get_monotonic',
+                'timekeeping_get_realtime': 'timekeeping_get_realtime',
+                'port_host_alloc': 'kmalloc_atomic', 'port_host_free': 'kfree',
+                'port_host_copy': 'memcpy', 'port_host_zero': 'memset',
+                'port_host_panic': 'panic',
+                'port_host_current_task': 'proc_current',
+                '_GLOBAL_OFFSET_TABLE_': '_GLOBAL_OFFSET_TABLE_',
+            }
             mapping = out/'host-imports.map'
-            mapping.write_text(''.join(f'a20_bsd_{name} {name}\n' for name in bridge))
+            mapping.write_text(''.join(f'a20_bsd_{name} {target}\n' for name, target in bridge.items()))
             prefixed = out/'bsd-core-isolated.o'
             subprocess.run(['objcopy', '--prefix-symbols=a20_bsd_',
                             str(out/'bsd-core.o'), str(prefixed)], check=True)
@@ -105,11 +122,15 @@ def main():
                 ['nm', '-g', '--format=posix', str(prefixed)], text=True)
             unexpected = [line.split()[0] for line in global_symbols.splitlines()
                           if line and not line.split()[0].startswith('a20_bsd_')
-                          and line.split()[0] not in bridge]
+                          and line.split()[0] not in bridge.values()]
             if unexpected:
                 raise SystemExit('unisolated BSD symbols: ' + ', '.join(unexpected))
+            for line in global_symbols.splitlines():
+                fields = line.split()
+                if fields and fields[0] in bridge.values() and fields[1] not in ('U', 'w'):
+                    raise SystemExit('BSD defines a host import: ' + fields[0])
             linked['namespace_checked'] = True
-            linked['host_imports'] = bridge[:-1]
+            linked['host_imports'] = {k: v for k, v in bridge.items() if k != '_GLOBAL_OFFSET_TABLE_'}
             linked['isolated_undefined'] = subprocess.check_output(
                 ['nm', '-u', str(prefixed)], text=True).splitlines()
             symbols = subprocess.check_output(['readelf', '-sW', str(prefixed)], text=True)
@@ -118,9 +139,16 @@ def main():
                                      if ' TLS ' in line]
             relocations = subprocess.check_output(['readelf', '-rW', str(prefixed)], text=True)
             (out/'isolated-relocations.txt').write_text(relocations)
+            if args.emulated_tls:
+                if linked['tls_symbols'] or re.search(r'R_X86_64_(?:TLS|TPOFF|DTP|GOTTPOFF)', relocations):
+                    raise SystemExit('native TLS remains in emulated BSD core')
+                assembly = subprocess.check_output(['objdump', '-d', str(prefixed)], text=True)
+                if re.search(r'%[fg]s:', assembly):
+                    raise SystemExit('BSD core still accesses FS/GS')
+                linked['no_native_tls_checked'] = True
             (out/'isolated-sections.txt').write_text(subprocess.check_output(
                 ['readelf', '-SW', str(prefixed)], text=True))
-    manifest = dict(revision=pin['revision'], source_manifest_sha256=hashlib.sha256((port/'port-sources.toml').read_bytes()).hexdigest(), partial_link=linked, compiler=subprocess.check_output([args.cc, '--version'], text=True), status='object-compilation-only-not-linked', sources=rows)
+    manifest = dict(net_profile=args.net_profile, emulated_tls=args.emulated_tls, revision=pin['revision'], source_manifest_sha256=hashlib.sha256((port/'port-sources.toml').read_bytes()).hexdigest(), partial_link=linked, compiler=subprocess.check_output([args.cc, '--version'], text=True), status='object-compilation-only-not-linked', sources=rows)
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     for row in rows:
         print(f"{'COMPILED' if row['rc'] == 0 else 'FAILED'} {row['source']}")

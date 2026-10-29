@@ -1,8 +1,8 @@
 # BSD 网络后端接入记录（2026-10-29）
 
-已将完整 FreeBSD 源码子模块替换为独立项目
-[F-Stack](https://github.com/F-Stack/f-stack)，固定提交
-`52514377b89750ffc03a93f401c22d2d4f269d5f`。它将 FreeBSD 网络实现和用户态适配一起
+初期已将完整 FreeBSD 源码子模块替换为独立项目
+[F-Stack](https://github.com/F-Stack/f-stack)，初期固定提交
+`52514377b89750ffc03a93f401c22d2d4f269d5f`（现已替换，见末节）。它将 FreeBSD 网络实现和用户态适配一起
 维护，不要求导入整个 FreeBSD OS。另一个真实候选是
 [libuinet](https://github.com/pkelsey/libuinet)，其 README 说明从 FreeBSD 9.1 起步。
 本轮选择 F-Stack 作为接入起点，不根据其上游性能宣传推断 A20OS 性能。
@@ -98,3 +98,68 @@ BSD `malloc/free/printf` 等不能误绑定到 A20OS 的同名、不同签名函
 set 依赖。最终内核链接还必须为它们提供真实的执行上下文和正确的 section 生命周期。
 不能把这些 TLS 变量改成共享全局，或让 BSD 访问用户进程的 FS/TLS。当前没有 BSD
 KVM 启动、socket 或公网访问结果；lwIP/native 的公网成功不能转记给 BSD。
+
+
+## 内存、任务 TLS 与发布基线修正
+
+当前 submodule 为 F-Stack `v1.25`，固定提交
+`761639943bdda33103aa98241ca6a3079f1c1b7e`，携带 FreeBSD 13.0 基线。
+这是首次运行适配的开发基线，不代表已完成安全维护评估或生产发布验收。版本选择
+来自实际检查：原固定提交和 v2.0 都携带 `ff_stub_14_extra.c`，其中说明为 link-only
+空桩，并存在与真实源码不一致的接口签名。没有把该文件放进 A20OS 构建。
+v1.25 不带该批次；新基线避免先围绕这些空桩补建运行行为。历史编译、失败和公网
+证据全部保留；此前 lwIP/native 的成功仍不属于 BSD。
+
+`bsd-release125-core-checked` 编译149个真实上游对象及3个运行时对象，部分链接成功，剩53个
+未解析符号，包括 linker set、格式化/字符串、宿主服务与导入接口。该数字不能直接
+解释为53个内核 API。`namespace_checked` 与 `no_native_tls_checked` 均为 true。
+这些是编译和静态边界验证，不是 BSD 启动或联网验证。
+
+### 内存适配
+
+`runtime/memory.c` 替换 libc/DPDK 的 BSD malloc/UMA backing：
+
+- heap 返回16字节对齐地址，匿名映射返回4096字节对齐且清零的内存。
+- 仅接受空地址、私有匿名、读写、整页映射；不冒充 Linux mmap、共享映射或物理连续 DMA。
+- 依据 `ff_glue.c` 的实际检查，映射失败返回 NULL，不能交给它 `(void *)-1`。
+- 配额包含 backing 请求、私有头和对齐预留；embedded/default/server 分别为
+  4/64/256 MiB。它不是已承诺能启动的最小配置，尤其 embedded 尚无 BSD 启动验收。
+  不包含 slab 向上取整、静态 BSD 镜像或公共 socket/驱动的额外成本。
+- 先原子预留预算，分配失败回滚；使用 `kmalloc_atomic`，不在 BSD 锁内触发回收或睡眠。
+  realloc 失败保留原块及内容；unmap 长度不匹配不释放；heap/mapping 所有权混用立即报错。
+- peak 是预留 backing 的高水位，包含进行中的分配；并发统计各字段独立采样。
+
+宿主导入通过私有别名再映射，例如 `port_host_copy→memcpy`。
+不能把 BSD 自身 `panic` 的定义改名到 A20OS 的同名入口；工具同时检查导入必须保持
+未定义，防止将 BSD 定义覆盖到内核导出名。
+
+### 任务独立 TLS
+
+Clang 的 `-femulated-tls` 使真实 `__thread` 访问经过 `__emutls_get_address`，不触碰
+用户 FS/TLS，也不把 pcurthread 改成共享假线程。注册表以 `proc_current()` 的实际任务
+身份查找所有者；每个上下文最多32个变量、16 KiB arena，最多8个同时绑定的上下文。
+这些是 runtime 上限，**不是 BSD 协议栈已支持8个并发执行器或独立网络域**。
+F-Stack 的空锁宏仍要求第一次接入采用单执行器，IRQ 只入队，不能进入 BSD。
+
+上下文先创建再由其任务绑定；停止回调、解绑后才能销毁。绑定中的上下文禁止销毁，
+跨任务解绑拒绝，槽位耗尽会回滚所有权；未绑定时访问 TLS 立即失败。描述符保持只读，
+首次访问从模板初始化并保证对齐；后续访问不分配、不修改共享索引。任务退出必须显式
+解绑销毁，最终 BSD worker 的停止/失败路径仍待接通，不能声称生命周期已端到端验收。
+
+编译探测可重跑：
+
+```sh
+python3 tools/probe-bsd-core.py --cc /path/to/clang --emulated-tls --net-profile 2 --out <新目录>
+python3 tools/test-bsd-runtime-host.py --clang /path/to/clang --out <新目录>
+python3 tools/test-bsd-runtime-host.py --clang /path/to/clang --sanitize --out <另一新目录>
+```
+
+本机使用 Debian Clang19.1.7，工具包解压在 `build/toolchains/bsd-clang19/`，未修改系统
+工具链。证据为 `bsd-release125-runtime-host` 和最终的 `bsd-release125-runtime-final`（ASan/UBSan）：
+内存对齐/清零/预算耗尽、后端分配失败、realloc 回滚、16,000次四线程分配释放通过；
+真实 Clang TLS 访问器的初始化、64字节对齐、四任务隔离、宿主 TLS canary、跨任务
+拒绝、8槽耗尽回滚、解绑回收通过，ASan/UBSan 无错误。预期的未绑定访问由子进程
+验证为失败，不提供假成功。测试没有运行 BSD TCP/IP 状态机。
+
+下一步仍是补齐宿主服务与 linker set，实际启动 SYSINIT/UMA，再接入同一 virtio 包
+I/O 和公共 socket 操作表；目前 `NET_STACK=bsd` 继续拒绝构建，没有 BSD 公网结果。
