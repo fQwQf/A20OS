@@ -4,7 +4,7 @@
 #include "net/socket_side.h"
 #include "mm/objcache.h"
 #include "mm/slab.h"
-#include "lwip/pbuf.h"
+typedef struct test_source { const void *payload; size_t tot_len; } test_source_t;
 #include "/usr/include/stdlib.h"
 #include "/usr/include/string.h"
 #include <unistd.h>
@@ -35,13 +35,13 @@ void kfree(void *p) { free(p); }
 void vfs_put_file(vfile_t *f) { if (f) file_puts++; }
 task_t *proc_current(void) { return NULL; }
 int net_notconn(net_notconn_reason_t why) { (void)why; return -ENOTCONN; }
-u16_t pbuf_copy_partial(const struct pbuf *p, void *dst, u16_t n, u16_t off)
+static int read_source(const void *source, void *dst, size_t n, uint32_t off)
 {
-    if (fail_pbuf_copy || !p || off > p->tot_len || n > p->tot_len - off)
-        return 0;
-    u16_t copied = short_pbuf_copy && n ? (u16_t)(n - 1) : n;
-    memcpy(dst, (const uint8_t *)p->payload + off, copied);
-    return copied;
+    const test_source_t *p = source;
+    if (fail_pbuf_copy || !p || off > p->tot_len || n > p->tot_len - off ||
+        (short_pbuf_copy && n)) return -EAGAIN;
+    memcpy(dst, (const char *)p->payload + off, n);
+    return 0;
 }
 
 static int fail(const char *s)
@@ -96,25 +96,25 @@ int main(void)
 
     /* Pbuf copy failure also frees the unpublished message without changing
      * linked state. The pbuf is a borrowed source in the production entry. */
-    struct pbuf p = {0};
+    test_source_t p = {0};
     p.payload = (void *)payload;
     p.tot_len = sizeof(payload);
     fail_pbuf_copy = 1;
-    CHECK(net_enqueue_msg_locked_pbuf(&s, &p, 0, sizeof(payload), NULL, 0, NULL) == -EAGAIN,
+    CHECK(net_enqueue_msg_locked_reader(&s, &p, 0, sizeof(payload), NULL, 0, NULL, read_source) == -EAGAIN,
           "pbuf-copy-failure-result\n");
     fail_pbuf_copy = 0;
     CHECK(empty(&s), "pbuf-copy-failure-mutated-queue\n");
     short_pbuf_copy = 1;
-    CHECK(net_enqueue_msg_locked_pbuf(&s, &p, 0, 8, NULL, 0, NULL) == -EAGAIN,
+    CHECK(net_enqueue_msg_locked_reader(&s, &p, 0, 8, NULL, 0, NULL, read_source) == -EAGAIN,
           "pbuf-short-copy-result\n");
     short_pbuf_copy = 0;
     CHECK(empty(&s), "pbuf-short-copy-mutated-queue\n");
-    CHECK(net_enqueue_msg_locked_pbuf(&s, &p, 1, 3, NULL, 0, NULL) == 3,
+    CHECK(net_enqueue_msg_locked_reader(&s, &p, 1, 3, NULL, 0, NULL, read_source) == 3,
           "pbuf-success-result\n");
     char pbuf_out[4] = {0};
     CHECK(net_dequeue_msg_locked(&s, pbuf_out, sizeof(pbuf_out), NULL, NULL) == 3 &&
           !memcmp(pbuf_out, "bcd", 3), "pbuf-success-payload\n");
-    CHECK(net_enqueue_msg_locked_pbuf(&s, &p, 0, 0, NULL, 0, NULL) == 0,
+    CHECK(net_enqueue_msg_locked_reader(&s, &p, 0, 0, NULL, 0, NULL, read_source) == 0,
           "pbuf-zero-copy-result\n");
     CHECK(net_dequeue_msg_locked(&s, pbuf_out, sizeof(pbuf_out), NULL, NULL) == 0 &&
           empty(&s), "pbuf-zero-copy-state\n");

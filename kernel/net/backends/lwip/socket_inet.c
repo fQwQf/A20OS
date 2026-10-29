@@ -1,4 +1,4 @@
-#include "net/socket/socket_internal.h"
+#include "native.h"
 #include "net/tun.h"
 #include "net/lwip_stack.h"
 #include "net/lwip_concurrency.h"
@@ -20,7 +20,7 @@
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
 #include "lwip/prot/icmp.h"
-#include "lwip/priv/pcb_lane.h"
+#include "native.h"
 
 /*
  * Take the lane currently recorded on a socket, then validate it against the
@@ -34,7 +34,7 @@ uint64_t net_inet_socket_lane_lock(net_socket_t *s)
     unsigned lane = net_socket_lane_load(s);
     for (;;) {
         uint64_t flags = a20_lwip_lane_lock(lane);
-        /* A cold publisher may have changed s->lane while this caller was
+        /* A cold publisher may have changed lw(s)->lane while this caller was
          * waiting for the snapshot lane.  Do not dereference a PCB until the
          * acquired lane still matches the published socket owner: otherwise a
          * completed rebucket/close could have moved or freed it on another
@@ -46,10 +46,10 @@ uint64_t net_inet_socket_lane_lock(net_socket_t *s)
             continue;
         }
         unsigned owner = lane;
-        if (s->tcp)
-            owner = NET_PCB_LANE_OWNER_OF_PCB(s->tcp);
-        else if (s->udp)
-            owner = NET_PCB_LANE_OWNER_OF_PCB(s->udp);
+        if (lw(s)->tcp)
+            owner = NET_PCB_LANE_OWNER_OF_PCB(lw(s)->tcp);
+        else if (lw(s)->udp)
+            owner = NET_PCB_LANE_OWNER_OF_PCB(lw(s)->udp);
         else if (net_socket_lane_load(s) != lane)
             owner = net_socket_lane_load(s);
         if (owner == lane)
@@ -543,7 +543,7 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
 int a20_net_bh_reserve(void *sp, uint32_t n)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    net_bh_ring_t *r = &s->bh_ring;
+    net_bh_ring_t *r = &lw(s)->bh_ring;
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
     return ((head - tail) + n) <= NET_BH_RING_SIZE ? 1 : 0;
@@ -552,7 +552,7 @@ int a20_net_bh_reserve(void *sp, uint32_t n)
 int a20_net_bh_prepare(void *sp, void **event_out)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    net_bh_ring_t *r = &s->bh_ring;
+    net_bh_ring_t *r = &lw(s)->bh_ring;
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
     if ((head - tail) >= NET_BH_RING_SIZE)
@@ -575,13 +575,13 @@ void a20_net_bh_commit(void *sp)
 {
     net_socket_t *s = (net_socket_t *)sp;
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    __atomic_fetch_add(&s->bh_ring.head, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&lw(s)->bh_ring.head, 1, __ATOMIC_RELAXED);
 }
 
 void *a20_net_bh_consume(void *sp)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    net_bh_ring_t *r = &s->bh_ring;
+    net_bh_ring_t *r = &lw(s)->bh_ring;
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
     if (head == tail)
@@ -594,7 +594,7 @@ void a20_net_bh_consume_commit(void *sp)
 {
     net_socket_t *s = (net_socket_t *)sp;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    __atomic_fetch_add(&s->bh_ring.tail, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&lw(s)->bh_ring.tail, 1, __ATOMIC_RELEASE);
 }
 
 /* Copying a spill into the socket queue completes before tail is published.
@@ -604,7 +604,7 @@ void a20_net_bh_consume_commit(void *sp)
 void a20_net_bh_reclaim_spills(void *sp)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    net_bh_ring_t *r = &s->bh_ring;
+    net_bh_ring_t *r = &lw(s)->bh_ring;
     uint64_t flags = net_inet_socket_lane_lock(s);
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
@@ -623,7 +623,7 @@ void a20_net_bh_stage_payload(void *sp, void *event, void *pp, uint32_t off,
                               size_t len)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    net_bh_ring_t *r = &s->bh_ring;
+    net_bh_ring_t *r = &lw(s)->bh_ring;
     net_bh_event_t *e = (net_bh_event_t *)event;
     struct pbuf *p = (struct pbuf *)pp;
     if (len <= NET_BH_INLINE_PAYLOAD) {
@@ -655,7 +655,7 @@ int a20_net_bh_max_sockets(void)
 int a20_net_bh_accept_pending(void *sp)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    return (s->listening && s->accept_stage.head != s->accept_stage.tail) ? 1 : 0;
+    return (s->listening && lw(s)->accept_stage.head != lw(s)->accept_stage.tail) ? 1 : 0;
 }
 
 void a20_net_bh_publish_pending(void *sp)
@@ -736,21 +736,34 @@ int a20_net_bh_raw_icmp_echo(void *sp, void *pp)
     return 0;
 }
 
-int a20_net_bh_enqueue_spill(void *sp, void *event)
-{
-    net_bh_event_t *e = (net_bh_event_t *)event;
-    return net_enqueue_msg_locked_pbuf((net_socket_t *)sp, e->spill, e->spill_off,
-                                       e->len,
-                                       e->addrlen ? e->addr : NULL, e->addrlen,
-                                       e);
+static net_recv_meta_t event_metadata(const net_bh_event_t *event) {
+    net_recv_meta_t meta = {0};
+    meta.has_pktinfo = event->has_pktinfo;
+    meta.has_hoplimit = event->has_hoplimit;
+    meta.has_tclass = event->has_tclass;
+    meta.pktinfo_family = event->pktinfo_family;
+    meta.pktinfo_ifindex = event->pktinfo_ifindex;
+    meta.pktinfo = event->pktinfo;
+    meta.hoplimit = event->hoplimit;
+    meta.tclass = event->tclass;
+    return meta;
 }
-
-int a20_net_bh_enqueue_inline(void *sp, void *event)
-{
-    net_bh_event_t *e = (net_bh_event_t *)event;
-    return net_enqueue_msg_locked_meta((net_socket_t *)sp, e->data, e->len,
-                                       e->addrlen ? e->addr : NULL, e->addrlen,
-                                       e);
+static int read_pbuf(const void *source, void *out, size_t len, uint32_t offset) {
+    const struct pbuf *p = source;
+    if (offset > p->tot_len || len > p->tot_len - offset) return -EMSGSIZE;
+    return pbuf_copy_partial(p, out, (u16_t)len, (u16_t)offset) == len ? 0 : -EIO;
+}
+int a20_net_bh_enqueue_spill(void *sp, void *event) {
+    net_bh_event_t *e = event;
+    net_recv_meta_t meta = event_metadata(e);
+    return net_enqueue_msg_locked_reader(sp, e->spill, e->spill_off, e->len,
+        e->addrlen ? e->addr : NULL, e->addrlen, &meta, read_pbuf);
+}
+int a20_net_bh_enqueue_inline(void *sp, void *event) {
+    net_bh_event_t *e = event;
+    net_recv_meta_t meta = event_metadata(e);
+    return net_enqueue_msg_locked_meta(sp, e->data, e->len,
+        e->addrlen ? e->addr : NULL, e->addrlen, &meta);
 }
 
 int a20_net_bh_collect_all(void *sp, int which, void *wake_q)
@@ -974,7 +987,7 @@ static void lwip_tcp_err_cb(void *arg, err_t err)
     net_socket_t *s = (net_socket_t *)arg;
     if (!s)
         return;
-    s->tcp = NULL;
+    lw(s)->tcp = NULL;
     __atomic_store_n(&s->bh_err_code, (int)err, __ATOMIC_RELEASE);
     __atomic_store_n(&s->bh_error, 1, __ATOMIC_RELEASE);
     net_inet_bh_schedule(s);
@@ -1149,26 +1162,26 @@ void a20_net_accept_view_init(void *sp, net_accept_view_t *out)
     out->send_timeout_ticks = &s->send_timeout_ticks;
     out->local = s->local;
     out->local_len = &s->local_len;
-    out->tcp = (void **)&s->tcp;
+    out->tcp = (void **)&lw(s)->tcp;
     out->peer_closed = &s->peer_closed;
     out->bh_closed = &s->bh_closed;
-    out->slots = s->accept_stage.slots;
-    out->head = &s->accept_stage.head;
-    out->tail = &s->accept_stage.tail;
-    out->dropped = &s->accept_stage.dropped;
-    out->drain_active = &s->accept_stage.drain_active;
+    out->slots = lw(s)->accept_stage.slots;
+    out->head = &lw(s)->accept_stage.head;
+    out->tail = &lw(s)->accept_stage.tail;
+    out->dropped = &lw(s)->accept_stage.dropped;
+    out->drain_active = &lw(s)->accept_stage.drain_active;
 }
 
 uint64_t a20_net_accept_stage_lock(void *sp)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    return a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, s->tcp);
+    return a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, lw(s)->tcp);
 }
 
 void a20_net_accept_stage_unlock(void *sp, uint64_t flags)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, s->tcp, flags);
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, lw(s)->tcp, flags);
 }
 
 void a20_net_accept_sock_lock(void *s, uint64_t *flags)
@@ -1228,7 +1241,9 @@ void a20_net_accept_slot_release(void *slotp)
 
 void *a20_net_accept_alloc(void)
 {
-    return net_socket_alloc();
+    net_socket_t *s = net_socket_alloc();
+    if (s && !net_inet_state_attach(s)) { net_socket_free(s); return NULL; }
+    return s;
 }
 
 void a20_net_accept_free(void *s)
@@ -1344,8 +1359,8 @@ void a20_net_accept_abort_child(void *childp)
 {
     net_socket_t *child = (net_socket_t *)childp;
     uint64_t cf = a20_lwip_lock();
-    tcp_abort(child->tcp);
-    child->tcp = NULL;
+    tcp_abort(lw(child)->tcp);
+    lw(child)->tcp = NULL;
     a20_lwip_unlock(cf);
 }
 
@@ -1427,59 +1442,59 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
 }
 
 /*
- * True when s->tcp is a listening pcb rather than a connection.
+ * True when lw(s)->tcp is a listening pcb rather than a connection.
  *
  * tcp_recv/tcp_sent/tcp_err all assert pcb->state != LISTEN, so every teardown
- * path has to ask the pcb what it is instead of assuming s->tcp is an
+ * path has to ask the pcb what it is instead of assuming lw(s)->tcp is an
  * established connection.  A real LISTEN pcb exists whenever tcpmode is lwip;
- * before that, net_listen() dropped the bound pcb and s->tcp was always an
+ * before that, net_listen() dropped the bound pcb and lw(s)->tcp was always an
  * ordinary pcb, which is why this could be written as an unconditional call.
  */
 static bool net_inet_tcp_pcb_is_listen(const net_socket_t *s)
 {
-    return s->tcp && s->tcp->state == LISTEN;
+    return lw(s)->tcp && lw(s)->tcp->state == LISTEN;
 }
 
-void net_tcp_close_pcb(net_socket_t *s)
+void a20_lwip_transport_close_pcb(net_socket_t *s)
 {
     if (!s) return;
     uint64_t flags = a20_lwip_lock();
-    if (!s->tcp) { a20_lwip_unlock(flags); return; }
+    if (!lw(s)->tcp) { a20_lwip_unlock(flags); return; }
     a20_lwip_lane_enter(net_socket_lane_load(s));
-    tcp_arg(s->tcp, NULL);
+    tcp_arg(lw(s)->tcp, NULL);
     if (net_inet_tcp_pcb_is_listen(s)) {
-        tcp_accept(s->tcp, NULL);
-        tcp_close(s->tcp);
+        tcp_accept(lw(s)->tcp, NULL);
+        tcp_close(lw(s)->tcp);
         net_inet_accept_stage_purge(s);
     } else {
-        tcp_recv(s->tcp, NULL);
-        tcp_err(s->tcp, NULL);
-        tcp_sent(s->tcp, NULL);
-        if (tcp_close(s->tcp) != ERR_OK)
-            tcp_abort(s->tcp);
+        tcp_recv(lw(s)->tcp, NULL);
+        tcp_err(lw(s)->tcp, NULL);
+        tcp_sent(lw(s)->tcp, NULL);
+        if (tcp_close(lw(s)->tcp) != ERR_OK)
+            tcp_abort(lw(s)->tcp);
     }
-    s->tcp = NULL;
+    lw(s)->tcp = NULL;
     a20_lwip_unlock(flags);
 }
 
-void net_tcp_drop_pcb(net_socket_t *s)
+void a20_lwip_transport_drop_pcb(net_socket_t *s)
 {
     if (!s) return;
     uint64_t flags = a20_lwip_lock();
-    if (!s->tcp) { a20_lwip_unlock(flags); return; }
+    if (!lw(s)->tcp) { a20_lwip_unlock(flags); return; }
     a20_lwip_lane_enter(net_socket_lane_load(s));
-    tcp_arg(s->tcp, NULL);
+    tcp_arg(lw(s)->tcp, NULL);
     if (net_inet_tcp_pcb_is_listen(s)) {
-        tcp_close(s->tcp);
+        tcp_close(lw(s)->tcp);
         net_inet_accept_stage_purge(s);
     } else {
-        tcp_recv(s->tcp, NULL);
-        tcp_err(s->tcp, NULL);
-        tcp_sent(s->tcp, NULL);
-        if (tcp_close(s->tcp) != ERR_OK)
-            tcp_abort(s->tcp);
+        tcp_recv(lw(s)->tcp, NULL);
+        tcp_err(lw(s)->tcp, NULL);
+        tcp_sent(lw(s)->tcp, NULL);
+        if (tcp_close(lw(s)->tcp) != ERR_OK)
+            tcp_abort(lw(s)->tcp);
     }
-    s->tcp = NULL;
+    lw(s)->tcp = NULL;
     a20_lwip_unlock(flags);
 }
 
@@ -1521,7 +1536,7 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
 
 void net_inet_bottom_half_process_socket(net_socket_t *s)
 {
-    a20_net_bh_process_socket(s);
+    if (s && s->transport_private) a20_net_bh_process_socket(s);
 }
 
 
@@ -1643,9 +1658,9 @@ void a20_net_inet_opt_view_init(void *sp, net_inet_opt_view_t *out)
     out->mc_ttl = &s->mc_ttl;
     out->mc_loop = &s->mc_loop;
     out->ip_opts_generation = &s->ip_opts_generation;
-    out->udp = (void **)&s->udp;
-    out->raw = (void **)&s->raw;
-    out->tcp = (void **)&s->tcp;
+    out->udp = (void **)&lw(s)->udp;
+    out->raw = (void **)&lw(s)->raw;
+    out->tcp = (void **)&lw(s)->tcp;
 }
 
 void a20_net_inet_opt_sock_lock(void *s, uint64_t *flags)
@@ -1717,7 +1732,11 @@ void a20_net_inet_opt_set_snd_buf(void *pcb, uint32_t v)
 
 void a20_net_inet_opt_set_wnd_limit(void *pcb, uint32_t v)
 {
+#ifndef CONFIG_LWIP_UPSTREAM
     ((struct tcp_pcb *)pcb)->wnd_limit = (tcpwnd_size_t)v;
+#else
+    (void)pcb; (void)v; /* Smaller native windows are rejected at setsockopt. */
+#endif
 }
 
 uint32_t a20_net_inet_opt_get_rcv_wnd(void *pcb)
@@ -1907,6 +1926,10 @@ static uint32_t net_buf_grow(uint32_t current, uint32_t ceiling)
 static uint32_t net_tcp_rcv_autotune(net_socket_t *s, struct tcp_pcb *pcb,
                                      size_t consumed)
 {
+#ifdef CONFIG_LWIP_UPSTREAM
+    (void)s; (void)pcb; (void)consumed;
+    return 0;
+#else
     if (!s->rcv_autotune || !pcb)
         return 0;
     uint32_t threshold = s->rcv_buf / 2;
@@ -1919,6 +1942,7 @@ static uint32_t net_tcp_rcv_autotune(net_socket_t *s, struct tcp_pcb *pcb,
         return next;
     }
     return 0;
+#endif
 }
 
 /* Called with the lane lock held.  Returns the new socket ceiling, or 0. */
@@ -2042,9 +2066,9 @@ void a20_net_inet_life_view_init(void *sp, net_inet_life_view_t *out)
     out->domain = &s->domain;
     out->sock_type = &s->type;
     out->protocol = &s->protocol;
-    out->udp = (void **)&s->udp;
-    out->raw = (void **)&s->raw;
-    out->tcp = (void **)&s->tcp;
+    out->udp = (void **)&lw(s)->udp;
+    out->raw = (void **)&lw(s)->raw;
+    out->tcp = (void **)&lw(s)->tcp;
 }
 
 void a20_net_inet_life_lock(uint64_t *flags)
@@ -2179,8 +2203,8 @@ int a20_net_inet_life_spill_count(void)
 void *a20_net_inet_life_spill_take(void *sp, int i)
 {
     net_socket_t *s = (net_socket_t *)sp;
-    struct pbuf *p = s->bh_ring.owned[i];
-    s->bh_ring.owned[i] = NULL;
+    struct pbuf *p = lw(s)->bh_ring.owned[i];
+    lw(s)->bh_ring.owned[i] = NULL;
     return p;
 }
 
@@ -2189,19 +2213,21 @@ void a20_net_inet_life_pbuf_free(void *p)
     pbuf_free((struct pbuf *)p);
 }
 
-int net_inet_tcp_listen(net_socket_t *s, int backlog)
+int a20_lwip_transport_tcp_listen(net_socket_t *s, int backlog)
 {
     return a20_net_inet_tcp_listen(s, backlog);
 }
 
-int net_inet_socket_init(net_socket_t *s)
+int a20_lwip_transport_socket_init(net_socket_t *s)
 {
+    if (s->domain != AF_INET && s->domain != AF_INET6) return 0;
+    if (!net_inet_state_attach(s)) return -ENOMEM;
     return a20_net_inet_socket_init(s);
 }
 
-void net_inet_socket_destroy(net_socket_t *s)
+void a20_lwip_transport_socket_destroy(net_socket_t *s)
 {
-    a20_net_inet_socket_destroy(s);
+    if (s->transport_private) a20_net_inet_socket_destroy(s);
 }
 
 /*
@@ -2228,9 +2254,9 @@ void a20_net_inet_bind_view_init(void *sp, net_inet_bind_view_t *out)
     out->net_ns = (void **)&s->net_ns;
     out->domain = &s->domain;
     out->sock_type = &s->type;
-    out->udp = (void **)&s->udp;
-    out->raw = (void **)&s->raw;
-    out->tcp = (void **)&s->tcp;
+    out->udp = (void **)&lw(s)->udp;
+    out->raw = (void **)&lw(s)->raw;
+    out->tcp = (void **)&lw(s)->tcp;
 }
 
 void a20_net_inet_bind_lock(uint64_t *flags)
@@ -2301,7 +2327,7 @@ int a20_net_inet_bind_tcp(void *pcb, const void *ip, uint16_t port)
     return (int)tcp_bind((struct tcp_pcb *)pcb, (const ip_addr_t *)ip, port);
 }
 
-int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
+int a20_lwip_transport_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
 {
     return a20_net_inet_bind_pcb(s, addr, addrlen);
 }
@@ -2395,7 +2421,9 @@ void a20_net_inet_connect_bind_ephemeral(void *sp)
 
 void *a20_net_inet_connect_alloc(void)
 {
-    return net_socket_alloc();
+    net_socket_t *s = net_socket_alloc();
+    if (s && !net_inet_state_attach(s)) { net_socket_free(s); return NULL; }
+    return s;
 }
 
 void a20_net_inet_connect_free(void *s)
@@ -2488,7 +2516,7 @@ void a20_net_inet_connect_trace(int which)
 
 /* Core transport half-close. No socket/bucket lock may be held while lwIP
  * stages FIN/error callbacks; the normal bottom half publishes their events. */
-int net_inet_shutdown(net_socket_t *s, int receive, int transmit)
+int a20_lwip_transport_shutdown(net_socket_t *s, int receive, int transmit)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6) ||
         s->type != SOCK_STREAM || s->local_tcp)
@@ -2502,12 +2530,12 @@ int net_inet_shutdown(net_socket_t *s, int receive, int transmit)
     uint64_t irq = a20_lwip_lock();
     a20_lwip_lane_enter(net_socket_lane_load(s));
     err_t error = ERR_OK;
-    if (s->tcp) {
-        int closing = s->tcp->state == FIN_WAIT_1 || s->tcp->state == FIN_WAIT_2 ||
-            s->tcp->state == CLOSING || s->tcp->state == LAST_ACK || s->tcp->state == TIME_WAIT;
-        if (!(transmit && !receive && closing)) error = tcp_shutdown(s->tcp, receive, transmit);
+    if (lw(s)->tcp) {
+        int closing = lw(s)->tcp->state == FIN_WAIT_1 || lw(s)->tcp->state == FIN_WAIT_2 ||
+            lw(s)->tcp->state == CLOSING || lw(s)->tcp->state == LAST_ACK || lw(s)->tcp->state == TIME_WAIT;
+        if (!(transmit && !receive && closing)) error = tcp_shutdown(lw(s)->tcp, receive, transmit);
     }
-    if (error == ERR_OK && s->tcp) (void)tcp_output(s->tcp);
+    if (error == ERR_OK && lw(s)->tcp) (void)tcp_output(lw(s)->tcp);
     a20_lwip_unlock(irq);
     return error == ERR_OK ? 0 : error == ERR_MEM ? -ENOMEM : -ENOTCONN;
 }
@@ -2532,18 +2560,18 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     s->tcp_connecting = 1;
     s->tcp_err = ERR_INPROGRESS;
     uint64_t lwip_flags = a20_lwip_lock();
-    if (!s->tcp) {
+    if (!lw(s)->tcp) {
         a20_lwip_unlock(lwip_flags);
         s->connected = 0;
         return -ECONNREFUSED;
     }
     a20_lwip_lane_enter(net_socket_lane_load(s));
-    err_t e = tcp_connect(s->tcp, &ip, port, lwip_tcp_connected_cb);
+    err_t e = tcp_connect(lw(s)->tcp, &ip, port, lwip_tcp_connected_cb);
     /* tcp_connect chooses a concrete local address and may rebucket the PCB.
      * Publish that owner before releasing the all-lane barrier: otherwise the
      * data-path lock retries between the old socket and new PCB forever. */
     if (e == ERR_OK)
-        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->tcp));
+        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(lw(s)->tcp));
     a20_lwip_unlock(lwip_flags);
     if (e != ERR_OK) {
         s->tcp_connecting = 0;
@@ -2631,7 +2659,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     return 0;
 }
 
-int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
+int a20_lwip_transport_connect(net_socket_t *s, const void *addr, size_t addrlen,
                      const void *connect_addr, size_t peer_len)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
@@ -2648,14 +2676,14 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         if (r < 0)
             return r;
         uint64_t flags = a20_lwip_lock();
-        if (!s->udp) {
+        if (!lw(s)->udp) {
             a20_lwip_unlock(flags);
             return -ENOTSOCK;
         }
         a20_lwip_lane_enter(net_socket_lane_load(s));
-        err_t e = udp_connect(s->udp, &ip, port);
+        err_t e = udp_connect(lw(s)->udp, &ip, port);
         if (e == ERR_OK)
-            net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->udp));
+            net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(lw(s)->udp));
         a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
@@ -2665,12 +2693,12 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         if (r < 0)
             return r;
         uint64_t flags = a20_lwip_lock();
-        if (!s->raw) {
+        if (!lw(s)->raw) {
             a20_lwip_unlock(flags);
             return -ENOTSOCK;
         }
         a20_lwip_lane_enter(net_socket_lane_load(s));
-        err_t e = raw_connect(s->raw, &ip);
+        err_t e = raw_connect(lw(s)->raw, &ip);
         a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
@@ -2680,12 +2708,12 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
         if (r < 0)
             return r;
         uint64_t flags = a20_lwip_lock();
-        if (!s->raw) {
+        if (!lw(s)->raw) {
             a20_lwip_unlock(flags);
             return -ENOTSOCK;
         }
         a20_lwip_lane_enter(net_socket_lane_load(s));
-        err_t e = raw_connect(s->raw, &ip);
+        err_t e = raw_connect(lw(s)->raw, &ip);
         a20_lwip_unlock(flags);
         return e == ERR_OK ? 0 : -ENETUNREACH;
     }
@@ -2783,8 +2811,8 @@ void a20_net_inet_send_view_init(void *sp, net_inet_send_view_t *out)
     out->peer_addr = s->peer_addr;
     out->peer_len = &s->peer_len;
     out->peer = (void **)&s->peer;
-    out->udp = (void **)&s->udp;
-    out->raw = (void **)&s->raw;
+    out->udp = (void **)&lw(s)->udp;
+    out->raw = (void **)&lw(s)->raw;
 }
 
 void a20_net_inet_send_lock(void *s, uint64_t *flags)
@@ -2860,8 +2888,8 @@ void a20_net_inet_send_bind_v4(void *sp, uint16_t port)
     ip_addr_set_zero_ip4(&any);
     uint64_t flags = a20_lwip_lock();
     a20_lwip_lane_enter(net_socket_lane_load(s));
-    if (s->udp && udp_bind(s->udp, &any, net_ntohs(port)) == ERR_OK)
-        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->udp));
+    if (lw(s)->udp && udp_bind(lw(s)->udp, &any, net_ntohs(port)) == ERR_OK)
+        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(lw(s)->udp));
     a20_lwip_unlock(flags);
 }
 
@@ -3043,7 +3071,7 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
                                  NET_MAX_QUEUE);
 }
 
-int net_inet_send_udp_control(net_socket_t *s, const void *buf, size_t len,
+int a20_lwip_transport_send_udp_control(net_socket_t *s, const void *buf, size_t len,
     int flags, const void *addr, size_t addrlen,
     const net_datagram_control_t *control)
 {
@@ -3082,7 +3110,7 @@ void a20_net_inet_send_tcp_view_init(void *sp, net_inet_send_tcp_view_t *out)
     out->local = s->local;
     out->local_len = &s->local_len;
     out->peer = (void **)&s->peer;
-    out->tcp = (void **)&s->tcp;
+    out->tcp = (void **)&lw(s)->tcp;
 }
 
 void a20_net_inet_send_tcp_lock(void *s, uint64_t *flags)
@@ -3242,10 +3270,10 @@ int a20_net_inet_send_tcp_wait(void *sp, uint64_t start, int allocation_blocked)
     net_sock_unlock(s, irq);
     uint64_t room_flags = net_inet_socket_lane_lock(s);
     int room_now = 0;
-    if (s->tcp && !s->closed && s->connected) {
+    if (lw(s)->tcp && !s->closed && s->connected) {
         /* Has an ACK landed since we parked, and does that mean room? */
-        room_now = !allocation_blocked && s->tcp->snd_buf > 0 &&
-                   s->tcp->snd_queuelen < TCP_SND_QUEUELEN;
+        room_now = !allocation_blocked && lw(s)->tcp->snd_buf > 0 &&
+                   lw(s)->tcp->snd_queuelen < TCP_SND_QUEUELEN;
     }
     a20_lwip_lane_unlock(room_flags);
     if (room_now)
@@ -3286,7 +3314,7 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
  * index in tcp_in; keeping a second name cache on the frontend would diverge
  * after accept or a concurrent setter. The cold barrier serializes setters,
  * close, interface removal and all protocol users. */
-int net_inet_bind_device(net_socket_t *s, const char *name)
+int a20_lwip_transport_bind_device(net_socket_t *s, const char *name)
 {
     uint64_t flags = a20_lwip_lock();
     struct netif *n = NULL;
@@ -3297,20 +3325,21 @@ int net_inet_bind_device(net_socket_t *s, const char *name)
     }
     u8_t index = n ? netif_get_index(n) : NETIF_NO_INDEX;
     int result = 0;
-    if (s->udp) s->udp->netif_idx = index;
-    else if (s->raw) s->raw->netif_idx = index;
-    else if (s->tcp) s->tcp->netif_idx = index;
+    if (lw(s)->udp) lw(s)->udp->netif_idx = index;
+    else if (lw(s)->raw) lw(s)->raw->netif_idx = index;
+    else if (lw(s)->tcp) lw(s)->tcp->netif_idx = index;
     else result = -EOPNOTSUPP;
     a20_lwip_unlock(flags);
     return result;
 }
 
-int net_inet_bound_device(net_socket_t *s, char name[16])
+int a20_lwip_transport_bound_device(net_socket_t *s, char name[16])
 {
+    if (!lw(s)) return -EOPNOTSUPP;
     memset(name, 0, 16);
     uint64_t flags = a20_lwip_lock();
-    u8_t index = s->udp ? s->udp->netif_idx : s->raw ? s->raw->netif_idx :
-        s->tcp ? s->tcp->netif_idx : NETIF_NO_INDEX;
+    u8_t index = lw(s)->udp ? lw(s)->udp->netif_idx : lw(s)->raw ? lw(s)->raw->netif_idx :
+        lw(s)->tcp ? lw(s)->tcp->netif_idx : NETIF_NO_INDEX;
     struct netif *n = index ? netif_get_by_index(index) : NULL;
     if (n && !a20_tun_netif_name(n, name, 16))
         snprintf(name, 16, "%c%c%u", n->name[0], n->name[1], n->num);
@@ -3320,7 +3349,7 @@ int net_inet_bound_device(net_socket_t *s, char name[16])
 
 /* lwIP's current output permits IPv4 fragmentation (DF clear). Expose that
  * actual mode; WANT/DO/PROBE require PMTU/DF plumbing and must not fake success. */
-int net_inet_pmtu_discover(net_socket_t *s, int mode, int set)
+int a20_lwip_transport_pmtu_discover(net_socket_t *s, int mode, int set)
 {
     if (!s || s->domain != AF_INET) return -EOPNOTSUPP;
 #if IP_FRAG
@@ -3331,7 +3360,7 @@ int net_inet_pmtu_discover(net_socket_t *s, int mode, int set)
 #endif
 }
 
-int net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
+int a20_lwip_transport_sendto(net_socket_t *s, const void *buf, size_t len,
                     int flags, const void *addr, size_t addrlen)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
@@ -3345,31 +3374,60 @@ int net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
     return -EOPNOTSUPP;
 }
 
-void net_inet_accept_child_ready(net_socket_t *s)
+int a20_lwip_transport_send_raw_packet(net_socket_t *s, const void *buf, size_t len,
+                              const void *addr, size_t addrlen, int hops, int tclass) {
+    if (!s || s->domain != AF_INET6 || s->type != SOCK_RAW || !lw(s))
+        return -EOPNOTSUPP;
+    if (len > NET_MAX_PAYLOAD) return -EMSGSIZE;
+    ip_addr_t target;
+    if (addr && net_sockaddr_to_lwip_ip(addr, addrlen, &target, NULL) < 0)
+        return -EINVAL;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
+    if (!p) return -ENOMEM;
+    if (len) pbuf_take(p, buf, (u16_t)len);
+    net_inet_ip_options_snapshot_t options;
+    uint64_t flags = net_inet_socket_ip_lane_lock(s, &options);
+    int result = -ENOTSOCK;
+    if (lw(s)->raw) {
+        net_inet_ip_opts_apply_snapshot_locked(s, &options);
+        /* A synchronous raw send reads this value copy. It is never linked
+         * into a PCB list and no shared PCB option is temporarily overwritten. */
+        struct raw_pcb packet = *lw(s)->raw;
+        if (hops >= 0) packet.ttl = (u8_t)hops;
+        if (tclass >= 0) packet.tos = (u8_t)tclass;
+        err_t e = addr ? raw_sendto(&packet, p, &target) : raw_send(&packet, p);
+        result = e == ERR_OK ? (int)len : e == ERR_MEM ? -ENOMEM : -ENETUNREACH;
+    }
+    pbuf_free(p);
+    a20_lwip_lane_unlock(flags);
+    return result;
+}
+
+void a20_lwip_transport_accept_child_ready(net_socket_t *s)
 {
-    if (s) {
+    if (s && lw(s)) {
         uint64_t flags = net_inet_socket_lane_lock(s);
         /* tcp_backlog_accepted() can emit the handshake ACK, and an ACK that
          * does not fit in the send window is queued, which is a PBUF_POOL
          * allocation. */
-        if (s->tcp)
-            tcp_backlog_accepted(s->tcp);
+        if (lw(s)->tcp)
+            tcp_backlog_accepted(lw(s)->tcp);
         a20_lwip_lane_unlock(flags);
     }
 }
 
-void net_tcp_recved(net_socket_t *s, size_t len) {
-    if (s && len > 0) {
+void a20_lwip_transport_recved(net_socket_t *s, size_t len) {
+    if (s && lw(s) && len > 0) {
         size_t consumed = len;
         uint32_t grown = 0;
         uint64_t flags = net_inet_socket_lane_lock(s);
-        while (s->tcp && len > 0) {
+        while (lw(s)->tcp && len > 0) {
             uint16_t n = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
-            tcp_recved(s->tcp, n);
+            tcp_recved(lw(s)->tcp, n);
             len -= n;
         }
-        if (s->tcp)
-            grown = net_tcp_rcv_autotune(s, s->tcp, consumed);
+        if (lw(s)->tcp)
+            grown = net_tcp_rcv_autotune(s, lw(s)->tcp, consumed);
         a20_lwip_lane_unlock(flags);
         if (grown) {
             uint64_t sf = net_sock_lock(s);

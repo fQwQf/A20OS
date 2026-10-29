@@ -9,12 +9,12 @@
  */
 #include "net/socket/socket_internal.h"
 #include "net/socket_side.h"
-#include "net/lwip_stack.h"
 #include "core/errno.h"
 #include "core/string.h"
 #include <stddef.h>
 
-#include "lwip/netif.h"
+#include "net/interface.h"
+#include "net/stack.h"
 
 /*
  * Both the depth and the slot size follow the profile.  This array is
@@ -207,32 +207,33 @@ void a20_net_packet_wakeq_flush(void *wake_q)
 
 int a20_net_packet_if_up(int ifindex)
 {
-    return a20_lwip_if_up((unsigned)ifindex);
+    return net_stack_if_up((unsigned)ifindex);
 }
 
 int a20_net_packet_if_default_index(void)
 {
-    return a20_lwip_if_default_index();
+    return net_stack_if_default_index();
 }
 
 int a20_net_packet_if_hwaddr(int ifindex, uint8_t out[8])
 {
-    return a20_lwip_if_hwaddr((unsigned)ifindex, out);
+    return net_stack_if_hwaddr((unsigned)ifindex, out);
 }
 
 int a20_net_packet_tx(int ifindex, const uint8_t *frame, size_t len)
 {
-    return a20_lwip_packet_tx((unsigned)ifindex, frame, len);
+    return net_stack_packet_tx((unsigned)ifindex, frame, len);
 }
 
 int net_packet_ifindex_by_name(const char *name)
 {
     if (!name || !name[0])
         return -1;
-    u8_t idx = netif_name_to_index(name);
-    if (idx == NETIF_NO_INDEX)
-        return -1;
-    return (int)idx;
+    nl_link_out_t interfaces[32];
+    int count = net_stack_interface_snapshot(interfaces, 32);
+    for (int i = 0; i < count; ++i)
+        if (!strcmp(interfaces[i].name, name)) return (int)interfaces[i].index;
+    return -1;
 }
 
 void net_packet_rx_defer(unsigned ifindex, const uint8_t *frame, size_t len)

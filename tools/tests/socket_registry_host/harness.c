@@ -25,6 +25,8 @@
 #include "/usr/include/stdlib.h"
 #include "/usr/include/string.h"
 #include <unistd.h>
+#include <stdarg.h>
+#include "core/stdio.h"
 
 /* --------------------------------------------------------------- primitives */
 

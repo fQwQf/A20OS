@@ -7,7 +7,6 @@
 #include "core/timer.h"
 #include "proc/proc.h"
 #include "core/stdio.h"
-#include "lwip/pbuf.h"
 
 _Static_assert(__builtin_offsetof(net_msg_t, next) == 0,
                "Rust socket queue ABI: net_msg.next must be first");
@@ -231,7 +230,7 @@ static uint8_t *net_msg_alloc_payload(net_msg_t **out, size_t len)
  * credentials, then the append onto the receive queue. */
 static int net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
                                const void *addr, size_t addrlen,
-                               const net_bh_event_t *meta)
+                               const net_recv_meta_t *meta)
 {
     if (addr && addrlen) {
         if (addrlen > NET_SOCKADDR_MAX)
@@ -312,7 +311,7 @@ static int net_rxq_fits(net_socket_t *dst, size_t len)
 
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen,
-                                const net_bh_event_t *meta)
+                                const net_recv_meta_t *meta)
 {
     if (!dst)
         return net_notconn(NET_NOTCONN_ENQUEUE_META);
@@ -345,10 +344,11 @@ int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
 /* Enqueue straight out of a pbuf, for a bottom-half event too large to stage
  * inline.  The pbuf stays owned by the ring (see net_bh_ring_t.owned); this
  * only borrows it for the duration of the copy. */
-int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
+int net_enqueue_msg_locked_reader(net_socket_t *dst, const void *p,
                                 uint32_t off, size_t len,
                                 const void *addr, size_t addrlen,
-                                const net_bh_event_t *meta)
+                                const net_recv_meta_t *meta,
+                                int (*read)(const void *, void *, size_t, uint32_t))
 {
     if (!dst)
         return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
@@ -357,14 +357,10 @@ int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
         return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
     if (!p || len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
-    if (off > (uint32_t)p->tot_len || len > (size_t)p->tot_len - off)
-        return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
         return -EAGAIN;
 #else
     if (!p)
-        return -EMSGSIZE;
-    if (off > (uint32_t)p->tot_len || len > (size_t)p->tot_len - off)
         return -EMSGSIZE;
 #endif
     int admission = net_rxq_fits(dst, len);
@@ -376,7 +372,7 @@ int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
     uint8_t *payload = net_msg_alloc_payload(&m, len);
     if (!payload)
         return -EAGAIN;
-    if (pbuf_copy_partial(p, payload, (u16_t)len, (u16_t)off) != (u16_t)len) {
+    if (read(p, payload, len, off) < 0) {
         net_msg_free(m);
         return -EAGAIN;
     }

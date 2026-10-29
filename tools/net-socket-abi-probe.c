@@ -60,6 +60,16 @@ static void receive_packet(int fd, size_t expected, struct in_addr local)
 int main(int argc, char **argv)
 {
     require(argc == 3, "usage: net-socket-abi-probe INTERFACE LOCAL_IPV4");
+    int pair[2];
+    require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "UNIX socketpair");
+    int unix_reuse = 1;
+    require(setsockopt(pair[0], SOL_SOCKET, SO_REUSEADDR, &unix_reuse, sizeof(unix_reuse)) == 0,
+            "UNIX options without a native TCP control block");
+    char token = 'u', echoed = 0;
+    require(send(pair[0], &token, 1, 0) == 1 && recv(pair[1], &echoed, 1, 0) == 1 &&
+            echoed == token, "UNIX without INET private state");
+    close(pair[0]);
+    close(pair[1]);
     unsigned index = if_nametoindex(argv[1]);
     require(index != 0, "if_nametoindex");
     int tcp_a = endpoint(SOCK_STREAM, "127.0.0.1", 40253);

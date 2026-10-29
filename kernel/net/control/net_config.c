@@ -3,13 +3,11 @@
 #include "core/bootargs.h"
 #include "core/string.h"
 #include "core/stdio.h"
-#include "net/lwip_stack.h"
-#include "lwip/netif.h"
-#include "lwip/dns.h"
+#include "net/stack.h"
 
 a20_net_config_t g_a20_net_config;
 
-static int parse_ipv4(const char *s, ip4_addr_t *out)
+static int parse_ipv4(const char *s, net_ipv4_addr_t *out)
 {
     unsigned octets[4];
     const char *p = s;
@@ -39,7 +37,8 @@ static int parse_ipv4(const char *s, ip4_addr_t *out)
     if (*p != '\0')
         return -1;
 
-    IP4_ADDR(out, (u8_t)octets[0], (u8_t)octets[1], (u8_t)octets[2], (u8_t)octets[3]);
+    uint8_t *bytes = (uint8_t *)&out->addr;
+    for (int i = 0; i < 4; ++i) bytes[i] = (uint8_t)octets[i];
     return 0;
 }
 
@@ -112,7 +111,7 @@ void a20_net_config_init(void)
             parse_ipv4(val, &g_a20_net_config.gateway);
 
         if (extract_key_value(p, tok_end, "a20.dns", val, sizeof(val))) {
-            if (g_a20_net_config.dns_count < DNS_MAX_SERVERS &&
+            if (g_a20_net_config.dns_count < A20_NET_DNS_SERVERS &&
                 parse_ipv4(val, &g_a20_net_config.dns[g_a20_net_config.dns_count]) == 0) {
                 g_a20_net_config.dns_count++;
             }
@@ -145,32 +144,10 @@ void a20_net_config_init(void)
     /* Preserve the old static QEMU command lines, which provide an address
      * but do not carry a20.dhcp=0.  An explicit a20.dhcp=1 always wins. */
     if (!dhcp_explicit &&
-        (!ip4_addr_isany_val(g_a20_net_config.ip) ||
-         !ip4_addr_isany_val(g_a20_net_config.netmask) ||
-         !ip4_addr_isany_val(g_a20_net_config.gateway)))
+        (g_a20_net_config.ip.addr != 0 ||
+         g_a20_net_config.netmask.addr != 0 ||
+         g_a20_net_config.gateway.addr != 0))
         g_a20_net_config.dhcp_enable = 0;
-}
-
-void a20_net_config_sync_from_lwip(void)
-{
-    struct netif *n = netif_default;
-    if (!n)
-        return;
-
-    ip4_addr_copy(g_a20_net_config.ip, *netif_ip4_addr(n));
-    ip4_addr_copy(g_a20_net_config.netmask, *netif_ip4_netmask(n));
-    ip4_addr_copy(g_a20_net_config.gateway, *netif_ip4_gw(n));
-
-    g_a20_net_config.dns_count = 0;
-#if LWIP_DNS
-    for (int i = 0; i < DNS_MAX_SERVERS; i++) {
-        const ip_addr_t *d = dns_getserver(i);
-        if (d && !ip_addr_isany(d)) {
-            ip4_addr_copy(g_a20_net_config.dns[i], *ip_2_ip4(d));
-            g_a20_net_config.dns_count++;
-        }
-    }
-#endif
 }
 
 int a20_net_config_format(char *buf, size_t bufsz)
@@ -180,49 +157,48 @@ int a20_net_config_format(char *buf, size_t bufsz)
 
     if (!resource_ns_is_initial(resource_ns_current(PROCNS_NET)))
         return snprintf(buf, bufsz, "ip=127.0.0.1\nnetmask=255.0.0.0\ngateway=0.0.0.0\ndns_count=0\ndhcp=0\n");
-    uint64_t flags = a20_lwip_lock();
-    a20_net_config_sync_from_lwip();
-    a20_lwip_unlock(flags);
+    a20_net_config_t config;
+    net_stack_config_snapshot(&config);
 
     size_t off = 0;
 
     char ipb[24], nmb[24], gwb[24];
     snprintf(ipb, sizeof(ipb), "%u.%u.%u.%u",
-             ip4_addr1(&g_a20_net_config.ip),
-             ip4_addr2(&g_a20_net_config.ip),
-             ip4_addr3(&g_a20_net_config.ip),
-             ip4_addr4(&g_a20_net_config.ip));
+             ((const uint8_t *)&config.ip)[0],
+             ((const uint8_t *)&config.ip)[1],
+             ((const uint8_t *)&config.ip)[2],
+             ((const uint8_t *)&config.ip)[3]);
     snprintf(nmb, sizeof(nmb), "%u.%u.%u.%u",
-             ip4_addr1(&g_a20_net_config.netmask),
-             ip4_addr2(&g_a20_net_config.netmask),
-             ip4_addr3(&g_a20_net_config.netmask),
-             ip4_addr4(&g_a20_net_config.netmask));
+             ((const uint8_t *)&config.netmask)[0],
+             ((const uint8_t *)&config.netmask)[1],
+             ((const uint8_t *)&config.netmask)[2],
+             ((const uint8_t *)&config.netmask)[3]);
     snprintf(gwb, sizeof(gwb), "%u.%u.%u.%u",
-             ip4_addr1(&g_a20_net_config.gateway),
-             ip4_addr2(&g_a20_net_config.gateway),
-             ip4_addr3(&g_a20_net_config.gateway),
-             ip4_addr4(&g_a20_net_config.gateway));
+             ((const uint8_t *)&config.gateway)[0],
+             ((const uint8_t *)&config.gateway)[1],
+             ((const uint8_t *)&config.gateway)[2],
+             ((const uint8_t *)&config.gateway)[3]);
 
     int n = snprintf(buf + off, bufsz - off,
                      "ip=%s\nnetmask=%s\ngateway=%s\n",
                      ipb, nmb, gwb);
     if (n > 0) off += (size_t)n;
 
-    for (int i = 0; i < g_a20_net_config.dns_count && i < DNS_MAX_SERVERS; i++) {
+    for (int i = 0; i < config.dns_count && i < A20_NET_DNS_SERVERS; i++) {
         char db[24];
         snprintf(db, sizeof(db), "%u.%u.%u.%u",
-                 ip4_addr1(&g_a20_net_config.dns[i]),
-                 ip4_addr2(&g_a20_net_config.dns[i]),
-                 ip4_addr3(&g_a20_net_config.dns[i]),
-                 ip4_addr4(&g_a20_net_config.dns[i]));
+                 ((const uint8_t *)&config.dns[i])[0],
+                 ((const uint8_t *)&config.dns[i])[1],
+                 ((const uint8_t *)&config.dns[i])[2],
+                 ((const uint8_t *)&config.dns[i])[3]);
         n = snprintf(buf + off, bufsz - off, "dns%d=%s\n", i, db);
         if (n > 0) off += (size_t)n;
     }
 
     n = snprintf(buf + off, bufsz - off,
                  "dhcp=%d\nhostname=%s\n",
-                 g_a20_net_config.dhcp_enable,
-                 g_a20_net_config.hostname[0] ? g_a20_net_config.hostname : "(none)");
+                 config.dhcp_enable,
+                 config.hostname[0] ? config.hostname : "(none)");
     if (n > 0) off += (size_t)n;
 
     n = snprintf(buf + off, bufsz - off, "tcpmode=%s\n",

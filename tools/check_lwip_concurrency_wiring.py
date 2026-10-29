@@ -169,7 +169,7 @@ def check() -> None:
     connect = _body("kernel/net/backends/lwip/socket_inet.c", "net_inet_connect_stream")
     connect = connect[connect.index("err_t e = tcp_connect"): ]
     _ordered(connect, "active open publishes rebucketed PCB ownership",
-             "tcp_connect(s->tcp", "net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(s->tcp))",
+             "tcp_connect(lw(s)->tcp", "net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(lw(s)->tcp))",
              "a20_lwip_unlock(lwip_flags)")
 
     virtio = _body("kernel/drivers/net/virtio_net.c", "virtio_net_irq_handler")
@@ -214,10 +214,10 @@ def check() -> None:
         raise ContractError("accept stage must lock stable PCB, arm the slot, publish head, unlock, then schedule BH")
 
     stage_lock = _body("kernel/net/backends/lwip/socket_inet.c", "a20_net_accept_stage_lock")
-    if "a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, s->tcp)" not in stage_lock:
+    if "a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, lw(s)->tcp)" not in stage_lock:
         raise ContractError("accept stage lock no longer binds the stable listener PCB")
     stage_unlock = _body("kernel/net/backends/lwip/socket_inet.c", "a20_net_accept_stage_unlock")
-    if "a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, s->tcp, flags)" not in stage_unlock:
+    if "a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, lw(s)->tcp, flags)" not in stage_unlock:
         raise ContractError("accept stage unlock no longer releases the listener guard")
     bh_schedule = _body("kernel/net/backends/lwip/socket_inet.c", "a20_net_accept_bh_schedule")
     if "net_inet_bh_schedule" not in bh_schedule:

@@ -158,6 +158,8 @@ def main():
     parser.add_argument('--trace-prefix', help='A20OS syscall trace comm prefix for diagnostics')
     parser.add_argument('--socket-probe', type=Path,
                         help='same static Linux ELF run on the router and Linux WAN')
+    parser.add_argument('--dhcp-broadcast', action='store_true',
+                        help='use DHCP broadcast replies; needs no dynamic ARP insertion')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     out = args.out.resolve()
@@ -166,7 +168,8 @@ def main():
     if args.services_world:
         inputs['world'] = dict(path=str(args.services_world.resolve()), sha256=bench.apk.sha(args.services_world))
     manifest = dict(inputs=inputs, router_sha256=bench.apk.sha(args.router_kernel),
-                    binary_sha256=bench.apk.sha(args.binary), nodes=[])
+                    binary_sha256=bench.apk.sha(args.binary),
+                    dhcp_broadcast=args.dhcp_broadcast, nodes=[])
     init = out / 'linux-init'
     init.write_text(INIT)
     init.chmod(0o755)
@@ -200,6 +203,7 @@ for i in $(seq 1 50); do
 done
 cat /tmp/dnsmasq.log
 test "$ready" = 1
+set +x
 tail -n 0 -f /tmp/dnsmasq.log &
 '''
         return script.replace(f'echo {marker}', setup + f'echo {marker}')
@@ -214,6 +218,8 @@ tail -n 0 -f /tmp/dnsmasq.log &
     if args.services_world:
         wan_script = with_service(wan_script, 'eth0', '--host-record=upstream.test,203.0.113.9', 'WAN_READY')
         router_script = with_service(router_script, 'en2', '--server=10.20.0.2 --dhcp-range=192.168.10.50,192.168.10.60,255.255.255.0,1h --dhcp-option=3,192.168.10.1 --dhcp-option=6,192.168.10.1 --dhcp-leasefile=/tmp/dhcp.leases --log-dhcp --log-queries', 'ROUTER_READY')
+        if args.dhcp_broadcast:
+            router_script = router_script.replace('dnsmasq --no-daemon', 'dnsmasq --dhcp-broadcast --no-daemon')
         service_tests = '''cat > /tmp/lease.sh <<'LEASE'
 #!/bin/sh
 if [ "$1" = bound ] || [ "$1" = renew ]; then

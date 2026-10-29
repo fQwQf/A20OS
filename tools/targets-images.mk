@@ -356,6 +356,10 @@ $(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c $(BUILD_
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
 
+$(BUILD_DIR)/external/lwip-upstream/src/%.o: $(KERNEL_DIR)/external/lwip-upstream/src/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
+
 # littlefs (kernel/external/littlefs) — same vendored-source policy as lwIP:
 # objects live under $(BUILD_DIR)/external/littlefs, no stack-canary
 # hardening, and the compat include dir goes FIRST so <stdlib.h>/<string.h>

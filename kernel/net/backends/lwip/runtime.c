@@ -6,6 +6,9 @@
 #include "net/socket/socket_internal.h"
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
+extern int a20_lwip_interface_snapshot(void *, int);
+extern void a20_lwip_config_snapshot(a20_net_config_t *);
+extern const net_transport_ops_t a20_lwip_transport_ops;
 
 /* Isolated port extension; upstream exposes only permanent insertion. */
 extern err_t a20_etharp_update_dynamic(struct netif *, const ip4_addr_t *,
@@ -13,6 +16,12 @@ extern err_t a20_etharp_update_dynamic(struct netif *, const ip4_addr_t *,
 
 static int neighbor_update_v4(uint32_t ifindex, uint32_t address,
                                const uint8_t mac[6]) {
+#ifdef CONFIG_LWIP_UPSTREAM
+    /* Upstream has no public dynamic insertion API. DHCP broadcast replies
+     * work without inventing a second cache or modifying upstream internals. */
+    (void)ifindex; (void)address; (void)mac;
+    return -EOPNOTSUPP;
+#else
     if (!ifindex || ifindex > 255 || !address || (mac[0] & 1))
         return -EINVAL;
     uint8_t any = 0;
@@ -35,6 +44,7 @@ static int neighbor_update_v4(uint32_t ifindex, uint32_t address,
     }
     a20_lwip_unlock(flags);
     return result;
+#endif
 }
 
 static void protocol_progress(unsigned budget) {
@@ -57,8 +67,14 @@ static int work_pending(void) {
     return a20_lwip_rx_pending_any() || net_bh_any_pending();
 }
 
-const net_stack_ops_t a20_lwip_stack_ops = {
-    .name = "lwip",
+const net_stack_ops_t a20_network_stack_ops = {
+    .transport = &a20_lwip_transport_ops,
+    .name =
+#ifdef CONFIG_LWIP_UPSTREAM
+        "lwip-upstream",
+#else
+        "lwip-legacy",
+#endif
     .init = a20_lwip_init,
     .attach_interfaces = a20_lwip_attach_netifs,
     .receive_progress = a20_lwip_rx_progress,
@@ -66,4 +82,18 @@ const net_stack_ops_t a20_lwip_stack_ops = {
     .timer_tick = timer_tick,
     .work_pending = work_pending,
     .neighbor_update_v4 = neighbor_update_v4,
+    .status = a20_lwip_format_status,
+    .poll_waiter = a20_lwip_poll_waiter,
+    .if_up = a20_lwip_if_up,
+    .if_default_index = a20_lwip_if_default_index,
+    .if_hwaddr = a20_lwip_if_hwaddr,
+    .packet_tx = a20_lwip_packet_tx,
+    .interface_snapshot = a20_lwip_interface_snapshot,
+    .config_snapshot = a20_lwip_config_snapshot,
+    .if_set_mtu = a20_lwip_if_set_mtu,
+    .if_set_flags = a20_lwip_if_set_flags,
+    .if_get_addr = a20_lwip_if_get_addr,
+    .if_set_addr = a20_lwip_if_set_addr,
+    .if_set_addr6 = a20_lwip_if_set_addr6,
+    .if_del_addr6 = a20_lwip_if_del_addr6,
 };

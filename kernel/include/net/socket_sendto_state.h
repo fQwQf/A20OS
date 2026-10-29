@@ -35,9 +35,9 @@ typedef struct net_sendto_view {
     int *connected;
     int *ever_connected;
     int *local_tcp;
-    void **tcp;
-    void **udp;
-    void **raw;
+    int has_tcp;
+    int has_udp;
+    int has_raw;
     void **peer;
     uint8_t *local;
     size_t *local_len;
