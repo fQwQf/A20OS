@@ -179,7 +179,8 @@
 #define NET_PROFILE_CONNTRACK_BUCKETS 8
 
 /*
- * The whole of this tier's networking RAM, in one number, as the sum of four
+ * The base networking structures/heap (TUN controls and payload added below),
+ * as the sum of the following
  * terms that are each asserted somewhere real:
  *
  *   socket table   NET_MAX_SOCKETS x sizeof(net_socket_t)
@@ -201,13 +202,15 @@
  * rather than bookkeeping: the tier was previously described as a 20 KiB
  * profile whose largest single term overran 20 KiB.  It is now described as a
  * profile that needs about 42-43 KiB and is asserted not to need more than
- * 44 KiB.  20 KiB was never achievable for a socket-capable lwIP -- the eight
+ * 44 KiB plus the explicit NET_PROFILE_TUN_BUDGET below. Allocator rounding
+ * and transient conversion buffers are not physical-memory promises.
+ * 20 KiB was never achievable for a socket-capable lwIP -- the eight
  * sockets alone exceed it on LP64 -- and the way that used to be expressed was
  * a ceiling that the code violated.  docs/status/current/server-readiness.md
  * carries the numbers.
  */
 #define NET_PROFILE_FILTER_BUDGET    (32 * 64 + 1280)
-#define NET_PROFILE_TOTAL_BUDGET     (44 * 1024)
+#define NET_PROFILE_TOTAL_BUDGET     (44 * 1024 + NET_PROFILE_TUN_BUDGET)
 
 /*
  * A bottom-half ring of one slot is not a small ring, it is a broken one: the
@@ -530,6 +533,15 @@ _Static_assert(NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE,
 #ifndef NET_PROFILE_TUN_MAX_DEVS
 #define NET_PROFILE_TUN_MAX_DEVS 2
 #endif
+/* TUN protocol slots and open-control credits are separate: all persistent
+ * interfaces can be detached while still leaving credits for reopening. The
+ * payload ceiling is counted in bytes as well as packets, including jumbo IP. */
+#define NET_PROFILE_TUN_CONTROL_SLOTS (2 * NET_PROFILE_TUN_MAX_DEVS)
+#define NET_PROFILE_TUN_RX_DEPTH (CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED ? 2 : 32)
+#define NET_PROFILE_TUN_RX_BYTES (NET_PROFILE_TUN_RX_DEPTH * NET_PROFILE_NETIF_FRAME_SIZE)
+#define NET_PROFILE_TUN_CONTROL_BUDGET (NET_PROFILE_TUN_CONTROL_SLOTS * 768)
+#define NET_PROFILE_TUN_BUDGET (NET_PROFILE_TUN_CONTROL_BUDGET + \
+                               NET_PROFILE_TUN_MAX_DEVS * NET_PROFILE_TUN_RX_BYTES)
 #define NET_PROFILE_NETIF_STRUCT_BUDGET \
     ((NET_PROFILE_NETIF_MAX_DEVS + 1 + NET_PROFILE_TUN_MAX_DEVS) * \
      NET_PROFILE_NETIF_STRUCT_BYTES)

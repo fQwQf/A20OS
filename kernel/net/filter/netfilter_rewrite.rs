@@ -296,19 +296,19 @@ pub unsafe extern "C" fn a20_rust_netfilter_set_port(
 }
 
 extern "C" {
-    fn a20_lwip_netif_ipv4(net_idx: i32) -> u32;
+    fn net_backend_interface_ipv4(net_idx: i32) -> u32;
 }
 
 /// # Safety
-/// The caller must hold the lwIP lock that serializes netif state and keep it
-/// held for both lookups. The C packet hook already calls this while holding
-/// that lock; calling this entry outside that context would race netif updates.
+/// Called only within the selected backend's protected packet execution.
+/// The resolver borrows interface values and must never take a backend lock
+/// from CT, allocate or call back into the policy engine.
 #[no_mangle]
 pub unsafe extern "C" fn a20_rust_netfilter_masq_addr(net_idx: i32) -> u32 {
     // An unnumbered egress cannot borrow another interface's identity. The
     // transaction rejects zero before touching the packet.
     if net_idx < 0 { return 0; }
-    unsafe { a20_lwip_netif_ipv4(net_idx) }
+    unsafe { net_backend_interface_ipv4(net_idx) }
 }
 
 #[inline]

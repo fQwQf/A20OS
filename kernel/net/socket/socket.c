@@ -736,7 +736,8 @@ int net_connect_sock(net_socket_t *s, const void *addr, size_t addrlen) {
         net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
-    if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
+    if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6) &&
+        !(s->type == SOCK_DGRAM && resource_ns_is_initial(s->net_ns)))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
     memcpy(s->peer_addr, addr, addrlen);
     s->peer_len = addrlen;

@@ -8,7 +8,6 @@
 #include "net/filter/netfilter_internal.h"
 #include "net/netfilter_rewrite.h"
 #include "net/profile.h"
-#include "net/lwip_stack.h"
 #include "core/lock.h"
 #include "core/string.h"
 #include "core/stdio.h"

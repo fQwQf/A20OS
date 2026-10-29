@@ -170,7 +170,7 @@ _Static_assert(NET_MAX_SOCKETS * (sizeof(lwip_socket_t) + sizeof(net_socket_t)) 
                    (NET_PROFILE_PACKET_RING_SLOTS + 1) * NET_PROFILE_PACKET_SLOT_BYTES +
                    NET_PROFILE_NETIF_MAX_DEVS * NET_PROFILE_NETIF_STATE_BYTES +
                    NET_PROFILE_NETIF_STRUCT_BUDGET + NET_PROFILE_FILTER_BUDGET +
-                   NET_PROFILE_MEM_SIZE + NET_PROFILE_MEMP_LANE_TABLE_BYTES
+                   NET_PROFILE_MEM_SIZE + NET_PROFILE_MEMP_LANE_TABLE_BYTES + NET_PROFILE_TUN_BUDGET
                <= NET_PROFILE_TOTAL_BUDGET, "embedded whole-network budget exceeded");
 #endif
 /* lw(s)->lane is published while bind/PCB rebucket operations may race with

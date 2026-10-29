@@ -1,12 +1,15 @@
 /* lwIP owns its execution model. A20OS scheduling only sees bounded protocol
  * progress and pending work, including socket events published by callbacks. */
 #include "net/stack.h"
+#include "tun_private.h"
 #include "core/string.h"
 #include "net/lwip_stack.h"
 #include "net/socket/socket_internal.h"
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
 extern int a20_lwip_interface_snapshot(void *, int);
+extern int a20_lwip_interface_mtu(unsigned);
+extern int a20_lwip_owns_ipv4(uint32_t);
 extern void a20_lwip_config_snapshot(a20_net_config_t *);
 extern const net_transport_ops_t a20_lwip_transport_ops;
 
@@ -94,6 +97,9 @@ const net_stack_ops_t a20_network_stack_ops = {
     .protocol_progress = protocol_progress,
     .timer_tick = timer_tick,
     .work_pending = work_pending,
+    .tun_create = a20_lwip_tun_create,
+    .tun_destroy = a20_lwip_tun_destroy,
+    .tun_inject = a20_lwip_tun_inject,
     .neighbor_update_v4 = neighbor_update_v4,
     .status = a20_lwip_format_status,
     .format_memory = a20_lwip_format_memp,
@@ -101,6 +107,8 @@ const net_stack_ops_t a20_network_stack_ops = {
     .format_routes = a20_lwip_format_route,
     .poll_waiter = a20_lwip_poll_waiter,
     .if_up = a20_lwip_if_up,
+    .owns_ipv4 = a20_lwip_owns_ipv4,
+    .if_mtu = a20_lwip_interface_mtu,
     .if_default_index = a20_lwip_if_default_index,
     .if_hwaddr = a20_lwip_if_hwaddr,
     .packet_tx = a20_lwip_packet_tx,

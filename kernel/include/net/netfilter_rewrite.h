@@ -64,12 +64,8 @@ void netfilter_set_port(uint8_t *frame, size_t len,
                         const netfilter_frame_t *pkt, int is_src,
                         uint16_t new_port);
 
-/*
- * The address a MASQUERADE translates to: the address of the interface being
- * left, falling back to the primary netif when that one has no IPv4 address
- * yet, so a rule installed before DHCP completes still translates instead of
- * silently passing traffic through untranslated.
- */
+/* MASQUERADE uses only the selected egress interface address. Missing or
+ * unnumbered egress returns zero; a different interface is never borrowed. */
 uint32_t netfilter_masq_addr(int net_idx);
 
 /* ---------------------------------------------------------------- conntrack */

@@ -1,7 +1,9 @@
+#include "tun_private.h"
 #include "native.h"
 #include "net/socket/socket_internal.h"
 #include "net/tun.h"
 #include "net/lwip_stack.h"
+#include "net/lwip_stack_state.h"
 #include "net/stack.h"
 #include "proc/userns.h"
 #include "core/string.h"
@@ -103,7 +105,7 @@ static void net_ifreq_fill(struct a20_ifreq *ifr, const struct netif *nif)
     memset(ifr, 0, sizeof(*ifr));
     /* A TUN netif carries a real interface name ("tailscale0"); the lwIP
      * two-char plus number spelling would hide it from if_nametoindex(). */
-    if (!a20_tun_netif_name((struct netif *)nif, ifr->ifr_name,
+    if (!net_tun_interface_name(netif_get_index(nif), ifr->ifr_name,
                             sizeof(ifr->ifr_name)))
         snprintf(ifr->ifr_name, sizeof(ifr->ifr_name), "%c%c%u",
                  nif->name[0], nif->name[1], nif->num);
@@ -161,7 +163,7 @@ static struct netif *net_ifreq_lookup(const char *name)
         return n;
     /* TUN names are not expressible in lwIP's name scheme, so ask the service
      * before falling through to the default-interface aliases. */
-    n = a20_tun_netif_by_name(name);
+    n = netif_get_by_index((u8_t)net_tun_interface_by_name(name));
     if (n)
         return n;
     /* A20OS names its lwIP netif "en0" while the device node users see is
@@ -183,9 +185,9 @@ static int net_ifreq_put_addr(void *uarg, uint16_t family,
      * back as 2.15.0.0. */
     out[0] = (uint8_t)family;
     out[1] = (uint8_t)(family >> 8);
-    if (n > sizeof(out) - 4)
-        n = sizeof(out) - 4;
-    memcpy(out + 4, bytes, n);
+    size_t offset = family == A20_AF_INET ? 4 : 2;
+    if (n > sizeof(out) - offset) n = sizeof(out) - offset;
+    memcpy(out + offset, bytes, n);
     return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, out, sizeof(out)) < 0
            ? -EFAULT : 0;
 }
@@ -193,140 +195,72 @@ static int net_ifreq_put_addr(void *uarg, uint16_t family,
 static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
 {
     struct a20_ifreq ifr;
-    if (copy_from_user(&ifr, uarg, sizeof(ifr)) < 0)
-        return -EFAULT;
+    if (copy_from_user(&ifr, uarg, sizeof(ifr)) < 0) return -EFAULT;
     ifr.ifr_name[A20_IFNAMSIZ - 1] = 0;
-
-    /* SIOCGIFNAME is indexed by ifr_ifindex; ifr_name is output and may be
-     * uninitialized. Looking it up as an input name broke libc if_indextoname
-     * and applications enumerating rtnetlink address records. Copy a value
-     * under the configuration barrier, then release it before usercopy. */
-    if (req == A20_SIOCGIFNAME) {
-        int index;
-        memcpy(&index, ifr.ifr_ifru.raw, sizeof(index));
-        char name[A20_IFNAMSIZ] = {0};
-        uint64_t lf = a20_lwip_lock();
-        for (struct netif *n = netif_list; n; n = n->next) {
-            if ((int)netif_get_index(n) != index) continue;
-            if (!a20_tun_netif_name(n, name, sizeof(name)))
-                snprintf(name,sizeof(name),"%c%c%u",n->name[0],n->name[1],n->num);
-            break;
+    uint64_t lf = a20_lwip_lock();
+    struct netif *n = req == A20_SIOCGIFNAME
+        ? netif_get_by_index((u8_t)ifr.ifr_ifru.ivalue) : net_ifreq_lookup(ifr.ifr_name);
+    if (!n || (req == A20_SIOCGIFNAME &&
+               (int)netif_get_index(n) != ifr.ifr_ifru.ivalue)) {
+        a20_lwip_unlock(lf); return -ENODEV;
+    }
+    unsigned index = netif_get_index(n);
+    if (req == A20_SIOCSIFADDR || req == A20_SIOCSIFNETMASK) {
+        if (ifr.ifr_ifru.addr.sa_family != A20_AF_INET) {
+            a20_lwip_unlock(lf); return -EINVAL;
         }
+        ip4_addr_t value = { .addr = ifr.ifr_ifru.addr.sa_addr };
+        if (req == A20_SIOCSIFADDR) netif_set_ipaddr(n, &value);
+        else netif_set_netmask(n, &value);
+        uint8_t addr[4], mask[4];
+        memcpy(addr, netif_ip4_addr(n), 4); memcpy(mask, netif_ip4_netmask(n), 4);
         a20_lwip_unlock(lf);
-        if (!name[0]) return -ENODEV;
-        memcpy(ifr.ifr_name,name,sizeof(name));
-        return copy_to_user(uarg,&ifr,sizeof(ifr)) < 0 ? -EFAULT : 0;
+        a20_lwip_stack_notify_addr(index, addr, mask);
+        return 0;
     }
-
-    struct netif *nif = net_ifreq_lookup(ifr.ifr_name);
-    if (!nif)
-        return -ENODEV;
-
+    /* All output is copied by value while serialized with interface removal.
+     * No backend pointer or execution lock crosses a potentially faulting copy. */
+    struct netif snapshot = *n;
+    if (req == A20_SIOCGIFNAME) {
+        if (!net_tun_interface_name(index, ifr.ifr_name, sizeof(ifr.ifr_name)))
+            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%c%c%u", n->name[0], n->name[1], n->num);
+    }
+    a20_lwip_unlock(lf);
+    n = &snapshot;
     switch (req) {
+    case A20_SIOCGIFNAME:
+        return copy_to_user(uarg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
     case A20_SIOCGIFHWADDR:
-        return net_ifreq_put_addr(uarg, (nif->flags & NETIF_FLAG_ETHERNET) ?
+        return net_ifreq_put_addr(uarg, n->flags & NETIF_FLAG_ETHERNET ?
                                   A20_ARPHRD_ETHER : A20_ARPHRD_LOOPBACK,
-                                  nif->hwaddr, nif->hwaddr_len);
+                                  n->hwaddr, n->hwaddr_len);
     case A20_SIOCGIFADDR:
-        return net_ifreq_put_addr(uarg, A20_AF_INET, &nif->ip_addr, 4);
+        return net_ifreq_put_addr(uarg, A20_AF_INET, netif_ip4_addr(n), 4);
     case A20_SIOCGIFNETMASK:
-        return net_ifreq_put_addr(uarg, A20_AF_INET, &nif->netmask, 4);
-    case A20_SIOCGIFDSTADDR:
-    case A20_SIOCGIFBRDADDR: {
-        uint32_t ip = 0, mask = 0, brd;
-        memcpy(&ip, &nif->ip_addr, 4);
-        memcpy(&mask, &nif->netmask, 4);
-        brd = ip | ~mask;
-        return net_ifreq_put_addr(uarg, A20_AF_INET, &brd, 4);
+        return net_ifreq_put_addr(uarg, A20_AF_INET, netif_ip4_netmask(n), 4);
+    case A20_SIOCGIFDSTADDR: case A20_SIOCGIFBRDADDR: {
+        uint32_t broadcast = netif_ip4_addr(n)->addr | ~netif_ip4_netmask(n)->addr;
+        return net_ifreq_put_addr(uarg, A20_AF_INET, &broadcast, 4);
     }
-    case A20_SIOCGIFMTU: {
-        int mtu = (int)nif->mtu;
-        return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &mtu, sizeof(mtu)) < 0
-               ? -EFAULT : 0;
+    case A20_SIOCGIFMTU: case A20_SIOCGIFINDEX: {
+        int value = req == A20_SIOCGIFMTU ? n->mtu : (int)index;
+        return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &value, sizeof(value)) < 0 ? -EFAULT : 0;
     }
-    case A20_SIOCSIFMTU: {
-        /*
-         * Routed through a20_lwip_if_set_mtu(), not a bare nif->mtu write, and
-         * the reason is the same one RTM_NEWLINK goes through it for: the
-         * RFC 791 floor and the profile's frame-size ceiling are enforced
-         * there and nowhere else.  Setting nif->mtu directly would be the one
-         * way to configure an MTU the receive path then silently truncates at
-         * its scratch-buffer clamp and the transmit path refuses with ERR_BUF.
-         *
-         * This case was missing -- SIOCSIFMTU was dispatched here by
-         * net_vfile_ioctl() but had no arm in the switch, so every caller got
-         * -ENOTTY and the ceiling a20_lwip_if_set_mtu() enforces was reachable
-         * only from netlink.  That is why the smoke for the ceiling had to go
-         * through RTM_NEWLINK until now; it now covers both entry points.
-         *
-         * The range check is here rather than in the callee because that takes
-         * uint16_t: an ifreq's ifr_mtu is an int, and 0x10000 would truncate
-         * back to 0 and be refused as a below-minimum MTU rather than as the
-         * out-of-range value it is.
-         */
-        int mtu;
-        if (copy_from_user(&mtu, (uint8_t *)uarg + A20_IFNAMSIZ, sizeof(mtu)) < 0)
-            return -EFAULT;
-        if (mtu < 0 || mtu > 0xffff)
-            return -EINVAL;
-        return a20_lwip_if_set_mtu(netif_get_index(nif), (uint16_t)mtu);
-    }
-    case A20_SIOCGIFINDEX: {
-        /* Not netif_name_to_index(): netif->name is a two-character
-         * abbreviation, not a NUL-terminated name, so that lookup compared
-         * against garbage and every interface answered 0.  This is also the
-         * numbering the netlink path and a20_lwip_netif_by_index() use. */
-        int idx = (int)netif_get_index(nif);
-        return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &idx, sizeof(idx)) < 0
-               ? -EFAULT : 0;
-    }
+    case A20_SIOCSIFMTU:
+        if (ifr.ifr_ifru.ivalue < 0 || ifr.ifr_ifru.ivalue > 65535) return -EINVAL;
+        return a20_lwip_if_set_mtu(index, (uint16_t)ifr.ifr_ifru.ivalue);
     case A20_SIOCGIFFLAGS: {
-        /* Only the 127.0.0.1 netif is a loopback.  Reporting every
-         * non-Ethernet interface as IFF_LOOPBACK made a TUN look like "lo"
-         * (ifconfig printed "Link encap:Local Loopback"), and netmon users
-         * discard loopback links when choosing a default route. */
-        short fl = 0;
-        if (nif->flags & NETIF_FLAG_ETHERNET)
-            fl |= A20_IFF_BROADCAST;
-        if (netif_ip4_addr(nif)->addr == 0x0100007fU)
-            fl |= A20_IFF_LOOPBACK;
-        if (nif->flags & NETIF_FLAG_UP)
-            fl |= A20_IFF_UP;
-        if (nif->flags & NETIF_FLAG_LINK_UP)
-            fl |= A20_IFF_RUNNING;
-        return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &fl, sizeof(fl)) < 0
-               ? -EFAULT : 0;
+        short value = 0;
+        if (n->flags & NETIF_FLAG_BROADCAST) value |= A20_IFF_BROADCAST;
+        if (netif_ip4_addr(n)->addr == 0x0100007fU) value |= A20_IFF_LOOPBACK;
+        if (n->flags & NETIF_FLAG_UP) value |= A20_IFF_UP;
+        if (n->flags & NETIF_FLAG_LINK_UP) value |= A20_IFF_RUNNING;
+        return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &value, sizeof(value)) < 0 ? -EFAULT : 0;
     }
-    case A20_SIOCSIFFLAGS: {
-        short fl = 0;
-        if (copy_from_user(&fl, (uint8_t *)uarg + A20_IFNAMSIZ, sizeof(fl)) < 0)
-            return -EFAULT;
-        if (fl & A20_IFF_UP)
-            netif_set_up(nif);
-        else
-            netif_set_down(nif);
-        return 0;
+    case A20_SIOCSIFFLAGS:
+        return a20_lwip_if_set_flags(index, (uint16_t)ifr.ifr_ifru.flags, A20_IFF_UP);
+    default: return -ENOTTY;
     }
-    case A20_SIOCSIFADDR: {
-        uint8_t a[16];
-        ip4_addr_t ip;
-        if (copy_from_user(a, (uint8_t *)uarg + A20_IFNAMSIZ, sizeof(a)) < 0)
-            return -EFAULT;
-        memcpy(&ip, a + 2, 4);
-        netif_set_ipaddr(nif, &ip);
-        return 0;
-    }
-    case A20_SIOCSIFNETMASK: {
-        uint8_t a[16];
-        ip4_addr_t nm;
-        if (copy_from_user(a, (uint8_t *)uarg + A20_IFNAMSIZ, sizeof(a)) < 0)
-            return -EFAULT;
-        memcpy(&nm, a + 2, 4);
-        netif_set_netmask(nif, &nm);
-        return 0;
-    }
-    }
-    return -ENOTTY;
 }
 
 /* A newly created network namespace owns an initially-down loopback and no
@@ -442,7 +376,7 @@ int a20_lwip_interface_snapshot(void *outp, int max) {
         /* A TUN netif carries a user-chosen name ("tailscale0"), which does
          * not fit lwIP's 2-char + num scheme; ask the service for it. */
         char tun_name[16];
-        int is_tun = a20_tun_netif_name(ni, tun_name, sizeof(tun_name));
+        int is_tun = net_tun_interface_name(netif_get_index(ni), tun_name, sizeof(tun_name));
         if (is_tun)
             snprintf(e->name, sizeof(e->name), "%s", tun_name);
         else
@@ -486,4 +420,12 @@ int a20_lwip_interface_snapshot(void *outp, int max) {
     }
     a20_lwip_unlock(lf);
     return n;
+}
+
+int a20_lwip_interface_mtu(unsigned index) {
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = index && index <= 255 ? netif_get_by_index((u8_t)index) : NULL;
+    int result = n ? n->mtu : -ENODEV;
+    a20_lwip_unlock(flags);
+    return result;
 }
