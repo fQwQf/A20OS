@@ -1,8 +1,8 @@
 # 多场景网络架构与迁移约束
 
 本轮目标是一个可裁剪的网络框架：系统接口由 A20OS 持有，TCP/IP 实现由网络域
-选择的后端持有。当前运行后端仍为已有 lwIP 分叉；获取 FreeBSD 源码不等于完成移植。
-服务器和桌面默认后端保持不变，必须完成同一 Linux ELF 的对照验收后才能更换。
+选择的后端持有。当前默认为原版 lwIP，native 承接旧分叉的协议实现；BSD 尚未运行。
+场景默认的进一步选择需同一 Linux ELF、相同驱动与链路的对照证据。
 原版 lwIP 的迁移决定和能力归属见 [backend-policy.md](./backend-policy.md)。
 
 ## 分层与所有权
@@ -12,11 +12,13 @@
 | `kernel/net/socket/` | fd/句柄桥接、生命周期、等待、UNIX/ALG/packet socket | 逐步移除 INET 协议私有状态 |
 | `kernel/net/control/` | 配置、netlink、路由控制事务 | 请求必须真实生效，不接受假成功 |
 | `kernel/net/filter/` | 过滤、conntrack、NAT | 状态表只有一个所有者；变换前后校验完整 |
-| `kernel/net/backends/lwip/` | lwIP PCB、回调、包暂存、计时与端口适配 | 所有上游依赖都经此层收敛 |
+| `kernel/net/backends/lwip/` | 原版/衍生实现共用的私有 C ABI 适配器 | 不向公共层暴露 PCB |
+| `kernel/net/backends/native/protocol/` | A20OS 维护的 lwIP 衍生协议实现 | 保留版权、来源和差异审计 |
+| `kernel/net/backends/bsd/` | BSD 适配与接入记录 | 运行时尚未完成 |
 | `kernel/net/crypto/` | 网络使用的密码辅助 | 不拥有 socket 或协议状态 |
 | `kernel/include/net/` | 子系统契约、ABI 桥和资源定义 | 不暴露新后端的 PCB/mbuf 类型 |
-| `kernel/external/freebsd-src/` | 固定版本上游 submodule | 上游保持只读；适配源码放后端目录 |
-| `kernel/external/lwip-upstream/` | 原版 lwIP 候选 submodule | 不修改上游源码；尚未接入运行 |
+| `kernel/external/f-stack/` | 固定版本上游 submodule | 上游保持只读；适配源码放后端目录 |
+| `kernel/external/lwip-upstream/` | 原版 lwIP submodule | 不修改上游源码；已接入运行 |
 
 源码由 `kernel/net/sources.mk` 显式列举；不递归收集后端目录中的任意 C 文件。
 公共 `socket_internal.h` 已移除 PCB、lane、BH ring 与 accept 暂存。它们由后端
@@ -43,9 +45,9 @@ attachment 独立拥有，操作经 `net/transport.h` 分派；设备 IRQ/TUN �
 资源档位与后端选择独立。`NET_PROFILE` 定义预算；后端功能定义能力。不能以增加预算
 或关闭 SMP 冒充不回退。后端未实现的选项返回准确错误；默认值变化属于可观察行为变化。
 
-当前 hosted 可选择 `NET_STACK=lwip` 或 `NET_STACK=lwip-upstream`，MCU 为 `NET_STACK=none`。
+当前 hosted 可选择 `NET_STACK=lwip`（默认）或 `NET_STACK=native`，MCU 为 `NET_STACK=none`。
 原版适配及能力差异见 [lwip-upstream.md](./lwip-upstream.md)。
-`NET_STACK=freebsd` 明确报错，不能回退后冒称 BSD 测试成功。`NET_LANES` 选择 lwIP
+`NET_STACK=bsd` 明确报错，不能回退后冒称 BSD 测试成功。原版 lwIP 强制 `NET_LANES=1`；native 的 `NET_LANES` 选择
 执行并发度，`NET_PROFILE=1/2/3` 选择资源预算；它们均不是 QEMU 的网络拓扑选项。
 公共路由事务见 [routing.md](./routing.md)，NAT 所有权与限制见 [nat.md](./nat.md)，
 对照测量口径见 [benchmark-method.md](./benchmark-method.md)。
@@ -55,11 +57,11 @@ LAN 服务及每报文元数据契约见 [lan-services.md](./lan-services.md)。
 
 ## 上游依赖策略
 
-FreeBSD 固定于 `.gitmodules` 所登记仓库中的 gitlink 提交，分支仅作为更新来源。
+BSD 候选采用独立 F-Stack 项目的 submodule，不导入完整 freebsd-src，见 [bsd-port.md](./bsd-port.md)。
 普通 lwIP 构建不依赖初始化 FreeBSD；原型、编译成功、数据面可用和验收通过分别记录。
 适配层不得在构建过程中改写 submodule。更新要提交上游 SHA、变更审计和回归结果。
 
-现有 lwIP 携带 PCB lane、并发、分配器、CUBIC 和窗口等修改。直接恢复会改变真实行为。
+native 衍生实现携带 PCB lane、并发、分配器、CUBIC 和窗口等修改。直接恢复会改变真实行为。
 先保留冻结参照并清点每项改动，再将可通过 hook/port 实现的部分迁出。原版候选必须
 验证 TCP/UDP、IPv6、TUN、关闭/取消、低内存和外部 peer；不得只凭编译通过替换。
 

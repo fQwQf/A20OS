@@ -70,3 +70,9 @@ TTL 分别检查，避免把本机发包误判为未递减的转发包。
 成功证据：`build/evidence/net-refactor-20261028/router-services-buckets-kvm/manifest.json`。
 两个内核均输出 `NET_SOCKET_ABI_PASS`，LAN 输出 `DHCP_LEASE_OK`、`LAN_SERVICES_PASS`，
 四份抓包校验和检查通过。失败样本保留在同级目录，UDP connect 自环可由 ABI 探针复现。
+
+## 原版默认后端
+
+原版 `NET_STACK=lwip` 当前不提供动态 SIOCSARP 写入。LAN DHCP 使用 dnsmasq 的
+`--dhcp-broadcast`，已完成真实 Linux 客户端租约回归。`NET_STACK=native` 仍支持
+有界动态邻居更新。不能将 upstream 对 SIOCSARP 返回的不支持改为假成功。

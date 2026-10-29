@@ -71,9 +71,9 @@ const net_stack_ops_t a20_network_stack_ops = {
     .transport = &a20_lwip_transport_ops,
     .name =
 #ifdef CONFIG_LWIP_UPSTREAM
-        "lwip-upstream",
+        "lwip",
 #else
-        "lwip-legacy",
+        "native",
 #endif
     .init = a20_lwip_init,
     .attach_interfaces = a20_lwip_attach_netifs,

@@ -1,19 +1,19 @@
 # 原版 lwIP 后端与公共边界
 
-`NET_STACK=lwip-upstream` 现在链接固定的 lwIP 2.2.1 submodule 原始源码；没有改写
+`NET_STACK=lwip` 现在链接固定的 lwIP 2.2.1 submodule 原始源码；没有改写
 上游文件、替换内部头文件或带入旧 CUBIC/PCB lane 补丁。每个内核选定一个执行器和
 transport 操作表，目前只支持初始网络域的单一后端，不支持运行中迁移连接。
 
 ```sh
 git submodule update --init --depth 1 kernel/external/lwip-upstream
-make ARCH=x86_64 NR_CPUS=2 NET_STACK=lwip-upstream NET_LANES=1 \
+make ARCH=x86_64 NR_CPUS=2 NET_STACK=lwip NET_LANES=1 \
   NET_ROLE=router OPT=-O3 CONFIG_UBSAN=0 kernel-only
-make NET_STACK=lwip-upstream check-net-backend-boundary
+make NET_STACK=lwip check-net-backend-boundary
 ```
 
 `NR_CPUS` 与协议执行并发度独立。原版强制 `NET_LANES=1`，多个应用 CPU 的 raw API
 访问由核心锁串行化；IRQ 仍通过设备层推进。`NET_PROFILE=1` 也通过编译与组合预算
-检查。已有 `NET_STACK=lwip` 仍表示旧分叉，默认暂未切换。
+检查。原版现为 hosted 默认；旧分叉仅作为 `native` 衍生协议实现维护。
 
 ## 已拆分的状态
 
@@ -43,7 +43,7 @@ lwIP 专用桥仍在，后续 BSD 接入还需替换设备侧桥；不能把这�
 | PMTU | 仅已实现的 DONT 模式；完整 PMTU 仍未完成 |
 | 网络域 | 原有隔离软件 loopback 保留；尚无多个独立 lwIP 全局实例 |
 
-这些差异会影响应用兼容性，是暂不自动切换默认的原因。不能以原版后端返回假成功
+这些差异会影响应用兼容性，选择原版默认时必须知晓。不能以原版后端返回假成功
 维持表面兼容，也不能把关闭 conntrack 当作 NAT 路由器的容量方案。
 
 2.2.1 的 IPv4 转发会清零校验和。当前 NIC 无 checksum offload，端口层在 linkoutput

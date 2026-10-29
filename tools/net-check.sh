@@ -20,7 +20,7 @@ for src in "$@"; do
             -Wall -Wextra -O3 -ffreestanding -nostdlib -fno-builtin -fno-common \
             -std=gnu99 \
             -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel \
-            -Ikernel/net/backends/lwip/port -Ikernel/external/lwip/src/include \
+            -Ikernel/net/backends/lwip/port -Ikernel/net/backends/native/protocol/src/include \
             -Ikernel/arch/riscv64/boards/qemu-virt-riscv64 \
             -I"$build_dir/generated" \
             -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany \

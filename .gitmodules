@@ -22,12 +22,11 @@
 [submodule "user/external/tlse"]
 	path = user/external/tlse
 	url = https://github.com/eduardsui/tlse.git
-[submodule "kernel/external/freebsd-src"]
-	path = kernel/external/freebsd-src
-	url = https://github.com/freebsd/freebsd-src.git
-	branch = releng/15.1
-	shallow = true
 [submodule "kernel/external/lwip-upstream"]
 	path = kernel/external/lwip-upstream
 	url = https://github.com/lwip-tcpip/lwip.git
+	shallow = true
+[submodule "kernel/external/f-stack"]
+	path = kernel/external/f-stack
+	url = https://github.com/F-Stack/f-stack.git
 	shallow = true
