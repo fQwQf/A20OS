@@ -11,6 +11,11 @@ sources = [
     "freebsd/netinet6/ip6_input.c",
     "freebsd/netinet6/ip6_output.c",
     "freebsd/kern/uipc_mbuf.c",
+    "freebsd/kern/kern_tc.c",
+    "freebsd/vm/uma_core.c",
+    "lib/ff_glue.c",
+    "lib/ff_init_main.c",
+    "lib/ff_freebsd_init.c",
     "lib/ff_lock.c",
     "lib/ff_kern_timeout.c",
     "lib/ff_subr_epoch.c",
@@ -49,3 +54,6 @@ sources = [
     "freebsd/netinet/tcp_usrreq.c",
     "freebsd/netinet/ip_icmp.c",
 ]
+
+# Compiled against A20OS headers, not BSD internal kernel headers.
+port_sources = ["kernel/net/backends/bsd/runtime/clock.c"]
