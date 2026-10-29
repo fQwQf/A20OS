@@ -31,7 +31,7 @@ accept 暂存位于 `backends/lwip/native.h` 的私有结构；仅 INET socket/a
 地址配置为 A20OS 值类型；netlink 接口快照、地址/MTU 控制、packet socket、状态显示
 与等待推进经公共执行器分派。`socket/`、`control/` 与公共 socket 内部头不包含 lwIP
 头或私有字段，由 `check-network-backend-boundary.py` 检查。virtio/e1000/rtl8139 IRQ 与 procfs 已通过公共执行器分派；
-TUN 的 lwIP 专用桥仍在，后续 BSD 接入还需完成包/设备侧适配；不能把这一阶段称为任意后端已可运行。
+TUN 已使用公共索引/同步借用接口，后续 BSD 还需实现自己的 packet/mbuf 与驱动桥；不能把这一阶段称为任意后端已可运行。
 
 ## 原版适配的能力差异
 
@@ -49,7 +49,7 @@ TUN 的 lwIP 专用桥仍在，后续 BSD 接入还需完成包/设备侧适配�
 2.2.1 的 IPv4 转发会清零校验和。当前 NIC 无 checksum offload，端口层在 linkoutput
 前补齐软件校验和，再进入 NAT/过滤；独立宿主测试覆盖24种 TCP/UDP/ICMP 与 IP options
 组合，并拒绝无法安全补齐的分片。输入 hook 防止 transit TTL/hop-limit 为0时回绕；
-本地投递和组播不因该 hook 改变。完整分片 NAT、ICMP 差错翻译与 PMTU 仍待实现。
+本地投递和组播不因该 hook 改变。完整分片 NAT 与本机 PMTU/错误队列仍待实现；RELATED 翻译和转发 MTU 差错进展见 [nat.md](./nat.md)。
 
 ## 验证与证据
 
@@ -73,4 +73,4 @@ virtio、e1000、rtl8139 的 IRQ 统一传递借用的设备身份，不再包�
 
 `lwip-driver-bridge-services-kvm` 与 `native-driver-bridge-services-kvm` 在上述最终
 驱动接口构建上均再次通过三节点服务回归；KVM 中 virtio IRQ 已注册。e1000/rtl8139
-本轮仅构建与边界检查，未进行对应硬件/模拟设备运行验证。TUN 尚保留私有 netif 桥。
+本轮仅构建与边界检查，未进行对应硬件/模拟设备运行验证。TUN 的后续解耦及回归见 [TUN](../drivers/classes/tun.md)。

@@ -63,6 +63,7 @@ const CT_NEW: u8 = 0;
 const CT_ESTABLISHED: u8 = 1;
 
 const EINVAL: i32 = 22;
+const EOPNOTSUPP: i32 = 95;
 const ENOSPC: i32 = 28;
 
 const TO_INDEX_TCP_NEW: usize = 0;
@@ -901,6 +902,250 @@ unsafe fn translate(
     }
 }
 
+/* ICMP exceptions are RELATED to a live binding, never new flows. We do not
+ * refresh timeouts or change TCP state in response to unauthenticated errors.
+ * RFC 5508: validate both IP headers, the complete ICMP checksum, the quoted
+ * tuple and error direction before touching any byte. Minimum TCP quotes have
+ * only eight transport bytes: never require or invent a full TCP header. */
+fn wire16(b: &[u8], at: usize) -> u16 {
+    u16::from_be_bytes([b[at], b[at + 1]])
+}
+fn wire32(b: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+}
+fn put16(b: &mut [u8], at: usize, x: u16) {
+    b[at..at + 2].copy_from_slice(&x.to_be_bytes());
+}
+fn put32(b: &mut [u8], at: usize, x: u32) {
+    b[at..at + 4].copy_from_slice(&x.to_be_bytes());
+}
+fn checksum(b: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for x in b.chunks(2) {
+        sum += (x[0] as u32) << 8 | *x.get(1).unwrap_or(&0) as u32;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 65535) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+fn delta16(check: u16, old: u16, new: u16) -> u16 {
+    let mut sum = (!check as u32 & 65535) + (!old as u32 & 65535) + new as u32;
+    while sum >> 16 != 0 {
+        sum = (sum & 65535) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+fn quote_rewrite(
+    b: &mut [u8],
+    at: usize,
+    ihl: usize,
+    old: (u32, u32, u16, u16),
+    new: (u32, u32, u16, u16),
+    proto: u8,
+) {
+    let transport = at + ihl;
+    let checksum_at = if proto == PROTO_UDP {
+        Some(transport + 6)
+    } else if proto == PROTO_TCP && b.len() >= transport + 18 {
+        Some(transport + 16)
+    } else {
+        None
+    };
+    if let Some(c) = checksum_at {
+        let original = wire16(b, c);
+        if original != 0 || proto != PROTO_UDP {
+            let mut check = original;
+            for (before, after) in [(old.0, new.0), (old.1, new.1)] {
+                check = delta16(check, (before >> 16) as u16, (after >> 16) as u16);
+                check = delta16(check, before as u16, after as u16);
+            }
+            check = delta16(check, old.2, new.2);
+            check = delta16(check, old.3, new.3);
+            put16(
+                b,
+                c,
+                if proto == PROTO_UDP && check == 0 {
+                    65535
+                } else {
+                    check
+                },
+            );
+        }
+    }
+    put32(b, at + 12, new.0);
+    put32(b, at + 16, new.1);
+    if proto != PROTO_ICMP {
+        put16(b, transport, new.2);
+        put16(b, transport + 2, new.3);
+    }
+    put16(b, at + 10, 0);
+    let check = checksum(&b[at..at + ihl]);
+    put16(b, at + 10, check);
+}
+unsafe fn translate_icmp_error(v: &View, bytes: &mut [u8], pkt: &Frame, dir: u8) -> i32 {
+    let ip = pkt.ip_off as usize;
+    if bytes.len() < ip + 20 {
+        return -EINVAL;
+    }
+    let ihl = (bytes[ip] & 15) as usize * 4;
+    let end = ip + wire16(bytes, ip + 2) as usize;
+    if ihl < 20 || end > bytes.len() || end < ip + ihl + 8 {
+        return -EINVAL;
+    }
+    let icmp = ip + ihl;
+    let ty = bytes[icmp];
+    let code = bytes[icmp + 1];
+    if !matches!(ty, 3 | 11 | 12) {
+        return 0;
+    }
+    if (ty == 3 && code > 15) || (ty == 11 && code > 1) || (ty == 12 && code > 2) {
+        return -EINVAL;
+    }
+    // Fragments must be reassembled before exception parsing/translation.
+    if wire16(bytes, ip + 6) & 0x3fff != 0
+        || checksum(&bytes[ip..icmp]) != 0
+        || checksum(&bytes[icmp..end]) != 0
+    {
+        return -EINVAL;
+    }
+    let quote = icmp + 8;
+    if end < quote + 20 || bytes[quote] >> 4 != 4 {
+        return -EINVAL;
+    }
+    let qihl = (bytes[quote] & 15) as usize * 4;
+    if qihl < 20
+        || end < quote + qihl + 8
+        || (wire16(bytes, quote + 2) as usize) < qihl + 8
+        || wire16(bytes, quote + 6) & 0x1fff != 0
+        || checksum(&bytes[quote..quote + qihl]) != 0
+    {
+        return -EINVAL;
+    }
+    let protocol = bytes[quote + 9];
+    let transport = quote + qihl;
+    if protocol == PROTO_TCP && (wire16(bytes, quote + 2) as usize) < qihl + 20 {
+        return -EINVAL;
+    }
+    let (sport, dport) = match protocol {
+        PROTO_TCP | PROTO_UDP => (wire16(bytes, transport), wire16(bytes, transport + 2)),
+        PROTO_ICMP if matches!(bytes[transport], 0 | 8) => (8, wire16(bytes, transport + 4)),
+        _ => return 0,
+    };
+    // A quote ending halfway through a TCP checksum cannot be repaired.
+    if protocol == PROTO_TCP && end == transport + 17 {
+        return -EINVAL;
+    }
+    let tuple = (
+        wire32(bytes, quote + 12),
+        wire32(bytes, quote + 16),
+        sport,
+        dport,
+    );
+    if pkt.dst_addr != tuple.0 {
+        return -EINVAL;
+    }
+    // Reverse the quoted wire packet and use the same collision-protected
+    // original/reply indexes as data traffic. Echo keeps its normalised ID
+    // fields instead of swapping them as TCP/UDP ports.
+    let (probe_source, probe_destination) = if protocol == PROTO_ICMP {
+        (ICMP_ECHO_REQUEST, tuple.3)
+    } else {
+        (tuple.3, tuple.2)
+    };
+    let Some((index, _)) = ct_find(
+        v,
+        tuple.1,
+        tuple.0,
+        probe_source,
+        probe_destination,
+        protocol,
+    ) else {
+        return 0;
+    };
+    let now = ct_now(v);
+    let e = v.entry(index);
+    if e.proto != protocol
+        || e.nat == NAT_NONE
+        || now.wrapping_sub(e.last_ms) >= ct_timeout_for(v, &e)
+    {
+        return 0;
+    }
+    let (rs, rd, rsp, rdp) = ct_reply_tuple(&e);
+    let forward = (
+        rd,
+        rs,
+        if protocol == PROTO_ICMP { 8 } else { rdp },
+        if protocol == PROTO_ICMP {
+            e.dst_port
+        } else {
+            rsp
+        },
+    );
+    let original_reply = (
+        e.dst_addr,
+        e.src_addr,
+        if protocol == PROTO_ICMP {
+            8
+        } else {
+            e.dst_port
+        },
+        if protocol == PROTO_ICMP {
+            e.dst_port
+        } else {
+            e.src_port
+        },
+    );
+    let snat = e.nat == NAT_SNAT || e.nat == NAT_MASQUERADE;
+    let (target, outer_source, outer_destination) = if tuple == forward
+        && ((snat && dir == DIR_IN) || (!snat && dir == DIR_OUT))
+    {
+        (
+            (e.src_addr, e.dst_addr, e.src_port, e.dst_port),
+            if !snat && pkt.src_addr == tuple.1 {
+                e.dst_addr
+            } else {
+                pkt.src_addr
+            },
+            if snat { e.src_addr } else { pkt.dst_addr },
+        )
+    } else if tuple == original_reply && ((snat && dir == DIR_OUT) || (!snat && dir == DIR_IN)) {
+        (
+            (
+                rs,
+                rd,
+                if protocol == PROTO_ICMP { 8 } else { rsp },
+                if protocol == PROTO_ICMP {
+                    e.dst_port
+                } else {
+                    rdp
+                },
+            ),
+            if snat && pkt.src_addr == e.src_addr {
+                rd
+            } else {
+                pkt.src_addr
+            },
+            if !snat { rs } else { pkt.dst_addr },
+        )
+    } else {
+        return 0;
+    };
+    // No fallible operation remains after this point. Keep MTU/type/code
+    // and all quote data intact except translated fields/checksums.
+    let b = &mut bytes[..end];
+    quote_rewrite(b, quote, qihl, tuple, target, protocol);
+    put32(b, ip + 12, outer_source);
+    put32(b, ip + 16, outer_destination);
+    put16(b, icmp + 2, 0);
+    let check = checksum(&b[icmp..end]);
+    put16(b, icmp + 2, check);
+    put16(b, ip + 10, 0);
+    let check = checksum(&b[ip..icmp]);
+    put16(b, ip + 10, check);
+    return 0;
+}
+
 /// A negative result requires the filter to drop the unchanged packet. A new
 /// binding is committed before rewriting; resource exhaustion cannot emit an
 /// untracked translated packet or overwrite another connection's reply tuple.
@@ -919,6 +1164,16 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(
     }
     let v = view(v);
     let pkt = &*pkt;
+    let bytes = core::slice::from_raw_parts_mut(frame, len);
+    let ip = pkt.ip_off as usize;
+    // Until the ingress datagram owner can reassemble before policy/NAT,
+    // never translate only fragment zero and leak untranslated tails. This
+    // check precedes tuple allocation, including first fragments with ports.
+    if *v.0.nat_count != 0 && ip != 0 && len >= ip + 8 && bytes[ip] >> 4 == 4 &&
+        wire16(bytes, ip + 6) & 0x3fff != 0 { return -EOPNOTSUPP; }
+    if pkt.proto == PROTO_ICMP && pkt.icmp_off == 0 {
+        return translate_icmp_error(&v, bytes, pkt, dir);
+    }
     let echo = pkt.proto == PROTO_ICMP && pkt.icmp_off != 0;
     if pkt.proto != PROTO_TCP && pkt.proto != PROTO_UDP && !echo {
         return 0;

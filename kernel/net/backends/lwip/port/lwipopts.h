@@ -4,12 +4,10 @@
 #include "net/profile.h"
 
 #define NO_SYS                          1
-#ifdef CONFIG_LWIP_UPSTREAM
 int a20_lwip_input_guard4(void *, void *);
 int a20_lwip_input_guard6(void *, void *);
 #define LWIP_HOOK_IP4_INPUT(p, n) a20_lwip_input_guard4((p), (n))
 #define LWIP_HOOK_IP6_INPUT(p, n) a20_lwip_input_guard6((p), (n))
-#endif
 #define SYS_LIGHTWEIGHT_PROT            1
 #define LWIP_TIMERS                     1
 #define LWIP_TIMERS_CUSTOM              0

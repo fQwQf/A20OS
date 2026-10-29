@@ -47,4 +47,5 @@ rules: reset count=0
 final: tracked=4 created=269 evicted=0 timeout=2
 NAPT ASSERTIONS OK
 NAPT CONCURRENCY OK
+ICMP RELATED ASSERTIONS OK
 HARNESS OK

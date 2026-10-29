@@ -721,6 +721,102 @@ static void scenario_napt_concurrency(void)
     say("NAPT CONCURRENCY OK");
 }
 
+static uint16_t independent_checksum(const uint8_t *b, size_t n, uint32_t sum) {
+    for (size_t i=0; i<n; ++i) sum += (uint32_t)b[i] << ((i&1) ? 0 : 8);
+    while (sum >> 16) sum = (sum & 65535) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+static void fix_ip(uint8_t *ip) {
+    ip[10]=ip[11]=0;
+    netfilter_put16(ip+10, independent_checksum(ip, (ip[0]&15)*4, 0));
+}
+static void fix_udp(uint8_t *ip) {
+    size_t h=(ip[0]&15)*4, size=netfilter_get16(ip+2)-h;
+    uint8_t *udp=ip+h; udp[6]=udp[7]=0;
+    uint32_t sum=17+size;
+    for (int i=12;i<20;i+=2) sum += netfilter_get16(ip+i);
+    uint16_t check=independent_checksum(udp,size,sum);
+    netfilter_put16(udp+6,check ? check : 65535);
+}
+static void error_packet(uint8_t *out, size_t *len, const uint8_t *quote, size_t size,
+                         uint8_t type, uint32_t source, netfilter_frame_t *pkt) {
+    uint32_t destination=((uint32_t)quote[12]<<24)|((uint32_t)quote[13]<<16)|((uint32_t)quote[14]<<8)|quote[15];
+    build_frame(out,len,pkt,1,source,destination,0,0);
+    size_t total=20+8+size; *len=14+total;
+    netfilter_put16(out+16,(uint16_t)total);
+    memset(out+34,0,8); out[34]=type; out[35]=type==3 ? 4 : 0;
+    netfilter_put16(out+40,1280);
+    memcpy(out+42,quote,size);
+    netfilter_put16(out+36,independent_checksum(out+34,8+size,0));
+    fix_ip(out+14);
+    pkt->proto=1; pkt->icmp_off=0; pkt->l4_off=0; pkt->has_ports=0;
+}
+static void scenario_icmp_errors(void) {
+    for (int dnat=0;dnat<2;++dnat) for (int tcp=0;tcp<2;++tcp) {
+        uint8_t original[128],forward[128],error[160],before[160];
+        size_t length; netfilter_frame_t view;
+        netfilter_conntrack_flush(); netfilter_nat_reset(); netfilter_conntrack_set_enabled(1);
+        net_nat_rule_t rule={0};
+        rule.dir=dnat ? NETFILTER_DIR_IN : NETFILTER_DIR_OUT;
+        rule.nat=dnat ? NET_NAT_DNAT : NET_NAT_SNAT;
+        rule.proto=tcp ? 6 : 17;
+        rule.src_addr=rule.dst_addr=NO_ADDR; rule.src_port=rule.dst_port=NO_PORT;
+        rule.nat_addr=dnat ? 0x0a010102 : 0xc0000201; rule.nat_port=42001;
+        require(netfilter_nat_add_rule(&rule)==0,"ICMP rule");
+        build_frame(original,&length,&view,rule.proto,0x0a000002,0xc6336402,53000,9000);
+        if (tcp) {
+            original[46]=0x50;
+            uint32_t pseudo=6+20;
+            for (int i=26;i<34;i+=2) pseudo+=netfilter_get16(original+i);
+            netfilter_put16(original+50,independent_checksum(original+34,20,pseudo));
+        }
+        else { netfilter_put16(original+38,20); fix_udp(original+14); }
+        fix_ip(original+14);
+        memcpy(forward,original,length);
+        forward[20]=0x20; /* MF on fragment zero: no partial NAT or CT allocation. */
+        uint8_t rejected[128]; memcpy(rejected,forward,length);
+        require(netfilter_conntrack_process(forward,length,0,rule.dir,&view)<0 &&
+                !memcmp(forward,rejected,length) && netfilter_conntrack_count()==0,
+                "NAT fragments fail before any mutation/allocation");
+        memcpy(forward,original,length);
+        require(netfilter_conntrack_process(forward,length,0,rule.dir,&view)==0,"ICMP create mapping");
+        for (int full=0;full<2;++full) for (int type_index=0;type_index<3;++type_index) {
+            const uint8_t type[3]={3,11,12}; size_t elen;
+            error_packet(error,&elen,forward+14,full?40:28,type[type_index],0xcb007101,&view);
+            memcpy(before,error,elen);
+            netfilter_dir_t dir=dnat ? NETFILTER_DIR_OUT : NETFILTER_DIR_IN;
+            require(netfilter_conntrack_process(error,elen,0,dir,&view)==0,"ICMP related translation");
+            require(!memcmp(error+54,original+26,8),"ICMP quote original addresses");
+            require(!memcmp(error+62,original+34,4),"ICMP quote original ports");
+            require(independent_checksum(error+14,20,0)==0,"ICMP outer IP checksum");
+            require(independent_checksum(error+34,elen-34,0)==0,"ICMP message checksum");
+            require(independent_checksum(error+42,20,0)==0,"ICMP quote IP checksum");
+            require(netfilter_get16(error+40)==1280,"ICMP next-hop MTU preserved");
+            if (!tcp) require(netfilter_get16(error+68)==netfilter_get16(original+40),"ICMP quoted UDP checksum restored");
+            else if (full) require(netfilter_get16(error+78)==netfilter_get16(original+50),"ICMP quoted TCP checksum restored");
+            memcpy(error,before,elen); error[36]^=1; memcpy(before,error,elen);
+            require(netfilter_conntrack_process(error,elen,0,dir,&view)<0 && !memcmp(error,before,elen),"ICMP bad checksum unchanged");
+            for (size_t cut=0;cut<elen;++cut) {
+                error_packet(error,&elen,forward+14,full?40:28,type[type_index],0xcb007101,&view);
+                memcpy(before,error,elen);
+                require(netfilter_conntrack_process(error,cut,0,dir,&view)<0 && !memcmp(error,before,elen),"ICMP all truncated prefixes unchanged");
+            }
+        }
+        /* A private-host error quotes a reply after reverse NAT. */
+        uint8_t reply[40]; memcpy(reply,original+14,40);
+        memcpy(reply+12,original+30,4); memcpy(reply+16,original+26,4);
+        memcpy(reply+20,original+36,2); memcpy(reply+22,original+34,2);
+        if (!tcp) fix_udp(reply); fix_ip(reply);
+        size_t elen;
+        uint32_t origin=((uint32_t)reply[16]<<24)|((uint32_t)reply[17]<<16)|((uint32_t)reply[18]<<8)|reply[19];
+        error_packet(error,&elen,reply,40,3,origin,&view);
+        require(netfilter_conntrack_process(error,elen,0,rule.dir,&view)==0,"ICMP reverse-error translation");
+        require(!memcmp(error+54,forward+30,4) && !memcmp(error+58,forward+26,4),"ICMP wire reply addresses");
+        require(!memcmp(error+62,forward+36,2) && !memcmp(error+64,forward+34,2),"ICMP wire reply ports");
+    }
+    say("ICMP RELATED ASSERTIONS OK");
+}
+
 int main(void)
 {
     netfilter_conntrack_init();
@@ -740,6 +836,7 @@ int main(void)
         (unsigned long long)st.evicted, (unsigned long long)st.timeout);
     scenario_napt();
     scenario_napt_concurrency();
+    scenario_icmp_errors();
     say("HARNESS OK");
     return g_fail ? 1 : 0;
 }
