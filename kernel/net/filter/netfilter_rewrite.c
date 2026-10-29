@@ -100,7 +100,7 @@ void netfilter_ct_reply_tuple(const net_conntrack_entry_t *e, uint32_t *rsrc,
 #else
 
 /* Implemented in kernel/net/backends/lwip/lwip_stack.c; the host test supplies its own. */
-uint32_t a20_lwip_netif_ipv4(int net_idx);
+uint32_t net_backend_interface_ipv4(int net_idx);
 
 /* ------------------------------------------------------------------ checksum */
 
@@ -253,7 +253,7 @@ void netfilter_set_port(uint8_t *frame, size_t len,
 
 uint32_t netfilter_masq_addr(int net_idx) {
     /* An unnumbered egress has no usable source identity. */
-    return net_idx < 0 ? 0 : a20_lwip_netif_ipv4(net_idx);
+    return net_idx < 0 ? 0 : net_backend_interface_ipv4(net_idx);
 }
 
 /* ---------------------------------------------------------------- conntrack */

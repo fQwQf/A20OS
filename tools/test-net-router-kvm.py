@@ -160,6 +160,10 @@ def main():
                         help='same static Linux ELF run on the router and Linux WAN')
     parser.add_argument('--dhcp-broadcast', action='store_true',
                         help='use DHCP broadcast replies; needs no dynamic ARP insertion')
+    parser.add_argument('--linux-preload-module', type=Path,
+                        help='explicit module for the pinned guest kernel (never loaded on host)')
+    parser.add_argument('--icmp-probe', type=Path,
+                        help='Linux LAN error-queue probe; sets router WAN MTU=1280')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     out = args.out.resolve()
@@ -209,6 +213,8 @@ tail -n 0 -f /tmp/dnsmasq.log &
         return script.replace(f'echo {marker}', setup + f'echo {marker}')
 
     wan_script, router_script, lan_script = WAN, ROUTER, LAN
+    if args.linux_preload_module:
+        manifest['linux_preload_module_sha256'] = bench.apk.sha(args.linux_preload_module)
     if args.socket_probe:
         manifest['socket_probe_sha256'] = bench.apk.sha(args.socket_probe)
         wan_script = wan_script.replace('echo WAN_READY',
@@ -242,13 +248,25 @@ echo LAN_SERVICES_PASS
 '''
         lan_script = LAN.replace('echo ROUTER_SUITE_PASS', service_tests + 'echo ROUTER_SUITE_PASS')
 
+    if args.icmp_probe:
+        manifest['icmp_probe_sha256'] = bench.apk.sha(args.icmp_probe)
+        router_script = router_script.replace('echo ROUTER_READY',
+                    'ip link set dev en3 mtu 1280\necho ROUTER_READY')
+        lan_script = lan_script.replace('ping -c 2 -W 3 10.20.0.2',
+                    '/usr/bin/net-icmp-router-probe\nping -c 2 -W 3 10.20.0.2')
+
     def boot(name, script_text, affinity, links, linux):
         image = out / f'{name}.img'
         subprocess.run(['cp', '--reflink=auto', '--sparse=always', inputs['world']['path'], str(image)], check=True)
         script = out / f'{name}.sh'
+        if linux and args.linux_preload_module:
+            bench.install(image, args.linux_preload_module.resolve(), '/a20-net-module.ko')
+            script_text = script_text.replace('set -eux', 'set -eux\ninsmod /a20-net-module.ko')
         script.write_text(script_text)
         bench.install(image, script, '/etc/a20-benchmark.sh')
         bench.install(image, args.binary.resolve(), '/usr/bin/net-microbench')
+        if args.icmp_probe:
+            bench.install(image, args.icmp_probe.resolve(), '/usr/bin/net-icmp-router-probe')
         if args.socket_probe:
             bench.install(image, args.socket_probe.resolve(), '/usr/bin/net-socket-abi-probe')
         if linux:

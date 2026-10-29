@@ -1,3 +1,5 @@
+#include "tun_private.h"
+#include "mm/mm.h"
 #include "native.h"
 #include "proc/resource_ns.h"
 #include "net/lwip_stack.h"
@@ -210,11 +212,14 @@ static struct netif g_loopif;
  * physical driver's index, and so remove() can be a plain slot reset. */
 static struct netif g_tun_netifs[NET_PROFILE_TUN_MAX_DEVS];
 static uint8_t g_tun_netif_used[NET_PROFILE_TUN_MAX_DEVS];
+static net_tun_emit_t g_tun_emit[NET_PROFILE_TUN_MAX_DEVS];
+static void *g_tun_context[NET_PROFILE_TUN_MAX_DEVS];
 
 /* The tier budget in net_profile.h is a ceiling; this is the measurement it
  * stands for.  Both arrays are unconditional .bss, so drift here is a silent
  * cost on every boot unless it is a compile-time failure. */
-_Static_assert(sizeof(g_netifs) + sizeof(g_loopif) + sizeof(g_tun_netifs) <=
+_Static_assert(sizeof(g_netifs) + sizeof(g_loopif) + sizeof(g_tun_netifs) +
+                   sizeof(g_tun_netif_used) + sizeof(g_tun_emit) + sizeof(g_tun_context) <=
                    NET_PROFILE_NETIF_STRUCT_BUDGET,
                "struct netif grew past the per-tier budget; update "
                "NET_PROFILE_NETIF_STRUCT_BYTES and the embedded total");
@@ -459,17 +464,16 @@ static void a20_lwip_netlink_flush(void)
  */
 static uint32_t a20_netif_ipv4_host(const struct netif *n);
 
-uint32_t a20_lwip_netif_ipv4(int net_idx)
-{
-    if (net_idx < 0 || net_idx >= A20_NET_MAX_DEVS) {
-        for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
-            uint32_t a = a20_netif_ipv4_host(&g_netifs[i]);
-            if (a)
-                return a;
-        }
-        return 0;
-    }
-    return a20_netif_ipv4_host(&g_netifs[net_idx]);
+/* Borrowed egress identity inside backend execution; never acquires a backend
+ * lock from CT. Physical and TUN identities share this backend-local space. */
+uint32_t net_backend_interface_ipv4(int index) {
+    if (index < 0) return 0;
+    if (index >= 0 && index < A20_NET_MAX_DEVS)
+        return a20_netif_ipv4_host(&g_netifs[index]);
+    index -= A20_NET_MAX_DEVS;
+    if (index >= 0 && index < NET_PROFILE_TUN_MAX_DEVS && g_tun_netif_used[index])
+        return a20_netif_ipv4_host(&g_tun_netifs[index]);
+    return 0;
 }
 
 /* ip_addr_t is a union over both IP versions here (LWIP_IPV6 is on), so the v4
@@ -2445,9 +2449,6 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
  * socket and netlink layers use.
  */
 
-/* Forward: defined with the other TUN helpers at the end of this file. */
-int a20_lwip_netif_is_tun(struct netif *n);
-
 void *a20_lwip_stack_netif_by_index(unsigned ifindex)
 {
     for (struct netif *n = netif_list; n; n = n->next) {
@@ -2615,74 +2616,120 @@ void a20_lwip_stack_notify_addr6(unsigned ifindex, const uint8_t addr[16],
  * (see docs/drivers/classes/tun.md).
  */
 
-static err_t a20_lwip_tun_init_cb(struct netif *netif)
-{
-    netif->name[0] = 't';
-    netif->name[1] = 'u';
-    netif->mtu = NET_PROFILE_NETIF_MTU;
-    /* No NETIF_FLAG_ETHERNET: netif_input() then hands packets straight to
-     * ip_input(), which is the L3-only contract a TUN has. */
-    netif->flags = NETIF_FLAG_LINK_UP;
+static size_t tun_read_flat(void *source, void *destination, size_t length) {
+    memcpy(destination, source, length);
+    return length;
+}
+/* Filter/NAT receives the same Ethernet-framed view as physical NIC traffic.
+ * This temporary belongs to the backend; no pbuf alias is modified or retained. */
+static uint8_t *tun_filter_packet(const uint8_t *packet, struct pbuf *p,
+                                  size_t length, int identity, int input, int *error) {
+    *error = 0;
+    if (!length || length > 65535) { *error = -EINVAL; return NULL; }
+    uint8_t *frame = kmalloc(length + 14);
+    if (!frame) { *error = -ENOMEM; return NULL; }
+    memset(frame, 0, 14);
+    if (p) {
+        if (pbuf_copy_partial(p, frame + 14, (u16_t)length, 0) != length) {
+            kfree(frame); *error = -EIO; return NULL;
+        }
+    } else memcpy(frame + 14, packet, length);
+    unsigned version = frame[14] >> 4;
+    if (version != 4 && version != 6) { kfree(frame); *error = -EINVAL; return NULL; }
+    frame[12] = version == 4 ? 8 : 0x86; frame[13] = version == 4 ? 0 : 0xdd;
+    if (a20_lwip_filter(frame, length + 14, identity, input) == NETFILTER_DROP) {
+        kfree(frame); return NULL; /* Policy drop consumes the packet normally. */
+    }
+    return frame;
+}
+static err_t tun_output(struct netif *n, struct pbuf *p, const ip4_addr_t *dest) {
+    (void)dest;
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; ++i) {
+        if (&g_tun_netifs[i] == n && g_tun_netif_used[i]) {
+            int rc;
+            uint8_t *frame = tun_filter_packet(NULL, p, p->tot_len, A20_NET_MAX_DEVS + i, 0, &rc);
+            if (frame) {
+                rc = g_tun_emit[i](g_tun_context[i], p->tot_len, tun_read_flat, frame + 14);
+                kfree(frame);
+            }
+            return rc == 0 ? ERR_OK : rc == -ENOMEM ? ERR_MEM : ERR_IF;
+        }
+    }
+    return ERR_IF;
+}
+static err_t tun_output6(struct netif *n, struct pbuf *p, const ip6_addr_t *dest) {
+    (void)dest;
+    return tun_output(n, p, NULL);
+}
+static err_t a20_lwip_tun_init_cb(struct netif *n) {
+    n->name[0] = 't'; n->name[1] = 'u';
+    n->mtu = NET_PROFILE_NETIF_MTU;
+    n->flags = NETIF_FLAG_LINK_UP;
+    n->output = tun_output;
+    n->output_ip6 = tun_output6;
     return ERR_OK;
 }
-
-struct netif *a20_lwip_tun_add(void)
-{
+static int tun_slot(unsigned index) {
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; ++i)
+        if (g_tun_netif_used[i] && netif_get_index(&g_tun_netifs[i]) == index)
+            return i;
+    return -1;
+}
+int a20_lwip_tun_create(net_tun_emit_t emit, void *context) {
+    if (!emit) return -EINVAL;
     uint64_t flags = a20_lwip_lock();
     int slot = -1;
-    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; i++) {
-        if (!g_tun_netif_used[i]) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) {
-        a20_lwip_unlock(flags);
-        return NULL;
-    }
-    ip4_addr_t any, mask, gw;
-    ip4_addr_set_zero(&any);
-    ip4_addr_set_zero(&mask);
-    ip4_addr_set_zero(&gw);
-    /* state stays NULL: the polling paths treat a non-NULL state as an
-     * a20_lwip_netif_state_t and would read the tun instance as one.  The
-     * instance is found from the netif pointer instead (see tun.c). */
-    struct netif *n = netif_add(&g_tun_netifs[slot], &any, &mask, &gw, NULL,
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; ++i)
+        if (!g_tun_netif_used[i]) { slot = i; break; }
+    if (slot < 0) { a20_lwip_unlock(flags); return -ENOSPC; }
+    ip4_addr_t any = { .addr = 0 };
+    /* No driver state: physical-device polling must skip this L3 interface. */
+    struct netif *n = netif_add(&g_tun_netifs[slot], &any, &any, &any, NULL,
                                 a20_lwip_tun_init_cb, netif_input);
-    if (!n) {
-        a20_lwip_unlock(flags);
-        return NULL;
-    }
+    if (!n) { a20_lwip_unlock(flags); return -ENOMEM; }
+    g_tun_emit[slot] = emit;
+    g_tun_context[slot] = context;
     g_tun_netif_used[slot] = 1;
-    netif_set_up(n);
-    netif_set_link_up(n);
+    netif_set_up(n); netif_set_link_up(n);
+    int index = netif_get_index(n);
     a20_lwip_unlock(flags);
-    return n;
+    return index;
 }
-
-void a20_lwip_tun_remove(struct netif *n)
-{
-    if (!n)
-        return;
+void a20_lwip_tun_destroy(unsigned index) {
     uint64_t flags = a20_lwip_lock();
-    netif_set_down(n);
-    netif_set_link_down(n);
-    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; i++) {
-        if (&g_tun_netifs[i] == n) {
-            netif_remove(n);
-            g_tun_netif_used[i] = 0;
-            break;
-        }
+    int slot = tun_slot(index);
+    if (slot >= 0) {
+        struct netif *n = &g_tun_netifs[slot];
+        netif_set_down(n); netif_set_link_down(n); netif_remove(n);
+        g_tun_netif_used[slot] = 0;
+        g_tun_emit[slot] = NULL; g_tun_context[slot] = NULL;
     }
     a20_lwip_unlock(flags);
 }
-
-int a20_lwip_netif_is_tun(struct netif *n)
-{
-    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; i++) {
-        if (g_tun_netif_used[i] && &g_tun_netifs[i] == n)
-            return 1;
+int a20_lwip_tun_inject(unsigned index, const uint8_t *packet, size_t length) {
+    if (!packet || !length || length > 65535) return -EINVAL;
+    uint64_t flags = a20_lwip_lock();
+    int slot = tun_slot(index);
+    if (slot < 0) { a20_lwip_unlock(flags); return -ENODEV; }
+    int error;
+    uint8_t *frame = tun_filter_packet(packet, NULL, length, A20_NET_MAX_DEVS + slot, 1, &error);
+    if (!frame) { a20_lwip_unlock(flags); return error; }
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)length, PBUF_RAM);
+    if (!p) { kfree(frame); a20_lwip_unlock(flags); return -ENOMEM; }
+    err_t copied = pbuf_take(p, frame + 14, (u16_t)length);
+    kfree(frame);
+    if (copied != ERR_OK) {
+        pbuf_free(p); a20_lwip_unlock(flags); return -ENOMEM;
     }
+    struct netif *n = &g_tun_netifs[slot];
+    /* netif_input -> ip_input consumes p, including protocol discard paths. */
+    err_t result = n->input(p, n);
+    a20_lwip_unlock(flags);
+    return result == ERR_OK ? 0 : -EIO;
+}
+int a20_lwip_netif_is_tun(struct netif *n) {
+    for (int i = 0; i < NET_PROFILE_TUN_MAX_DEVS; ++i)
+        if (g_tun_netif_used[i] && &g_tun_netifs[i] == n) return 1;
     return 0;
 }
 

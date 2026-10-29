@@ -3,7 +3,7 @@
 #
 # Compiles tools/test-nat-rewrite-host.c together with the real
 # kernel/net/filter/netfilter_rewrite.c, so a passing run exercises the shipped source
-# rather than a copy of it.  The test supplies its own a20_lwip_netif_ipv4(),
+# rather than a copy of it.  The test supplies its own net_backend_interface_ipv4(),
 # which is the only kernel symbol that file needs; everything else in it is
 # pure.
 #

@@ -40,7 +40,7 @@ uint64_t timer_get_ticks(void)
 
 /* The MASQUERADE source address: a fixed interface address so the transcript
  * does not depend on any real netif state. */
-uint32_t a20_lwip_netif_ipv4(int net_idx)
+uint32_t net_backend_interface_ipv4(int net_idx)
 {
     (void)net_idx;
     return 0x0a00020fu; /* 10.0.2.15 */

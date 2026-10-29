@@ -389,7 +389,7 @@ static uint32_t g_netif_addr[4] = {0, 0, 0, 0};
 static int g_netif_queries;
 
 /* Mirrors the real contract: -1 means "the primary netif". */
-uint32_t a20_lwip_netif_ipv4(int net_idx) {
+uint32_t net_backend_interface_ipv4(int net_idx) {
     g_netif_queries++;
     if (net_idx < 0)
         return g_netif_addr[0];

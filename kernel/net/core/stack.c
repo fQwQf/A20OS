@@ -15,7 +15,13 @@ void net_stack_receive_progress(unsigned budget) {
     stack->receive_progress(budget);
 }
 void net_stack_device_interrupt(const struct device *dev) { stack->device_interrupt(dev); }
-int net_stack_format_memory(char *b, size_t n) { return stack->format_memory(b, n); }
+int net_stack_format_memory(char *b, size_t n) {
+    if (!n) return 0;
+    int used = stack->format_memory(b, n);
+    if (used < 0) used = 0;
+    if ((size_t)used >= n) return (int)n - 1;
+    return used + net_tun_format(b + used, n - (size_t)used);
+}
 int net_stack_format_devices(char *b, size_t n) { return stack->format_devices(b, n); }
 int net_stack_format_routes(char *b, size_t n) { return stack->format_routes(b, n); }
 void net_stack_protocol_progress(unsigned budget) {
@@ -42,10 +48,25 @@ int net_stack_status(char *b, size_t n) {
     int used = snprintf(b, n, "backend: %s\n", stack->name);
     if (used < 0) return 0;
     if ((size_t)used >= n) return (int)n - 1;
-    return used + stack->status(b + used, n - (size_t)used);
+    int backend_used = stack->status(b + used, n - (size_t)used);
+    if (backend_used > 0) used += backend_used;
+    if ((size_t)used >= n) return (int)n - 1;
+    return used + net_tun_format(b + used, n - (size_t)used);
 }
 void net_stack_poll_waiter(void) { stack->poll_waiter(); }
 int net_stack_if_up(unsigned i) { return stack->if_up(i); }
 int net_stack_if_default_index(void) { return stack->if_default_index(); }
 int net_stack_if_hwaddr(unsigned i, uint8_t *a) { return stack->if_hwaddr(i, a); }
 int net_stack_packet_tx(unsigned i, const uint8_t *p, size_t n) { return stack->packet_tx(i, p, n); }
+
+int net_stack_tun_create(net_tun_emit_t emit, void *ctx) {
+    return stack->tun_create ? stack->tun_create(emit, ctx) : -EOPNOTSUPP;
+}
+void net_stack_tun_destroy(unsigned i) { if (stack->tun_destroy) stack->tun_destroy(i); }
+int net_stack_tun_inject(unsigned i, const uint8_t *p, size_t n) {
+    return stack->tun_inject ? stack->tun_inject(i, p, n) : -EOPNOTSUPP;
+}
+
+int net_stack_if_mtu(unsigned i) { return stack->if_mtu(i); }
+
+int net_stack_owns_ipv4(uint32_t address) { return stack->owns_ipv4(address); }

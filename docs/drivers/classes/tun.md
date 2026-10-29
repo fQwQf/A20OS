@@ -1,108 +1,58 @@
-# TUN 设备形态（A20OS 混合内核）
+# TUN：Linux ABI 与可替换协议后端
 
-Linux ABI 的 `/dev/net/tun` 是一个**内核服务型字符设备**：字符设备前端
-负责 TUN ABI，真正的网络对象是一个由 lwIP 消费的虚拟 netif。本文先确定
-它在 A20OS 驱动模型中的位置，再给出实现与验收边界。
+TUN 是由 `open("/dev/net/tun")` 和 `TUNSETIFF` 创建的内核服务，没有可探测的硬件。
+`drivers/net/tun.c` 拥有名字、文件 ABI、等待与有界报文队列；协议接口、路由、IP 输入
+和协议缓冲由当前后端拥有。公共头 `net/tun.h` 不包含 netif/pbuf/mbuf。
 
-## 1. 形态判断：内核服务，而不是 `.a20drv` 模块
+## 数据和生命周期
 
-A20OS 有两类驱动形态：
+`net_stack_tun_create` 返回公共接口索引；驱动不保存协议对象指针。输出回调同步借用
+报文 reader，复制后归还；禁止保留源指针或从回调反向调用协议后端。注入同步借用
+输入字节，后端完成复制后调用自己的 IP 输入函数。destroy 与输入/输出执行互斥，
+返回后不再回调该实例。物理 NIC 和 TUN 都经过公共过滤/NAT，TUN 不绕过策略。
 
-| 形态 | 适用条件 | 例子 |
-|---|---|---|
-| `.a20drv` 运行时模块（DriverStore） | 可在总线上发现、有 probe/match、部署位置可迁移 | virtio-net、ahci、virtio-gpu |
-| 内核服务（`GENERIC_KERNEL_SERVICE_SRCS`） | 无硬件可发现、是内核 ABI/子系统的组成部分 | `pty.c`、`block/loop.c`、`block/udisk.c` |
+控制操作以进程上下文 mutex 串行化；回调只取得短期队列锁。控制 mutex 可以调用
+后端；后端回调不能取得该 mutex。接口名字查询使用独立表锁，不在持表锁时进入
+后端。潜在 fault 的 usercopy 不持有协议执行锁。SETIFF 复制返回失败会撤销接口，
+失败名字可再次使用；close 先停止后端回调，再清理全部队列。
 
-TUN 全部满足第二列的判据，不满足第一列：
+持久接口关闭后保留接口、释放当前队列，并可按名字重新绑定；清除 persist 后关闭
+即销毁接口。控制槽与协议槽分开计数，全部协议槽持久化后仍有重连控制额度。
+`TUNSETPERSIST` 使用 Linux 命令203、标量参数；不再把命令200（TUNSETNOCSUM）冒充
+持久化，也不把 TUNGETSNDBUF 冒充不存在的 TUNGETPERSIST。
 
-* 没有总线、没有设备树条目、没有 probe/match —— 实例由
-  `open("/dev/net/tun")` + `TUNSETIFF` 创建，属于**用户请求的对象**，不是
-  启动时枚举出来的硬件。
-* 数据面在核内：一端是 lwIP 的 netif 输入/输出，另一端是字符设备队列。
-  把它做成用户态模块只会把同一份 lwIP 内核符号导出面扩大，换不到任何
-  硬件解耦收益（和 virtio-net 这种"硬件在门外"的驱动正好相反）。
-* 它是网络 ABI 的组成部分。做成 DriverStore 模块会让 distro 镜像多一个
-  "没装驱动就没有 `/dev/net/tun`" 的失败模式，而 Linux 程序（tailscale、
-  OpenVPN、wireguard-go）默认它存在。
+## 功能与配置
 
-因此落点是 `kernel/drivers/net/tun.c`，加入 `GENERIC_KERNEL_SERVICE_SRCS`，
-devfs 增加**固定节点** `/dev/net/tun`（与 `/dev/ptmx` 同一类：固定服务节点，
-不是动态 class 节点）。netif 一侧与 `g_loopif` 同构：一个虚拟 netif，只是
-对端从"回环到自身"换成"用户态 fd"。
+- 支持 IPv4/IPv6 的 L3 TUN、`IFF_NO_PI`，以及带协议信息的 PI 报头。
+- MTU/UP/索引/名字查询通过公共接口操作；MTU 直接读取后端，不维护第二份缓存。
+  MTU 查询没有修改链路状态的副作用。IPv4 ifreq 设置使用正确的 sockaddr_in 地址偏移。
+- `IFF_VNET_HDR` 的报头大小为10字节；支持 IPv4 checksum completion、TSO4、USO4。
+  `TUNSETOFFLOAD` 只接受实际实现的能力位，IPv6 GSO 等明确拒绝，IPv6 普通报文可用。
+- 修改接口/持久化需要所属网络域的 CAP_NET_ADMIN。当前仅初始网络域；TAP、多队列、
+  delegated owner/group 和 IPv6 GSO 尚未实现，不返回假成功。GSO 的完整互操作矩阵不在本轮普通 IP/UDP 回归的通过范围内。
 
-## 2. 分层
+`NET_PROFILE_TUN_MAX_DEVS` 是协议接口上限（默认2）；控制槽为其两倍。每接口队列同时
+限制包数与字节：embedded为2包，其他档32包，字节限额为深度×该档帧大小。超限丢包
+并计数，不保留无界 jumbo 分配。控制结构有768 B/槽的编译断言，资源宏位于
+`net/profile.h`；原44 KiB基础预算此前未包括完整 TUN 队列，现显式加上 TUN 控制及
+payload 项。该项是结构/有效载荷预算，分配器取整与瞬时包转换缓冲需另计，不能当作
+整机物理内存承诺。`/proc/net/status` 与 `/proc/a20/netmem` 的 tun 行报告当前槽、
+排队包/字节、丢包、静态成本与队列额度。
 
-```text
-userspace: open/read/write/ioctl/poll
-  -> devfs 固定节点 /dev/net/tun, vfile_ops
-  -> tun instance (name, flags, mtu, queues, netif)
-  -> lwIP netif  (output -> 实例队列)  /  ip4_input (write 注入)
-  -> route table (RTM_NEWROUTE) -> LWIP_HOOK_IP4_ROUTE_SRC
-```
+## 回归
 
-* **前端**：`vfile_ops` 实现 TUN ABI。open 只分配实例；`TUNSETIFF` 才创建
-  netif（Linux 语义：dummy 打开不产生接口）。
-* **核心**：每打开实例一个 `tun_t`，拥有名字、flags、MTU、两个有界队列
-  （内核→用户、用户→内核不排队，写入直接注入）。
-* **后端**：`netif_add()` 挂进 lwIP；`netif->output` 把 pbuf 拷进实例队列；
-  用户 write 的报文在 lwIP 锁内 `ip4_input()`。
+`tools/net-tun-abi-probe.c` 编译成同一个静态 Linux ELF，在 Linux KVM 和 A20OS 运行：
+IPv4/IPv6 双向 UDP、64次 FIFO 回绕、IPv6 connected/lazy/unbound-connect 的实际线缆
+地址/端口、MTU/UP、持久化重连、全部协议槽持久化后重连、24次创建/关闭，
+以及只读 ifreq 的 EFAULT 清理。Linux 可能先输出 DAD/RS，探针按实际 UDP 报文匹配，
+不把第一帧必为测试数据作为假设；IPv6 bind 等待真实 DAD 就绪，避免偶发使用
+link-local 来源探测跨网段服务。宿主不加载模块；测试为固定 Linux guest 显式
+安装匹配内核版本的 tun.ko，并在 manifest 记录其哈希。
 
-## 3. 锁与背压
+本轮原始记录位于 `build/evidence/net-router-completion-20261029/`。TUN IPv6 探针还
+发现并修复旧 UDP 发送路径对物理域 IPv6 的直接拒绝；延迟绑定现在先在后端绑定，
+再发布前端地址/端口。该测试证明具体 ABI 路径，不代表已完成所有 IPv6 socket 选项。
 
-* `netif->output` 在 lwIP 锁内被调用，只做**有界入队 + 唤醒**，不阻塞、
-  不分配大块内存；队列满则丢包并计数（对应 Linux 的 `tx_dropped`）。
-* 用户 read 取出整包后拷出；队列空时阻塞在实例 wait queue 上（`poll_sources`
-  同时给 poll/select/epoll 供源），非阻塞返回 `-EAGAIN`。
-* 实例队列有独立自旋锁；lwIP 锁与实例锁的获取顺序固定为 lwIP 后实例，
-  与现有 net lane 纪律一致。
-
-## 4. 路由模型（TUN 模式 tailscale 的关键）
-
-lwIP 原生只有"同网段/默认网关"选择，没有 Linux 的路由表；而 TUN 用户
-（tailscale 的 router）通过 netlink 下发 `100.64.0.0/10 dev tunN`、exit node
-的 `0.0.0.0/1`+`128.0.0.0/1` 等前缀路由。设计：
-
-* 内核新增一张**小路由表**（`dst/prefixlen -> ifindex, metric`），由
-  `RTM_NEWROUTE`/`RTM_DELROUTE` 维护，`RTM_NEWRULE` 在单表语义下接受为
-  no-op（A20OS 没有多路由表/策略路由，明确不支持，而不是假装支持）。
-* 通过 lwIP 的 `LWIP_HOOK_IP4_ROUTE_SRC(src, dest)` 查询：命中返回 netif，
-  未命中返回 NULL，回落到 lwIP 原有逻辑。这样 tunnel 前缀走 tun，其余
-  仍走物理网卡，不需要改 lwIP 内部。
-* 地址仍走 `RTM_NEWADDR`（`apply_addr`），MTU/UP 走 `RTM_NEWLINK`——这两条
-  路径内核已经有，只需保证按 ifindex 能命中 tun netif。
-
-## 5. ABI 覆盖范围
-
-实现（tailscale / wireguard-go / OpenVPN 的公共子集）：
-
-| 项 | 说明 |
-|---|---|
-| `TUNSETIFF` / `TUNGETIFF` | `IFF_TUN`、`IFF_NO_PI`；名字缺省 `tunN` |
-| `TUNGETFEATURES` | 如实报告 `IFF_TUN|IFF_NO_PI` |
-| `SIOCSIFMTU` / `SIOCGIFMTU` | Linux TUN 用户在 TUNSETIFF 后用这个设 MTU |
-| MTU / UP / ADDR / ROUTE | 经 netlink（已有写路径 + 新路由表） |
-| `read`/`write`/`poll` | 单包语义，非阻塞 + 阻塞、丢包计数 |
-
-明确不做（返回 `-EOPNOTSUPP`，不静默降级）：`IFF_TAP`（L2，需要以太网
-netif 语义）、`IFF_MULTI_QUEUE`/`TUNSETQUEUE`、`TUNSETPERSIST`、
-`TUNSETOWNER/GROUP`、vnet hdr（`TUNSETVNETHDRSZ` 仅接受 0）、IPv6 TUN。
-
-## 6. netns
-
-lwIP 只有一张全局 netif 表；非初始 netns 目前只有合成 loopback。
-TUN 先在初始 netns 落地，其他 netns 的 `TUNSETIFF` 返回 `-EOPNOTSUPP`。
-per-netns netif 需要单独设计（netif 所有权 + 路由表按 ns 分区），不在本次
-范围内，文档里明确记录，避免"看起来支持"。
-
-## 7. 验收
-
-1. 结构：`/dev/net/tun` 打开 + `TUNSETIFF` 后，`net.Interfaces()`/`ip link`
-   能看到 `tunN`（非 loopback、有 MTU、能 UP）。
-2. 数据面：guest 内一个最小程序写入一个 IPv4 报文，从物理网卡发出；
-   反向从物理口收到的报文进入 tun 的 read 队列。
-3. 真实负载：`tailscaled --tun=tailscale0`（**不用**
-   `--tun=userspace-networking`），`tailscale up` 后：
-   * `tailscale ping <peer>` 直连 pong；
-   * 透明 `curl http://<peer-ip>:9999/`（不经过 SOCKS）；
-   * 宿主 `curl http://<guest-ip>:8000/` 命中 guest 服务（入站不再依赖
-     127.0.0.1 转发）。
+原实现的入队索引固定从 head=0 起算，出队却推进 tail，第二个包即可读空槽并遗留
+指针；现统一以 `(tail + count) % depth` 入队。字节计数与包计数同时随消费归还，
+64个带独立序号的报文覆盖重复回绕，不能以首包通过代替 FIFO 验证。

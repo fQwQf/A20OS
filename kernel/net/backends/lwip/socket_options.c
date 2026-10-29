@@ -1,3 +1,4 @@
+#include "tun_private.h"
 #include "native.h"
 #include "net/socket/socket_internal.h"
 #include "net/lwip_stack.h"

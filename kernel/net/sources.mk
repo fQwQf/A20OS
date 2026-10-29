@@ -3,6 +3,7 @@ A20_NET_COMMON_SRC := \
     $(KERNEL_DIR)/net/core/stack.c \
     $(KERNEL_DIR)/net/core/transport.c \
     $(KERNEL_DIR)/net/socket/net_lock_probe.c \
+    $(KERNEL_DIR)/net/socket/address.c \
     $(KERNEL_DIR)/net/socket/socket.c \
     $(KERNEL_DIR)/net/socket/socket_alg.c \
     $(KERNEL_DIR)/net/socket/socket_control.c \

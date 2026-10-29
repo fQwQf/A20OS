@@ -5,8 +5,8 @@
  * docs/drivers/classes/tun.md.  Short version: TUN has no hardware to probe,
  * its instances are created by open() + TUNSETIFF, and its peer is the kernel
  * network stack, so it is a kernel service (like pty), not a DriverStore
- * module.  The netif slots are owned by lwip_stack.c (per-profile .bss
- * accounting); this file owns the ABI, the queues and the instance state.
+ * module. Protocol interface slots belong to the selected backend; this file
+ * owns only the Linux ABI, packet queues and service instance state.
  */
 #include "core/defs.h"
 #include "core/errno.h"
@@ -23,17 +23,17 @@
 #include "proc/park.h"
 #include "proc/signal.h"
 #include "proc/resource_ns.h"
-#include "net/lwip_stack.h"
+#include "proc/userns.h"
+#include "net/stack.h"
+#include "net/profile.h"
 #include "net/tun.h"
 
-#include "lwip/netif.h"
-#include "lwip/pbuf.h"
-#include "lwip/ip.h"
 
-#define TUN_MAX          NET_PROFILE_TUN_MAX_DEVS
+#define TUN_MAX          NET_PROFILE_TUN_CONTROL_SLOTS
+/* Separate bounded control credits let a full set of detached persistent
+ * interfaces be reopened. Protocol interface capacity stays backend-owned. */
 #define TUN_NAME_LEN     16
-#define TUN_RX_DEPTH     32
-#define TUN_DEFAULT_MTU  1500
+#define TUN_RX_DEPTH     NET_PROFILE_TUN_RX_DEPTH
 
 /* Linux TUN ABI (values are architecture-independent for these). */
 #define TUNSETIFF        0x400454caUL
@@ -42,8 +42,7 @@
 #define TUNSETVNETHDRSZ  0x400454d8UL
 #define TUNGETVNETHDRSZ  0x800454d7UL
 #define TUNSETOFFLOAD    0x400454d0UL
-#define TUNSETPERSIST    0x400454c8UL
-#define TUNGETPERSIST    0x800454d1UL
+#define TUNSETPERSIST    0x400454cbUL
 #define TUNSETOWNER      0x400454ccUL
 #define TUNSETGROUP      0x400454ceUL
 #define TUNSETQUEUE      0x400454d9UL
@@ -79,6 +78,7 @@ struct tun_ifreq {
 
 typedef struct {
     int      used;
+    int      attached;
     char     name[TUN_NAME_LEN];
     int      flags;
     int      vnet_hdr;
@@ -87,16 +87,15 @@ typedef struct {
     int      owner;
     int      group;
     uint32_t offload;
-    int      mtu;
-    struct netif *nf;
+    unsigned ifindex;
     /* Kernel -> user: one entry per received packet.  The output callback is
-     * called with the lwIP lock held, so it only copies and enqueues; a full
+     * called with the backend execution lock held, so it only copies and enqueues; a full
      * queue drops and counts, like Linux's tx_dropped. */
     uint8_t *rx[TUN_RX_DEPTH];
     uint16_t rx_len[TUN_RX_DEPTH];
-    int      rx_head;
     int      rx_tail;
     int      rx_count;
+    size_t   rx_bytes;
     uint64_t rx_dropped;
     spinlock_t lock;
     wait_queue_t rd_wait;
@@ -105,6 +104,11 @@ typedef struct {
 
 static tun_t g_tuns[TUN_MAX];
 static spinlock_t g_tun_table_lock = SPINLOCK_INIT;
+/* Process-context control is serialized; never held by protocol callbacks.
+ * Backend -> queue/table spinlocks; control mutex -> backend, never inverse. */
+static mutex_t g_tun_control = MUTEX_INIT;
+_Static_assert(sizeof(g_tuns) + sizeof(g_tun_table_lock) + sizeof(g_tun_control) <=
+               NET_PROFILE_TUN_CONTROL_BUDGET, "TUN control storage exceeds profile budget");
 
 static tun_t *tun_from_vfile(vfile_t *vf)
 {
@@ -139,56 +143,43 @@ static void tun_alloc_name(tun_t *t, char *out)
 
 /* ---------------------------------------------------------------- data path */
 
-static tun_t *tun_by_netif(const struct netif *nf)
+static int tun_emit(void *context, size_t len, net_tun_reader_t reader, void *source)
 {
-    if (!nf)
-        return NULL;
-    for (int i = 0; i < TUN_MAX; i++) {
-        if (g_tuns[i].used && g_tuns[i].nf == nf)
-            return &g_tuns[i];
+    tun_t *t = context;
+    if (!len || len > 65535) return -EINVAL;
+    if (len > NET_PROFILE_TUN_RX_BYTES) {
+        __atomic_add_fetch(&t->rx_dropped, 1, __ATOMIC_RELAXED);
+        return 0;
     }
-    return NULL;
-}
-
-static err_t tun_netif_output(struct netif *netif, struct pbuf *p,
-                              const ip4_addr_t *ipaddr)
-{
-    (void)ipaddr;
-    /* netif->state is deliberately NULL (see a20_lwip_tun_add): the lwIP
-     * polling paths interpret a non-NULL state as their driver state. */
-    tun_t *t = tun_by_netif(netif);
-    if (!t)
-        return ERR_IF;
-
-    uint16_t len = p->tot_len;
-    { static int o0; if (len == 0 && o0 < 5) { kinfo("[TUN] output empty pbuf proto=%u\n", (unsigned)p->len); o0++; } }
     uint8_t *copy = (uint8_t *)kmalloc(len);
     if (!copy) {
         __atomic_add_fetch(&t->rx_dropped, 1, __ATOMIC_RELAXED);
-        return ERR_MEM;
+        return -ENOMEM;
     }
-    if (pbuf_copy_partial(p, copy, len, 0) != len) {
+    if (reader(source, copy, len) != len) {
         kfree(copy);
         __atomic_add_fetch(&t->rx_dropped, 1, __ATOMIC_RELAXED);
-        return ERR_BUF;
+        return -EIO;
     }
 
     uint64_t flags = spin_lock_irqsave(&t->lock);
-    if (t->rx_count >= TUN_RX_DEPTH) {
+    if (!t->attached || t->rx_count >= TUN_RX_DEPTH ||
+        len > NET_PROFILE_TUN_RX_BYTES - t->rx_bytes) {
         spin_unlock_irqrestore(&t->lock, flags);
         kfree(copy);
         __atomic_add_fetch(&t->rx_dropped, 1, __ATOMIC_RELAXED);
         /* Queue full is a drop, not an interface error: the link is fine. */
-        return ERR_OK;
+        return 0;
     }
-    int slot = (t->rx_head + t->rx_count) % TUN_RX_DEPTH;
+    int slot = (t->rx_tail + t->rx_count) % TUN_RX_DEPTH;
     t->rx[slot] = copy;
     t->rx_len[slot] = len;
     t->rx_count++;
+    t->rx_bytes += len;
     spin_unlock_irqrestore(&t->lock, flags);
 
     wait_queue_wake_all(&t->rd_wait, 0, PROC_WAKE_EVENT);
-    return ERR_OK;
+    return 0;
 }
 
 /* Block until a packet is queued (or a signal/timeout).  Lock is held on entry
@@ -253,6 +244,7 @@ int tun_file_open(vfile_t *vf)
         if (!g_tuns[i].used) {
             t = &g_tuns[i];
             t->used = 1;
+            t->attached = 1;
             t->name[0] = 0;
             t->flags = 0;
             t->vnet_hdr = 0;
@@ -261,9 +253,10 @@ int tun_file_open(vfile_t *vf)
             t->owner = 0;
             t->group = 0;
             t->offload = 0;
-            t->mtu = TUN_DEFAULT_MTU;
-            t->nf = NULL;
-            t->rx_head = t->rx_tail = t->rx_count = 0;
+            t->ifindex = 0;
+            t->rx_tail = t->rx_count = 0;
+            t->rx_bytes = 0;
+            t->rx_dropped = 0;
             spin_init(&t->lock); /* fresh instance: no waiter can exist yet */
             wait_queue_init(&t->rd_wait);
             t->readers_waiting = 0;
@@ -278,7 +271,7 @@ int tun_file_open(vfile_t *vf)
     return 0;
 }
 
-static int tun_setiff(tun_t *t, void *arg)
+static int tun_setiff(vfile_t *vf, tun_t *t, void *arg)
 {
     if (resource_ns_is_initial(resource_ns_task_get(NULL, PROCNS_NET)) == 0)
         return -EOPNOTSUPP; /* per-netns netifs are not designed yet */
@@ -292,8 +285,9 @@ static int tun_setiff(tun_t *t, void *arg)
         return -EOPNOTSUPP;
     if ((want_flags & ~(IFF_TUN | IFF_NO_PI | IFF_VNET_HDR)) != 0)
         return -EOPNOTSUPP;
-    if (t->nf)
+    if (t->ifindex)
         return -EBUSY;
+    if (ifr.ifr_name[TUN_NAME_LEN - 1]) return -EINVAL;
 
     char name[TUN_NAME_LEN];
     memset(name, 0, sizeof(name));
@@ -304,9 +298,26 @@ static int tun_setiff(tun_t *t, void *arg)
     }
     if (have_name) {
         uint64_t tf = spin_lock_irqsave(&g_tun_table_lock);
-        if (tun_name_in_use(name, t)) {
+        tun_t *existing = NULL;
+        for (int i = 0; i < TUN_MAX; ++i)
+            if (&g_tuns[i] != t && g_tuns[i].used && !strcmp(g_tuns[i].name, name)) {
+                existing = &g_tuns[i]; break;
+            }
+        if (existing) {
             spin_unlock_irqrestore(&g_tun_table_lock, tf);
-            return -EBUSY;
+            if (!existing->persist || existing->attached) return -EBUSY;
+            if (existing->flags != want_flags) return -EINVAL;
+            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", existing->name);
+            ifr.ifr_u.ifr_flags = (short)existing->flags;
+            if (copy_to_user(arg, &ifr, sizeof(ifr)) < 0) return -EFAULT;
+            uint64_t qf = spin_lock_irqsave(&existing->lock);
+            existing->attached = 1;
+            spin_unlock_irqrestore(&existing->lock, qf);
+            tf = spin_lock_irqsave(&g_tun_table_lock);
+            t->used = 0;
+            vf->priv = existing;
+            spin_unlock_irqrestore(&g_tun_table_lock, tf);
+            return 0;
         }
         snprintf(t->name, sizeof(t->name), "%s", name);
         spin_unlock_irqrestore(&g_tun_table_lock, tf);
@@ -316,26 +327,34 @@ static int tun_setiff(tun_t *t, void *arg)
         spin_unlock_irqrestore(&g_tun_table_lock, tf);
     }
 
-    struct netif *n = a20_lwip_tun_add();
-    if (!n)
-        return -ENOMEM;
-    /* The output callback is installed after netif_add, exactly like the
-     * loopback interface does it: nothing can route here before an address
-     * exists, and the address arrives later through netlink. */
-    n->output = tun_netif_output;
-    t->nf = n;
+    int index = net_stack_tun_create(tun_emit, t);
+    if (index < 0) {
+        uint64_t tf = spin_lock_irqsave(&g_tun_table_lock);
+        t->name[0] = 0;
+        spin_unlock_irqrestore(&g_tun_table_lock, tf);
+        return index;
+    }
+    uint64_t tf = spin_lock_irqsave(&g_tun_table_lock);
+    t->ifindex = (unsigned)index;
+    spin_unlock_irqrestore(&g_tun_table_lock, tf);
     t->flags = want_flags;
     t->vnet_hdr = (want_flags & IFF_VNET_HDR) != 0;
-    t->vnet_hdr_sz = t->vnet_hdr ? TUN_VNET_HDR_LEN : 0;
+    t->vnet_hdr_sz = TUN_VNET_HDR_LEN;
 
     snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", t->name);
     ifr.ifr_u.ifr_flags = (short)t->flags;
-    if (copy_to_user(arg, &ifr, sizeof(ifr)) < 0)
+    if (copy_to_user(arg, &ifr, sizeof(ifr)) < 0) {
+        net_stack_tun_destroy(t->ifindex);
+        tf = spin_lock_irqsave(&g_tun_table_lock);
+        t->ifindex = 0;
+        t->name[0] = 0;
+        spin_unlock_irqrestore(&g_tun_table_lock, tf);
         return -EFAULT;
+    }
     return 0;
 }
 
-static int tun_ioctl(vfile_t *vf, unsigned long req, void *arg)
+static int tun_ioctl_locked(vfile_t *vf, unsigned long req, void *arg)
 {
     tun_t *t = tun_from_vfile(vf);
     if (!t)
@@ -343,18 +362,18 @@ static int tun_ioctl(vfile_t *vf, unsigned long req, void *arg)
 
     switch (req) {
     case TUNSETIFF:
-        return tun_setiff(t, arg);
+        return tun_setiff(vf, t, arg);
     case TUNGETIFF: {
-        if (!t->nf)
+        if (!t->ifindex)
             return -EBADFD;
         struct tun_ifreq ifr;
         memset(&ifr, 0, sizeof(ifr));
         snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", t->name);
-        ifr.ifr_u.ifr_flags = (short)t->flags;
+        ifr.ifr_u.ifr_flags = (short)(t->flags | (t->persist ? 0x0800 : 0));
         return copy_to_user(arg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
     }
     case TUNGETFEATURES: {
-        int features = IFF_TUN | IFF_NO_PI;
+        int features = IFF_TUN | IFF_NO_PI | IFF_VNET_HDR;
         return copy_to_user(arg, &features, sizeof(features)) < 0 ?
                -EFAULT : 0;
     }
@@ -364,7 +383,7 @@ static int tun_ioctl(vfile_t *vf, unsigned long req, void *arg)
         if (req == TUNSETVNETHDRSZ) {
             if (copy_from_user(&sz, arg, sizeof(sz)) < 0)
                 return -EFAULT;
-            if (sz != 0 && sz != TUN_VNET_HDR_LEN)
+            if (sz != TUN_VNET_HDR_LEN)
                 return -EINVAL;
             t->vnet_hdr_sz = sz;
             return 0;
@@ -372,105 +391,66 @@ static int tun_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return copy_to_user(arg, &t->vnet_hdr_sz, sizeof(sz)) < 0 ?
                -EFAULT : 0;
     }
-    case TUNSETOFFLOAD:
-        /* The argument is the flags word itself, not a pointer: Linux's tun
-         * driver compares `arg` directly, and wireguard-go passes it with
-         * IoctlSetInt.  Dereferencing it (the usual ioctl convention) reads
-         * address 0x7 and fails with EFAULT, which is what made
-         * tstun.New("tailscale0") die with "bad address".
-         *
-         * Advertised capability only: reads always carry hdr.flags == 0 and
-         * writes that request offload are refused, so accepting the word never
-         * leaves a half-checksummed packet on the wire. */
-        t->offload = (uint32_t)(uintptr_t)arg;
+    case TUNSETOFFLOAD: {
+        uint32_t requested = (uint32_t)(uintptr_t)arg;
+        /* IPv4 checksum completion/TSO/USO only. Unsupported IPv6 GSO is
+         * rejected at negotiation, rather than silently losing its packets. */
+        if (requested & ~0x2bu) return -EINVAL;
+        t->offload = requested;
         return 0;
+    }
     case TUNSETPERSIST:
-    case TUNGETPERSIST: {
-        int v = 1;
-        if (req == TUNSETPERSIST) {
-            if (copy_from_user(&v, arg, sizeof(v)) < 0)
-                return -EFAULT;
-            t->persist = (v != 0);
-            return 0;
-        }
-        v = t->persist;
-        return copy_to_user(arg, &v, sizeof(v)) < 0 ? -EFAULT : 0;
-    }
-    case TUNSETOWNER:
-    case TUNSETGROUP: {
-        int *dst = (req == TUNSETOWNER) ? &t->owner : &t->group;
-        if (copy_from_user(dst, arg, sizeof(*dst)) < 0)
-            return -EFAULT;
+        if (!t->ifindex) return -EBADFD;
+        t->persist = (uintptr_t)arg != 0;
         return 0;
-    }
+    case TUNSETOWNER: case TUNSETGROUP:
+        /* Delegated ownership needs userns/credential checks on reattach. */
+        return -EOPNOTSUPP;
     case TUNSETQUEUE:
         /* Single queue; multi-queue attach is not implemented. */
         return -EINVAL;
-    case SIOCGIFMTU:
-    case SIOCSIFFLAGS: {
+    case SIOCGIFMTU: case SIOCSIFMTU: case SIOCGIFINDEX:
+    case SIOCGIFFLAGS: case SIOCSIFFLAGS: case SIOCGIFHWADDR: case SIOCGIFNAME: {
         struct tun_ifreq ifr;
-        if (copy_from_user(&ifr, arg, sizeof(ifr)) < 0)
-            return -EFAULT;
-        if (!t->nf)
-            return -ENODEV;
-        uint64_t flags = a20_lwip_lock();
-        if (ifr.ifr_u.ifr_flags & 0x1 /* IFF_UP */) {
-            netif_set_up(t->nf);
-            netif_set_link_up(t->nf);
-        } else {
-            netif_set_down(t->nf);
-            netif_set_link_down(t->nf);
+        if (copy_from_user(&ifr, arg, sizeof(ifr)) < 0) return -EFAULT;
+        if (!t->ifindex) return -ENODEV;
+        if (req == SIOCSIFFLAGS)
+            return net_stack_if_set_flags(t->ifindex, ifr.ifr_u.ifr_flags, 0x1);
+        if (req == SIOCSIFMTU) {
+            if (ifr.ifr_u.ifr_mtu < 68 || ifr.ifr_u.ifr_mtu > 65535) return -EINVAL;
+            int rc = net_stack_if_set_mtu(t->ifindex, (uint16_t)ifr.ifr_u.ifr_mtu);
+            return rc;
         }
-        a20_lwip_unlock(flags);
-        return 0;
-    }
-    case SIOCGIFINDEX:
-    case SIOCGIFFLAGS:
-    case SIOCGIFHWADDR:
-    case SIOCGIFNAME: {
-        struct tun_ifreq ifr;
-        if (copy_from_user(&ifr, arg, sizeof(ifr)) < 0)
-            return -EFAULT;
-        if (SIOCGIFINDEX == req || SIOCGIFNAME == req) {
-            if (!t->nf)
-                return -ENODEV;
-            ifr.ifr_u.ifr_mtu = (int)netif_get_index(t->nf);
-            return copy_to_user(arg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
+        if (req == SIOCGIFNAME) {
+            if (ifr.ifr_u.ifr_mtu != (int)t->ifindex) return -ENODEV;
+            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", t->name);
+        } else if (req == SIOCGIFINDEX) ifr.ifr_u.ifr_mtu = (int)t->ifindex;
+        else if (req == SIOCGIFMTU) {
+            int mtu = net_stack_if_mtu(t->ifindex);
+            if (mtu < 0) return mtu;
+            ifr.ifr_u.ifr_mtu = mtu;
         }
-        if (SIOCGIFFLAGS == req) {
-            uint64_t flags = a20_lwip_lock();
-            int up = t->nf && netif_is_up(t->nf);
-            a20_lwip_unlock(flags);
-            ifr.ifr_u.ifr_flags = (short)(IFF_TUN |
-                ((up) ? 0x1 /* IFF_UP */ : 0) |
-                ((t->flags & IFF_NO_PI) ? IFF_NO_PI : 0));
-            return copy_to_user(arg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
-        }
-        if (SIOCGIFHWADDR == req) {
-            memset(&ifr.ifr_u, 0, sizeof(ifr.ifr_u));
-            return copy_to_user(arg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
-        }
-        ifr.ifr_u.ifr_mtu = t->mtu;
+        else if (req == SIOCGIFFLAGS)
+            ifr.ifr_u.ifr_flags = (short)(IFF_TUN | (t->flags & IFF_NO_PI) |
+                                         (net_stack_if_up(t->ifindex) ? 1 : 0));
+        else memset(&ifr.ifr_u, 0, sizeof(ifr.ifr_u));
         return copy_to_user(arg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
-    }
-    case SIOCSIFMTU: {
-        struct tun_ifreq ifr;
-        if (copy_from_user(&ifr, arg, sizeof(ifr)) < 0)
-            return -EFAULT;
-        int mtu = ifr.ifr_u.ifr_mtu;
-        if (mtu < 68 || mtu > 0xffff)
-            return -EINVAL;
-        t->mtu = mtu;
-        if (t->nf) {
-            uint64_t flags = a20_lwip_lock();
-            t->nf->mtu = (u16_t)mtu;
-            a20_lwip_unlock(flags);
-        }
-        return 0;
     }
     default:
         return -EINVAL;
     }
+}
+
+static int tun_ioctl(vfile_t *vf, unsigned long req, void *arg) {
+    mutex_lock(&g_tun_control);
+    resource_namespace_t *ns = resource_ns_current(PROCNS_NET);
+    int modifies = req == TUNSETIFF || req == TUNSETPERSIST ||
+                   req == TUNSETOWNER || req == TUNSETGROUP ||
+                   req == SIOCSIFMTU || req == SIOCSIFFLAGS;
+    int rc = modifies && (!ns || !userns_capable(proc_current(), ns->owner, CAP_NET_ADMIN))
+        ? -EPERM : tun_ioctl_locked(vf, req, arg);
+    mutex_unlock(&g_tun_control);
+    return rc;
 }
 
 static int tun_read(vfile_t *vf, char *buf, size_t count)
@@ -501,6 +481,7 @@ static int tun_read(vfile_t *vf, char *buf, size_t count)
         t->rx[t->rx_tail] = NULL;
         t->rx_tail = (t->rx_tail + 1) % TUN_RX_DEPTH;
         t->rx_count--;
+        t->rx_bytes -= len;
         spin_unlock_irqrestore(&t->lock, flags);
         if (len != 0 && pkt)
             break;
@@ -511,6 +492,17 @@ static int tun_read(vfile_t *vf, char *buf, size_t count)
             kfree(pkt);
     }
 
+    /* Linux PI precedes an optional virtio header. The protocol field is
+     * Ethernet order, flags are native order; truncation sets TUN_PKT_STRIP. */
+    size_t pi = (t->flags & IFF_NO_PI) ? 0 : 4;
+    if (count < pi + (t->vnet_hdr ? TUN_VNET_HDR_LEN : 0)) { kfree(pkt); return -EINVAL; }
+    if (pi) {
+        uint16_t flags = len > count - pi - (t->vnet_hdr ? TUN_VNET_HDR_LEN : 0) ? 1 : 0;
+        memcpy(buf, &flags, 2);
+        buf[2] = (pkt[0] >> 4) == 6 ? (char)0x86 : 8;
+        buf[3] = (pkt[0] >> 4) == 6 ? (char)0xdd : 0;
+        buf += pi; count -= pi;
+    }
     /* Linux truncates to the caller's buffer rather than reporting EMSGSIZE. */
     if (t->vnet_hdr) {
         if (count < TUN_VNET_HDR_LEN) {
@@ -522,12 +514,12 @@ static int tun_read(vfile_t *vf, char *buf, size_t count)
         size_t n = len < room ? len : room;
         memcpy(buf + TUN_VNET_HDR_LEN, pkt, n);
         kfree(pkt);
-        return (int)(n + TUN_VNET_HDR_LEN);
+        return (int)(n + TUN_VNET_HDR_LEN + pi);
     }
     size_t n = len < count ? len : count;
     memcpy(buf, pkt, n);
     kfree(pkt);
-    return (int)n;
+    return (int)(n + pi);
 }
 
 /* ---------------------------------------------------- virtio-net offload */
@@ -620,6 +612,10 @@ static int tun_finish_csum4(uint8_t *pkt, size_t len, uint16_t csum_start,
         return -EINVAL;
     if (csum_start < ihl || (size_t)csum_start + csum_offset + 2 > total)
         return -EINVAL;
+    if (csum_start != ihl ||
+        !((pkt[9] == 6 && csum_offset == 16 && total >= ihl + 20) ||
+          (pkt[9] == 17 && csum_offset == 6 && total >= ihl + 8))) return -EINVAL;
+    pkt[csum_start + csum_offset] = pkt[csum_start + csum_offset + 1] = 0;
     uint32_t sum = tun_csum_add(pkt + 12, 8, 0);      /* src + dst */
     sum += (uint32_t)pkt[9];                          /* protocol */
     sum += (uint32_t)(total - ihl);                   /* transport length */
@@ -628,22 +624,8 @@ static int tun_finish_csum4(uint8_t *pkt, size_t len, uint16_t csum_start,
     return 0;
 }
 
-static err_t tun_inject(tun_t *t, const uint8_t *pkt, size_t len)
-{
-    uint64_t flags = a20_lwip_lock();
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_RAM);
-    if (!p) {
-        a20_lwip_unlock(flags);
-        return ERR_MEM;
-    }
-    if (pbuf_take(p, pkt, (u16_t)len) != ERR_OK) {
-        pbuf_free(p);
-        a20_lwip_unlock(flags);
-        return ERR_MEM;
-    }
-    err_t e = t->nf->input(p, t->nf);
-    a20_lwip_unlock(flags);
-    return e;
+static int tun_inject(tun_t *t, const uint8_t *packet, size_t length) {
+    return net_stack_tun_inject(t->ifindex, packet, length);
 }
 
 /* Segment one TCP-over-IPv4 GSO packet into MTU-sized segments.  Each segment
@@ -706,7 +688,7 @@ static int tun_gso_tcp4(tun_t *t, uint8_t *pkt, size_t len, size_t hdr_len,
         sum += (uint32_t)(seglen - ihl);
         sum = tun_csum_add(seg + ihl, seglen - ihl, sum);
         tun_csum_put(seg + ihl + 16, tun_csum_fold(sum));
-        if (tun_inject(t, seg, seglen) != ERR_OK) {
+        if (tun_inject(t, seg, seglen) != 0) {
             rc = -EIO;
             break;
         }
@@ -764,7 +746,7 @@ static int tun_gso_udp4(tun_t *t, uint8_t *pkt, size_t len, size_t hdr_len,
         sum += (uint32_t)(seglen - ihl);
         sum = tun_csum_add(seg + ihl, seglen - ihl, sum);
         tun_csum_put(seg + ihl + 6, tun_csum_fold(sum));
-        if (tun_inject(t, seg, seglen) != ERR_OK) {
+        if (tun_inject(t, seg, seglen) != 0) {
             rc = -EIO;
             break;
         }
@@ -777,21 +759,24 @@ static int tun_gso_udp4(tun_t *t, uint8_t *pkt, size_t len, size_t hdr_len,
 static int tun_write(vfile_t *vf, const char *buf, size_t count)
 {
     tun_t *t = tun_from_vfile(vf);
-    if (!t || !t->nf)
+    if (!t || !t->ifindex)
         return -EIO;
     if (count == 0) {
         /* wireguard-go's status probe.  Its routineHackListener maps EINVAL to
          * "up" and EIO to "down" and gives up on anything else. */
-        uint64_t flags = a20_lwip_lock();
-        int up = netif_is_up(t->nf) && netif_is_link_up(t->nf);
-        a20_lwip_unlock(flags);
+        int up = net_stack_if_up(t->ifindex);
         return up ? -EINVAL : -EIO;
     }
 
     const uint8_t *pkt = (const uint8_t *)buf;
     size_t pkt_len = count;
+    if (!(t->flags & IFF_NO_PI)) {
+        if (pkt_len < 4) return -EINVAL;
+        if (!((pkt[2] == 8 && pkt[3] == 0) || (pkt[2] == 0x86 && pkt[3] == 0xdd))) return -EINVAL;
+        pkt += 4; pkt_len -= 4;
+    }
     if (t->vnet_hdr) {
-        if (count < TUN_VNET_HDR_LEN)
+        if (pkt_len < TUN_VNET_HDR_LEN)
             return -EINVAL;
         struct tun_vnet_hdr h;
         h.flags = pkt[0];
@@ -801,7 +786,7 @@ static int tun_write(vfile_t *vf, const char *buf, size_t count)
         h.csum_start = tun_rd16(pkt + 6);
         h.csum_offset = tun_rd16(pkt + 8);
         pkt += TUN_VNET_HDR_LEN;
-        pkt_len = count - TUN_VNET_HDR_LEN;
+        pkt_len -= TUN_VNET_HDR_LEN;
         /* A header with no packet behind it is what wireguard-go emits for an
          * empty payload; Linux's tun_get_user() accepts and drops it. */
         if (pkt_len == 0)
@@ -857,7 +842,7 @@ static int tun_write(vfile_t *vf, const char *buf, size_t count)
     }
     if (pkt_len > 0xffff)
         return -EMSGSIZE;
-    if (tun_inject(t, pkt, pkt_len) != ERR_OK)
+    if (tun_inject(t, pkt, pkt_len) != 0)
         return -EIO;
     return (int)count;
 }
@@ -891,12 +876,14 @@ static size_t tun_poll_sources(vfile_t *vf, short events,
 
 static int tun_close(vfile_t *vf)
 {
+    mutex_lock(&g_tun_control);
     tun_t *t = tun_from_vfile(vf);
-    if (!t)
-        return 0;
-    if (t->nf && !t->persist) {
-        a20_lwip_tun_remove(t->nf);
-        t->nf = NULL;
+    if (!t) { mutex_unlock(&g_tun_control); return 0; }
+    if (t->ifindex && !t->persist) {
+        net_stack_tun_destroy(t->ifindex);
+        uint64_t tf = spin_lock_irqsave(&g_tun_table_lock);
+        t->ifindex = 0;
+        spin_unlock_irqrestore(&g_tun_table_lock, tf);
     }
     uint64_t flags = spin_lock_irqsave(&t->lock);
     for (int i = 0; i < TUN_RX_DEPTH; i++) {
@@ -906,14 +893,16 @@ static int tun_close(vfile_t *vf)
         }
     }
     t->rx_count = 0;
-    t->rx_head = t->rx_tail = 0;
+    t->rx_bytes = 0;
+    t->attached = 0;
+    t->rx_tail = 0;
     spin_unlock_irqrestore(&t->lock, flags);
 
     uint64_t tf = spin_lock_irqsave(&g_tun_table_lock);
-    t->used = 0;
-    t->name[0] = 0;
+    if (!t->persist) { t->used = 0; t->name[0] = 0; }
     spin_unlock_irqrestore(&g_tun_table_lock, tf);
     vf->priv = NULL;
+    mutex_unlock(&g_tun_control);
     return 0;
 }
 
@@ -926,27 +915,51 @@ vfile_ops_t g_tun_ops = {
     .close = tun_close,
 };
 
-int a20_tun_netif_name(struct netif *n, char *out, unsigned cap)
-{
-    if (!n || !out || cap == 0)
-        return 0;
-    for (int i = 0; i < TUN_MAX; i++) {
-        if (g_tuns[i].used && g_tuns[i].nf == n) {
-            snprintf(out, cap, "%s", g_tuns[i].name);
-            return 1;
+int net_tun_interface_name(unsigned index, char *out, unsigned cap) {
+    if (!index || !out || !cap) return 0;
+    int found = 0;
+    uint64_t flags = spin_lock_irqsave(&g_tun_table_lock);
+    for (int i = 0; i < TUN_MAX; ++i)
+        if (g_tuns[i].used && g_tuns[i].ifindex == index) {
+            snprintf(out, cap, "%s", g_tuns[i].name); found = 1; break;
         }
-    }
-    return 0;
+    spin_unlock_irqrestore(&g_tun_table_lock, flags);
+    return found;
+}
+unsigned net_tun_interface_by_name(const char *name) {
+    if (!name || !name[0]) return 0;
+    unsigned index = 0;
+    uint64_t flags = spin_lock_irqsave(&g_tun_table_lock);
+    for (int i = 0; i < TUN_MAX; ++i)
+        if (g_tuns[i].used && !strcmp(g_tuns[i].name, name)) {
+            index = g_tuns[i].ifindex; break;
+        }
+    spin_unlock_irqrestore(&g_tun_table_lock, flags);
+    return index;
 }
 
-struct netif *a20_tun_netif_by_name(const char *name)
-{
-    if (!name || !name[0])
-        return NULL;
-    for (int i = 0; i < TUN_MAX; i++) {
-        if (g_tuns[i].used && g_tuns[i].nf &&
-            strcmp(g_tuns[i].name, name) == 0)
-            return g_tuns[i].nf;
+int net_tun_format(char *out, size_t capacity) {
+    if (!out || !capacity) return 0;
+    unsigned controls = 0, interfaces = 0, attached = 0, packets = 0;
+    size_t bytes = 0; uint64_t dropped = 0;
+    uint64_t flags = spin_lock_irqsave(&g_tun_table_lock);
+    for (int i = 0; i < TUN_MAX; ++i) {
+        tun_t *t = &g_tuns[i];
+        if (!t->used) continue;
+        ++controls;
+        if (t->ifindex) ++interfaces;
+        uint64_t qf = spin_lock_irqsave(&t->lock);
+        attached += t->attached != 0;
+        packets += (unsigned)t->rx_count; bytes += t->rx_bytes;
+        dropped += __atomic_load_n(&t->rx_dropped, __ATOMIC_RELAXED);
+        spin_unlock_irqrestore(&t->lock, qf);
     }
-    return NULL;
+    spin_unlock_irqrestore(&g_tun_table_lock, flags);
+    int used = snprintf(out, capacity,
+        "tun: controls=%u/%u interfaces=%u/%u attached=%u queued=%u bytes=%lu dropped=%llu static=%lu queue_quota=%lu\n",
+        controls, (unsigned)TUN_MAX, interfaces, (unsigned)NET_PROFILE_TUN_MAX_DEVS,
+        attached, packets, (unsigned long)bytes, (unsigned long long)dropped,
+        (unsigned long)(sizeof(g_tuns) + sizeof(g_tun_table_lock) + sizeof(g_tun_control)),
+        (unsigned long)(NET_PROFILE_TUN_MAX_DEVS * NET_PROFILE_TUN_RX_BYTES));
+    return used < 0 ? 0 : (size_t)used >= capacity ? (int)capacity - 1 : used;
 }

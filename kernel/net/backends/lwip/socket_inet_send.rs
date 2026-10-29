@@ -109,8 +109,8 @@ unsafe extern "C" {
     fn a20_net_inet_send_free(s: *mut c_void);
     fn a20_net_inet_send_buf_in_force(s: *mut c_void) -> u32;
     fn a20_net_inet_send_ephemeral_port() -> u16;
-    fn a20_net_inet_send_bind_v6(s: *mut c_void, port: u16);
-    fn a20_net_inet_send_bind_v4(s: *mut c_void, port: u16);
+    fn a20_net_inet_send_bind_v6(s: *mut c_void, port: u16) -> i32;
+    fn a20_net_inet_send_bind_v4(s: *mut c_void, port: u16) -> i32;
     fn a20_net_inet_send_find_udp_dst(s: *mut c_void, addr: *const c_void,
                                       len: usize) -> *mut c_void;
     fn a20_net_inet_send_namespace_target(s: *mut c_void, addr: *const c_void,
@@ -217,11 +217,12 @@ unsafe fn send_udp(
 
     if *v.bound == 0 {
         let port = a20_net_inet_send_ephemeral_port();
-        if *v.domain == AF_INET6 {
-            a20_net_inet_send_bind_v6(s, port);
+        let result = if *v.domain == AF_INET6 {
+            a20_net_inet_send_bind_v6(s, port)
         } else {
-            a20_net_inet_send_bind_v4(s, port);
-        }
+            a20_net_inet_send_bind_v4(s, port)
+        };
+        if result < 0 { return result; }
     }
 
     /* The destination is resolved first, with no lock held, because the table
@@ -309,9 +310,6 @@ unsafe fn send_udp(
     }
 
     if a20_net_inet_send_ns_initial(s) == 0 {
-        return if !dst_addr.is_null() { -ECONNREFUSED } else { -EDESTADDRREQ };
-    }
-    if *v.domain == AF_INET6 {
         return if !dst_addr.is_null() { -ECONNREFUSED } else { -EDESTADDRREQ };
     }
 
@@ -497,6 +495,7 @@ mod tests {
     static mut T_PORT: u16 = 40000;
     static mut T_BIND_V4: i32 = 0;
     static mut T_BIND_V6: i32 = 0;
+    static mut T_BIND_RC: i32 = 0;
     static mut T_REF: i32 = 0;
     static mut T_FREE: i32 = 0;
     static mut T_FIND: i32 = 0;
@@ -558,6 +557,7 @@ mod tests {
         T_PORT = 40000;
         T_BIND_V4 = 0;
         T_BIND_V6 = 0;
+        T_BIND_RC = 0;
         T_REF = 0;
         T_FREE = 0;
         T_FIND = 0;
@@ -645,16 +645,20 @@ mod tests {
         T_PORT
     }
     #[no_mangle]
-    unsafe extern "C" fn a20_net_inet_send_bind_v4(s: *mut c_void, port: u16) {
+    unsafe extern "C" fn a20_net_inet_send_bind_v4(s: *mut c_void, port: u16) -> i32 {
         assert_eq!(port, T_PORT);
         T_BIND_V4 += 1;
+        if T_BIND_RC < 0 { return T_BIND_RC; }
         (*(s as *mut Sock)).bound = 1;
+        0
     }
     #[no_mangle]
-    unsafe extern "C" fn a20_net_inet_send_bind_v6(s: *mut c_void, port: u16) {
+    unsafe extern "C" fn a20_net_inet_send_bind_v6(s: *mut c_void, port: u16) -> i32 {
         assert_eq!(port, T_PORT);
         T_BIND_V6 += 1;
+        if T_BIND_RC < 0 { return T_BIND_RC; }
         (*(s as *mut Sock)).bound = 1;
+        0
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_inet_send_find_udp_dst(_s: *mut c_void,
@@ -891,7 +895,7 @@ mod tests {
             let _ = a20_net_inet_send_udp(s as *mut c_void, ptr::null(), 1, 0,
                                           ptr::null(), 0, 4);
             assert_eq!((T_BIND_V4, T_BIND_V6), (1, 0));
-            /* A v6 socket: the loopback address, no udp_bind. */
+            /* A v6 socket uses the same real backend bind transaction. */
             reset();
             let s = udp_src();
             (*s).bound = 0;
@@ -899,6 +903,24 @@ mod tests {
             let _ = a20_net_inet_send_udp(s as *mut c_void, ptr::null(), 1, 0,
                                           ptr::null(), 0, 4);
             assert_eq!((T_BIND_V4, T_BIND_V6), (0, 1));
+        }
+    }
+
+    #[test]
+    fn failed_implicit_bind_stops_before_allocating_or_sending() {
+        unsafe {
+            let _serial = serial();
+            for family in [2, AF_INET6] {
+                reset();
+                let s = udp_src();
+                (*s).domain = family;
+                (*s).bound = 0;
+                T_BIND_RC = -98; // EADDRINUSE from the actual owner.
+                assert_eq!(a20_net_inet_send_udp(s.cast(), ptr::null(), 1, 0,
+                                               ptr::null(), 0, 4), -98);
+                assert_eq!((*s).bound, 0);
+                assert_eq!((T_PBUF_ALLOC, T_SENDTO_CALLS, T_SEND_CALLS), (0, 0, 0));
+            }
         }
     }
 

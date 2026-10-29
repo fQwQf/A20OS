@@ -1,3 +1,4 @@
+#include "tun_private.h"
 #include "native.h"
 #include "net/tun.h"
 #include "net/lwip_stack.h"
@@ -60,102 +61,16 @@ uint64_t net_inet_socket_lane_lock(net_socket_t *s)
 }
 
 
-/*
- * Next ephemeral port to hand out.
- *
- * This needed no synchronisation of its own while every caller held
- * g_net_lock.  Callers now hold the socket's own lock, and
- * two CPUs binding different sockets hold *different* buckets, so the counter
- * is a compare-exchange.  It stays a global counter: it is not per-socket
- * state, so it does not belong in net_socket_t.
- */
-static volatile uint16_t g_next_ephemeral = 49152;
-
-static uint16_t net_htons(uint16_t x)
-{
-    return (uint16_t)((x << 8) | (x >> 8));
+static uint16_t net_htons(uint16_t value) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap16(value);
+#else
+    return value;
+#endif
 }
 
-uint16_t net_ntohs(uint16_t x)
+int a20_lwip_owns_ipv4(uint32_t addr)
 {
-    return net_htons(x);
-}
-
-uint16_t net_alloc_ephemeral_port_locked(void)
-{
-    uint16_t p;
-    for (;;) {
-        uint16_t cur = __atomic_load_n(&g_next_ephemeral, __ATOMIC_RELAXED);
-        /* Same floor and same 16-bit wrap as the plain ++ it replaced: nothing
-         * below 49152 is ever handed out. */
-        uint16_t next = (uint16_t)(cur + 1);
-        if (next < 49152)
-            next = 49152;
-        if (__atomic_compare_exchange_n(&g_next_ephemeral, &cur, next, 1,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-            p = cur;
-            break;
-        }
-    }
-    return net_htons(p);
-}
-
-/*
- * Implicit bind of an unbound inet socket to the loopback address of its own
- * family.  An AF_INET6 socket used to get a 16-byte sockaddr_in with
- * sin_family = AF_INET6 and the v4 loopback in sin_addr, which is not a valid
- * sockaddr_in6 -- the 16 bytes then read back as sin6_flowinfo/sin6_scope_id.
- * getpeername()/getsockname() and the netlink diag path both read that struct
- * back, so a v6 socket's implicit bind reported a nonsense scope id.
- */
-void net_sockaddr_loopback(net_socket_t *s, uint16_t port)
-{
-    if (s->domain == AF_INET6) {
-        net_sockaddr_in6_t in6;
-        memset(&in6, 0, sizeof(in6));
-        in6.sin6_family = AF_INET6;
-        in6.sin6_port = port;
-        in6.sin6_addr[15] = 1;      /* ::1 */
-        memcpy(s->local, &in6, sizeof(in6));
-        s->local_len = sizeof(in6);
-        s->bound = 1;
-        return;
-    }
-    net_sockaddr_in_t in;
-    memset(&in, 0, sizeof(in));
-    in.sin_family = (uint16_t)s->domain;
-    in.sin_port = port;
-    in.sin_addr = 0x0100007fU;
-    memcpy(s->local, &in, sizeof(in));
-    s->local_len = sizeof(in);
-    s->bound = 1;
-}
-
-int net_sockaddr_port(const void *addr, size_t len, uint16_t *port)
-{
-    if (!addr || len < sizeof(net_sockaddr_in_t) || !port)
-        return -EINVAL;
-    int family = *(const uint16_t *)addr;
-    if (family != AF_INET && family != AF_INET6)
-        return -EAFNOSUPPORT;
-    *port = ((const net_sockaddr_in_t *)addr)->sin_port;
-    return 0;
-}
-
-void net_sockaddr_set_port(void *addr, size_t len, uint16_t port)
-{
-    if (!addr || len < sizeof(net_sockaddr_in_t))
-        return;
-    net_sockaddr_in_t *in = (net_sockaddr_in_t *)addr;
-    if (in->sin_family == AF_INET || in->sin_family == AF_INET6)
-        in->sin_port = port;
-}
-
-int net_sockaddr_in_local(const net_sockaddr_in_t *in)
-{
-    if (!in)
-        return 0;
-    uint32_t addr = in->sin_addr;
     /* INADDR_ANY: bind() means "any local address", always available.
      * 127.0.0.1: loopback is up before any interface is configured. */
     if (addr == 0 || addr == 0x0100007fU)
@@ -2667,9 +2582,7 @@ int a20_lwip_transport_connect(net_socket_t *s, const void *addr, size_t addrlen
     int ns_result = net_namespace_target(s, connect_addr, peer_len);
     if (ns_result < 0) return ns_result;
     if (!resource_ns_is_initial(s->net_ns) && s->type == SOCK_DGRAM) return 0;
-    if (s->type == SOCK_DGRAM && s->domain == AF_INET6)
-        return 0;
-    if (s->type == SOCK_DGRAM && s->domain == AF_INET) {
+    if (s->type == SOCK_DGRAM) {
         ip_addr_t ip;
         uint16_t port = 0;
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, &port);
@@ -2681,11 +2594,32 @@ int a20_lwip_transport_connect(net_socket_t *s, const void *addr, size_t addrlen
             return -ENOTSOCK;
         }
         a20_lwip_lane_enter(net_socket_lane_load(s));
-        err_t e = udp_connect(lw(s)->udp, &ip, port);
-        if (e == ERR_OK)
-            net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(lw(s)->udp));
+        struct udp_pcb *pcb = lw(s)->udp;
+        err_t e = ERR_OK;
+        /* Connected UDP pins a concrete local source and lets the protocol
+         * reserve an unused port. No loopback placeholder is published. */
+        if (ip_addr_isany(&pcb->local_ip)) {
+            struct netif *n = pcb->netif_idx != NETIF_NO_INDEX
+                ? netif_get_by_index(pcb->netif_idx) : ip_route(&pcb->local_ip, &ip);
+            const ip_addr_t *source = n ? ip_netif_get_local_ip(n, &ip) : NULL;
+            if (!source || ip_addr_isany(source)) e = ERR_RTE;
+            else e = udp_bind(pcb, source, pcb->local_port);
+        }
+        if (e == ERR_OK) e = udp_connect(pcb, &ip, port);
+        uint8_t local[NET_SOCKADDR_MAX]; size_t local_length = 0;
+        if (e == ERR_OK) {
+            net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(pcb));
+            net_lwip_ip_to_sockaddr(&pcb->local_ip, pcb->local_port, local, &local_length);
+        }
         a20_lwip_unlock(flags);
-        return e == ERR_OK ? 0 : -ENETUNREACH;
+        if (e != ERR_OK) return e == ERR_USE ? -EADDRINUSE : -ENETUNREACH;
+        flags = net_sock_lock(s);
+        int result = net_socket_is_live(s) ? 0 : -ENOTSOCK;
+        if (result == 0) {
+            memcpy(s->local, local, local_length); s->local_len = local_length; s->bound = 1;
+        }
+        net_sock_unlock(s, flags);
+        return result;
     }
     if (s->type == SOCK_RAW && s->domain == AF_INET) {
         ip_addr_t ip;
@@ -2867,30 +2801,44 @@ uint16_t a20_net_inet_send_ephemeral_port(void)
     return net_alloc_ephemeral_port_locked();
 }
 
-void a20_net_inet_send_bind_v6(void *sp, uint16_t port)
-{
-    net_socket_t *s = (net_socket_t *)sp;
-    net_sockaddr_in6_t in6;
-    memset(&in6, 0, sizeof(in6));
-    in6.sin6_family = AF_INET6;
-    in6.sin6_port = port;
-    in6.sin6_addr[15] = 1;
-    memcpy(s->local, &in6, sizeof(in6));
-    s->local_len = sizeof(in6);
-    s->bound = 1;
-}
-
-void a20_net_inet_send_bind_v4(void *sp, uint16_t port)
-{
-    net_socket_t *s = (net_socket_t *)sp;
-    net_sockaddr_loopback(s, port);
-    ip_addr_t any;
-    ip_addr_set_zero_ip4(&any);
+static int net_udp_autobind(net_socket_t *s, uint16_t port, int v6) {
+    if (!resource_ns_is_initial(s->net_ns)) {
+        uint64_t flags = net_sock_lock(s);
+        if (!s->bound) net_sockaddr_loopback(s, port);
+        net_sock_unlock(s, flags);
+        return 0;
+    }
+    uint8_t address[NET_SOCKADDR_MAX]; size_t length = 0;
     uint64_t flags = a20_lwip_lock();
+    struct udp_pcb *pcb = lw(s) ? lw(s)->udp : NULL;
+    if (!pcb) { a20_lwip_unlock(flags); return -ENOTSOCK; }
     a20_lwip_lane_enter(net_socket_lane_load(s));
-    if (lw(s)->udp && udp_bind(lw(s)->udp, &any, net_ntohs(port)) == ERR_OK)
-        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(lw(s)->udp));
+    ip_addr_t any;
+    if (v6) ip_addr_set_zero_ip6(&any); else ip_addr_set_zero_ip4(&any);
+    /* A concurrent first send/bind may already have selected a port. Use that
+     * value; never publish a second frontend port over the same live PCB. */
+    /* Port zero lets the protocol owner probe/reserve atomically. A blind
+     * frontend counter can pick a port already held by an explicit bind. */
+    err_t error = pcb->local_port ? ERR_OK : udp_bind(pcb, &any, 0);
+    if (error == ERR_OK) {
+        net_socket_lane_store(s, NET_PCB_LANE_OWNER_OF_PCB(pcb));
+        net_lwip_ip_to_sockaddr(&pcb->local_ip, pcb->local_port, address, &length);
+    }
     a20_lwip_unlock(flags);
+    if (error != ERR_OK) return error == ERR_USE ? -EADDRINUSE : -EIO;
+    flags = net_sock_lock(s);
+    int result = net_socket_is_live(s) ? 0 : -ENOTSOCK;
+    if (result == 0 && !s->bound) {
+        memcpy(s->local, address, length); s->local_len = length; s->bound = 1;
+    }
+    net_sock_unlock(s, flags);
+    return result;
+}
+int a20_net_inet_send_bind_v6(void *s, uint16_t port) {
+    return net_udp_autobind(s, port, 1);
+}
+int a20_net_inet_send_bind_v4(void *s, uint16_t port) {
+    return net_udp_autobind(s, port, 0);
 }
 
 void *a20_net_inet_send_find_udp_dst(void *s, const void *addr, size_t len)
@@ -3320,7 +3268,7 @@ int a20_lwip_transport_bind_device(net_socket_t *s, const char *name)
     struct netif *n = NULL;
     if (name[0]) {
         n = netif_find(name);
-        if (!n) n = a20_tun_netif_by_name(name);
+        if (!n) n = netif_get_by_index((u8_t)net_tun_interface_by_name(name));
         if (!n) { a20_lwip_unlock(flags); return -ENODEV; }
     }
     u8_t index = n ? netif_get_index(n) : NETIF_NO_INDEX;
@@ -3341,7 +3289,7 @@ int a20_lwip_transport_bound_device(net_socket_t *s, char name[16])
     u8_t index = lw(s)->udp ? lw(s)->udp->netif_idx : lw(s)->raw ? lw(s)->raw->netif_idx :
         lw(s)->tcp ? lw(s)->tcp->netif_idx : NETIF_NO_INDEX;
     struct netif *n = index ? netif_get_by_index(index) : NULL;
-    if (n && !a20_tun_netif_name(n, name, 16))
+    if (n && !net_tun_interface_name(netif_get_index(n), name, 16))
         snprintf(name, 16, "%c%c%u", n->name[0], n->name[1], n->num);
     a20_lwip_unlock(flags);
     return index && !n ? -ENODEV : 0;
