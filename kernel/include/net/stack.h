@@ -7,12 +7,17 @@
 #include "net/net_config.h"
 #include "net/transport.h"
 
+struct device;
+
 typedef struct net_stack_ops {
     const net_transport_ops_t *transport;
     const char *name;
     void (*init)(void);
     void (*attach_interfaces)(void);
     void (*receive_progress)(unsigned budget);
+    /* IRQ-safe borrowed device identity; backend chooses staging/locking.
+     * Driver acknowledges IRQ and drops its queue lock before calling. */
+    void (*device_interrupt)(const struct device *);
     void (*protocol_progress)(unsigned budget);
     void (*timer_tick)(void);
     int (*work_pending)(void);
@@ -22,6 +27,9 @@ typedef struct net_stack_ops {
                               const uint8_t mac[6]);
     int (*interface_snapshot)(void *out, int maximum);
     int (*status)(char *, size_t);
+    int (*format_memory)(char *, size_t);
+    int (*format_devices)(char *, size_t);
+    int (*format_routes)(char *, size_t);
     void (*poll_waiter)(void);
     int (*if_up)(unsigned);
     int (*if_default_index)(void);
@@ -44,10 +52,14 @@ const net_transport_ops_t *net_stack_transport(void);
 void net_stack_init(void);
 void net_stack_attach_interfaces(void);
 void net_stack_receive_progress(unsigned budget);
+void net_stack_device_interrupt(const struct device *);
 void net_stack_protocol_progress(unsigned budget);
 void net_stack_timer_tick(void);
 int net_stack_work_pending(void);
 int net_stack_status(char *, size_t);
+int net_stack_format_memory(char *, size_t);
+int net_stack_format_devices(char *, size_t);
+int net_stack_format_routes(char *, size_t);
 void net_stack_poll_waiter(void);
 int net_stack_if_up(unsigned);
 int net_stack_if_default_index(void);

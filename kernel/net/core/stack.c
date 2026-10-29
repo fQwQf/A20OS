@@ -14,6 +14,10 @@ void net_stack_attach_interfaces(void) { stack->attach_interfaces(); }
 void net_stack_receive_progress(unsigned budget) {
     stack->receive_progress(budget);
 }
+void net_stack_device_interrupt(const struct device *dev) { stack->device_interrupt(dev); }
+int net_stack_format_memory(char *b, size_t n) { return stack->format_memory(b, n); }
+int net_stack_format_devices(char *b, size_t n) { return stack->format_devices(b, n); }
+int net_stack_format_routes(char *b, size_t n) { return stack->format_routes(b, n); }
 void net_stack_protocol_progress(unsigned budget) {
     stack->protocol_progress(budget);
 }

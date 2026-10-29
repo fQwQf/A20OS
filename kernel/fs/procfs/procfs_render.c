@@ -43,7 +43,7 @@
 #include "net/socket.h"
 #include "net/socket/socket_internal.h"
 #include "net/net_config.h"
-#include "net/lwip_stack.h"
+#include "net/stack.h"
 #include "drivers/core/riscv_iommu.h"
 #include "drivers/bus/pci_msix.h"
 
@@ -802,7 +802,7 @@ static int gen_format_helper(int which, char *buf, size_t size)
         netfilter_format(buf, size);
         return (int)strlen(buf);
     case 7:
-        return a20_lwip_format_memp(buf, size);
+        return net_stack_format_memory(buf, size);
     case 8:
         return ext4_journal_crash_points_format(buf, size);
     case 9: {
@@ -833,10 +833,10 @@ static int gen_format_helper(int which, char *buf, size_t size)
         a20_net_config_format(buf, size);
         return (int)strlen(buf);
     case 13:
-        a20_lwip_format_net_dev(buf, size);
+        net_stack_format_devices(buf, size);
         return (int)strlen(buf);
     case 14:
-        a20_lwip_format_route(buf, size);
+        net_stack_format_routes(buf, size);
         return (int)strlen(buf);
     default:
         net_format_status(buf, size);

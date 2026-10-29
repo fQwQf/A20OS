@@ -173,9 +173,14 @@ def check() -> None:
              "a20_lwip_unlock(lwip_flags)")
 
     virtio = _body("kernel/drivers/net/virtio_net.c", "virtio_net_irq_handler")
-    _ordered(virtio, "virtio IRQ ingress bridge",
+    _ordered(virtio, "virtio IRQ acknowledges before backend notification",
+             "VIRTIO_MMIO_INTERRUPT_ACK, isr)",
+             "net_stack_device_interrupt(net->device)")
+    bridge = _body("kernel/net/backends/lwip/runtime.c", "device_interrupt")
+    _ordered(bridge, "backend owns IRQ identity and ingress serialization",
              "a20_lwip_ingress_lock()",
-             "a20_lwip_process_netif_irq_locked(net->slot)",
+             "a20_lwip_netif_index_for_device(dev)",
+             "a20_lwip_process_netif_irq_locked(index)",
              "a20_lwip_ingress_unlock(flags)")
     header = (ROOT / "kernel/include/net/lwip_stack.h").read_text(encoding="utf-8")
     if "void a20_lwip_process_netif_irq_locked(int net_idx);" not in header:

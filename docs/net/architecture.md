@@ -22,7 +22,7 @@
 
 源码由 `kernel/net/sources.mk` 显式列举；不递归收集后端目录中的任意 C 文件。
 公共 `socket_internal.h` 已移除 PCB、lane、BH ring 与 accept 暂存。它们由后端
-attachment 独立拥有，操作经 `net/transport.h` 分派；设备 IRQ/TUN 的旧后端桥仍待拆分。
+attachment 独立拥有，操作经 `net/transport.h` 分派；物理 NIC IRQ 已经公共入口分派；TUN 的旧后端桥仍待拆分。
 
 网络域为接口、地址、路由、端口空间和协议状态的所有权边界。一个域选择一个后端，
 存活连接不迁移。初期编译/启动时选择后端，不按每个包或每个 socket 任意混用栈。
