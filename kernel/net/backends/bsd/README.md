@@ -14,3 +14,8 @@ git submodule update --init --depth 1 kernel/external/f-stack
 veth/mbuf 的释放和驱动接口都需适配到 A20OS。
 
 具体边界、源码入口和验收顺序见 [BSD 接入记录](../../../../docs/net/bsd-port.md)。
+
+`port-sources.toml` 明确列出当前独立编译的真实 BSD 对象。运行
+`python3 tools/probe-bsd-core.py --out <新目录>` 可生成头文件、编译并部分链接，
+保留逐对象源码哈希、命令、告警与全部未解析符号。当前46个对象通过；这尚不是
+`NET_STACK=bsd` 的可运行构建清单，不能据此声称初始化、收发或 socket 已贯通。
