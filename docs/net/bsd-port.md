@@ -18,8 +18,7 @@ make -C kernel/external/f-stack/lib -n all
 ```
 
 本机第二条命令 exit 2：`lib/Makefile:65` 报未安装 DPDK。原始记录保存在
-`build/evidence/net-upstream-20261029/f-stack-build-probe.log`。这是配置探测，尚未完成
-BSD 编译、链接或数据面测试。`NET_STACK=bsd` 故意拒绝构建，避免静默回退。
+`build/evidence/net-upstream-20261029/f-stack-build-probe.log`。这是早期配置探测；后续独立对象编译见下节，尚无完整链接或数据面测试。`NET_STACK=bsd` 故意拒绝构建，避免静默回退。
 
 ## 需要替换的真实边界
 
@@ -39,3 +38,24 @@ socket。DPDK 不进入 A20OS 正常驱动路径；直接启用 DPDK 会破坏�
 先贯通单线程 BSD 初始化、内存/同步/时钟，再适配 mbuf 与现有设备，随后接入 socket
 生命周期、等待/错误和控制事务。每一步保留失败样本；最终运行与 lwip/native 相同的
 Linux ELF，逐项比较转发/NAT、服务、吞吐、p99、CPU/字节与连接/内存。尚无 BSD 数值。
+
+## 独立编译与部分链接进展
+
+新增 `tools/probe-bsd-core.py --out <新目录>`，不调用依赖 DPDK 的上游完整构建，
+直接编译选定的真实网络对象。所有生成头和机器目录软链接均位于输出目录；
+`device_if.h`/`bus_if.h` 由上游 awk 生成器生成，不手写空壳、不修改 submodule。
+使用 x86_64 freestanding、无 red zone、仅通用寄存器、large code model 和 BSD 内核头，禁用宿主
+Linux 头/宏，不链接 libc/DPDK，也不以宿主 socket 替代协议执行。
+
+`bsd-core9` 已编译46个对象并以 `ld -r` 部分链接：amd64 checksum、IPv4/IPv6 输入输出、
+TCP 输入输出/连接生命周期、UDP、mbuf、socket/sockbuf/domain、接口、FIB/下一跳、
+锁、callout 与 epoch。源码选择由 `kernel/net/backends/bsd/port-sources.toml` 拥有，
+工具从 `upstream.toml` 读取版本，不在脚本中重复固定版本。checksum 按上游 VPATH 选择 amd64
+实现，不能同时链接 portable 和 amd64 两份。早期缺生成头和重复定义的失败保留在
+`bsd-core2`/`bsd-core4`；扩展 source list 时的路径错误保留在 `bsd-core7`。精确参数、源码 SHA、编译器、告警和未解析符号写入 manifest；工具及两个 TOML
+文件也复制到证据目录，便于按原始 source list 重放。
+
+部分链接仍有454个未解析符号，其中包括尚未加入的 BSD 对象与 A20OS 运行时适配，
+不能把它们全部称为内核缺失 API。未提供成功空桩来隐藏这些依赖；目前没有 BSD 初始化、
+TCP 连接或 KVM 运行结果，更没有 BSD 吞吐数字。后续需补齐 SYSINIT/VNET/PCPU、
+分配与线程上下文、同步/callout/epoch，再接入现有 NIC/TUN 和 socket 执行表。

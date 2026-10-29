@@ -161,3 +161,31 @@ BH events=35284、native=21980；二者 `net_bh_overflow=0`、`net_alloc_fail=0`
 这轮未观察到暂存溢出/分配失败，不能据此排除长期压力问题。锁探针有实际争用记录，
 但各后端工作量与覆盖点不同，不能仅用累计等待值判定锁是主导瓶颈；计数器不是完整
 CPU 调用栈采样。原始 per-site 记录留在各 manifest 的 profile 字段。
+
+
+## TUN 解耦与 ICMP 改写后的对照（2026-10-29）
+
+冻结内核对应 `70f7534a`，证据为
+`build/evidence/net-router-completion-20261029/matched-lwip-completion/` 与
+`matched-native-completion/`。24个样本均 rc=0、verified=1，invalid_samples 为空。
+同一 Linux ELF SHA256 为
+`9a2323f3f9e483a03b94618ad30949c128e7532f145e98acbc5b59af3480aedd`，
+2 vCPU/2 GiB，affinity0,2，virtio 卸载关闭、相同 SLIRP 与外部 peer，未启用追踪。
+每项3轮×2秒，各指标单独取中位数，p99没有合并样本。CPU 仍为整个 QEMU
+ns/双向已验证 payload 字节；宿主回环只作参考。
+
+| 系统 | TCP16KiB MiB/s | TCP p99 µs | TCP ns/B | UDP64B MiB/s | UDP p99 µs | UDP ns/B |
+|---|---:|---:|---:|---:|---:|---:|
+| Linux KVM | 34.319 | 1063.535 | 20.702 | 0.331969 | 672.318 | 2340.102 |
+| A20OS lwip | 23.578 | 3459.985 | 27.467 | 0.296779 | 308.901 | 2486.737 |
+| A20OS native | 12.468 | 6914.284 | 53.499 | 0.301767 | 255.449 | 2613.848 |
+| 宿主 Linux 回环参考 | 364.457 | 55.811 | 0.704 | 2.798728 | 30.873 | 67.899 |
+
+原版单执行域、native4 lane，保留其当前执行配置；native 在原版组之后运行，未交错
+随机化。三节点正确性回归在其他 CPU 上有短时重叠，不能排除宿主共享资源干扰。
+这张表只说明当前完整系统在该短时负载下仍有 TCP 成本/吞吐及尾延迟差距，不能将
+差距全部归因于协议栈核心，也不能凭此决定桌面/服务器默认后端。BSD 不可运行；
+本轮没有重测连接规模与内存曲线，前述256条默认 CT 容量等限制未因本轮修复消失。
+
+本轮真实双网卡/TUN/ICMP验收范围、复现命令及失败记录见
+[解耦与路由错误回归](router-completion-2026-10-29.md)。
