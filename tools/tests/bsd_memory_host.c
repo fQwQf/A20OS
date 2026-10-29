@@ -74,7 +74,10 @@ int main(void)
     assert(ff_munmap(p, 8192) == 0);
     assert(ff_mmap(NULL, 4096, 3, ff_MAP_ANON | ff_MAP_SHARED, -1, 0) == NULL);
     assert(ff_mmap(NULL, 4096, ff_PROT_READ, ff_MAP_ANON | ff_MAP_PRIVATE, -1, 0) == NULL);
-    assert(ff_mmap(NULL, 4095, 3, ff_MAP_ANON | ff_MAP_PRIVATE, -1, 0) == NULL);
+    p = ff_mmap(NULL, 1664, 3, ff_MAP_ANON | ff_MAP_PRIVATE, -1, 0);
+    assert(p && (uintptr_t)p % 4096 == 0);
+    for (unsigned i = 0; i < 4096; ++i) assert(p[i] == 0);
+    assert(ff_munmap(p, 4096) == -1 && ff_munmap(p, 1664) == 0);
     assert(ff_mmap(NULL, 4096, 3, ff_MAP_ANON | ff_MAP_PRIVATE, 1, 0) == NULL);
     atomic_store(&fail_next, 1);
     assert(ff_mmap(NULL, 4096, 3, ff_MAP_ANON | ff_MAP_PRIVATE, -1, 0) == NULL);

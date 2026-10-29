@@ -28,16 +28,17 @@ def main():
     selection = tomllib.loads((port/'port-sources.toml').read_text())
     sources = selection['sources']
     port_sources = selection.get('port_sources', [])
+    bsd_port_sources = selection.get('bsd_port_sources', [])
     upstream = root / pin['path']
     git = lambda *a: subprocess.check_output(['git', '-C', str(upstream), *a], text=True).strip()
     if git('rev-parse', 'HEAD') != pin['revision'] or git('status', '--porcelain', '--untracked-files=all'):
         parser.error('F-Stack revision must be pinned and clean')
-    if len(sources) != len(set(sources)) or len(port_sources) != len(set(port_sources)):
+    if len(sources) != len(set(sources)) or len(port_sources + bsd_port_sources) != len(set(port_sources + bsd_port_sources)):
         parser.error('duplicate BSD source entries')
     for source in sources:
         if not (upstream/source).is_file() or not (upstream/source).resolve().is_relative_to(upstream.resolve()):
             parser.error(f'invalid BSD source: {source}')
-    for source in port_sources:
+    for source in port_sources + bsd_port_sources:
         if not (root/source).is_file() or not (root/source).resolve().is_relative_to(port.resolve()):
             parser.error(f'invalid A20OS port source: {source}')
     out = args.out.resolve()
@@ -50,7 +51,7 @@ def main():
     for name, source in [('machine', 'amd64'), ('x86', 'x86')]:
         (machine / name).symlink_to(upstream / f'freebsd/{source}/include', target_is_directory=True)
     flags = ['-O2', '-std=gnu99', '-ffreestanding', '-fno-builtin', '-fno-common',
-             '-fno-stack-protector', '-mno-red-zone', '-mgeneral-regs-only', '-mcmodel=large', '-fno-pie', '-nostdinc',
+             '-fno-stack-protector', '-mno-red-zone', '-mgeneral-regs-only', '-mcmodel=large', '-fPIC', '-nostdinc',
              '-U__linux__', '-U__linux', '-Ulinux', '-U__gnu_linux__',
              '-D_KERNEL', '-DFSTACK', f"-D__FreeBSD__={pin.get('freebsd_major', 14)}", '-DINET', '-DINET6',
              '-DHAVE_KERNEL_OPTION_HEADERS', '-include', str(upstream/'lib/opt/opt_global.h')]
@@ -61,9 +62,9 @@ def main():
         flags += ['-I' + str(upstream / directory)]
     generated = out / 'generated'
     generated.mkdir()
-    for name in ['device_if', 'bus_if']:
+    for name in ['device_if', 'bus_if', 'linker_if']:
         subprocess.run(['awk', '-f', str(upstream/'freebsd/tools/makeobjops.awk'),
-                        str(upstream/f'freebsd/kern/{name}.m'), '-h'], cwd=generated, check=True)
+                        str(upstream/f'freebsd/kern/{name}.m'), '-h', *(['-c'] if name == 'linker_if' else [])], cwd=generated, check=True)
     flags += ['-I' + str(machine), '-I' + str(generated)]
 
     port_flags = ['-O2', '-std=gnu99', '-ffreestanding', '-fno-builtin',
@@ -76,7 +77,7 @@ def main():
 
     def compile_one(entry):
         source, owner = entry
-        source_path = (root if owner == 'a20' else upstream)/source
+        source_path = (upstream if owner == 'upstream' else out if owner == 'generated' else root)/source
         name = source.replace('/', '_')
         obj = out / (name + '.o')
         argv = [args.cc, *(port_flags if owner == 'a20' else flags), '-c', str(source_path), '-o', str(obj)]
@@ -85,10 +86,15 @@ def main():
         row = dict(source=source, owner=owner, source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
                    argv=argv, rc=result.returncode)
         if result.returncode == 0:
+            overrides = selection.get('object_symbol_overrides', {}).get(source, {})
+            if overrides:
+                subprocess.run(['objcopy', *['--redefine-sym=' + old + '=' + new
+                                            for old, new in overrides.items()], str(obj)], check=True)
+                row['object_symbol_overrides'] = overrides
             row['undefined'] = subprocess.check_output(['nm', '-u', str(obj)], text=True).splitlines()
         return row
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        rows = list(pool.map(compile_one, [(s, 'upstream') for s in sources] + [(s, 'a20') for s in port_sources]))
+        rows = list(pool.map(compile_one, [(s, 'upstream') for s in sources] + [(s, 'a20') for s in port_sources] + [(s, 'a20-bsd') for s in bsd_port_sources] + [('generated/linker_if.c', 'generated')]))
     linked = None
     if all(row['rc'] == 0 for row in rows):
         objects = [str(out/(row['source'].replace('/', '_') + '.o')) for row in rows]
@@ -109,6 +115,8 @@ def main():
                 'port_host_copy': 'memcpy', 'port_host_zero': 'memset',
                 'port_host_panic': 'panic',
                 'port_host_current_task': 'proc_current',
+                'port_host_log': 'klog_write', 'port_host_random': 'random_fill',
+                'port_host_move': 'memmove', 'port_host_compare': 'memcmp',
                 '_GLOBAL_OFFSET_TABLE_': '_GLOBAL_OFFSET_TABLE_',
             }
             mapping = out/'host-imports.map'

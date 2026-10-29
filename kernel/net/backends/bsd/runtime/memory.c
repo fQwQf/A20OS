@@ -129,11 +129,15 @@ void *ff_mmap(void *address, uint64_t length, int prot, int flags, int fd, uint6
     /* kmem_malloc/UMA need zeroed, page-aligned anonymous writable backing.
      * This is the private BSD kernel allocation contract, not Linux sys_mmap:
      * ff_glue.c checks NULL, so failure must never return MAP_FAILED (-1). */
-    if (address || !length || length > SIZE_MAX || length % PAGE_ALIGNMENT ||
+    if (address || !length || length > SIZE_MAX || length > SIZE_MAX - (PAGE_ALIGNMENT - 1) ||
         prot != (ff_PROT_READ | ff_PROT_WRITE) || fd != -1 || offset ||
         (flags & ~ff_MAP_NOCORE) != (ff_MAP_PRIVATE | ff_MAP_ANON)) return NULL;
-    void *result = allocate((size_t)length, PAGE_ALIGNMENT, 1);
-    if (result) memset(result, 0, (size_t)length);
+    size_t rounded = ((size_t)length + PAGE_ALIGNMENT - 1) & ~(PAGE_ALIGNMENT - 1);
+    void *result = allocate(rounded, PAGE_ALIGNMENT, 1);
+    if (result) {
+        owned(result, 1)->length = (size_t)length;
+        memset(result, 0, rounded);
+    }
     return result;
 }
 int ff_munmap(void *address, uint64_t length)
