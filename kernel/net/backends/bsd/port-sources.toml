@@ -2,6 +2,27 @@
 # Dependency/bootstrap selection, not yet a runnable backend manifest.
 # One amd64 checksum implementation; no DPDK veth, IPsec or libalias.
 sources = [
+    "freebsd/libkern/strrchr.c",
+    "freebsd/libkern/strtouq.c",
+    "freebsd/kern/kern_module.c",
+    "freebsd/kern/kern_linker.c",
+    "freebsd/kern/subr_module.c",
+    "freebsd/kern/link_elf.c",
+    "freebsd/kern/subr_scanf.c",
+    "freebsd/libkern/strcmp.c",
+    "freebsd/libkern/strcpy.c",
+    "freebsd/libkern/strlen.c",
+    "freebsd/libkern/strncmp.c",
+    "freebsd/libkern/strncpy.c",
+    "freebsd/libkern/strsep.c",
+    "freebsd/libkern/strchr.c",
+    "freebsd/libkern/strcat.c",
+    "freebsd/libkern/strtol.c",
+    "freebsd/libkern/strtoq.c",
+    "freebsd/libkern/strdup.c",
+    "freebsd/libkern/memset.c",
+    "freebsd/libkern/memcmp.c",
+
     "freebsd/amd64/amd64/in_cksum.c",
     "lib/ff_compat.c",
     "lib/ff_glue.c",
@@ -158,3 +179,10 @@ port_sources = [
     "kernel/net/backends/bsd/runtime/memory.c",
     "kernel/net/backends/bsd/runtime/tls.c",
 ]
+
+bsd_port_sources = ["kernel/net/backends/bsd/runtime/services_bsd.c"]
+
+# Replace the host-side seeded rand_r wrapper with the OS entropy service.
+# Only the generated object is renamed; upstream source remains untouched.
+[object_symbol_overrides."lib/ff_compat.c"]
+arc4random = "port_retired_seeded_random"
