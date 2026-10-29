@@ -92,7 +92,8 @@ NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定�
 - `NET_ROLE=router` 开启 IPv4/IPv6 转发。真实 KVM 三节点已覆盖双网卡、动态 NAPT
   源端口冲突、网关/源策略路由及 Linux dnsmasq DHCP/DNS。原版 DHCP 使用
   `--dhcp-broadcast`；其动态 SIOCSARP 尚不支持。
-- 完整分片 NAT、ICMP 差错翻译与 PMTU 仍未完成，当前不能宣称生产软路由成熟。
+- 已接入 ICMP RELATED 翻译与转发 MTU 差错；完整分片 NAT、本机 PMTU/差错队列
+  仍未完成，当前不能宣称生产软路由成熟。
   默认 conntrack=256 是已实测的连接容量限制，服务器档原版在保持跟踪开启时通过
   320连接；固定 INET 暂存区仍有约30 KiB/连接的成本。
 - 原版提供 Reno，CUBIC 和部分 per-socket TCP 缓冲调整属于 native 能力；不支持
