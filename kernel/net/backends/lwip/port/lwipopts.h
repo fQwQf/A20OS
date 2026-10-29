@@ -198,7 +198,7 @@ _Static_assert(MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB,
 #define LWIP_TCP_TIMESTAMPS             NET_PROFILE_TCP_TIMESTAMPS
 
 /* CUBIC (RFC 8312) as a second, per-connection congestion control algorithm.
- * Not an upstream option -- see kernel/external/lwip/DIVERGENCE.md 2.5.  It
+ * Not an upstream option -- see kernel/net/backends/native/protocol/DIVERGENCE.md 2.5.  It
  * adds ~28 B to every tcp_pcb and ~4 KB of .text; EMBEDDED leaves it off for
  * the same reason it leaves the options off. */
 #ifdef CONFIG_LWIP_UPSTREAM
@@ -341,7 +341,7 @@ void a20_lwip_assert_core_locked(void *site);
  * the answer is an A20OS concept: the lane is the address-derived ownership
  * hash (net_lane_of), and the only place it is known is the A20OS entry point
  * that is about to enter the lwIP core.  net_lane.h records why this may not
- * be derived from the CPU instead; kernel/external/lwip/DIVERGENCE.md lists
+ * be derived from the CPU instead; kernel/net/backends/native/protocol/DIVERGENCE.md lists
  * what this adds to the upstream tree.
  *
  * Left undefined it means "no lane concept", which is upstream's behaviour and

@@ -1,6 +1,6 @@
 /*
  * Host-side unit test for the CUBIC window function in
- * kernel/external/lwip/src/core/tcp_cubic.c.
+ * kernel/net/backends/native/protocol/src/core/tcp_cubic.c.
  *
  * Why this exists as a host test and not as a QEMU smoke target: the things
  * that can be wrong in CUBIC are the arithmetic (a cube root that truncates, a

@@ -2,7 +2,7 @@
 
 ## 源码存储形态
 
-- `kernel/external/{lwip,uacpi}` 是普通 tracked tree；`user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 与 fastfetch 使用固定 commit 的 submodule。
+- `kernel/external/uacpi` 是普通 tracked tree；原版 lwIP 与 BSD 候选 F-Stack 使用 submodule；`user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 与 fastfetch 使用固定 commit 的 submodule。
 - `.gitmodules` 登记依赖来源，超级项目的 gitlink 固定具体 commit；许可证必须对该精确 commit 核验。首次检出运行 `git submodule update --init --recursive`。来源、保留适配和版本历史约定见 [userland-submodules.md](userland-submodules.md)。
 - fastfetch 是唯一仍从源码编译进根文件系统的独立第三方程序：它被链接进 FAT32 根，而该根在任何 Alpine world 挂载之前就要启动。
 - 基础 `user/Makefile` 存在静态 musl 链接；分发分析不能把用户程序一概描述为与 musl 分离。
@@ -21,12 +21,13 @@
 
 ## lwIP
 
-- `EXTERNAL_LWIP_SOURCE_MANIFEST`：内核 lwIP 源文件清单位于 `kernel/external/lwip/sources.mk`；导入新的 lwIP 代码树时只更新这一份清单。
+- `EXTERNAL_LWIP_SOURCE_MANIFEST`：内核 lwIP 源文件清单位于 `kernel/net/backends/lwip/sources.mk`；导入新的 lwIP 代码树时只更新这一份清单。
 - `EXTERNAL_LWIP_CONFIG_CONTRACT`：A20OS 通过 `kernel/net/backends/lwip/lwip_stack.c` 以 `NO_SYS=1` 模式使用 lwIP，而不是使用 lwIP 自带的 socket API。
 - 内核 socket 层拥有 socket 文件，并在 `g_lwip_lock` 保护下转换为 lwIP TCP/UDP/RAW 原语。
 - 进展推进基于轮询：`sys_check_timeouts()`、virtio-net TX 完成、RX 投递和 `netif_poll()` 都通过 `a20_lwip_poll()` 与 `kernel_progress_poll()` 驱动。
-- `EXTERNAL_LWIP_IS_A_FORK`：**`kernel/external/lwip` 不是纯上游 vendoring，而是带 A20OS 自有改动的分叉。** 它包含上游不存在的 `src/include/lwip/priv/pcb_lane.h`（PCB 链表按 lane 分桶），并给 `struct tcp_pcb` / `struct udp_pcb` 增加 `lane` 字段——属数据结构级改动，不可按上游文档推断行为。A20OS 自身改动为 9 文件 `+790 / -302`（口径：`git diff f773b0aa HEAD -- kernel/external/lwip`）。上游基线 SHA 记录在 `kernel/external/lwip/.upstream-base`，完整差异清单见 [`kernel/external/lwip/DIVERGENCE.md`](../../kernel/external/lwip/DIVERGENCE.md)。`tools/lwip-sync.sh` 提供 `--record` / `--stat` / `--check`。
-  - **因此"不随上游风格重排"这句话对本目录不成立**：`pbuf.c` 里有 A20OS 自有的板级诊断，`tcp.c` / `udp.c` / `tcp_in.c` 的链表组织已被改写。读代码时必须先读 DIVERGENCE.md。
+- 原版 `NET_STACK=lwip` 固定于 `kernel/external/lwip-upstream`，构建门禁检查提交与干净状态；该目录不写入适配。
+- `EXTERNAL_LWIP_IS_A_FORK`：旧实现已迁入 `kernel/net/backends/native/protocol`，以 `NET_STACK=native` 独立维护，不再作为外部原版 lwIP。版权与历史差异清单保留，当前归属见 [native README](../../kernel/net/backends/native/README.md)。
+- BSD 的 F-Stack submodule 尚不能直接链接到内核；具体依赖与进度见 [bsd-port.md](../net/bsd-port.md)。
 
 ## 网络默认值与 bootargs
 

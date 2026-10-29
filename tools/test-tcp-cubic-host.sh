@@ -2,7 +2,7 @@
 # Host unit tests for the lwIP CUBIC implementation.
 #
 # Compiles tools/test-tcp-cubic-host.c, which #includes the real
-# kernel/external/lwip/src/core/tcp_cubic.c against a mirror of the struct
+# kernel/net/backends/native/protocol/src/core/tcp_cubic.c against a mirror of the struct
 # tcp_pcb fields that file touches.  So a passing run exercises the shipped
 # source, not a copy of it.
 #
@@ -19,7 +19,7 @@ mkdir -p build/tmp
 TMPDIR="$PWD/build/tmp"
 export TMPDIR
 
-LWIP=kernel/external/lwip/src
+LWIP=kernel/net/backends/native/protocol/src
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 

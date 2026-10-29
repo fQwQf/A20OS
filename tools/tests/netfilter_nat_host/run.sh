@@ -64,7 +64,7 @@ cd "$repo" || { record_exit repository-cd 1; exit 1; }
 
 inc=( -Itools/tests/socket_registry_host/hostinc -Ikernel/arch/x86_64/include
       -Ikernel/include -Ikernel -Ikernel/net/backends/lwip/port
-      -Ikernel/external/lwip/src/include -Ikernel/external/littlefs
+      -Ikernel/net/backends/native/protocol/src/include -Ikernel/external/littlefs
       -Ikernel/external/littlefs/compat -Ikernel/arch/x86_64/boards/x86_64-pc
       )
 

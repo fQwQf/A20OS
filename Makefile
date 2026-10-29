@@ -359,26 +359,26 @@ endif
 NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,lwip)
 .PHONY: check-net-backend-boundary
 check-net-backend-boundary:
-	$(PYTHON) tools/check-network-backend-boundary.py $(if $(filter lwip-upstream,$(NET_STACK)),--check-upstream,)
-ifeq ($(NET_STACK),lwip-upstream)
+	$(PYTHON) tools/check-network-backend-boundary.py $(if $(filter lwip,$(NET_STACK)),--check-upstream,)
+ifeq ($(NET_STACK),lwip)
 kernel-only: check-net-backend-boundary
 endif
-LWIP_SOURCE_ROOT = $(KERNEL_DIR)/external/$(if $(filter lwip-upstream,$(NET_STACK)),lwip-upstream,lwip)
+LWIP_SOURCE_ROOT = $(if $(filter native,$(NET_STACK)),$(KERNEL_DIR)/net/backends/native/protocol,$(KERNEL_DIR)/external/lwip-upstream)
 ifeq ($(NET_ROLE),router)
 ifeq ($(NET_STACK),none)
 $(error NET_ROLE=router requires a TCP/IP backend)
 endif
 endif
-ifeq ($(NET_STACK),freebsd)
-$(error NET_STACK=freebsd is not runnable yet; upstream source pin alone is not a backend)
+ifeq ($(NET_STACK),bsd)
+$(error NET_STACK=bsd is not runnable yet; see docs/net/bsd-port.md for missing A20OS host and device adapters)
 endif
-ifeq ($(NET_STACK),lwip-upstream)
+ifeq ($(NET_STACK),lwip)
 ifneq ($(NET_LANES),1)
 $(error pristine lwIP requires NET_LANES=1; its core is serialized independently of NR_CPUS)
 endif
 endif
-ifeq ($(filter $(NET_STACK),lwip lwip-upstream none),)
-$(error NET_STACK must be lwip, lwip-upstream or none; FreeBSD is not runnable)
+ifeq ($(filter $(NET_STACK),lwip native none),)
+$(error NET_STACK must be lwip, native, bsd or none; bsd currently fails explicitly until its port is runnable)
 endif
 ifeq ($(NET_STACK),none)
 ifeq ($(PROFILE),mcu)
@@ -1205,7 +1205,7 @@ endif
 BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
-BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)$(if $(filter lwip-upstream,$(NET_STACK)),-lwip-upstream,)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)-$(NET_STACK)
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -1839,7 +1839,7 @@ CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,$(if $(filter benchmark,$(PROFILE)
 # is a regression.  Unverified arches that still carry warnings can build with
 # KERNEL_WERROR=0 while they are cleaned up.
 KERNEL_WERROR ?= 1
-CFLAGS = $(if $(filter lwip-upstream,$(NET_STACK)),-DCONFIG_LWIP_UPSTREAM=1,) -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
+CFLAGS = $(if $(filter lwip,$(NET_STACK)),-DCONFIG_LWIP_UPSTREAM=1,) -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/backends/lwip/port \

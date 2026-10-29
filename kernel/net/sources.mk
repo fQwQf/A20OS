@@ -21,7 +21,7 @@ A20_NET_COMMON_SRC := \
     $(KERNEL_DIR)/net/crypto/md5.c
 
 A20_NET_BACKEND_SRC :=
-ifneq ($(filter lwip lwip-upstream,$(NET_STACK)),)
+ifneq ($(filter lwip native,$(NET_STACK)),)
 A20_NET_BACKEND_SRC := \
     $(KERNEL_DIR)/net/backends/lwip/input_guard.c \
     $(KERNEL_DIR)/net/backends/lwip/transport.c \

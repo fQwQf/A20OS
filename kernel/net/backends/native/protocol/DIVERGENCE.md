@@ -1,4 +1,8 @@
-# lwIP 分叉差异清单 (Divergence Manifest)
+# lwIP 衍生实现历史差异清单 (Divergence Manifest)
+
+2026-10-29：本实现迁入 native 后端。下文旧路径与计数是原始审计记录，不表示当前
+外部依赖布局；当前源码在本目录，原版默认使用独立的 lwip-upstream submodule。
+来源、维护责任与构建见 [native README](../README.md)。
 
 最后核实：2026-10-03（`644b3c76`）。
 
@@ -13,8 +17,8 @@
   同一个 Linux socket ABI 探针在 Linux KVM/A20OS KVM 验证 wildcard UDP 的
   sendmsg → connect → sendmsg → close，首次失败的日志和修复后的结果均保留在
   `build/evidence/net-refactor-20261028/router-services-*-kvm/`。
-- 转发校验和与 TTL/hop-limit 修正见 [router.md](../../../docs/net/router.md)。
-- 动态邻居写入端口扩展见 [lan-services.md](../../../docs/net/lan-services.md)。
+- 转发校验和与 TTL/hop-limit 修正见 [router.md](../../../../../docs/net/router.md)。
+- 动态邻居写入端口扩展见 [lan-services.md](../../../../../docs/net/lan-services.md)。
   复用正常有界缓存和老化，不把 DHCP 临时客户端做成永久 ARP 表项。
 
 这些修正不改变“当前仍是分叉”的事实。原版候选必须单独引入并验收，不能悄悄替换

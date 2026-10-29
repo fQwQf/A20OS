@@ -2362,7 +2362,7 @@ CASES: dict[str, dict] = {
         'gate': {'mem': '1G', 'cpus': '4'},
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=4',
-                           'NET_LANES=4', 'OPT=-O3 -DCONFIG_NET_PCB_SANE=1'],
+                           'NET_STACK=native', 'NET_LANES=4', 'OPT=-O3 -DCONFIG_NET_PCB_SANE=1'],
                   'target': 'dev-build'},
         'log': '.kernel-build/smoke/netopt-lwip-riscv64.log',
         'stdin': {'kind': 'pipe', 'delay': 8,

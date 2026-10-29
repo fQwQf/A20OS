@@ -349,10 +349,9 @@ $(BUILD_DIR)/proc/timer_heap.o: $(KERNEL_DIR)/proc/timer_heap.c $(BUILD_FLAGS_ST
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TIMER_HEAP_TEST_CFLAGS) -c $< -o $@
 
-# lwIP lives under the kernel tree (kernel/external/lwip); the kernel compiles
-# the shared sources, objects land under $(BUILD_DIR)/external/lwip as before.
-# vendored 代码不参与内核栈金丝雀加固，保持其编译行为不变。
-$(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
+# Protocol sources retain their existing no-stack-protector compilation policy.
+# Native owns the derived implementation; pristine lwIP stays in its submodule.
+$(BUILD_DIR)/net/backends/native/protocol/src/%.o: $(KERNEL_DIR)/net/backends/native/protocol/src/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
 

@@ -52,7 +52,7 @@ record_exit build-slot 0
 
 cd "$repo" || { record_exit repository-cd 1; exit 1; }
 inc=( -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel \
-      -Ikernel/net/backends/lwip/port -Ikernel/external/lwip/src/include \
+      -Ikernel/net/backends/lwip/port -Ikernel/net/backends/native/protocol/src/include \
       -Ikernel/external/littlefs -Ikernel/external/littlefs/compat \
       -Ikernel/arch/x86_64/boards/x86_64-pc )
 {

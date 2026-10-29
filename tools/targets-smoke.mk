@@ -1489,7 +1489,7 @@ smoke-mm-alloc-fail:
 		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
 # Network-lane observability smoke (stage A)
 # ================================================================
-# Boots a NR_CPUS=4 NET_LANES=4 build, runs net_stress_test, and reads
+# Boots a NR_CPUS=4 NET_STACK=native NET_LANES=4 build, runs net_stress_test, and reads
 # /proc/net/status.  It asserts the structural facts only:
 #
 #   * the stress test passes, so the stack still moves bytes with lanes on;
@@ -1510,12 +1510,12 @@ smoke-mm-alloc-fail:
 # line instead of eating the 'n' off net_stress_test.  Observed exactly once,
 # as 'ent_stress_test: inaccessible or not found', which made this gate fail
 # with the network perfectly healthy.
-NET_LANES4_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" print-build-dir)
-NET_LANES1_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=1 print-build-dir)
+NET_LANES4_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" print-build-dir)
+NET_LANES1_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=1 print-build-dir)
 
 smoke-net-lanes: NET_HOSTFWD=
 smoke-net-lanes:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-lanes-riscv64.log"; \
@@ -1570,8 +1570,8 @@ smoke-net-lanes:
 # equivalence.
 smoke-net-lanes-n1: NET_HOSTFWD=
 smoke-net-lanes-n1:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=1 dev-build
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=1 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=4 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	lanes1_dir="$(NET_LANES1_BUILD_DIR)"; \
@@ -1717,8 +1717,8 @@ NET_LANE_HOST_PORTS = 18100,18101,18105,18110
 NET_LANE_HOST_GUEST_ARGS = 18100 18101 18105 18110
 smoke-net-lanes-hostfwd: NET_HOSTFWD=hostfwd=tcp:127.0.0.1:18100-10.0.2.15:18100,hostfwd=tcp:127.0.0.1:18101-10.0.2.15:18101,hostfwd=tcp:127.0.0.1:18105-10.0.2.15:18105,hostfwd=tcp:127.0.0.1:18110-10.0.2.15:18110
 smoke-net-lanes-hostfwd:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=1 dev-build
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=1 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	lanes1_dir="$(NET_LANES1_BUILD_DIR)"; \
@@ -1798,7 +1798,7 @@ smoke-net-lanes-hostfwd:
 # downstream -- or, for the lookup bug, as a plain missed connection.
 smoke-net-tcp-lanes: NET_HOSTFWD=
 smoke-net-tcp-lanes:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-tcp-lanes-riscv64.log"; \
@@ -2381,7 +2381,7 @@ smoke-net-rtl8139:
 # NOT asserted: interleaved_tokens.  A kernel print spliced into an echo line
 # corrupts the *log*, not the receive path, and counting it here would make
 # this gate fail on console traffic that the driver delivered correctly.
-SERIAL_FIDELITY_ARGS = ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4
+SERIAL_FIDELITY_ARGS = ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_STACK=native NET_LANES=4
 smoke-serial-fidelity: NET_HOSTFWD=
 smoke-serial-fidelity:
 	$(MAKE) $(SERIAL_FIDELITY_ARGS) dev-build

@@ -136,7 +136,7 @@ class SmokeBuildPathTests(unittest.TestCase):
     def test_netopt_lwip_uses_resolved_smp4_lane4_image_and_real_lwip_mode(self):
         case = smoke.CASES["smoke-netopt-lwip"]
         self.assertEqual(case["build"]["vars"], [
-            "ARCH=riscv64", "ABI=linux", "BRINGUP=0", "NR_CPUS=4", "NET_LANES=4",
+            "ARCH=riscv64", "ABI=linux", "BRINGUP=0", "NR_CPUS=4", "NET_STACK=native", "NET_LANES=4",
             "OPT=-O3 -DCONFIG_NET_PCB_SANE=1",
         ])
         self.assertEqual(case["stdin"]["lines"],

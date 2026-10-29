@@ -646,7 +646,7 @@ _Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
  * What the per-lane memp tables cost, so the tiers can be reconciled against it.
  *
  * Stage C2 gave every pool a per-lane descriptor row plus a per-(lane, pool)
- * pair of counters (kernel/external/lwip/src/core/memp.c).  Three static tables
+ * pair of counters (kernel/net/backends/native/protocol/src/core/memp.c).  Three static tables
  * follow, and only lane 0's descriptor row is free: it aliases memp_pools[]
  * rather than copying it, so the descriptor table is (N-1) rows, not N.
  *

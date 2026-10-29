@@ -41,6 +41,6 @@ LWIP_SRC = \
     $(LWIPDIR)/core/ipv6/nd6.c \
     $(LWIPDIR)/netif/ethernet.c
 
-ifneq ($(NET_STACK),lwip-upstream)
+ifeq ($(NET_STACK),native)
 LWIP_SRC += $(LWIPDIR)/core/tcp_cubic.c
 endif

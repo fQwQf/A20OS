@@ -1,5 +1,5 @@
 # ---- netd: userspace lwIP service (removed).
-# The TCP/IP stack lives in the kernel (kernel/external/lwip + kernel/net);
+# The TCP/IP stack lives in the kernel (kernel/net and the selected protocol submodule);
 # the user-space netd frame-ring/socket-proxy plane was abandoned.
 
 .PHONY: smoke-native-dynlink smoke-native-mm smoke-native-signal \

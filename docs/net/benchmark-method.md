@@ -80,3 +80,52 @@ A20OS 默认配置在256处达到 conntrack 容量。重复样本
 规模失败还暴露出旧统计把 conntrack/NAT 丢包计为 accepted。本轮已改为最终 verdict
 确定后只计一次，并由生产 hook 的进出方向失败用例验证。上述冻结内核在修正前，
 其 accepted/drop 行不可用于推导最终报文损失；原始失败证据保留。
+
+## 原版接入后的对照（2026-10-29）
+
+证据根为 `build/evidence/net-upstream-20261029/`。`matched-upstream3` 与
+`matched-legacy` 使用同一 SHA256 `9a2323f3f9e483a03b94618ad30949c128e7532f145e98acbc5b59af3480aedd`
+的 Linux ELF、virtio NIC（卸载关闭）、SLIRP、2 vCPU/2 GiB 与 affinity `0,2`。
+每项3次、每次2秒，所有样本 verified=1。下表分别取各指标的3次中位数；CPU 为整个
+QEMU（guest+VMM，全线程）ns/双向已验证 payload 字节，不是纯内核 CPU 周期。
+宿主回环只有参考意义，不能与 SLIRP 当作相同链路排名。
+
+| 系统/冻结版本 | TCP16KiB MiB/s | TCP p99 µs | TCP ns/B | UDP64B MiB/s | UDP p99 µs | UDP ns/B |
+|---|---:|---:|---:|---:|---:|---:|
+| Linux KVM | 22.367 | 1405.305 | 34.631 | 0.310909 | 716.997 | 2593.433 |
+| A20OS 原版适配 | 17.850 | 3431.222 | 33.923 | 0.287948 | 314.059 | 2570.554 |
+| A20OS 衍生实现（旧冻结内核） | 12.153 | 6141.358 | 52.853 | 0.274434 | 339.494 | 2683.937 |
+| 宿主 Linux 回环参考 | 358.071 | 58.178 | 0.720 | 2.720980 | 32.057 | 69.572 |
+
+这两组后端样本分组先后运行，没有交错随机顺序；SLIRP、宿主调度和短时请求/应答测试
+都会影响结果，不能用此表证明原版协议核心普遍更快或已解决吞吐瓶颈。冻结内核早于
+最后的 UNIX 选项空 attachment 防护、零 TTL 输入 guard 和选项重命名；准确源码/ELF
+身份以各 manifest 为准。当前重命名后的双网卡正确性另有独立回归，不能冒称表中数据
+是最终构建性能。无 BSD 样本，不填估计数字。用户已决定去除独立旧分叉后端，该决定
+不以这张性能表为条件。
+
+`lwip-three-backends-services-kvm` 和 `native-three-backends-services-kvm` 使用最后
+构建的 `kernel-lwip.elf` / `kernel-native.elf`，都通过真实三节点双网卡、IPv4/IPv6、
+NAPT 源端口冲突、策略路由正负例、socket ABI 与 DHCP/DNS。原版 lane=1、native lane=4，
+两者 NR_CPUS=2；这是后端各自执行模型的正确性回归，不能冒称相同执行并发度的性能实验。
+
+## 当前连接与内存瓶颈
+
+`lwip-three-scale2-kvm` 使用同一静态 Linux connection-probe ELF，每个连接独立 token，
+连接群建立前后均核验数据，并记录 baseline/held/closed/closed_2s 内存。Linux KVM 的
+64/256/320 均通过；A20OS 原版默认档64/256通过，320仅建立256条并返回失败。失败样本
+保留。默认 conntrack 上限256仍是硬限制；不能关闭跟踪来声称软路由容量已解决。
+
+原版当前 frontend=1192 B、private=29304 B、combined=30496 B（LP64/default），
+INET attachment 仍有固定 BH payload ring 的成本。256连接实测持有时 lwIP heap
+88736 B，关闭后仍88736 B（TIME_WAIT）；frontend引用从live256回到0，allocs=frees=512，
+faults=0。整机 MemFree 的持有前后差约9600 KiB，关闭后恢复大部分；它包含分配器、
+页与系统活动，不能当作精确每连接成本或仅凭2秒窗口判定泄漏。Linux 同次测量还发生
+后台内存释放，必须结合原始 `/proc` 状态解释，不能简单比较 MemFree 差值。
+
+应继续降低固定 socket attachment 成本、按场景给出跟踪容量与压力行为，再用直连
+受控链路测多连接吞吐与 CPU 归因。当前结果足以证明存在容量与内存成本问题，尚不足
+定位单一吞吐热点。
+
+`native-three-scale-kvm` 在 native lane=4 的相同默认预算下也在64/256通过、320只建立256。
+这进一步表明该限制属于共有跟踪容量，不能归因于原版 lwIP 性能下降。

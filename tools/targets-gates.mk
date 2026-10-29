@@ -312,9 +312,9 @@ check-cluster-loopback:
 $(TMPDIR)/a20-host-test_lwip_allocator_concurrency \
 $(TMPDIR)/a20-host-test_lwip_allocator_single_lane: \
         tools/tests/test_lwip_allocator_concurrency.c \
-        kernel/external/lwip/src/core/mem.c \
-        kernel/external/lwip/src/core/memp.c \
-        kernel/external/lwip/src/core/pbuf.c \
+        kernel/net/backends/native/protocol/src/core/mem.c \
+        kernel/net/backends/native/protocol/src/core/memp.c \
+        kernel/net/backends/native/protocol/src/core/pbuf.c \
         kernel/net/backends/lwip/lwip_compat.c \
         kernel/net/backends/lwip/port/arch/heap.h \
         tools/tests/lwip_host_port/core/lock.h \
@@ -326,7 +326,7 @@ $(TMPDIR)/a20-host-test_lwip_allocator_single_lane: \
 	  -DCONFIG_NET_LANES=$(if $(findstring single_lane,$@),1,4) \
 	  -Itools/tests/lwip_host_port \
 	  -Itools/tests/net_lane_host_port \
-	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
+	  -Ikernel/net/backends/native/protocol/src/include -Ikernel/include -Ikernel \
 	  $(filter %.c,$^) -Wl,--gc-sections -o $@
 
 # Compile the real lane queue implementation, with only CPU identity shimmed.

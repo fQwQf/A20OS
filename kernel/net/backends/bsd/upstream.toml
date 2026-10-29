@@ -1,0 +1,8 @@
+# Independent FreeBSD-derived networking project, not the complete OS source.
+repository = "https://github.com/F-Stack/f-stack.git"
+path = "kernel/external/f-stack"
+revision = "52514377b89750ffc03a93f401c22d2d4f269d5f"
+status = "port-in-progress-not-runnable"
+# Upstream's Linux/DPDK host substrate is not A20OS's kernel runtime.
+host_substrate = "replace-required"
+device_substrate = "replace-dpdk-with-a20-packet-io"

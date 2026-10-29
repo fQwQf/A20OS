@@ -223,7 +223,7 @@ def check() -> None:
     if "net_inet_bh_schedule" not in bh_schedule:
         raise ContractError("accept schedule no longer enters the bottom half")
 
-    listen = _body("kernel/external/lwip/src/core/tcp_in.c", "tcp_listen_input")
+    listen = _body("kernel/net/backends/native/protocol/src/core/tcp_in.c", "tcp_listen_input")
     alloc = listen.find("npcb = tcp_alloc(pcb->prio)")
     if alloc < 0:
         raise ContractError("tcp_listen_input no longer allocates child PCB")
@@ -238,7 +238,7 @@ def check() -> None:
     if any(match.start() < listener_locks[0].start() for match in listener_unlocks):
         raise ContractError("tcp_listen_input listener backlog guard must be released before tcp_alloc")
 
-    tcp_source = (ROOT / "kernel/external/lwip/src/core/tcp_in.c").read_text(encoding="utf-8")
+    tcp_source = (ROOT / "kernel/net/backends/native/protocol/src/core/tcp_in.c").read_text(encoding="utf-8")
     tcp_start = tcp_source.find("tcp_input(struct pbuf *p, struct netif *inp)")
     listen_call = tcp_source.find("tcp_listen_input(lpcb);")
     if tcp_start < 0 or listen_call < tcp_start:

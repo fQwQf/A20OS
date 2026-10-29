@@ -100,6 +100,9 @@ def main():
     parser.add_argument('--a20-setup', type=Path,
                         help='explicit configuration ablation, copied and hashed')
     args = parser.parse_args()
+    sides = args.sides.split(',')
+    if not sides or any(x not in ('linux-kvm', 'a20-kvm') for x in sides):
+        parser.error('sides must be linux-kvm and/or a20-kvm')
     counts = [int(x) for x in args.counts.split(',')]
     if not counts or any(x < 1 or x > 8192 for x in counts):
         parser.error('counts must be in 1..8192')
@@ -121,7 +124,7 @@ def main():
     peer = EchoPeer(args.port)
     try:
         for count in counts:
-            for side in args.sides.split(','):
+            for side in sides:
                 if side not in ('linux-kvm', 'a20-kvm'):
                     raise ValueError(f'unknown side {side}')
                 label = f'{side}-{count}'

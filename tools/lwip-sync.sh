@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # lwIP fork divergence helper.
 #
-# The vendored tree under kernel/external/lwip carries A20OS-owned changes, so
+# The derived tree under kernel/net/backends/native/protocol carries A20OS-owned changes, so
 # "external code" is no longer an accurate description of it.  This tool makes
 # the divergence measurable and re-syncing upstream a mechanical operation.
-# See kernel/external/lwip/DIVERGENCE.md for the human-readable manifest.
+# See kernel/net/backends/native/protocol/DIVERGENCE.md for the human-readable manifest.
 #
 #   --record <upstream-checkout>   pin an upstream SHA as the re-sync baseline
 #   --stat                        print the diffstat against the pinned baseline
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TREE="kernel/external/lwip"
+TREE="kernel/net/backends/native/protocol"
 MANIFEST="$TREE/DIVERGENCE.md"
 BASE_FILE="$TREE/.upstream-base"
 
