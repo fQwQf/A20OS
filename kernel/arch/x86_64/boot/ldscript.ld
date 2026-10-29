@@ -20,20 +20,20 @@ SECTIONS
         . = ALIGN(4096);
         __uefi_entry_phys = . - LOAD_DELTA;   /* the counter, not ADDR(.text) */
         *(.uefi64)
-        *(.text .text.*)
+        *(.text .text.* .ltext .ltext.*)
     }
 
     . = ALIGN(4096);
     __rodata_start = .;
     .rodata : AT(ADDR(.rodata) - LOAD_DELTA) {
         KEEP(*(.rodata.ap_trampoline))
-        *(.rodata .rodata.*)
+        *(.rodata .rodata.* .lrodata .lrodata.*)
     }
 
     . = ALIGN(4096);
     __data_start = .;
     .data : AT(ADDR(.data) - LOAD_DELTA) {
-        *(.data .data.*)
+        *(.data .data.* .ldata .ldata.*)
         *(.sdata .sdata.*)
     }
 

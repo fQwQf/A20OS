@@ -315,6 +315,10 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_KERNEL_RUNTIME_LINK) $(KALLSYMS_O
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(RUST_KERNEL_RUNTIME_LINK) $(ARCH_LIBS) -o $@
 
+ifneq ($(strip $(BSD_BOOTSTRAP_OBJECT)),)
+$(KERNEL_NOSYMS_ELF) $(KERNEL_ELF): kernel/net/backends/bsd/sets.ld
+endif
+
 # Kernel objects treat Makefile as an order-only prerequisite, so a change in
 # compiler flags (e.g. the CONFIG_UBSAN choice that PROFILE flips between
 # development and benchmark/final builds) leaves stale objects from a previous

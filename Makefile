@@ -138,6 +138,8 @@ NR_CPUS ?= 1
 CONFIG_KERNEL_PREEMPT ?= 1
 # Functional diagnostic; separate artifacts, never enabled in normal builds.
 SMP_SELFTEST ?= 0
+# Explicit freestanding BSD bootstrap diagnostic artifact; never a fallback backend.
+BSD_BOOTSTRAP_OBJECT ?=
 # Optional shared-RAM multi-process QEMU platform; ordinary builds unchanged.
 QEMU_SHARED_SMP ?= 0
 ifneq ($(filter $(QEMU_SHARED_SMP),0 1),$(QEMU_SHARED_SMP))
@@ -1206,6 +1208,15 @@ BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)-$(NET_STACK)
+ifneq ($(strip $(BSD_BOOTSTRAP_OBJECT)),)
+ifneq ($(ARCH),x86_64)
+$(error BSD_BOOTSTRAP_OBJECT currently requires ARCH=x86_64)
+endif
+ifeq ($(wildcard $(BSD_BOOTSTRAP_OBJECT)),)
+$(error BSD_BOOTSTRAP_OBJECT does not exist)
+endif
+BUILD_VARIANT := $(BUILD_VARIANT)-bsdboot-$(shell sha256sum '$(BSD_BOOTSTRAP_OBJECT)' | cut -c1-12)
+endif
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -2531,6 +2542,12 @@ check-cluster-ssi-network:
 KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(LWIP_SOURCE_ROOT)/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
+ifneq ($(strip $(BSD_BOOTSTRAP_OBJECT)),)
+CFLAGS += -DCONFIG_BSD_BOOTSTRAP_TEST
+KERNEL_SRC += kernel/net/backends/bsd/bootstrap_test.c
+KERNEL_OBJ += $(abspath $(BSD_BOOTSTRAP_OBJECT))
+LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld
+endif
 KERNEL_OBJ += $(RUST_LANDLOCK_OBJECT) $(RUST_SECCOMP_OBJECT)
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
