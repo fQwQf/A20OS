@@ -1,5 +1,8 @@
 # BSD 网络后端接入记录（2026-10-29）
 
+最新状态、真实 KVM 回环结果与交接命令见 [BSD-HANDOFF.md](BSD-HANDOFF.md)。
+下文按阶段保留历史记录，早期“未运行”描述以交接记录为准。
+
 初期已将完整 FreeBSD 源码子模块替换为独立项目
 [F-Stack](https://github.com/F-Stack/f-stack)，初期固定提交
 `52514377b89750ffc03a93f401c22d2d4f269d5f`（现已替换，见末节）。它将 FreeBSD 网络实现和用户态适配一起
@@ -120,7 +123,7 @@ v1.25 不带该批次；新基线避免先围绕这些空桩补建运行行为�
 `runtime/memory.c` 替换 libc/DPDK 的 BSD malloc/UMA backing：
 
 - heap 返回16字节对齐地址，匿名映射返回4096字节对齐且清零的内存。
-- 仅接受空地址、私有匿名、读写、整页映射；不冒充 Linux mmap、共享映射或物理连续 DMA。
+- 仅接受空地址、私有匿名、读写映射；实际 backing 按页向上取整，按原始请求长度释放；不冒充 Linux mmap、共享映射或物理连续 DMA。
 - 依据 `ff_glue.c` 的实际检查，映射失败返回 NULL，不能交给它 `(void *)-1`。
 - 配额包含 backing 请求、私有头和对齐预留；embedded/default/server 分别为
   4/64/256 MiB。它不是已承诺能启动的最小配置，尤其 embedded 尚无 BSD 启动验收。

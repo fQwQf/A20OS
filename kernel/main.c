@@ -388,6 +388,11 @@ void init_kthread(void) {
     net_stack_attach_interfaces();
 #endif
 
+#ifdef CONFIG_BSD_BOOTSTRAP_TEST
+    extern void a20_bsd_bootstrap_test(void);
+    a20_bsd_bootstrap_test();
+#endif
+
     const char *init_path = NULL;
     int fd = -1;
     char distro_interp[MAX_PATH_LEN];
