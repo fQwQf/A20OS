@@ -59,3 +59,42 @@ TCP 输入输出/连接生命周期、UDP、mbuf、socket/sockbuf/domain、接�
 不能把它们全部称为内核缺失 API。未提供成功空桩来隐藏这些依赖；目前没有 BSD 初始化、
 TCP 连接或 KVM 运行结果，更没有 BSD 吞吐数字。后续需补齐 SYSINIT/VNET/PCPU、
 分配与线程上下文、同步/callout/epoch，再接入现有 NIC/TUN 和 socket 执行表。
+
+
+## 桌面/服务器目标与第一批运行时适配
+
+桌面与服务器的最终后端现已指定为 BSD，见 [后端策略](backend-policy.md)。当前仍不
+改变可联网的过渡默认，也不解除 `NET_STACK=bsd` 的构建拒绝；该选项不能用空操作表
+或宿主 socket 实现假成功。
+
+`bsd-host-runtime3` 扩展到51个上游对象及1个 A20OS 适配对象，52个对象均编译并部分
+链接成功。新增真实 SYSINIT、UMA、BSD 时间管理与 F-Stack 初始化/glue；源码仍由
+submodule 拥有。部分链接保留428个未解析符号，这不是428个都要重写的宿主 API。
+
+`runtime/clock.c` 接通 callout 使用的 `ff_get_tsc_ns` 到 A20OS 单调时钟，消除对
+`rte_rdtsc`/DPDK 频率和浮点换算的依赖；realtime 与 monotonic 使用不同的内核时钟。
+`ff_get_current_time` 每次读取实际时间，不需要用户态轮询刷新共享缓存。此适配已经
+与真实 `ff_kern_timeout.c` 同一部分链接，而不是只有未调用的接口定义。主机验证：
+
+```sh
+cc -std=gnu99 -Wall -Wextra -Werror \
+  -Ikernel/include -Ikernel/external/f-stack/lib \
+  kernel/net/backends/bsd/runtime/clock.c tools/tests/bsd_clock_host.c \
+  -o /tmp/a20-bsd-clock-host
+/tmp/a20-bsd-clock-host
+```
+
+命名空间隔离后的真实 clock 对象也与同一 harness 链接并通过，记录为
+`bsd-host-runtime3/clock-host-test.json`。测试覆盖200天 uptime、纳秒进位、FAST/默认时钟语义、wall clock 回拨期间 callout
+时间不倒退，以及 realtime 无刷新读取。它只验证该时钟适配，不是 BSD 启动测试。
+
+工具同时产出 `bsd-core-isolated.o`：所有 BSD 的定义及未解析引用统一加
+`a20_bsd_` 前缀，只有明确列出的两个 A20OS 时钟入口和 ELF GOT 特殊符号保留原名。
+BSD `malloc/free/printf` 等不能误绑定到 A20OS 的同名、不同签名函数。未提供内存、锁、
+线程等成功空桩。原始对象也保留，manifest 记录前后依赖、导入白名单以及 TLS 符号；
+完整 readelf 符号、重定位和 section 输出可供下一步链接使用。
+
+这次发现并保留5个 TLS 符号（包括未定义的 pcurthread）与 SYSINIT/VNET/PCPU linker
+set 依赖。最终内核链接还必须为它们提供真实的执行上下文和正确的 section 生命周期。
+不能把这些 TLS 变量改成共享全局，或让 BSD 访问用户进程的 FS/TLS。当前没有 BSD
+KVM 启动、socket 或公网访问结果；lwIP/native 的公网成功不能转记给 BSD。
