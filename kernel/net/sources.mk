@@ -1,5 +1,6 @@
 # Explicit ownership manifests; never recursively collect backend sources.
 A20_NET_COMMON_SRC := \
+    $(KERNEL_DIR)/net/core/backend.c \
     $(KERNEL_DIR)/net/core/stack.c \
     $(KERNEL_DIR)/net/core/transport.c \
     $(KERNEL_DIR)/net/socket/net_lock_probe.c \
@@ -37,6 +38,13 @@ A20_NET_BACKEND_SRC := \
     $(KERNEL_DIR)/net/backends/lwip/lwip_stack.c \
     $(KERNEL_DIR)/net/backends/lwip/net_lane.c \
     $(KERNEL_DIR)/net/backends/lwip/socket_inet.c
+endif
+ifeq ($(NET_STACK),bsd)
+A20_NET_BACKEND_SRC := \
+    $(KERNEL_DIR)/net/backends/bsd/executor.c \
+    $(KERNEL_DIR)/net/backends/bsd/runtime.c \
+    $(KERNEL_DIR)/net/backends/bsd/options.c \
+    $(KERNEL_DIR)/net/backends/bsd/transport.c
 endif
 
 A20_NET_SRC := $(A20_NET_COMMON_SRC) $(A20_NET_BACKEND_SRC)

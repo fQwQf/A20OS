@@ -4,6 +4,8 @@
 # 宿主机上自动启用 KVM 加速（无 KVM 时回退 TCG）。
 #
 #   tools/a20 run xfce-x86_64
+#     （x86_64 桌面默认已是 BSD；已通过本实例内 curl、真实 Firefox
+#       HTTP/HTTPS DOM、动态控制面和 hostfwd TCP/UDP 入站）
 name = "xfce-x86_64"
 description = "XFCE Wayland/labwc desktop via apk world 'xfce', KVM-accelerated on x86_64"
 arch = "x86_64"
@@ -22,3 +24,13 @@ enabled = true
 [rootfs]
 world = "xfce"
 world_size_mb = 4096
+
+[net]
+# Protocol stack selected by this instance (NOT the QEMU netdev spec).
+stack = "bsd"
+# QEMU user networking publishes the kernel path as the Multiboot cmdline
+# when no -append is supplied.  Declare the SLIRP static lease explicitly so
+# the BSD backend never starts with an unconfigured link.
+guest_ip = "10.0.2.15"
+guest_netmask = "255.255.255.0"
+guest_gateway = "10.0.2.2"

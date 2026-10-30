@@ -14,3 +14,14 @@ extra_qemu = ["-cpu", "host"]
 [rootfs]
 world = "benchmark"
 world_size_mb = 512
+
+[net]
+# Protocol stack selected by this instance (NOT the QEMU netdev spec).
+# Build derives NET_STACK from this field; see docs/net/instance-config.md.
+stack = "bsd"
+# QEMU user networking publishes the kernel path as the Multiboot cmdline
+# when no -append is supplied.  Declare the SLIRP static lease explicitly so
+# the BSD backend never starts with an unconfigured link.
+guest_ip = "10.0.2.15"
+guest_netmask = "255.255.255.0"
+guest_gateway = "10.0.2.2"

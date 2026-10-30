@@ -86,6 +86,26 @@ print-ci-kernel-arches:
 include components/trim.mk
 
 ARCH ?= riscv64
+
+# Instance-driven build selection.  The instance manifest is the single source
+# of truth for arch/board/ABI, protocol stack, lanes, resource tier and role:
+#
+#   make NET_INSTANCE=xfce-x86_64 kernel-only
+#
+# `tools/a20 build <instance>` uses the same derivation.  Command-line
+# assignments still win, because GNU make gives them precedence over eval.
+ifneq ($(NET_INSTANCE),)
+NET_INSTANCE_FILE := $(if $(filter /%,$(NET_INSTANCE)),$(NET_INSTANCE),$(CURDIR)/instances/$(NET_INSTANCE).toml)
+ifeq ($(wildcard $(NET_INSTANCE_FILE)),)
+$(error NET_INSTANCE=$(NET_INSTANCE): no manifest at $(NET_INSTANCE_FILE))
+endif
+NET_INSTANCE_VARS := $(shell $(PYTHON) tools/a20_net_vars.py $(NET_INSTANCE_FILE))
+ifeq ($(strip $(NET_INSTANCE_VARS)),)
+$(error NET_INSTANCE=$(NET_INSTANCE): failed to derive build variables)
+endif
+$(foreach assignment,$(NET_INSTANCE_VARS),$(eval $(assignment)))
+endif
+
 RETIRED_ARCHES := loongarch32 ppc64le
 ifneq ($(filter $(ARCH),$(RETIRED_ARCHES)),)
 $(error ARCH=$(ARCH) is retired from active builds; for historical reproduction, check out v0.18 or earlier (see docs/releases/v1.0.md))
@@ -140,6 +160,7 @@ CONFIG_KERNEL_PREEMPT ?= 1
 SMP_SELFTEST ?= 0
 # Explicit freestanding BSD bootstrap diagnostic artifact; never a fallback backend.
 BSD_BOOTSTRAP_OBJECT ?=
+BSD_CLANG ?= $(if $(wildcard $(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang),$(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang,clang)
 # Optional shared-RAM multi-process QEMU platform; ordinary builds unchanged.
 QEMU_SHARED_SMP ?= 0
 ifneq ($(filter $(QEMU_SHARED_SMP),0 1),$(QEMU_SHARED_SMP))
@@ -358,29 +379,48 @@ endif
 endif
 
 # Stack selection is separate from resource budgets and QEMU NET_BACKEND.
-NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,lwip)
-.PHONY: check-net-backend-boundary
+# x86_64 desktop/server hosts use the FreeBSD backend once the real XFCE
+# browser, inbound/outbound TCP/UDP and control-plane transaction gates pass.
+# Other architectures stay on their validated lwIP default until their BSD
+# ports have the same evidence.
+NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,$(if $(filter x86_64,$(ARCH)),bsd,lwip))
+# Instances set NET_STACK through [net].stack (tools/a20 or NET_INSTANCE=).
+# The default above is only for a bare `make` with no manifest.
+.PHONY: check-net-backend-boundary check-net-backend-host
 check-net-backend-boundary:
 	$(PYTHON) tools/check-network-backend-boundary.py $(if $(filter lwip,$(NET_STACK)),--check-upstream,)
+check-net-backend-host:
+	sh tools/tests/net_backend_host.sh
 ifeq ($(NET_STACK),lwip)
 kernel-only: check-net-backend-boundary
 endif
-LWIP_SOURCE_ROOT = $(if $(filter native,$(NET_STACK)),$(KERNEL_DIR)/net/backends/native/protocol,$(KERNEL_DIR)/external/lwip-upstream)
+LWIP_SOURCE_ROOT = $(if $(filter native,$(NET_STACK)),$(KERNEL_DIR)/net/backends/native/protocol,$(if $(filter lwip,$(NET_STACK)),$(KERNEL_DIR)/external/lwip-upstream,))
 ifeq ($(NET_ROLE),router)
 ifeq ($(NET_STACK),none)
 $(error NET_ROLE=router requires a TCP/IP backend)
 endif
 endif
 ifeq ($(NET_STACK),bsd)
-$(error NET_STACK=bsd is not runnable yet; see docs/net/bsd-port.md for missing A20OS host and device adapters)
+ifneq ($(ARCH),x86_64)
+$(error NET_STACK=bsd currently requires ARCH=x86_64)
+endif
+ifneq ($(NET_LANES),1)
+$(error BSD uses one serialized protocol executor; set NET_LANES=1)
+endif
+ifneq ($(NET_PROFILE),2)
+$(error NET_STACK=bsd currently validates only NET_PROFILE=2; embedded/server tiers need separate budget evidence)
+endif
+ifeq ($(NET_ROLE),router)
+$(error NET_STACK=bsd currently supports the desktop/host vertical slice, not NET_ROLE=router)
+endif
 endif
 ifeq ($(NET_STACK),lwip)
 ifneq ($(NET_LANES),1)
 $(error pristine lwIP requires NET_LANES=1; its core is serialized independently of NR_CPUS)
 endif
 endif
-ifeq ($(filter $(NET_STACK),lwip native none),)
-$(error NET_STACK must be lwip, native, bsd or none; bsd currently fails explicitly until its port is runnable)
+ifeq ($(filter $(NET_STACK),lwip native bsd none),)
+$(error NET_STACK must be lwip, native, bsd or none)
 endif
 ifeq ($(NET_STACK),none)
 ifeq ($(PROFILE),mcu)
@@ -1854,7 +1894,7 @@ CFLAGS = $(if $(filter lwip,$(NET_STACK)),-DCONFIG_LWIP_UPSTREAM=1,) -Wall -Wext
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/backends/lwip/port \
-         -I$(LWIP_SOURCE_ROOT)/src/include \
+         $(if $(LWIP_SOURCE_ROOT),-I$(LWIP_SOURCE_ROOT)/src/include,) \
          -I$(KERNEL_DIR)/external/littlefs \
          -I$(KERNEL_DIR)/external/littlefs/compat \
          -DLFS_MALLOC=lfs_kmalloc -DLFS_FREE=lfs_kfree \
@@ -1868,8 +1908,15 @@ CFLAGS = $(if $(filter lwip,$(NET_STACK)),-DCONFIG_LWIP_UPSTREAM=1,) -Wall -Wext
          -DCONFIG_NET_LANES=$(NET_LANES) \
          -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
          -DCONFIG_NET_ROUTER=$(if $(filter router,$(NET_ROLE)),1,0) \
+         -DCONFIG_NET_BACKEND_NAME='"$(NET_STACK)"' \
          -DCONFIG_CLUSTER_PROFILE=$(CLUSTER_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
+ifneq ($(filter lwip native,$(NET_STACK)),)
+CFLAGS += -DCONFIG_NET_BACKEND_LWIP=1
+endif
+ifeq ($(NET_STACK),bsd)
+CFLAGS += -DCONFIG_NET_BACKEND_BSD=1
+endif
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 CFLAGS += -DCONFIG_NETFILTER_REWRITE_RUST
 endif
@@ -2509,6 +2556,11 @@ KERNEL_ROUTE_OBJECT = $(RUST_NET_ROUTE_OBJECT)
 endif
 
 include tools/driver-modules.mk
+ifeq ($(NET_STACK),bsd)
+# Cluster SSI's opt-in selftests currently inspect lwIP memory statistics.
+# Keep the desktop/BSD build independent instead of inventing a second stats ABI.
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/cluster/selftest.c $(KERNEL_DIR)/cluster/udp_selftest.c,$(KERNEL_SRC))
+endif
 
 # Object files
 LWIP_KERNEL_SRC := $(filter $(LWIP_SOURCE_ROOT)/src/%.c,$(KERNEL_SRC))
@@ -2542,9 +2594,21 @@ check-cluster-ssi-network:
 KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(LWIP_SOURCE_ROOT)/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
+ifeq ($(NET_STACK),bsd)
+BSD_CORE_DIR = $(BUILD_DIR)/bsd-core
+BSD_CORE_OBJECT = $(BSD_CORE_DIR)/bsd-core-isolated.o
+.PHONY: FORCE_BSD_CORE
+FORCE_BSD_CORE:
+$(BSD_CORE_OBJECT): FORCE_BSD_CORE
+	@rm -rf $(BSD_CORE_DIR)
+	$(PYTHON) tools/probe-bsd-core.py --cc '$(BSD_CLANG)' --emulated-tls --net-profile $(NET_PROFILE) --out $(BSD_CORE_DIR)
+KERNEL_OBJ += $(BSD_CORE_OBJECT)
+CFLAGS += -DCONFIG_NET_STACK_BSD=1
+LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld
+endif
 ifneq ($(strip $(BSD_BOOTSTRAP_OBJECT)),)
 CFLAGS += -DCONFIG_BSD_BOOTSTRAP_TEST
-KERNEL_SRC += kernel/net/backends/bsd/bootstrap_test.c
+KERNEL_SRC += kernel/net/backends/bsd/bootstrap_test.c kernel/net/backends/bsd/diagnostic_nic_host.c
 KERNEL_OBJ += $(abspath $(BSD_BOOTSTRAP_OBJECT))
 LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld
 endif

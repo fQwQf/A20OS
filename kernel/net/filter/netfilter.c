@@ -71,6 +71,33 @@ _Static_assert(sizeof(netfilter_stats_t) == 48,
 static netfilter_rule_t g_rules[NETFILTER_MAX_RULES];
 static uint32_t g_rule_count;
 
+/* One atomic load on the packet path decides whether the Rust parser,
+ * conntrack table and NAT rewrite need to run at all.  Configuration paths
+ * refresh it; the common "no rules, no NAT, no live entries" case pays only
+ * this load instead of a full parse plus a conntrack transaction. */
+static volatile uint32_t g_netfilter_busy;
+/* Explicit cton/ctoff request.  Default is 0: tracking is lazy until a rule,
+ * NAT rule or live entry needs it. */
+static volatile uint32_t g_netfilter_force;
+
+int netfilter_busy(void)
+{
+    return __atomic_load_n(&g_netfilter_busy, __ATOMIC_ACQUIRE) != 0;
+}
+
+void netfilter_busy_refresh(void)
+{
+    int busy = netfilter_rule_count() || netfilter_nat_rule_count() ||
+               netfilter_conntrack_count() || g_netfilter_force;
+    __atomic_store_n(&g_netfilter_busy, busy ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+void netfilter_busy_force(int on)
+{
+    __atomic_store_n(&g_netfilter_force, on ? 1u : 0u, __ATOMIC_RELEASE);
+    netfilter_busy_refresh();
+}
+
 /*
  * Seqlock over the rule table.  Even means the table is stable, odd means a
  * writer is inside it.  Writers hold g_netfilter_lock, so they are already
@@ -324,6 +351,8 @@ int netfilter_add_rule(const netfilter_rule_t *rule)
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     int r = a20_netfilter_rule_add(net_filter_view(), rule);
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    if (r == 0)
+        netfilter_busy_refresh();
     return r;
 }
 
@@ -332,6 +361,8 @@ int netfilter_del_rule(unsigned index)
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     int r = a20_netfilter_rule_del(net_filter_view(), index);
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    if (r == 0)
+        netfilter_busy_refresh();
     return r;
 }
 
@@ -340,6 +371,7 @@ void netfilter_reset(void)
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     a20_netfilter_rule_reset(net_filter_view());
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    netfilter_busy_refresh();
 }
 
 int netfilter_get_rule(unsigned index, netfilter_rule_t *out)

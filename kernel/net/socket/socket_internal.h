@@ -186,6 +186,13 @@ typedef struct net_socket {
     wait_queue_t accept_waitq;
     wait_queue_t read_waitq;
     wait_queue_t write_waitq;
+    /* Backend policy cache, not protocol state.
+     *
+     * These fields let the frontend answer getsockopt/poll without entering
+     * the stack.  The authoritative TCP/connection state lives in the backend
+     * attachment; nothing here may be used to reconstruct it.  New backends
+     * should add a capability/module rather than another field in this block.
+     */
     int local_tcp;
     int tcp_connecting;
     int tcp_err;

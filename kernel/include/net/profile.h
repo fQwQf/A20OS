@@ -519,7 +519,7 @@ _Static_assert(NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE,
 
 #define NET_PROFILE_PACKET_SLOT_BYTES (4 + NET_PROFILE_PACKET_FRAME_SIZE)
 #ifndef NET_PROFILE_NETIF_STATE_OVERHEAD
-#define NET_PROFILE_NETIF_STATE_OVERHEAD 128
+#define NET_PROFILE_NETIF_STATE_OVERHEAD 144
 #endif
 #define NET_PROFILE_NETIF_STATE_BYTES \
     (2 * NET_PROFILE_NETIF_FRAME_SIZE + NET_PROFILE_NETIF_STATE_OVERHEAD)
@@ -744,6 +744,23 @@ _Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
  */
 #ifndef CONFIG_NET_PCB_SANE
 #define CONFIG_NET_PCB_SANE 0
+#endif
+
+/*
+ * Per-iteration receive budget shared by every backend.
+ *
+ * The frontend's scheduler/idle hook already bounds its own drain with
+ * CONFIG_NET_RX_IRQ_BUDGET; a backend that runs its own executor (BSD) needs
+ * the same tier-aware number instead of a private constant.  Keeping it in the
+ * profile header is what stops each backend from growing a second, silently
+ * different definition of "one batch".
+ */
+#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
+#define NET_PROFILE_RX_BUDGET 8
+#elif CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_SERVER
+#define NET_PROFILE_RX_BUDGET 128
+#else
+#define NET_PROFILE_RX_BUDGET 32
 #endif
 
 #endif /* _NET_PROFILE_H */

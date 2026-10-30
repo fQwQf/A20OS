@@ -1,76 +1,216 @@
+/* Frontend -> backend socket dispatch.
+ *
+ * The frontend never sees a protocol control block.  Each helper resolves the
+ * selected backend's module once and degrades to a precise error when the
+ * module or the advertised capability is absent.  This is the only file that
+ * maps the socket-facing part of net/backend.h onto the old internal helpers.
+ */
 #include "net/socket/socket_internal.h"
-#include "net/transport.h"
+#include "net/backend.h"
 #include "net/stack.h"
+#include "core/errno.h"
+
+static const net_socket_ops_t *sock_ops(void) {
+    const net_backend_t *b = net_backend_current();
+    return (b && b->socket) ? b->socket : NULL;
+}
+
+static const net_socket_opt_ops_t *opt_ops(void) {
+    const net_backend_t *b = net_backend_current();
+    return (b && b->opts) ? b->opts : NULL;
+}
+
+static const net_endpoint_ops_t *endpoint_ops(void) {
+    const net_backend_t *b = net_backend_current();
+    return (b && b->endpoint) ? b->endpoint : NULL;
+}
 
 int net_inet_socket_init(net_socket_t *s) {
-    return net_stack_transport()->socket_init(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (!ops || !ops->open)
+        return -ENETDOWN;
+    return ops->open(s);
 }
+
 void net_inet_socket_destroy(net_socket_t *s) {
-    net_stack_transport()->socket_destroy(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->close)
+        ops->close(s);
 }
+
 void net_inet_state_release(net_socket_t *s) {
-    net_stack_transport()->state_release(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->release)
+        ops->release(s);
 }
+
 int net_inet_bind_pcb(net_socket_t *s, const void *a, size_t n) {
-    return net_stack_transport()->bind_pcb(s,a,n);
+    const net_socket_ops_t *ops = sock_ops();
+    return (ops && ops->bind) ? ops->bind(s, a, n) : -EOPNOTSUPP;
 }
-int net_inet_connect(net_socket_t *s, const void *a, size_t n, const void *p, size_t pn) {
-    return net_stack_transport()->connect(s,a,n,p,pn);
+
+int net_inet_connect(net_socket_t *s, const void *a, size_t n, const void *p,
+                     size_t pn) {
+    const net_socket_ops_t *ops = sock_ops();
+    return (ops && ops->connect) ? ops->connect(s, a, n, p, pn) : -EOPNOTSUPP;
 }
+
 int net_inet_tcp_listen(net_socket_t *s, int backlog) {
-    return net_stack_transport()->tcp_listen(s,backlog);
+    const net_socket_ops_t *ops = sock_ops();
+    if (!net_backend_has(NET_CAP_LISTEN))
+        return -EOPNOTSUPP;
+    return (ops && ops->listen) ? ops->listen(s, backlog) : -EOPNOTSUPP;
 }
-int net_inet_sendto(net_socket_t *s, const void *b, size_t n, int f, const void *a, size_t an) {
-    return net_stack_transport()->sendto(s,b,n,f,a,an);
+
+int net_inet_sendto(net_socket_t *s, const void *b, size_t n, int f,
+                    const void *a, size_t an) {
+    const net_socket_ops_t *ops = sock_ops();
+    return (ops && ops->send) ? ops->send(s, b, n, f, a, an) : -EOPNOTSUPP;
 }
+
 int net_inet_shutdown(net_socket_t *s, int receive, int transmit) {
-    return net_stack_transport()->shutdown(s,receive,transmit);
+    const net_socket_ops_t *ops = sock_ops();
+    if (!net_backend_has(NET_CAP_SHUTDOWN))
+        return -EOPNOTSUPP;
+    return (ops && ops->shutdown) ? ops->shutdown(s, receive, transmit)
+                                  : -EOPNOTSUPP;
 }
+
 void net_inet_accept_child_ready(net_socket_t *s) {
-    net_stack_transport()->accept_child_ready(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->accept_ready)
+        ops->accept_ready(s);
 }
+
 void net_tcp_recved(net_socket_t *s, size_t n) {
-    net_stack_transport()->recved(s,n);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->recved)
+        ops->recved(s, n);
 }
+
 void net_inet_options_apply(net_socket_t *s, unsigned mask) {
-    net_stack_transport()->options_apply(s,mask);
+    const net_socket_opt_ops_t *ops = opt_ops();
+    if (ops && ops->apply)
+        ops->apply(s, mask);
 }
-int net_inet_option_validate(net_socket_t *s, int level, int option, const void *v, size_t n) {
-    return net_stack_transport()->option_validate(s,level,option,v,n);
+
+int net_inet_option_validate(net_socket_t *s, int level, int option,
+                             const void *v, size_t n) {
+    const net_socket_opt_ops_t *ops = opt_ops();
+    return (ops && ops->validate) ? ops->validate(s, level, option, v, n) : 0;
 }
+
 uint32_t net_inet_buffer_default(int send) {
-    return net_stack_transport()->buffer_default(send);
+    const net_socket_opt_ops_t *ops = opt_ops();
+    return (ops && ops->buf_default) ? ops->buf_default(send) : 0;
 }
+
 int net_inet_has_transport(const net_socket_t *s) {
-    return net_stack_transport()->has_transport(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (!ops)
+        return 0;
+    if (ops->has_transport)
+        return ops->has_transport(s);
+    return s != NULL;
 }
+
 int net_inet_has_tcp(const net_socket_t *s) {
-    return net_stack_transport()->has_tcp(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->has_stream)
+        return ops->has_stream(s);
+    return net_backend_has(NET_CAP_STREAM) && s != NULL;
 }
+
 int net_inet_bind_device(net_socket_t *s, const char *name) {
-    return net_stack_transport()->bind_device(s,name);
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    if (!net_backend_has(NET_CAP_BINDTODEVICE))
+        return -EOPNOTSUPP;
+    return (ops && ops->bind_device) ? ops->bind_device(s, name) : -EOPNOTSUPP;
 }
+
 int net_inet_bound_device(net_socket_t *s, char name[16]) {
-    return net_stack_transport()->bound_device(s,name);
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    if (!net_backend_has(NET_CAP_BINDTODEVICE))
+        return -EOPNOTSUPP;
+    return (ops && ops->bound_device) ? ops->bound_device(s, name)
+                                      : -EOPNOTSUPP;
 }
-int net_inet_send_udp_control(net_socket_t *s, const void *b, size_t n, int f, const void *a, size_t an, const net_datagram_control_t *c) {
-    return net_stack_transport()->send_udp_control(s,b,n,f,a,an,c);
+
+int net_inet_send_udp_control(net_socket_t *s, const void *b, size_t n, int f,
+                              const void *a, size_t an,
+                              const net_datagram_control_t *c) {
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    if (!net_backend_has(NET_CAP_UDP_CONTROL))
+        return -EOPNOTSUPP;
+    return (ops && ops->udp_control) ? ops->udp_control(s, b, n, f, a, an, c)
+                                     : -EOPNOTSUPP;
 }
+
 int net_inet_pmtu_discover(net_socket_t *s, int mode, int set) {
-    return net_stack_transport()->pmtu_discover(s,mode,set);
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    if (!net_backend_has(NET_CAP_PMTU))
+        return -EOPNOTSUPP;
+    return (ops && ops->pmtu) ? ops->pmtu(s, mode, set) : -EOPNOTSUPP;
 }
-int net_inet_send_raw_packet(net_socket_t *s, const void *b, size_t n, const void *a, size_t an, int h, int t) {
-    return net_stack_transport()->send_raw_packet(s,b,n,a,an,h,t);
+
+int net_inet_send_raw_packet(net_socket_t *s, const void *b, size_t n,
+                             const void *a, size_t an, int h, int t) {
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    if (!net_backend_has(NET_CAP_RAW_TX))
+        return -EOPNOTSUPP;
+    return (ops && ops->raw_send) ? ops->raw_send(s, b, n, a, an, h, t)
+                                  : -EOPNOTSUPP;
 }
+
 int net_inet_interface_ioctl(net_socket_t *s, unsigned long request, void *a) {
-    return net_stack_transport()->interface_ioctl(s,request,a);
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    return (ops && ops->ioctl) ? ops->ioctl(s, request, a) : -EOPNOTSUPP;
 }
+
 unsigned net_inet_transport_flags(const net_socket_t *s) {
-    return net_stack_transport()->transport_flags(s);
+    const net_socket_ops_t *ops = sock_ops();
+    return (ops && ops->flags) ? ops->flags(s) : 0;
 }
+
 void net_tcp_close_pcb(net_socket_t *s) {
-    net_stack_transport()->close_pcb(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->close_pcb)
+        ops->close_pcb(s);
 }
+
 void net_tcp_drop_pcb(net_socket_t *s) {
-    net_stack_transport()->drop_pcb(s);
+    const net_socket_ops_t *ops = sock_ops();
+    if (ops && ops->drop_pcb)
+        ops->drop_pcb(s);
+}
+
+uint32_t net_socket_buf_ceiling(net_socket_t *s, int is_snd) {
+    const net_socket_opt_ops_t *ops = opt_ops();
+    return (ops && ops->buf_ceiling) ? ops->buf_ceiling(s, is_snd) : 0;
+}
+
+uint32_t net_socket_buf_in_force(net_socket_t *s, int is_snd) {
+    const net_socket_opt_ops_t *ops = opt_ops();
+    return (ops && ops->buf_in_force) ? ops->buf_in_force(s, is_snd) : 0;
+}
+
+void net_inet_ip_opts_apply(net_socket_t *s) {
+    const net_socket_opt_ops_t *ops = opt_ops();
+    if (ops && ops->ip_apply)
+        ops->ip_apply(s);
+}
+
+void net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
+                           uint8_t *mc_ttl) {
+    const net_socket_opt_ops_t *ops = opt_ops();
+    if (ops && ops->ip_effective) {
+        ops->ip_effective(s, ttl, tos, mc_ttl);
+        return;
+    }
+    if (ttl)
+        *ttl = 64;
+    if (tos)
+        *tos = 0;
+    if (mc_ttl)
+        *mc_ttl = 1;
 }

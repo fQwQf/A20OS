@@ -142,7 +142,7 @@ image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 # but with the virtio-gpu display stack and audio.  The image is built here (in
 # its own make invocation) rather than as a prerequisite so that the desktop
 # size default above actually applies.
-run-world-gui: $(FAT32_IMG)
+run-world-gui: $(KERNEL_ELF) $(FAT32_IMG)
 	$(MAKE) ARCH=$(ARCH) PKG_WORLD=$(PKG_WORLD) GUI_MEDIA="$(GUI_MEDIA)" \
 		PKG_SIZE_MB=$(PKG_SIZE_MB_WORLD) image-world
 	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(patsubst -m $(QEMU_MEMORY),-m $(QEMU_MEMORY_WORLD),$(QEMU_FLAGS_NO_SDCARD))) \
@@ -169,7 +169,7 @@ run-gui:
 # 组装并直接启动：world 镜像作为第二块盘（内核挂载为 /extra；
 # 含 /usr/lib/a20/init 标记的镜像会被 init chroot 接管，即 distro 模式）。
 # 根盘仍是常规开发镜像（FAT32 → /bin）。
-run-world: image-world $(FAT32_IMG)
+run-world: $(KERNEL_ELF) image-world $(FAT32_IMG)
 	$(QEMU_CONSOLE_RUNNER) $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
 		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \
 		-device $(QEMU_BLK_SECOND),drive=xworld \

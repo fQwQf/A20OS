@@ -59,7 +59,7 @@ extern void input_mux_wake(void);
 #include "mm/slab.h"
 #include "drivers/gpu/gpu_core.h"
 #include "drivers/usb/usb.h"
-#include "net/lwip_stack.h"
+#include "net/stack.h"
 
 #define DRV_MAX_IRQ_VECTOR 255   /* hwapi IRQ line limit (0..255) */
 #define DRV_MAX_ISRS 64
@@ -529,23 +529,14 @@ const struct drv_export drv_export_table[] = {
     { "usb_core_free_address",   (void *)usb_core_free_address },
     { "usb_control_msg",         (void *)usb_control_msg },
     { "usb_submit_urb",          (void *)usb_submit_urb },
-    /* in-kernel lwIP bridge (virtio-net) */
-    { "a20_lwip_ingress_lock", (void *)a20_lwip_ingress_lock },
-    { "a20_lwip_ingress_unlock", (void *)a20_lwip_ingress_unlock },
-    { "a20_lwip_lock",                 (void *)a20_lwip_lock },
-    { "a20_lwip_unlock",               (void *)a20_lwip_unlock },
-    { "a20_lwip_poll_locked",          (void *)a20_lwip_poll_locked },
-    /* The poll phases are separate entry points, and the loadable virtio-net
-     * module calls the receive one directly so it can pass a packet budget.
-     * Omitting them here does not fail at build time: the module loads as a
-     * relocation against an unexported name and drvmod_load() rejects it with
-     * -EINVAL at run time, which presents as "no network interface". */
-    { "a20_lwip_poll_timers_locked",   (void *)a20_lwip_poll_timers_locked },
-    { "a20_lwip_poll_rx_locked",       (void *)a20_lwip_poll_rx_locked },
-    { "a20_lwip_process_netif_irq_locked", (void *)a20_lwip_process_netif_irq_locked },
-    { "a20_lwip_netif_index_for_device", (void *)a20_lwip_netif_index_for_device },
-    { "a20_lwip_rx_pending_any",       (void *)a20_lwip_rx_pending_any },
-    { "a20_lwip_signal_rx_pending",    (void *)a20_lwip_signal_rx_pending },
+    /* Backend-neutral in-kernel network bridge. Loadable NICs never acquire a
+     * protocol-private lock or enter FreeBSD/lwIP from their IRQ context. */
+    { "net_stack_receive_progress",  (void *)net_stack_receive_progress },
+    { "net_stack_protocol_progress", (void *)net_stack_protocol_progress },
+    { "net_stack_timer_tick",        (void *)net_stack_timer_tick },
+    { "net_stack_device_interrupt",  (void *)net_stack_device_interrupt },
+    { "net_stack_work_pending",      (void *)net_stack_work_pending },
+    { "net_stack_poll_waiter",       (void *)net_stack_poll_waiter },
 };
 const unsigned drv_export_count =
     sizeof(drv_export_table) / sizeof(drv_export_table[0]);

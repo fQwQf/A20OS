@@ -117,6 +117,12 @@ def main():
                 'port_host_current_task': 'proc_current',
                 'port_host_log': 'klog_write', 'port_host_random': 'random_fill',
                 'port_host_move': 'memmove', 'port_host_compare': 'memcmp',
+                'port_host_nic_bind': 'a20_bsd_host_nic_bind',
+                'port_host_nic_unbind': 'a20_bsd_host_nic_unbind',
+                'port_host_nic_recv': 'a20_bsd_host_nic_recv',
+                'port_host_nic_send': 'a20_bsd_host_nic_send',
+                'port_host_nic_poll': 'a20_bsd_host_nic_poll',
+                'port_host_nic_token_freed': 'a20_bsd_host_nic_token_freed',
                 '_GLOBAL_OFFSET_TABLE_': '_GLOBAL_OFFSET_TABLE_',
             }
             mapping = out/'host-imports.map'

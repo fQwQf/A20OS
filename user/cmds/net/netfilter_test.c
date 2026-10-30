@@ -365,8 +365,12 @@ int main(void)
      * state without also destroying the configuration installed above.
      */
     CHK(nf_write("ctflush") == 0, "flush conntrack");
+    /* Tracking is lazy: with no filter/NAT rule the fast path skips the
+     * conntrack transaction.  cton is the explicit opt-in this case needs,
+     * and it is also what a diagnostics-only deployment uses. */
+    CHK(nf_write("cton") == 0, "force conntrack tracking");
     CHK(nf_read(buf, sizeof(buf)) > 0, "read after flush");
-    CHK(strstr(buf, "conntrack: on") != NULL, "conntrack is on by default");
+    CHK(strstr(buf, "conntrack: on") != NULL, "conntrack is on after cton");
     CHK(nf_stat(buf, "ct_capacity") > 0, "a capacity is reported");
     unsigned long long ct0 = nf_stat(buf, "ct_tracked");
     unsigned long long cp0 = nf_stat(buf, "ct_packets");

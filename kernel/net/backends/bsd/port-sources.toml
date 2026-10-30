@@ -39,6 +39,7 @@ sources = [
     "lib/ff_syscall_wrapper.c",
     "lib/ff_subr_prf.c",
     "lib/ff_vfs_ops.c",
+    "lib/ff_veth.c",
     "freebsd/kern/kern_descrip.c",
     "freebsd/kern/kern_event.c",
     "freebsd/kern/kern_fail.c",
@@ -180,7 +181,11 @@ port_sources = [
     "kernel/net/backends/bsd/runtime/tls.c",
 ]
 
-bsd_port_sources = ["kernel/net/backends/bsd/runtime/services_bsd.c"]
+bsd_port_sources = [
+    "kernel/net/backends/bsd/runtime/services_bsd.c",
+    "kernel/net/backends/bsd/protocol_socket.c",
+    "kernel/net/backends/bsd/protocol_nic.c",
+]
 
 # Replace the host-side seeded rand_r wrapper with the OS entropy service.
 # Only the generated object is renamed; upstream source remains untouched.

@@ -25,30 +25,45 @@ extern int a20_lwip_transport_interface_ioctl(net_socket_t *s, unsigned long req
 extern unsigned a20_lwip_transport_flags(const net_socket_t *s);
 extern void a20_lwip_transport_close_pcb(net_socket_t *s);
 extern void a20_lwip_transport_drop_pcb(net_socket_t *s);
+extern uint32_t a20_lwip_transport_buffer_ceiling(net_socket_t *s, int is_snd);
+extern uint32_t a20_lwip_transport_buffer_in_force(net_socket_t *s, int is_snd);
+extern void a20_lwip_transport_ip_options_apply(net_socket_t *s);
+extern void a20_lwip_transport_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
+                                            uint8_t *mc_ttl);
 
-const net_transport_ops_t a20_lwip_transport_ops = {
-    .socket_init = a20_lwip_transport_socket_init,
-    .socket_destroy = a20_lwip_transport_socket_destroy,
-    .state_release = a20_lwip_transport_state_release,
-    .bind_pcb = a20_lwip_transport_bind_pcb,
+const net_socket_ops_t a20_lwip_socket_ops = {
+    .open = a20_lwip_transport_socket_init,
+    .close = a20_lwip_transport_socket_destroy,
+    .release = a20_lwip_transport_state_release,
+    .bind = a20_lwip_transport_bind_pcb,
     .connect = a20_lwip_transport_connect,
-    .tcp_listen = a20_lwip_transport_tcp_listen,
-    .sendto = a20_lwip_transport_sendto,
+    .listen = a20_lwip_transport_tcp_listen,
+    .send = a20_lwip_transport_sendto,
     .shutdown = a20_lwip_transport_shutdown,
-    .accept_child_ready = a20_lwip_transport_accept_child_ready,
+    .accept_ready = a20_lwip_transport_accept_child_ready,
     .recved = a20_lwip_transport_recved,
-    .options_apply = a20_lwip_transport_options_apply,
-    .option_validate = a20_lwip_transport_option_validate,
-    .buffer_default = a20_lwip_transport_buffer_default,
-    .has_transport = a20_lwip_transport_has_transport,
-    .has_tcp = a20_lwip_transport_has_tcp,
-    .bind_device = a20_lwip_transport_bind_device,
-    .bound_device = a20_lwip_transport_bound_device,
-    .send_udp_control = a20_lwip_transport_send_udp_control,
-    .pmtu_discover = a20_lwip_transport_pmtu_discover,
-    .send_raw_packet = a20_lwip_transport_send_raw_packet,
-    .interface_ioctl = a20_lwip_transport_interface_ioctl,
-    .transport_flags = a20_lwip_transport_flags,
     .close_pcb = a20_lwip_transport_close_pcb,
     .drop_pcb = a20_lwip_transport_drop_pcb,
+    .has_transport = a20_lwip_transport_has_transport,
+    .has_stream = a20_lwip_transport_has_tcp,
+    .flags = a20_lwip_transport_flags,
+};
+
+const net_socket_opt_ops_t a20_lwip_socket_opt_ops = {
+    .apply = a20_lwip_transport_options_apply,
+    .validate = a20_lwip_transport_option_validate,
+    .buf_default = a20_lwip_transport_buffer_default,
+    .buf_ceiling = a20_lwip_transport_buffer_ceiling,
+    .buf_in_force = a20_lwip_transport_buffer_in_force,
+    .ip_apply = a20_lwip_transport_ip_options_apply,
+    .ip_effective = a20_lwip_transport_ip_effective,
+};
+
+const net_endpoint_ops_t a20_lwip_endpoint_ops = {
+    .bind_device = a20_lwip_transport_bind_device,
+    .bound_device = a20_lwip_transport_bound_device,
+    .udp_control = a20_lwip_transport_send_udp_control,
+    .pmtu = a20_lwip_transport_pmtu_discover,
+    .raw_send = a20_lwip_transport_send_raw_packet,
+    .ioctl = a20_lwip_transport_interface_ioctl,
 };

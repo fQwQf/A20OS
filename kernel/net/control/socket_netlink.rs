@@ -57,6 +57,7 @@ const RTM_NEWRULE: u16 = 32;
 const RTM_DELRULE: u16 = 33;
 const RTM_GETRULE: u16 = 34;
 const RTM_GETROUTE: u16 = 26;
+const ESRCH: i32 = 3;
 
 const IFLA_ADDRESS: u16 = 1;
 const IFLA_IFNAME: u16 = 3;
@@ -290,6 +291,9 @@ unsafe extern "C" {
     fn a20_net_netlink_if_set_flags(ifindex: u32, value: u32, mask: u32) -> i32;
     fn a20_net_netlink_if_get_addr(ifindex: u32, ip: *mut u8, mask: *mut u8,
                                    gw: *mut u8) -> i32;
+    fn net_stack_route_update_v4(dst: *const u8, prefix: u8,
+                                 gateway: *const u8, ifindex: u16,
+                                 remove: i32) -> i32;
     fn a20_net_netlink_if_set_addr(ifindex: u32, ip: *const u8, mask: *const u8,
                                    gw: *const u8) -> i32;
     fn a20_net_netlink_if_set_addr6(ifindex: u32, addr: *const u8,
@@ -1166,7 +1170,44 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
             return rc;
         }
     }
-    a20_net_route_update_v4(&r, (msg_type == RTM_DELROUTE) as i32, flags as u32)
+    /* Keep the protocol RIB and the common policy FIB in the same
+     * transaction.  Backends without a second RIB make this a no-op. */
+    let mut backend_rc = 0;
+    if r.table == 0 {
+        let dst = r.destination.to_ne_bytes();
+        let gateway = r.gateway.to_ne_bytes();
+        backend_rc = net_stack_route_update_v4(
+            dst.as_ptr(),
+            r.prefix,
+            if r.gateway == 0 { core::ptr::null() } else { gateway.as_ptr() },
+            r.ifindex as u16,
+            (msg_type == RTM_DELROUTE) as i32,
+        );
+        if backend_rc < 0 {
+            return backend_rc;
+        }
+    }
+    let common_rc = a20_net_route_update_v4(&r, (msg_type == RTM_DELROUTE) as i32,
+                                            flags as u32);
+    /* A boot-configured default route may exist only in the backend RIB.  A
+     * successful backend delete must not be converted to ESRCH merely because
+     * the policy FIB was never seeded with that implicit route. */
+    if common_rc == -ESRCH && msg_type == RTM_DELROUTE && backend_rc == 0 {
+        return 0;
+    }
+    if common_rc < 0 && backend_rc == 0 {
+        let dst = r.destination.to_ne_bytes();
+        let gateway = r.gateway.to_ne_bytes();
+        let rollback_remove = (msg_type == RTM_NEWROUTE) as i32;
+        let _ = net_stack_route_update_v4(
+            dst.as_ptr(),
+            r.prefix,
+            if r.gateway == 0 { core::ptr::null() } else { gateway.as_ptr() },
+            r.ifindex as u16,
+            rollback_remove,
+        );
+    }
+    common_rc
 }
 
 /* fib_rule_hdr uses the rtmsg's 12-byte layout, with action in the type byte.
@@ -2356,6 +2397,12 @@ mod tests {
                                                      _m: *mut u8, _g: *mut u8) -> i32 {
         ptr::copy_nonoverlapping(T_GET_ADDR_IP.as_ptr(), ip, 4);
         T_GET_ADDR_RC
+    }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_route_update_v4(_d: *const u8, _p: u8,
+                                                   _g: *const u8, _i: u16,
+                                                   _r: i32) -> i32 {
+        0
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_netlink_if_set_addr(_i: u32, _ip: *const u8,

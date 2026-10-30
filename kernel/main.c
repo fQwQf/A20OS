@@ -38,7 +38,6 @@ extern void acpi_os_start_worker(void);
 #include "proc/signal.h"
 #include "drivers/block/loop.h"
 #include "net/socket.h"
-#include "net/lwip_stack.h"
 #include "net/stack.h"
 #include "drivers/core/driver_core.h"
 #include "drvmod/drvmod.h"
@@ -300,10 +299,12 @@ void kernel_main(void) {
      * strstr on normal boots.  Also calls a20_clx_core_init() when the
      * bootarg is present, so the check does not depend on a userspace
      * cluster syscall happening first. */
+#ifndef CONFIG_NET_STACK_BSD
     {
         extern void a20_clx_selftest_boot(void);
         a20_clx_selftest_boot();
     }
+#endif
 #endif
 
     boot_advance(BOOT_PHASE_DEVICES, BOOT_PHASE_READY);

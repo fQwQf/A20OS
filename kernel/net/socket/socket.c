@@ -517,6 +517,14 @@ int net_socket_create(int domain, int type, int protocol) {
         return -EPROTONOSUPPORT;
 
     if (domain == AF_INET || domain == AF_INET6) {
+        if (!net_stack_available())
+            return -ENETDOWN;
+        if (base_type == SOCK_STREAM && !net_stack_has(NET_CAP_STREAM))
+            return -EPROTONOSUPPORT;
+        if (base_type == SOCK_DGRAM && !net_stack_has(NET_CAP_DGRAM))
+            return -EPROTONOSUPPORT;
+        if (base_type == SOCK_RAW && !net_stack_has(NET_CAP_RAW))
+            return -EPROTONOSUPPORT;
         if (base_type == SOCK_STREAM && protocol != 0 && protocol != IPPROTO_TCP)
             return -EPROTONOSUPPORT;
         if (base_type == SOCK_DGRAM && protocol != 0 && protocol != IPPROTO_UDP)
