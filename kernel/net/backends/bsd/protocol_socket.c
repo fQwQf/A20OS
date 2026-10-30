@@ -5,6 +5,7 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
 #include <sys/poll.h>
+#include <sys/event.h>
 #include <netinet/in.h>
 #include <net/if_dl.h>
 #include "ff_api.h"
@@ -380,3 +381,70 @@ int port_socket_set_str_freebsd(int fd, int level, int option,
 
 void port_protocol_progress(void) { ff_swi_net_excute(); }
 void port_hardclock(void) { ff_hardclock(); }
+
+/* ---- Readiness multiplexing ---------------------------------------------
+ * The backend executor owns exactly one kqueue.  A socket is registered once
+ * when its descriptor is created (or accepted) and removed before close, so a
+ * progress pass costs one kevent() instead of one non-blocking recv() for
+ * every open socket.  That is the difference between O(ready) and O(open). */
+#define READINESS_BATCH 64
+static int readiness_kq = -1;
+static struct kevent readiness_events[READINESS_BATCH];
+
+int port_readiness_init(void)
+{
+    if (readiness_kq >= 0)
+        return 0;
+    int kq = ff_kqueue();
+    if (kq < 0)
+        return -linux_errno(port_last_error());
+    readiness_kq = kq;
+    return 0;
+}
+
+int port_readiness_add(int fd, void *tag)
+{
+    if (fd < 0)
+        return -EINVAL;
+    int error = port_readiness_init();
+    if (error < 0)
+        return error;
+    struct kevent change;
+    EV_SET(&change, fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, tag);
+    if (ff_kevent(readiness_kq, &change, 1, NULL, 0, NULL) < 0)
+        return -linux_errno(port_last_error());
+    return 0;
+}
+
+void port_readiness_remove(int fd)
+{
+    if (readiness_kq < 0 || fd < 0)
+        return;
+    struct kevent change;
+    EV_SET(&change, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    (void)ff_kevent(readiness_kq, &change, 1, NULL, 0, NULL);
+}
+
+int port_readiness_wait(a20_bsd_ready_t *events, int maximum)
+{
+    if (readiness_kq < 0 || !events || maximum <= 0)
+        return 0;
+    if (maximum > READINESS_BATCH)
+        maximum = READINESS_BATCH;
+    int count = ff_kevent(readiness_kq, NULL, 0, readiness_events, maximum,
+                          NULL);
+    if (count < 0) {
+        int error = port_last_error();
+        /* A spurious wakeup is not a socket error. */
+        if (error == EINTR || error == EWOULDBLOCK || error == EAGAIN)
+            return 0;
+        return -linux_errno(error);
+    }
+    for (int i = 0; i < count; ++i) {
+        events[i].fd = (int)readiness_events[i].ident;
+        events[i].flags = (readiness_events[i].flags & EV_EOF)
+                              ? A20_BSD_READY_EOF : 0u;
+        events[i].tag = readiness_events[i].udata;
+    }
+    return count;
+}

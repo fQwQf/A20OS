@@ -6,6 +6,7 @@
 #include "runtime/memory.h"
 #include "net/stack.h"
 #include "net/profile.h"
+#include "tun.h"
 #include "net/interface.h"
 #include "net/netfilter.h"
 #include "drivers/core/driver_core.h"
@@ -349,24 +350,29 @@ static int interface_snapshot(void *outp, int maximum)
         entry->ip[0] = 127; entry->ip[3] = 1;
         entry->mask[0] = 255;
     }
+    if (count < maximum)
+        count += a20_bsd_tun_snapshot(&out[count], maximum - count);
     return count;
 }
 
 static int if_default_index(void) { return nics[0].attached ? 1 : 2; }
 static int if_up(unsigned index)
 {
+    if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_up(index);
     if (index == 1) return nics[0].attached && nics[0].up;
     if (index == 2) return 1;
     return 0;
 }
 static int if_mtu(unsigned index)
 {
+    if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_mtu(index);
     if (index == 1) return nics[0].attached ? nics[0].mtu : -ENODEV;
     if (index == 2) return 16384;
     return -ENODEV;
 }
 static int if_hwaddr(unsigned index, uint8_t *out)
 {
+    if (a20_bsd_tun_is_index(index)) return -EOPNOTSUPP;
     if (!out) return -EINVAL;
     if (index == 1 && nics[0].attached) {
         memcpy(out, nics[0].mac, 6);
@@ -381,6 +387,8 @@ static int if_hwaddr(unsigned index, uint8_t *out)
 
 static int if_get_addr(unsigned index, uint8_t *address, uint8_t *mask, uint8_t *gateway)
 {
+    if (a20_bsd_tun_is_index(index))
+        return a20_bsd_tun_get_addr(index, address, mask, gateway);
     if (index == 1 && nics[0].attached) {
         memcpy(address, &g_a20_net_config.ip, 4);
         memcpy(mask, &g_a20_net_config.netmask, 4);
@@ -481,6 +489,8 @@ static int route_update_v4(const uint8_t *destination, uint8_t prefix,
 static int if_set_addr(unsigned index, const uint8_t *address,
                        const uint8_t *mask, const uint8_t *gateway)
 {
+    if (a20_bsd_tun_is_index(index))
+        return a20_bsd_tun_set_addr(index, address, mask, 1);
     if (index != 1 || !nics[0].attached || !address || !mask) return -ENODEV;
     a20_net_config_t config;
     config_snapshot(&config);
@@ -512,6 +522,7 @@ static int if_set_addr(unsigned index, const uint8_t *address,
 
 static int if_set_mtu(unsigned index, uint16_t mtu)
 {
+    if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_set_mtu(index, mtu);
     if (index != 1 || !nics[0].attached) return -ENODEV;
     if (mtu < 576 || mtu > 1500) return -EINVAL;
     if (mtu == nics[0].mtu) return 0;
@@ -523,6 +534,8 @@ static int if_set_mtu(unsigned index, uint16_t mtu)
 
 static int if_set_flags(unsigned index, uint32_t value, uint32_t mask)
 {
+    if (a20_bsd_tun_is_index(index))
+        return a20_bsd_tun_set_flags(index, value, mask);
     if (index == 2) return (value & NLRT_IF_FLAGS_UP) ? 0 : -EOPNOTSUPP;
     if (index != 1 || !nics[0].attached) return -ENODEV;
     if (mask & ~(uint32_t)NLRT_IF_FLAGS_UP) return -EOPNOTSUPP;
@@ -552,6 +565,8 @@ static int addr6_job_run(void *argument)
 static int if_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
                     int add)
 {
+    if (a20_bsd_tun_is_index(index))
+        return a20_bsd_tun_set_addr6(index, address, prefix, add);
     if (index != 0 || !nics[0].context || !address) return -ENODEV;
     addr6_job_t job;
     memset(&job, 0, sizeof(job));
@@ -578,6 +593,7 @@ static int owns_ipv4(uint32_t address)
     /* Linux wildcard bind selects a local address later; it is not an attempt
      * to bind a foreign unicast address. */
     if (address == 0) return 1;
+    if (a20_bsd_tun_owns_ipv4(address)) return 1;
     if (nics[0].attached && address == g_a20_net_config.ip.addr) return 1;
     uint8_t loopback[4] = {127, 0, 0, 1};
     uint32_t value;
@@ -608,6 +624,7 @@ static int packet_tx(unsigned index, const uint8_t *frame, size_t length)
 
 static uint32_t interface_ipv4(int index)
 {
+    if (index >= 3) return a20_bsd_tun_interface_ipv4((unsigned)index);
     if (index != 0 || !nics[0].attached) return 0;
     const uint8_t *a = (const uint8_t *)&g_a20_net_config.ip;
     return (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 |
@@ -707,8 +724,21 @@ static const net_backend_if_ops_t bsd_iface_ops = {
     .interface_ipv4 = interface_ipv4,
 };
 
+static int tun_create(net_tun_emit_t emit, void *ctx)
+{
+    return a20_bsd_tun_create(emit, ctx);
+}
+static void tun_destroy(unsigned index) { a20_bsd_tun_destroy(index); }
+static int tun_inject(unsigned index, const uint8_t *packet, size_t length)
+{
+    return a20_bsd_tun_inject(index, packet, length);
+}
+
 static const net_backend_packet_ops_t bsd_packet_ops = {
     .tx = packet_tx,
+    .tun_create = tun_create,
+    .tun_destroy = tun_destroy,
+    .tun_inject = tun_inject,
 };
 
 static const net_backend_obs_ops_t bsd_obs_ops = {

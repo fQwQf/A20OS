@@ -185,6 +185,7 @@ bsd_port_sources = [
     "kernel/net/backends/bsd/runtime/services_bsd.c",
     "kernel/net/backends/bsd/protocol_socket.c",
     "kernel/net/backends/bsd/protocol_nic.c",
+    "kernel/net/backends/bsd/protocol_tun.c",
 ]
 
 # Replace the host-side seeded rand_r wrapper with the OS entropy service.

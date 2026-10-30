@@ -45,6 +45,7 @@ A20_NET_BACKEND_SRC := \
     $(KERNEL_DIR)/net/backends/bsd/runtime.c \
     $(KERNEL_DIR)/net/backends/bsd/options.c \
     $(KERNEL_DIR)/net/backends/bsd/netfilter_bridge.c \
+    $(KERNEL_DIR)/net/backends/bsd/tun.c \
     $(KERNEL_DIR)/net/backends/bsd/transport.c
 endif
 

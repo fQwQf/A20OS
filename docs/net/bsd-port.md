@@ -166,8 +166,21 @@ python3 tools/test-bsd-runtime-host.py --clang /path/to/clang --sanitize --out <
 验证为失败，不提供假成功。测试没有运行 BSD TCP/IP 状态机。
 
 后续已经补齐宿主服务/linker set、持久执行器、`ff_veth`/virtio 数据面、公共 socket
-出站/监听路径、动态 IPv4/MTU/link 事务；`NET_STACK=bsd NET_LANES=1` 已在 x86_64
-桌面完成 DNS/HTTP/HTTPS，并由真实 Firefox 151 读取 HTTP/HTTPS DOM。外部 IPv6/RA、
-DHCP、TUN/router、raw/PMTU 和完整性能/关闭回收仍未完成；x86_64 桌面/服务器已切换
+出站/监听路径、动态 IPv4/MTU/link 事务、raw/PMTU、单 NIC `SO_BINDTODEVICE`、
+netfilter/conntrack/NAT 桥、AF_PACKET TX/RX 以及 L3 TUN。TUN 通过
+`protocol_tun.c` 的最小 FreeBSD ifnet 实现，地址仍走 `in_control`/`in6_control`，
+入站包进入 `NETISR_IP`/`NETISR_IPV6`，而不是在 A20 层另起一套 IP 状态机。
+socket 就绪改为每后端一个 kqueue，只对就绪 fd 做 `recv()`，空闲轮询不再随
+socket 数量线性增长。`bsd_scale_test` 用 512 个空闲 UDP socket 加 32 包突发测量
+`/proc/net/status` 的 `bsd_recv_probes`：全扫描回退为 16994 次，就绪集合为 64 次。
+
+TUN 地址仍由 `SIOCSIFADDR`/`SIOCSIFNETMASK` 驱动。首次 `SIOCSIFADDR` 早于
+`SIOCSIFNETMASK`，若把零掩码当 `/0` 安装，会生成 tun0 的直连默认路由并覆盖
+a20n0 的默认路由；实现按类别补默认掩码，`tun_test` 还验证 off-link 目标不会
+出现在 TUN 队列里。
+
+`NET_STACK=bsd NET_LANES=1` 已在 x86_64 桌面完成 DNS/HTTP/HTTPS，并由真实
+Firefox 151 读取 HTTP/HTTPS DOM。仍待完成：router 模式、外部 IPv6/RA、DHCP、
+多队列/零拷贝数据面，以及与 lwIP 的同条件吞吐/p99 对比。x86_64 桌面/服务器已切换
 为默认，其它架构保持 lwIP。详见
 [BSD 桌面联网垂直切片](bsd-desktop-internet-2026-10-29.md)。
