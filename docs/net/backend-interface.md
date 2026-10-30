@@ -159,21 +159,21 @@ typedef struct net_socket_opt_ops {
 | 能力 | lwip | native | bsd |
 |---|---|---|---|
 | stream/dgram | ✓ | ✓ | ✓ |
-| raw | ✓ | ✓ | |
+| raw | ✓ | ✓ | ✓ |
 | ipv6 | ✓ | ✓ | 本地 |
 | listen/shutdown | ✓ | ✓ | ✓ |
 | sndbuf/rcvbuf | ✓ | ✓ | ✓ |
-| pktinfo | ✓ | ✓ | |
-| bindtodevice | ✓ | ✓ | |
-| udp control | ✓ | ✓ | |
-| pmtu | ✓ | ✓ | |
-| raw tx | ✓ | ✓ | |
+| pktinfo | ✓ | ✓ | ✓ |
+| bindtodevice | ✓ | ✓ | ✓（单 NIC） |
+| udp control | ✓ | ✓ | ✓ |
+| pmtu | ✓ | ✓ | ✓ |
+| raw tx | ✓ | ✓ | ✓ |
 | tun | ✓ | ✓ | |
 | neigh | | ✓ | |
 | route | | | ✓ |
-| ifaddr6 | ✓ | ✓ | |
+| ifaddr6 | ✓ | ✓ | ✓ |
 | ifdynamic | ✓ | ✓ | ✓ |
-| congestion | ✓ (reno) | ✓ | |
+| congestion | ✓ (reno) | ✓ | ✓ (newreno/cubic) |
 | device irq | ✓ | ✓ | ✓ |
 | TX SG | ✓ | ✓ | |
 
@@ -303,7 +303,8 @@ python3 tools/check-network-backend-boundary.py --check-upstream
 - 多 lane 的 RX 仍先落在 `rx_frame` 再复制进 lane 队列，因为队列所有权和唤醒
   协议尚未改为 pbuf 引用；
 - 协议回调到 socket 队列仍有至少一次拷贝（inline 或 spill），用户态读取再拷贝；
-- BSD 后端仍是单执行器 + 每 socket 轮询，未做零拷贝；
+- BSD 后端仍是单执行器 + 每 socket 轮询，未做零拷贝；其 RX/TX 现在经过
+  `netfilter_bridge.c` 接入同一套过滤/NAT/conntrack，而不是绕过策略层；
 - 没有规则时的 netfilter 快路径不统计 conntrack 包，这是懒启用的直接结果。
 
 这些优化没有改变任何 ABI；`/proc/net/status` 的 backend/caps 行和

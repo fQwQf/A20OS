@@ -27,6 +27,9 @@
   已完成时 TX 直接借用 pbuf 发送。多 lane 仍保留 staging 拷贝，属于后续工作。
 - conntrack 改为懒启用：没有规则时不为普通流建表，见
   [net/nat.md](../../net/nat.md#懒启用2026-10-30)。
+- F-Stack/BSD 与 lwIP 共用 socket 前端与策略层：raw、pktinfo、UDP 控制、
+  PMTU、congestion、IPv6 地址、单 NIC `SO_BINDTODEVICE` 以及 netfilter/NAT
+  桥均已接入；TUN/router/外部 IPv6 仍不宣称。
 
 ## 锁与 lane
 

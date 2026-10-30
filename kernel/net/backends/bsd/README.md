@@ -10,8 +10,10 @@ git submodule update --init --depth 1 kernel/external/f-stack
 
 **x86_64 host/desktop 垂直切片已运行。** `NET_STACK=bsd NET_LANES=1` 编译真实
 F-Stack 核心，使用单 BSD 执行器、外部 token/`ff_veth` 数据面和公共 Linux socket
-完成 DNS/HTTP/HTTPS；真实 XFCE 桌面 curl 已验证。当前支持单 virtio、动态 IPv4/MTU/link、TCP/UDP 与本地
-IPv6；TUN/router/raw/PMTU/外部 IPv6/DHCP 和完整关闭/性能验收仍缺失。这里
+完成 DNS/HTTP/HTTPS；真实 XFCE 桌面 curl 已验证。当前支持单 virtio、动态 IPv4/MTU/link/邻居、TCP/UDP、本地 IPv6、
+raw socket、IP_PKTINFO/IP_SEND*、PMTU、TCP_CONGESTION、IPv6 地址事务、
+SO_BINDTODEVICE（单 NIC 语义）和 A20 netfilter/NAT 桥；TUN、router、
+外部 IPv6/RA、DHCP 和完整关闭/性能验收仍缺失。这里
 不链接 lwIP，也不调用宿主 socket 冒充 BSD。后端接口见 [网络后端接口契约](../../../../docs/net/backend-interface.md)，
 接入细节见 [BSD 桌面联网垂直切片](../../../../docs/net/bsd-desktop-internet-2026-10-29.md)。
 
@@ -31,5 +33,6 @@ FS/TLS。原生 TLS 的 GCC 编译仍只用于依赖探测，不是内核运行�
 配额、生命周期及测试命令见 [BSD 接入记录](../../../../docs/net/bsd-port.md)。
 
 最新交接与复现入口：[BSD-HANDOFF.md](../../../../docs/net/BSD-HANDOFF.md)。
-BSD 已在真实 A20OS KVM 中执行初始化与 TCP/UDP 回环；物理接口、公共 socket ABI
-和公网访问仍未接通。`BSD_BOOTSTRAP_OBJECT` 仅是显式诊断，不是可用后端选择。
+BSD 已在真实 A20OS KVM 中执行初始化、TCP/UDP 回环、公共 Linux socket ABI
+和公网 HTTP/HTTPS；`BSD_BOOTSTRAP_OBJECT` 仅是显式诊断，不是可用后端选择。
+物理板卡、TUN/router 和完整性能验收仍未完成。

@@ -534,10 +534,42 @@ static int if_set_flags(unsigned index, uint32_t value, uint32_t mask)
     return result;
 }
 
+typedef struct addr6_job {
+    void *context;
+    uint8_t address[16];
+    uint8_t prefix;
+    int add;
+} addr6_job_t;
+
+static int addr6_job_run(void *argument)
+{
+    addr6_job_t *job = argument;
+    int rc = a20_bsd_port_nic_set_ipv6(job->context, job->address,
+                                       job->prefix, job->add);
+    return rc < 0 ? rc : -rc;
+}
+
+static int if_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
+                    int add)
+{
+    if (index != 0 || !nics[0].context || !address) return -ENODEV;
+    addr6_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.context = nics[0].context;
+    memcpy(job.address, address, 16);
+    job.prefix = prefix;
+    job.add = add;
+    return a20_bsd_executor_call(addr6_job_run, &job);
+}
+
 static int if_set_addr6(unsigned index, const uint8_t *address, uint8_t prefix)
-{ (void)index; (void)address; (void)prefix; return -EOPNOTSUPP; }
+{
+    return if_addr6(index, address, prefix, 1);
+}
 static int if_del_addr6(unsigned index, const uint8_t *address)
-{ (void)index; (void)address; return -EOPNOTSUPP; }
+{
+    return if_addr6(index, address, 128, 0);
+}
 static int neighbor_update_v4(uint32_t index, uint32_t address, const uint8_t mac[6])
 { (void)index; (void)address; (void)mac; return -EOPNOTSUPP; }
 
@@ -612,9 +644,10 @@ static int format_devices(char *buffer, size_t size)
     if (a20_bsd_executor_call(stats_job_run, &job) < 0)
         return snprintf(buffer, size, "a20n0: statistics unavailable\n");
     return snprintf(buffer, size,
-                    "a20n0: rx=%lu tx=%lu rx_drop=%lu tx_error=%lu rx_starved=%lu\n",
+                    "a20n0: rx=%lu tx=%lu rx_drop=%lu tx_drop=%lu tx_error=%lu rx_starved=%lu\n",
                     (unsigned long)job.stats.rx_frames, (unsigned long)job.stats.tx_frames,
-                    (unsigned long)job.stats.rx_drops, (unsigned long)job.stats.tx_errors,
+                    (unsigned long)job.stats.rx_drops, (unsigned long)job.stats.tx_drops,
+                    (unsigned long)job.stats.tx_errors,
                     (unsigned long)job.stats.rx_starved);
 }
 
@@ -681,7 +714,9 @@ const net_backend_t a20_bsd_backend = {
     .caps = NET_CAP_STREAM | NET_CAP_DGRAM | NET_CAP_IPV6 |
             NET_CAP_LISTEN | NET_CAP_SHUTDOWN |
             NET_CAP_SNDBUF | NET_CAP_RCVBUF |
-            NET_CAP_IF_DYNAMIC | NET_CAP_ROUTE | NET_CAP_DEVICE_IRQ,
+            NET_CAP_IF_DYNAMIC | NET_CAP_IF_ADDR6 | NET_CAP_ROUTE |
+            NET_CAP_PMTU | NET_CAP_RAW | NET_CAP_RAW_TX |
+            NET_CAP_CONGESTION | NET_CAP_DEVICE_IRQ,
     .cycle = &bsd_cycle_ops,
     .event = &bsd_event_ops,
     .socket = &a20_bsd_socket_ops,

@@ -6,28 +6,28 @@
 
 int tcp_cong_alg_parse(const char *name)
 {
-    return name && !strcmp(name, "reno") ? 0 : -1;
+    if (!name) return -1;
+    if (!strcmp(name, "reno") || !strcmp(name, "newreno")) return 0;
+    if (!strcmp(name, "cubic")) return 2;
+    return -1;
 }
 
 const char *tcp_cong_alg_name(uint8_t algorithm)
 {
-    (void)algorithm;
-    return "reno";
-}
-
-int a20_net_option_group_membership(void *socket, const void *request, int join)
-{
-    (void)socket; (void)request; (void)join;
-    return -EOPNOTSUPP;
+    return algorithm == 2 ? "cubic" : "reno";
 }
 
 int a20_net_option_tcp_live(void *socket, int which)
 {
     net_socket_t *s = socket;
     if (!s || s->type != SOCK_STREAM || !s->transport_private) return -1;
-    /* FreeBSD's default algorithm is Reno in this initial vertical slice.
-     * Keepalive timer values are not reported as live until their setsockopt
-     * application is implemented; returning the frontend's requested integer
-     * would falsely claim the protocol had accepted it. */
-    return which == 0 ? 0 : -1;
+    /* Live values are only reported after options_apply() pushed them to the
+     * BSD socket.  which: 0 congestion, 1 keep_idle, 2 keep_intvl, 3 keep_cnt. */
+    switch (which) {
+    case 0: return s->tcp_congestion == 2 ? 2 : 0;
+    case 1: return s->keep_idle;
+    case 2: return s->keep_intvl;
+    case 3: return s->keep_cnt;
+    default: return -1;
+    }
 }

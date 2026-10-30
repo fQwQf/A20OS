@@ -6,8 +6,10 @@
 #include <sys/socket.h>
 #include <sys/poll.h>
 #include <netinet/in.h>
+#include <net/if_dl.h>
 #include "ff_api.h"
 #include "ff_host_interface.h"
+#include "protocol_abi.h"
 
 extern int port_last_error(void);
 extern void ff_hardclock(void);
@@ -167,6 +169,153 @@ int port_socket_recv(int fd, void *buffer, size_t length, int flags,
     return received < 0 ? -linux_errno(port_last_error()) : (int)received;
 }
 
+int port_socket_enable_pktinfo(int fd, int domain)
+{
+    int one = 1;
+    int rc;
+    if (domain == AF_INET) {
+        rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVDSTADDR,
+                                          &one, sizeof(one)));
+        if (rc < 0) return rc;
+        rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVIF,
+                                          &one, sizeof(one)));
+        if (rc < 0) return rc;
+        rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVTTL,
+                                          &one, sizeof(one)));
+        if (rc < 0) return rc;
+        return result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVTOS,
+                                            &one, sizeof(one)));
+    }
+    if (domain == AF_INET6) {
+        rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO,
+                                          &one, sizeof(one)));
+        if (rc < 0) return rc;
+        rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_RECVHOPLIMIT,
+                                          &one, sizeof(one)));
+        if (rc < 0) return rc;
+        return result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_RECVTCLASS,
+                                            &one, sizeof(one)));
+    }
+    return -EAFNOSUPPORT;
+}
+
+int port_socket_multicast(int fd, uint32_t group, uint32_t ifaddr, int join)
+{
+    struct ip_mreq req;
+    memset(&req, 0, sizeof(req));
+    memcpy(&req.imr_multiaddr, &group, 4);
+    memcpy(&req.imr_interface, &ifaddr, 4);
+    return result(ff_setsockopt_freebsd(
+        fd, IPPROTO_IP, join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP,
+        &req, sizeof(req)));
+}
+
+int port_socket_recv_meta(int fd, void *buffer, size_t length, int flags,
+                          void *address, size_t *address_length,
+                          a20_bsd_pktinfo_t *info)
+{
+    struct iovec iov = { .iov_base = buffer, .iov_len = length };
+    struct msghdr msg;
+    uint8_t control[192];
+    memset(&msg, 0, sizeof(msg));
+    memset(control, 0, sizeof(control));
+    if (info) memset(info, 0, sizeof(*info));
+    msg.msg_name = address;
+    msg.msg_namelen = address_length ? (socklen_t)*address_length : 0;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+    ssize_t received = ff_recvmsg(fd, &msg, flags);
+    if (address_length) *address_length = msg.msg_namelen;
+    if (received < 0) return -linux_errno(port_last_error());
+
+    if (info) {
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c;
+             c = CMSG_NXTHDR(&msg, c)) {
+            if (c->cmsg_level == IPPROTO_IP &&
+                c->cmsg_type == IP_RECVDSTADDR) {
+                memcpy(info->address, CMSG_DATA(c), 4);
+                info->family = AF_INET;
+                info->valid = 1;
+            } else if (c->cmsg_level == IPPROTO_IP &&
+                       c->cmsg_type == IP_RECVIF) {
+                struct sockaddr_dl *sdl = (struct sockaddr_dl *)CMSG_DATA(c);
+                info->ifindex = sdl->sdl_index;
+                info->valid = 1;
+            } else if (c->cmsg_level == IPPROTO_IP &&
+                       c->cmsg_type == IP_RECVTTL) {
+                info->hoplimit = *(uint8_t *)CMSG_DATA(c);
+                info->valid = 1;
+            } else if (c->cmsg_level == IPPROTO_IP &&
+                       c->cmsg_type == IP_RECVTOS) {
+                info->tclass = *(uint8_t *)CMSG_DATA(c);
+                info->valid = 1;
+            } else if (c->cmsg_level == IPPROTO_IPV6 &&
+                       c->cmsg_type == IPV6_PKTINFO) {
+                struct in6_pktinfo *pi =
+                    (struct in6_pktinfo *)CMSG_DATA(c);
+                memcpy(info->address, &pi->ipi6_addr, 16);
+                info->ifindex = pi->ipi6_ifindex;
+                info->family = AF_INET6;
+                info->valid = 1;
+            } else if (c->cmsg_level == IPPROTO_IPV6 &&
+                       c->cmsg_type == IPV6_HOPLIMIT) {
+                info->hoplimit = (uint8_t)*(int *)CMSG_DATA(c);
+                info->valid = 1;
+            } else if (c->cmsg_level == IPPROTO_IPV6 &&
+                       c->cmsg_type == IPV6_TCLASS) {
+                info->tclass = (uint8_t)*(int *)CMSG_DATA(c);
+                info->valid = 1;
+            }
+        }
+    }
+    return (int)received;
+}
+
+int port_socket_send_control(int fd, const void *buffer, size_t length,
+                             int flags, const void *address,
+                             size_t address_length, uint32_t ifindex,
+                             const uint8_t source_v4[4])
+{
+    struct iovec iov = { .iov_base = (void *)buffer, .iov_len = length };
+    struct msghdr msg;
+    uint8_t control[128];
+    memset(&msg, 0, sizeof(msg));
+    memset(control, 0, sizeof(control));
+    msg.msg_name = (void *)address;
+    msg.msg_namelen = (socklen_t)address_length;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    struct cmsghdr *c = NULL;
+    int family = address ? ((const struct sockaddr *)address)->sa_family
+                         : AF_UNSPEC;
+    if (family == AF_INET && source_v4 && (source_v4[0] || source_v4[1] ||
+                                           source_v4[2] || source_v4[3])) {
+        c = CMSG_FIRSTHDR(&msg);
+        c->cmsg_level = IPPROTO_IP;
+        c->cmsg_type = IP_SENDSRCADDR;
+        c->cmsg_len = CMSG_LEN(4);
+        memcpy(CMSG_DATA(c), source_v4, 4);
+        msg.msg_controllen = CMSG_SPACE(4);
+    } else if (family == AF_INET6 && ifindex) {
+        c = CMSG_FIRSTHDR(&msg);
+        c->cmsg_level = IPPROTO_IPV6;
+        c->cmsg_type = IPV6_PKTINFO;
+        c->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+        struct in6_pktinfo *pi = (struct in6_pktinfo *)CMSG_DATA(c);
+        memset(pi, 0, sizeof(*pi));
+        pi->ipi6_ifindex = (unsigned)ifindex;
+        msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
+    }
+
+    ssize_t sent = ff_sendmsg(fd, &msg, flags);
+    return sent < 0 ? -linux_errno(port_last_error()) : (int)sent;
+}
+
 int port_socket_error(int fd)
 {
     int error = 0;
@@ -207,6 +356,26 @@ int port_socket_getsockname(int fd, void *address, size_t *length)
 int port_socket_set_int(int fd, int level, int option, int value)
 {
     return result(ff_setsockopt(fd, level, option, &value, sizeof(value)));
+}
+
+int port_socket_set_int_freebsd(int fd, int level, int option, int value)
+{
+    return result(ff_setsockopt_freebsd(fd, level, option, &value,
+                                        sizeof(value)));
+}
+
+int port_socket_get_int_freebsd(int fd, int level, int option, int *value)
+{
+    socklen_t length = sizeof(*value);
+    return result(ff_getsockopt_freebsd(fd, level, option, value, &length));
+}
+
+int port_socket_set_str_freebsd(int fd, int level, int option,
+                                const char *value)
+{
+    if (!value) return -EINVAL;
+    return result(ff_setsockopt_freebsd(fd, level, option, value,
+                                        (socklen_t)strlen(value) + 1));
 }
 
 void port_protocol_progress(void) { ff_swi_net_excute(); }

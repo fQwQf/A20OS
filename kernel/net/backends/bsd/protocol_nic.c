@@ -18,6 +18,8 @@
 #include <net/route/route_ctl.h>
 #include <netinet/in.h>
 #include <netinet/in_var.h>
+#include <netinet6/in6_var.h>
+#include <netinet6/nd6.h>
 #include "ff_veth.h"
 #include "ff_config.h"
 #include "ff_dpdk_if.h"
@@ -34,7 +36,7 @@ typedef struct a20_bsd_nic_config {
     char gateway[16];
 } a20_bsd_nic_config_t;
 typedef struct a20_bsd_nic_stats {
-    uint64_t rx_frames, tx_frames, rx_drops, tx_errors, rx_starved;
+    uint64_t rx_frames, tx_frames, rx_drops, tx_drops, tx_errors, rx_starved;
 } a20_bsd_nic_stats_t;
 
 #define NIC_FRAME_BYTES 1536
@@ -46,6 +48,11 @@ extern int port_host_nic_recv(void *context, void *frame, int capacity);
 extern int port_host_nic_send(void *context, const void *frame, int length);
 extern void port_host_nic_poll(void *context);
 extern void port_host_nic_token_freed(void *context);
+/* A20OS policy bridge; resolves to the non-isolated common object. */
+extern int a20_bsd_netfilter_input(void *frame, size_t len, int ifindex);
+extern int a20_bsd_netfilter_output(void *frame, size_t len, int ifindex);
+/* Mirror of netfilter_action_t: 0 accept, 1 drop. */
+#define BSD_NETFILTER_DROP 1
 
 typedef struct nic_token {
     struct nic_token *next;
@@ -136,6 +143,13 @@ int ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m, int total)
     int result = 0;
     if (unsupported || ff_mbuf_copydata(m, ctx->tx_frame, 0, total) < 0) {
         result = EOPNOTSUPP;
+    } else if (a20_bsd_netfilter_output(ctx->tx_frame, (size_t)total,
+                                        ctx->port_id) == BSD_NETFILTER_DROP) {
+        /* Policy drop is a successful consumption, not a driver error. */
+        result = 0;
+        ctx->stats.tx_drops++;
+        ff_mbuf_free(m);
+        return result;
     } else if (port_host_nic_send(ctx, ctx->tx_frame, total) < 0) {
         result = ENOBUFS;
     } else {
@@ -188,6 +202,12 @@ void port_nic_progress(void *context, unsigned budget)
             token_return(token, 0);
             continue;
         }
+        if (a20_bsd_netfilter_input(token->frame, (size_t)length,
+                                    ctx->port_id) == BSD_NETFILTER_DROP) {
+            ctx->stats.rx_drops++;
+            token_return(token, 0);
+            continue;
+        }
         void *m = ff_mbuf_gethdr(token, (uint16_t)length, token->frame,
                                  (uint16_t)length, 0);
         if (!m) {
@@ -214,6 +234,39 @@ static uint32_t ipv4_word(const uint8_t address[4])
     uint32_t value;
     memcpy(&value, address, sizeof(value));
     return value;
+}
+
+int port_nic_set_ipv6(void *context, const uint8_t address[16],
+                              uint8_t prefix, int add)
+{
+    struct ff_dpdk_if_context *ctx = context;
+    if (!ctx || !ctx->ifp || !address || prefix > 128)
+        return EINVAL;
+    struct in6_aliasreq ifra;
+    memset(&ifra, 0, sizeof(ifra));
+    strlcpy(ifra.ifra_name, ((struct ifnet *)ctx->ifp)->if_xname,
+            sizeof(ifra.ifra_name));
+    ifra.ifra_addr.sin6_family = AF_INET6;
+    ifra.ifra_addr.sin6_len = sizeof(ifra.ifra_addr);
+    memcpy(&ifra.ifra_addr.sin6_addr, address, 16);
+    ifra.ifra_prefixmask.sin6_family = AF_INET6;
+    ifra.ifra_prefixmask.sin6_len = sizeof(ifra.ifra_prefixmask);
+    for (unsigned i = 0; i < 16; ++i) {
+        unsigned bits = prefix > i * 8 ? prefix - i * 8 : 0;
+        if (bits >= 8)
+            ifra.ifra_prefixmask.sin6_addr.s6_addr[i] = 0xff;
+        else if (bits)
+            ifra.ifra_prefixmask.sin6_addr.s6_addr[i] =
+                (uint8_t)(0xff << (8 - bits));
+    }
+    /* Infinite preferred/valid lifetime: the address is installed by an
+     * administrator, not learned from RA. */
+    ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
+    ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
+    int error = in6_control(NULL,
+                            add ? SIOCAIFADDR_IN6 : SIOCDIFADDR_IN6,
+                            (caddr_t)&ifra, (struct ifnet *)ctx->ifp, NULL);
+    return error ? error : 0;
 }
 
 static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,
