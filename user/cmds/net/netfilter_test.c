@@ -349,8 +349,8 @@ int main(void)
     close(lfd);
     CHK(ln > 0, "read /proc/a20/lock_contention");
     locks[ln] = '\0';
-    CHK(strstr(locks, "lwip:") != NULL,
-        "g_lwip_lock is registered for contention accounting");
+    CHK(strstr(locks, "lwip:") != NULL || strstr(locks, "bsd:") != NULL,
+        "the selected backend's data-plane lock is registered");
 
     /*
      * 8. conntrack, without configuring any NAT.

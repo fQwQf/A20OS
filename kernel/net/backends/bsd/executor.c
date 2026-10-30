@@ -7,6 +7,7 @@
 #include "core/lock.h"
 #include "core/stdio.h"
 #include "core/sync.h"
+#include "core/lock_counters.h"
 #include "proc/proc.h"
 
 extern void *a20_bsd_port_tls_create(void);
@@ -140,6 +141,11 @@ failed:
 
 int a20_bsd_executor_start(void)
 {
+    static int registered;
+    if (!registered) {
+        lock_counters_register(&executor_lock, "bsd");
+        registered = 1;
+    }
     uint64_t flags = spin_lock_irqsave(&executor_lock);
     int state = executor_state;
     if (state == 0) {

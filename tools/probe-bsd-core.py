@@ -71,7 +71,9 @@ def main():
                   '-fno-common', '-fno-stack-protector', '-mno-red-zone',
                   '-mgeneral-regs-only', '-mcmodel=large', '-fno-pie', '-nostdinc',
                   '-I' + str(root/'kernel/arch/x86_64/include'),
-                  '-I' + str(root/'kernel/include'), '-I' + str(upstream/'lib')]
+                  '-I' + str(root/'kernel/include'),
+                  '-I' + str(root/'kernel/net/backends/bsd'),
+                  '-I' + str(upstream/'lib')]
 
     port_flags += [f'-DCONFIG_NET_PROFILE={args.net_profile}']
 
@@ -123,6 +125,8 @@ def main():
                 'port_host_nic_send': 'a20_bsd_host_nic_send',
                 'port_host_nic_poll': 'a20_bsd_host_nic_poll',
                 'port_host_nic_token_freed': 'a20_bsd_host_nic_token_freed',
+                'a20_bsd_netfilter_input': 'a20_bsd_netfilter_input',
+                'a20_bsd_netfilter_output': 'a20_bsd_netfilter_output',
                 '_GLOBAL_OFFSET_TABLE_': '_GLOBAL_OFFSET_TABLE_',
             }
             mapping = out/'host-imports.map'

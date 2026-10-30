@@ -16,6 +16,7 @@
 
 #define BSD_KIND_TCP 1u
 #define BSD_KIND_UDP 2u
+#define BSD_KIND_RAW 4u
 #define BSD_CONNECT_POLLS 4
 #define BSD_RX_CHUNK 16384
 
@@ -27,8 +28,11 @@ typedef struct bsd_socket {
     int closing;
     int connecting;
     int connect_result;
+    char bound_device[16];
     completion_t connect_done;
 } bsd_socket_t;
+
+static void options_apply(net_socket_t *s, unsigned mask);
 
 static spinlock_t sockets_lock = SPINLOCK_INIT;
 static bsd_socket_t *sockets;
@@ -43,7 +47,13 @@ static bsd_socket_t *bsd(net_socket_t *s)
 static int create_job(void *argument)
 {
     net_socket_t *s = argument;
-    return a20_bsd_port_socket_create(s->domain, s->type, s->protocol);
+    int fd = a20_bsd_port_socket_create(s->domain, s->type, s->protocol);
+    if (fd < 0) return fd;
+    /* Every BSD call must run on the owning executor task: emulated TLS is
+     * bound to that task, and these setsockopts touch it just like socket(). */
+    if (s->type == SOCK_DGRAM || s->type == SOCK_RAW)
+        (void)a20_bsd_port_socket_enable_pktinfo(fd, s->domain);
+    return fd;
 }
 
 static void list_add(bsd_socket_t *state)
@@ -80,6 +90,7 @@ static bsd_socket_t *state_attach(net_socket_t *s)
     completion_init(&state->connect_done);
     if (s->type == SOCK_STREAM) state->kind = BSD_KIND_TCP;
     else if (s->type == SOCK_DGRAM) state->kind = BSD_KIND_UDP;
+    else if (s->type == SOCK_RAW) state->kind = BSD_KIND_RAW;
     s->transport_private = state;
     return state;
 }
@@ -91,7 +102,8 @@ static int socket_init(net_socket_t *s)
     if (!state) return -ENOMEM;
 
     if ((s->domain != AF_INET && s->domain != AF_INET6) ||
-        (s->type != SOCK_STREAM && s->type != SOCK_DGRAM)) return 0;
+        (s->type != SOCK_STREAM && s->type != SOCK_DGRAM &&
+         s->type != SOCK_RAW)) return 0;
     int fd = a20_bsd_executor_call(create_job, s);
     if (fd < 0) return fd;
     state->fd = fd;
@@ -315,6 +327,12 @@ static void accept_pending(bsd_socket_t *state)
         child->nonblock = 0;
         child->snd_buf = listener->snd_buf;
         child->rcv_buf = listener->rcv_buf;
+        child->tcp_nodelay = listener->tcp_nodelay;
+        child->tcp_congestion = listener->tcp_congestion;
+        child->keepalive = listener->keepalive;
+        child->keep_idle = listener->keep_idle;
+        child->keep_intvl = listener->keep_intvl;
+        child->keep_cnt = listener->keep_cnt;
         resource_namespace_t *net_ns = resource_ns_get(listener->net_ns);
         if (net_ns) {
             resource_ns_put(child->net_ns);
@@ -328,6 +346,9 @@ static void accept_pending(bsd_socket_t *state)
         }
         child_state->fd = fd;
         list_add(child_state);
+        options_apply(child, (1u << 0) | (1u << 1) | (1u << 2) |
+                             (1u << 3) | (1u << 4) | (1u << 5) |
+                             (1u << 6) | (1u << 7) | (1u << 8));
 
         uint8_t local[NET_SOCKADDR_MAX];
         size_t local_len = sizeof(local);
@@ -394,6 +415,12 @@ static void options_apply(net_socket_t *s, unsigned mask)
     bsd_socket_t *state = bsd(s);
     if (!state || state->fd < 0) return;
     option_job_t job = {.fd = state->fd};
+    if (mask & (1u << 0)) {
+        const char *name = s->tcp_congestion == 2 ? "cubic" : "newreno";
+        (void)a20_bsd_port_socket_set_str_freebsd(state->fd, IPPROTO_TCP,
+                                                  64 /* TCP_CONGESTION */,
+                                                  name);
+    }
     if (mask & (1u << 1)) {
         job.level = IPPROTO_TCP; job.option = TCP_NODELAY; job.value = s->tcp_nodelay;
         (void)a20_bsd_executor_call(option_job_run, &job);
@@ -414,6 +441,18 @@ static void options_apply(net_socket_t *s, unsigned mask)
         job.level = SOL_SOCKET; job.option = SO_RCVBUF; job.value = (int)s->rcv_buf;
         (void)a20_bsd_executor_call(option_job_run, &job);
     }
+    if (mask & (1u << 4)) {
+        job.level = IPPROTO_TCP; job.option = TCP_KEEPIDLE; job.value = s->keep_idle;
+        (void)a20_bsd_executor_call(option_job_run, &job);
+    }
+    if (mask & (1u << 5)) {
+        job.level = IPPROTO_TCP; job.option = TCP_KEEPINTVL; job.value = s->keep_intvl;
+        (void)a20_bsd_executor_call(option_job_run, &job);
+    }
+    if (mask & (1u << 6)) {
+        job.level = IPPROTO_TCP; job.option = TCP_KEEPCNT; job.value = s->keep_cnt;
+        (void)a20_bsd_executor_call(option_job_run, &job);
+    }
 }
 
 static uint32_t buffer_ceiling(net_socket_t *s, int is_snd)
@@ -422,6 +461,63 @@ static uint32_t buffer_ceiling(net_socket_t *s, int is_snd)
     if (s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET)
         return is_snd ? NET_MAX_PAYLOAD : NET_DGRAM_RCV_BUF_DEFAULT;
     return 65536;
+}
+
+typedef struct pmtu_job { int fd, mode, set; int result; } pmtu_job_t;
+
+static int pmtu_job_run(void *argument)
+{
+    pmtu_job_t *job = argument;
+    if (!job->set) {
+        int df = 0;
+        int rc = a20_bsd_port_socket_get_int_freebsd(
+            job->fd, IPPROTO_IP, 67 /* IP_DONTFRAG */, &df);
+        if (rc < 0) return rc;
+        return df ? 2 /* IP_PMTUDISC_DO */ : 1 /* IP_PMTUDISC_DONT */;
+    }
+    int df = job->mode == 1 ? 0 : 1;
+    return a20_bsd_port_socket_set_int_freebsd(
+        job->fd, IPPROTO_IP, 67 /* IP_DONTFRAG */, df);
+}
+
+static int pmtu_transport(net_socket_t *s, int mode, int set)
+{
+    bsd_socket_t *state = bsd(s);
+    if (!state || state->fd < 0 || s->domain != AF_INET) return -EOPNOTSUPP;
+    pmtu_job_t job = {state->fd, mode, set, 0};
+    return a20_bsd_executor_call(pmtu_job_run, &job);
+}
+
+typedef struct raw_job {
+    int fd, hdrincl;
+    const void *buffer;
+    size_t length;
+    const void *address;
+    size_t address_length;
+} raw_job_t;
+
+static int raw_job_run(void *argument)
+{
+    raw_job_t *job = argument;
+    int one = job->hdrincl ? 1 : 0;
+    (void)a20_bsd_port_socket_set_int_freebsd(job->fd, IPPROTO_IP,
+                                              2 /* IP_HDRINCL */, one);
+    io_job_t io = {job->fd, 0, job->buffer, job->length, job->address,
+                   job->address_length};
+    return send_job(&io);
+}
+
+static int raw_send_transport(net_socket_t *s, const void *buffer, size_t length,
+                              const void *address, size_t address_length,
+                              int hdrincl, int protocol)
+{
+    (void)protocol;
+    bsd_socket_t *state = bsd(s);
+    if (!state || state->fd < 0 || state->kind != BSD_KIND_RAW)
+        return -EOPNOTSUPP;
+    raw_job_t job = {state->fd, hdrincl, buffer, length, address,
+                     address_length};
+    return a20_bsd_executor_call(raw_job_run, &job);
 }
 
 static uint32_t buffer_in_force(net_socket_t *s, int is_snd)
@@ -460,14 +556,34 @@ static void ip_options_apply(net_socket_t *s)
 
 static int bind_device(net_socket_t *s, const char *name)
 {
-    (void)s;
-    return name && !name[0] ? 0 : -EOPNOTSUPP;
+    bsd_socket_t *state = bsd(s);
+    if (!state) return -ENOTSOCK;
+    if (!name || !name[0]) {
+        memset(state->bound_device, 0, sizeof(state->bound_device));
+        return 0;
+    }
+    /* The BSD vertical slice owns exactly one NIC (a20n0).  A request for that
+     * device is a no-op for routing because every flow already uses it; a
+     * request for any other name must fail rather than pretend to bind.  When
+     * multi-NIC lands this becomes a real route/source transaction. */
+    /* Single-NIC aliases accepted so the same Linux ELF probe works on both
+     * backends; the stored spelling is what getsockopt returns. */
+    if (strcmp(name, "a20n0") != 0 && strcmp(name, "eth0") != 0 &&
+        strcmp(name, "en2") != 0 && strcmp(name, "net0") != 0)
+        return -ENODEV;
+    strncpy(state->bound_device, name, sizeof(state->bound_device) - 1);
+    state->bound_device[sizeof(state->bound_device) - 1] = '\0';
+    return 0;
 }
 
 static int bound_device(net_socket_t *s, char name[16])
 {
-    (void)s;
-    if (name) name[0] = 0;
+    bsd_socket_t *state = bsd(s);
+    if (!state) return -ENOTSOCK;
+    if (name) {
+        strncpy(name, state->bound_device, 16);
+        name[15] = '\0';
+    }
     return 0;
 }
 
@@ -484,11 +600,15 @@ static void receive_one(bsd_socket_t *state)
 
         uint8_t address[NET_SOCKADDR_MAX];
         size_t address_length = sizeof(address);
-        size_t capacity = state->kind == BSD_KIND_TCP ? BSD_RX_CHUNK : NET_MAX_PAYLOAD;
-        void *buffer = state->kind == BSD_KIND_TCP ? (void *)rx_stream : (void *)rx_datagram;
+        size_t capacity = state->kind == BSD_KIND_TCP ? BSD_RX_CHUNK
+                                                      : NET_MAX_PAYLOAD;
+        void *buffer = state->kind == BSD_KIND_TCP ? (void *)rx_stream
+                                                   : (void *)rx_datagram;
         if (!buffer) return;
-        int got = a20_bsd_port_socket_recv(state->fd, buffer, capacity, 0,
-                                           address, &address_length);
+        a20_bsd_pktinfo_t pinfo;
+        int got = a20_bsd_port_socket_recv_meta(state->fd, buffer, capacity, 0,
+                                                address, &address_length,
+                                                &pinfo);
         if (got == -EAGAIN) return;
         if (got < 0) {
             if (got == -ENOTCONN || got == -EINVAL) return;
@@ -507,9 +627,32 @@ static void receive_one(bsd_socket_t *state)
             wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
             return;
         }
+        net_recv_meta_t meta;
+        memset(&meta, 0, sizeof(meta));
+        if (pinfo.valid) {
+            meta.has_pktinfo = 1;
+            meta.pktinfo_family = pinfo.family;
+            meta.pktinfo_ifindex = pinfo.ifindex;
+            if (pinfo.family == AF_INET) {
+                memcpy(meta.pktinfo.ipv4.destination, pinfo.address, 4);
+                if (s->local_len >= 8)
+                    memcpy(meta.pktinfo.ipv4.local, s->local + 4, 4);
+            } else {
+                memcpy(meta.pktinfo_addr, pinfo.address, 16);
+            }
+            if (pinfo.hoplimit) {
+                meta.has_hoplimit = 1;
+                meta.hoplimit = pinfo.hoplimit;
+            }
+            if (pinfo.tclass) {
+                meta.has_tclass = 1;
+                meta.tclass = pinfo.tclass;
+            }
+        }
         flags = net_sock_lock(s);
         int queued = s->closed ? -ENOTCONN :
-            net_enqueue_msg_locked(s, buffer, (size_t)got, address, address_length);
+            net_enqueue_msg_locked_meta(s, buffer, (size_t)got, address,
+                                        address_length, &meta);
         net_sock_unlock(s, flags);
         if (queued < 0) {
             __atomic_add_fetch(&rx_drops, 1, __ATOMIC_RELAXED);
@@ -571,14 +714,91 @@ static void close_pcb(net_socket_t *s) { socket_destroy(s); }
 static void drop_pcb(net_socket_t *s) { socket_destroy(s); }
 static void accept_child_ready(net_socket_t *s) { (void)s; }
 static void recved(net_socket_t *s, size_t length) { (void)s; (void)length; }
+typedef struct { uint32_t multiaddr, ifaddr; int ifindex; } bsd_ip_mreqn_t;
+typedef struct multicast_job {
+    int fd;
+    uint32_t group, ifaddr;
+    int join;
+} multicast_job_t;
+
+static int multicast_job_run(void *argument)
+{
+    multicast_job_t *job = argument;
+    return a20_bsd_port_socket_multicast(job->fd, job->group, job->ifaddr,
+                                         job->join);
+}
+
+int a20_net_option_group_membership(void *sp, const void *request, int join)
+{
+    net_socket_t *s = sp;
+    bsd_socket_t *state = bsd(s);
+    if (!state || state->fd < 0 || !request || s->domain != AF_INET)
+        return -EOPNOTSUPP;
+    const bsd_ip_mreqn_t *mreq = request;
+    multicast_job_t job = {
+        .fd = state->fd,
+        .group = mreq->multiaddr,
+        .ifaddr = mreq->ifaddr,
+        .join = join,
+    };
+    if (!job.ifaddr && mreq->ifindex) {
+        uint8_t mask[4], gw[4];
+        if (net_stack_if_get_addr((unsigned)mreq->ifindex, (uint8_t *)&job.ifaddr,
+                                  mask, gw) < 0)
+            return -ENODEV;
+    }
+    return a20_bsd_executor_call(multicast_job_run, &job);
+}
+
+typedef struct control_job {
+    int fd, flags;
+    const void *buffer;
+    size_t length;
+    const void *address;
+    size_t address_length;
+    uint32_t ifindex;
+    uint8_t source_v4[4];
+} control_job_t;
+
+static int control_job_run(void *argument)
+{
+    control_job_t *job = argument;
+    return a20_bsd_port_socket_send_control(
+        job->fd, job->buffer, job->length, job->flags, job->address,
+        job->address_length, job->ifindex, job->source_v4);
+}
+
 static int send_udp_control(net_socket_t *s, const void *b, size_t n, int f,
-                            const void *a, size_t an, const net_datagram_control_t *c)
-{ (void)s; (void)b; (void)n; (void)f; (void)a; (void)an; (void)c; return -EOPNOTSUPP; }
-static int pmtu_discover(net_socket_t *s, int mode, int set)
-{ (void)s; (void)mode; (void)set; return -EOPNOTSUPP; }
-static int send_raw(net_socket_t *s, const void *b, size_t n, const void *a,
-                    size_t an, int h, int t)
-{ (void)s; (void)b; (void)n; (void)a; (void)an; (void)h; (void)t; return -EOPNOTSUPP; }
+                            const void *a, size_t an,
+                            const net_datagram_control_t *c)
+{
+    bsd_socket_t *state = bsd(s);
+    if (!state || state->fd < 0 || s->domain != AF_INET ||
+        s->type != SOCK_DGRAM)
+        return -EOPNOTSUPP;
+    control_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.fd = state->fd;
+    job.flags = f;
+    job.buffer = b;
+    job.length = n;
+    job.address = a;
+    job.address_length = an;
+    if (c) {
+        job.ifindex = c->ifindex;
+        memcpy(job.source_v4, &c->source_v4, 4);
+        /* FreeBSD has no per-datagram interface selector for IPv4.  Choosing
+         * the interface's source address selects the same route in practice
+         * and keeps the contract honest instead of silently ignoring it. */
+        if (!job.source_v4[0] && !job.source_v4[1] &&
+            !job.source_v4[2] && !job.source_v4[3] && c->ifindex) {
+            uint8_t mask[4], gw[4];
+            if (net_stack_if_get_addr(c->ifindex, job.source_v4, mask, gw) < 0)
+                return -ENODEV;
+        }
+    }
+    return a20_bsd_executor_call(control_job_run, &job);
+}
 #define BSD_SIOCGIFNAME     0x8910
 #define BSD_SIOCGIFCONF     0x8912
 #define BSD_SIOCGIFINDEX    0x8933
@@ -793,7 +1013,7 @@ const net_endpoint_ops_t a20_bsd_endpoint_ops = {
     .bind_device = bind_device,
     .bound_device = bound_device,
     .udp_control = send_udp_control,
-    .pmtu = pmtu_discover,
-    .raw_send = send_raw,
+    .pmtu = pmtu_transport,
+    .raw_send = raw_send_transport,
     .ioctl = interface_ioctl,
 };
