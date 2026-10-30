@@ -51,13 +51,16 @@ def command(argv):
 
 
 class Guest:
-    def __init__(self, argv, logfile):
+    def __init__(self, argv, logfile,
+                 ready_pattern=rb"A20_BENCH_READY\r?\n", ready_timeout=60):
         self.log = logfile.open("wb")
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, cwd=REPO)
         self.buffer = b""
+        if ready_pattern is None:
+            return
         try:
-            self.until(rb"A20_BENCH_READY\r?\n", 60)
+            self.until(ready_pattern, ready_timeout)
         except BaseException:
             self.close()
             raise

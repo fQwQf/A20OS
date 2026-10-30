@@ -1,4 +1,5 @@
 # lwIP source manifest. Update this single list when importing a new lwIP tree.
+ifneq ($(filter lwip native,$(NET_STACK)),)
 LWIPDIR := $(LWIP_SOURCE_ROOT)/src
 LWIP_SRC = \
     $(LWIPDIR)/core/init.c \
@@ -43,4 +44,5 @@ LWIP_SRC = \
 
 ifeq ($(NET_STACK),native)
 LWIP_SRC += $(LWIPDIR)/core/tcp_cubic.c
+endif
 endif

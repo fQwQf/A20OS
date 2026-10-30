@@ -10,6 +10,7 @@
 #include "net/socket/socket_internal.h"
 #include "net/net_config.h"
 #include "net/netfilter.h"
+#include "net/socket_side.h"
 #include "core/timer.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -236,6 +237,10 @@ typedef struct {
     uint32_t caps;
     uint8_t rx_frame[NET_PROFILE_NETIF_FRAME_SIZE];
     uint8_t tx_frame[NET_PROFILE_NETIF_FRAME_SIZE];
+    /* One cached PBUF_POOL element for the single-lane direct-receive path.
+     * It survives an empty drain, so an idle poll does not allocate, and is
+     * consumed (set back to NULL) exactly when a frame is handed to lwIP. */
+    struct pbuf *rx_spare;
     uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
     uint64_t tx_packets, tx_bytes, tx_errors;
     uint64_t rx_filtered, tx_filtered;
@@ -320,6 +325,10 @@ static int netif_device_irq_driven(const a20_lwip_netif_state_t *st) {
  * identity, and drop the stack's binding/device reference on replacement. */
 static void netif_binding_clear(unsigned index) {
     a20_lwip_netif_state_t *st = &g_netif_state[index];
+    if (st->rx_spare) {
+        pbuf_free(st->rx_spare);
+        st->rx_spare = NULL;
+    }
     uint64_t flags = spin_lock_irqsave(&g_netif_binding_lock);
     class_device_t *old = st->binding;
     st->binding = NULL; st->dev = NULL;
@@ -466,7 +475,7 @@ static uint32_t a20_netif_ipv4_host(const struct netif *n);
 
 /* Borrowed egress identity inside backend execution; never acquires a backend
  * lock from CT. Physical and TUN identities share this backend-local space. */
-uint32_t net_backend_interface_ipv4(int index) {
+uint32_t a20_lwip_interface_ipv4(int index) {
     if (index < 0) return 0;
     if (index >= 0 && index < A20_NET_MAX_DEVS)
         return a20_netif_ipv4_host(&g_netifs[index]);
@@ -496,16 +505,68 @@ u32_t sys_now(void) {
 
 extern int a20_lwip_complete_software_tx(uint8_t *, size_t);
 
-static netfilter_action_t a20_lwip_filter(uint8_t *frame, size_t len,
-                                         int idx, int input)
+/* Read-only checksum readiness check for the zero-copy TX path.
+ *
+ * Returning 1 means the frame is already complete and may be handed to the
+ * driver directly.  Returning 0 means the staged path must run: it has the
+ * writable buffer that a20_lwip_complete_software_tx() needs.  UDP checksum 0
+ * is legal ("no checksum") and counts as complete; TCP/ICMP 0 does not. */
+static int a20_lwip_tx_frame_ready(const uint8_t *frame, size_t len)
 {
-    /* Conntrack owns its synchronization independently of protocol lanes. */
+    if (len < 34 || frame[12] != 0x08 || frame[13] != 0x00)
+        return 1; /* ARP/IPv6: no IPv4 checksum completion on this path. */
+    const uint8_t *ip = frame + 14;
+    if ((ip[0] >> 4) != 4)
+        return 1;
+    size_t header = (size_t)(ip[0] & 0x0f) * 4;
+    if (header < 20 || len < 14 + header)
+        return 0;
+    size_t total = ((size_t)ip[2] << 8) | ip[3];
+    if (total < header || total > len - 14)
+        return 0;
+    if (!ip[10] && !ip[11])
+        return 0; /* IPv4 header checksum incomplete. */
+    unsigned fragment = (((unsigned)ip[6] << 8) | ip[7]) & 0x3fff;
+    if (fragment)
+        return 1; /* Non-first fragment: the L4 header is not here. */
+    if (ip[9] == 6) {
+        if (total - header < 20)
+            return 1;
+        const uint8_t *tcp = ip + header;
+        if (!tcp[16] && !tcp[17])
+            return 0;
+    } else if (ip[9] == 1) {
+        if (total - header < 8)
+            return 1;
+        const uint8_t *icmp = ip + header;
+        if (!icmp[2] && !icmp[3])
+            return 0;
+    }
+    return 1;
+}
+
+/* Receive-side filter.  The common no-rules/no-NAT/no-conntrack case skips
+ * the Rust parser and conntrack transaction entirely. */
+static netfilter_action_t a20_lwip_rx_filter(uint8_t *frame, size_t len,
+                                             int idx)
+{
+    if (!netfilter_busy())
+        return NETFILTER_ACCEPT;
+    return netfilter_input(frame, len, idx);
+}
+
+/* Transmit-side filter.  Checksum completion still runs when netfilter is
+ * idle because it is a correctness step, not a policy step. */
+static netfilter_action_t a20_lwip_tx_filter(uint8_t *frame, size_t len,
+                                             int idx)
+{
 #ifdef CONFIG_LWIP_UPSTREAM
-    if (!input && a20_lwip_complete_software_tx(frame, len) < 0)
+    if (a20_lwip_complete_software_tx(frame, len) < 0)
         return NETFILTER_DROP;
 #endif
-    return input ? netfilter_input(frame, len, idx) :
-        netfilter_output(frame, len, idx);
+    if (!netfilter_busy())
+        return NETFILTER_ACCEPT;
+    return netfilter_output(frame, len, idx);
 }
 
 static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
@@ -557,16 +618,20 @@ int r;
      * The loopback netif never reaches this function (netif_loop_output()
      * bypasses linkoutput entirely), so the fast path cannot affect it.
      */
-    if ((st->caps & NET_DEV_CAP_TX_SG) && p->next == NULL) {
+    /* Zero-copy transmit when nothing can rewrite the frame.
+     *
+     * The copy below exists for netfilter/NAT (which needs a writable flat
+     * buffer) and for completing a checksum the stack left zero.  When there
+     * is no filter/NAT/conntrack state and the frame is already complete, the
+     * pbuf payload is handed to the driver through the borrowed send_sg
+     * contract and no staging copy happens. */
+    int direct = !netfilter_busy() && p->next == NULL &&
+                 (st->caps & NET_DEV_CAP_TX_SG) &&
+                 a20_lwip_tx_frame_ready(p->payload, p->tot_len);
+
+    if (direct) {
         net_iovec_t iov;
-        pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-        if (a20_lwip_filter(st->tx_frame, p->tot_len, st->idx, 0) ==
-            NETFILTER_DROP) {
-            __atomic_fetch_add(&st->tx_filtered, 1, __ATOMIC_RELAXED);
-            a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
-            return ERR_OK;
-        }
-        iov.base = st->tx_frame;
+        iov.base = p->payload;
         iov.len = p->tot_len;
         r = netif_device_send_sg(st, &iov, 1);
         if (r == (int)p->tot_len) {
@@ -575,13 +640,25 @@ int r;
         }
     } else {
         pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-        if (a20_lwip_filter(st->tx_frame, p->tot_len, st->idx, 0) ==
+        if (a20_lwip_tx_filter(st->tx_frame, p->tot_len, st->idx) ==
             NETFILTER_DROP) {
             __atomic_fetch_add(&st->tx_filtered, 1, __ATOMIC_RELAXED);
             a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
             return ERR_OK;
         }
-        r = netif_device_send(st, st->tx_frame, p->tot_len);
+        if (st->caps & NET_DEV_CAP_TX_SG) {
+            net_iovec_t iov;
+            iov.base = st->tx_frame;
+            iov.len = p->tot_len;
+            r = netif_device_send_sg(st, &iov, 1);
+            if (r == (int)p->tot_len) {
+                __atomic_fetch_add(&st->tx_sg_frames, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&st->tx_sg_bytes, p->tot_len,
+                                   __ATOMIC_RELAXED);
+            }
+        } else {
+            r = netif_device_send(st, st->tx_frame, p->tot_len);
+        }
     }
 
     a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
@@ -1257,8 +1334,9 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
         __atomic_fetch_add(&st->rx_bytes, (uint64_t)len, __ATOMIC_RELAXED);
         a20_perf_count(A20_PERF_NET_RX_PACKETS);
         a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
-        net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
-                            (size_t)len);
+        if (net_packet_bound_count())
+            net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
+                                (size_t)len);
         /* The filter still runs here, on rx_frame, before the lane is worked
          * out -- and that ordering is load-bearing for the same reason it was
          * before the pbuf existed: a DNAT rewrites the destination in place, so
@@ -1266,7 +1344,7 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
          * the packet used to have.  Running it after the enqueue would make the
          * dispatch disagree with the lookup in udp_input(), which reads the
          * post-NAT destination. */
-        if (a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1) ==
+        if (a20_lwip_rx_filter(st->rx_frame, (size_t)len, st->idx) ==
             NETFILTER_DROP) {
             LINK_STATS_INC(link.drop);
             __atomic_fetch_add(&st->rx_filtered, 1, __ATOMIC_RELAXED);
@@ -1471,52 +1549,61 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
             drained = 0;
             break;
         }
-        int len = netif_device_recv(st, st->rx_frame, sizeof(st->rx_frame));
-        if (len <= 0)
+        /* Direct receive: the device fills the pbuf payload itself, so the
+         * old rx_frame -> pbuf_take() copy is gone.  The spare survives an
+         * empty drain, which keeps idle polling allocation-free; it is
+         * consumed only when a frame is actually handed to lwIP. */
+        struct pbuf *p = st->rx_spare;
+        if (!p) {
+            p = pbuf_alloc(PBUF_RAW, (u16_t)sizeof(st->rx_frame), PBUF_POOL);
+            if (!p) {
+                LINK_STATS_INC(link.memerr);
+                LINK_STATS_INC(link.drop);
+                __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
+                a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
+                drained = 0;
+                break;
+            }
+        }
+        int len = netif_device_recv(st, p->payload, p->len);
+        if (len <= 0) {
+            st->rx_spare = p;
             break;
+        }
         done++;
-        /* recv() was handed sizeof(rx_frame), so this only fires if a driver
-         * over-reports; without it an over-report reads past rx_frame below. */
-        if ((size_t)len > sizeof(st->rx_frame))
-            len = (int)sizeof(st->rx_frame);
+        if ((size_t)len > p->len)
+            len = (int)p->len;
+        pbuf_realloc(p, (u16_t)len);
+        st->rx_spare = NULL;
         __atomic_fetch_add(&st->rx_packets, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&st->rx_bytes, (uint64_t)len, __ATOMIC_RELAXED);
         a20_perf_count(A20_PERF_NET_RX_PACKETS);
         a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
-        net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
-                            (size_t)len);
+        if (net_packet_bound_count())
+            net_packet_rx_defer((unsigned)netif_get_index(n), p->payload,
+                                (size_t)len);
         /*
-         * The filter runs on rx_frame, before the pbuf is filled from it, and
-         * that ordering is load-bearing rather than incidental.  A DNAT rewrites
-         * the destination in place; if the hook ran after pbuf_take() the copy
-         * lwIP would go on to parse would still hold the pre-NAT destination and
-         * the translation would silently do nothing -- the rule would report a
-         * match and the connection would never be made.  Running first also
-         * means the drop path has no pbuf to release.
+         * The filter runs on the same bytes the stack will parse.  A DNAT
+         * rewrite is therefore visible to ethernet_input(), which is the
+         * ordering the old rx_frame path had; the only difference is that
+         * those bytes now live in the pbuf payload.
          */
-        if (a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1) ==
+        if (a20_lwip_rx_filter(p->payload, (size_t)len, st->idx) ==
             NETFILTER_DROP) {
+            pbuf_free(p);
             LINK_STATS_INC(link.drop);
             __atomic_fetch_add(&st->rx_filtered, 1, __ATOMIC_RELAXED);
             continue;
         }
-        struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
-        if (!p) {
-            LINK_STATS_INC(link.memerr);
-            LINK_STATS_INC(link.drop);
-            __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
-            a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
-            continue;
-        }
-        pbuf_take(p, st->rx_frame, (u16_t)len);
         /*
          * One pbuf_free() call site brackets the n->input() call below, and it
          * is not redundant -- ownership moves at the call.  After
          * ethernet_input() has taken ownership it frees the pbuf itself on its
          * error paths while still returning ERR_OK (see the "so the caller
          * doesn't have to free it again" note in lwip ethernet.c), so the
-         * caller must not free again.  The filter's drop path no longer
-         * appears here at all: it runs before the pbuf exists.
+         * caller must not free again.  The filter's drop path already freed
+         * its pbuf above, so every surviving path hands ownership exactly
+         * once.
          */
         if (n->input(p, n) != ERR_OK) {
             LINK_STATS_INC(link.drop);
@@ -2637,7 +2724,10 @@ static uint8_t *tun_filter_packet(const uint8_t *packet, struct pbuf *p,
     unsigned version = frame[14] >> 4;
     if (version != 4 && version != 6) { kfree(frame); *error = -EINVAL; return NULL; }
     frame[12] = version == 4 ? 8 : 0x86; frame[13] = version == 4 ? 0 : 0xdd;
-    if (a20_lwip_filter(frame, length + 14, identity, input) == NETFILTER_DROP) {
+    netfilter_action_t verdict = input
+        ? a20_lwip_rx_filter(frame, length + 14, identity)
+        : a20_lwip_tx_filter(frame, length + 14, identity);
+    if (verdict == NETFILTER_DROP) {
         kfree(frame); return NULL; /* Policy drop consumes the packet normally. */
     }
     return frame;

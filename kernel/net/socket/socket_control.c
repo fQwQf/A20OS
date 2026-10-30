@@ -1,4 +1,5 @@
 #include "net/socket/socket_internal.h"
+#include "net/backend.h"
 #include "net/tun.h"
 #include "ipc/ipc.h"
 #include "proc/userns.h"
@@ -488,11 +489,31 @@ int a20_net_option_ip_effective(void *sp, int which)
 
 extern int linux_pidfd_create(int pid, int flags);
 
+/* Options whose meaning is a backend promise.  Rejecting them here keeps the
+ * Linux ABI honest for stacks that cannot honour them, instead of accepting a
+ * value that no protocol path will ever read. */
+static int net_option_cap_supported(int level, int optname)
+{
+    if (level == SOL_SOCKET && optname == 25 /* SO_BINDTODEVICE */)
+        return net_backend_has(NET_CAP_BINDTODEVICE);
+    if (level == IPPROTO_TCP && optname == 13 /* TCP_CONGESTION */)
+        return net_backend_has(NET_CAP_CONGESTION);
+    if (level == IPPROTO_IP && optname == 10 /* IP_MTU_DISCOVER */)
+        return net_backend_has(NET_CAP_PMTU);
+    if (level == IPPROTO_IP && optname == 8 /* IP_PKTINFO */)
+        return net_backend_has(NET_CAP_PKTINFO);
+    if (level == IPPROTO_IPV6 && optname == 49 /* IPV6_RECVPKTINFO */)
+        return net_backend_has(NET_CAP_PKTINFO);
+    return 1;
+}
+
 int net_setsockopt_sock(net_socket_t *s, int level, int optname,
                         const void *optval, size_t optlen)
 {
     if (!s)
         return -ENOTSOCK;
+    if (!net_option_cap_supported(level, optname))
+        return -ENOPROTOOPT;
     int validation = net_inet_option_validate(s, level, optname, optval, optlen);
     if (validation < 0) return validation;
     /* SO_BINDTODEVICE is a name and restricts native receive and transmit. */

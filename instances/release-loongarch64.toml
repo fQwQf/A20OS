@@ -17,3 +17,6 @@ smp = 8
 kind = "release"
 kernel_out = "kernel-la"
 disk_out = "disk-la.img"
+
+[net]
+stack = "lwip"

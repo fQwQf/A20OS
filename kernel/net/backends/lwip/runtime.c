@@ -11,7 +11,10 @@ extern int a20_lwip_interface_snapshot(void *, int);
 extern int a20_lwip_interface_mtu(unsigned);
 extern int a20_lwip_owns_ipv4(uint32_t);
 extern void a20_lwip_config_snapshot(a20_net_config_t *);
-extern const net_transport_ops_t a20_lwip_transport_ops;
+extern uint32_t a20_lwip_interface_ipv4(int);
+extern const net_socket_ops_t a20_lwip_socket_ops;
+extern const net_socket_opt_ops_t a20_lwip_socket_opt_ops;
+extern const net_endpoint_ops_t a20_lwip_endpoint_ops;
 
 /* Isolated port extension; upstream exposes only permanent insertion. */
 extern err_t a20_etharp_update_dynamic(struct netif *, const ip4_addr_t *,
@@ -82,42 +85,95 @@ static int work_pending(void) {
     return a20_lwip_rx_pending_any() || net_bh_any_pending();
 }
 
-const net_stack_ops_t a20_network_stack_ops = {
-    .transport = &a20_lwip_transport_ops,
+static const net_backend_cycle_ops_t lwip_cycle_ops = {
+    .init = a20_lwip_init,
+    .attach = a20_lwip_attach_netifs,
+};
+
+static const net_backend_event_ops_t lwip_event_ops = {
+    .rx_progress = a20_lwip_rx_progress,
+    .irq = device_interrupt,
+    .protocol_progress = protocol_progress,
+    .timer_tick = timer_tick,
+    .work_pending = work_pending,
+    .poll_waiter = a20_lwip_poll_waiter,
+};
+
+static const net_backend_if_ops_t lwip_iface_ops = {
+    .up = a20_lwip_if_up,
+    .default_index = a20_lwip_if_default_index,
+    .owns_ipv4 = a20_lwip_owns_ipv4,
+    .mtu = a20_lwip_interface_mtu,
+    .hwaddr = a20_lwip_if_hwaddr,
+    .snapshot = a20_lwip_interface_snapshot,
+    .config_snapshot = a20_lwip_config_snapshot,
+    .set_mtu = a20_lwip_if_set_mtu,
+    .set_flags = a20_lwip_if_set_flags,
+    .get_addr = a20_lwip_if_get_addr,
+    .set_addr = a20_lwip_if_set_addr,
+    .set_addr6 = a20_lwip_if_set_addr6,
+    .del_addr6 = a20_lwip_if_del_addr6,
+    .neighbor_update_v4 = neighbor_update_v4,
+    .interface_ipv4 = a20_lwip_interface_ipv4,
+};
+
+static const net_backend_packet_ops_t lwip_packet_ops = {
+    .tx = a20_lwip_packet_tx,
+    .tun_create = a20_lwip_tun_create,
+    .tun_destroy = a20_lwip_tun_destroy,
+    .tun_inject = a20_lwip_tun_inject,
+};
+
+static const net_backend_obs_ops_t lwip_obs_ops = {
+    .status = a20_lwip_format_status,
+    .memory = a20_lwip_format_memp,
+    .devices = a20_lwip_format_net_dev,
+    .routes = a20_lwip_format_route,
+};
+
+/*
+ * Capabilities are the Linux-ABI promises this backend can keep.  The upstream
+ * lwIP port intentionally does not advertise neighbour injection or CUBIC:
+ * its own modules return -EOPNOTSUPP for those, and a capability bit without a
+ * working module would be a lie the frontend forwards to userspace.
+ */
+#ifdef CONFIG_LWIP_UPSTREAM
+#define A20_LWIP_CAPS                                                   \
+    (NET_CAP_STREAM | NET_CAP_DGRAM | NET_CAP_RAW | NET_CAP_IPV6 |      \
+     NET_CAP_LISTEN | NET_CAP_SHUTDOWN | NET_CAP_SNDBUF |               \
+     NET_CAP_RCVBUF | NET_CAP_PKTINFO | NET_CAP_BINDTODEVICE |          \
+     NET_CAP_UDP_CONTROL | NET_CAP_PMTU | NET_CAP_RAW_TX | NET_CAP_TUN |\
+     NET_CAP_IF_ADDR6 | NET_CAP_IF_DYNAMIC | NET_CAP_CONGESTION |         \
+     NET_CAP_DEVICE_IRQ | NET_CAP_OFFLOAD_SG)
+#else
+#define A20_LWIP_CAPS                                                   \
+    (NET_CAP_STREAM | NET_CAP_DGRAM | NET_CAP_RAW | NET_CAP_IPV6 |      \
+     NET_CAP_LISTEN | NET_CAP_SHUTDOWN | NET_CAP_SNDBUF |               \
+     NET_CAP_RCVBUF | NET_CAP_PKTINFO | NET_CAP_BINDTODEVICE |          \
+     NET_CAP_UDP_CONTROL | NET_CAP_PMTU | NET_CAP_RAW_TX | NET_CAP_TUN |\
+     NET_CAP_NEIGH | NET_CAP_IF_ADDR6 | NET_CAP_IF_DYNAMIC |            \
+     NET_CAP_CONGESTION | NET_CAP_DEVICE_IRQ | NET_CAP_OFFLOAD_SG)
+#endif
+
+const net_backend_t a20_lwip_backend = {
     .name =
 #ifdef CONFIG_LWIP_UPSTREAM
         "lwip",
 #else
         "native",
 #endif
-    .init = a20_lwip_init,
-    .attach_interfaces = a20_lwip_attach_netifs,
-    .receive_progress = a20_lwip_rx_progress,
-    .device_interrupt = device_interrupt,
-    .protocol_progress = protocol_progress,
-    .timer_tick = timer_tick,
-    .work_pending = work_pending,
-    .tun_create = a20_lwip_tun_create,
-    .tun_destroy = a20_lwip_tun_destroy,
-    .tun_inject = a20_lwip_tun_inject,
-    .neighbor_update_v4 = neighbor_update_v4,
-    .status = a20_lwip_format_status,
-    .format_memory = a20_lwip_format_memp,
-    .format_devices = a20_lwip_format_net_dev,
-    .format_routes = a20_lwip_format_route,
-    .poll_waiter = a20_lwip_poll_waiter,
-    .if_up = a20_lwip_if_up,
-    .owns_ipv4 = a20_lwip_owns_ipv4,
-    .if_mtu = a20_lwip_interface_mtu,
-    .if_default_index = a20_lwip_if_default_index,
-    .if_hwaddr = a20_lwip_if_hwaddr,
-    .packet_tx = a20_lwip_packet_tx,
-    .interface_snapshot = a20_lwip_interface_snapshot,
-    .config_snapshot = a20_lwip_config_snapshot,
-    .if_set_mtu = a20_lwip_if_set_mtu,
-    .if_set_flags = a20_lwip_if_set_flags,
-    .if_get_addr = a20_lwip_if_get_addr,
-    .if_set_addr = a20_lwip_if_set_addr,
-    .if_set_addr6 = a20_lwip_if_set_addr6,
-    .if_del_addr6 = a20_lwip_if_del_addr6,
+    .caps = A20_LWIP_CAPS,
+    .cycle = &lwip_cycle_ops,
+    .event = &lwip_event_ops,
+    .socket = &a20_lwip_socket_ops,
+    .opts = &a20_lwip_socket_opt_ops,
+    .endpoint = &a20_lwip_endpoint_ops,
+    .iface = &lwip_iface_ops,
+    .packet = &lwip_packet_ops,
+    .obs = &lwip_obs_ops,
 };
+
+void a20_lwip_backend_register(void)
+{
+    (void)net_backend_register(&a20_lwip_backend);
+}

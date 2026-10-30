@@ -22,7 +22,8 @@ accept 暂存位于 `backends/lwip/native.h` 的私有结构；仅 INET socket/a
 分配，UNIX/ALG 不携带这些数据。attachment 在发布前创建，close 先撤销 PCB/回调，
 最后一个前端引用释放时才回收 attachment；失败创建也走同一释放入口。
 
-`net/transport.h` 定义创建、关闭、绑定、连接、收发、选项与接口控制分派。公共发送
+`net/backend.h` 定义创建、关闭、绑定、连接、收发、选项与接口控制分派（模块化
+`cycle/event/socket/opts/endpoint/iface/packet/obs`）。公共发送
 事务只观察 transport kind 的值快照，不借用 PCB 地址。公共队列以借用 reader 回调
 复制源数据，不知道 pbuf 布局，也不保留源引用；复制失败不会发布未完成的消息。
 接收地址/接口元数据跨边界按值复制。IPv6 raw 每报文选项使用同步发送的 PCB 值副本，

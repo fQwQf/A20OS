@@ -215,6 +215,35 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append("net.guest_netmask: only meaningful together with net.guest_ip")
     if n.guest_gateway is not None and n.guest_ip is None:
         e.append("net.guest_gateway: only meaningful together with net.guest_ip")
+    # Protocol stack selection.  These mirror the Makefile guards so `a20 check`
+    # fails before a build spends time on an impossible combination.  Keep the
+    # two in sync: the Makefile is still authoritative for plain `make`.
+    if n.stack is not None and n.stack not in ("lwip", "native", "bsd", "none"):
+        e.append(f"net.stack: '{n.stack}' must be lwip, native, bsd or none")
+    if n.lanes is not None and n.lanes < 1:
+        e.append("net.lanes: must be >= 1")
+    if n.resource_profile is not None and n.resource_profile not in (1, 2, 3):
+        e.append("net.resource_profile: must be 1 (embedded), 2 (default) or 3 (server)")
+    if n.role is not None and n.role not in ("host", "router"):
+        e.append(f"net.role: '{n.role}' must be host or router")
+    if n.stack == "bsd":
+        if inst.arch != "x86_64":
+            e.append("net.stack=bsd: currently requires arch = x86_64")
+        if n.lanes is not None and n.lanes != 1:
+            e.append("net.stack=bsd: uses one serialized executor; net.lanes must be 1")
+        if n.resource_profile is not None and n.resource_profile != 2:
+            e.append("net.stack=bsd: only NET_PROFILE=2 has budget evidence")
+        if n.role == "router":
+            e.append("net.stack=bsd: the desktop/host vertical slice does not provide router mode")
+    if n.stack == "lwip" and n.lanes is not None and n.lanes != 1:
+        e.append("net.stack=lwip: pristine lwIP requires net.lanes = 1")
+    if n.stack == "none":
+        if n.role == "router":
+            e.append("net.stack=none: router mode needs a TCP/IP backend")
+        if k.profile != "mcu":
+            e.append("net.stack=none: only the mcu kernel profile may omit TCP/IP")
+    if n.role == "router" and n.stack in ("none",):
+        e.append("net.role=router: requires lwip, native or bsd")
     if t.timeout is not None and not _TIMEOUT_RE.fullmatch(t.timeout):
         e.append(f"test.timeout: '{t.timeout}' must match {_TIMEOUT_RE.pattern} (e.g. 45s)")
     has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands,

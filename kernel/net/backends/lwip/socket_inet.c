@@ -1794,12 +1794,12 @@ void a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg)
     a20_net_cong_apply_impl(pcb, alg);
 }
 
-uint32_t net_socket_buf_ceiling(net_socket_t *s, int is_snd)
+uint32_t a20_lwip_transport_buffer_ceiling(net_socket_t *s, int is_snd)
 {
     return a20_net_socket_buf_ceiling(s, is_snd);
 }
 
-uint32_t net_socket_buf_in_force(net_socket_t *s, int is_snd)
+uint32_t a20_lwip_transport_buffer_in_force(net_socket_t *s, int is_snd)
 {
     return a20_net_socket_buf_in_force(s, is_snd);
 }
@@ -2690,7 +2690,7 @@ void net_inet_ip_options_snapshot(net_socket_t *s,
     a20_net_inet_ip_options_snapshot(s, out);
 }
 
-void net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
+void a20_lwip_transport_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
                            uint8_t *mc_ttl)
 {
     a20_net_inet_ip_effective(s, ttl, tos, mc_ttl);
@@ -2702,7 +2702,7 @@ void net_inet_ip_opts_apply_snapshot_locked(
     a20_net_inet_ip_opts_apply_snapshot_locked(s, opts);
 }
 
-void net_inet_ip_opts_apply(net_socket_t *s)
+void a20_lwip_transport_ip_options_apply(net_socket_t *s)
 {
     a20_net_inet_ip_opts_apply(s);
 }

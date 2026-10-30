@@ -91,6 +91,13 @@ if [ -x /usr/lib/polkit-1/polkitd ]; then
     /usr/lib/polkit-1/polkitd 2>/dev/null &
 fi
 
+# Firefox profile locks are process-lifetime state, but image assembly can
+# preserve them from a previous rootfs build.  No browser is running yet, so
+# remove stale locks before any session starts; otherwise Firefox waits on a
+# profile that no process owns and never reaches page navigation.
+rm -f /root/.config/mozilla/firefox/*/lock \
+      /root/.config/mozilla/firefox/*/.parentlock 2>/dev/null || true
+
 # The compositor owns the session.  When it exits (the power menu's Log Out,
 # or a crash) there is no display manager to return to, so restart the
 # session instead of leaving PID 1 with no userspace.  Three consecutive short

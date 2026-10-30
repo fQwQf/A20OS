@@ -6,25 +6,67 @@ fixture is not part of the production overlay. Protocol reference:
 https://firefox-source-docs.mozilla.org/remote/marionette/Protocol.html
 """
 import json
+import os
+import shlex
+import shutil
+import signal
 import socket
+import subprocess
 import time
+
+
+def launch_firefox(url):
+    """Launch the real browser from a disposable profile.
+
+    The shell owns the background child and exits immediately.  Letting the
+    Python process fork the browser directly makes Popen wait on Firefox's own
+    exec handshake, which is exactly the path the browser gate must not depend
+    on.
+    """
+    args = ['/usr/lib/firefox/firefox', '--marionette', '--no-remote']
+    if os.environ.get('XFCE_WEB_DEFAULT_PROFILE') != '1':
+        profile = '/tmp/bsd-firefox-profile'
+        shutil.rmtree(profile, ignore_errors=True)
+        os.makedirs(profile, exist_ok=True)
+        args += ['--profile', profile]
+    args.append(url)
+    command = ' '.join(shlex.quote(x) for x in args)
+    subprocess.Popen(
+        ['/bin/sh', '-c',
+         f'{command} >/tmp/bsd-firefox.log 2>&1 </dev/null &'],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    print('XFCE_WEB: Firefox launched', flush=True)
+    # Marionette listens after profile setup and the parent process starts.
+    # Waiting for a stable listener also avoids racing a connect against the
+    # transition from ECONNREFUSED to LISTEN.  Keep the wait observable: a
+    # single long sleep hiding behind a pending SIGCHLD is indistinguishable
+    # from a browser startup failure.
+    for second in range(15):
+        time.sleep(1)
+        print(f'XFCE_WEB: Firefox start wait {second + 1}', flush=True)
 
 
 class Firefox:
     def __init__(self):
         deadline = time.monotonic() + 180
+        print('XFCE_WEB: Marionette connect start', flush=True)
         while True:
             try:
                 self.sock = socket.create_connection(('127.0.0.1', 2828), timeout=10)
+                print('XFCE_WEB: Marionette connected', flush=True)
                 break
-            except OSError:
+            except OSError as error:
+                print(f'XFCE_WEB: Marionette connect retry {error!r}', flush=True)
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(2)
         self.sock.settimeout(150)
         self.stream = self.sock.makefile('rb')
         self.sequence = 0
+        print('XFCE_WEB: Marionette hello wait', flush=True)
         hello = self.receive()
+        print('XFCE_WEB: Marionette hello', hello, flush=True)
         assert hello.get('marionetteProtocol') == 3, hello
 
     def receive(self):
@@ -71,6 +113,11 @@ class Firefox:
 
 
 def main():
+    # The launcher shell exits immediately; auto-reap it instead of carrying a
+    # zombie through the browser startup window.
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    if os.environ.get('XFCE_WEB_LAUNCH') == '1':
+        launch_firefox(os.environ.get('XFCE_WEB_URL', 'https://example.org/'))
     browser = Firefox()
     session = browser.command('WebDriver:NewSession',
                               acceptInsecureCerts=False, pageLoadStrategy='eager')
@@ -83,6 +130,10 @@ def main():
         browser.wait_script("return /Example Domain/i.test(document.title) && document.body && document.body.innerText.length > 100;")
         assert browser.script('return location.protocol;') == scheme + ':'
         print(f'XFCE_WEB: Firefox {scheme.upper()} DOM PASS', flush=True)
+    if os.environ.get('XFCE_WEB_QUICK') == '1':
+        browser.command('WebDriver:DeleteSession')
+        print('XFCE_WEB: Firefox PASS', flush=True)
+        return
     browser.command('WebDriver:Navigate', url='https://www.bing.com/')
     browser.wait_script("return !!document.querySelector('input[name=q],textarea[name=q]');")
     assert browser.script('return location.hostname;').endswith('bing.com')

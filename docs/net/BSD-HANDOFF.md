@@ -1,8 +1,14 @@
 # BSD 网络接入交接（2026-10-29）
 
-用户要求停止继续开发并交接。**目标尚未完成：BSD 不能通过 A20OS 的普通 socket/NIC
-访问公网。** 请不要将诊断回环通过解释为“BSD 后端已可用”，也不要提前更改默认。
-桌面、服务器最终采用 BSD 的决策保持不变。
+本文件保留 2026-10-29 中段的交接基线。**后续已完成第一个真实桌面垂直切片：x86_64 XFCE 使用 BSD 后端、virtio-net 和
+公共 Linux socket 完成 DNS/HTTP/HTTPS，并由真实 Firefox 151 读取 HTTP/HTTPS
+DOM；动态 IPv4/MTU/link 事务也已通过。**
+当前状态、限制和复现见
+[BSD 桌面联网垂直切片](bsd-desktop-internet-2026-10-29.md)。
+
+这仍不是完整 BSD 后端：外部 IPv6/RA、DHCP、TUN/router、raw/PMTU、完整错误/
+关闭回收和性能矩阵未完成；x86_64 桌面/服务器默认已是 BSD，其它架构仍为 lwip。
+不要把本页较早的“未运行”描述当作最新状态。
 
 工作分支：`codex/net-backends-router`。最近实现提交：
 
@@ -19,11 +25,11 @@
 | 默认 `NET_STACK=lwip` | 未修改 upstream 2.2.1；此前冻结版本真实公网 HTTP/HTTPS 通过 | 最新收尾版本仅重新构建，未再次跑公网测试 |
 | `NET_STACK=native` | 衍生协议实现，此前冻结版本公网验证通过 | 本轮没有重测 |
 | BSD 私有运行时 | 分配/回收/预算/TLS 测试及 ASan/UBSan 通过 | 完整 BSD worker 退出、预算耗尽时 BSD 上层行为 |
-| BSD 协议核心 | 主机与真实 A20OS KVM 内执行 SYSINIT、UMA、UDP 回环、TCP 建连/双向校验 | 物理 NIC、公共 Linux socket ABI、IPv6 回归、公网 DNS/HTTP/HTTPS/apk |
-| `NET_STACK=bsd` | 仍明确拒绝普通构建，禁止静默回退 | 尚无可选的完整 `net_stack_ops` / `net_transport_ops` 实现 |
+| BSD 协议核心 | 真实 A20OS KVM 执行 SYSINIT、UMA；单 virtio、公共 socket、DNS/HTTP/HTTPS、IPv4/IPv6 listen/accept、动态 IPv4/MTU/link；XFCE 桌面 curl 与 Firefox DOM 通过 | 外部 IPv6/RA、DHCP、TUN/router、raw/PMTU、完整 close/cancel/低内存 |
+| `NET_STACK=bsd` | x86_64 desktop/server/benchmark 默认，`NET_LANES=1` | 非 x86_64、router/embedded、IPv6/DHCP/TUN/raw、完整能力/性能验收 |
 
 **KVM 诊断没有网卡，使用 `-net none`。** 它在初始化内核任务里运行 BSD 私有 socket
-API，随后保留已初始化域并循环让出 CPU，不进入用户 init。默认后端仍标记为 lwip；
+API，随后保留已初始化域并循环让出 CPU，不进入用户 init。该诊断构建仍标记为 lwip；
 诊断没有经由它发送回环流量。普通 Linux ELF 经公共前端使用 BSD 的路径尚未接通。
 
 ## 基线、边界和代码入口
@@ -116,6 +122,9 @@ python3 tools/check-network-backend-boundary.py --check-upstream
 
 ## 接手后的工作顺序与已知约束
 
+> 2026-10-29 后续：第 1、2 项的 x86_64 单 NIC/静态 IPv4 部分及第 3 项的出站
+> socket 子集已落地，并完成桌面 HTTP/HTTPS。以下列表继续用于剩余工作。
+
 1. 建立持久 BSD executor 的启动/停止契约。当前诊断复用了初始化内核任务；正式后端
    应有稳定所有者，绑定 TLS 后执行一次初始化，IRQ只入队，不能在任意 Linux 调用
    线程和中断里同时进入 BSD。F-Stack 的空锁宏不是 A20OS SMP 锁实现。8个 TLS槽也
@@ -124,7 +133,7 @@ python3 tools/check-network-backend-boundary.py --check-upstream
 2. 接入现有 virtio 包 I/O、BSD ifnet/mbuf、RX/TX所有权和背压。公共 driver/stack
    分派已存在，不应再让 virtio/e1000/rtl8139 包含协议私有头。先双向收发与 ARP/ND，
    再上 DNS/TCP。TUN 同样要实现公共索引和同步借用接口，不传 pbuf/mbuf 给前端。
-3. 实现 `net_stack_ops` 和 `net_transport_ops`，包括 socket 生命周期、非阻塞进展、
+3. 实现 `net_backend_t`（`cycle/event/socket` 必备，其余按能力补齐），包括 socket 生命周期、非阻塞进展、
    接收/accept 发布、close与回调撤销、接口/路由配置事务。BSD errno、IPv6 family28、
    sockaddr长度字节、私有 fd 都不能直接泄漏为 Linux ABI。公共前端必须完成用户内存
    校验/复制，再把受控内核缓冲交给 BSD；不能直接照搬 F-Stack 的 memcpy式 copyin。
@@ -132,7 +141,7 @@ python3 tools/check-network-backend-boundary.py --check-upstream
    poll 都调用一次 hardclock。当前短时回环不验证重传/超时、长时间运行或 teardown。
 5. 在相同驱动与链路下让同一 Linux ELF 使用 BSD，验证 DNS、公网 HTTP/HTTPS、在线
    apk 和 IPv4/IPv6/ABI；再跑吞吐、p99、CPU/字节、连接规模与峰值/回收内存。成功
-   后才启用普通 `NET_STACK=bsd`，并落实桌面/服务器场景默认。
+   后才把普通默认扩展到更多架构/资源档。x86_64 桌面/服务器默认已切换。
 6. 原始范围中仍有完整分片 NAT、本机 socket PMTU/错误队列、软路由整体验收；前轮
    ICMP RELATED/转发MTU错误的成功不能代替这些工作。详见 `nat.md` 和
    `router-completion-2026-10-29.md`。

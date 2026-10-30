@@ -177,6 +177,12 @@ int netfilter_parse_frame(const uint8_t *frame, size_t len, netfilter_frame_t *o
 /* Rule table management.  With no rules installed the default policy is
  * ACCEPT, so an unconfigured system behaves exactly as before. */
 int         netfilter_rule_count(void);
+/* Packet-path fast check: non-zero when a filter rule, NAT rule or live
+ * conntrack entry may change this packet.  Configured by the control paths. */
+int         netfilter_busy(void);
+void        netfilter_busy_refresh(void);
+/* cton/ctoff: force tracking even with no rules (non-zero does). */
+void        netfilter_busy_force(int on);
 int         netfilter_add_rule(const netfilter_rule_t *rule);
 int         netfilter_del_rule(unsigned index);
 void        netfilter_reset(void);

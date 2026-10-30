@@ -8,17 +8,19 @@
 git submodule update --init --depth 1 kernel/external/f-stack
 ```
 
-**当前尚非可用的网卡/socket 后端。** `NET_STACK=bsd` 明确报错；不链接 lwIP、不调用宿主 socket 冒充 BSD。
-实际检查上游 `lib/Makefile` 发现 DPDK 依赖；`make -n` 配置探测亦因此失败。
-这不是“安装 DPDK 后即可成为内核后端”：host 内存、线程/TLS、时钟、随机数以及
-veth/mbuf 的释放和驱动接口都需适配到 A20OS。
+**x86_64 host/desktop 垂直切片已运行。** `NET_STACK=bsd NET_LANES=1` 编译真实
+F-Stack 核心，使用单 BSD 执行器、外部 token/`ff_veth` 数据面和公共 Linux socket
+完成 DNS/HTTP/HTTPS；真实 XFCE 桌面 curl 已验证。当前支持单 virtio、动态 IPv4/MTU/link、TCP/UDP 与本地
+IPv6；TUN/router/raw/PMTU/外部 IPv6/DHCP 和完整关闭/性能验收仍缺失。这里
+不链接 lwIP，也不调用宿主 socket 冒充 BSD。后端接口见 [网络后端接口契约](../../../../docs/net/backend-interface.md)，
+接入细节见 [BSD 桌面联网垂直切片](../../../../docs/net/bsd-desktop-internet-2026-10-29.md)。
 
 具体边界、源码入口和验收顺序见 [BSD 接入记录](../../../../docs/net/bsd-port.md)。
 
 `port-sources.toml` 明确列出当前独立编译的真实 BSD 对象。运行
 `python3 tools/probe-bsd-core.py --out <新目录>` 可生成头文件、编译并部分链接，
-保留逐对象源码哈希、命令、告警与全部未解析符号。当前174个对象通过；这尚不是
-`NET_STACK=bsd` 的可运行构建清单，不能据此声称初始化、收发或 socket 已贯通。
+保留逐对象源码哈希、命令、告警与全部未解析符号。当前177个对象通过。普通 BSD
+构建会自动重跑该探测并链接隔离对象；运行时能力边界以桌面联网记录为准。
 
 当前移植基线为 F-Stack `v1.25`，固定提交见 `upstream.toml`。原先选定提交及 v2.0
 包含仅用于链接的 FreeBSD-14 空桩批次，未将这些空桩引入内核。新基线仍需独立验证，

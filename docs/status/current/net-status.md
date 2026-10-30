@@ -5,6 +5,29 @@
 > 配置面见 [net/network-config-design.md](../../net/network-config-design.md)，
 > NAT 形态见 [net/conntrack-nat.md](../../net/conntrack-nat.md)。
 
+## 接口与实例选择（2026-10-30）
+
+- 协议栈接口统一为 `kernel/include/net/backend.h` 的模块化契约：
+  `cycle/event/socket/opts/endpoint/iface/packet/obs` 八个模块，能力位表达
+  Linux ABI 可观察行为。旧的 `net_stack_ops_t` / `net_transport_ops_t` 已移除，
+  `net/transport.h` 仅作兼容 include。
+- 前端只经 `net/stack.h` facade 调用后端；`kernel/net/core/stack.c` 是唯一
+  解引用 `net_backend_t` 的地方，`kernel/net/core/transport.c` 是唯一映射
+  socket 模块的地方。
+- 后端由实例 TOML 的 `[net].stack` 选择：`tools/a20 build <instance>` 与
+  `make NET_INSTANCE=<instance>` 都转换为 `NET_STACK`，构建只链接选中的后端，
+  启动按名字选择且不回退。字段与校验见
+  [net/instance-config.md](../../net/instance-config.md)。
+- `/proc/net/status` 增加 `backend: <name>` 后的能力行（如
+  `lwip: stream,dgram,...`），用于确认实际后端与能力，而不是只信构建参数。
+- BSD 的资源上限改用共享的 `NET_PROFILE_*`（NIC 数与 RX 预算），不再维护
+  `BSD_MAX_NICS` 之类的私有档位副本。
+- 数据面快路径：lwIP 单 lane 收包直接写入 pbuf（去掉 rx_frame→pbuf_take
+  拷贝）；无 netfilter/NAT/conntrack 时跳过 Rust 解析和状态机；无策略且校验和
+  已完成时 TX 直接借用 pbuf 发送。多 lane 仍保留 staging 拷贝，属于后续工作。
+- conntrack 改为懒启用：没有规则时不为普通流建表，见
+  [net/nat.md](../../net/nat.md#懒启用2026-10-30)。
+
 ## 锁与 lane
 
 - 普通单播 IPv4/IPv6 TCP/UDP 热路径只取所属 lane 锁；`g_lwip_lock` 仅作为设备
@@ -82,6 +105,16 @@
 - `smoke-ipv6-rx-soak`：`CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1` 下 4,000 轮 UDP6
   （64 B ~ 16 KB，跨越单 pbuf 边界），用于 NET-09 的池引用/越界回归。
 - 未覆盖：IPv6 外部 peer、ICMP 差错/PMTU、e1000/rtl8139 的多 lane 并发。
+
+## BSD 后端
+
+x86_64 桌面和服务器/基准主机的默认 `NET_STACK` 已是 BSD（`NET_LANES=1`）。真实
+F-Stack/FreeBSD 核心在单个持久执行器中运行，经真实 `ff_veth` 和单 virtio 完成
+IPv4 DNS、TCP 出站、IPv4/IPv6 本地 listen/accept、hostfwd TCP/UDP 入站，以及动态
+IPv4/MTU/link/默认路由事务。benchmark world、XFCE 桌面 curl 和真实 Firefox 151 的
+HTTP/HTTPS DOM 均已通过。外部 IPv6/RA、DHCP、TUN/router、raw/PMTU、完整关闭回收和
+性能矩阵未完成；非 x86_64 架构仍为 lwIP。详见
+[BSD 桌面联网垂直切片](../../net/bsd-desktop-internet-2026-10-29.md)。
 
 ## 常用命令
 

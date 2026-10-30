@@ -166,6 +166,9 @@ nav:
           - 一致性模型: fs/fs-consistency-model.md
           - NTFS 实现: fs/ntfs.md
       - 网络:
+          - 网络架构: net/architecture.md
+          - 后端接口契约: net/backend-interface.md
+          - 实例配置: net/instance-config.md
           - 网络配置设计: net/network-config-design.md
           - 网络锁契约: net/network-lock-contract.md
       - 图形:

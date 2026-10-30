@@ -17,3 +17,8 @@ smp = 8
 kind = "release"
 kernel_out = "kernel-rv"
 disk_out = "disk.img"
+
+[net]
+# Protocol stack selected by this instance.  RISC-V has no BSD backend port;
+# pristine lwIP is the verified default.
+stack = "lwip"

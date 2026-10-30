@@ -6,6 +6,7 @@
 #include "drivers/char/cmos_rtc.h"
 #include "core/arch.h"
 #include "core/bootargs.h"
+#include "core/string.h"
 #include "core/smp.h"
 #include "core/stdio.h"
 #include "core/timer.h"
@@ -18,7 +19,12 @@
  * while guest socket syscalls drive a20_lwip_poll(). */
 const char *arch_bootargs_get(void) {
     const char *cmdline = firmware_bootargs();
-    if (cmdline[0])
+    /* QEMU's direct -kernel path provides the kernel filename as the
+     * Multiboot command line when no -append was given.  That is not a kernel
+     * command line; fall back to the static SLIRP layout instead of booting an
+     * unconfigured link.  A real command line always has a key=value or a
+     * separate token. */
+    if (cmdline[0] && strchr(cmdline, '='))
         return cmdline;
     return "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
            "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "

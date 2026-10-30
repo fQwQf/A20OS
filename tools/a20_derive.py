@@ -90,6 +90,14 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"NET_GUEST_NETMASK={n.guest_netmask}")
     if n.guest_gateway is not None:
         v.append(f"NET_GUEST_GATEWAY={n.guest_gateway}")
+    if n.stack is not None:
+        v.append(f"NET_STACK={n.stack}")
+    if n.lanes is not None:
+        v.append(f"NET_LANES={n.lanes}")
+    if n.resource_profile is not None:
+        v.append(f"NET_PROFILE={n.resource_profile}")
+    if n.role is not None:
+        v.append(f"NET_ROLE={n.role}")
     if r.size_mb is not None:
         v.append(f"FAT32_IMAGE_MB={r.size_mb}")
     if r.ext4_size_mb is not None:

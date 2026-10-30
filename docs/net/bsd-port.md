@@ -1,7 +1,8 @@
 # BSD 网络后端接入记录（2026-10-29）
 
-最新状态、真实 KVM 回环结果与交接命令见 [BSD-HANDOFF.md](BSD-HANDOFF.md)。
-下文按阶段保留历史记录，早期“未运行”描述以交接记录为准。
+最新运行状态、XFCE 桌面联网证据、限制与复现命令见
+[BSD 桌面联网垂直切片](bsd-desktop-internet-2026-10-29.md)。本页下文按阶段保留
+历史记录，早期“未运行”描述以新记录为准。
 
 初期已将完整 FreeBSD 源码子模块替换为独立项目
 [F-Stack](https://github.com/F-Stack/f-stack)，初期固定提交
@@ -31,7 +32,7 @@ make -C kernel/external/f-stack/lib -n all
 | `lib/ff_thread.c`、`ff_lock.c` | 线程、TLS/pcurthread、同步 | 调度器线程上下文、锁顺序与每 CPU/任务状态；不能用全局假线程代替 |
 | `ff_kern_timeout.c`、`ff_subr_epoch.c` | callout、epoch 及延迟释放 | 关闭与退出时停止回调，等待引用归还后回收 |
 | `lib/ff_veth.c`、`ff_veth.h` | ff_dpdk_if_context、mbuf/DPDK 包释放和卸载 | 使用现有 virtio/TUN 设备；RX 只转移一次，TX 完成前不得释放 |
-| `ff_syscall_wrapper.c`、`ff_api.h` | BSD socket/errno、线程上下文、sockaddr | 接入现有 `net/transport.h`；Linux IPv6 family=10，BSD=28，不能强转 |
+| `ff_syscall_wrapper.c`、`ff_api.h` | BSD socket/errno、线程上下文、sockaddr | 接入现有 `net/backend.h` 的 socket 模块；Linux IPv6 family=10，BSD=28，不能强转 |
 | `ff_route.c` 与 BSD 路由表 | BSD 自身 FIB/接口索引 | 公共路由事务的执行副本；变更失败必须回滚，不能静默分叉 |
 
 上游 `FF_KERNEL_COEXIST` 路径不能用作本项目的正确性替代，否则可能走宿主 Linux
@@ -164,5 +165,9 @@ python3 tools/test-bsd-runtime-host.py --clang /path/to/clang --sanitize --out <
 拒绝、8槽耗尽回滚、解绑回收通过，ASan/UBSan 无错误。预期的未绑定访问由子进程
 验证为失败，不提供假成功。测试没有运行 BSD TCP/IP 状态机。
 
-下一步仍是补齐宿主服务与 linker set，实际启动 SYSINIT/UMA，再接入同一 virtio 包
-I/O 和公共 socket 操作表；目前 `NET_STACK=bsd` 继续拒绝构建，没有 BSD 公网结果。
+后续已经补齐宿主服务/linker set、持久执行器、`ff_veth`/virtio 数据面、公共 socket
+出站/监听路径、动态 IPv4/MTU/link 事务；`NET_STACK=bsd NET_LANES=1` 已在 x86_64
+桌面完成 DNS/HTTP/HTTPS，并由真实 Firefox 151 读取 HTTP/HTTPS DOM。外部 IPv6/RA、
+DHCP、TUN/router、raw/PMTU 和完整性能/关闭回收仍未完成；x86_64 桌面/服务器已切换
+为默认，其它架构保持 lwIP。详见
+[BSD 桌面联网垂直切片](bsd-desktop-internet-2026-10-29.md)。

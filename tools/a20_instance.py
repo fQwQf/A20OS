@@ -122,6 +122,18 @@ class NetCfg:
     # attaches the default NIC as -device ...,netdev=net.  Mutually exclusive
     # with hostfwd, which only exists on the user backend.
     backend: str | None = None
+    # Protocol stack for this instance: "lwip", "native", "bsd" or "none".
+    # This is NOT the QEMU netdev spec above.  It is derived into NET_STACK and
+    # baked into the kernel as CONFIG_NET_BACKEND_NAME; a name that is not
+    # compiled in is a hard error at boot, never a fallback.
+    stack: str | None = None
+    # Execution concurrency (NET_LANES) and resource tier (NET_PROFILE 1/2/3).
+    # They are independent: lanes do not change budgets, and a tier does not
+    # select a stack.
+    lanes: int | None = None
+    resource_profile: int | None = None
+    # "host" or "router"; router requires a TCP/IP backend.
+    role: str | None = None
     # Guest-side static IPv4, handed to the kernel as a20.* boot arguments
     # (kernel/net/control/net_config.c).  Only meaningful together with guest_ip, and
     # only on architectures with a QEMU -append path.
@@ -342,7 +354,9 @@ _SECTION_SPECS: Final = {
     "gui": {f: ("bool" if f == "enabled" else "str")
             for f in GuiCfg.__dataclass_fields__},
     "net": {f: ("str" if f in ("mac", "backend", "guest_ip", "guest_netmask",
-                               "guest_gateway") else "str_list")
+                               "guest_gateway", "stack", "role")
+                else "int" if f in ("lanes", "resource_profile")
+                else "str_list")
             for f in NetCfg.__dataclass_fields__},
     "rootfs": {f: ("str_list" if f == "drivers"
                    else "str" if f == "world"

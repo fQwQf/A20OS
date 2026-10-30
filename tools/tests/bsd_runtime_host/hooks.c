@@ -38,3 +38,15 @@ static _Thread_local uintptr_t canary;
 struct task_t *port_host_current_task(void) { return (struct task_t *)&identity; }
 void host_canary_set(uintptr_t value) { canary = value; }
 uintptr_t host_canary_get(void) { return canary; }
+
+/* The bootstrap/loopback fixture deliberately has no NIC. These are host
+ * substrate errors, not replacements for ff_veth or any protocol function. */
+int a20_bsd_host_nic_bind(void *context, int port_id)
+{ (void)context; (void)port_id; return -19; }
+void a20_bsd_host_nic_unbind(void *context) { (void)context; }
+int a20_bsd_host_nic_recv(void *context, void *frame, int capacity)
+{ (void)context; (void)frame; (void)capacity; return -19; }
+int a20_bsd_host_nic_send(void *context, const void *frame, int length)
+{ (void)context; (void)frame; (void)length; return -19; }
+void a20_bsd_host_nic_poll(void *context) { (void)context; }
+void a20_bsd_host_nic_token_freed(void *context) { (void)context; }

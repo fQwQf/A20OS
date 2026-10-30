@@ -16,6 +16,12 @@
 
 #include "net/netfilter_nat_state.h"
 
+/* The host harness links this file without netfilter.c.  The strong
+ * definition in netfilter.c wins in the kernel; this fallback keeps the
+ * conntrack state machine independently testable. */
+__attribute__((weak)) void netfilter_busy_refresh(void) {}
+__attribute__((weak)) void netfilter_busy_force(int on) { (void)on; }
+
 static spinlock_t g_ct_lock = SPINLOCK_INIT;
 
 uint64_t a20_netfilter_ct_lock(void) { return spin_lock_irqsave(&g_ct_lock); }
@@ -343,6 +349,7 @@ uint32_t a20_netfilter_masq_addr(int net_idx)
 void netfilter_conntrack_init(void)
 {
     a20_netfilter_ct_init(net_ct_view());
+    netfilter_busy_force(0);
 }
 
 void netfilter_conntrack_set_timeouts(unsigned tcp_new_ms, unsigned tcp_est_ms,
@@ -369,8 +376,11 @@ int netfilter_conntrack_lru_victim(void)
 int netfilter_conntrack_inject(uint32_t src, uint32_t dst, uint16_t sport,
                                uint16_t dport, uint8_t proto, uint8_t state)
 {
-    return a20_netfilter_ct_inject(net_ct_view(), src, dst, sport, dport,
-                                   proto, state);
+    int r = a20_netfilter_ct_inject(net_ct_view(), src, dst, sport, dport,
+                                    proto, state);
+    if (r == 0)
+        netfilter_busy_refresh();
+    return r;
 }
 
 int netfilter_conntrack_snapshot(net_conntrack_entry_t *out, unsigned max)
@@ -381,6 +391,7 @@ int netfilter_conntrack_snapshot(net_conntrack_entry_t *out, unsigned max)
 void netfilter_conntrack_flush(void)
 {
     a20_netfilter_ct_flush(net_ct_view());
+    netfilter_busy_refresh();
 }
 
 void netfilter_conntrack_get_stats(net_conntrack_stats_t *out)
@@ -391,6 +402,9 @@ void netfilter_conntrack_get_stats(net_conntrack_stats_t *out)
 void netfilter_conntrack_set_enabled(int on)
 {
     a20_netfilter_ct_set_enabled(net_ct_view(), on);
+    /* cton is also the explicit "track even with no rules" request; ctoff
+     * stops new entries but leaves existing NAT bindings in force. */
+    netfilter_busy_force(on);
 }
 
 int netfilter_conntrack_enabled(void)
@@ -400,7 +414,10 @@ int netfilter_conntrack_enabled(void)
 
 unsigned netfilter_conntrack_expire(unsigned max_scan)
 {
-    return a20_netfilter_ct_expire(net_ct_view(), max_scan);
+    unsigned removed = a20_netfilter_ct_expire(net_ct_view(), max_scan);
+    if (removed)
+        netfilter_busy_refresh();
+    return removed;
 }
 
 int netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
@@ -424,6 +441,8 @@ int netfilter_nat_add_rule(const net_nat_rule_t *rule)
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     int r = a20_netfilter_nat_add(net_ct_view(), rule);
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    if (r == 0)
+        netfilter_busy_refresh();
     return r;
 }
 
@@ -432,6 +451,8 @@ int netfilter_nat_del_rule(unsigned index)
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     int r = a20_netfilter_nat_del(net_ct_view(), index);
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    if (r == 0)
+        netfilter_busy_refresh();
     return r;
 }
 
@@ -440,6 +461,7 @@ void netfilter_nat_reset(void)
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
     a20_netfilter_nat_reset(net_ct_view());
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    netfilter_busy_refresh();
 }
 
 int netfilter_nat_parse_rule(const char *line, size_t len,

@@ -1,16 +1,19 @@
 # 原版 lwIP、FreeBSD 与 A20OS 原生能力
 
-2026-10-29 决策：只推进 `lwip`、`native`、`bsd` 三个协议后端。默认 `lwip` 使用
-未修改的上游发布源码；旧分叉不再作为外部 lwIP 或第四个后端保留，其协议实现迁入
-`backends/native/protocol`，由 A20OS 明确承担维护责任。性能差异不作为保留旧后端的理由。
-BSD 接入尚未完成，不能据此宣称三者均可运行。
+2026-10-29 决策：只推进 `lwip`、`native`、`bsd` 三个协议后端。x86_64 桌面和
+服务器/基准主机默认 `bsd`；其它架构默认 `lwip`。默认 `lwip` 使用未修改的上游发布
+源码；旧分叉不再作为外部 lwIP 或第四个后端保留，其协议实现迁入
+`backends/native/protocol`，由 A20OS 明确承担维护责任。性能差异不作为保留旧后端的
+理由。
 
 ## 桌面和服务器的目标后端
 
 用户已指定普通桌面与服务器最终使用 BSD 网络栈上网。这个场景选择已经确定，
-性能对照用于定位和验收，不再作为是否选择 BSD 的投票。当前 `NET_STACK=lwip`
-仍是可联网的过渡默认；BSD 尚未完成运行时接入，因此不提前把普通构建切成不能启动
-的后端，也不允许 `NET_STACK=bsd` 静默回退到 lwIP。完成下述验收后再切换场景默认：
+性能对照用于定位和验收，不再作为是否选择 BSD 的投票。x86_64 桌面/服务器默认
+已切换到 BSD。BSD 已完成 x86_64 单 NIC、IPv4 出站/入站、公共 socket、动态
+地址/MTU/路由事务和 XFCE 桌面 Firefox HTTP/HTTPS DOM 垂直切片，但下述完整验收
+尚未全部完成，也不允许 `NET_STACK=bsd` 静默回退到 lwIP。当前进度见
+[BSD 桌面联网垂直切片](bsd-desktop-internet-2026-10-29.md)，剩余验收为：
 
 1. BSD 自身初始化、线程/TLS、分配器、锁/等待、时钟/callout/epoch 在 A20OS 执行。
 2. 接入同一套 virtio/包 I/O 与公共 Linux socket 前端，执行真实 BSD TCP/UDP。
@@ -58,7 +61,8 @@ Ethernet 层只改第一片的端口，也不能放两套互不关联的邻居/�
 [hook](https://www.nongnu.org/lwip/2_1_x/group__lwip__opts__hooks.html)，不能靠同名
 头文件偷偷替换内部结构以维持旧 ABI。
 
-当前默认 `NET_STACK=lwip` 链接原版；`NET_STACK=native` 选择衍生协议实现，见
+当前 x86_64 默认 `NET_STACK=bsd`；其它架构默认 `NET_STACK=lwip` 链接原版；
+`NET_STACK=native` 选择衍生协议实现，见
 [适配记录](./lwip-upstream.md)。获取源码不等于接入成功，不能默认回退后冒充原版。候选采用
 每域串行协议执行，SMP 仍用于应用与 I/O，不宣称单域能并行执行多个 TCP 核心。
 多域独立实例需先隔离上游全局状态，不能复制一把锁就宣称支持。

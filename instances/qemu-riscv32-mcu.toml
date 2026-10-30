@@ -13,3 +13,7 @@ memory = "16M"
 [test]
 timeout = "5s"
 expect = ["[MCU TEST] PASS", "A20OS MCU READY"]
+
+[net]
+# No TCP/IP in this footprint; cluster transports still use UART.
+stack = "none"
