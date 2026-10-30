@@ -20,6 +20,16 @@ int a20_bsd_port_socket_recv(int fd, void *buffer, size_t length,
 
 #include "protocol_abi.h"
 
+/* Readiness multiplexing.  One kqueue per backend lets the executor touch
+ * only sockets that actually have data, instead of issuing a non-blocking
+ * recv() per open socket on every progress pass.  a20_bsd_ready_t is declared
+ * in protocol_abi.h so the BSD namespace can fill it. */
+int a20_bsd_port_readiness_init(void);
+int a20_bsd_port_readiness_add(int fd, void *tag);
+void a20_bsd_port_readiness_remove(int fd);
+int a20_bsd_port_readiness_wait(a20_bsd_ready_t *events, int maximum);
+
+
 int a20_bsd_port_socket_recv_meta(int fd, void *buffer, size_t length,
                                   int flags, void *address,
                                   size_t *address_length,
@@ -81,5 +91,20 @@ int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add);
 int a20_bsd_port_nic_send_raw(void *context, const void *frame, size_t length);
+
+/* TUN (L3) interface.  The returned pointer is opaque to the common layer. */
+void *a20_bsd_port_tun_create(int unit, a20_bsd_tun_emit_t emit, void *ctx);
+void a20_bsd_port_tun_destroy(void *context);
+int a20_bsd_port_tun_inject(void *context, const void *packet, size_t length);
+int a20_bsd_port_tun_set_mtu(void *context, uint16_t mtu);
+int a20_bsd_port_tun_set_flags(void *context, uint32_t value, uint32_t mask);
+int a20_bsd_port_tun_get_addr(void *context, uint8_t address[4],
+                              uint8_t mask[4], uint8_t gateway[4]);
+int a20_bsd_port_tun_set_addr(void *context, const uint8_t address[4],
+                              const uint8_t mask[4], int add);
+int a20_bsd_port_tun_set_addr6(void *context, const uint8_t address[16],
+                               uint8_t prefix, int add);
+int a20_bsd_port_tun_snapshot(void *context, a20_bsd_tun_info_t *out);
+const char *a20_bsd_port_tun_name(void *context);
 
 #endif

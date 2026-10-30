@@ -168,7 +168,7 @@ typedef struct net_socket_opt_ops {
 | udp control | ✓ | ✓ | ✓ |
 | pmtu | ✓ | ✓ | ✓ |
 | raw tx | ✓ | ✓ | ✓ |
-| tun | ✓ | ✓ | |
+| tun | ✓ | ✓ | ✓ |
 | neigh | | ✓ | |
 | route | | | ✓ |
 | ifaddr6 | ✓ | ✓ | ✓ |
@@ -297,14 +297,21 @@ python3 tools/check-network-backend-boundary.py --check-upstream
 3. **netfilter 懒检查**：`netfilter_busy()` 是一次原子读。没有过滤规则、NAT 规则、
    存活 conntrack 表项且未 `cton` 时，RX/TX 跳过 Rust 解析和 conntrack 事务。
    conntrack 也因此不再为普通无规则流量建表；需要跟踪时写 `cton`。
+4. **BSD 就绪集合**：后端执行器只维护一个 kqueue，socket 创建/accept 时注册
+   `EVFILT_READ`，关闭前删除。每轮进度只对真正就绪的 fd 调用 `recv()`，空闲成本
+   从“每个 socket 一次系统调用”降为“一次 `kevent()`”。有连接在途时才做
+   connect 完成扫描；kqueue 注册失败时自动回退到旧的完整扫描，不会静默丢就绪。
+   固定门槛见 `user/cmds/net/bsd_scale_test.c`：512 个空闲 UDP socket 加单 socket
+   32 包突发，全扫描为 16994 次 `recv` 探测，就绪集合为 64 次（上限 1024）。
 
 仍然存在的成本（有意保留或待后续）：
 
 - 多 lane 的 RX 仍先落在 `rx_frame` 再复制进 lane 队列，因为队列所有权和唤醒
   协议尚未改为 pbuf 引用；
 - 协议回调到 socket 队列仍有至少一次拷贝（inline 或 spill），用户态读取再拷贝；
-- BSD 后端仍是单执行器 + 每 socket 轮询，未做零拷贝；其 RX/TX 现在经过
-  `netfilter_bridge.c` 接入同一套过滤/NAT/conntrack，而不是绕过策略层；
+- BSD 后端仍是单执行器，socket 数据的最终发布仍有一次队列拷贝，用户态读取再
+  拷贝一次；kqueue 只消除了空闲 socket 的逐轮 `recv()`，RX/TX 尚未零拷贝。其
+  RX/TX 经过 `netfilter_bridge.c` 接入同一套过滤/NAT/conntrack，而不是绕过策略层；
 - 没有规则时的 netfilter 快路径不统计 conntrack 包，这是懒启用的直接结果。
 
 这些优化没有改变任何 ABI；`/proc/net/status` 的 backend/caps 行和

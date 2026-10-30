@@ -19,7 +19,7 @@ IPv6/DHCP/TUN/raw/路由能力都已完备。
 | TX | mbuf 线性化后调用 class `send`；驱动复制到自有 TX buffer 后立即释放 mbuf；提交不等于线上完成 |
 | socket | 真实 `ff_socket/bind/connect/sendto/recvfrom/close`；BSD errno 显式转 Linux errno |
 | 公共 ABI | 复用现有 Linux socket 前端、接收队列、poll/wait 和 `/proc`；未引入私有 fd/PCB |
-| 数据发布 | 执行器轮询 BSD socket，将数据送入公共 `net_msg_t` 队列并唤醒等待者 |
+| 数据发布 | 执行器用单个 kqueue 取得就绪 socket，将数据送入公共 `net_msg_t` 队列并唤醒等待者 |
 | 控制面 | 常见 `ifreq` 查询/设置与 netlink 索引；地址、MTU、link up/down 经执行器事务执行 |
 | 地址事务 | 替换 IPv4 主地址时先删除旧 `in_ifaddr`，再安装新地址；失败恢复旧地址与默认路由 |
 

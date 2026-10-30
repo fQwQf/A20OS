@@ -15,3 +15,25 @@ typedef struct a20_bsd_pktinfo {
 } a20_bsd_pktinfo_t;
 
 #endif
+
+/* TUN callback shapes.  They mirror net/tun.h without including A20 headers
+ * in the BSD namespace. */
+typedef size_t (*a20_bsd_tun_reader_t)(void *source, void *destination,
+                                       size_t length);
+typedef int (*a20_bsd_tun_emit_t)(void *context, size_t length,
+                                  a20_bsd_tun_reader_t reader, void *source);
+
+typedef struct a20_bsd_tun_info {
+    char     name[16];
+    uint32_t mtu;
+    uint32_t flags;
+    uint8_t  ip[4], mask[4], gw[4];
+    uint8_t  has_ip;
+} a20_bsd_tun_info_t;
+
+typedef struct a20_bsd_ready {
+    int      fd;
+    uint32_t flags;
+    void    *tag;
+} a20_bsd_ready_t;
+#define A20_BSD_READY_EOF 1u

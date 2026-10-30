@@ -33,15 +33,34 @@ typedef struct bsd_socket {
 } bsd_socket_t;
 
 static void options_apply(net_socket_t *s, unsigned mask);
+static void connect_clear(bsd_socket_t *state);
 
 static spinlock_t sockets_lock = SPINLOCK_INIT;
 static bsd_socket_t *sockets;
 static uint8_t *rx_stream, *rx_datagram;
 static unsigned long rx_drops;
+static unsigned long rx_probes;
+/* Cleared while kqueue can represent every socket.  If a descriptor cannot be
+ * registered the backend falls back to the historical full sweep rather than
+ * silently losing readiness. */
+static int readiness_broken;
+/* Number of sockets with an in-flight non-blocking connect.  When zero the
+ * progress sweep has no work at all, so an idle backend costs one kevent(). */
+static int connecting_count;
+
+#define BSD_READY_BATCH 64
+#define BSD_READY_ROUNDS 4
 
 static bsd_socket_t *bsd(net_socket_t *s)
 {
     return s ? (bsd_socket_t *)s->transport_private : NULL;
+}
+
+static void readiness_add(bsd_socket_t *state, int fd)
+{
+    if (!state || fd < 0) return;
+    if (a20_bsd_port_readiness_add(fd, state) < 0)
+        __atomic_store_n(&readiness_broken, 1, __ATOMIC_RELEASE);
 }
 
 static int create_job(void *argument)
@@ -53,6 +72,7 @@ static int create_job(void *argument)
      * bound to that task, and these setsockopts touch it just like socket(). */
     if (s->type == SOCK_DGRAM || s->type == SOCK_RAW)
         (void)a20_bsd_port_socket_enable_pktinfo(fd, s->domain);
+    readiness_add(bsd(s), fd);
     return fd;
 }
 
@@ -113,7 +133,9 @@ static int socket_init(net_socket_t *s)
 
 static int close_job(void *argument)
 {
-    return a20_bsd_port_socket_close((int)(intptr_t)argument);
+    int fd = (int)(intptr_t)argument;
+    a20_bsd_port_readiness_remove(fd);
+    return a20_bsd_port_socket_close(fd);
 }
 
 static void socket_destroy(net_socket_t *s)
@@ -124,7 +146,7 @@ static void socket_destroy(net_socket_t *s)
     list_remove(state);
     if (__atomic_load_n(&state->connecting, __ATOMIC_ACQUIRE)) {
         state->connect_result = -ECANCELED;
-        __atomic_store_n(&state->connecting, 0, __ATOMIC_RELEASE);
+        connect_clear(state);
         complete_all(&state->connect_done);
     }
     int fd = __atomic_exchange_n(&state->fd, -1, __ATOMIC_ACQ_REL);
@@ -167,6 +189,12 @@ static int connect_job(void *argument)
     return a20_bsd_port_socket_connect(job->fd, job->address, job->length);
 }
 
+static void connect_clear(bsd_socket_t *state)
+{
+    if (__atomic_exchange_n(&state->connecting, 0, __ATOMIC_ACQ_REL))
+        __atomic_sub_fetch(&connecting_count, 1, __ATOMIC_RELEASE);
+}
+
 static void connect_finish(bsd_socket_t *state, int result)
 {
     net_socket_t *s = state->socket;
@@ -181,7 +209,7 @@ static void connect_finish(bsd_socket_t *state, int result)
     }
     net_sock_unlock(s, flags);
     state->connect_result = result;
-    __atomic_store_n(&state->connecting, 0, __ATOMIC_RELEASE);
+    connect_clear(state);
     complete_all(&state->connect_done);
     wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
     wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
@@ -197,13 +225,14 @@ static int connect_transport(net_socket_t *s, const void *address, size_t length
     completion_init(&state->connect_done);
     state->connect_result = -EINPROGRESS;
     __atomic_store_n(&state->connecting, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&connecting_count, 1, __ATOMIC_RELEASE);
     uint64_t sf = net_sock_lock(s);
     s->tcp_connecting = 1;
     net_sock_unlock(s, sf);
     address_job_t job = {state->fd, address, length};
     int result = a20_bsd_executor_call(connect_job, &job);
     if (result != -EINPROGRESS) {
-        __atomic_store_n(&state->connecting, 0, __ATOMIC_RELEASE);
+        connect_clear(state);
         sf = net_sock_lock(s);
         s->tcp_connecting = 0;
         net_sock_unlock(s, sf);
@@ -345,6 +374,7 @@ static void accept_pending(bsd_socket_t *state)
             return;
         }
         child_state->fd = fd;
+        readiness_add(child_state, fd);
         list_add(child_state);
         options_apply(child, (1u << 0) | (1u << 1) | (1u << 2) |
                              (1u << 3) | (1u << 4) | (1u << 5) |
@@ -606,6 +636,7 @@ static void receive_one(bsd_socket_t *state)
                                                    : (void *)rx_datagram;
         if (!buffer) return;
         a20_bsd_pktinfo_t pinfo;
+        __atomic_add_fetch(&rx_probes, 1, __ATOMIC_RELAXED);
         int got = a20_bsd_port_socket_recv_meta(state->fd, buffer, capacity, 0,
                                                 address, &address_length,
                                                 &pinfo);
@@ -662,7 +693,35 @@ static void receive_one(bsd_socket_t *state)
     }
 }
 
-void a20_bsd_socket_progress(void)
+static void progress_socket(bsd_socket_t *state, int do_io)
+{
+    if (__atomic_load_n(&state->closing, __ATOMIC_ACQUIRE) || state->fd < 0)
+        return;
+    net_socket_t *s = net_socket_ref(state->socket);
+    if (!s) return;
+    if (__atomic_load_n(&state->connecting, __ATOMIC_ACQUIRE)) {
+        uint8_t address[NET_SOCKADDR_MAX];
+        size_t length = sizeof(address);
+        int peer = a20_bsd_port_socket_getpeername(state->fd, address, &length);
+        int error = peer == 0 ? 0 : a20_bsd_port_socket_error(state->fd);
+        if (error > 0)
+            connect_finish(state, -error);
+        else if (peer == 0)
+            connect_finish(state, 0);
+    }
+    if (do_io && !__atomic_load_n(&state->connecting, __ATOMIC_ACQUIRE)) {
+        if (s->listening && state->kind == BSD_KIND_TCP)
+            accept_pending(state);
+        else
+            receive_one(state);
+    }
+    net_socket_free(s);
+}
+
+/* Detach the list so a concurrent close always observes a consistent state,
+ * reinsert live entries, and give pending connects their completion check.
+ * The sweep is syscall-free for everything except in-flight connects. */
+static void progress_sweep(int do_io)
 {
     uint64_t flags = spin_lock_irqsave(&sockets_lock);
     bsd_socket_t *pending = sockets;
@@ -673,28 +732,37 @@ void a20_bsd_socket_progress(void)
         bsd_socket_t *state = pending;
         pending = state->next;
         state->next = NULL;
-        if (!__atomic_load_n(&state->closing, __ATOMIC_ACQUIRE)) {
-            /* Reinsert before processing so close can always find and remove
-             * the state. The detached pending list makes this a finite pass. */
+        if (!__atomic_load_n(&state->closing, __ATOMIC_ACQUIRE))
             list_add(state);
+        progress_socket(state, do_io);
+    }
+}
+
+void a20_bsd_socket_progress(void)
+{
+    if (__atomic_load_n(&readiness_broken, __ATOMIC_ACQUIRE)) {
+        progress_sweep(1);
+        return;
+    }
+    if (__atomic_load_n(&connecting_count, __ATOMIC_ACQUIRE))
+        progress_sweep(0);
+
+    a20_bsd_ready_t ready[BSD_READY_BATCH];
+    for (unsigned round = 0; round < BSD_READY_ROUNDS; ++round) {
+        int count = a20_bsd_port_readiness_wait(ready, BSD_READY_BATCH);
+        if (count < 0) {
+            /* A broken kqueue must never stall the data plane. */
+            __atomic_store_n(&readiness_broken, 1, __ATOMIC_RELEASE);
+            progress_sweep(1);
+            return;
         }
-        net_socket_t *s = net_socket_ref(state->socket);
-        if (!s) continue;
-        accept_pending(state);
-        if (__atomic_load_n(&state->connecting, __ATOMIC_ACQUIRE)) {
-            uint8_t address[NET_SOCKADDR_MAX];
-            size_t length = sizeof(address);
-            int peer = a20_bsd_port_socket_getpeername(state->fd, address, &length);
-            int error = peer == 0 ? 0 : a20_bsd_port_socket_error(state->fd);
-            if (error > 0) {
-                connect_finish(state, -error);
-            } else if (peer == 0) {
-                connect_finish(state, 0);
-            }
+        if (count == 0) break;
+        for (int i = 0; i < count; ++i) {
+            bsd_socket_t *state = ready[i].tag;
+            if (state && state->fd == ready[i].fd)
+                progress_socket(state, 1);
         }
-        if (!__atomic_load_n(&state->connecting, __ATOMIC_ACQUIRE))
-            receive_one(state);
-        net_socket_free(s);
+        if (count < BSD_READY_BATCH) break;
     }
 }
 
@@ -707,7 +775,8 @@ int a20_bsd_socket_runtime_init(void)
 
 int a20_bsd_socket_format_status(char *buffer, size_t size)
 {
-    return snprintf(buffer, size, "bsd_rx_drops: %lu\n", rx_drops);
+    return snprintf(buffer, size, "bsd_rx_drops: %lu\nbsd_recv_probes: %lu\n",
+                    rx_drops, __atomic_load_n(&rx_probes, __ATOMIC_RELAXED));
 }
 
 static void close_pcb(net_socket_t *s) { socket_destroy(s); }
@@ -845,6 +914,11 @@ static int ifreq_name_index(const char *name)
         !strcmp(name, "eth0") || !strcmp(name, "net0"))
         return net_stack_if_default_index();
     if (!strcmp(name, "lo")) return 2;
+    nl_link_out_t links[32];
+    int count = net_stack_interface_snapshot(links, 32);
+    for (int i = 0; i < count; ++i)
+        if (!strcmp(links[i].name, name))
+            return (int)links[i].index;
     return -ENODEV;
 }
 
@@ -866,19 +940,40 @@ static int ifconf_fill(void *uarg)
 {
     struct bsd_ifconf conf;
     if (copy_from_user(&conf, uarg, sizeof(conf)) < 0) return -EFAULT;
-    int needed = 2 * (int)sizeof(struct bsd_ifreq);
+    /* a20n0 and lo are always projected, even while the NIC is detached, which
+     * is the historical SIOCGIFCONF contract.  TUN instances are appended from
+     * the same snapshot if_nametoindex() uses. */
+    nl_link_out_t links[32];
+    int link_count = net_stack_interface_snapshot(links, 32);
+    int tun_count = 0;
+    for (int i = 0; i < link_count; ++i)
+        if (links[i].index >= 3) tun_count++;
+    int needed = (2 + tun_count) * (int)sizeof(struct bsd_ifreq);
     if (!conf.buffer) {
         conf.length = needed;
         return copy_to_user(uarg, &conf, sizeof(conf)) < 0 ? -EFAULT : 0;
     }
     int used = 0;
-    for (int index = 1; index <= 2; ++index) {
+    for (int slot = 0; slot < 2 + tun_count; ++slot) {
         if (used + (int)sizeof(struct bsd_ifreq) > conf.length) break;
         struct bsd_ifreq row;
         memset(&row, 0, sizeof(row));
-        if (index == 1) strcpy(row.name, "a20n0"); else strcpy(row.name, "lo");
+        unsigned index = slot == 0 ? 1u : slot == 1 ? 2u : 0u;
+        if (slot < 2) {
+            if (slot == 0) strcpy(row.name, "a20n0"); else strcpy(row.name, "lo");
+        } else {
+            int wanted = slot - 2, seen = 0;
+            for (int i = 0; i < link_count; ++i) {
+                if (links[i].index < 3) continue;
+                if (seen++ != wanted) continue;
+                index = links[i].index;
+                strncpy(row.name, links[i].name, sizeof(row.name) - 1);
+                break;
+            }
+        }
+        if (!index) break;
         uint8_t ip[4], mask[4], gateway[4];
-        if (net_stack_if_get_addr((unsigned)index, ip, mask, gateway) == 0) {
+        if (net_stack_if_get_addr(index, ip, mask, gateway) == 0) {
             row.u.addr.family = 2;
             memcpy(&row.u.addr.address, ip, 4);
         }
@@ -888,6 +983,21 @@ static int ifconf_fill(void *uarg)
     }
     conf.length = used;
     return copy_to_user(uarg, &conf, sizeof(conf)) < 0 ? -EFAULT : 0;
+}
+
+static int ifname_for_index(int index, char *out, size_t size)
+{
+    if (index == 1) { strncpy(out, "a20n0", size - 1); out[size - 1] = 0; return 0; }
+    if (index == 2) { strncpy(out, "lo", size - 1); out[size - 1] = 0; return 0; }
+    nl_link_out_t links[32];
+    int count = net_stack_interface_snapshot(links, 32);
+    for (int i = 0; i < count; ++i) {
+        if ((int)links[i].index != index) continue;
+        strncpy(out, links[i].name, size - 1);
+        out[size - 1] = 0;
+        return 0;
+    }
+    return -ENODEV;
 }
 
 static int interface_ioctl(net_socket_t *s, unsigned long request, void *argument)
@@ -904,9 +1014,8 @@ static int interface_ioctl(net_socket_t *s, unsigned long request, void *argumen
 
     switch (request) {
     case BSD_SIOCGIFNAME:
-        if (index == 1) strcpy(ifr.name, "a20n0");
-        else if (index == 2) strcpy(ifr.name, "lo");
-        else return -ENODEV;
+        if (ifname_for_index(index, ifr.name, sizeof(ifr.name)) < 0)
+            return -ENODEV;
         return copy_to_user(argument, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
     case BSD_SIOCGIFINDEX:
     case BSD_SIOCGIFMTU:
