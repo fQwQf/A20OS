@@ -80,5 +80,6 @@ int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
                             int remove);
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add);
+int a20_bsd_port_nic_send_raw(void *context, const void *frame, size_t length);
 
 #endif
