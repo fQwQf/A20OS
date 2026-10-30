@@ -236,6 +236,19 @@ static uint32_t ipv4_word(const uint8_t address[4])
     return value;
 }
 
+int port_nic_send_raw(void *context, const void *frame, size_t length)
+{
+    struct ff_dpdk_if_context *ctx = context;
+    if (!ctx || !frame || !length || length > NIC_FRAME_BYTES)
+        return EMSGSIZE;
+    if (port_host_nic_send(ctx, frame, length) < 0) {
+        ctx->stats.tx_errors++;
+        return ENOBUFS;
+    }
+    ctx->stats.tx_frames++;
+    return 0;
+}
+
 int port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add)
 {

@@ -585,10 +585,25 @@ static int owns_ipv4(uint32_t address)
     return address == value;
 }
 
+typedef struct raw_tx_job {
+    void *context;
+    const uint8_t *frame;
+    size_t length;
+} raw_tx_job_t;
+
+static int raw_tx_job_run(void *argument)
+{
+    raw_tx_job_t *job = argument;
+    int rc = a20_bsd_port_nic_send_raw(job->context, job->frame, job->length);
+    return rc < 0 ? rc : -rc;
+}
+
 static int packet_tx(unsigned index, const uint8_t *frame, size_t length)
 {
-    (void)index; (void)frame; (void)length;
-    return -EOPNOTSUPP;
+    /* Public interface identity is 1 for a20n0 (2 is loopback). */
+    if (index != 1 || !nics[0].context || !frame) return -ENODEV;
+    raw_tx_job_t job = {nics[0].context, frame, length};
+    return a20_bsd_executor_call(raw_tx_job_run, &job);
 }
 
 static uint32_t interface_ipv4(int index)

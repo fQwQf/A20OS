@@ -207,7 +207,15 @@ void a20_net_packet_wakeq_flush(void *wake_q)
 
 int a20_net_packet_if_up(int ifindex)
 {
-    return net_stack_if_up((unsigned)ifindex);
+    /* net_stack_if_up() is a boolean by contract; an index that does not
+     * exist must still be distinguishable so AF_PACKET bind can return
+     * ENODEV instead of silently attaching to nothing. */
+    nl_link_out_t links[32];
+    int count = net_stack_interface_snapshot(links, 32);
+    for (int i = 0; i < count; ++i)
+        if ((int)links[i].index == ifindex)
+            return net_stack_if_up((unsigned)ifindex);
+    return -ENODEV;
 }
 
 int a20_net_packet_if_default_index(void)
