@@ -12,6 +12,7 @@
 #include "mm/slab.h"
 #include "sys/usercopy.h"
 #include "net/stack.h"
+#include "nic.h"
 #include "net/interface.h"
 
 #define BSD_KIND_TCP 1u
@@ -34,6 +35,7 @@ typedef struct bsd_socket {
 
 static void options_apply(net_socket_t *s, unsigned mask);
 static void connect_clear(bsd_socket_t *state);
+static int ifreq_name_index(const char *name);
 
 static spinlock_t sockets_lock = SPINLOCK_INIT;
 static bsd_socket_t *sockets;
@@ -592,15 +594,13 @@ static int bind_device(net_socket_t *s, const char *name)
         memset(state->bound_device, 0, sizeof(state->bound_device));
         return 0;
     }
-    /* The BSD vertical slice owns exactly one NIC (a20n0).  A request for that
-     * device is a no-op for routing because every flow already uses it; a
-     * request for any other name must fail rather than pretend to bind.  When
-     * multi-NIC lands this becomes a real route/source transaction. */
-    /* Single-NIC aliases accepted so the same Linux ELF probe works on both
-     * backends; the stored spelling is what getsockopt returns. */
-    if (strcmp(name, "a20n0") != 0 && strcmp(name, "eth0") != 0 &&
-        strcmp(name, "en2") != 0 && strcmp(name, "net0") != 0)
-        return -ENODEV;
+    /* F-Stack/FreeBSD has no SO_BINDTODEVICE.  Binding the primary interface
+     * is a true no-op because every unbound flow already leaves through it;
+     * a secondary NIC would require per-socket FIB/source routing that this
+     * port does not implement, so refuse it rather than silently misroute. */
+    int index = ifreq_name_index(name);
+    if (index < 0) return -ENODEV;
+    if (index != net_stack_if_default_index()) return -EOPNOTSUPP;
     strncpy(state->bound_device, name, sizeof(state->bound_device) - 1);
     state->bound_device[sizeof(state->bound_device) - 1] = '\0';
     return 0;
@@ -663,10 +663,17 @@ static void receive_one(bsd_socket_t *state)
         if (pinfo.valid) {
             meta.has_pktinfo = 1;
             meta.pktinfo_family = pinfo.family;
-            meta.pktinfo_ifindex = pinfo.ifindex;
+            uint32_t public_index = 0;
+            uint8_t local_ip[4] = {0, 0, 0, 0};
+            int mapped = pinfo.ifindex ?
+                a20_bsd_nic_public_ifindex(pinfo.ifindex, local_ip,
+                                           &public_index) : -ENODEV;
+            meta.pktinfo_ifindex = mapped == 0 ? public_index : pinfo.ifindex;
             if (pinfo.family == AF_INET) {
                 memcpy(meta.pktinfo.ipv4.destination, pinfo.address, 4);
-                if (s->local_len >= 8)
+                if (mapped == 0)
+                    memcpy(meta.pktinfo.ipv4.local, local_ip, 4);
+                else if (s->local_len >= 8)
                     memcpy(meta.pktinfo.ipv4.local, s->local + 4, 4);
             } else {
                 memcpy(meta.pktinfo_addr, pinfo.address, 16);
@@ -914,6 +921,7 @@ static int ifreq_name_index(const char *name)
         !strcmp(name, "eth0") || !strcmp(name, "net0"))
         return net_stack_if_default_index();
     if (!strcmp(name, "lo")) return 2;
+    if (!strcmp(name, "en2")) return 1;
     nl_link_out_t links[32];
     int count = net_stack_interface_snapshot(links, 32);
     for (int i = 0; i < count; ++i)
@@ -987,7 +995,7 @@ static int ifconf_fill(void *uarg)
 
 static int ifname_for_index(int index, char *out, size_t size)
 {
-    if (index == 1) { strncpy(out, "a20n0", size - 1); out[size - 1] = 0; return 0; }
+    if (index == 1) { strncpy(out, "en2", size - 1); out[size - 1] = 0; return 0; }
     if (index == 2) { strncpy(out, "lo", size - 1); out[size - 1] = 0; return 0; }
     nl_link_out_t links[32];
     int count = net_stack_interface_snapshot(links, 32);

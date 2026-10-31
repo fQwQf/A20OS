@@ -20,6 +20,9 @@
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
+#include <netinet/ip_var.h>
+#include <netinet6/ip6_var.h>
+#include <net/vnet.h>
 #include "ff_veth.h"
 #include "ff_config.h"
 #include "ff_dpdk_if.h"
@@ -176,7 +179,12 @@ void *port_nic_attach(const a20_bsd_nic_config_t *config)
     cfg.broadcast = (char *)config->broadcast;
     cfg.gateway = (char *)config->gateway;
     /* All offload fields, addr6 and VLAN/lcore lists deliberately remain zero. */
-    return ff_veth_attach(&cfg);
+    void *context = ff_veth_attach(&cfg);
+    if (context) {
+        struct ff_dpdk_if_context *ctx = context;
+        if (ctx->ifp) if_up((struct ifnet *)ctx->ifp);
+    }
+    return context;
 }
 
 void port_nic_progress(void *context, unsigned budget)
@@ -354,6 +362,13 @@ static int v4_addr_ctl(struct ifnet *ifp, uint32_t address, uint32_t mask,
     return error;
 }
 
+int port_nic_ifindex(void *context)
+{
+    struct ff_dpdk_if_context *ctx = context;
+    if (!ctx || !ctx->ifp) return -ENODEV;
+    return (int)((struct ifnet *)ctx->ifp)->if_index;
+}
+
 int port_nic_set_mtu(void *context, int mtu)
 {
     struct ff_dpdk_if_context *ctx = context;
@@ -362,6 +377,18 @@ int port_nic_set_mtu(void *context, int mtu)
         return EINVAL;
     ifp = ctx->ifp;
     return if_setmtu(ifp, mtu);
+}
+
+void port_nic_set_forwarding(int ipv4, int ipv6)
+{
+    /* This port builds without VIMAGE, so the accessors are plain globals. */
+    V_ipforwarding = ipv4 ? 1 : 0;
+#ifdef INET6
+    V_ip6_forwarding = ipv6 ? 1 : 0;
+#else
+    (void)ipv6;
+#endif
+    printf("[NET] BSD forwarding ipv4=%d ipv6=%d\n", ipv4, ipv6);
 }
 
 int port_nic_set_up(void *context, int up)

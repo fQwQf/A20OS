@@ -164,7 +164,7 @@ typedef struct net_socket_opt_ops {
 | listen/shutdown | ✓ | ✓ | ✓ |
 | sndbuf/rcvbuf | ✓ | ✓ | ✓ |
 | pktinfo | ✓ | ✓ | ✓ |
-| bindtodevice | ✓ | ✓ | ✓（单 NIC） |
+| bindtodevice | ✓ | ✓ | ✓（主接口） |
 | udp control | ✓ | ✓ | ✓ |
 | pmtu | ✓ | ✓ | ✓ |
 | raw tx | ✓ | ✓ | ✓ |

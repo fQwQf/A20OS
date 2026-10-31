@@ -6,6 +6,7 @@
  */
 #include "executor.h"
 #include "protocol.h"
+#include "tun.h"
 #include "net/tun.h"
 #include "net/interface.h"
 #include "net/profile.h"
@@ -14,7 +15,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 
-#define BSD_TUN_BASE 3
+#define BSD_TUN_BASE A20_BSD_TUN_BASE
 #define BSD_TUN_MAX NET_PROFILE_TUN_MAX_DEVS
 
 typedef struct bsd_tun_slot {

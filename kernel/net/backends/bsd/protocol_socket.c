@@ -184,8 +184,9 @@ int port_socket_enable_pktinfo(int fd, int domain)
         rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVTTL,
                                           &one, sizeof(one)));
         if (rc < 0) return rc;
-        return result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVTOS,
-                                            &one, sizeof(one)));
+        rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IP, IP_RECVTOS,
+                                          &one, sizeof(one)));
+        return rc;
     }
     if (domain == AF_INET6) {
         rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO,
@@ -232,43 +233,60 @@ int port_socket_recv_meta(int fd, void *buffer, size_t length, int flags,
     if (received < 0) return -linux_errno(port_last_error());
 
     if (info) {
-        for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c;
-             c = CMSG_NXTHDR(&msg, c)) {
-            if (c->cmsg_level == IPPROTO_IP &&
-                c->cmsg_type == IP_RECVDSTADDR) {
-                memcpy(info->address, CMSG_DATA(c), 4);
-                info->family = AF_INET;
-                info->valid = 1;
-            } else if (c->cmsg_level == IPPROTO_IP &&
-                       c->cmsg_type == IP_RECVIF) {
-                struct sockaddr_dl *sdl = (struct sockaddr_dl *)CMSG_DATA(c);
-                info->ifindex = sdl->sdl_index;
-                info->valid = 1;
-            } else if (c->cmsg_level == IPPROTO_IP &&
-                       c->cmsg_type == IP_RECVTTL) {
-                info->hoplimit = *(uint8_t *)CMSG_DATA(c);
-                info->valid = 1;
-            } else if (c->cmsg_level == IPPROTO_IP &&
-                       c->cmsg_type == IP_RECVTOS) {
-                info->tclass = *(uint8_t *)CMSG_DATA(c);
-                info->valid = 1;
-            } else if (c->cmsg_level == IPPROTO_IPV6 &&
-                       c->cmsg_type == IPV6_PKTINFO) {
-                struct in6_pktinfo *pi =
-                    (struct in6_pktinfo *)CMSG_DATA(c);
-                memcpy(info->address, &pi->ipi6_addr, 16);
-                info->ifindex = pi->ipi6_ifindex;
-                info->family = AF_INET6;
-                info->valid = 1;
-            } else if (c->cmsg_level == IPPROTO_IPV6 &&
-                       c->cmsg_type == IPV6_HOPLIMIT) {
-                info->hoplimit = (uint8_t)*(int *)CMSG_DATA(c);
-                info->valid = 1;
-            } else if (c->cmsg_level == IPPROTO_IPV6 &&
-                       c->cmsg_type == IPV6_TCLASS) {
-                info->tclass = (uint8_t)*(int *)CMSG_DATA(c);
-                info->valid = 1;
+        /* ff_recvmsg() rewrites the control buffer from FreeBSD into the
+         * Linux cmsg ABI before returning: the 64-bit length at offset 0 and
+         * level/type at offsets 8/12.  Reading it as struct cmsghdr here sees
+         * zeroed level/type because the two headers overlap differently. */
+        typedef struct {
+            uint64_t cmsg_len;
+            int cmsg_level;
+            int cmsg_type;
+        } recv_cmsg_t;
+        enum { RECV_CMSG_IP_TOS = 1, RECV_CMSG_IP_TTL = 2 };
+        uint8_t *control = msg.msg_control;
+        size_t controllen = msg.msg_controllen;
+        size_t offset = 0;
+        while (control && offset + sizeof(recv_cmsg_t) <= controllen) {
+            recv_cmsg_t *c = (recv_cmsg_t *)(void *)(control + offset);
+            if (c->cmsg_len < sizeof(*c) ||
+                offset + c->cmsg_len > controllen)
+                break;
+            uint8_t *data = (uint8_t *)c + sizeof(*c);
+            size_t payload = (size_t)c->cmsg_len - sizeof(*c);
+            if (c->cmsg_level == IPPROTO_IP) {
+                if (c->cmsg_type == IP_RECVDSTADDR && payload >= 4) {
+                    memcpy(info->address, data, 4);
+                    info->family = AF_INET;
+                    info->valid = 1;
+                } else if (c->cmsg_type == IP_RECVIF && payload >= 8) {
+                    struct sockaddr_dl *sdl = (struct sockaddr_dl *)data;
+                    info->ifindex = sdl->sdl_index;
+                    info->valid = 1;
+                } else if (c->cmsg_type == RECV_CMSG_IP_TTL && payload >= 4) {
+                    info->hoplimit = (uint8_t)*(int *)data;
+                    info->valid = 1;
+                } else if (c->cmsg_type == RECV_CMSG_IP_TOS && payload >= 1) {
+                    info->tclass = data[0];
+                    info->valid = 1;
+                }
+            } else if (c->cmsg_level == IPPROTO_IPV6) {
+                if (c->cmsg_type == IPV6_PKTINFO &&
+                    payload >= sizeof(struct in6_pktinfo)) {
+                    struct in6_pktinfo *pi =
+                        (struct in6_pktinfo *)data;
+                    memcpy(info->address, &pi->ipi6_addr, 16);
+                    info->ifindex = pi->ipi6_ifindex;
+                    info->family = AF_INET6;
+                    info->valid = 1;
+                } else if (c->cmsg_type == IPV6_HOPLIMIT && payload >= 4) {
+                    info->hoplimit = (uint8_t)*(int *)data;
+                    info->valid = 1;
+                } else if (c->cmsg_type == IPV6_TCLASS && payload >= 4) {
+                    info->tclass = (uint8_t)*(int *)data;
+                    info->valid = 1;
+                }
             }
+            offset += (size_t)((c->cmsg_len + 7) & ~(uint64_t)7);
         }
     }
     return (int)received;

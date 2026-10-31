@@ -410,9 +410,6 @@ endif
 ifneq ($(NET_PROFILE),2)
 $(error NET_STACK=bsd currently validates only NET_PROFILE=2; embedded/server tiers need separate budget evidence)
 endif
-ifeq ($(NET_ROLE),router)
-$(error NET_STACK=bsd currently supports the desktop/host vertical slice, not NET_ROLE=router)
-endif
 endif
 ifeq ($(NET_STACK),lwip)
 ifneq ($(NET_LANES),1)
