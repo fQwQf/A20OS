@@ -66,6 +66,7 @@ const IFLA_OPERSTATE: u16 = 5;
 
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+const IFA_BROADCAST: u16 = 4;
 const IFA_LABEL: u16 = 3;
 
 const RTA_DST: u16 = 1;
@@ -982,6 +983,13 @@ unsafe fn build_addrmsg(buf: &mut [u8], ifindex: u32, addr: &[u8; 4],
     off += core::mem::size_of::<IfAddrMsg>();
     off = put_attr(buf, off, IFA_ADDRESS, addr);
     off = put_attr(buf, off, IFA_LOCAL, addr);
+    if loopback == 0 && *mask != [0xff; 4] {
+        let mut broadcast = [0u8; 4];
+        for i in 0..4 {
+            broadcast[i] = addr[i] | !mask[i];
+        }
+        off = put_attr(buf, off, IFA_BROADCAST, &broadcast);
+    }
     if !name.is_empty() {
         let mut label = [0u8; 17];
         let n = name.len().min(16);

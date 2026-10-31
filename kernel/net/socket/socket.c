@@ -1162,12 +1162,21 @@ void a20_net_recv_peek_msg(void *head, void *buf, size_t len, void *addr,
     if (meta) {
         net_recv_meta_t *rm = (net_recv_meta_t *)meta;
         rm->has_pktinfo = m->has_pktinfo;
+        /* The family is what tells the Linux cmsg builder whether to read the
+         * IPv4 or IPv6 view; omitting it here made MSG_PEEK hand dnsmasq an
+         * IP_PKTINFO with ifindex/spec_dst/addr all zero while the payload was
+         * still correct. */
+        rm->pktinfo_family = m->pktinfo_family;
         rm->has_hoplimit = m->has_hoplimit;
         rm->has_tclass = m->has_tclass;
         rm->pktinfo_ifindex = m->pktinfo_ifindex;
         memcpy(rm->pktinfo_addr, m->pktinfo_addr, sizeof(rm->pktinfo_addr));
         rm->hoplimit = m->hoplimit;
         rm->tclass = m->tclass;
+        rm->has_cred = m->has_cred;
+        rm->cred_pid = m->cred_pid;
+        rm->cred_uid = m->cred_uid;
+        rm->cred_gid = m->cred_gid;
     }
     *out_avail = avail;
     *out_n = n;
