@@ -91,6 +91,11 @@ int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add);
 int a20_bsd_port_nic_send_raw(void *context, const void *frame, size_t length);
+/* Insert (or refresh) a static Ethernet neighbour entry.  DHCP servers use
+ * SIOCSARP for this because the client has no address to answer ARP with yet;
+ * without it the OFFER/ACK is queued behind an ARP that can never resolve. */
+int a20_bsd_port_nic_set_neighbor(void *context, uint32_t address,
+                                  const uint8_t mac[6]);
 int a20_bsd_port_nic_ifindex(void *context);
 /* Router builds install the kernel forwarding sysctls in this port's VNET. */
 void a20_bsd_port_nic_set_forwarding(int ipv4, int ipv6);

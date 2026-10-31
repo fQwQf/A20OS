@@ -11,6 +11,7 @@
 #include "core/timer.h"
 #include "mm/slab.h"
 #include "sys/usercopy.h"
+#include "proc/userns.h"
 #include "net/stack.h"
 #include "nic.h"
 #include "net/interface.h"
@@ -891,6 +892,7 @@ static int send_udp_control(net_socket_t *s, const void *b, size_t n, int f,
 #define BSD_SIOCGIFMTU      0x8921
 #define BSD_SIOCSIFMTU      0x8922
 #define BSD_SIOCGIFHWADDR   0x8927
+#define BSD_SIOCSARP        0x8955
 #define BSD_SIOCGIFTXQLEN   0x8942
 #define BSD_SIOCSIFTXQLEN   0x8943
 #define BSD_IFNAMSIZ        16
@@ -1008,11 +1010,46 @@ static int ifname_for_index(int index, char *out, size_t size)
     return -ENODEV;
 }
 
+/*
+ * SIOCSARP: pre-load a neighbour entry for an address that cannot answer ARP
+ * yet.  dnsmasq does this before unicasting a DHCP OFFER/ACK to a client that
+ * has not configured the offered address.  Only complete Ethernet entries are
+ * accepted (ATF_COM), matching what a DHCP server asks for.
+ */
+static int interface_set_arp(net_socket_t *s, void *argument)
+{
+    struct {
+        uint8_t protocol[16];
+        uint8_t hardware[16];
+        int flags;
+        uint8_t netmask[16];
+        char device[BSD_IFNAMSIZ];
+    } request;
+    if (!s) return -ENOTSOCK;
+    if (!userns_capable(proc_current(), s->net_ns->owner, CAP_NET_ADMIN))
+        return -EPERM;
+    if (!resource_ns_is_initial(s->net_ns)) return -EOPNOTSUPP;
+    if (copy_from_user(&request, argument, sizeof(request)) < 0) return -EFAULT;
+    uint16_t family, hardware;
+    uint32_t address;
+    memcpy(&family, request.protocol, sizeof(family));
+    memcpy(&hardware, request.hardware, sizeof(hardware));
+    memcpy(&address, request.protocol + 4, sizeof(address));
+    if (family != 2 /* AF_INET */ || hardware != BSD_ARPHRD_ETHER) return -EINVAL;
+    if (request.flags != 2 /* ATF_COM */) return -EOPNOTSUPP;
+    request.device[BSD_IFNAMSIZ - 1] = 0;
+    if (!request.device[0]) return -ENODEV;
+    int index = ifreq_name_index(request.device);
+    if (index < 0) return index;
+    return net_stack_neighbor_update_v4((uint32_t)index, address,
+                                        request.hardware + 2);
+}
+
 static int interface_ioctl(net_socket_t *s, unsigned long request, void *argument)
 {
-    (void)s;
     if (!argument) return -EFAULT;
     if (request == BSD_SIOCGIFCONF) return ifconf_fill(argument);
+    if (request == BSD_SIOCSARP) return interface_set_arp(s, argument);
     struct bsd_ifreq ifr;
     if (copy_from_user(&ifr, argument, sizeof(ifr)) < 0) return -EFAULT;
     ifr.name[BSD_IFNAMSIZ - 1] = 0;

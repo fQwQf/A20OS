@@ -8,12 +8,15 @@
 #include <sys/socket.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
+#include <sys/eventhandler.h>
 #include <sys/mbuf.h>
 #include <sys/sockio.h>
 #include <sys/socketvar.h>
 #include <sys/proc.h>
 #include <net/if.h>
 #include <net/if_var.h>
+#include <net/if_llatbl.h>
+#include <net/ethernet.h>
 #include <net/route.h>
 #include <net/route/route_ctl.h>
 #include <netinet/in.h>
@@ -377,6 +380,70 @@ int port_nic_set_mtu(void *context, int mtu)
         return EINVAL;
     ifp = ctx->ifp;
     return if_setmtu(ifp, mtu);
+}
+
+/*
+ * Static ARP injection (Linux SIOCSARP / ATF_COM).
+ *
+ * dnsmasq answers a DHCP DISCOVER by unicasting the OFFER to the address it
+ * just offered.  The client has not configured that address yet, so it cannot
+ * answer an ARP request; dnsmasq therefore pre-loads the MAC with SIOCSARP.
+ * Without this the OFFER sits in FreeBSD's ARP hold queue until it is dropped
+ * and the lease never completes.
+ *
+ * The entry is inserted the same way arp_add_ifa_lle() does it, with
+ * lltable_calc_llheader()/lltable_set_entry_addr() so the cached link header
+ * (r_linkdata/r_hdrlen) is valid; arpresolve() copies that, not ll_addr.
+ */
+int port_nic_set_neighbor(void *context, uint32_t address, const uint8_t mac[6])
+{
+    struct ff_dpdk_if_context *ctx = context;
+    struct ifnet *ifp;
+    struct lltable *llt;
+    struct llentry *lle, *old;
+    struct sockaddr_in dst;
+    u_char linkhdr[LLE_MAX_LINKHDR];
+    size_t linkhdrsize = sizeof(linkhdr);
+    int lladdr_off = 0;
+
+    if (!ctx || !ctx->ifp || !mac) return EINVAL;
+    ifp = ctx->ifp;
+    if (ifp->if_addrlen != ETHER_ADDR_LEN) return EOPNOTSUPP;
+    if (address == 0) return EINVAL;
+    llt = LLTABLE(ifp);
+    if (!llt) return EOPNOTSUPP;
+    if (lltable_calc_llheader(ifp, AF_INET, (char *)mac, linkhdr,
+                              &linkhdrsize, &lladdr_off) != 0) {
+        printf("[NET] arp inject: calc_llheader failed on %s\n", ifp->if_xname);
+        return EOPNOTSUPP;
+    }
+
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_len = sizeof(dst);
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = address;
+
+    lle = lltable_alloc_entry(llt, LLE_STATIC, (struct sockaddr *)&dst);
+    if (!lle) {
+        printf("[NET] arp inject: alloc failed on %s addr=%08x fib=%d\n",
+               ifp->if_xname, address, ifp->if_fib);
+        return ENOMEM;
+    }
+
+    IF_AFDATA_WLOCK(ifp);
+    LLE_WLOCK(lle);
+    old = lla_lookup(llt, LLE_EXCLUSIVE, (struct sockaddr *)&dst);
+    if (old)
+        lltable_unlink_entry(llt, old);
+    lltable_set_entry_addr(ifp, lle, linkhdr, linkhdrsize, lladdr_off);
+    lle->la_flags |= LLE_STATIC;
+    lltable_link_entry(llt, lle);
+    IF_AFDATA_WUNLOCK(ifp);
+    EVENTHANDLER_INVOKE(lle_event, lle, LLENTRY_RESOLVED);
+    LLE_WUNLOCK(lle);
+    if (old)
+        lltable_free_entry(llt, old);
+    return 0;
 }
 
 void port_nic_set_forwarding(int ipv4, int ipv6)
