@@ -24,11 +24,19 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 - UDP 单包经 `10.20.0.1:<port>` NAPT 到 WAN 并收到回包；
 - `ip addr`/`ip route` 在 `en2`/`en3` 上读写正常。
 
+DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：
+`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，
+随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：
+`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及
+BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`
+预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
+
 BSD 当前未完成：策略路由/多 FIB（`ip rule` + `table 100` 仍只落到主 RIB）、
 RA/SLAAC、内核内 DHCP 客户端；`SO_BINDTODEVICE` 目前只对主接口是真实 no-op，
-绑定次级网卡会明确 `EOPNOTSUPP` 而不是静默错路由。DHCP 服务端
-（dnsmasq `--dhcp-range`）能在 en2 启动并收到 DISCOVER，但租约交换仍待继续
-修正 `IP_PKTINFO` 元数据。
+绑定次级网卡会明确 `EOPNOTSUPP` 而不是静默错路由。RA 侧已定位到：RA 报文能
+到达端口并进入 FreeBSD 输入路径，但 `ND6_IFF_ACCEPT_RTADV` 在接口的
+`nd_ifinfo` 上不能保持（写后随即被重置为 `nd6_ifattach()` 的默认值），因此
+SLAAC 地址生成尚未生效，需要继续在 nd6 侧处理。
 
 ## 最小双网卡配置
 
