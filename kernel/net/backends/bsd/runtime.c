@@ -6,7 +6,12 @@
 #include "runtime/memory.h"
 #include "net/stack.h"
 #include "net/profile.h"
+
+#ifndef CONFIG_NET_ROUTER
+#define CONFIG_NET_ROUTER 0
+#endif
 #include "tun.h"
+#include "nic.h"
 #include "net/interface.h"
 #include "net/netfilter.h"
 #include "drivers/core/driver_core.h"
@@ -33,11 +38,15 @@ typedef struct bsd_nic_slot {
     device_t *device;
     class_device_t *binding;
     void *context;
+    unsigned present;
     unsigned attached;
     unsigned rx_pending;
     unsigned up;
     uint16_t mtu;
     uint8_t mac[6];
+    uint8_t ip[4], mask[4], gw[4];
+    unsigned bsd_ifindex;
+    int has_ip;
 } bsd_nic_slot_t;
 
 static bsd_nic_slot_t nics[BSD_MAX_NICS];
@@ -48,6 +57,27 @@ static uint64_t clock_last;
 static unsigned clock_due;
 static void config_snapshot(a20_net_config_t *out);
 static int stack_ready;
+
+/* Public index layout: 1 = primary NIC, 2 = loopback, 3.. =
+ * additional NIC slots, A20_BSD_TUN_BASE.. = TUN.  Slot 0 keeps index 1 so
+ * existing a20n0/en2 users are unaffected while a router can address en3 on
+ * slot 1. */
+static int nic_slot_for_index(unsigned index)
+{
+    if (index == 1) return 0;
+    if (index >= 3 && index < A20_BSD_TUN_BASE) return (int)index - 2;
+    return -1;
+}
+
+static unsigned nic_index_for_slot(int slot)
+{
+    return slot == 0 ? 1u : (unsigned)(slot + 2);
+}
+
+static void nic_name_for_slot(int slot, char *out, size_t size)
+{
+    snprintf(out, size, "en%d", slot == 0 ? 2 : slot + 2);
+}
 
 static bsd_nic_slot_t *slot_for_context(void *context)
 {
@@ -219,6 +249,135 @@ static void stack_init(void)
     stack_ready = 1;
 }
 
+typedef struct ifindex_job {
+    void *context;
+    int result;
+} ifindex_job_t;
+
+static int ifindex_job_run(void *argument)
+{
+    ifindex_job_t *job = argument;
+    job->result = a20_bsd_port_nic_ifindex(job->context);
+    return job->result < 0 ? job->result : 0;
+}
+
+int a20_bsd_nic_public_ifindex(unsigned bsd_ifindex, uint8_t local[4],
+                               uint32_t *public_index)
+{
+    for (int slot = 0; slot < BSD_MAX_NICS; ++slot) {
+        if (!nics[slot].attached || nics[slot].bsd_ifindex != bsd_ifindex)
+            continue;
+        if (public_index) *public_index = nic_index_for_slot(slot);
+        if (local) memcpy(local, nics[slot].ip, 4);
+        return 0;
+    }
+    return -ENODEV;
+}
+
+typedef struct attach_cleanup {
+    void *context;
+    uint8_t address[4], mask[4];
+} attach_cleanup_t;
+
+static int attach_cleanup_run(void *argument)
+{
+    attach_cleanup_t *job = argument;
+    uint8_t zero[4] = {0, 0, 0, 0};
+    return a20_bsd_port_nic_set_ipv4(job->context, zero, zero, NULL,
+                                     job->address, job->mask, NULL);
+}
+
+static int attach_one_nic(int slot, const a20_net_config_t *config,
+                          int configured)
+{
+    char address[16] = {0}, netmask[16] = {0}, broadcast[16] = {0};
+    char gateway[16] = {0};
+    uint8_t mac[6];
+    if (copy_mac(slot, mac) < 0) return -ENODEV;
+    nics[slot].present = 1;
+
+    attach_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.config.port_id = slot;
+    nic_name_for_slot(slot, job.config.ifname, sizeof(job.config.ifname));
+    memcpy(job.config.mac, mac, 6);
+
+    int placeholder = 0;
+    if (configured) {
+        ipv4_text(address, &config->ip);
+        ipv4_text(netmask, &config->netmask);
+        ipv4_text(gateway, &config->gateway);
+        uint8_t bc[4];
+        const uint8_t *ip = (const uint8_t *)&config->ip;
+        const uint8_t *mask = (const uint8_t *)&config->netmask;
+        for (unsigned i = 0; i < 4; ++i)
+            bc[i] = ip[i] | (uint8_t)~mask[i];
+        ipv4_text(broadcast, bc);
+    } else {
+        /* ff_veth_attach always installs cfg.addr.  A zero mask would become
+         * a connected 0.0.0.0/0 route and shadow the real default, so give the
+         * unconfigured interface a unique /32 and remove it right away. */
+        snprintf(address, sizeof(address), "169.254.%d.1", slot + 1);
+        snprintf(netmask, sizeof(netmask), "255.255.255.255");
+        snprintf(broadcast, sizeof(broadcast), "169.254.%d.1", slot + 1);
+        snprintf(gateway, sizeof(gateway), "0.0.0.0");
+        placeholder = 1;
+    }
+    snprintf(job.config.address, sizeof(job.config.address), "%s", address);
+    snprintf(job.config.netmask, sizeof(job.config.netmask), "%s", netmask);
+    snprintf(job.config.broadcast, sizeof(job.config.broadcast), "%s", broadcast);
+    snprintf(job.config.gateway, sizeof(job.config.gateway), "%s", gateway);
+
+    int result = a20_bsd_executor_call(attach_job_run, &job);
+    if (result < 0) return result;
+
+    nics[slot].context = job.context;
+    nics[slot].attached = 1;
+    nics[slot].up = 1;
+    nics[slot].mtu = 1500;
+    ifindex_job_t index_job = {job.context, -1};
+    if (a20_bsd_executor_call(ifindex_job_run, &index_job) == 0)
+        nics[slot].bsd_ifindex = (unsigned)index_job.result;
+    memcpy(nics[slot].mac, mac, 6);
+    if (configured) {
+        memcpy(nics[slot].ip, &config->ip, 4);
+        memcpy(nics[slot].mask, &config->netmask, 4);
+        memcpy(nics[slot].gw, &config->gateway, 4);
+        nics[slot].has_ip = 1;
+    } else {
+        memset(nics[slot].ip, 0, 4);
+        memset(nics[slot].mask, 0, 4);
+        memset(nics[slot].gw, 0, 4);
+        nics[slot].has_ip = 0;
+    }
+
+    if (placeholder) {
+        attach_cleanup_t cleanup;
+        memset(&cleanup, 0, sizeof(cleanup));
+        cleanup.context = job.context;
+        cleanup.address[0] = 169;
+        cleanup.address[1] = 254;
+        cleanup.address[2] = (uint8_t)(slot + 1);
+        cleanup.address[3] = 1;
+        memset(cleanup.mask, 0xff, 4);
+        (void)a20_bsd_executor_call(attach_cleanup_run, &cleanup);
+    }
+    return 0;
+}
+
+#if CONFIG_NET_ROUTER
+typedef struct forwarding_job {
+    int ipv4, ipv6;
+} forwarding_job_t;
+
+static int forwarding_job_run(void *argument)
+{
+    forwarding_job_t *job = argument;
+    a20_bsd_port_nic_set_forwarding(job->ipv4, job->ipv6);
+    return 0;
+}
+#endif
+
 static void attach_interfaces(void)
 {
     if (!stack_ready) stack_init();
@@ -232,47 +391,50 @@ static void attach_interfaces(void)
         printf("[NET] BSD executor initialization failed: %d\n", result);
         return;
     }
-    if (nics[0].attached) return;
 
     a20_net_config_t config;
     uint64_t flags = spin_lock_irqsave(&config_lock);
     config = g_a20_net_config;
     spin_unlock_irqrestore(&config_lock, flags);
-    if (!config.ip.addr || !config.netmask.addr || !config.gateway.addr) {
-        printf("[NET] BSD initial backend requires static IPv4 address/netmask/gateway\n");
-        return;
-    }
+    int primary_configured = config.ip.addr && config.netmask.addr;
 
-    attach_job_t job;
-    memset(&job, 0, sizeof(job));
-    job.config.port_id = 0;
-    memcpy(job.config.ifname, "a20n0", 6);
-    result = copy_mac(0, job.config.mac);
-    if (result < 0) {
-        printf("[NET] BSD found no usable class NIC: %d\n", result);
+    int attached = 0;
+    for (int slot = 0; slot < BSD_MAX_NICS; ++slot) {
+        if (nics[slot].attached) {
+            attached++;
+            continue;
+        }
+        int configured = slot == 0 && primary_configured;
+        result = attach_one_nic(slot, &config, configured);
+        if (result == -ENODEV)
+            continue; /* no class NIC at this slot */
+        if (result < 0) {
+            printf("[NET] BSD ifnet attach slot %d failed: %d\n", slot, result);
+            continue;
+        }
+        attached++;
+        char name[16];
+        nic_name_for_slot(slot, name, sizeof(name));
+        if (configured) {
+            char address[16], netmask[16], gateway[16];
+            ipv4_text(address, &config.ip);
+            ipv4_text(netmask, &config.netmask);
+            ipv4_text(gateway, &config.gateway);
+            printf("[NET] BSD attached %s %s/%s gateway %s\n", name,
+                   address, netmask, gateway);
+        } else {
+            printf("[NET] BSD attached %s unconfigured\n", name);
+        }
+    }
+    if (!attached) {
+        printf("[NET] BSD found no usable class NIC\n");
         return;
     }
-    memcpy(nics[0].mac, job.config.mac, 6);
-    ipv4_text(job.config.address, &config.ip);
-    ipv4_text(job.config.netmask, &config.netmask);
-    ipv4_text(job.config.gateway, &config.gateway);
-    uint8_t broadcast[4];
-    const uint8_t *ip = (const uint8_t *)&config.ip;
-    const uint8_t *mask = (const uint8_t *)&config.netmask;
-    for (unsigned i = 0; i < 4; ++i) broadcast[i] = ip[i] | (uint8_t)~mask[i];
-    ipv4_text(job.config.broadcast, broadcast);
-    result = a20_bsd_executor_call(attach_job_run, &job);
-    if (result < 0) {
-        printf("[NET] BSD ifnet attach failed: %d\n", result);
-        return;
-    }
-    nics[0].context = job.context;
-    nics[0].attached = 1;
-    nics[0].up = 1;
-    nics[0].mtu = 1500;
+#if CONFIG_NET_ROUTER
+    forwarding_job_t forwarding = {1, 1};
+    (void)a20_bsd_executor_call(forwarding_job_run, &forwarding);
+#endif
     clock_last = timer_get_ticks();
-    printf("[NET] BSD attached a20n0 %s/%s gateway %s\n",
-           job.config.address, job.config.netmask, job.config.gateway);
     a20_bsd_executor_notify();
 }
 
@@ -324,18 +486,25 @@ static int interface_snapshot(void *outp, int maximum)
 {
     nl_link_out_t *out = outp;
     int count = 0;
-    if (count < maximum && nics[0].attached) {
+    for (int slot = 0; slot < BSD_MAX_NICS && count < maximum; ++slot) {
+        bsd_nic_slot_t *nic = &nics[slot];
+        if (!nic->attached) continue;
         nl_link_out_t *entry = &out[count++];
         memset(entry, 0, sizeof(*entry));
-        memcpy(entry->name, "a20n0", 6);
-        entry->index = 1;
-        entry->mtu = nics[0].mtu;
-        entry->flags = (nics[0].up ? NLRT_IF_FLAGS_UP | NLRT_IF_FLAGS_RUNNING : 0);
-        memcpy(entry->mac, nics[0].mac, 6);
-        entry->has_ip = entry->has_gw = 1;
-        memcpy(entry->ip, &g_a20_net_config.ip, 4);
-        memcpy(entry->mask, &g_a20_net_config.netmask, 4);
-        memcpy(entry->gw, &g_a20_net_config.gateway, 4);
+        nic_name_for_slot(slot, entry->name, sizeof(entry->name));
+        entry->index = nic_index_for_slot(slot);
+        entry->mtu = nic->mtu;
+        entry->flags = (nic->up ? NLRT_IF_FLAGS_UP | NLRT_IF_FLAGS_RUNNING : 0);
+        memcpy(entry->mac, nic->mac, 6);
+        if (nic->has_ip) {
+            entry->has_ip = 1;
+            memcpy(entry->ip, nic->ip, 4);
+            memcpy(entry->mask, nic->mask, 4);
+            if (nic->gw[0] || nic->gw[1] || nic->gw[2] || nic->gw[3]) {
+                entry->has_gw = 1;
+                memcpy(entry->gw, nic->gw, 4);
+            }
+        }
     }
     if (count < maximum) {
         nl_link_out_t *entry = &out[count++];
@@ -355,18 +524,25 @@ static int interface_snapshot(void *outp, int maximum)
     return count;
 }
 
-static int if_default_index(void) { return nics[0].attached ? 1 : 2; }
+static int if_default_index(void)
+{
+    for (int slot = 0; slot < BSD_MAX_NICS; ++slot)
+        if (nics[slot].attached) return (int)nic_index_for_slot(slot);
+    return 2;
+}
 static int if_up(unsigned index)
 {
     if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_up(index);
-    if (index == 1) return nics[0].attached && nics[0].up;
+    int slot = nic_slot_for_index(index);
+    if (slot >= 0) return nics[slot].attached && nics[slot].up;
     if (index == 2) return 1;
     return 0;
 }
 static int if_mtu(unsigned index)
 {
     if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_mtu(index);
-    if (index == 1) return nics[0].attached ? nics[0].mtu : -ENODEV;
+    int slot = nic_slot_for_index(index);
+    if (slot >= 0) return nics[slot].attached ? nics[slot].mtu : -ENODEV;
     if (index == 2) return 16384;
     return -ENODEV;
 }
@@ -374,8 +550,10 @@ static int if_hwaddr(unsigned index, uint8_t *out)
 {
     if (a20_bsd_tun_is_index(index)) return -EOPNOTSUPP;
     if (!out) return -EINVAL;
-    if (index == 1 && nics[0].attached) {
-        memcpy(out, nics[0].mac, 6);
+    int slot = nic_slot_for_index(index);
+    if (slot >= 0) {
+        if (!nics[slot].attached) return -ENODEV;
+        memcpy(out, nics[slot].mac, 6);
         return 0;
     }
     if (index == 2) {
@@ -389,15 +567,18 @@ static int if_get_addr(unsigned index, uint8_t *address, uint8_t *mask, uint8_t 
 {
     if (a20_bsd_tun_is_index(index))
         return a20_bsd_tun_get_addr(index, address, mask, gateway);
-    if (index == 1 && nics[0].attached) {
-        memcpy(address, &g_a20_net_config.ip, 4);
-        memcpy(mask, &g_a20_net_config.netmask, 4);
-        memcpy(gateway, &g_a20_net_config.gateway, 4);
+    int slot = nic_slot_for_index(index);
+    if (slot >= 0) {
+        if (!nics[slot].attached) return -ENODEV;
+        if (address) memcpy(address, nics[slot].ip, 4);
+        if (mask) memcpy(mask, nics[slot].mask, 4);
+        if (gateway) memcpy(gateway, nics[slot].gw, 4);
         return 0;
     }
     if (index == 2) {
-        memset(address, 0, 4); memset(mask, 0, 4); memset(gateway, 0, 4);
-        address[0] = 127; address[3] = 1; mask[0] = 255;
+        if (address) { memset(address, 0, 4); address[0] = 127; address[3] = 1; }
+        if (mask) { memset(mask, 0, 4); mask[0] = 255; }
+        if (gateway) memset(gateway, 0, 4);
         return 0;
     }
     return -ENODEV;
@@ -462,12 +643,13 @@ static int route_update_v4(const uint8_t *destination, uint8_t prefix,
                            const uint8_t *gateway, uint16_t ifindex,
                            int remove)
 {
-    if (!destination || !nics[0].attached) return -ENODEV;
-    if (ifindex != 1) return -ENODEV;
+    if (!destination) return -EINVAL;
+    int slot = ifindex ? nic_slot_for_index(ifindex) : 0;
+    if (slot < 0 || !nics[slot].attached) return -ENODEV;
     if (prefix > 32) return -EINVAL;
     route4_job_t job;
     memset(&job, 0, sizeof(job));
-    job.context = nics[0].context;
+    job.context = nics[slot].context;
     memcpy(job.destination, destination, 4);
     job.prefix = prefix;
     job.remove = remove;
@@ -476,11 +658,10 @@ static int route_update_v4(const uint8_t *destination, uint8_t prefix,
         job.have_gateway = 1;
     } else if (prefix == 0 && memcmp(destination, "\0\0\0\0", 4) == 0) {
         /* `ip route del default` commonly carries no RTA_GATEWAY.  Match the
-         * backend route installed from the configured default gateway. */
-        a20_net_config_t config;
-        config_snapshot(&config);
-        memcpy(job.gateway, &config.gateway, 4);
-        job.have_gateway = config.gateway.addr != 0;
+         * gateway observed on the primary or the selected interface. */
+        memcpy(job.gateway, nics[slot].gw, 4);
+        job.have_gateway = nics[slot].gw[0] || nics[slot].gw[1] ||
+                           nics[slot].gw[2] || nics[slot].gw[3];
     }
     if (!job.have_gateway && !remove) return 0; /* connected routes are ifaddr-owned */
     return a20_bsd_executor_call(route4_job_run, &job);
@@ -491,44 +672,52 @@ static int if_set_addr(unsigned index, const uint8_t *address,
 {
     if (a20_bsd_tun_is_index(index))
         return a20_bsd_tun_set_addr(index, address, mask, 1);
-    if (index != 1 || !nics[0].attached || !address || !mask) return -ENODEV;
-    a20_net_config_t config;
-    config_snapshot(&config);
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || !nics[slot].attached || !address || !mask) return -ENODEV;
+    bsd_nic_slot_t *nic = &nics[slot];
     addr4_job_t job;
     memset(&job, 0, sizeof(job));
-    job.context = nics[0].context;
+    job.context = nic->context;
     memcpy(job.address, address, 4);
     memcpy(job.mask, mask, 4);
-    memcpy(job.old_address, &config.ip, 4);
-    memcpy(job.old_mask, &config.netmask, 4);
-    memcpy(job.old_gateway, &config.gateway, 4);
+    memcpy(job.old_address, nic->ip, 4);
+    memcpy(job.old_mask, nic->mask, 4);
+    memcpy(job.old_gateway, nic->gw, 4);
     if (gateway) {
         memcpy(job.gateway, gateway, 4);
         job.have_gateway = 1;
-    } else {
-        memcpy(job.gateway, &config.gateway, 4);
-        job.have_gateway = config.gateway.addr != 0;
+    } else if (slot == 0) {
+        memcpy(job.gateway, nic->gw, 4);
+        job.have_gateway = nic->gw[0] || nic->gw[1] || nic->gw[2] || nic->gw[3];
     }
     int result = a20_bsd_executor_call(addr4_job_run, &job);
     if (result < 0) return result;
 
-    uint64_t flags = spin_lock_irqsave(&config_lock);
-    memcpy(&g_a20_net_config.ip, address, 4);
-    memcpy(&g_a20_net_config.netmask, mask, 4);
-    if (gateway) memcpy(&g_a20_net_config.gateway, gateway, 4);
-    spin_unlock_irqrestore(&config_lock, flags);
+    memcpy(nic->ip, address, 4);
+    memcpy(nic->mask, mask, 4);
+    nic->has_ip = address[0] || address[1] || address[2] || address[3];
+    if (gateway) memcpy(nic->gw, gateway, 4);
+
+    if (slot == 0) {
+        uint64_t flags = spin_lock_irqsave(&config_lock);
+        memcpy(&g_a20_net_config.ip, address, 4);
+        memcpy(&g_a20_net_config.netmask, mask, 4);
+        if (gateway) memcpy(&g_a20_net_config.gateway, gateway, 4);
+        spin_unlock_irqrestore(&config_lock, flags);
+    }
     return 0;
 }
 
 static int if_set_mtu(unsigned index, uint16_t mtu)
 {
     if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_set_mtu(index, mtu);
-    if (index != 1 || !nics[0].attached) return -ENODEV;
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || !nics[slot].attached) return -ENODEV;
     if (mtu < 576 || mtu > 1500) return -EINVAL;
-    if (mtu == nics[0].mtu) return 0;
-    mtu_job_t job = {.context = nics[0].context, .mtu = mtu};
+    if (mtu == nics[slot].mtu) return 0;
+    mtu_job_t job = {.context = nics[slot].context, .mtu = mtu};
     int result = a20_bsd_executor_call(mtu_job_run, &job);
-    if (result == 0) nics[0].mtu = mtu;
+    if (result == 0) nics[slot].mtu = mtu;
     return result;
 }
 
@@ -537,13 +726,14 @@ static int if_set_flags(unsigned index, uint32_t value, uint32_t mask)
     if (a20_bsd_tun_is_index(index))
         return a20_bsd_tun_set_flags(index, value, mask);
     if (index == 2) return (value & NLRT_IF_FLAGS_UP) ? 0 : -EOPNOTSUPP;
-    if (index != 1 || !nics[0].attached) return -ENODEV;
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || !nics[slot].attached) return -ENODEV;
     if (mask & ~(uint32_t)NLRT_IF_FLAGS_UP) return -EOPNOTSUPP;
     int up = (value & NLRT_IF_FLAGS_UP) != 0;
-    if (up == (int)nics[0].up) return 0;
-    link_job_t job = {.context = nics[0].context, .up = up};
+    if (up == (int)nics[slot].up) return 0;
+    link_job_t job = {.context = nics[slot].context, .up = up};
     int result = a20_bsd_executor_call(link_job_run, &job);
-    if (result == 0) nics[0].up = up ? 1 : 0;
+    if (result == 0) nics[slot].up = up ? 1 : 0;
     return result;
 }
 
@@ -567,10 +757,11 @@ static int if_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
 {
     if (a20_bsd_tun_is_index(index))
         return a20_bsd_tun_set_addr6(index, address, prefix, add);
-    if (index != 0 || !nics[0].context || !address) return -ENODEV;
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || !nics[slot].context || !address) return -ENODEV;
     addr6_job_t job;
     memset(&job, 0, sizeof(job));
-    job.context = nics[0].context;
+    job.context = nics[slot].context;
     memcpy(job.address, address, 16);
     job.prefix = prefix;
     job.add = add;
@@ -594,7 +785,12 @@ static int owns_ipv4(uint32_t address)
      * to bind a foreign unicast address. */
     if (address == 0) return 1;
     if (a20_bsd_tun_owns_ipv4(address)) return 1;
-    if (nics[0].attached && address == g_a20_net_config.ip.addr) return 1;
+    for (int slot = 0; slot < BSD_MAX_NICS; ++slot) {
+        if (!nics[slot].attached || !nics[slot].has_ip) continue;
+        uint32_t wire;
+        memcpy(&wire, nics[slot].ip, sizeof(wire));
+        if (wire == address) return 1;
+    }
     uint8_t loopback[4] = {127, 0, 0, 1};
     uint32_t value;
     memcpy(&value, loopback, 4);
@@ -616,19 +812,27 @@ static int raw_tx_job_run(void *argument)
 
 static int packet_tx(unsigned index, const uint8_t *frame, size_t length)
 {
-    /* Public interface identity is 1 for a20n0 (2 is loopback). */
-    if (index != 1 || !nics[0].context || !frame) return -ENODEV;
-    raw_tx_job_t job = {nics[0].context, frame, length};
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || !nics[slot].context || !frame) return -ENODEV;
+    raw_tx_job_t job = {nics[slot].context, frame, length};
     return a20_bsd_executor_call(raw_tx_job_run, &job);
 }
 
 static uint32_t interface_ipv4(int index)
 {
-    if (index >= 3) return a20_bsd_tun_interface_ipv4((unsigned)index);
-    if (index != 0 || !nics[0].attached) return 0;
-    const uint8_t *a = (const uint8_t *)&g_a20_net_config.ip;
-    return (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 |
-           (uint32_t)a[2] << 8 | a[3];
+    /* netfilter passes the device slot as net_idx; TUN sits after the NIC
+     * slots in the same space. */
+    if (index >= 0 && index < BSD_MAX_NICS) {
+        if (!nics[index].attached || !nics[index].has_ip) return 0;
+        const uint8_t *a = nics[index].ip;
+        return (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 |
+               (uint32_t)a[2] << 8 | a[3];
+    }
+    int tun_slot = index - BSD_MAX_NICS;
+    if (tun_slot >= 0 && tun_slot < NET_PROFILE_TUN_MAX_DEVS)
+        return a20_bsd_tun_interface_ipv4(
+            (unsigned)(A20_BSD_TUN_BASE + tun_slot));
+    return 0;
 }
 
 static void config_snapshot(a20_net_config_t *out)
@@ -671,24 +875,47 @@ static int stats_job_run(void *argument)
 
 static int format_devices(char *buffer, size_t size)
 {
-    if (!nics[0].context) return snprintf(buffer, size, "a20n0: detached\n");
-    stats_job_t job = {.context = nics[0].context};
-    if (a20_bsd_executor_call(stats_job_run, &job) < 0)
-        return snprintf(buffer, size, "a20n0: statistics unavailable\n");
-    return snprintf(buffer, size,
-                    "a20n0: rx=%lu tx=%lu rx_drop=%lu tx_drop=%lu tx_error=%lu rx_starved=%lu\n",
-                    (unsigned long)job.stats.rx_frames, (unsigned long)job.stats.tx_frames,
-                    (unsigned long)job.stats.rx_drops, (unsigned long)job.stats.tx_drops,
-                    (unsigned long)job.stats.tx_errors,
-                    (unsigned long)job.stats.rx_starved);
+    size_t used = 0;
+    for (int slot = 0; slot < BSD_MAX_NICS; ++slot) {
+        char name[16];
+        nic_name_for_slot(slot, name, sizeof(name));
+        if (!nics[slot].present && slot != 0) continue;
+        if (!nics[slot].context) {
+            if (slot == 0)
+                used += snprintf(buffer + used, size > used ? size - used : 0,
+                                 "%s: detached\n", name);
+            continue;
+        }
+        stats_job_t job = {.context = nics[slot].context};
+        if (a20_bsd_executor_call(stats_job_run, &job) < 0) {
+            used += snprintf(buffer + used, size > used ? size - used : 0,
+                             "%s: statistics unavailable\n", name);
+            continue;
+        }
+        used += snprintf(buffer + used, size > used ? size - used : 0,
+                         "%s: rx=%lu tx=%lu rx_drop=%lu tx_drop=%lu tx_error=%lu rx_starved=%lu\n",
+                         name,
+                         (unsigned long)job.stats.rx_frames,
+                         (unsigned long)job.stats.tx_frames,
+                         (unsigned long)job.stats.rx_drops,
+                         (unsigned long)job.stats.tx_drops,
+                         (unsigned long)job.stats.tx_errors,
+                         (unsigned long)job.stats.rx_starved);
+        if (used >= size) break;
+    }
+    return (int)used;
 }
 
 static int format_routes(char *buffer, size_t size)
 {
-    if (!nics[0].attached) return snprintf(buffer, size, "no BSD route\n");
-    char gateway[16];
-    ipv4_text(gateway, &g_a20_net_config.gateway);
-    return snprintf(buffer, size, "default via %s dev a20n0\n", gateway);
+    int slot = -1;
+    for (int i = 0; i < BSD_MAX_NICS; ++i)
+        if (nics[i].attached) { slot = i; break; }
+    if (slot < 0) return snprintf(buffer, size, "no BSD route\n");
+    char gateway[16], name[16];
+    ipv4_text(gateway, nics[slot].gw);
+    nic_name_for_slot(slot, name, sizeof(name));
+    return snprintf(buffer, size, "default via %s dev %s\n", gateway, name);
 }
 
 static const net_backend_cycle_ops_t bsd_cycle_ops = {
@@ -759,6 +986,8 @@ const net_backend_t a20_bsd_backend = {
     .caps = NET_CAP_STREAM | NET_CAP_DGRAM | NET_CAP_IPV6 |
             NET_CAP_LISTEN | NET_CAP_SHUTDOWN |
             NET_CAP_SNDBUF | NET_CAP_RCVBUF |
+            NET_CAP_PKTINFO | NET_CAP_UDP_CONTROL | NET_CAP_TUN |
+            NET_CAP_BINDTODEVICE |
             NET_CAP_IF_DYNAMIC | NET_CAP_IF_ADDR6 | NET_CAP_ROUTE |
             NET_CAP_PMTU | NET_CAP_RAW | NET_CAP_RAW_TX |
             NET_CAP_CONGESTION | NET_CAP_DEVICE_IRQ,

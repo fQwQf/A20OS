@@ -12,6 +12,24 @@ make ARCH=x86_64 NR_CPUS=2 NET_LANES=4 NET_ROLE=router kernel-only
 PMTU、故障恢复和规模成本仍需逐项完成，不能把打开 forwarding 宏当作结论。
 LAN DHCPv4/DNS A 转发的配置与已验证范围见 [lan-services.md](./lan-services.md)。
 
+BSD/F-Stack 后端现在也接受 `NET_ROLE=router`：启动时按 class NIC 顺序 attach
+全部网卡（公共名为 `en2`、`en3`…，索引 1、3…；`lo` 固定为 2），并在执行器内
+置 `V_ipforwarding=1`、`V_ip6_forwarding=1`。IPv4/IPv6 转发、TTL/hop-limit
+递减、TCP/UDP NAPT 均经过 `netfilter_bridge.c` 的同一套规则/conntrack 路径。
+
+BSD 已验证（三节点 QEMU socket 拓扑）：
+
+- IPv4 ping 与 IPv6 ping 的 TTL/hop limit 均为 63；
+- 16 KiB TCP 回显完整；
+- UDP 单包经 `10.20.0.1:<port>` NAPT 到 WAN 并收到回包；
+- `ip addr`/`ip route` 在 `en2`/`en3` 上读写正常。
+
+BSD 当前未完成：策略路由/多 FIB（`ip rule` + `table 100` 仍只落到主 RIB）、
+RA/SLAAC、内核内 DHCP 客户端；`SO_BINDTODEVICE` 目前只对主接口是真实 no-op，
+绑定次级网卡会明确 `EOPNOTSUPP` 而不是静默错路由。DHCP 服务端
+（dnsmasq `--dhcp-range`）能在 en2 启动并收到 DISCOVER，但租约交换仍待继续
+修正 `IP_PKTINFO` 元数据。
+
 ## 最小双网卡配置
 
 下面是验证使用的隔离地址，实际部署需按自己的接口/地址更改：

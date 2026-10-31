@@ -91,6 +91,9 @@ int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add);
 int a20_bsd_port_nic_send_raw(void *context, const void *frame, size_t length);
+int a20_bsd_port_nic_ifindex(void *context);
+/* Router builds install the kernel forwarding sysctls in this port's VNET. */
+void a20_bsd_port_nic_set_forwarding(int ipv4, int ipv6);
 
 /* TUN (L3) interface.  The returned pointer is opaque to the common layer. */
 void *a20_bsd_port_tun_create(int unit, a20_bsd_tun_emit_t emit, void *ctx);

@@ -179,6 +179,27 @@ TUN 地址仍由 `SIOCSIFADDR`/`SIOCSIFNETMASK` 驱动。首次 `SIOCSIFADDR` �
 a20n0 的默认路由；实现按类别补默认掩码，`tun_test` 还验证 off-link 目标不会
 出现在 TUN 队列里。
 
+`NET_ROLE=router` 已可用于 BSD：后端 attach 所有 class NIC（`en2`/`en3`…），
+执行器内打开 IPv4/IPv6 forwarding，并通过同一 `netfilter_bridge.c` 做 NAT。
+三节点 QEMU 验证了双栈 ping（TTL/hop 63）、16 KiB TCP 回显和 UDP NAPT 回包。
+未完成项是策略路由/多 FIB、RA/SLAAC 和内核内 DHCP 客户端；DHCP 服务端仍受
+`IP_PKTINFO` 元数据问题影响，详见 [router.md](./router.md)。
+
+### 连接规模对比（BSD vs lwIP）
+
+同一静态 `net-connection-probe`、同一 QEMU user-net 和 world，分别启动 BSD 与
+lwIP 内核；指标是全部 TCP 握手完成并校验通过的时间（不是线速吞吐）：
+
+| 并发连接 | BSD | lwIP | BSD 加速 |
+|---:|---:|---:|---:|
+| 64 | 95 ms | 157 ms | 1.65x |
+| 256 | 391 ms | 535 ms | 1.37x |
+| 320 | 400 ms | 664 ms | 1.66x |
+
+BSD 为两次运行均值；lwIP 的 64/256 为两次、320 为一次。QEMU/SLIRP 只用于同一
+宿主上的相对比较，不能当作物理线速结论。单连接样本受 boot/settle 噪声影响大，
+未列入表内。
+
 `NET_STACK=bsd NET_LANES=1` 已在 x86_64 桌面完成 DNS/HTTP/HTTPS，并由真实
 Firefox 151 读取 HTTP/HTTPS DOM。仍待完成：router 模式、外部 IPv6/RA、DHCP、
 多队列/零拷贝数据面，以及与 lwIP 的同条件吞吐/p99 对比。x86_64 桌面/服务器已切换
