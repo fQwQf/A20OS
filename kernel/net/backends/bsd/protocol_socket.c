@@ -309,26 +309,39 @@ int port_socket_send_control(int fd, const void *buffer, size_t length,
     msg.msg_control = control;
     msg.msg_controllen = sizeof(control);
 
-    struct cmsghdr *c = NULL;
+    /* ff_sendmsg() is F-Stack's Linux-facing entry point: it reads the
+     * control buffer with Linux cmsghdr layout (8-byte length, level at 8,
+     * type at 12, data at 16) and translates it to the FreeBSD one.  Handing
+     * it a FreeBSD cmsghdr made the translator read the length from the wrong
+     * offset and the send never returned.  IPv4 source selection has no
+     * translation entry, so the type is the FreeBSD IP_SENDSRCADDR value and
+     * the payload is copied verbatim; IPv6 uses Linux's IPV6_PKTINFO, which
+     * the translator maps to the FreeBSD constant. */
+    struct send_cmsg_linux {
+        uint64_t cmsg_len;
+        int cmsg_level;
+        int cmsg_type;
+    } *c = (struct send_cmsg_linux *)(void *)control;
     int family = address ? ((const struct sockaddr *)address)->sa_family
                          : AF_UNSPEC;
     if (family == AF_INET && source_v4 && (source_v4[0] || source_v4[1] ||
                                            source_v4[2] || source_v4[3])) {
-        c = CMSG_FIRSTHDR(&msg);
         c->cmsg_level = IPPROTO_IP;
         c->cmsg_type = IP_SENDSRCADDR;
-        c->cmsg_len = CMSG_LEN(4);
-        memcpy(CMSG_DATA(c), source_v4, 4);
-        msg.msg_controllen = CMSG_SPACE(4);
+        c->cmsg_len = sizeof(*c) + sizeof(struct in_addr); /* 20 */
+        memcpy(control + sizeof(*c), source_v4, sizeof(struct in_addr));
+        msg.msg_controllen = sizeof(*c) + 8; /* CMSG_SPACE(4) in Linux */
     } else if (family == AF_INET6 && ifindex) {
-        c = CMSG_FIRSTHDR(&msg);
         c->cmsg_level = IPPROTO_IPV6;
-        c->cmsg_type = IPV6_PKTINFO;
-        c->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
-        struct in6_pktinfo *pi = (struct in6_pktinfo *)CMSG_DATA(c);
+        c->cmsg_type = 50; /* Linux IPV6_PKTINFO */
+        c->cmsg_len = sizeof(*c) + sizeof(struct in6_pktinfo);
+        struct in6_pktinfo *pi = (struct in6_pktinfo *)(void *)(control + sizeof(*c));
         memset(pi, 0, sizeof(*pi));
         pi->ipi6_ifindex = (unsigned)ifindex;
-        msg.msg_controllen = CMSG_SPACE(sizeof(struct in6_pktinfo));
+        msg.msg_controllen = sizeof(*c) + ((sizeof(struct in6_pktinfo) + 7) & ~7u);
+    } else {
+        msg.msg_control = NULL;
+        msg.msg_controllen = 0;
     }
 
     ssize_t sent = ff_sendmsg(fd, &msg, flags);

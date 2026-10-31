@@ -752,6 +752,20 @@ static int addr6_job_run(void *argument)
     return rc < 0 ? rc : -rc;
 }
 
+typedef struct neighbor_job {
+    void *context;
+    uint32_t address;
+    uint8_t mac[6];
+} neighbor_job_t;
+
+static int neighbor_job_run(void *argument)
+{
+    neighbor_job_t *job = argument;
+    int rc = a20_bsd_port_nic_set_neighbor(job->context, job->address,
+                                           job->mac);
+    return rc < 0 ? rc : -rc;
+}
+
 static int if_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
                     int add)
 {
@@ -777,7 +791,17 @@ static int if_del_addr6(unsigned index, const uint8_t *address)
     return if_addr6(index, address, 128, 0);
 }
 static int neighbor_update_v4(uint32_t index, uint32_t address, const uint8_t mac[6])
-{ (void)index; (void)address; (void)mac; return -EOPNOTSUPP; }
+{
+    if (!mac) return -EINVAL;
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || !nics[slot].context) return -ENODEV;
+    neighbor_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.context = nics[slot].context;
+    job.address = address;
+    memcpy(job.mac, mac, 6);
+    return a20_bsd_executor_call(neighbor_job_run, &job);
+}
 
 static int owns_ipv4(uint32_t address)
 {
