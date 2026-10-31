@@ -20,6 +20,11 @@
 #define BSD_KIND_UDP 2u
 #define BSD_KIND_RAW 4u
 #define BSD_CONNECT_POLLS 4
+/* Datagrams drained from one ready socket per progress pass.  A burst of N
+ * datagrams used to cost N/4 executor passes (and 4 N/4 kevent() calls);
+ * draining to EAGAIN or to this bound keeps a burst in one pass while still
+ * yielding to other ready sockets. */
+#define BSD_RX_DRAIN 16
 #define BSD_RX_CHUNK 16384
 
 typedef struct bsd_socket {
@@ -621,7 +626,7 @@ static int bound_device(net_socket_t *s, char name[16])
 static void receive_one(bsd_socket_t *state)
 {
     net_socket_t *s = state->socket;
-    for (unsigned i = 0; i < BSD_CONNECT_POLLS; ++i) {
+    for (unsigned i = 0; i < BSD_RX_DRAIN; ++i) {
         if (__atomic_load_n(&state->closing, __ATOMIC_ACQUIRE) || state->fd < 0 ||
             __atomic_load_n(&state->connecting, __ATOMIC_ACQUIRE)) return;
         uint64_t flags = net_sock_lock(s);
