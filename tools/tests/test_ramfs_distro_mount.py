@@ -4,7 +4,10 @@ import os
 import subprocess
 import tempfile
 import unittest
-from .test_firmware_model import ROOT, STUBS
+try:
+    from .test_firmware_model import ROOT, STUBS
+except ImportError:  # unittest discovery loads this module as a top-level name
+    from test_firmware_model import ROOT, STUBS
 
 HARNESS = r'''
 #include <assert.h>

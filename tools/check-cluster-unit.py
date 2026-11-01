@@ -29,6 +29,7 @@ def main():
             binary = Path(directory) / name
             run(compiler + ["-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
                             "-Ikernel/arch/riscv64/include", "-Ikernel/include", "-Ikernel",
+                            "-Ikernel/arch/armv7m/boards/stm32f103/include",
                             f"tools/tests/{name}.c", "-o", str(binary)], root)
             run([str(binary)], root)
         server = Path(directory) / "fragment-server"

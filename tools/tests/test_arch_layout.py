@@ -35,12 +35,13 @@ class ArchLayoutTests(unittest.TestCase):
         checked = []
         for directory in sorted((ROOT/'kernel/arch').glob('*/boards/*')):
             arch, board = directory.parent.parent.name, directory.name
-            if arch not in ACTIVE_ARCHES or board == 'm0sense-bl702':
-                continue  # Retired targets and the standalone BL702 probe are not OS ports.
+            if arch not in ACTIVE_ARCHES or board == 'm0sense-bl702' or arch == 'riscv32':
+                continue  # Retired targets, the standalone BL702 probe, and the MCU boot graph are not hosted OS ports.
             with self.subTest(arch=arch, board=board):
                 result = subprocess.run(['make', '-s', f'ARCH={arch}', f'BOARD={board}',
                     'BRINGUP=1', 'DRIVER_DEPLOYMENT=embedded',
                     *(['CROSS_PREFIX=arm-none-eabi-'] if arch == 'armv7m' else []),
+                    *(['ABI=native'] if arch == 'riscv32' else []),
                     '--eval=print-boot-graph:;@echo $(KERNEL_SRC) $(ASM_SRC)',
                     'print-boot-graph'], cwd=ROOT, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)

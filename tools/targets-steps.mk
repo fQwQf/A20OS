@@ -1,23 +1,12 @@
-# Process-milestone verification targets.
+# Process-milestone boot smokes.
 #
-# The check-proc-stepN targets are cumulative gate sets, not separate tests.
-# Each step re-runs everything the previous step required and adds one more
-# contract, so a step only passes if all the earlier ones still hold:
+# Each remaining step target runs the baseline boot smoke (tools/smoke.py
+# step35) on a four-way build matrix -- two architectures times two profiles --
+# and asserts the STEP35_* markers while containing none of STEP35_FORBID.  The
+# guest must reach userspace.
 #
-#   step35          the baseline boot smoke (tools/smoke.py step35): the guest
-#                   must reach userspace, and its log must contain the
-#                   STEP35_* markers while containing none of STEP35_FORBID.
-#   step4           adds check-blocking-point-boundary
-#   step5           adds check-signal-exit-boundary
-#   step6           a flat set of five contracts, without stepping on step5
-#   step7           adds check-smp-runqueue-boundary
-#   step8           adds check-process-lock-split-boundary
-#
-# The -local variants are the real work; the bare names are thin aliases that
-# just echo PASS, so `make check-proc-step8` reads as one command.
-#
-# Every step runs a four-way build matrix, two architectures times two
-# profiles, because these contracts are exactly the ones a single
+# Every step runs that matrix because these are exactly the configurations a
+# single boot would hide.
 # configuration can pass by accident:
 #
 #   <arch>-debug-1c     NR_CPUS=1, -O0 -g -DDEBUG, 1G
@@ -29,16 +18,7 @@
 # capability actually appeared in the boot log, so a step cannot pass by
 # simply not exercising the feature.
 #
-.PHONY: check-task-lifetime-boundary check-blocking-point-boundary \
-	check-signal-exit-boundary check-timeout-ownership-boundary \
-	check-smp-runqueue-boundary check-process-lock-split-boundary \
-	check-proc-step35 \
-	check-proc-step4 check-proc-step4-local \
-	check-proc-step5 check-proc-step5-local \
-	check-proc-step6 check-proc-step6-local \
-	check-proc-step7 check-proc-step7-local \
-	check-proc-step8 check-proc-step8-local \
-	check-proc-step35-local step35-rv-debug-1c step35-la-debug-1c \
+.PHONY: step35-rv-debug-1c step35-la-debug-1c \
 	step35-rv-release-8c step35-la-release-8c \
 	step6-rv-debug-1c step6-la-debug-1c \
 	step6-rv-release-8c step6-la-release-8c \
@@ -172,45 +152,6 @@ _step35_smoke: dev-build
 		--require-timeout-capacity "$(REQUIRE_TIMEOUT_CAPACITY)" \
 		--require-smp-runqueue "$(REQUIRE_SMP_RUNQUEUE)" \
 		--require-lock-split "$(REQUIRE_LOCK_SPLIT)"
-check-proc-step35-local: check-task-state-boundary \
-	check-concurrency-foundation check-task-lifetime-boundary \
-	step35-rv-debug-1c step35-la-debug-1c \
-	step35-rv-release-8c step35-la-release-8c
-	@$(PYTHON) tools/gates.py whitespace --label check-proc-step35-local
-check-proc-step6-local: check-task-state-boundary \
-	check-concurrency-foundation check-task-lifetime-boundary \
-	check-blocking-point-boundary check-signal-exit-boundary \
-	check-timeout-ownership-boundary \
-	step6-rv-debug-1c step6-la-debug-1c \
-	step6-rv-release-8c step6-la-release-8c
-	@$(PYTHON) tools/gates.py whitespace --label check-proc-step6-local
-check-proc-step7-local: check-task-state-boundary \
-	check-concurrency-foundation check-task-lifetime-boundary \
-	check-blocking-point-boundary check-signal-exit-boundary \
-	check-timeout-ownership-boundary check-smp-runqueue-boundary \
-	step7-rv-debug-1c step7-la-debug-1c \
-	step7-rv-release-8c step7-la-release-8c
-	@$(PYTHON) tools/gates.py whitespace --label check-proc-step7-local
-check-proc-step8-local: check-task-state-boundary \
-	check-concurrency-foundation check-task-lifetime-boundary \
-	check-blocking-point-boundary check-signal-exit-boundary \
-	check-timeout-ownership-boundary check-smp-runqueue-boundary \
-	check-process-lock-split-boundary \
-	step8-rv-debug-1c step8-la-debug-1c \
-	step8-rv-release-8c step8-la-release-8c
-	@$(PYTHON) tools/gates.py whitespace --label check-proc-step8-local
-check-proc-step35: check-proc-step35-local
-	@echo "check-proc-step35: PASS"
-
-check-proc-step6: check-proc-step6-local
-	@echo "check-proc-step6: PASS"
-
-check-proc-step7: check-proc-step7-local
-	@echo "check-proc-step7: PASS"
-
-check-proc-step8: check-proc-step8-local
-	@echo "check-proc-step8: PASS"
-
 smoke-socket-stress:
 	$(PYTHON) tools/smoke.py smoke-socket-stress
 

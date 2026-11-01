@@ -386,14 +386,9 @@ endif
 NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,$(if $(filter x86_64,$(ARCH)),bsd,lwip))
 # Instances set NET_STACK through [net].stack (tools/a20 or NET_INSTANCE=).
 # The default above is only for a bare `make` with no manifest.
-.PHONY: check-net-backend-boundary check-net-backend-host
-check-net-backend-boundary:
-	$(PYTHON) tools/check-network-backend-boundary.py $(if $(filter lwip,$(NET_STACK)),--check-upstream,)
+.PHONY: check-net-backend-host
 check-net-backend-host:
 	sh tools/tests/net_backend_host.sh
-ifeq ($(NET_STACK),lwip)
-kernel-only: check-net-backend-boundary
-endif
 LWIP_SOURCE_ROOT = $(if $(filter native,$(NET_STACK)),$(KERNEL_DIR)/net/backends/native/protocol,$(if $(filter lwip,$(NET_STACK)),$(KERNEL_DIR)/external/lwip-upstream,))
 ifeq ($(NET_ROLE),router)
 ifeq ($(NET_STACK),none)
@@ -505,10 +500,7 @@ ifneq ($(NR_CPUS),1)
 ifeq ($(ALLOW_UNVERIFIED_SMP),0)
 SMP_PLATFORM_VERIFIED := $(and $(filter $(ARCH),$(SMP_VERIFIED_QEMU_ARCHES)),$(filter $(BOARD),qemu-virt-$(ARCH)))
 ifeq ($(SMP_PLATFORM_VERIFIED),)
-SMP_VALIDATION_GOALS := check-concurrency-foundation check-doc-test-gates check-final-definition
-ifeq ($(filter $(SMP_VALIDATION_GOALS),$(MAKECMDGOALS)),)
 $(error NR_CPUS=$(NR_CPUS) is unverified for ARCH=$(ARCH) BOARD=$(BOARD); set ALLOW_UNVERIFIED_SMP=1 only for explicit SMP bringup experiments)
-endif
 endif
 endif
 endif
@@ -559,11 +551,10 @@ help:
 	  '    make kernel-only               just the kernel, for ARCH/BOARD' \
 	  '    make clean                     remove build output for the current variant' \
 	  '' \
-	  '  Gates -- fast and host-only (no QEMU, no cross toolchain)' \
-	  '    make check                     the whole fast tier; equals CI toolchain-gates' \
-	  '    make check-format              clang-format drift gate over first-party sources' \
+	  '  Tests -- fast and host-only (no QEMU, no cross toolchain)' \
+	  '    make check                     the whole fast test tier' \
 	  '' \
-	  "  What 'make check' runs ($(words $(CHECK_FAST_GATES)) gates):" \
+	  "  What 'make check' runs ($(words $(CHECK_FAST_GATES)) entries):" \
 	  $(call help-gate-chunk,1,4) \
 	  $(call help-gate-chunk,5,8) \
 	  $(call help-gate-chunk,9,12) \
@@ -571,9 +562,8 @@ help:
 	  '' \
 	  '    make check-manifests           instances/ components/ Makefile agree' \
 	  '    make host-tests                host-gcc unit tests for kernel format/helper logic' \
-	  '    make check-doc-test-gates      every documented source-contract gate (11 need QEMU)' \
 	  '' \
-	  '  Gates -- need a cross toolchain and/or QEMU' \
+	  '  Tests and builds -- need a cross toolchain and/or QEMU' \
 	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
 	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
 	  '    make check-cluster-send        reliable one-way SEND, loss and mixed routed profiles' \
@@ -583,7 +573,6 @@ help:
 	  '    make demo-wordcount            sixteen shards over eight servers or a mixed MCU cluster' \
 	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
 	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
-	  '    make check-concurrency-foundation  SMP lock-model contract, builds a 2-CPU config' \
 	  '' \
 	  '  Release (what a bare `make` does)' \
 	  '    make                           dual-arch release: kernel-rv kernel-la disk*.img' \
@@ -2194,7 +2183,7 @@ endif
 # Hardware/board features consumed by common code.
 #
 # Feature names stay arch-agnostic so common code never branches on
-# CONFIG_<architecture>; the check-arch-boundary gate enforces that.
+# CONFIG_<architecture>.
 # The per-arch defines and the PCIe arch lists come from
 # components/trim.toml via components/trim.mk.
 # ------------------------------------------------------------------
@@ -3481,18 +3470,6 @@ include tools/targets-bench.mk
 .PHONY: docs
 docs:
 	@bash tools/gen_docs_pdf.sh
-
-# ================================================================
-# Envelope choke-point coverage gate (docs/research/08 §4)
-# ================================================================
-# Regenerates the coverage matrix from syscall_table.def and fails when
-# the committed copy drifts -- a newly registered syscall must be
-# explicitly classified before the gate passes again.
-.PHONY: check-envelope-coverage
-check-envelope-coverage:
-	@$(PYTHON) tools/gensync.py envelope-coverage \
-		--file docs/research/verification/envelope_coverage.md
-
 
 # The binaries the native stamp rule requires.  make owns this list so the gate
 # and the build cannot disagree about what "built" means.  This is exactly

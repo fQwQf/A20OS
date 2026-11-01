@@ -30,8 +30,7 @@ XLATOR_GUEST ?= x86_64
 # mistake, but the variable has to mean the right thing too.
 #
 # This map and kernel/proc/xlator_guests.def are the two halves of "which
-# guest architectures exist", and check-xlator-guests fails if they disagree
-# in either direction.  Adding a guest means one line here and one there --
+# guest architectures exist", and they must agree in either direction.  Adding a guest means one line here and one there --
 # NOT one here only.  That is the drift this map used to have: a
 # XLATOR_GUEST_CC_riscv64 line with no matching registry entry, so
 # `--guest riscv64` was rejected by argparse while the make variable

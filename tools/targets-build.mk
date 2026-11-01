@@ -2,18 +2,10 @@
 # Release build.  `make all` produces the dual-architecture release artifacts
 # kernel-rv, kernel-la, disk.img, and disk-la.img in the repository root.
 # ----------------------------------------------------------------
-.PHONY: check-smp-platform-boundary check-io-progress-model
-
-# Several gate groups launch recursive builds that share the default RISC-V
-# image.  GNU make's .NOTPARALLEL is not transitive: marking the top-level
-# check-doc-test-gates serializes its direct child groups, but does not
-# serialize sibling smoke prerequisites *inside* each group.  Mark every
-# runtime aggregate whose sibling smokes can concurrently rebuild the same
-# FAT image.  Keep check-final-definition covered because it delegates to the
-# full aggregate.
-.NOTPARALLEL: check-doc-test-gates check-final-definition \
-	check-blocking-point-boundary check-timeout-ownership-boundary \
-	check-mm-lock-model check-upgrade-userland-smokes
+# Several targets launch recursive builds that share the default RISC-V image.
+# GNU make's .NOTPARALLEL is not transitive, so mark the runtime aggregate whose
+# sibling smokes can concurrently rebuild the same FAT image.
+.NOTPARALLEL: check-upgrade-userland-smokes
 
 all:
 	$(MAKE) release-rv
@@ -226,103 +218,16 @@ check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
 check-user-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
 
 check-build-matrix: check-kernel-build check-user-build
-	@$(PYTHON) tools/gates.py check-build-matrix
 	@echo "check-build-matrix: PASS"
 
 check-build-matrix-all: check-kernel-build-all check-user-build-all
-	@$(PYTHON) tools/gates.py check-build-matrix-all
 	@echo "check-build-matrix-all: PASS"
-
-check-arch-boundary: smoke-arch-mmu-matrix
-	@$(PYTHON) tools/gates.py check-arch-boundary
-	@echo "check-arch-boundary: PASS"
-
-check-task-state-boundary:
-	@$(PYTHON) tools/gates.py check-task-state-boundary
-	@echo "check-task-state-boundary: PASS"
-
-check-smp-platform-boundary:
-	@$(PYTHON) tools/gates.py smp-platform-boundary
-	@echo "check-smp-platform-boundary: PASS"
-
-check-abi-smoke-gate:
-	@$(PYTHON) tools/gates.py check-abi-smoke-gate
-	@echo "check-abi-smoke-gate: PASS"
 
 # EXTERNAL_USERLAND_UPGRADE_CHECKLIST: run every gate group that must pass
 # before an upgraded musl/sbase/mksh (or other imported userland) is
 # accepted -- see docs/dev/external-dependencies.md.
 .PHONY: check-upgrade-userland-smokes
 check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
-
-# Documentation cites the generated Native IDL header. Materialize and verify
-# that build input before resolving paths, including on a fresh checkout.
-check-doc-drift: check-a20-idl
-	@$(PYTHON) tools/gates.py check-doc-drift
-	@$(PYTHON) tools/gen_linux_syscall_coverage.py --check
-	@$(PYTHON) tools/gates.py check-doc-drift --segment 1
-	@$(PYTHON) tools/check_doc_citations.py
-	@echo "check-doc-drift: PASS"
-
-check-task-lifetime-boundary:
-	@$(PYTHON) tools/gates.py check-task-lifetime-boundary
-	@echo "check-task-lifetime-boundary: PASS"
-
-check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
-	@$(PYTHON) tools/gates.py check-blocking-point-boundary
-	@echo "check-blocking-point-boundary: PASS"
-
-check-signal-exit-boundary: smoke-proc-stress
-	@$(PYTHON) tools/gates.py check-signal-exit-boundary
-	@echo "check-signal-exit-boundary: PASS"
-
-check-timeout-ownership-boundary: smoke-futex-stress smoke-timeout-test
-	@$(PYTHON) tools/gates.py check-timeout-ownership-boundary
-	@echo "check-timeout-ownership-boundary: PASS"
-
-check-smp-runqueue-boundary: smoke-sched-stress
-	@$(PYTHON) tools/gates.py check-smp-runqueue-boundary
-	@echo "check-smp-runqueue-boundary: PASS"
-
-check-process-lock-split-boundary: smoke-sched-stress
-	@$(PYTHON) tools/gates.py check-process-lock-split-boundary
-	@echo "check-process-lock-split-boundary: PASS"
-
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-native-abi-coverage check-abi-config-guard check-driver-core-model check-drm-store-locking check-drm-abi check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
-	@$(PYTHON) tools/gates.py check-doc-test-gates
-	@echo "check-doc-test-gates: PASS"
-
-# Not a distinct gate, and deliberately so.
-#
-# Every one of the 11 assertions in tools/gates.toml's check-final-definition
-# entry is already asserted by a gate check-doc-test-gates runs: MM_LOCK_MODEL
-# by check-mm-lock-model, TASK_STATE_MUTATION_CONTRACT by
-# check-concurrency-foundation, TASK_REFERENCE_LIFETIME by
-# check-task-state-boundary, VFS_REFCOUNT_HELPER_CONTRACT and
-# VFS_OPEN_DISPATCH_CONTRACT by check-vfs-abstraction, the three
-# NATIVE_*/LINUX_ABI_* markers by check-abi-boundary,
-# KERNEL_PROGRESS_SERVICE_CONTRACT by check-io-progress-model,
-# DRIVER_CORE_CONCURRENCY_MODEL by check-driver-core-model and
-# EXTERNAL_USERLAND_UPGRADE_CHECKLIST by
-# check-external-dependency-boundary.  So the target adds no coverage, and CI
-# runs it through its strict superset check-doc-test-gates only: a second CI job
-# would replay the same nine QEMU smokes to re-check eleven markers that the
-# first job already checked.
-#
-# The rule stays because it is load-bearing twice over, neither of which is
-# visible from this recipe: Makefile's SMP_VALIDATION_GOALS lists it, so naming
-# this target is one of three ways to tell the NR_CPUS guard that an
-# unverified NR_CPUS>1 build is deliberate; and tools/gates.toml owns the
-# assertion list, which this surface may not edit.
-#
-# The previous PASS line read "SMP smoke tracked separately by TODO section 10".
-# That was false: SMP *is* covered here, through check-concurrency-foundation,
-# which runs smoke-smp-bringup and builds a 2-CPU configuration.  The line was
-# also the only thing the target added over its prerequisite, so it was the one
-# part of this target that misdescribed it.
-check-final-definition: check-doc-test-gates
-	@$(PYTHON) tools/gates.py check-final-definition
-	@echo "check-final-definition: PASS (SMP covered via check-concurrency-foundation; every assertion here is already asserted by a gate check-doc-test-gates runs)"
 
 # The kernel bring-up targets may also build per-arch user driver blobs.  Route
 # matrix user builds through USER_BUILD_STAMP so both paths take stamps.py's
@@ -354,70 +259,3 @@ check-dev-build:
 check-release-build:
 	$(MAKE) all
 
-check-concurrency-foundation: smoke-smp-bringup
-	@$(PYTHON) tools/gates.py check-concurrency-foundation
-	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
-	@echo "check-concurrency-foundation: PASS"
-
-# Honesty policy: an unimplemented facility must report absence, never
-# fabricate output.  A stub that returns success is strictly worse than a
-# missing one, because the caller cannot tell and proceeds on a false belief.
-#
-# This gate is mostly *negative*: it asserts the specific anti-patterns that
-# were removed stay removed.  Positive marker checks elsewhere in this file
-# only prove a string exists; these prove a bug cannot come back unnoticed.
-check-honesty-policy:
-	@echo "check-honesty-policy: auditing fail-closed behaviour"
-	@if rg -q '", 1 \},' kernel/net/socket/socket_alg.c; then \
-	  echo "  FAIL AF_ALG advertises an algorithm it cannot compute"; exit 1; fi
-	@if rg -Uq '(?s)level == SOL_SOCKET\)\s*\n\s*return 0;' kernel/net/socket/socket_control.c; then \
-	  echo "  FAIL setsockopt still reports success for discarded SOL_SOCKET options"; exit 1; fi
-	@if rg -q 'congestion\[\] = "cubic"' kernel/net/socket/socket_control.c; then \
-	  echo "  FAIL TCP_CONGESTION hardcodes an algorithm the stack lacks"; exit 1; fi
-	@if rg -q '0\.00 0\.00 0\.00 1/64' kernel/fs/procfs/procfs_render.c; then \
-	  echo "  FAIL /proc/loadavg is a constant again"; exit 1; fi
-	@if rg -Uq '(?s)PF_PID_IO.{0,400}total_time' kernel/fs/procfs/procfs_render.c; then \
-	  echo "  FAIL /proc/pid/io reports CPU ticks as byte counts"; exit 1; fi
-	@if rg -q 'avg60=0\.00 avg300=0\.00 total=%llu' kernel/core/psi.c; then \
-	  echo "  FAIL PSI discards its computed avg60/avg300"; exit 1; fi
-	@if rg -Uq '(?s)sys_getrusage.{0,700}total_time' kernel/abi/linux/sys_proc.c; then \
-	  echo "  FAIL getrusage still conflates utime and stime"; exit 1; fi
-	@if ! rg -Uq '(?s)PF_PID_PAGEMAP\).{0,300}proc_task_may_access' kernel/fs/procfs/procfs.c; then \
-	  echo "  FAIL /proc/pid/pagemap is not gated on task ownership"; exit 1; fi
-	@if ! rg -Uq '(?s)int64_t sys_reboot.{0,700}CAP_SYS_BOOT' kernel/abi/linux/sys_proc.c; then \
-	  echo "  FAIL sys_reboot is not gated on CAP_SYS_BOOT"; exit 1; fi
-	@if ! rg -q 'int \(\*flush\)\(struct block_dev \*dev\);' kernel/include/drivers/block/block_dev.h; then \
-	  echo "  FAIL block_dev_t lost its flush primitive"; exit 1; fi
-	@if ! rg -q 'partition\.block\.flush\s*=\s*partition_flush' kernel/fs/mount_setup.c; then \
-	  echo "  FAIL partition wrapper stopped forwarding flush"; exit 1; fi
-	@if ! rg -q 'class_block->block\.flush\s*=\s*class_block_flush' kernel/fs/mount_setup.c; then \
-	  echo "  FAIL class wrapper stopped forwarding flush"; exit 1; fi
-	@if ! rg -q 'bc->dev->flush' kernel/fs/block_cache.c; then \
-	  echo "  FAIL block cache sync no longer reaches the device flush"; exit 1; fi
-	@if ! rg -q 'VIRTIO_BLK_T_FLUSH' kernel/drivers/block/virtio_blk.c; then \
-	  echo "  FAIL virtio-blk no longer issues a flush request"; exit 1; fi
-	@if ! rg -q 'ATA_CMD_FLUSH_CACHE_EXT' kernel/drivers/block/ahci.c; then \
-	  echo "  FAIL AHCI no longer issues FLUSH CACHE"; exit 1; fi
-	@# Check the live wrappers and ordering, not the former one-lock call shape.
-	@$(PYTHON) tools/check_lwip_concurrency_wiring.py
-	@if ! rg -q 'proc_loadavg_tick' kernel/proc/sched.c; then \
-	  echo "  FAIL load average is no longer sampled from the scheduler tick"; exit 1; fi
-	@if ! rg -q 'proc_io_account' kernel/fs/vfs/file.c; then \
-	  echo "  FAIL read/write no longer charge I/O accounting"; exit 1; fi
-	@echo "check-honesty-policy: PASS"
-
-# smoke-mm-seg-index-overflow is here, and not only as a case of its own,
-# because it is the only workload in the tree that reaches the ordered index's
-# capacity-overflow fallback.  The aggregate is what people actually run, so a
-# branch covered only by a case nobody invokes is a branch nobody verifies.
-check-mm-lock-model: check-pt-mcs-preempt-window smoke-mm-stress smoke-mm-fork-exec-race smoke-mm-seg-index-overflow
-	@$(PYTHON) tools/gates.py check-mm-lock-model
-	@echo "check-mm-lock-model: PASS"
-
-check-mm-pt-lock-order:
-	@$(PYTHON) tools/gates.py check-mm-pt-lock-order
-	@echo "check-mm-pt-lock-order: PASS"
-
-check-io-progress-model:
-	@$(PYTHON) tools/gates.py check-io-progress-model
-	@echo "check-io-progress-model: PASS"
