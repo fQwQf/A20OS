@@ -168,11 +168,11 @@ Invalidate the previous writable translation before exposing the
 read-only COW mapping to another hart.
 
 Validation:
-- make check-mm-lock-model
-- make smoke-mm-pt-race
+- make smoke-mm-stress
+- make host-tests
 ```
 
-示例中的验证命令仅说明写法，应替换为该提交实际执行的检查。历史提交信息规范化与验证工具见 [历史迁移工具](../tools/history_rewrite/README.md)。
+示例中的验证命令仅说明写法，应替换为该提交实际执行的检查。
 
 ## 6. Pull Request
 

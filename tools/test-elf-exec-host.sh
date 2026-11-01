@@ -2,7 +2,7 @@
 # Host gate for the Rust ELF/exec decision core (kernel/mm/elf_core.rs).
 #
 # Run through the build-2 slot:
-#   <repo>/.git/parallel-rewrite/run-build.sh build-2 \
+#   .git/parallel-rewrite/run-build.sh build-2 \
 #       sh tools/test-elf-exec-host.sh
 #
 # Covers, without any kernel build:

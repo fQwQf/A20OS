@@ -30,10 +30,9 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-LOCK_DIR = Path("<repo>/.git/parallel-rewrite")
+LOCK_DIR = REPO / ".git/parallel-rewrite"
 WRAPPER = LOCK_DIR / "run-build.sh"
-DEFAULT_USER_BUILD_DIR = Path(
-    "<build-dir>/zcode-expanded-20261017/process-build/user-riscv64")
+DEFAULT_USER_BUILD_DIR = REPO / "build/process-build/user-riscv64"
 
 CASES = {
     "pid": {
@@ -351,7 +350,7 @@ def main() -> int:
     ap.add_argument("--lease-timeout", type=int, default=3600,
                     help="seconds to wait in the flock queue for one guest")
     ap.add_argument("--build-root", type=Path,
-                    default=Path("<build-dir>/zcode-expanded-20261017/process-runs/process"))
+                    default=REPO / "build/process-runs/process"))
     ap.add_argument("--jobs", default="2")
     ap.add_argument("--timeout", type=float, default=220.0)
     ap.add_argument("--boot-delay", type=float, default=14.0)

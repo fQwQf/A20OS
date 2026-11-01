@@ -18,7 +18,8 @@ import sys
 import time
 
 
-DEFAULT_LOCK_DIR = "<repo>/.git/parallel-rewrite"
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_LOCK_DIR = str(ROOT / ".git/parallel-rewrite")
 SHUTDOWN_MARKER = "System is going down for power-off NOW"
 
 

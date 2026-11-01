@@ -29,7 +29,7 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-base = Path(os.environ.get("SCM_SEND_EVIDENCE", "<build-dir>/secondary-linux-abi-batch4/scm-send-host")) / f"scm-send-host-{stamp}-{os.getpid()}"
+base = Path(os.environ.get("SCM_SEND_EVIDENCE", str(ROOT / "build/evidence/scm-send-host"))) / f"scm-send-host-{stamp}-{os.getpid()}"
 base.mkdir(parents=True, exist_ok=False)
 text = source.read_text()
 function = extract_function(text, "static int linux_scm_acquire_send_fd(")

@@ -415,7 +415,7 @@ def guest_slot_locks() -> tuple[str, object]:
     import fcntl
     lock_dir = Path(os.environ.get(
         "A20OS_SIGNAL_RUNNER_LOCK_DIR",
-        "<repo>/.git/parallel-rewrite"))
+        str(REPO / ".git/parallel-rewrite")))
     try:
         activity = (lock_dir / "activity.lock").open("r")
         qemu = (lock_dir / "qemu-1.lock").open("r")

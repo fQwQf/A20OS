@@ -29,7 +29,7 @@ cd "$repo"
 printf '%q ' "$0" "$out" >"$out/runner.argv"
 printf '\n' >>"$out/runner.argv"
 date -u +'%Y-%m-%dT%H:%M:%SZ' >"$out/start.utc"
-df -h <build-dir> >"$out/df.before.txt"
+df -h "$repo" >"$out/df.before.txt"
 rustc --version --verbose >"$out/rustc.txt" 2>&1
 gcc --version >"$out/gcc.txt" 2>&1
 sha256sum tools/tests/socket_mmsg_host/run.sh \
@@ -88,7 +88,7 @@ sha256sum tools/tests/socket_mmsg_host/run.sh \
     user/cmds/stress/socket_stress.c >"$out/inputs.after.sha256"
 if [[ -e "$out/mmsg_tests" ]]; then sha256sum "$out/mmsg_tests"; fi >"$out/binaries.sha256"
 if [[ -e "$out/linux_oracle" ]]; then sha256sum "$out/linux_oracle"; fi >>"$out/binaries.sha256"
-df -h <build-dir> >"$out/df.after.txt"
+df -h "$repo" >"$out/df.after.txt"
 date -u +'%Y-%m-%dT%H:%M:%SZ' >"$out/end.utc"
 
 status=0

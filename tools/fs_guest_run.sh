@@ -22,8 +22,8 @@
 # line reports the ext4 unlink-orphan deferral count and any FAIL marker.
 set -eu
 
-LOCKDIR=<repo>/.git/parallel-rewrite
 repo=$(git rev-parse --show-toplevel)
+LOCKDIR=$repo/.git/parallel-rewrite
 name=${1:?usage: fs_guest_run.sh NAME KERNEL LOGFILE CMDFILE}
 kernel=${2:?kernel elf}
 log=${3:?log file}

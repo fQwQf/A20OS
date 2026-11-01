@@ -28,8 +28,8 @@ def run_build_script() -> Path:
 def make_dry_run(*args):
     return subprocess.run([str(run_build_script()),
                            "build-1", "make", "-n",
-                           "BUILD_DIR=<build-dir>/isolated/rust-user-make-tests/build",
-                           "USER_BUILD_DIR=<build-dir>/isolated/rust-user-make-tests/user",
+                           f"BUILD_DIR={ROOT / 'build/tmp/rust-user-make-tests/build'}",
+                           f"USER_BUILD_DIR={ROOT / 'build/tmp/rust-user-make-tests/user'}",
                            *args], cwd=ROOT, text=True,
                          capture_output=True)
 
