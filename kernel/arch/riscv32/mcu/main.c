@@ -12,6 +12,8 @@
 #include "mm/slab.h"
 #include "proc/proc.h"
 
+extern void mcu_user_demo_start(void);
+
 static volatile unsigned worker_count;
 static completion_t worker_ready;
 static void worker(void) {
@@ -136,6 +138,9 @@ void kernel_main(void) {
     completion_init(&worker_ready);
     if (proc_alloc(worker) < 0 || proc_alloc(console_task) < 0)
         panic("MCU boot: cannot allocate tasks");
+#if defined(CONFIG_MCU_USER_DEMO) && defined(CONFIG_MCU_NATIVE_PROGRAM)
+    mcu_user_demo_start();
+#endif
     printf("[BOOT] scheduler initialized heap=%u bytes\n", (unsigned)mcu_heap_available());
     advance(BOOT_PHASE_DEVICES, BOOT_PHASE_READY);
     arch_local_irq_enable();
