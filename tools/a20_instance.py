@@ -29,7 +29,7 @@ QEMU_RUNNABLE_ARCHES: Final = (
     "riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "riscv32",
 )
 PHYSICAL_ONLY_BOARDS: Final = frozenset({
-    "pine-a64", "licheerv-nano", "ls2k0300", "m0sense-bl702",
+    "hi3861", "pine-a64", "licheerv-nano", "ls2k0300", "m0sense-bl702",
     "lichee-pi-zero", "quartz64-zero", "ox64",
 })
 # Capability arch matrices (nommu, swap, xlator, ramfs-user, smp-verified-qemu)
@@ -47,7 +47,8 @@ PREPARE_TARGETS: Final = {"pine-a64": "pine-a64-prepare",
                           "quartz64-zero": "quartz64-zero-prepare",
                           "ox64": "ox64-prepare",
                           "m0sense-bl702": "m0sense-recovery-assets",
-                          "esp32-c3": "esp32-c3-prepare"}
+                          "esp32-c3": "esp32-c3-prepare",
+                          "hi3861": "hi3861-prepare"}
 RELEASE_ARCH_ARTIFACTS: Final = {
     "riscv64": ("kernel-rv", "disk.img"),
     "loongarch64": ("kernel-la", "disk-la.img"),

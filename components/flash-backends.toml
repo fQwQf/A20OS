@@ -33,3 +33,9 @@ name = "esptool"
 description = "ESP32-C3 ROM serial programmer with detected flash geometry"
 boards = ["esp32-c3"]
 make_target = "flash-esp32-c3"
+
+[[backend]]
+name = "hiburn"
+description = "Hi3861 ROM serial loader (YMODEM) writing the kernel A partition"
+boards = ["hi3861"]
+make_target = "flash-hi3861"

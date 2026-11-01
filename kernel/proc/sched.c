@@ -1135,6 +1135,22 @@ void kernel_preempt_at_irq_return(void)
         return;
     if (cur->state != PROC_RUNNING)
         return;
+    /*
+     * A task freshly published by context_switch_locked() has not run
+     * proc_task_first_entry() yet.  If the tick lands in the two-instruction
+     * window inside __switch() where mstatus.MIE is already set but `ret` has
+     * not executed, preempting here would strand the task: its saved context
+     * is the switch frame, not a task frame, and the CPU keeps re-entering the
+     * interrupt at the same PC.  Let it start first.
+     */
+    if (cur->first_kernel_entry)
+        return;
+    /*
+     * Nothing else is runnable, so the yield can only keep `cur`.  Skipping
+     * it keeps the IRQ handler shorter than the tick period on slow MCUs.
+     */
+    if (proc_runq_load_sum() == 0)
+        return;
     a20_perf_count(A20_PERF_KERNEL_PREEMPTS);
     /* sched()'s slow helpers (bottom halves, zombie reaping, the timer scan)
      * reach code that expects interrupts on, so hand them a CPU with

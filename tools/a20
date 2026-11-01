@@ -345,7 +345,7 @@ def _report(inst, result, log) -> int:
         return EXIT_OK
     print(f"{inst.name}: console FAIL at {result.stage}; missing {list(result.missing)}; "
           f"transcript in {log}", file=sys.stderr)
-    print("\n".join(result.transcript.tail(60)), file=sys.stderr)
+    print(result.transcript.tail(60), file=sys.stderr)
     return EXIT_FAIL
 
 
@@ -462,8 +462,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         print(f"{inst.name}: using existing deployment artifacts (--no-build)")
     elif not args.no_flash and section_is_set(inst.flash):
         flash_args = list(args.make_args)
-        if inst.board == "esp32-c3" and getattr(args, "serial", None):
-            flash_args.append(f"ESPTOOL_PORT={args.serial}")
+        if getattr(args, "serial", None):
+            variable = {"esp32-c3": "ESPTOOL_PORT", "hi3861": "HI3861_PORT"}.get(inst.board)
+            if variable:
+                flash_args.append(f"{variable}={args.serial}")
         run_flash(inst, _flash_backends(), flash_args, args.dry_run)
     elif section_is_set(inst.flash):
         pass

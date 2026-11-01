@@ -107,7 +107,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append(f"name: '{inst.name}' must match {_NAME_RE.pattern}")
     if inst.board and not (repo_root / "kernel" / "arch" / inst.arch / "boards" / inst.board).is_dir():
         e.append(f"board: no kernel/arch/{inst.arch}/boards/{inst.board} directory")
-    physical_arch = {"pine-a64": "aarch64", "ls2k0300": "loongarch64",
+    physical_arch = {"hi3861": "riscv32",
+                     "pine-a64": "aarch64", "ls2k0300": "loongarch64",
                      "lichee-pi-zero": "arm32", "quartz64-zero": "aarch64",
                      "ox64": "riscv64",
                      "m0sense-bl702": "riscv32"}.get(inst.board)
@@ -115,6 +116,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append(f"board {inst.board}: requires arch = {physical_arch}")
     if inst.board == "m0sense-bl702" and (k.bringup is not True or k.nommu is not True):
         e.append("board m0sense-bl702: requires kernel.bringup=true and kernel.nommu=true (M-mode probe)")
+    if inst.board == "hi3861" and (k.bringup is not True or k.nommu is not True):
+        e.append("board hi3861: requires kernel.bringup=true and kernel.nommu=true (M-mode MCU kernel)")
     if inst.abi is not None and inst.abi not in ABI_CHOICES:
         e.append(f"abi: unsupported '{inst.abi}'; supported: {', '.join(ABI_CHOICES)}")
     if k.profile is not None and k.profile not in PROFILES:
