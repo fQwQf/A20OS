@@ -48,7 +48,11 @@ A20OS 在运行空间上更像宏内核：
 | Linux ABI | 366 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
 | Native ABI | 142 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
-两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](status/current/hybrid-kernel-status.md)。
+两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。
+
+当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](status/current/hybrid-kernel-status.md)。
+
+CMSIS-RTOS2 **不是**第三种 syscall ABI：它是用户态人格库，`user/cmsis_rtos2/` 通过 POSIX 或 Native 后端复用上述机制；对象族与 syscall 子集由 `cmsis_rtos2.toml` 声明，`tools/cmsis_trim.py` 生成并校验，见 [CMSIS-RTOS2 兼容层](native-abi/11-cmsis-rtos2.md)。
 
 ### 分层原则（内部实现 ↔ ABI 薄包装）
 
