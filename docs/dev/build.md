@@ -229,6 +229,8 @@ rustup component add --toolchain 1.96.0 rust-src
 | `make stm32f103-xuanwu` | 生成玄武板 512 KiB Flash / 64 KiB SRAM 固件 | 普中玄武板 |
 | `make run-stm32f103-qemu` | 构建 128 KiB Flash / 8 KiB SRAM 固件并启动 `stm32vldiscovery` | 需要 `qemu-system-arm` |
 | `make flash-stm32f103-xuanwu` | 构建玄武板固件并通过 OpenOCD 烧录 | 需要 OpenOCD、CMSIS-DAP 和实板 |
+| `tools/a20 test qemu-riscv32-mcu` | 构建并在 QEMU 中运行 RV32 M 态内核 + CMSIS 实验 4.1–4.4 | 需要 `qemu-system-riscv` 和 RV32IMC 工具链 |
+| `tools/a20 flash hi3861` | 生成并写入 Hi3861 kernel A；`prepare` 取得固定版本 loaderboot | 需要 RV32IMC 工具链、CH340 串口和板卡复位操作 |
 | `make -C user ARCH=riscv64` | 单独编译 RISC-V 用户态 | 只改用户程序 |
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为六架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译六个 hosted 架构的内核 bring-up 和用户态 | 完整活跃架构构建检查 |

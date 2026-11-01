@@ -1,0 +1,34 @@
+# Hi3861V100 (HiSpark Pegasus) M-mode firmware.
+# The kernel executes from the factory FlashBoot kernel A partition and keeps
+# its serial shell in the existing A20OS MCU console; no MMU/userspace.
+name = "hi3861"
+description = "Hi3861V100 RV32IMC M-mode firmware; UART0 console and existing MCU shell"
+arch = "riscv32"
+board = "hi3861"
+abi = "native"
+
+[kernel]
+profile = "mcu"
+bringup = true
+nommu = true
+swap = false
+
+[machine]
+smp = 1
+
+[package]
+kind = "kernel-bundle"
+
+[flash]
+tool = "hiburn"
+serial = "/dev/ttyUSB0"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 1
+boot_timeout = "20s"
+console_check = ["A20OS RV32 M-mode MCU board=hi3861", "A20OS MCU READY"]
+commands = ["info", "heap", "ticks", "tasks", "test"]
+expect = ["board=hi3861", "heap free=", "[MCU TEST] PASS"]
+log = ".kernel-build/hi3861/console.log"

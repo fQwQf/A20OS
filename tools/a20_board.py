@@ -16,7 +16,8 @@ from a20_error import A20Error
 from a20_make import build_instance, exec_make
 from a20_registry import FlashBackend, RegistryError, load_flash_backends
 
-FLASH_TARGET_REACHABLE: Final = frozenset({"flash-xuanwu-openocd", "flash-esp32-c3"})
+FLASH_TARGET_REACHABLE: Final = frozenset({"flash-xuanwu-openocd", "flash-esp32-c3",
+                                           "flash-hi3861"})
 
 
 def firmware_make_args(inst: Instance) -> list[str]:
@@ -123,7 +124,8 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # here or in the manifest.
             target = {"ls2k0300": "ls2k0300-bundle",
                       "m0sense-bl702": "m0sense-probe",
-                      "esp32-c3": "esp32-c3-package"}.get(inst.board, "kernel-bundle")
+                      "esp32-c3": "esp32-c3-package",
+                      "hi3861": "hi3861-package"}.get(inst.board, "kernel-bundle")
             extra = list(make_args)
             if target in {"kernel-bundle", "ls2k0300-bundle"}:
                 extra.append(f"HANDOFF_INSTANCE={inst.source}")
