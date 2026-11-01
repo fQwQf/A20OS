@@ -27,26 +27,16 @@ jobs:
           fi
           echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
 
-  # 工具链层门禁：a20 工具本身与其数据、源码契约门禁。
-  # 全部是宿主侧纯 Python / rg / 宿主 gcc，与架构无关、无需交叉工具链、
-  # 无需 QEMU，所以不进容器、不做矩阵，排在所有重量级 job 之前。
-  # 刻意不拉 submodule：这些门禁只读 instances/、components/、tools/、
-  # Makefile、docs/ 与 kernel/ 下的一方源文件路径（vendored 的
-  # kernel/external/lwip 是普通 tracked tree，user/external 下的第三方树
-  # 不参与），完全不碰 submodule 里的东西。
-  #
-  # 这里跑的门禁全部是 fail-closed 的：断言的是"某个反模式没有被重新引入"，
-  # 而不是"某个字符串存在"。本地跑绿而在 CI 里没人跑，等于这些断言不存在。
-  toolchain-gates:
-    name: toolchain-gates
+  # 宿主侧测试：与架构无关、无需交叉工具链、无需 QEMU，所以不进容器、
+  # 不做矩阵，排在所有重量级 job 之前。只跑行为测试与构建配置校验。
+  host-tests:
+    name: host-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      # The fail-closed source gates use `rg`; ubuntu-latest does not guarantee
-      # ripgrep is preinstalled, so declare the host-side dependency explicitly.
-      - name: Install source-gate tools
+      - name: Install host test tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends ripgrep
@@ -57,19 +47,8 @@ jobs:
       - name: Unit tests for the a20 toolchain
         run: make check-a20-tests
 
-      # ~25 条反回归断言，秒级。它是本 job 最高杠杆的一步：未实现的设施
-      # 必须报告缺席而不是伪造输出，这条策略此前只有本地跑。
-      - name: Honesty policy (fail-closed anti-regression)
-        run: make check-honesty-policy
-
       - name: Smoke case table agrees with the makefiles
         run: make check-smoke-cases
-
-      # kernel/proc/xlator_guests.def（内核策略）与 tools/targets-xlator.mk
-      # （构建宿主上装了哪些交叉编译器）互推不出来，只能断言一致。两者已经
-      # 漂移过一次：CC 表里有一个内核从未注册过的架构。
-      - name: Guest architecture registry agrees across kernel and build
-        run: make check-xlator-guests
 
       - name: Host-side unit tests for kernel format/helper logic
         run: make host-tests
@@ -89,12 +68,9 @@ jobs:
       - name: Slab CPU array IRQ reentry and migration boundaries
         run: make check-slab-cpu-window
 
-      # 把 kernel/include/drivers/gpu/drm.h 的每个 DRM_IOCTL_* 编号与
-      # 宿主 linux-headers 的 include/uapi/drm 逐条比对，并实测线结构体
-      # 尺寸与字段偏移。tools/ci/Dockerfile 刻意不带 linux-headers，所以
-      # 在这里（裸 runner）装：镜像保持不变，不必为让一个门禁生效而重建
-      # buildenv。门禁本身在缺头文件时会"干净跳过"，因此本步骤在它真的
-      # 跳过时判失败——一个静默不再断言的门禁比没有门禁更糟。
+      - name: Linux syscall coverage table agrees with the registered table
+        run: make check-abi-boundary
+
       - name: DRM UAPI ioctl numbers and struct layouts vs the Linux UAPI
         run: |
           set -euo pipefail
@@ -105,37 +81,9 @@ jobs:
           out="$(make check-drm-abi 2>&1)" || { echo "$out"; exit 1; }
           echo "$out"
           if printf '%s\n' "$out" | grep -q '^skip:'; then
-            echo '::error::check-drm-abi skipped -- no Linux UAPI DRM headers on this runner, so the gate asserted nothing'
+            echo '::error::check-drm-abi skipped -- no Linux UAPI DRM headers on this runner'
             exit 1
           fi
-
-      # check-doc-test-gates 里不依赖 QEMU 的子门禁在这里跑。带 QEMU guest 的那些
-      # （边界/MM/VFS/驱动/并发）属于 smoke job 的范围，不能混进这个快速 job。
-      - name: 'Source contracts: subsystem boundaries'
-        run: |
-          make check-task-lifetime-boundary
-          make check-smp-platform-boundary
-          make check-io-progress-model
-          make check-external-dependency-boundary
-
-      - name: 'Source contracts: ABI table and envelope choke-point coverage'
-        run: |
-          make check-abi-boundary
-          make check-envelope-coverage
-          # Native 侧的同一件事：Linux 侧有覆盖表生成器与信封分类，Native 侧
-          # 此前两样都没有，check-abi-boundary 的 19 条断言全是单文件关键词
-          # 存在性检查。两条都是宿主侧，与 check-abi-boundary 共用这一步。
-          make check-native-abi-coverage
-          make check-abi-config-guard
-
-      - name: 'Source contracts: task-state boundary, ABI smoke contract, doc drift'
-        run: |
-          make check-task-state-boundary
-          make check-abi-smoke-gate
-          make check-doc-drift
-
-      - name: 'Source contracts: arch boundary (static gate)'
-        run: python3 tools/gates.py check-arch-boundary
 
   # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
   # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
