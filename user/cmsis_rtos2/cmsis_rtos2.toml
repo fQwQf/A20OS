@@ -1,0 +1,86 @@
+# CMSIS-RTOS2 personality manifest.
+#
+# This file is the single source of truth for the trim: it names the object
+# families the library exposes and the Native ABI syscalls those families need.
+# tools/cmsis_trim.py reads it to
+#
+#   * generate the OS_CFG_* feature header (what the compiler keeps), and
+#   * generate the Native ABI dispatch table subset (what the kernel links),
+#
+# and to verify a built kernel ELF against the same declaration.  Generation
+# and verification therefore cannot drift: both consume this file.
+#
+# A syscall that is absent from a profile is still reachable from C code (the
+# dispatcher returns -NOT_SUPPORTED); it simply never enters the kernel image.
+
+[library]
+name = "cmsis_rtos2"
+api_version = "2.1.3"
+core = [
+    "os_kernel.c",
+    "os_thread.c",
+    "os_sync.c",
+    "os_timer.c",
+    "os_queue.c",
+]
+backends = { posix = "backend_posix.c", native = "backend_native.c" }
+
+# Feature -> OS_CFG_* macro.  Everything not listed here is compiled out and
+# its API entry points return osErrorResource.
+[feature_macro]
+thread        = "OS_CFG_THREAD"
+timer         = "OS_CFG_TIMER"
+mutex         = "OS_CFG_MUTEX"
+semaphore     = "OS_CFG_SEMAPHORE"
+memory_pool   = "OS_CFG_MEMORY_POOL"
+message_queue = "OS_CFG_MESSAGE_QUEUE"
+event_flags   = "OS_CFG_EVENT_FLAGS"
+
+# Why each Native syscall is in the minimum set.  Keep this table exhaustive:
+# the generator refuses an unknown name.
+[syscall_reason]
+clock_get        = "monotonic clock for ticks and timeouts"
+vm_alloc         = "a20_malloc heap for control blocks, stacks and queues"
+thread_create    = "osThreadNew"
+thread_exit      = "osThreadExit"
+thread_sleep     = "osDelay / timed waits"
+thread_yield     = "osThreadYield / osDelay(0) / mutex handoff"
+task_wait        = "process-child wait (osThreadJoin uses its own exit word)"
+task_kill        = "osThreadTerminate"
+task_set_sched   = "osThreadSetPriority / osThreadSetAffinity"
+handle_close     = "osThreadJoin / osThreadDetach reaps the thread handle"
+futex_wait       = "blocking queue: sleep"
+futex_wake       = "blocking queue: wake"
+atomic32         = "blocking queue: lock and sequence counter"
+
+# Full hosted personality: the POSIX backend needs no Native syscalls, but a
+# Native build of the same profile may use every object family.
+[profile.full]
+features = [
+    "thread", "timer", "mutex", "semaphore",
+    "memory_pool", "message_queue", "event_flags",
+]
+syscalls = "all"
+
+# Recommended MCU profile: the object families a teaching demo or a small
+# firmware actually uses.  Memory pools and thread suspend are the first
+# things to drop on a 280 KiB-SRAM part.
+[profile.mcu]
+features = ["thread", "mutex", "semaphore", "timer", "event_flags",
+            "message_queue"]
+syscalls = [
+    "clock_get", "vm_alloc",
+    "thread_create", "thread_exit", "thread_sleep", "thread_yield",
+    "task_kill", "task_set_sched", "handle_close",
+    "futex_wait", "futex_wake", "atomic32",
+]
+
+# Smallest still-useful personality: threads, semaphores and software timers
+# (the 4.1/4.2/4.3 demo set) without join/terminate/priority control.
+[profile.mcu-min]
+features = ["thread", "semaphore", "timer"]
+syscalls = [
+    "clock_get", "vm_alloc",
+    "thread_create", "thread_exit", "thread_sleep", "thread_yield",
+    "futex_wait", "futex_wake", "atomic32",
+]

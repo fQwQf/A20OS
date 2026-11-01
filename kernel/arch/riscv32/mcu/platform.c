@@ -25,7 +25,14 @@ void __trap_from_user(void) { arch_halt(); }
 void __return_to_user(void) { arch_halt(); }
 void __trap_from_kernel(void) { arch_halt(); }
 
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+extern int64_t riscv_mcu_syscall(trap_context_t *ctx);
+#endif
+
 void riscv_mcu_trap_handler(uint32_t *frame) {
+    /* entry.S stores the M-mode register file in trap_context_t order:
+     * x[0..31], mstatus (as sstatus), mepc (as sepc). */
+    trap_context_t *ctx = (trap_context_t *)frame;
     uint32_t cause = (uint32_t)arch_read_cause();
     if (cause & CAUSE_INTR_MASK) {
         hardirq_enter();
@@ -33,11 +40,24 @@ void riscv_mcu_trap_handler(uint32_t *frame) {
         if (!handled) proc_sched_tick(0);
         hardirq_exit();
         if (!handled) {
-            if (frame[33] & (1U << 7)) kernel_preempt_at_irq_return();
+            if (ctx->sstatus & (1U << 7)) kernel_preempt_at_irq_return();
             return;
         }
     }
+    if ((cause & CAUSE_CODE_MASK) == CAUSE_ECALL_U) {
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+        (void)riscv_mcu_syscall(ctx);
+#else
+        /* Bring-up checkpoint without the flat-program profile. */
+        printf("[USER] ecall nr=0x%x\n", (unsigned)TRAP_CTX_SYSCALL_NUM(ctx));
+        TRAP_CTX_SET_RET(ctx, 0);
+        arch_advance_syscall_epc(ctx);
+        proc_yield();
+#endif
+        return;
+    }
+
     printf("\n[RV32 MCU] TRAP cause=0x%x pc=0x%x addr=0x%x\n",
-           cause, frame[32], (uint32_t)arch_read_tval());
+           cause, (unsigned)TRAP_CTX_EPC(ctx), (unsigned)arch_read_tval());
     arch_halt();
 }

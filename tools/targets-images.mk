@@ -341,6 +341,58 @@ $(BUILD_FLAGS_STAMP): FORCE
 		--stamp "$@" \
 		--build-flags-sig '$(BUILD_FLAGS_SIG)'
 
+# The MCU trim links the generated syscall subset, not the full Native table.
+# One manifest drives both the emitted table and the library feature header.
+CMSIS_TRIM_DIR := $(BUILD_DIR)/generated/cmsis
+$(CMSIS_TRIM_DIR)/.stamp: user/cmsis_rtos2/cmsis_rtos2.toml tools/cmsis_trim.py
+	@mkdir -p $(CMSIS_TRIM_DIR)
+	$(PYTHON) tools/cmsis_trim.py emit --profile mcu --out $(CMSIS_TRIM_DIR)
+	@touch $@
+
+$(CMSIS_TRIM_DIR)/syscall_table_mcu.def $(CMSIS_TRIM_DIR)/cmsis_config.h: $(CMSIS_TRIM_DIR)/.stamp
+	@test -f $@
+
+$(BUILD_DIR)/abi/native/syscall_table.o: $(CMSIS_TRIM_DIR)/.stamp
+
+# Learner demo image: standard CMSIS-RTOS2 core + Native backend, linked as a
+# static PIE against the freestanding demo runtime.  The kernel embeds it via
+# demo_image.S, so a board flash/run stays a single artefact.
+MCU_DEMO_SRC := \
+    user/tests/liteos-demos/start.c \
+    user/tests/liteos-demos/runtime.c \
+    user/tests/liteos-demos/demo.c \
+    user/tests/liteos-demos/interrupt.c \
+    user/port/hi3861_hal/src/hi_isr.c \
+    user/port/hi3861_hal/src/iot_gpio.c \
+    user/port/hi3861_hal/src/iot_pwm.c \
+    user/cmsis_rtos2/src/os_kernel.c \
+    user/cmsis_rtos2/src/os_thread.c \
+    user/cmsis_rtos2/src/os_sync.c \
+    user/cmsis_rtos2/src/os_timer.c \
+    user/cmsis_rtos2/src/os_queue.c \
+    user/cmsis_rtos2/src/backend_native.c \
+    user/cmsis_rtos2/src/native_platform_a20.c \
+    user/liba20rt/a20_malloc.c
+MCU_DEMO_CC := $(RISCV_ELF_PREFIX)gcc
+MCU_DEMO_CFLAGS := -march=rv32imc_zicsr_zifencei -mabi=ilp32 \
+    -mcmodel=medany -msmall-data-limit=0 -mno-relax \
+    -Os -ffreestanding -fno-builtin -fno-stack-protector -fPIE \
+    -ffunction-sections -fdata-sections -DOS_CFG_TIMER_THREAD_STACK=4096 \
+    -Iuser/liba20rt -Iuser/cmsis_rtos2/include -Iuser/cmsis_rtos2/src \
+    -Iuser/port/hi3861_hal/include -Ikernel/include/uapi/a20 -I$(CMSIS_TRIM_DIR)
+MCU_DEMO_LDFLAGS := -nostdlib \
+    -Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 \
+    -Wl,-T,user/tests/liteos-demos/link.ld
+
+$(BUILD_DIR)/liteos-demo.elf: $(MCU_DEMO_SRC) user/tests/liteos-demos/link.ld \
+        $(CMSIS_TRIM_DIR)/.stamp user/cmsis_rtos2/cmsis_rtos2.toml
+	@mkdir -p $(@D)
+	$(MCU_DEMO_CC) $(MCU_DEMO_CFLAGS) \
+	    -include $(CMSIS_TRIM_DIR)/cmsis_config.h $(MCU_DEMO_LDFLAGS) \
+	    $(MCU_DEMO_SRC) -o $@
+
+$(BUILD_DIR)/arch/riscv32/mcu/demo_image.o: $(BUILD_DIR)/liteos-demo.elf
+
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@

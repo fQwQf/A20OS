@@ -3,8 +3,8 @@
 
 #include "core/types.h"
 #include "proc/debug_regs.h"
-#include "page_table.h"
 #include "platform.h"
+#include "page_table.h"
 
 typedef struct {
     uint32_t x[32];
@@ -15,6 +15,28 @@ typedef struct {
     uint64_t f[32];
     uint32_t fcsr;
 } __attribute__((aligned(16))) trap_context_t;
+
+/* MCU flat programs keep their per-task image state behind this field; the
+ * rest of the kernel only sees the generic task_t accessors. */
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+struct riscv_mcu_program;
+void riscv_mcu_program_release(struct riscv_mcu_program *program);
+#define ARCH_PROGRAM_FIELD struct riscv_mcu_program *arch_program;
+#define ARCH_PROGRAM_INIT(task) ((task)->arch_program = NULL)
+#define ARCH_TASK_RELEASE(task)                                                \
+    do {                                                                       \
+        riscv_mcu_program_release((task)->arch_program);                       \
+        (task)->arch_program = NULL;                                           \
+        (task)->flat_user = NULL;                                              \
+    } while (0)
+#else
+#define ARCH_PROGRAM_FIELD
+#define ARCH_PROGRAM_INIT(task) ((void)(task))
+#endif
+
+#define ARCH_TASK_FIELDS \
+    ARCH_PROGRAM_FIELD
+#define ARCH_TASK_INIT(task) do { ARCH_PROGRAM_INIT(task); } while (0)
 
 typedef struct {
     uint32_t ra;

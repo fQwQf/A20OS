@@ -53,6 +53,8 @@ sources = [
     "kernel/core/smp.c",
     "kernel/core/shared_fabric.c",
     "kernel/core/fabric_atomics.c",
+    "kernel/abi/native/syscall_table.c",
+    "kernel/abi/native/sys_clock_basic.c",
     "kernel/abi/native/sys_thread_basic.c",
     "kernel/abi/native/sys_task_signal.c",
     "kernel/abi/native/sys_file.c",

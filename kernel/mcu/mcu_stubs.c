@@ -197,6 +197,17 @@ long copy_to_user(void *dst, const void *src, size_t n) {
     return task ? a20_flat_copy(task->flat_user, (void *)src, dst, n, 1)
                 : -EFAULT;
 }
+
+/* The futex wait path re-reads the user word without sleeping; a normal
+ * copy_from_user with the flat range check is exactly that. */
+int user_read_u32_atomic(const uint32_t *src, uint32_t *out)
+{
+    uint32_t value;
+    if (!out || copy_from_user(&value, src, sizeof(value)) < 0)
+        return -EFAULT;
+    *out = value;
+    return 0;
+}
 #else
 long copy_to_user(void *dst, const void *src, size_t n) {
     (void)dst;

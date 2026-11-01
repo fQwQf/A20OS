@@ -8,6 +8,9 @@
 #define _IPC_OBJSTATS_H
 
 #include "core/types.h"
+#ifdef CONFIG_UP_SOFT_ATOMICS
+#include "core/arch.h"
+#endif
 
 typedef struct a20_objstats {
     _Atomic uint64_t handles;      /* installed native handle entries */
@@ -25,7 +28,15 @@ extern a20_objstats_t g_a20_objstats;
 
 static inline void a20_objstat_add(_Atomic uint64_t *field, int64_t delta)
 {
+#ifdef CONFIG_UP_SOFT_ATOMICS
+    /* A single core with no 64-bit atomics: IRQ masking makes the
+     * read-modify-write of the counter indivisible. */
+    uint32_t flags = arch_irq_save();
+    *(uint64_t *)field = *(uint64_t *)field + (uint64_t)delta;
+    arch_irq_restore(flags);
+#else
     __atomic_fetch_add(field, delta, __ATOMIC_RELAXED);
+#endif
 }
 
 #endif

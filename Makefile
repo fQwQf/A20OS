@@ -291,6 +291,21 @@ MCU_SHARED_KERNEL ?= 0
 MCU_SHARED_RAM_KB ?= 1024
 MCU_SHARED_TEST ?= 0
 MCU_NATIVE_PROGRAM ?= 0
+# Opt-in: boot the CMSIS learner demo on the physical Hi3861 (U-mode).
+HI3861_LITEOS_DEMO ?= 0
+ifeq ($(filter $(HI3861_LITEOS_DEMO),0 1),)
+$(error HI3861_LITEOS_DEMO must be 0 or 1)
+endif
+# The RV32 demo board always runs its learner experiments as flat U-mode
+# programs; a command-line MCU_NATIVE_PROGRAM=0 still wins.
+ifeq ($(ARCH)/$(BOARD),riscv32/qemu-virt-riscv32-mcu)
+MCU_NATIVE_PROGRAM := 1
+endif
+ifeq ($(ARCH)/$(BOARD),riscv32/hi3861)
+# Same flat-program foundation; the demo image stays opt-in until the U-mode
+# path is confirmed on the physical part.
+MCU_NATIVE_PROGRAM := 1
+endif
 NATIVE_FLAT_FILES ?= 0
 ifeq ($(filter $(NATIVE_FLAT_FILES),0 1),)
 $(error NATIVE_FLAT_FILES must be 0 or 1)
@@ -307,8 +322,10 @@ ifeq ($(MCU_NATIVE_PROGRAM),1)
 ifeq ($(filter $(ABI),native both),)
 $(error MCU_NATIVE_PROGRAM requires ABI=native or ABI=both)
 endif
+ifeq ($(ARCH),armv7m)
 ifneq ($(MCU_SHARED_KERNEL),1)
-$(error MCU_NATIVE_PROGRAM currently requires MCU_SHARED_KERNEL=1)
+$(error MCU_NATIVE_PROGRAM on armv7m requires MCU_SHARED_KERNEL=1)
+endif
 endif
 endif
 ifeq ($(filter $(MCU_SHARED_KERNEL),0 1),)
@@ -591,6 +608,7 @@ help:
 	  '    make BRINGUP=1 run-<arch>      kernel-only bring-up variant' \
 	  '    make vf2-sdcard                VisionFive 2 SD card' \
 	  '    make stm32f103-bringup         STM32F103 firmware (64 KiB flash)' \
+	  '    tools/a20 package hi3861       Hi3861 kernel A image (hupg)' \
 	  '' \
 	  'Docs: docs/dev/build.md (build), docs/testing-gates.md (gates),' \
 	  '      docs/dev/instances.md (instances), docs/CONTRIBUTING.md (style + gates).'
@@ -1018,7 +1036,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -2254,6 +2272,8 @@ CFLAGS += -DMCU_TEST_ELF_PATH=\"$(BUILD_DIR)/mcu-test-program.elf\"
 endif
 endif
 endif
+
+
 ifneq ($(shell printf '%s' '$(STM32_BT_NAME)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{1,32}$$' && echo yes),yes)
 $(error STM32_BT_NAME must contain 1-32 ASCII letters, digits, '_' or '-')
 endif
@@ -2293,6 +2313,15 @@ ifeq ($(STM32_QEMU),1)
 # The 8 KiB QEMU probe carries only idle; use the existing bounded timer
 # heap override instead of spending 2.5 KiB on the 64-entry MCU default.
 CFLAGS += -DCONFIG_STM32_QEMU -DCONFIG_MCU_DISABLE_CLUSTER_LEAF -DCONFIG_WAIT_TIMER_HEAP_MAX=4
+endif
+endif
+
+ifeq ($(ARCH),riscv32)
+ifeq ($(MCU_NATIVE_PROGRAM),1)
+# Native flat programs on RV32 M-mode: the user-task ABI, the flat memory
+# model and the embedded learner demo image are one profile.
+CFLAGS += -DCONFIG_MCU_NATIVE_PROGRAM -DCONFIG_NATIVE_TASK_HANDLES_ONLY -DCONFIG_NATIVE_FLAT_THREAD
+CFLAGS += -DMCU_DEMO_ELF_PATH=\"$(BUILD_DIR)/liteos-demo.elf\"
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32 loongarch32),)
@@ -2454,6 +2483,11 @@ ifeq ($(PROFILE),mcu)
 # below stay here on purpose: board drivers, platform files and the arch are
 # per-board facts the registry cannot enumerate.
 CFLAGS += $(TRIM_PROFILE_MCU_OPT) $(TRIM_PROFILE_MCU_CPPFLAGS)
+# The MCU trim links one syscall table: the profile the CMSIS manifest
+# declares.  tools/cmsis_trim.py emits both the table subset and the feature
+# header from user/cmsis_rtos2/cmsis_rtos2.toml, so kernel and library cannot
+# disagree about which syscalls exist.
+CFLAGS += -I$(BUILD_DIR)/generated/cmsis -DA20_NATIVE_SYSCALL_TABLE=\"syscall_table_mcu.def\"
 KERNEL_SRC = $(TRIM_PROFILE_MCU_SOURCES) \
              $(wildcard $(KERNEL_DIR)/boot/*.c) $(KERNEL_DIR)/firmware/node.c \
              $(if $(filter 1,$(STM32_QEMU)),$(BOARD_DRIVER_DIR)/stm32_uart.c $(BOARD_DRIVER_DIR)/extsram.c,$(wildcard $(BOARD_DRIVER_DIR)/*.c)) \
@@ -3440,6 +3474,7 @@ include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
 include tools/m0sense.mk
+include tools/hi3861.mk
 include tools/pine-a64.mk
 include tools/licheerv-nano.mk
 include tools/quartz64-zero.mk

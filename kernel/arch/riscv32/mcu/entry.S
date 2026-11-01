@@ -5,6 +5,19 @@ _start:
     csrw mie, zero
     la sp, _stack_top
     mv tp, zero
+#ifdef CONFIG_MCU_COPY_DATA
+    /* XIP boards link .data with a flash LMA and a RAM VMA. */
+    la t0, _data_load
+    la t1, _data_start
+    la t2, _data_end
+1:  bgeu t1, t2, 2f
+    lw t3, 0(t0)
+    sw t3, 0(t1)
+    addi t0, t0, 4
+    addi t1, t1, 4
+    j 1b
+2:
+#endif
     la t0, _bss_start
     la t1, _bss_end
 1:  bgeu t0, t1, 2f
@@ -33,7 +46,13 @@ riscv_mcu_vectors:
     .section .text,"ax",@progbits
     .balign 4
 riscv_mcu_trap:
-    /* Integer registers, mepc and mstatus. Keep the C ABI 16-byte alignment. */
+    /* Trap stack switch.  While U-mode runs, mscratch holds that task's
+     * kernel stack top; a trap from M-mode keeps mscratch == 0 and stays on
+     * the current stack.  csrrw + bnez touches no general register, so the
+     * interrupted t0 is still intact when the frame is written below. */
+    csrrw sp, mscratch, sp
+    bnez sp, 9f
+    csrrw sp, mscratch, sp        /* from M: restore sp (mscratch stays 0) */
     addi sp, sp, -144
     sw ra, 4(sp)
     sw gp, 12(sp)
@@ -41,7 +60,16 @@ riscv_mcu_trap:
     sw t0, 20(sp)
     addi t0, sp, 144
     sw t0, 8(sp)
-    sw t1, 24(sp)
+    j 8f
+9:  addi sp, sp, -144              /* from U: sp is the kernel stack top */
+    sw ra, 4(sp)
+    sw gp, 12(sp)
+    sw tp, 16(sp)
+    sw t0, 20(sp)
+    csrr t0, mscratch             /* user sp */
+    sw t0, 8(sp)
+    csrw mscratch, zero           /* handler never runs on the user stack */
+8:  sw t1, 24(sp)
     sw t2, 28(sp)
     sw s0, 32(sp)
     sw s1, 36(sp)
@@ -67,20 +95,19 @@ riscv_mcu_trap:
     sw t4, 116(sp)
     sw t5, 120(sp)
     sw t6, 124(sp)
-    csrr t0, mepc
-    sw t0, 128(sp)
     csrr t0, mstatus
+    sw t0, 128(sp)
+    csrr t0, mepc
     sw t0, 132(sp)
     mv a0, sp
     call riscv_mcu_trap_handler
-    lw t0, 128(sp)
-    csrw mepc, t0
     lw t0, 132(sp)
+    csrw mepc, t0
+    lw t0, 128(sp)
     csrw mstatus, t0
     lw ra, 4(sp)
     lw gp, 12(sp)
     lw tp, 16(sp)
-    lw t0, 20(sp)
     lw t1, 24(sp)
     lw t2, 28(sp)
     lw s0, 32(sp)
@@ -107,5 +134,38 @@ riscv_mcu_trap:
     lw t4, 116(sp)
     lw t5, 120(sp)
     lw t6, 124(sp)
+
+    /* Return path depends on the privilege the trap came from (MPP). */
+    lw t0, 128(sp)
+    srli t0, t0, 11
+    andi t0, t0, 3
+    bnez t0, 1f                   /* back to M */
+    /* Back to U: keep the kernel stack top in mscratch for the next trap,
+     * restore the interrupted t0 and the user stack pointer. */
+    addi t0, sp, 144
+    csrw mscratch, t0
+    lw t0, 20(sp)
+    lw sp, 8(sp)
+    mret
+1:  csrw mscratch, zero
+    lw t0, 20(sp)
     addi sp, sp, 144
     mret
+
+	/* Enter U-mode: a0 = entry, a1 = arg, a2 = user sp, a3 = mstatus.
+	 * PMP is opened for the whole address space: this profile is a trusted
+	 * flat-program model, not hardware isolation. */
+	.section .text
+	.balign 4
+	.globl mcu_enter_user
+mcu_enter_user:
+	li	t0, -1
+	csrw	pmpaddr0, t0
+	li	t0, 0x1f
+	csrw	pmpcfg0, t0
+
+	csrw	mepc, a0
+	csrw	mstatus, a3
+	mv	sp, a2
+	mv	a0, a1
+	mret
