@@ -12,7 +12,7 @@ import time
 
 source_root = Path(os.environ.get("A20_SOURCE_ROOT", Path(__file__).resolve().parents[1]))
 evidence = Path(os.environ.get(
-    "A20_EVIDENCE_DIR", "<build-dir>/evidence/mutex-state-rv64"))
+    "A20_EVIDENCE_DIR", source_root / "build/evidence/mutex-state-rv64"))
 evidence.mkdir(parents=True, exist_ok=True)
 common = [
     "ARCH=riscv64", "BOARD=qemu-virt-riscv64", "ABI=both", "BRINGUP=1",
@@ -37,7 +37,7 @@ markers = [
 runs = []
 
 for impl in ("c", "rust"):
-    build_dir = Path("<build-dir>/isolated") / f"mutex-state-{impl}-rv64-20261014"
+    build_dir = source_root / "build/isolated" / f"mutex-state-{impl}-rv64"
     flags = [*common, f"MUTEX_STATE_IMPL={impl}", f"BUILD_DIR={build_dir}"]
     build_log = evidence / f"{impl}-build.log"
     with build_log.open("wb") as output:
