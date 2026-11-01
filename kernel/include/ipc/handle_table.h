@@ -17,7 +17,13 @@
 #define A20_SWEEP_INTERVAL_TICKS  (TICKS_PER_SEC / 10 > 0 ? TICKS_PER_SEC / 10 : 1)
 
 /* Handle-table sizing (per-task quota, M2). */
+#if defined(CONFIG_MCU) && defined(CONFIG_RISCV32)
+/* The RV32 trust-boundary profile starts small (the learner demos use a
+ * handful of handles) and grows on demand. */
+#define A20_HT_INITIAL_CAP    32
+#else
 #define A20_HT_INITIAL_CAP    256
+#endif
 #define A20_HT_MAX_CAP        65536
 #define A20_HT_DEFAULT_QUOTA  4096
 #define A20_HT_GROWTH_FACTOR  2
