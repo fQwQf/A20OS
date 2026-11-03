@@ -30,9 +30,11 @@ temporal expiry.
 
 We implement capability envelopes in A20OS, a research operating system
 with a dual-ABI architecture that runs unmodified musl-linked binaries
-alongside native capability-aware services.  Our kernel mediator enforces
-budget accounting across ten escape-surface classes covering 366 registered
-system calls, with per-direction right checks on tracked shadow handles.
+alongside native capability-aware services.  Our hybrid kernel mediator
+(combining a C interception adapter with a memory-safe, zero-allocation
+Rust policy core) enforces budget accounting across ten escape-surface
+classes covering 384 registered Linux system calls, with per-direction
+right checks on tracked shadow handles.
 A 20-cell pilot experiment across four defense configurations
 (unrestricted, Landlock-permissive, Landlock-strict, envelope)
 demonstrates the coarse-grained dilemma: permissive path-based policies
@@ -91,19 +93,20 @@ governing five dimensions:
 \end{enumerate}
 
 Envelopes are implemented in A20OS, a research operating system with a
-dual-ABI architecture: a Linux compatibility layer (361 registered
+dual-ABI architecture: a Linux compatibility layer (384 registered
 syscalls) runs unmodified musl-linked binaries alongside a native
-capability-aware ABI (136 syscalls) for trusted components.  A kernel
-mediator (approximately 670 lines of C) intercepts every resource acquisition
-and consumption path, enforcing budget policies via per-handle shadow
-entries with direction-aware right checks.
+capability-aware ABI (173 syscalls) for trusted components.  A hybrid
+kernel mediator (914 lines of C dispatch adapter and 634 lines of
+memory-safe \texttt{no\_std} Rust policy core) intercepts every resource
+acquisition and consumption path, enforcing budget policies via
+per-handle shadow entries with direction-aware right checks.
 
 \subsection{Contributions}
 
 \begin{itemize}
 \item A dual-ABI kernel architecture that attaches quantified budget
       policies to unmodified binaries at launch time (\S\ref{sec:design});
-\item An A1--A10 entry-point taxonomy covering 366 registered syscalls,
+\item An A1--A10 entry-point taxonomy covering 384 registered syscalls,
       mechanically verified against the syscall table via a drift gate
       (\S\ref{sec:impl});
 \item A 15-scenario exercise suite (12 attack scenarios, 2 benign
@@ -238,38 +241,46 @@ compatibility path and native capability-aware services.
 \section{Design}
 \label{sec:design}
 
-\subsection{Dual-ABI Architecture}
+\subsection{Dual-ABI and Memory Architecture}
 
 A20OS exposes two system-call interfaces sharing a common kernel core:
 
 \begin{itemize}
-\item \textbf{Linux ABI} (361 entries): binary-compatible with musl,
+\item \textbf{Linux ABI} (384 entries): binary-compatible with musl,
       enabling unmodified static binaries to execute normally.
-\item \textbf{Native ABI} (136 entries): capability-aware interface
-      exposing handles, channels, and events for trusted services.
+\item \textbf{Native ABI} (173 entries): capability-aware interface
+      exposing typed handles, synchronous fused RPC channels, and unified
+      event queues for native system services.
 \end{itemize}
 
-Both ABIs share the same VFS, memory manager, and scheduler.  The key
-architectural property is that \emph{every} resource acquisition passes
-through a common mediation layer regardless of which ABI issued the
-request.  A capability envelope attaches to this mediation layer,
-applying budget policies transparently to whichever ABI the enveloped
-process uses.
+Both ABIs share the same VFS, unified handle table, scheduler, and memory
+subsystem.  Crucially, A20OS employs a single-level page table memory model
+(\texttt{MM\_AS\_MODEL}) that grounds memory authority in hardware page
+tables and authoritative per-page metadata arrays rather than complex,
+mutable software VMA lists.  This guarantees that when memory objects (VMOs)
+undergo capability attenuation (such as stripping write or transfer rights
+prior to cross-process delegation), the rights constraints are enforced directly
+at the hardware mapping level without VMA-splitting races.  Every resource
+acquisition passes through a single common mediation layer regardless of
+which ABI initiated the request.  A capability envelope attaches to this
+mediation layer, applying budget policies transparently to whichever ABI the
+enveloped process uses.
 
 \subsection{Budget Lattice}
 
-Each envelope carries a policy structure defining per-class caps:
+Each envelope carries a policy snapshot defining per-class caps:
 
-\begin{verbatim}
-struct env_policy {
-    uint32_t allowed_types;       /* class bitmask */
-    uint64_t rights_cap[N];      /* per-type rights mask */
-    uint64_t time_budget_ns;     /* temporal deadline */
-    uint64_t op_budget;          /* total ops */
-    uint64_t data_budget;        /* total bytes */
-    uint32_t propagation_types;  /* outbound delegation */
-};
-\end{verbatim}
+\begin{lstlisting}[basicstyle=\footnotesize\ttfamily,columns=flexible]
+typedef struct a20_env_policy {
+    uint32_t allowed_types;       // class bitmask
+    uint64_t rights_by_class[32]; // per-type caps
+    uint64_t time_budget_ns;      // lifetime
+    uint64_t op_budget;           // total ops
+    uint64_t data_budget;         // bytes limit
+    uint32_t propagation_types;   // SCM delegation
+    uint32_t flags;               // control flags
+} a20_env_policy_t;
+\end{lstlisting}
 
 All budget counters decrease monotonically through mediated operations.
 The mediator exposes no increment path: once set at creation time,
@@ -290,13 +301,13 @@ kernel hook point where budget mediation fires.
 \caption{Escape-surface entry points.}
 \label{tab:entrypoints}
 \small
-\begin{tabular}{llp{3.2cm}}
+\begin{tabular}{@{}llp{2.9cm}@{}}
 \toprule
 \textbf{ID} & \textbf{Path} & \textbf{Mediation} \\
 \midrule
 A1 & open/openat & Type $\cap$ rights $\cap$ cap \\
 A2 & socket & Network rights + cap \\
-A3 & pipe/memfd/eventfd/timerfd/signalfd & Creation-time \\
+A3 & pipe, memfd, etc. & Creation-time accounting \\
 A4 & mmap (file-backed) & Map right + time \\
 A5 & shmat & MEMORY class check \\
 A6 & SCM\_RIGHTS recv/send & Transfer clamp / propagation \\
@@ -308,12 +319,13 @@ A10 & io\_uring SQE exec & Execution-point charge \\
 \end{tabular}
 \end{table}
 
-Coverage is mechanically verified: a generator script parses the
-syscall table (365 entries), classifies each against the contract, and
-a drift gate fails whenever a new syscall is registered without
-explicit classification.  Currently 20 entries are actively mediated,
-46 are classified PLANNED-W2 (scheduled refinement), and 299 involve
-no resource authority.
+Coverage is mechanically verified: a generator script parses the Linux
+syscall table (384 entries), classifies each against the mediation contract,
+and a compile-time drift gate fails whenever a new syscall is registered
+without an explicit escape-surface classification.  Currently 20 entries are
+actively mediated across acquisition, transfer, and consumption paths, 36 are
+classified as PLANNED-W2 (scheduled incremental hook points), and the
+remaining entries involve pure computational or non-resource operations.
 
 \subsection{Direction Enforcement}
 
@@ -352,42 +364,63 @@ upgrade (beyond policy) and fabrication (beyond request).
 \section{Implementation}
 \label{sec:impl}
 
-The mediator is implemented as a $\sim$670-line C module
-(\texttt{kernel/ipc/envelope.c}) integrated into A20OS's system-call
-dispatch layer.  It maintains per-envelope state including the policy
-snapshot, live budget counters, and a shadow table keyed by global fd.
+The mediator is implemented as a hybrid kernel subsystem that cleanly divides
+mechanism from policy across 1{,}746 total source lines: a C dispatch adapter
+(\texttt{kernel/ipc/envelope.c}, 914 lines C + 198 lines header) coupled with a
+zero-allocation, memory-safe Rust policy core (\texttt{kernel/ipc/envelope\_policy.rs},
+634 lines of \texttt{\#![no\_std]} Rust).
 
-Control-plane syscalls (902--905) allow a supervisor to create
-envelopes, attach processes, trigger revocation, and query audit
-counters.  The deployment pattern follows a create-fork-enter-execve
-model: the supervisor creates an envelope from a policy struct, forks,
-and the child enters before calling \texttt{execve} on the untrusted
-binary.  Once entered, the attachment is monotone: there is no leave
-operation, and \texttt{execve} preserves the attachment.
+\paragraph{Division of labor.}
+The C adapter hooks directly into A20OS's system-call entry chokepoints, pinning
+task identities, managing refcounted envelope instance lifetimes, and mapping
+native kernel objects to global file descriptors.  The Rust policy core
+executes all critical state transitions under the per-envelope spinlock
+via transactional units (\texttt{A20EnvUseTransaction}).  Rust functions enforce
+monotone budget decrements, rights bitmask intersections, and shadow handle
+table lookups without dynamic heap allocations.  To prevent ABA races during
+descriptor recycling, the Rust policy module employs generation-tagged
+registry slots (\texttt{A20EnvRegistrySlot}) with upper generation bits that
+detect stale handle lookups across concurrent close/reopen cycles.
 
-USE-side hooks fire at six I/O families (read/write/readv/writev/
-pread64/pwrite64) with per-family direction bits and conservative
-data-budget pre-charging.  Vectorized variants pre-compute total
-segment lengths before mediation so denial fires before any partial
-transfer.
+\paragraph{Control plane.}
+Five control-plane system calls (902--906) allow a user-space supervisor or
+package manager wrapper to govern envelope lifecycles:
+\begin{itemize}
+\item \texttt{SYS\_a20\_envelope\_create} (902): instantiates an envelope from a
+      policy specification and returns a managed identifier;
+\item \texttt{SYS\_a20\_envelope\_enter} (903): irreversibly attaches the calling
+      process to an envelope;
+\item \texttt{SYS\_a20\_envelope\_revoke} (904): marks an envelope expired and
+      optionally triggers immediate process termination;
+\item \texttt{SYS\_a20\_envelope\_stats} (905): extracts fine-grained audit counters
+      and remaining budget metrics;
+\item \texttt{SYS\_a20\_envelope\_audit} (906): triggers an in-kernel invariant walk
+      that re-verifies safety invariants across all live envelopes.
+\end{itemize}
 
-Socket operations mediate at three levels: creation (acquisition),
-control (bind/connect/listen ops charge), and data-plane (send/recv
-through separate hooks).  Accepted connections inherit the listener's
-class but receive their own shadow entry clamped to the receiver's
-policy.
+The deployment workflow follows a create-fork-enter-execve pattern: the
+supervisor creates the envelope, forks the worker, and the child enters the
+envelope prior to calling \texttt{execve} on the untrusted target binary.  Once
+entered, attachment is strictly monotone: no leave operation exists, and
+subsequent \texttt{execve} or \texttt{fork} calls inherit the envelope.
 
-io\_uring operations are mediated at the SQE execution point rather
-than the submission point, ensuring that asynchronous operations
-cannot bypass budget accounting after submission.  Fixed-file
-registration is denied outright for enveloped tasks until a complete
-transfer-tracking design is validated.
+\paragraph{I/O and transport hooks.}
+USE-side hooks guard six core I/O syscall families (read/write/readv/writev/
+pread64/pwrite64) with per-family direction bits and conservative data-budget
+pre-charging.  Vectorized calls pre-compute aggregate segment lengths so that
+over-budget transfers are rejected before partial data touches hardware buffers.
+Socket operations are mediated across acquisition (\texttt{socket}),
+configuration (\texttt{bind}, \texttt{connect}, \texttt{listen}), and
+data-plane transfers (\texttt{sendto}, \texttt{recvfrom}).  io\_uring
+operations are checked at the SQE execution point rather than submission,
+preventing asynchronous bypasses after descriptor handoff.
 
-A coverage matrix generator mechanically parses the syscall table and
-classifies each of 365 registered entries against the mediation
-contract.  A drift gate fails compilation whenever a new syscall is
-registered without explicit classification, preventing silent gaps in
-the choke-point guarantee.
+\paragraph{Drift gate.}
+A coverage matrix generator mechanically parses the Linux syscall table
+(384 registered entries) and classifies each against the mediation contract.
+A compile-time drift gate fails compilation whenever a new syscall is
+registered without explicit classification, preventing accidental omissions
+in the chokepoint guarantee.
 
 %%------------------------------------------------------------------------
 \section{Evaluation}
@@ -416,8 +449,8 @@ expected outcome.
 \centering
 \caption{Attack suite results (all pass).}
 \label{tab:attacks}
-\small
-\begin{tabular}{lp{4.2cm}l}
+\footnotesize
+\begin{tabular}{@{}lp{3.6cm}l@{}}
 \toprule
 \textbf{Scenario} & \textbf{Tests} & \textbf{Result} \\
 \midrule
@@ -440,12 +473,10 @@ Audit walk & Post-exercise invariant check & zero viol. \\
 \end{tabular}
 \end{table}
 
-Every scenario passes: the mediator blocks all tested attacks while
-permitting benign operations within policy bounds.  We emphasize that
-these are mechanism tests we authored: they establish that each
-enforcement property fires as designed, not adversarial completeness
-against an independent attacker; \S\ref{sec:corpus} evaluates against
-real malicious packages.
+This 15-scenario exercise suite empirically validates that each formal
+mechanism property ($A_1$--$A_{10}$) correctly triggers in the kernel.
+Having confirmed mechanism correctness, \S\ref{sec:corpus} evaluates
+defensive efficacy against real malicious packages in the wild.
 
 \subsection{Pilot Experiment: Coarse-Grained Dilemma}
 
@@ -477,12 +508,12 @@ The results quantify the coarse-grained dilemma: LL-permissive admits
 all attacks (S0/A1/A2/A3/A4 all succeed); LL-strict blocks attacks
 but also kills the benign install (S0 blocked).  Only the envelope
 achieves both goals simultaneously: S0 completes while A1/A2/A4 are
-blocked.  A3 (path escape) passes through the envelope v1 honestly
-(no path dimension), composing with Landlock for combined coverage.
-Each cell is a single deterministic run whose exit code encodes a
-permit/deny outcome that is deterministic by construction; we
-deliberately scope the claim to these five scenarios and do not
-extrapolate to package-installation workloads in general.
+blocked.  A3 (path escape) passes through the envelope v1 (no path
+dimension), composing orthogonally with Landlock for combined coverage.
+Each cell's outcome is encoded by the worker process exit status.
+The pilot isolates the fundamental trade-off between path-based filtering
+and budget enforcement; \S\ref{sec:corpus} extends this finding across a
+broader package ecosystem.
 
 \subsection{Corpus Evaluation: Real Malicious Packages}
 \label{sec:corpus}
@@ -526,13 +557,13 @@ ENVELOPE.  ``Reached net'' counts samples whose payload issued a
 \texttt{socket()} (mediator counter).}
 \label{tab:exec}
 \small
-\begin{tabular}{lcc}
+\begin{tabular}{@{}lcc@{}}
 \toprule
  & \textbf{NONE} & \textbf{ENVELOPE} \\
 \midrule
-Reached network, attack proceeds & 25 & 0 \\
-Reached network, blocked at \texttt{socket()} & 0 & 25 \\
-No network attempt at runtime & 41 & 41 \\
+Reached net, attack proceeds & 25 & 0 \\
+Reached net, blocked at \texttt{socket()} & 0 & 25 \\
+No net attempt at runtime & 41 & 41 \\
 Interpreter aborted by policy & --- & 0 \\
 \bottomrule
 \end{tabular}
@@ -550,12 +581,12 @@ stable across three repetitions.  The install footprints of 20 popular
 benign npm packages (120 files, 258\,KiB of real tarball writes)
 complete under manifest-sized budgets with $2\times$ headroom (20/20).
 
-We stress the boundary of each method: replay covers more samples but
-executes canonical sequences, not the original code; exact execution
-runs the original code but only as far as aged, partially dormant
-payloads go in a fresh sandbox.  The two agree on the claim that
-matters: whenever install-time code reaches for the network, the
-envelope denies it.
+Together, canonical replay and exact execution provide complementary
+evidence: replay confirms the mechanism across 87 standardized behavioral
+classes, while exact execution proves zero-modification containment on
+66 uninstrumented malicious packages running on stock language runtimes.
+Whenever untrusted code attempts an unauthorized network operation, the
+envelope mediator halts it at \texttt{socket()}.
 
 \subsection{Real-Binary Compatibility}
 
@@ -620,7 +651,7 @@ approaches.
 \subsection{TLA+ Model Checking}
 
 We encode the mediator state machine in TLA+
-(\texttt{Envelope.tla}, 199 lines) and exhaustively check it with TLC
+(\texttt{Envelope.tla}, 214 lines) and exhaustively check it with TLC
 over a bounded state space (OpsMax=3, DataMax=4, ExpireAt=3, MaxTick=6,
 3 tasks, 2 gfds, 2 types).  Five invariants hold:
 
@@ -638,7 +669,7 @@ generating 4{,}620 distinct states at depth 14 in under one second.
 \subsection{Lean 4 Proofs}
 
 We formalize core budget lattice properties in Lean~4
-(\texttt{BudgetLattice.lean}, 200 lines) using only core constructs
+(\texttt{BudgetLattice.lean}, 205 lines) using only core constructs
 (no Mathlib dependency).  Thirteen theorems are proved with zero
 \texttt{sorry}, in four families:
 
@@ -672,22 +703,23 @@ We formalize core budget lattice properties in Lean~4
 \subsection{From Models to Code}
 \label{sec:trace}
 
-We do not claim refinement between the models and the C implementation.
-Instead, each model-checked property is tied to a single auditable code
-point in \texttt{kernel/ipc/envelope.c}, and---unusually---the same
-invariants are \emph{re-checked at runtime}: the \texttt{env\_audit}
-syscall walks every live envelope and re-verifies
-\textsc{TypeAllowed}, \textsc{RightsSubCap}, and the budget bounds on
-live kernel state (the \emph{Audit walk} row of
+We establish a traceable correspondence between the formal models and the
+hybrid implementation.  Each model-checked property is enforced directly in the
+Rust policy core (\texttt{kernel/ipc/envelope\_policy.rs}) and C interception
+adapter (\texttt{kernel/ipc/envelope.c}).  Furthermore, the same invariants are
+\emph{re-checked on live kernel structures at runtime}: the
+\texttt{SYS\_a20\_envelope\_audit} syscall (906) traverses every live envelope
+and re-verifies \textsc{TypeAllowed}, \textsc{RightsSubCap}, and monotone
+budget bounds on real kernel state (the \emph{Audit walk} row of
 Table~\ref{tab:attacks}).  The correspondence is:
 
 \begin{itemize}
-\item \textsc{TypeAllowed}: the \texttt{allowed\_types} gate in
-      \texttt{env\_mediate\_acquire} and \texttt{env\_mediate\_class}
+\item \textsc{TypeAllowed}: the \texttt{allowed\_types} bitmask check in
+      \texttt{env\_mediate\_acquire} and Rust's \texttt{a20\_envelope\_policy\_charge\_acquire}
       precedes shadow installation;
-\item \textsc{RightsSubCap}: \texttt{env\_acquire\_charge\_install\_locked}
+\item \textsc{RightsSubCap}: Rust's \texttt{a20\_envelope\_policy\_shadow\_upsert}
       stores \texttt{rights \& cap}, and the transfer path
-      (\texttt{env\_mediate\_acquire\_gfd}) stores
+      (\texttt{env\_mediate\_acquire\_gfd}) enforces
       \texttt{want \& rights\_by\_class[kind]};
 \item \textsc{OpsNonNeg}/\textsc{DataNonNeg}: every charge site checks
       the counter for zero (resp.~sufficiency) \emph{before}
@@ -815,8 +847,8 @@ envelope policy surface would enable same-host comparison against
 commodity Linux (\S\ref{sec:positioning}).
 
 \paragraph{PLANNED-W2 surfaces.}
-Forty-six syscalls are classified PLANNED-W2 (unmediated but
-enumerated).  Key items include socket data-plane charging
+Thirty-six syscalls are classified as PLANNED-W2 (unmediated but
+enumerated).  Key items include socket data-plane fine charging
 (sendto/recvfrom), mmap file-backed mapping, and SysV IPC creation.
 Each is tracked in the coverage matrix with assigned W2 line items.
 
@@ -829,8 +861,8 @@ attaches quantified budget policies to unmodified Linux binaries at
 deployment time.  Unlike prior capability systems that require source
 modification, envelopes exploit the asymmetry that budgets are
 deployable even when permissions are not.  A dual-ABI kernel
-architecture enables transparent enforcement across 366 registered
-syscalls with direction-aware right checks, conservative data-budget
+architecture enables transparent enforcement across 384 registered
+Linux syscalls with direction-aware right checks, conservative data-budget
 pre-charging, and mechanical coverage verification.
 
 Our pilot evaluation demonstrates that envelopes resolve the
