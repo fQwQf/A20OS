@@ -218,6 +218,12 @@ int osb_thread_boost(osThreadId_t t)
 
 void osb_thread_unboost(osThreadId_t t) { (void)t; }
 
+int osb_thread_self_handle(osThreadId_t t)
+{
+    (void)t;
+    return 0;   /* pthreads use TLS for self; no kernel handle needed */
+}
+
 int osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set)
 {
     if (!t->bhandle)

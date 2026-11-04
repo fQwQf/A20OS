@@ -303,6 +303,13 @@ void osb_thread_unboost(osThreadId_t t)
     (void)osn_task_set_sched(t->bhandle, OSN_SCHED_UNDONATE, 0, 0, 0);
 }
 
+int osb_thread_self_handle(osThreadId_t t)
+{
+    if (!t || osb_thread_self() != t)
+        return -OS_EINVAL;
+    return osn_thread_self_handle(&t->bhandle) == 0 ? 0 : -OS_EIO;
+}
+
 int osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set)
 {
     return osn_task_set_sched(t->bhandle, OSN_SCHED_AFFINITY, 0, 0, cpu_set) == 0

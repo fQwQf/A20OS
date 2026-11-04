@@ -30,6 +30,7 @@ static const char *const g_call_names[OSN_CALL_COUNT] = {
     "task_set_sched",
     "task_get_sched",
     "sched_lock",
+    "task_self",
     "handle_close",
     "futex_wait",
     "futex_wake",
@@ -165,6 +166,16 @@ int osn_sched_lock(int32_t mode, int32_t depth)
     g_calls[OSN_SCHED_LOCK]++;
     int64_t rc = a20_sched_lock(mode, depth);
     return rc < 0 ? -1 : (int)rc;
+}
+
+int osn_thread_self_handle(void **out_handle)
+{
+    g_calls[OSN_TASK_SELF]++;
+    int64_t h = a20_task_self();
+    if (h < 0 || h == A20_HANDLE_NULL)
+        return -1;
+    *out_handle = (void *)(uintptr_t)(h + 1);
+    return 0;
 }
 
 int osn_handle_close(void *handle)

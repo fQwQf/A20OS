@@ -104,6 +104,12 @@ static inline a20_status_t a20_sched_lock(int32_t mode, int32_t depth)
                         0, 0, 0, 0);
 }
 
+/* Install and return a handle for the calling task in its own table. */
+static inline int64_t a20_task_self(void)
+{
+    return a20_syscall6(A20_SYS_task_self, 0, 0, 0, 0, 0, 0);
+}
+
 static inline a20_status_t a20_task_set_limit(a20_handle_t task,
                                                a20_resource_limits_t *limits)
 {

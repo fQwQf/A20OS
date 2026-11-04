@@ -381,28 +381,71 @@ static int test_chained_inheritance(void)
     return ok;
 }
 
+
+/* ---------------------------------------------------------------------- */
+/* 6. the initial thread is a valid donation target                       */
+/* ---------------------------------------------------------------------- */
+
+static volatile int g_init_done;
+
+static void init_high(void *arg)
+{
+    (void)arg;
+    osMutexAcquire(arg, osWaitForever);
+    g_init_done = 1;
+    osMutexRelease(arg);
+}
+
+static int test_initial_inheritance(void)
+{
+    demo_log("[4.5] initial-thread-inheritance");
+    osMutexId_t m = osMutexNew(NULL);
+    int ok = demo_check(m != NULL, "initial mutex");
+    if (!ok)
+        return 0;
+
+    g_init_done = 0;
+    (void)osMutexAcquire(m, osWaitForever);
+    osThreadAttr_t attr;
+    rt_attr(&attr, "init-high", osPriorityHigh, 0);
+    osThreadId_t t = osThreadNew(init_high, m, &attr);
+    ok &= demo_check(t != NULL, "initial high waiter");
+    /* The high thread is blocked on the mutex main owns; with the installed
+     * self handle main must now carry the waiter's priority. */
+    ok &= demo_check(osThreadGetPriority(osThreadGetId()) == osPriorityHigh,
+                     "initial thread inherited the waiter priority");
+    (void)osMutexRelease(m);
+    if (t)
+        osThreadJoin(t);
+    ok &= demo_check(g_init_done == 1, "initial waiter completed");
+    demo_log("[4.5] initial done ok=%d", ok);
+    osMutexDelete(m);
+    return ok;
+}
+
 int experiment_45(void)
 {
     demo_log("[4.5] static priorities and priority inheritance");
     g_ev = osEventFlagsNew(NULL);
     g_ready = osSemaphoreNew(4, 0, NULL);
     int ok = demo_check(g_ev && g_ready, "4.5 objects");
-    int p1 = 0, p2 = 0, p3 = 0, p4 = 0, p5 = 0;
+    int p1 = 0, p2 = 0, p3 = 0, p4 = 0, p5 = 0, p6 = 0;
     if (g_ev && g_ready) {
         p1 = test_create_priority();
         p2 = test_set_priority();
         p3 = test_kernel_lock();
         p4 = test_priority_inheritance();
         p5 = test_chained_inheritance();
+        p6 = test_initial_inheritance();
         osEventFlagsDelete(g_ev);
         osSemaphoreDelete(g_ready);
         osMutexDelete(g_mtx);
-        ok &= p1 && p2 && p3 && p4 && p5;
+        ok &= p1 && p2 && p3 && p4 && p5 && p6;
     }
     g_ev = NULL;
     g_ready = NULL;
     g_mtx = NULL;
-    demo_log("[4.5] %s create=%d setprio=%d lock=%d inherit=%d chain=%d",
-             ok ? "PASS" : "FAIL", p1, p2, p3, p4, p5);
+    demo_log("[4.5] %s create=%d setprio=%d lock=%d inherit=%d chain=%d init=%d",
+             ok ? "PASS" : "FAIL", p1, p2, p3, p4, p5, p6);
     return ok;
 }

@@ -127,4 +127,24 @@ int64_t sys_a20_sched_lock(const a20_syscall_args_t *args) {
         return -A20_ERR_INVALID_ARGUMENT;
     return previous;
 }
+
+/*
+ * Install a handle for the calling task in its own table and return it.
+ * A Native process launched directly as a flat program has no creator that
+ * could hand it a self handle, but the personality needs one as a priority
+ * inheritance target for the initial thread.  The handle lives in the shared
+ * handle table, so sibling threads can use it too.
+ */
+int64_t sys_a20_task_self(const a20_syscall_args_t *args) {
+    (void)args;
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
+    return a20_handle_install_task(
+        ht, cur, A20_OBJ_THREAD,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
+            A20_RIGHT_CONTROL | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
+            A20_RIGHT_ADMIN | A20_RIGHT_READ | A20_RIGHT_WRITE);
+}
 #endif

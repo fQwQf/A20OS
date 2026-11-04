@@ -55,7 +55,7 @@ A20OS 内核机制（调度、futex、VM、定时器）
 
 - `osThreadSuspend/Resume` 在 POSIX 后端是协作式（信号触发），Native 后端不支持并返回 `osError`；
 - 消息队列为 FIFO，`msg_prio` 接受但忽略；
-- 初始/main 线程没有 handle，不能被其他线程作为优先级继承的目标；它可以给自己 `osThreadSetPriority`、`osKernelLock` 或查询优先级；
+- 初始/main 线程在 `osKernelInitialize()` 时通过 `task_self` 安装自己的 handle，因此也可以作为优先级继承的目标；如果初始化是在已创建的 CMSIS 线程里调用的，该线程本来就有 handle；
 - 线程正在执行优先级捐赠时，`osThreadSetPriority` 返回 `osError`：内核保存的 base 快照不能在不丢失的情况下改写；
 - `osKernelLock` 只推迟调度器抢占，不屏蔽中断；锁内阻塞仍是应用错误。POSIX 后端的 `osKernelLock` 仍是递归互斥，不能阻止锁内显式阻塞。
 
@@ -100,7 +100,7 @@ python3 tools/cmsis_trim.py list --profile mcu
 | Profile | 对象族 | syscall 数 |
 |---|---|---|
 | `full` | 全部 | 主表全部 |
-| `mcu` | thread、mutex、semaphore、timer、event flags、message queue | 14 |
+| `mcu` | thread、mutex、semaphore、timer、event flags、message queue | 15 |
 | `mcu-min` | thread、semaphore、timer（不含 join/terminate/priority 的最小集合） | 9 |
 
 被裁掉的对象族仍保留入口（返回 `osErrorResource`），因此"链接兼容、镜像裁剪"：
@@ -109,7 +109,7 @@ python3 tools/cmsis_trim.py list --profile mcu
 - 不会因为少一个对象族而让应用链接失败；
 - 不会把未使用的内核 syscall 带进镜像。
 
-在 riscv32imc/ilp32、`-Os`、`-ffunction-sections`（链接 GC 前）下测得库 text：`full` 12.2 KiB、`mcu` 11.6 KiB、`mcu-min` 10.3 KiB。
+在 riscv32imc/ilp32、`-Os`、`-ffunction-sections`（链接 GC 前）下测得库 text：`full` 12.5 KiB、`mcu` 11.8 KiB、`mcu-min` 10.6 KiB。
 
 `check` 是裁剪的闭环：它读 ELF 的 `sys_a20_*` 符号集合，与 manifest 比较，多一个或少一个都失败。因此"镜像里只有声明的 syscall"由构建检查保证，而不是靠代码评审。
 
@@ -175,7 +175,7 @@ tools/a20 test qemu-riscv32-mcu
 #   [4.2] PASS taken=5 produced=5
 #   [4.3] PASS once=1 periodic=12
 #   [4.4] PASS irq=5
-#   [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1
+#   [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1 init=1
 #   [DEMO] experiments 4.1-4.5: PASS
 
 # 裁剪闭环：内核 ELF 只含 manifest 声明的 syscall

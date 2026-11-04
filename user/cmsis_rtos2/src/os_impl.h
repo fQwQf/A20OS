@@ -94,6 +94,8 @@ osPriority_t osb_thread_get_priority(osThreadId_t t);
  */
 int      osb_thread_boost(osThreadId_t owner);
 void     osb_thread_unboost(osThreadId_t t);
+/* Give the initial thread a handle so it can be a donation target. */
+int      osb_thread_self_handle(osThreadId_t t);
 int      osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set);
 uint32_t osb_thread_get_affinity(osThreadId_t t);
 uint32_t osb_thread_stack_space(osThreadId_t t);
