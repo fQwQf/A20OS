@@ -26,6 +26,8 @@ enum osn_call {
     OSN_THREAD_YIELD,
     OSN_TASK_KILL,
     OSN_TASK_SET_SCHED,
+    OSN_TASK_GET_SCHED,
+    OSN_SCHED_LOCK,
     OSN_HANDLE_CLOSE,
     OSN_FUTEX_WAIT,
     OSN_FUTEX_WAKE,
@@ -40,8 +42,20 @@ enum osn_call {
 #define OSN_ATOMIC_CAS    3u
 
 /* Scheduling fields, numbered like the Native ABI. */
+#define OSN_SCHED_POLICY   (1u << 0)
 #define OSN_SCHED_PRIORITY (1u << 1)
 #define OSN_SCHED_AFFINITY (1u << 2)
+#define OSN_SCHED_DONATE   (1u << 4)
+#define OSN_SCHED_UNDONATE (1u << 5)
+
+/* Kernel scheduler-lock operations (osKernelLock). */
+#define OSN_LOCK_ACQUIRE 0
+#define OSN_LOCK_RELEASE 1
+#define OSN_LOCK_RESTORE 2
+
+#define OSN_SCHED_NORMAL 0
+#define OSN_SCHED_FIFO   1
+#define OSN_SCHED_RR     2
 
 void     osn_platform_init(void);
 /* Smallest stack the platform can actually run; 0 means "any". */
@@ -49,8 +63,13 @@ size_t   osn_stack_grow(size_t requested);
 int      osn_clock_get_ns(uint64_t *out_ns);
 int      osn_vm_alloc(size_t size, void **out_ptr);
 void     osn_vm_free(void *ptr);
+/*
+ * The scheduling arguments are applied before the new thread is published.
+ * Passing 0 for policy/priority means "inherit the creator".
+ */
 int      osn_thread_create(void (*entry)(void *), void *arg,
                            void *stack, size_t stack_size,
+                           int32_t policy, int32_t priority,
                            void **out_handle);
 void     osn_thread_exit(void);
 /* Wait for a backend thread to be really gone.  The host implementation
@@ -60,8 +79,11 @@ void     osn_thread_reap(void *handle);
 int      osn_thread_sleep_ns(uint64_t ns);
 void     osn_thread_yield(void);
 int      osn_task_kill(void *handle);
-int      osn_task_set_sched(void *handle, uint32_t fields, int32_t priority,
-                            uint32_t affinity);
+/* handle == NULL names the calling thread on the Native backend. */
+int      osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
+                            int32_t priority, uint32_t affinity);
+int      osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority);
+int      osn_sched_lock(int32_t mode, int32_t depth);
 int      osn_handle_close(void *handle);
 
 /* Futex word wait/wake; timeout is relative nanoseconds (0 = no wait,

@@ -27,7 +27,8 @@ static unsigned g_calls[OSN_CALL_COUNT];
 static const char *const g_call_names[OSN_CALL_COUNT] = {
     "clock_get", "vm_alloc", "thread_create", "thread_exit",
     "thread_sleep", "thread_yield", "task_kill",
-    "task_set_sched", "handle_close", "futex_wait", "futex_wake",
+    "task_set_sched", "task_get_sched", "sched_lock", "handle_close",
+    "futex_wait", "futex_wake",
     "atomic32",
 };
 
@@ -104,9 +105,12 @@ int osn_vm_alloc(size_t size, void **out_ptr)
 void osn_vm_free(void *ptr) { free(ptr); }
 
 int osn_thread_create(void (*entry)(void *), void *arg, void *stack,
-                      size_t stack_size, void **out_handle)
+                      size_t stack_size, int32_t policy, int32_t priority,
+                      void **out_handle)
 {
     g_calls[OSN_THREAD_CREATE]++;
+    (void)policy;
+    (void)priority;
     struct host_thread *h = (struct host_thread *)calloc(1, sizeof(*h));
     struct host_start *s = (struct host_start *)calloc(1, sizeof(*s));
     if (!h || !s) {
@@ -172,15 +176,41 @@ int osn_task_kill(void *handle)
     return pthread_cancel(h->tid) == 0 ? 0 : -1;
 }
 
-int osn_task_set_sched(void *handle, uint32_t fields, int32_t priority,
-                       uint32_t affinity)
+int osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
+                       int32_t priority, uint32_t affinity)
 {
     g_calls[OSN_TASK_SET_SCHED]++;
     (void)handle;
     (void)fields;
+    (void)policy;
     (void)priority;
     (void)affinity;
     return 0;
+}
+
+int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority)
+{
+    g_calls[OSN_TASK_GET_SCHED]++;
+    (void)handle;
+    (void)policy;
+    (void)priority;
+    return -1;   /* the host does not model CMSIS RT priorities */
+}
+
+int osn_sched_lock(int32_t mode, int32_t depth)
+{
+    g_calls[OSN_SCHED_LOCK]++;
+    static int host_depth;
+    int previous = host_depth;
+    if (mode == 0)
+        host_depth++;
+    else if (mode == 1) {
+        if (host_depth > 0)
+            host_depth--;
+    } else if (mode == 2) {
+        host_depth = depth > 0 ? depth : 0;
+    }
+    return previous;
 }
 
 int osn_handle_close(void *handle)

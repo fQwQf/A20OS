@@ -205,6 +205,20 @@ osPriority_t osb_thread_get_priority(osThreadId_t t)
     return osPriorityNone;
 }
 
+/*
+ * Hosted POSIX builds keep whatever pthread policy the process was started
+ * with, so inheritance has nothing to donate to.  The MCU/Native backend is
+ * where CMSIS priorities and PI are real.
+ */
+int osb_thread_boost(osThreadId_t t, osPriority_t prio)
+{
+    (void)t;
+    (void)prio;
+    return 0;
+}
+
+void osb_thread_unboost(osThreadId_t t) { (void)t; }
+
 int osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set)
 {
     if (!t->bhandle)

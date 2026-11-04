@@ -72,6 +72,7 @@ static osStatus_t mutex_acquire(osMutexId_t m, uint32_t timeout)
             m->owner = self;
             m->count = 1;
             osb_bq_unlock(m->obj.q);
+            self->held_mutexes++;
             return osOK;
         }
         if (m->owner == self) {
@@ -87,6 +88,14 @@ static osStatus_t mutex_acquire(osMutexId_t m, uint32_t timeout)
             osb_bq_unlock(m->obj.q);
             return osErrorResource;
         }
+        /*
+         * Priority inheritance: the owner runs at our priority until it
+         * releases the mutex, so a medium-priority thread cannot keep it
+         * from making progress.  The backend keeps the maximum donation and
+         * the core drops it when the owner's last mutex is released.
+         */
+        if (m->attr & osMutexPrioInherit)
+            (void)osb_thread_boost(m->owner, self->priority);
         self->state = osThreadBlocked;
         int rc = osb_bq_wait_until(m->obj.q, deadline);
         self->state = osThreadRunning;
@@ -109,6 +118,7 @@ osStatus_t osMutexRelease(osMutexId_t mutex_id)
     if (!mutex_valid(mutex_id))
         return osErrorParameter;
     osThreadId_t self = os_current_thread();
+    int final = 0;
 
     osb_bq_lock(mutex_id->obj.q);
     if (mutex_id->owner != self) {
@@ -117,9 +127,24 @@ osStatus_t osMutexRelease(osMutexId_t mutex_id)
     }
     if (--mutex_id->count == 0) {
         mutex_id->owner = NULL;
-        osb_bq_wake(mutex_id->obj.q, 1);
+        /*
+         * Wake every waiter: the scheduler then runs the highest-priority
+         * one first, which is the CMSIS handoff order.  A single wake would
+         * hand the mutex to the oldest waiter regardless of priority.
+         */
+        osb_bq_wake_all(mutex_id->obj.q);
+        final = 1;
     }
     osb_bq_unlock(mutex_id->obj.q);
+
+    if (final) {
+        /* Drop the inheritance donation only when no mutex is held any
+         * more; a lower-priority mutex may still be contended. */
+        if (self->held_mutexes > 0)
+            self->held_mutexes--;
+        if (self->held_mutexes == 0)
+            osb_thread_unboost(self);
+    }
     return osOK;
 }
 
@@ -251,7 +276,12 @@ osStatus_t osSemaphoreRelease(osSemaphoreId_t semaphore_id)
         return osErrorResource;
     }
     semaphore_id->count++;
-    osb_bq_wake(semaphore_id->obj.q, 1);
+    /*
+     * Broadcast, not a single handoff: the woken set is ordered by the
+     * scheduler's priority queues, so the highest-priority waiter takes the
+     * token.  Lower-priority waiters re-check the count and sleep again.
+     */
+    osb_bq_wake_all(semaphore_id->obj.q);
     osb_bq_unlock(semaphore_id->obj.q);
     return osOK;
 #endif
