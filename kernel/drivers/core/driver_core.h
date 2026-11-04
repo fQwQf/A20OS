@@ -242,6 +242,7 @@ int a20_driver_registry_remove(void **slots, int *count, void *item);
 #endif
 /* Format registered drivers for /proc/drivers. */
 int  driver_core_list_drivers(char *buf, size_t sz);
+int  driver_core_list_devices(char *buf, size_t sz);
 int  driver_register(driver_t *drv);
 int  driver_unregister(driver_t *drv);
 int  device_register(device_t *dev);

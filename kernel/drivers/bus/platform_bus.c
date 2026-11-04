@@ -6,19 +6,19 @@ static int platform_match(device_t *dev, const driver_t *drv)
 {
     if (!dev || !drv || drv->bus != &platform_bus) return 0;
     dev->firmware_match = NULL;
-    if (fw_node_valid(&dev->firmware_node)) {
-        const char *source = fw_node_source(&dev->firmware_node);
-        for (const firmware_device_id_t *id = drv->firmware_ids; id && id->id; id++) {
-            if (id->source && (!source || strcmp(id->source, source))) continue;
-            if (fw_node_match_id(&dev->firmware_node, id->id) > 0 ||
-                (dev->software_id && !strcmp(dev->software_id, id->id))) {
-                dev->firmware_match = id;
-                return 1;
-            }
+    int has_node = fw_node_valid(&dev->firmware_node);
+    const char *source = has_node ? fw_node_source(&dev->firmware_node) : NULL;
+    for (const firmware_device_id_t *id = drv->firmware_ids; id && id->id; id++) {
+        if (id->source && (!source || strcmp(id->source, source)))
+            continue;
+        /* A static board device has no firmware node; software_id is the
+         * identity the board supplied for exactly that case. */
+        if ((has_node && fw_node_match_id(&dev->firmware_node, id->id) > 0) ||
+            (dev->software_id && !strcmp(dev->software_id, id->id))) {
+            dev->firmware_match = id;
+            return 1;
         }
-        return 0;
     }
-
     return 0;
 }
 
