@@ -69,7 +69,7 @@ POSIX 后端把 CMSIS 线程映射到 pthread，优先级由宿主 pthread 策�
 | 创建 | `osThreadNew` 经 `thread_create` 的 sched 字段，在 `proc_publish_deferred_task()` 之前调用 `proc_sched_set()`；新线程不会先以创建者优先级跑一步 |
 | 抢占 | 高优先级线程就绪后，在 syscall 返回 / IRQ 返回的 safe point 立即抢占，不需要等 tick；MCU 的 `riscv_mcu_syscall()` 和 `kernel_preempt_at_irq_return()` 都走这条路径 |
 | 唤醒 | 信号量/互斥量释放用 broadcast wake；RT 队列按优先级选最高者先跑，低优先级等待者重新检查并继续睡 |
-| 优先级继承 | 内核 `proc_sched_rt_donate()` / `proc_sched_rt_restore()`：等待者在阻塞前对 owner 捐赠自己的**有效** RT 优先级（链式捐赠），owner 释放最后一个 mutex 时恢复。内核保存 base policy/priority/nice，READY owner 通过 `proc_sched_set()` 同一套 detach/re-enqueue 路径重排 |
+| 优先级继承 | 内核 `proc_sched_rt_donate()` / `proc_sched_rt_restore()`：等待者在阻塞前沿 mutex 等待链（`wait_owner`）逐 link 捐赠自己的**有效** RT 优先级，owner 释放最后一个 mutex 时恢复。等待图是 mutex 语义，留在人格层；最大捐赠、base 快照和重排在内核，READY owner 走 `proc_sched_set()` 同一套 detach/re-enqueue 路径 |
 | `osKernelLock` | 内核 per-task `sched_lock_depth`；safe point 和 IRQ 返回点看到非零就推迟 pending reschedule，解锁到 0 时立即消费它 |
 | tick | 时间分辨率仍是内核 tick：Hi3861 100 Hz（10 ms），QEMU MCU 1 kHz。`osDelay(1)`、超时和软件定时器不会优于该粒度 |
 | RT 带宽 | MCU 构建关闭 hosted 的 5%/秒保留，RT 线程不会每秒被强制让出约 50 ms |
@@ -148,7 +148,7 @@ QEMU 板 `qemu-virt-riscv32-mcu` 与 Hi3861 使用同一条路径：
 |---|---|
 | `demo.c` | 4.1 线程、4.2 信号量、4.3 软件定时器（只用 `cmsis_os2.h`） |
 | `interrupt.c` | 4.4 中断，只用 `cmsis_os2.h` + `hi_isr.h`/`iot_gpio.h`/`iot_pwm.h` |
-| `rt.c` | 4.5 创建优先级、`osThreadSetPriority`、`osKernelLock`、互斥量优先级继承 |
+| `rt.c` | 4.5 创建优先级、`osThreadSetPriority`、`osKernelLock`、互斥量优先级继承与链式继承 |
 | `runtime.c` | freestanding 启动、日志环、64 位除法 |
 | `start.c` | `_start`，a0 = run record |
 
@@ -175,7 +175,7 @@ tools/a20 test qemu-riscv32-mcu
 #   [4.2] PASS taken=5 produced=5
 #   [4.3] PASS once=1 periodic=12
 #   [4.4] PASS irq=5
-#   [4.5] PASS create=1 setprio=1 lock=1 inherit=1
+#   [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1
 #   [DEMO] experiments 4.1-4.5: PASS
 
 # 裁剪闭环：内核 ELF 只含 manifest 声明的 syscall

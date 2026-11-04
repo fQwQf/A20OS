@@ -82,12 +82,12 @@ CMSIS priority is the kernel RT priority (1:1, `osPriorityIdle(1)` through
   point, not at the next tick;
 * semaphore/mutex release broadcasts; the RT runqueue picks the highest
   waiter, and lower waiters re-check and sleep again;
-* mutex inheritance is kernel-owned (`proc_sched_rt_donate/restore`): the
-  waiter donates its **effective** RT priority (so a chained donation
-  propagates), the scheduler stores the maximum donation and the base
-  policy/priority/nice, re-keys a READY owner through the normal
-  `proc_sched_set()` path, and restores it when the owner releases its last
-  mutex;
+* mutex inheritance is split at the right boundary: the mutex layer keeps
+  the `wait_owner` chain (A waits on B, B waits on C) and walks it on every
+  block, donating the waiter's **effective** RT priority to each link; the
+  kernel (`proc_sched_rt_donate/restore`) owns the maximum donation, the base
+  policy/priority/nice snapshot, the READY-owner re-key through
+  `proc_sched_set()`, and the restore on the owner's last mutex release;
 * `osKernelLock` is a per-task `sched_lock_depth` checked by the kernel's
   preemption points, not a user-space priority trick.  It defers the
   scheduler, not interrupts; blocking inside the lock is still an
@@ -185,7 +185,7 @@ tools/a20 test qemu-riscv32-mcu
 # [4.2] PASS taken=5 produced=5
 # [4.3] PASS once=1 periodic=12
 # [4.4] PASS irq=5
-# [4.5] PASS create=1 setprio=1 lock=1 inherit=1
+# [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1
 # [DEMO] experiments 4.1-4.5: PASS
 ```
 

@@ -150,6 +150,7 @@ struct os_thread_cb {
     void           *owned_stack;   /* allocated by the backend, freed on release */
     osPriority_t    priority;       /* base priority requested by the app */
     uint32_t        held_mutexes;   /* mutexes owned; PI is dropped at zero */
+    osThreadId_t    wait_owner;     /* mutex owner this thread is blocked on */
     uint32_t        attr_bits;
     volatile int32_t state;
     volatile uint32_t flags;

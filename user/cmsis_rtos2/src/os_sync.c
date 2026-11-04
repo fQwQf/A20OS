@@ -91,14 +91,24 @@ static osStatus_t mutex_acquire(osMutexId_t m, uint32_t timeout)
         /*
          * Priority inheritance: the owner runs at our priority until it
          * releases the mutex, so a medium-priority thread cannot keep it
-         * from making progress.  The backend keeps the maximum donation and
-         * the core drops it when the owner's last mutex is released.
+         * from making progress.  The wait-for relation is mutex state, so
+         * the chain walk lives here; the donation itself is kernel-owned.
+         * Walk the whole chain because the owner may itself be waiting on a
+         * mutex (A waits on B, B waits on C): every link must receive A's
+         * effective priority, not just B.
          */
-        if (m->attr & osMutexPrioInherit)
-            (void)osb_thread_boost(m->owner);
+        self->wait_owner = m->owner;
+        if (m->attr & osMutexPrioInherit) {
+            osThreadId_t o = m->owner;
+            for (unsigned depth = 0; o && depth < 8; depth++) {
+                (void)osb_thread_boost(o);
+                o = o->wait_owner;
+            }
+        }
         self->state = osThreadBlocked;
         int rc = osb_bq_wait_until(m->obj.q, deadline);
         self->state = osThreadRunning;
+        self->wait_owner = NULL;
         if (rc == -OS_ETIMEDOUT) {
             osb_bq_unlock(m->obj.q);
             return osErrorTimeout;
