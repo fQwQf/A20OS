@@ -2493,6 +2493,22 @@ KERNEL_SRC = $(TRIM_PROFILE_MCU_SOURCES) \
              $(if $(filter 1,$(STM32_QEMU)),$(BOARD_DRIVER_DIR)/stm32_uart.c $(BOARD_DRIVER_DIR)/extsram.c,$(wildcard $(BOARD_DRIVER_DIR)/*.c)) \
              $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)/*.c) \
              $(ARCH_KERNEL_C_SRC) $(ARCH_SHARED_SRC_$(ARCH))
+
+ifeq ($(ARCH)/$(BOARD),riscv32/hi3861)
+# The Hi3861 image carries the standard A20OS driver core.  The QEMU MCU
+# regression stays on the minimal shell-only source set.
+KERNEL_SRC += \
+    kernel/drivers/core/driver_core.c \
+    kernel/drivers/core/driver_class_mcu.c \
+    kernel/drivers/bus/platform_bus.c \
+    kernel/firmware/device.c \
+    kernel/firmware/irq.c \
+    kernel/drivers/gpio/hi3861_gpio.c \
+    kernel/drivers/i2c/hi3861_i2c.c \
+    kernel/drivers/spi/hi3861_spi.c \
+    kernel/drivers/pwm/hi3861_pwm.c \
+    kernel/drivers/adc/hi3861_adc.c
+endif
 else
 # The CONFIG_XLATOR=n case drops kernel/proc/xlator.c from the source list
 # outright rather than compiling it to an empty translation unit -- the same

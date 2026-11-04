@@ -13,6 +13,9 @@
 #include "proc/proc.h"
 
 extern void mcu_user_demo_start(void);
+#ifdef CONFIG_MCU_DRIVER_MODEL
+extern int mcu_driver_shell(const char *line);
+#endif
 
 static volatile unsigned worker_count;
 static completion_t worker_ready;
@@ -96,8 +99,12 @@ static void console_task(void) {
         if (c < 0) { proc_sleep_until(timer_get_ticks() + 1U); continue; }
         if (c == '\r' || c == '\n') {
             uart_putc('\n'); line[len] = 0;
-            if (!strcmp(line, "help"))
+            if (!strcmp(line, "help")) {
                 printf("help info heap ticks tasks test reboot\n");
+#ifdef CONFIG_MCU_DRIVER_MODEL
+                printf("drivers devs gpio adc pwm i2c spi\n");
+#endif
+            }
             else if (!strcmp(line, "info"))
                 printf("board=%s arch=%s mode=M RV32IMC NOMMU trusted-kernel-tasks\n", current_board->name, ARCH_NAME);
             else if (!strcmp(line, "heap"))
@@ -108,6 +115,9 @@ static void console_task(void) {
                 printf("console pid=%d worker-count=%u\n", proc_current()->pid, worker_count);
             else if (!strcmp(line, "test")) selftest();
             else if (!strcmp(line, "reboot")) firmware_reboot();
+#ifdef CONFIG_MCU_DRIVER_MODEL
+            else if (mcu_driver_shell(line)) { }
+#endif
             else if (len) printf("unknown command: %s\n", line);
             len = 0; printf("a20> ");
         } else if (c == 8 || c == 127) {
@@ -135,6 +145,11 @@ void kernel_main(void) {
     advance(BOOT_PHASE_MEMORY, BOOT_PHASE_DEVICES);
     preempt_state_init(0);
     proc_init();
+#ifdef CONFIG_MCU_DRIVER_MODEL
+    driver_core_init();
+    if (current_board->enumerate_devices)
+        current_board->enumerate_devices();
+#endif
     completion_init(&worker_ready);
     if (proc_alloc(worker) < 0 || proc_alloc(console_task) < 0)
         panic("MCU boot: cannot allocate tasks");
