@@ -62,8 +62,9 @@ Documented limits:
 * Message queues are FIFO; `msg_prio` is accepted and ignored.
 * The POSIX backend implements `osKernelLock` as a recursive mutex; a
   blocking call inside the lock is still an application error.
-* The initial thread has no handle and cannot be the target of another
-  thread's inheritance donation.  It can still set/query its own priority.
+* The initial thread installs its own handle at `osKernelInitialize()`
+  (`task_self`), so it can be the target of another thread's inheritance
+  donation as well as setting/querying its own priority.
 * `osThreadSetPriority` returns `osError` while the target is executing a
   donation: the kernel's saved base snapshot cannot be rewritten without
   losing the restore point.
@@ -138,12 +139,12 @@ Profiles:
 | Profile | Object families | Syscalls |
 |---|---|---|
 | `full` | all | all (mirrors the master table) |
-| `mcu` | thread, mutex, semaphore, timer, event flags, message queue | 14 |
+| `mcu` | thread, mutex, semaphore, timer, event flags, message queue | 15 |
 | `mcu-min` | thread, semaphore, timer (no join/terminate/priority control) | 9 |
 
 Measured library text for the Native backend, riscv32imc/ilp32, `-Os`
-(`-ffunction-sections`, before link GC): `full` 12.2 KiB, `mcu` 11.6 KiB,
-`mcu-min` 10.3 KiB.
+(`-ffunction-sections`, before link GC): `full` 12.5 KiB, `mcu` 11.8 KiB,
+`mcu-min` 10.6 KiB.
 
 A family compiled out keeps its entry points (they return `osErrorResource`),
 so an application built against the full header links against every profile;
@@ -185,7 +186,7 @@ tools/a20 test qemu-riscv32-mcu
 # [4.2] PASS taken=5 produced=5
 # [4.3] PASS once=1 periodic=12
 # [4.4] PASS irq=5
-# [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1
+# [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1 init=1
 # [DEMO] experiments 4.1-4.5: PASS
 ```
 

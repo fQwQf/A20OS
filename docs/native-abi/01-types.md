@@ -650,7 +650,7 @@ Linux 的 `sched_setparam`/`sched_getparam`/`sched_setscheduler`/`sched_getsched
 
 `A20_SCHED_DONATE`/`A20_SCHED_UNDONATE` 是 `task_set_sched` 的内部操作：`DONATE` 把目标提升到至少 `priority` 并在首次捐赠时保存 base 策略/优先级/nice；`priority` 为 0 时使用调用者当前的有效 RT 优先级（链式捐赠）；`UNDONATE` 恢复该快照。它们是内核 RT PI 的 ABI，不是普通应用设置优先级的方式。
 
-`task` 为 `A20_HANDLE_NULL` 时表示调用者自己（仅 set/get；捐赠仍需要目标 handle）。
+`task` 为 `A20_HANDLE_NULL` 时表示调用者自己（仅 set/get；捐赠仍需要目标 handle）。没有创建者发放 handle 的初始线程可以调用 `task_self` 在自己的句柄表里安装一个，用于 PI 目标或跨线程查询。
 
 ### sched_lock — per-task 调度器锁
 

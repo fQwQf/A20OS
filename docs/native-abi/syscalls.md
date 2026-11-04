@@ -521,6 +521,7 @@ A20 Native ABI 采用十六进制高位分区（Class），稳定系统调用严
 | 0x0213 | `A20_SYS_task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 结构体/指针 | 按 handle manifest 克隆当前 task 并安装句柄 |
 | 0x0214 | `A20_SYS_execve` | `int64_t execve(const char *path, char **argv, char **envp)` | 结构体/指针 | 原地替换当前 task 的映像，成功不返回 |
 | 0x0219 | `A20_SYS_sched_lock` | `int64_t sched_lock(int32_t mode, int32_t depth)` | 纯标量 | per-task 调度器锁（osKernelLock）：0 获取/1 释放/2 恢复深度；返回操作前深度；需要 `CAP_SYS_NICE` |
+| 0x021A | `A20_SYS_task_self` | `int64_t task_self(void)` | 无参数 | 在当前 task 的句柄表中安装并返回自己的 THREAD handle；用于初始线程的 PI/优先级查询 |
 | 0x0216 | `A20_SYS_task_adopt` | `int64_t task_adopt(const a20_handle_t handles[6])` | 纯标量 | 接管当前 task 的 stdio/root/cwd/self 句柄，顺序固定 |
 | 0x0217 | `A20_SYS_task_checkpoint` | `int64_t task_checkpoint(int pid, const char *path, uint32_t path_len, uint32_t flags)` | 标量+指针 | 冻结单线程 task 并序列化寄存器/地址空间/fd 表为 A20CKPT1 镜像（见 docs/kernel/kexec-hot-update.md） |
 | 0x0218 | `A20_SYS_task_restore` | `int64_t task_restore(const char *path, uint32_t path_len)` | 标量+指针 | restore-as-exec：以检查点镜像替换当前 task，成功不返回 |

@@ -46,6 +46,10 @@ int os_core_init(void)
 
     os_thread_registry_add(&g_main_thread);
     osb_thread_set_self(&g_main_thread);
+    /* The initial thread has no creator to hand it a handle.  Install one so
+     * a mutex waiter can boost it (PI) and osThreadGet/SetPriority work. */
+    if (os_current_thread() == &g_main_thread)
+        (void)osb_thread_self_handle(&g_main_thread);
     g_state = osKernelReady;
     return 0;
 }

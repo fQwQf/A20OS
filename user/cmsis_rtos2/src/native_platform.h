@@ -28,6 +28,7 @@ enum osn_call {
     OSN_TASK_SET_SCHED,
     OSN_TASK_GET_SCHED,
     OSN_SCHED_LOCK,
+    OSN_TASK_SELF,
     OSN_HANDLE_CLOSE,
     OSN_FUTEX_WAIT,
     OSN_FUTEX_WAKE,
@@ -84,6 +85,8 @@ int      osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
                             int32_t priority, uint32_t affinity);
 int      osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority);
 int      osn_sched_lock(int32_t mode, int32_t depth);
+/* A handle for the calling thread, installed in its shared table. */
+int      osn_thread_self_handle(void **out_handle);
 int      osn_handle_close(void *handle);
 
 /* Futex word wait/wake; timeout is relative nanoseconds (0 = no wait,

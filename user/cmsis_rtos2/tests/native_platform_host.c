@@ -27,8 +27,8 @@ static unsigned g_calls[OSN_CALL_COUNT];
 static const char *const g_call_names[OSN_CALL_COUNT] = {
     "clock_get", "vm_alloc", "thread_create", "thread_exit",
     "thread_sleep", "thread_yield", "task_kill",
-    "task_set_sched", "task_get_sched", "sched_lock", "handle_close",
-    "futex_wait", "futex_wake",
+    "task_set_sched", "task_get_sched", "sched_lock", "task_self",
+    "handle_close", "futex_wait", "futex_wake",
     "atomic32",
 };
 
@@ -211,6 +211,13 @@ int osn_sched_lock(int32_t mode, int32_t depth)
         host_depth = depth > 0 ? depth : 0;
     }
     return previous;
+}
+
+int osn_thread_self_handle(void **out_handle)
+{
+    g_calls[OSN_TASK_SELF]++;
+    (void)out_handle;
+    return -1;   /* the host does not need a kernel self handle */
 }
 
 int osn_handle_close(void *handle)
