@@ -29,6 +29,12 @@ SECTIONS {
         . = ALIGN(4);
     } > FLASH
 
+    .driver_init : {
+        __driver_init_start = .;
+        KEEP(*(.driver_init))
+        __driver_init_end = .;
+    } > FLASH
+
     .rodata : {
         *(.rodata .rodata.* .srodata .srodata.*)
         . = ALIGN(16);

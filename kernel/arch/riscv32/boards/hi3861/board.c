@@ -185,12 +185,15 @@ void riscv_mcu_reboot(void) {
     arch_halt();
 }
 
+void hi3861_enumerate_devices(void);
+
 static const board_config_t board = {
     .name = "hi3861",
     .ram_base = PHYS_MEMORY_BASE,
     .ram_end = PHYS_MEMORY_END,
     .early_init = early_init,
     .reboot = riscv_mcu_reboot,
+    .enumerate_devices = hi3861_enumerate_devices,
 };
 
 const board_config_t *const current_board = &board;
