@@ -41,6 +41,7 @@
 #define A20_SYS_thread_yield 0x0208
 #define A20_SYS_task_set_sched 0x0209
 #define A20_SYS_task_get_sched 0x020A
+#define A20_SYS_sched_lock 0x0219
 #define A20_SYS_task_get_limits 0x020B
 #define A20_SYS_task_set_limits 0x020C
 #define A20_SYS_task_get_usage 0x020D

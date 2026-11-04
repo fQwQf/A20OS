@@ -237,6 +237,34 @@ static task_t *rt_node_task(proc_rt_node_t *node)
     return (task_t *)((char *)node - offsetof(task_t, rt_node));
 }
 
+#ifdef CONFIG_MCU
+/*
+ * A20OS MCU images are dedicated RTOS images: there is no general-purpose
+ * work class to reserve CPU for.  The hosted 5%-per-second RT budget exists
+ * to stop a runaway SCHED_FIFO task from starving the desktop, but applied to
+ * a CMSIS-RTOS2 application it would silently suspend the highest-priority
+ * thread for up to 50 ms every second -- exactly the guarantee CMSIS asks for
+ * and a missed deadline for any control loop.  Keep the accounting out of the
+ * MCU dispatch path and use the plain pick-and-unlink primitive instead.
+ */
+static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
+{
+    (void)rq;
+    (void)now;
+    return 0;
+}
+
+static task_t *sched_rt_controller_pick_locked(proc_runq_t *rq, uint64_t now,
+                                               int *throttled_out)
+{
+    (void)now;
+    *throttled_out = 0;
+    proc_rt_node_t *node = NULL;
+    if (a20_rt_take_best(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS, &node) != 1)
+        return NULL;
+    return rt_node_task(node);
+}
+#else
 static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
 {
     task_t *current = proc_current();
@@ -274,6 +302,7 @@ static task_t *sched_rt_controller_pick_locked(proc_runq_t *rq, uint64_t now,
               arch_current_cpu_id(), flags);
     return rt_node_task(node);
 }
+#endif
 
 static int sched_rt_throttled_local(void)
 {
@@ -886,6 +915,85 @@ invalid:
     return -EINVAL;
 }
 
+/* ================================================================
+ * RT priority inheritance
+ *
+ * The user-space personality decides *when* a donation is needed (a mutex
+ * waiter blocking on an owner).  The scheduler owns the donation itself:
+ * the maximum requested priority, the base snapshot, and the restore.  This
+ * is the RT counterpart of the EEVDF PI weight above, and it deliberately
+ * reuses proc_sched_set() so a READY owner is re-keyed through exactly the
+ * same detach/re-enqueue path as any other priority change.
+ * ================================================================ */
+
+int proc_sched_rt_donate(task_t *t, int priority)
+{
+    if (!t || priority < 1 || priority > 99)
+        return -EINVAL;
+
+    uint64_t flags = spin_lock_irqsave(&t->pi_lock);
+    if (!t->pi_boosted) {
+        proc_sched_config_t base;
+        if (proc_sched_get(t, &base) != 0) {
+            spin_unlock_irqrestore(&t->pi_lock, flags);
+            return -EINVAL;
+        }
+        t->pi_saved_policy = base.policy;
+        t->pi_saved_priority = base.priority;
+        t->pi_saved_nice = base.nice;
+        t->pi_saved_reset_on_fork = base.reset_on_fork;
+        t->pi_boosted = 1;
+        t->pi_rt_priority = 0;
+    }
+
+    int effective = sched_policy_rt_value(t->sched_policy) ? t->priority : 0;
+    if (priority <= effective || (uint32_t)priority <= t->pi_rt_priority) {
+        spin_unlock_irqrestore(&t->pi_lock, flags);
+        return 0;
+    }
+
+    proc_sched_config_t config = {
+        .fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY,
+        .policy = SCHED_FIFO,
+        .priority = priority,
+        .reset_on_fork = t->sched_reset_on_fork,
+    };
+    int rc = proc_sched_set(t, &config);
+    if (rc == 0)
+        t->pi_rt_priority = (uint32_t)priority;
+    else if (t->pi_rt_priority == 0)
+        t->pi_boosted = 0;   /* no donation was applied; drop the snapshot */
+    spin_unlock_irqrestore(&t->pi_lock, flags);
+    return rc;
+}
+
+int proc_sched_rt_restore(task_t *t)
+{
+    if (!t)
+        return -EINVAL;
+
+    uint64_t flags = spin_lock_irqsave(&t->pi_lock);
+    if (!t->pi_boosted) {
+        spin_unlock_irqrestore(&t->pi_lock, flags);
+        return 0;
+    }
+
+    proc_sched_config_t config = {
+        .fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY | PROC_SCHED_NICE,
+        .policy = t->pi_saved_policy,
+        .priority = t->pi_saved_priority,
+        .nice = t->pi_saved_nice,
+        .reset_on_fork = t->pi_saved_reset_on_fork,
+    };
+    int rc = proc_sched_set(t, &config);
+    if (rc == 0) {
+        t->pi_boosted = 0;
+        t->pi_rt_priority = 0;
+    }
+    spin_unlock_irqrestore(&t->pi_lock, flags);
+    return rc;
+}
+
 unsigned proc_sched_select_cpu(task_t *t)
 {
     unsigned current = cpu_current_id();
@@ -1091,8 +1199,47 @@ int proc_sched_safe_point(void)
     if (cpu >= CONFIG_NR_CPUS ||
         !__atomic_load_n(&sched_cpu[cpu].need_resched, __ATOMIC_ACQUIRE))
         return 0;
+    /* osKernelLock(): a pending reschedule is deferred until the task drops
+     * its last lock level.  The request survives in need_resched. */
+    task_t *cur = proc_current();
+    if (cur && cur->sched_lock_depth)
+        return 0;
     proc_yield();
     return 1;
+}
+
+int proc_sched_lock_set(int mode, int depth)
+{
+    task_t *cur = proc_current();
+    if (!cur)
+        return -EINVAL;
+
+    uint64_t flags = arch_irq_save();
+    int previous = (int)cur->sched_lock_depth;
+    int next;
+    switch (mode) {
+    case PROC_SCHED_LOCK_ACQUIRE:
+        next = previous + 1;
+        break;
+    case PROC_SCHED_LOCK_RELEASE:
+        next = previous > 0 ? previous - 1 : 0;
+        break;
+    case PROC_SCHED_LOCK_RESTORE:
+        next = depth > 0 ? depth : 0;
+        break;
+    default:
+        arch_irq_restore(flags);
+        return -EINVAL;
+    }
+    cur->sched_lock_depth = (uint32_t)next;
+    arch_irq_restore(flags);
+
+    /* Dropping the last level is the release point: run the safe point here
+     * so the deferred higher-priority task starts before the unlock syscall
+     * returns to the caller. */
+    if (previous != 0 && next == 0)
+        (void)proc_sched_safe_point();
+    return previous;
 }
 
 /*
@@ -1134,6 +1281,8 @@ void kernel_preempt_at_irq_return(void)
     if (!cur || cur->pid == 0 || cur == proc_idle_task())
         return;
     if (cur->state != PROC_RUNNING)
+        return;
+    if (cur->sched_lock_depth)
         return;
     /*
      * A task freshly published by context_switch_locked() has not run

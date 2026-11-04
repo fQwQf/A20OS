@@ -40,7 +40,16 @@ typedef struct proc_rt_bucket {
 } proc_rt_bucket_t;
 
 #ifdef CONFIG_MCU
-#define PROC_RT_PRI_LEVELS 8
+/*
+ * The MCU profile cannot afford the hosted 100-bucket array, but 8 was too
+ * coarse for CMSIS-RTOS2: that API exposes osPriorityLow(8) through
+ * osPriorityRealtime7(55), and a20_rt_priority_slot() truncates anything at
+ * or above `levels`.  With 8 levels every CMSIS priority >= 7 collapsed into
+ * one FIFO bucket.  64 keeps each CMSIS level distinct (two bitmap words,
+ * 512 bytes of buckets on the single MCU CPU) while still reserving 64..99
+ * for Native applications.
+ */
+#define PROC_RT_PRI_LEVELS 64
 #else
 #define PROC_RT_PRI_LEVELS 100
 #endif
@@ -619,6 +628,21 @@ typedef struct task_t {
      * every trap.  Appended to preserve all existing task_t offsets. */
     uint64_t           arch_tls_fs_base;
     uint64_t           arch_tls_gs_base;
+    /* Appended so every existing task_t offset (including assembly-visible
+     * context fields) is unchanged. */
+    /* RT priority inheritance (CMSIS-RTOS2 / any fixed-priority personality).
+     * Owned by the scheduler so the donation, its base snapshot and restore
+     * are one implementation instead of per-library user-space state. */
+    spinlock_t         pi_lock;          /* serializes donate/restore per task */
+    uint32_t           pi_boosted;       /* base saved in pi_saved_* */
+    uint32_t           pi_rt_priority;   /* highest donated RT priority, 0 = none */
+    int                pi_saved_policy;
+    int                pi_saved_priority;
+    int                pi_saved_nice;
+    int                pi_saved_reset_on_fork;
+    /* Per-task scheduler lock (osKernelLock).  While non-zero, the IRQ and
+     * syscall preemption points defer a pending reschedule. */
+    uint32_t           sched_lock_depth;
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&
@@ -754,6 +778,25 @@ int      proc_sched_get(task_t *t, proc_sched_config_t *out);
  * requires IRQs enabled and no spinlock/hardirq context; migration is only
  * published after the old kernel stack has stopped executing. */
 int      proc_sched_set(task_t *t, const proc_sched_config_t *config);
+/*
+ * RT priority inheritance.  donate() raises t to at least `priority` and
+ * snapshots its base scheduling attributes on the first donation; restore()
+ * puts the snapshot back.  Both are scheduler-owned so every personality
+ * (CMSIS-RTOS2, vendor HALs) shares the same donation/restore path.
+ */
+int      proc_sched_rt_donate(task_t *t, int priority);
+int      proc_sched_rt_restore(task_t *t);
+/*
+ * Per-task scheduler lock used by osKernelLock().  mode is one of
+ * PROC_SCHED_LOCK_ACQUIRE / RELEASE / RESTORE; returns the previous depth.
+ * Releasing to zero consumes a pending reschedule through the normal safe
+ * point.  Interrupts still run; a blocking call while locked is an
+ * application error, as in CMSIS-RTOS2.
+ */
+#define PROC_SCHED_LOCK_ACQUIRE 0
+#define PROC_SCHED_LOCK_RELEASE 1
+#define PROC_SCHED_LOCK_RESTORE 2
+int      proc_sched_lock_set(int mode, int depth);
 int      proc_sched_priority_range(int policy, int *min, int *max);
 uint32_t proc_sched_effective_affinity(task_t *t);
 void     sched(void);

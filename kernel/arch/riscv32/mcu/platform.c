@@ -39,10 +39,14 @@ void riscv_mcu_trap_handler(uint32_t *frame) {
         int handled = riscv_mcu_irq_dispatch(cause & CAUSE_CODE_MASK);
         if (!handled) proc_sched_tick(0);
         hardirq_exit();
-        if (!handled) {
-            if (ctx->sstatus & (1U << 7)) kernel_preempt_at_irq_return();
-            return;
-        }
+        /*
+         * A handled IRQ can wake a higher-priority thread just as the timer
+         * can (the CMSIS 4.4 vendor dispatcher is the obvious case).  Run the
+         * same IRQ-return preemption point for both; it already refuses when
+         * preemption is not allowed.
+         */
+        if (ctx->sstatus & (1U << 7)) kernel_preempt_at_irq_return();
+        return;
     }
     if ((cause & CAUSE_CODE_MASK) == CAUSE_ECALL_U) {
 #ifdef CONFIG_MCU_NATIVE_PROGRAM

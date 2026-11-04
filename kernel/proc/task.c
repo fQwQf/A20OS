@@ -183,6 +183,15 @@ void proc_task_init_base(task_t *t, task_t *parent)
     t->eevdf_last_account = 0;
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
     t->sched_reset_on_fork = 0;
+    t->pi_boost_weight = 0;
+    t->pi_boosted = 0;
+    t->pi_rt_priority = 0;
+    t->pi_saved_policy = SCHED_NORMAL;
+    t->pi_saved_priority = 0;
+    t->pi_saved_nice = 0;
+    t->pi_saved_reset_on_fork = 0;
+    spin_init(&t->pi_lock);
+    t->sched_lock_depth = 0;
     t->fault_storm_pc = 0;
     t->fault_storm_va = 0;
     t->fault_storm_cause = 0;

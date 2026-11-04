@@ -13,9 +13,27 @@
 int64_t sys_a20_thread_create(const a20_syscall_args_t *args) {
     a20_thread_create_args_t *uargs = (void *)(uintptr_t)A20_ARG(0);
     a20_thread_create_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    /*
+     * E-APPEND: v1 callers pass the 56-byte structure that predates the
+     * scheduling fields.  Accept it and zero-pad; only a structure that
+     * covers the original layout may be used.
+     */
+    if (a20_validate_struct_header(uargs, A20_THREAD_CREATE_V1_SIZE, 1) < 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+    uint32_t user_size;
+    if (copy_from_user(&user_size, uargs, sizeof(user_size)) < 0)
+        return -A20_ERR_FAULT;
+    memset(&kargs, 0, sizeof(kargs));
+    uint32_t copy_n = user_size < sizeof(kargs) ? user_size
+                                                : (uint32_t)sizeof(kargs);
+    if (copy_from_user(&kargs, uargs, copy_n) < 0)
+        return -A20_ERR_FAULT;
+
     if (!kargs.entry || !kargs.stack_base || !kargs.stack_size ||
         (kargs.flags & ~A20_THREAD_CREATE_JOINABLE) ||
+        (kargs.sched_flags &
+         ~(uint32_t)(A20_SCHED_POLICY | A20_SCHED_PRIORITY)) ||
         kargs.entry > UINTPTR_MAX || kargs.arg > UINTPTR_MAX ||
         kargs.stack_base > UINTPTR_MAX || kargs.stack_size > SIZE_MAX ||
         kargs.tls_base > UINTPTR_MAX || kargs.stack_size > kargs.stack_base)
@@ -39,6 +57,25 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args) {
     if (!child) {
         proc_free_pid(pid);
         return -A20_ERR_NO_MEMORY;
+    }
+    /*
+     * Apply scheduling before the child is published.  A CMSIS-RTOS2 thread
+     * must never take a single step at the creator's priority: doing this
+     * after proc_publish_deferred_task() would leave exactly that window.
+     */
+    if (kargs.sched_flags) {
+        proc_sched_config_t config = {
+            .fields = kargs.sched_flags,
+            .policy = kargs.sched_policy,
+            .priority = kargs.sched_priority,
+        };
+        int sr = proc_sched_set(child, &config);
+        if (sr < 0) {
+            proc_free_pid(pid);
+            proc_put(child);
+            return sr == -EPERM ? -A20_ERR_ACCESS
+                                : -A20_ERR_INVALID_ARGUMENT;
+        }
     }
     int64_t h = a20_handle_install_task(
         ht, child, A20_OBJ_THREAD,

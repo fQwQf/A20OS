@@ -505,7 +505,21 @@ typedef struct a20_thread_create_args {
     uint64_t       tls_base;
     uint32_t       flags;
     a20_handle_t   out_thread;
+    /*
+     * Optional v1 append (E-APPEND): the original 56-byte structure stays
+     * valid because the kernel accepts a size that covers it.  When
+     * sched_flags is non-zero the child gets these attributes before it is
+     * published, so it never runs once at the creator's priority.
+     * Supported bits: A20_SCHED_POLICY | A20_SCHED_PRIORITY.
+     */
+    uint32_t       sched_flags;
+    int32_t        sched_policy;    /* SCHED_NORMAL(0) / SCHED_FIFO(1) / SCHED_RR(2) */
+    int32_t        sched_priority;  /* 1..99 when the policy is RT */
+    uint32_t       reserved0;
 } a20_thread_create_args_t;
+
+/* The pre-append layout, used as the minimum accepted size. */
+#define A20_THREAD_CREATE_V1_SIZE 56U
 
 typedef struct a20_sched_args {
     uint32_t       size;
@@ -523,6 +537,18 @@ typedef struct a20_sched_args {
 #define A20_SCHED_PRIORITY (1U << 1)
 #define A20_SCHED_AFFINITY (1U << 2)
 #define A20_SCHED_NICE     (1U << 3)
+/* task_set_sched-only operations: priority inheritance donation/restore. */
+#define A20_SCHED_DONATE   (1U << 4)
+#define A20_SCHED_UNDONATE (1U << 5)
+/* sched_lock modes. */
+#define A20_SCHED_LOCK_ACQUIRE 0
+#define A20_SCHED_LOCK_RELEASE 1
+#define A20_SCHED_LOCK_RESTORE 2
+
+/* a20_sched_args_t.policy and a20_thread_create_args_t.sched_policy values. */
+#define A20_SCHED_NORMAL   0
+#define A20_SCHED_FIFO     1
+#define A20_SCHED_RR       2
 
 typedef struct a20_rlimit_args {
     uint32_t       size;
