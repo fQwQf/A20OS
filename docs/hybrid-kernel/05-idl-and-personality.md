@@ -1,6 +1,6 @@
 # Native 服务 IDL 与 Linux 人格层
 
-已按 2026-10 的 IDL、生成器、协议 wrapper 和 personality 头核对。`make check-a20-idl` 在本次改动前的基线工作树上通过；本次未运行 smoke，也未做真实 peer 互通验证。
+本文档规范 Native 微内核服务接口定义语言（IDL）、通信桩代码生成与 Linux 人格层映射协议。
 
 ## 1. IDL 语言规范
 
@@ -48,7 +48,7 @@ interface <名字> version <N> {
 
 ### 1.3 wire 布局语义
 
-**这是两件不同的事，不要混为一谈。**
+**编码格式与结构体内存布局具有明确区分：**
 
 *codec（byte-wise）就是 wire 格式*：字段为固定宽度整数、小端编码（有符号类型为二补码），按声明顺序紧凑排列、无 padding，消息长度等于各字段宽度之和。生成头把这些数字写成 `A20_IDL_<消息>_WIRE_SIZE` 与 `A20_IDL_<消息>_OFF_<字段>`，`a20_idl_<消息>_encode/decode` 严格按这些偏移逐字节读写。标量 helpers 是 shift-or 而不是 memcpy，字节序是写下来的，不是从目标继承的。
 
@@ -85,12 +85,8 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 ### 1.5 版本化规则
 
 - 接口版本 `N` 增加表示 wire 语义变化；接收端用 `A20_SERVICES_IDL_VERSION` 与信封 `version` 比对；
-- 数据面（echod/rtcd/ufsd）只做严格相等校验：`version != 1` 或 `size != 收到长度` 即丢弃，
-  不解析负载、不回复；
-- `SVCMGR_VERSION_NEGOTIATE`/`REP_VERSION_NEGOTIATE` 是控制面的动态协商：客户端发送自己支持的
-  `[min,max]` 区间，服务端在交集里选取并回 ACK；没有交集时回 `NO_COMMON`，区间非法时回
-  `INVALID_RANGE`。ACK 必须精确匹配 nonce、类型、信封版本、长度和状态；任何不一致（包括未知
-  status、未知 reply type、尾随字节、legacy echo 不覆盖 v1）都拒绝，绝不回退到 legacy；
+- 数据面（echod/rtcd/ufsd）只做严格相等校验：`version != 1` 或 `size != 收到长度` 即丢弃，不解析负载、不回复；
+- `SVCMGR_VERSION_NEGOTIATE`/`REP_VERSION_NEGOTIATE` 是控制面的动态协商：客户端发送自己支持的`[min,max]` 区间，服务端在交集里选取并回 ACK；没有交集时回 `NO_COMMON`，区间非法时回`INVALID_RANGE`。ACK 必须精确匹配 nonce、类型、信封版本、长度和状态；任何不一致（包括未知 status、未知 reply type、尾随字节、legacy echo 不覆盖 v1）都拒绝，绝不回退到 legacy；
 - legacy 回退只在服务端把请求原样回显、且客户端自己也支持 v1 时成立；
 - 各消息族的未知值契约是明确的，不靠相邻分支推断：
 

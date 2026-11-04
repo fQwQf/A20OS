@@ -1,10 +1,6 @@
 # 快速上手（Quickstart）
 
-最后核实：2026-08-27。
-
-所有命令在项目根目录执行。首次使用只需记得三个入口：
-`make pkgs`（打包）→ `make pkg-repo`（建仓库）→ `make image-world`（组镜像），
-而 `image-world` 会自动带上前两者，所以最常用的就是最后一条。
+所有命令在项目根目录执行。首次使用只需记得三个入口：`make pkgs`（打包）→ `make pkg-repo`（建仓库）→ `make image-world`（组镜像），而 `image-world` 会自动带上前两者，所以最常用的就是最后一条。
 
 ## 一分钟跑通
 
@@ -21,8 +17,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base PKG_ALPINE=0
 #   build/images/base-riscv64.img       ext4 rootfs 镜像
 ```
 
-首次运行会自动生成本地开发签名密钥 `build/keys/a20os-dev.rsa`
-（在 `.gitignore` 覆盖的 `build/` 下，不会被提交）。
+首次运行会自动生成本地开发签名密钥 `build/keys/a20os-dev.rsa`（在 `.gitignore` 覆盖的 `build/` 下，不会被提交）。
 
 ## 常用命令
 
@@ -39,9 +34,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base PKG_ALPINE=0
 
 ## 加一个用户软件（vim/git 等）
 
-绝大多数用户软件不需要写 recipe：Alpine 上游已经有 apk 包，在 world 清单里
-加一行包名即可。`user/extra.mk` 与源码构建的 extra 路径已删除，
-`extra-user-apps` / `extra-img` / `run-*-extra` 只会报错并告诉你替代命令。
+绝大多数用户软件不需要写 recipe：Alpine 上游已经有 apk 包，在 world 清单里加一行包名即可。`user/extra.mk` 与源码构建的 extra 路径已删除，`extra-user-apps` / `extra-img` / `run-*-extra` 只会报错并告诉你替代命令。
 
 ```bash
 $EDITOR packages/world/devel.world     # 追加一行，例如 vim / git / gcc
@@ -49,8 +42,7 @@ make ARCH=riscv64 image-world PKG_WORLD=devel    # 重新组镜像
 make ARCH=riscv64 run-world  PKG_WORLD=devel    # 组镜像并在 QEMU 验证
 ```
 
-仍然从源码构建的用户程序只有两个：新增的 `user/cmds/` 程序，和必须进 FAT32
-根的 fastfetch。详见 [distro/source-software-porting.md](../distro/source-software-porting.md)。
+仍然从源码构建的用户程序只有两个：新增的 `user/cmds/` 程序，和必须进 FAT32 根的 fastfetch。详见 [distro/source-software-porting.md](../distro/source-software-porting.md)。
 
 ## 在桌面内使用 apk
 
@@ -64,12 +56,9 @@ tree --version
 apk del tree
 ```
 
-上述更新、安装、执行、删除和触发脚本已在 x86_64 A20OS 内实测。包安装成功
-并不表示包内所有程序都兼容 A20OS；新增软件仍需验证其系统调用、图形和音频
-依赖。当前未验证完整系统 `apk upgrade`。
+上述更新、安装、执行、删除和触发脚本已在 x86_64 A20OS 内实测。包安装成功并不表示包内所有程序都兼容 A20OS；新增软件仍需验证其系统调用、图形和音频依赖。当前未验证完整系统 `apk upgrade`。
 
-旧镜像不会因为源码 world 改动而自动获得 apk 或新应用，需要重新组装。新增
-桌面软件与架构差异见 [测试记录](../status/history/desktop-apps-apk-2026-10-23.md)。
+旧镜像不会因为源码 world 改动而自动获得 apk 或新应用，需要重新组装。新增桌面软件与架构差异见 [测试记录](../status/history/desktop-apps-apk-2026-10-23.md)。
 
 ## 在容器里构建（与 CI 完全相同的环境）
 

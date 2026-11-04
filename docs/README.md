@@ -1,13 +1,10 @@
 # A20OS 文档首页
 
-1.0 开发与范围决策以 [1.0 计划](releases/v1.0.md) 为入口：完成已承诺的子系统功能并验证稳定性；在共享状态、争用和复杂生命周期等确有收益的职责中使用 Rust，保留合理的 C 与硬件机制边界；LoongArch32/PPC64LE 退出支持。功能与性能验收要求见 [验收计划](releases/v1.0-validation.md)。
-这些是发布要求，不能引用为当前已实现能力；早期阶段边界不豁免 1.0 验收。
+欢迎查阅 A20OS 设计与开发技术文档。系统 1.0 范围与技术决策见 [1.0 计划](releases/v1.0.md) 与 [验收计划](releases/v1.0-validation.md)。
 
-第一次运行：按 [构建与运行指南](dev/build.md#首次运行linux--risc-v-64) 获取完整子模块、
-安装单架构依赖与固定 Rust，运行 `python3 tools/check_quickstart.py`，再执行
-`tools/a20 run qemu-riscv64 -- -j4`。进入 shell 后用 `poweroff` 退出；
-`make -j4 smoke-quickstart` 自动验收 shell、外部命令和正常关机。
-根目录 `make all` 是双架构发布构建。了解系统架构可继续阅读 [OS-Design.md](OS-Design.md)，启动与硬件发现接口见 [启动模型](dev/boot-model.md)。
+- **首次体验与快速开始**：推荐阅读 [构建与运行指南](dev/build.md#首次运行linux--risc-v-64)，按步骤准备环境并通过 `tools/a20 run qemu-riscv64 -- -j4` 启动 RISC-V 64 交互系统。进入 shell 后输入 `poweroff` 正常关机。
+- **系统架构概览**：阅读 [architecture.md](architecture.md) 了解混合内核设计、双 ABI 机制以及模块划分；启动与硬件发现机制见 [启动模型](dev/boot-model.md)。
+- **文档站点**：在线文档使用 MkDocs Material 构建，本地预览可运行 `mkdocs serve` 或 `bash site/build.sh`。
 
 ---
 
@@ -15,7 +12,7 @@
 
 ## 文档范围与权威性
 
-- 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[dev/build.md](dev/build.md)、[dev/instances.md](dev/instances.md)、[kernel/process-scheduler.md](kernel/process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
+- 当前事实文档：本页、[architecture.md](architecture.md)、[dev/build.md](dev/build.md)、[dev/instances.md](dev/instances.md)、[kernel/process-scheduler.md](kernel/process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - 目录分工：根目录只放入口文档（本页、贡献指南、架构总览、测试门禁与致谢/许可声明）；`dev/` 放构建、运行、调试与外部依赖；`kernel/` 放核心内核参考（调度、内存管理、Linux ABI 细节、架构特性）；其余按子系统分目录（`drivers/`、`fs/`、`net/`、`graphics/`、`native-abi/`、`cluster/`、`hypervisor/`、`platforms/` 等）。
 - 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
 - 状态与进度文档：`status/` 是进度、已知问题、模块状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/gaps/` 是**唯一的待办与缺口台账**（完成一项删一项，清空即表示承诺范围完成），`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。文档与门禁工具的当前行为及复验入口见 [docs-gates.md](status/current/docs-gates.md)。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
@@ -26,14 +23,12 @@
 
 ## 按读者选择参考页
 
-用户操作路径只承载用途、前提、命令、可观察结果与失败语义。锁序、引用/所有权、
-内部状态与回滚机制属于技术参考页或源码注释；操作页用链接引导需要实现细节的读者。
-驱动开发教程中的寄存器与 DMA 契约、调试命令需要的参数布局属于其读者完成操作的前提。
+用户操作路径只承载用途、前提、命令、可观察结果与失败语义。锁序、引用/所有权、内部状态与回滚机制属于技术参考页或源码注释；操作页用链接引导需要实现细节的读者。驱动开发教程中的寄存器与 DMA 契约、调试命令需要的参数布局属于其读者完成操作的前提。
 
-- 运行系统：从 [构建](dev/build.md)、[实例](dev/instances.md)、[打包快速开始](packaging/quickstart.md)、[翻译器使用](exec-xlator/01-usage.md)、[虚拟机使用](hypervisor/03-usage.md)、[集群运维](cluster/10-operator-guide.md) 进入。
-- 远程页数据共享：[可配置远程内存](cluster/63-configurable-remote-memory.md) 提供显式快照和事务；普通程序跨机执行见 [透明线程执行片](cluster/64-transparent-thread-slices.md)，当前为串行交接的实验模式，尚不提供同进程多机并行加速。
-- 理解实现：阅读各子系统的技术契约；例如 [调度](kernel/process-scheduler.md)、[网络锁](net/network-lock-contract.md)、[翻译器内部](exec-xlator/03-internals.md)、[驱动运行时](drivers/guide/runtime-contracts.md)。
-- 检查文档：`make check-doc-drift` 检查源码路径、候选内容与行号范围；`mkdocs build` 构建文档站并严格检查内部链接和锚点；`make docs` 生成参考手册 PDF。依赖与聚合门禁的边界见 [文档门禁现状](status/current/docs-gates.md)。
+- 运行系统：从 [构建](dev/build.md)、[实例](dev/instances.md)、[打包快速开始](packaging/quickstart.md)、[翻译器使用](kernel/exec-xlator/01-usage.md)、[虚拟机使用](hypervisor/03-usage.md)、[集群运维](cluster/10-operator-guide.md) 进入。
+- 远程页数据共享：[可配置远程内存](cluster/runtime-ssi.md#2-可配置远程内存与页共享) 提供显式快照和事务；普通程序跨机执行见 [透明线程执行片](cluster/runtime-ssi.md#3-透明线程执行片-thread-slices)，当前为串行交接的实验模式，尚不提供同进程多机并行加速。
+- 理解实现：阅读各子系统的技术契约；例如 [调度](kernel/process-scheduler.md)、[网络锁](net/network-lock-contract.md)、[翻译器内部](kernel/exec-xlator/03-internals.md)、[驱动运行时](drivers/guide/runtime-contracts.md)。
+- 检查文档：直接执行 `make check-docs` 一键核验全站文档（包含排版换行、代码引用、MkDocs 导航 100% 覆盖率与死链/锚点检测）；`mkdocs build` 构建文档站并严格检查内部链接和锚点；`make docs` 生成参考手册 PDF。文档与门禁现状见 [文档门禁现状](status/current/docs-gates.md)。
 
 ## 文档时效性约定
 
@@ -41,7 +36,7 @@
 
 - 文档描述的是**接口与设计契约**，以 HEAD 源码为最终依据；发现文档与源码不一致时，以源码为准，并欢迎直接修正文档。
 - 单篇文档头部的"最后核实"日期表示内容在该时点与源码核对过；日期久远不等于内容失效。
-- 运行类结论不写入文档，运行产物也不随仓库保存。任何结论在作为当前事实引用前，必须按 [testing-gates.md](testing-gates.md) 的入口在**当前提交**上实际重跑；已冻结的里程碑审计快照见 [archive/](archive/)。
+- 运行类结论不写入文档，运行产物也不随仓库保存。任何结论在作为当前事实引用前，必须按 [testing-gates.md](testing-gates.md) 的入口在**当前提交**上实际重跑；已冻结的里程碑审计快照见 归档快照目录 `docs/archive/`。
 
 刚接触项目的话，下面几条路径可能用得上。
 
@@ -49,7 +44,7 @@
 
 如果你准备第一次看代码、改 bug 或者提交补丁：
 
-- [OS-Design.md](OS-Design.md)：总体架构、双重 ABI 与模块组织
+- [architecture.md](architecture.md)：总体架构、双重 ABI 与模块组织
 - [dev/instances.md](dev/instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
 - [kernel/process-scheduler.md](kernel/process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
@@ -114,48 +109,30 @@
 
 `execve` 一个外来架构（x86_64 / aarch64）的 Linux 可执行文件，内核把它改写成一次对用户态翻译器的就地 re-exec。不了解本系统的人从索引点进来可以按角色直接选入口：
 
-- [exec-xlator/README.md](exec-xlator/README.md)：机制说明与三分钟快速上手（入口页）
-- [exec-xlator/01-usage.md](exec-xlator/01-usage.md)：使用手册——三层开关、启动键与 argv 模板语法、`/proc/a20/xlator`、无交叉编译器的验证路径、排查表
-- [exec-xlator/02-integration.md](exec-xlator/02-integration.md)：接入指南——翻译器需要满足什么契约、加一个 guest 架构要改几处、Rosetta 型包装器与 Prism 型 AOT 的可行性
-- [exec-xlator/03-internals.md](exec-xlator/03-internals.md)：内核内部——形态取舍、代码地图、`xlator_*` API 契约、并发不变量、已知代价
+- [kernel/exec-xlator/README.md](kernel/exec-xlator/README.md)：机制说明与三分钟快速上手（入口页）
+- [kernel/exec-xlator/01-usage.md](kernel/exec-xlator/01-usage.md)：使用手册——三层开关、启动键与 argv 模板语法、`/proc/a20/xlator`、无交叉编译器的验证路径、排查表
+- [kernel/exec-xlator/02-integration.md](kernel/exec-xlator/02-integration.md)：接入指南——翻译器需要满足什么契约、加一个 guest 架构要改几处、Rosetta 型包装器与 Prism 型 AOT 的可行性
+- [kernel/exec-xlator/03-internals.md](kernel/exec-xlator/03-internals.md)：内核内部——形态取舍、代码地图、`xlator_*` API 契约、并发不变量、已知代价
 
 ### Linux ABI 兼容层
 
 - `kernel/abi/linux/syscall_coverage.md`：Linux syscall 的逐项兼容等级与证据（含四主线架构编号覆盖说明）
 - `kernel/abi/linux/compat_notes.md`：Linux ABI 兼容性说明（高风险 partial 区域、文件化接口、占位符决策记录）
-- [OS-Design.md](OS-Design.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
+- [architecture.md](architecture.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
 
 ### 虚拟化（hypervisor）
 
-共享 VM/vCPU 核心现有 RV64 H、RV32 H、AArch64 EL2、ARM32 HYP、AMD SVM 与
-Intel VMX 后端，多架构小载荷的双 vCPU 并行运行已验证。Intel VMX 使用 Bochs
-软件 CPU，尚无 Intel 实机验证。LoongArch LVZ 是默认关闭的实验实现，仅通过
-编译与无 LVZ 负控，没有实际 LVZ guest 执行证据。完整 OS guest 的 ELF/FDT
-装载和管理器工作流仍面向 RV64，完整 OS SMP、虚拟 GIC/APIC 和长稳尚未验收。
+共享 VM/vCPU 核心现有 RV64 H、RV32 H、AArch64 EL2、ARM32 HYP、AMD SVM 与 Intel VMX 后端，多架构小载荷的双 vCPU 并行运行已验证。Intel VMX 使用 Bochs 软件 CPU，尚无 Intel 实机验证。LoongArch LVZ 是默认关闭的实验实现，仅通过编译与无 LVZ 负控，没有实际 LVZ guest 执行证据。完整 OS guest 的 ELF/FDT 装载和管理器工作流仍面向 RV64，完整 OS SMP、虚拟 GIC/APIC 和长稳尚未验收。
 
 - [hypervisor/README.md](hypervisor/README.md)：文档导航、当前后端与验收边界。
-- [hypervisor/03-usage.md](hypervisor/03-usage.md)：依赖、构建、QEMU / Bochs、
-  bootargs、日志判据、用户态最小 guest、VMM/SMP 调用顺序和故障排查。
-- [hypervisor/08-multiarch-backends.md](hypervisor/08-multiarch-backends.md)：
-  各后端 guest 模式、页表、寄存器与设备边界。
-- [hypervisor/09-smp-validation.md](hypervisor/09-smp-validation.md)：实际运行
-  矩阵、复现命令、SMP 方法及镜像/日志哈希清单。
-- [status/current/hypervisor-implementation-status.md](status/current/hypervisor-implementation-status.md)：
-  当前实现、完整 guest 场景和未完成项。
-- [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)、
-  [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：RV64
-  命名实例、磁盘与控制台隔离、双 guest 管理及控制协议。
-- [hypervisor/00-design.md](hypervisor/00-design.md)、
-  [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)、
-  [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)、
-  [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：基础设计、
-  历史阶段与后续平台目标，以当前使用指南和运行记录为状态依据。
+- [hypervisor/03-usage.md](hypervisor/03-usage.md)：依赖、构建、QEMU / Bochs、 bootargs、日志判据、用户态最小 guest、VMM/SMP 调用顺序和故障排查。
+- [hypervisor/08-multiarch-backends.md](hypervisor/08-multiarch-backends.md)：各后端 guest 模式、页表、寄存器与设备边界。
+- [hypervisor/09-smp-validation.md](hypervisor/09-smp-validation.md)：实际运行矩阵、复现命令、SMP 方法及镜像/日志哈希清单。
+- [status/current/hypervisor-implementation-status.md](status/current/hypervisor-implementation-status.md)：当前实现、完整 guest 场景和未完成项。
+- [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)、[hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：RV64 命名实例、磁盘与控制台隔离、双 guest 管理及控制协议。
+- [hypervisor/00-design.md](hypervisor/00-design.md)、[hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)、[hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)、[hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：基础设计、历史阶段与后续平台目标，以当前使用指南和运行记录为状态依据。
 
-多架构运行入口为 `python3 tools/check_hyp_multiarch.py --arch ARCH --cpus 2
---build`，VMX 另用 Bochs runner。旧 `smoke-hyp-*` 门禁保留 RV64 完整 guest
-场景覆盖；不能将多架构小载荷通过等同于这些完整 guest 场景全部通过。
-Native 与 Linux 扩展 ABI 共享内核核心，但编号、handle 和权限包装各自独立；
-当前没有 A20 `/dev/kvm` 兼容层。
+多架构运行入口为 `python3 tools/check_hyp_multiarch.py --arch ARCH --cpus 2 --build`，VMX 另用 Bochs runner。旧 `smoke-hyp-*` 门禁保留 RV64 完整 guest 场景覆盖；不能将多架构小载荷通过等同于这些完整 guest 场景全部通过。 Native 与 Linux 扩展 ABI 共享内核核心，但编号、handle 和权限包装各自独立；当前没有 A20 `/dev/kvm` 兼容层。
 
 ## 当前契约与边界记录
 
@@ -174,7 +151,7 @@ Native 与 Linux 扩展 ABI 共享内核核心，但编号、handle 和权限包
 - [dev/external-dependencies.md](dev/external-dependencies.md)：外部依赖与协议说明
 - [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：第三方组件许可证集中声明
-- [archive/](archive/)：历史里程碑的审计快照（冻结档案）
+- 归档快照目录 `docs/archive/`：历史里程碑的审计快照（冻结档案）
 
 ---
 

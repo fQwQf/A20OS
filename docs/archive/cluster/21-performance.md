@@ -1,0 +1,134 @@
+# Native 集群性能测量与回归
+
+本文对应 [06-production.md](06-production.md) 的性能验收。功能正确、性能达标、长期稳定性分别记录；任何一项通过都不能替代另外两项。
+
+## 可复现入口
+
+```sh
+make check-cluster-performance
+make check-cluster-fuzz-smoke
+```
+
+前者构建 `CLUSTER_PROFILE=3` 的 RISC-V64 内核与 Native 程序，依次启动本机、 loopback、双独立内核 UDP 场景。每个场景用独立 QEMU snapshot；检查器只回收自己启动的进程。日志与 JSON 写入 `.kernel-build/cluster/performance/`。运行期间不能重打包它所使用的磁盘镜像。
+
+`native-cluster-bench` 可单独跨架构构建。它是主机 Native 基准程序，使用约 1 MiB 静态采样/业务缓冲，不适合直接移植到 20 KiB SRAM 的 MCU。 MCU 的统一机制由共用 wire/CW 格式、叶子执行器与资源档提供，串口性能入口见 [13-uart-head.md](13-uart-head.md)。
+
+也可在已经构建好服务器档镜像后缩小场景：
+
+```sh
+python3 tools/check-cluster-performance.py --skip-build --mode udp --udp-calls 1000
+python3 tools/check-cluster-performance.py --skip-build --mode local --calls 100000
+```
+
+## 测量口径
+
+- 本机、loopback 各 100000 次 64B 调用；UDP 为 10000 次 64B 和 1000 次 65536B 调用。每阶段先做 100 次预热。
+- 客户端实际调用 Native 融合 syscall `a20_channel_call`。服务是另一个真实 Native 线程；UDP 服务运行在另一套内核中，没有主机 echo 代答。 loopback 使用默认 v0 代理，UDP 使用协商的 v1 可靠连接；可靠等级分别标明。
+- 每次请求携带序号，回复逐字节核对。阶段末读取服务执行计数，要求恰好等于已执行的预热与测量调用总数。统计请求本身不增加该计数。
+- RTT 为两次 MONOTONIC 读数之差，包含融合调用及其阻塞等待；逐字节核对位于结束读数之后。`elapsed_ns` 还包含循环与内容核对，用于应用有效吞吐计算。
+- p50/p95/p99 使用排序后 `floor((n-1)*p/100)` 索引。100 个连续等长块的总和与全部样本和必须一致；块均值标准误只描述本次运行，不能当成独立启动实验。
+- 双向有效负载 MB/s = `2 * bytes * calls / elapsed_seconds / 1000000`，不含帧头、收据、重传，也不是网卡线速或四节点聚合吞吐。
+- JSON 保留原始块均值、调用数、实际执行数、内核 ELF 摘要、源码摘要、QEMU 参数/版本、时间和工作区状态。失败时仍保存已完成阶段，不写成功结果。
+
+## 本机改造前后比较
+
+使用独立的只读基线 checkout 构建旧内核，不使用原工作目录的脏构建产物。两版内核运行同一个镜像中的同一个 Native 基准程序。本机模式不初始化集群。参考内核通过 `--kernel /absolute/path/kernel.elf` 指定，仅允许与`--mode local --skip-build` 同用。
+
+每版至少两次、建议五次独立启动，每次 100000 次调用，并交替先后顺序：
+
+```sh
+python3 tools/compare-cluster-performance.py \
+  --baseline /absolute/baseline-0/evidence.json /absolute/baseline-1/evidence.json \
+  --candidate /absolute/candidate-0/evidence.json /absolute/candidate-1/evidence.json \
+  --output .kernel-build/cluster/local-comparison.json
+```
+
+比较器以每次独立启动的均值为单位，报告均值变化、双侧精确置换检验 p 值与固定种子的 bootstrap 95% 区间。它拒绝失败记录、重复文件、不同版本基准、同组不同内核，以及样本不足。回归超过 20% 返回失败；观察均值差小于 3%只是一项结果，不能据此声称置信区间已证明等价。TCG 代码布局与主机调度仍会影响结果；严谨的硬件性能结论需要独立物理机测试。
+
+## 五分钟模糊档
+
+`check-cluster-fuzz-smoke` 在 ASan/UBSan 下持续至少 300 秒运行生产 frame 解码器和 MCU leaf 分发器，每批 100 万用例并更换确定性种子；完整批次结束才停止，因此可能略超时。JSON 记录每批种子、实际变异数和变异阶段时长。额外运行分片、端到端会话、配置、作业和可靠收据回归。原有`check-cluster-fuzz` 仍是百万用例快速档。这个入口是有界语料变异，未声称使用覆盖率反馈的 libFuzzer，也不提供目标设备性能证据。
+
+手动触发 CI 的扩展运行接入这两个入口；本地运行通过不等于远端 CI 已运行。
+
+## 长流量发现的 virtio-net 描述符回收错误
+
+最初连续大消息测量在第 717/776 次测量调用附近重试 8 次后失败；接收侧 malformed/策略丢弃为零，但发送失败不断增长。短的 8 次分片测试未暴露它。实际驱动把 `used.ring[].id` 当成 available ring 下标，再从旧映射取槽位，导致 TX 回收错误缓冲；RX 首片和续片也做了同样的错误转换。
+
+[VIRTIO 1.2 §2.7.8](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)规定该值标识描述符链头。现已直接按完整 32 位 ID 做边界检查与回收，移除两个多余映射数组，每设备少用 1024 B。核心和 drvmod 共用同一个实现。
+
+`make check-virtio-net-completion` 从生产文件提取实际 TX 完成函数，测试乱序、错误 ID、available 位置与描述符编号不同，以及 30 万次计数回绕。旧函数在首次不同编号断言失败，修复后 ASan/UBSan 通过。连续 UDP 调用还必须验证真实设备路径；函数单测不代替运行结果。
+
+修复后的默认规模入口已完整通过，日志为`.kernel-build/cluster/performance-release/`。其中 UDP 服务端实际执行 11200 次业务请求，恰好包含两阶段预热；两端 TX/RX drops 与 malformed 均为零，客户端发生 1 次重传且未重复执行。结束时两端重组 context/bytes 均为零。
+
+驱动修复后，另行顺序运行默认档直连 UDP（故障与重启）、服务器档三节点路由、服务器/默认档混合三节点路由，以及 UDP→x86 COM2→静态 leaf 网关回归，全部通过。对应日志前缀为 `performance-fixed-udp-` 与`performance-fixed-gateway.log`。完整 `make check-doc-test-gates` 在性能测量结束后独立重跑通过；早期并发运行曾触发接收超时测试的调度时长阈值，保留失败日志，没有放宽测试阈值。
+
+| 路径 | 测量次数 | RTT 均值 | p50 | p99 | 双向有效负载 MB/s |
+|---|---:|---:|---:|---:|---:|
+| 本机，64B | 100000 | 70.712 µs | 67.600 µs | 168.600 µs | 1.687 |
+| loopback v0，64B | 100000 | 2141.549 µs | 1883.100 µs | 4035.600 µs | 0.059 |
+| UDP v1，64B | 10000 | 7289.380 µs | 7628.400 µs | 12118.800 µs | 0.018 |
+| UDP v1，65536B | 1000 | 83946.012 µs | 82826.900 µs | 98664.000 µs | 1.545 |
+
+loopback 同次运行均值比为 30.286，超过目标 3；UDP 64B 的 p50 为 7.628 ms，超过目标 5 ms。RX 与 adapter poll 各自有 1 ms 周期等待，代理/导出工作线程也增加调度次数。64 KiB 发送每 4 片主动让出 1 ms，单请求往返的固定节流、 47 片双向编解码与多缓冲 virtio RX 都会影响结果。这些是代码可确认的瓶颈，尚未以消融确定各自占比。下一步需要事件唤醒与受控的有界流水线，再按相同基准对比，不能只改验收数值。顺序单连接数据不是四节点批量聚合测试， 100 MB/s 聚合目标仍未验收。
+
+## 尚不能替代的验收
+
+普通远端业务已同时提供 CALL 与可靠单向 SEND，后者见 22 文档。当前基准自身不覆盖四节点 60 秒 SEND 吞吐，也不满足四节点、混合 SEND/CALL、 10% 丢帧、8 小时 soak。资源漂移、首尾 p99 漂移和物理 MCU 性能必须另行实测。这些差距继续保留在生产验收清单中。
+
+## 接收事件唤醒：开发测量
+
+生产 RX 队列成功入队后立即唤醒等待者，采用现有 token/park 协议；条件锁内重查并登记，锁外 commit。空闲 10 ms 期限用于重组清理。UDP 轮询 owner 另外等待 socket read_waitq，就绪时提前继续；最多 1 ms 超时保留 UART 轮询和心跳进展。检查 pending BH，下一轮 socket 读入口仍负责推进网络底半部。不修改普通 Native channel 的 syscall 或融合调用路径。
+
+`make check-cluster-wakeup` 从生产文件提取 RX 入队、RX 等待及 UDP 就绪等待函数，在 ASan/UBSan 下执行各 25 万次交错边界：登记前、登记后 commit 前、已休眠后到达，超时、登记/prepare 失败、队列满、OOM、待处理网络底半部，并验证 socket 引用平衡与调度操作均在条件锁外。该测试验证边界，不代替真实 SMP 竞争和跨节点运行。
+
+开发对比均使用服务器档、同一 Native 程序，各一次独立启动、100 次预热加 10000 次 64 B loopback v0 调用：轮询版本均值 3.243 ms，RX 事件版本 0.843 ms，p50 3.238→0.812 ms。原始日志为 `rx-polling-before/` 和`rx-event-first/`。这是单次开发比较，不能作为多次启动的显著性或目标验收。只改变 RX 等待的一次实验与随后加入 UDP 就绪等待的最终版本分别记录。
+
+初次 UDP 开发运行（1000 次 64 B、1000 次 64 KiB，另各 100 次预热）通过： p50 分别 6.257/74.476 ms，双向有效负载分别 0.019/1.711 MB/s。日志在 `rx-event-udp-first/`。64 B p50 仍超过 5 ms，不能写成达标；默认 100000/10000 次规模的完整测量及故障回归另行记录。
+
+完整规模 `rx-event-release/` 已通过，耗时 248.737 秒；各阶段逐字节核对和实际服务执行计数符合，UDP 服务累计 11200 次业务执行。以下为事件唤醒后的实测，不覆盖前表归档的历史版本；该表也早于随后发现并修复的单通道 SMP lwIP 内存保护问题，修复后的版本须重新测量：
+
+| 路径 | 测量次数 | RTT 均值 | p50 | p99 | 双向有效负载 MB/s |
+|---|---:|---:|---:|---:|---:|
+| 本机，64 B | 100000 | 69.780 µs | 66.500 µs | 142.500 µs | 1.713 |
+| loopback v0，64 B | 100000 | 860.420 µs | 788.400 µs | 2938.500 µs | 0.147 |
+| UDP v1，64 B | 10000 | 6917.092 µs | 6483.800 µs | 11085.700 µs | 0.018 |
+| UDP v1，65536 B | 1000 | 74493.208 µs | 73605.100 µs | 87197.300 µs | 1.747 |
+
+同次 loopback/本机均值比为 12.330，仍超过 3 倍；UDP 64 B p50 仍超过 5 ms。当前仍经过代理、RX、服务、导出等多个调度交接；大消息保持每四片让出 1 ms 的接收保护预算。下一步需要实际四节点 SEND 和批量 CALL 测量，再针对观察到的队列/CPU 瓶颈优化。不能从顺序 CALL 推断流水线吞吐或长期资源稳定。
+
+## 单通道 SMP 内存保护修复后的测量
+
+实际双 CPU 故障测试曾发现 lwIP pbuf 引用断言；单通道配置错误地省略了全局堆与引用计数锁，现已修复，详见 08 文档第 21 节。加锁后的完整默认规模 CALL 检查通过，日志为 `rx-event-locked-release/`。其开头曾与宿主快速门禁重叠，本机阶段另以相同内核独立启动重测，记录在`rx-event-locked-local-isolated/`。保留两次原始数据与重叠说明；以下混合两份同版本测量，不能用来声称启动间显著性或 ±3% 等价。
+
+| 路径 | 测量次数 | RTT 均值 | p50 | p99 | 双向有效负载 MB/s |
+|---|---:|---:|---:|---:|---:|
+| 本机，64 B，独立重测 | 100000 | 73.113 µs | 68.900 µs | 169.800 µs | 1.532 |
+| loopback v0，64 B | 100000 | 832.004 µs | 786.100 µs | 2019.900 µs | 0.152 |
+| UDP v1，64 B | 10000 | 7068.170 µs | 6842.100 µs | 10415.100 µs | 0.018 |
+| UDP v1，65536 B | 1000 | 75144.915 µs | 74779.900 µs | 83933.600 µs | 1.729 |
+
+上述 loopback 和 UDP 小消息目标仍未达到。服务器持续丢帧、混合资源档多跳、实际 Native UART SEND 网关在最终版本再次通过；新增双 CPU 门禁通过，并记录完整 QEMU 参数和内核 SHA256。七架构构建与完整文档关联内核门禁也再次通过。短时调用成功及瞬时资源回收不等于长期稳定性验收。
+
+## 四节点 SEND 速率契约（2026-10-22）
+
+`tools/check-cluster-load.py` 现在是带契约门禁，而不是只打印数值：
+
+```sh
+python3 tools/check-cluster-load.py --seconds 60 --timeout 240 --min-rate 100
+python3 tools/check-cluster-load.py --seconds 600 --timeout 900 --min-rate 100
+python3 tools/check-cluster-load.py --seconds 300 --timeout 600 \
+    --random-loss 0.1 --min-rate 25 --seed 20261011
+```
+
+判据同时包含：接收者单调窗口内的实际接纳数、`submitted == delivered`、零重复/零坏帧、结束时在途字节/重组/代理归零，以及每方向速率不低于`--min-rate`。检查器只转发真实 Ethernet 帧，不生成业务回复；四个 guest 运行同一 Native ELF。
+
+参考环境实测（四套独立 RISC-V QEMU TCG，本机为开发主机，不是物理板）：
+
+| 运行 | 每方向 admitted SEND/s | 结果 |
+|---|---:|---|
+| 60 s，无注入丢包 | 124.833 / 130.383 / 132.350 / 139.467 | 精确交付，契约通过 |
+| 600 s，无注入丢包 | 124.325 / 120.578 / 125.512 / 123.473 | 精确交付，资源归零，契约通过 |
+| 300 s，10% 随机丢包 | 71.437 / 68.397 / 73.163 / 72.630 | 精确交付，资源归零，契约通过 |
+
+这些数字**不是**线速或物理部署承诺。早期 `>10k msg/s/节点` 的数字没有受支持的测量依据，已从 1.0 验收线移除；生产部署的 8 小时矩阵仍保留在[06-production.md](06-production.md)，作为未验证的物理/长期边界。

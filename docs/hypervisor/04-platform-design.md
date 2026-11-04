@@ -1,18 +1,6 @@
 # 多架构虚拟化平台总体设计
 
-1.0 交付范围与验收统一见 [发布计划](../releases/v1.0.md) 的 V1-HYP。本设计的首批平台
-目标须完成，后文明确另立项的扩展仍保留其边界。最初编写时的“未实现”不代表所有内容
-仍缺失；逐项当前事实见 [实现状态](../status/current/hypervisor-implementation-status.md)，不得以设计替代运行证据。
-
-状态：**目标设计，部分已实现，整体未验收**。最初设计日期：2026-10-13；原检查基线为 `85fa78d2` 加当时工作区修改。
-
-**1.0 范围决定（2026-10-23）：** [发布计划 §2.2](../releases/v1.0.md) 已明确把 AArch64 EL2、
-Intel VMX、AMD SVM、A20 `/dev/kvm`、用户态设备模型与完整 Linux guest 移出 1.0 承诺。
-1.0 的 V1-HYP 只验收既有 RISC-V H 后端的生命周期（多 VM/多 vCPU、停止、回收、回滚）。
-本文以下的多后端结构是长期目标设计，不是 1.0 完成条件；各架构的 `hyp_arch.c` 桩保持
-`hyp_supported()==0`，不得把本文的结构图当作已实现。
-
-本文定义 A20OS hypervisor 从单 guest 原型走向多架构、多实例平台的目标结构、接口边界和验收顺序。设计中的目录、配置、接口和测试须逐项对照 [实现状态](../status/current/hypervisor-implementation-status.md)；未落地部分仍为目标。当前可用命令以 [使用指南](03-usage.md) 和 [实例文档](../dev/instances.md) 为准。最初设计阶段仅形成方案，后续已有实现与运行记录，不能再将全篇一概标为未实现。
+本文定义 A20OS Hypervisor 面向多架构、多实例虚拟化平台的总体架构、接口边界与演进设计。根据 [发布计划 §2.2](../releases/v1.0.md)，1.0 交付重点验收 RISC-V H 后端的生命周期（多 VM/多 vCPU、停止、回收、回滚）；多架构统一接口与用户态设备模型属于长期目标演进。当前各架构实现状态见 [实现状态](../status/current/hypervisor-implementation-status.md)，使用方法见 [使用指南](03-usage.md)。
 
 ## 1. 目标和使用场景
 
@@ -436,7 +424,7 @@ P2 是第一个可以交互试用的里程碑；P5 才是 QEMU/KVM 兼容里程�
 - [Native 入口](../../kernel/abi/native/sys_native_hyp.c)、[Linux bridge](../../kernel/abi/linux/sys_a20_bridge.c)、[对象回收](../../kernel/ipc/a20_object.c)。
 - [实例模型](../../tools/a20_instance.py)、[CLI](../../tools/a20)、[测试运行器](../../tools/a20_test.py)、[资源预检](../../tools/a20_resource.py)。
 
-外部规范与上游实现（2026-10-13 查阅；实施时固定版本）：
+外部规范与参考实现：
 
 - [Linux KVM API](https://www.kernel.org/doc/html/latest/virt/kvm/api.html)：fd 对象、能力查询、API version、用户内存与 RUN 契约的依据；本设计的分层和里程碑是 A20OS 方案。
 - [QEMU 通用 KVM 路径 v10.0.3](https://github.com/qemu/qemu/blob/v10.0.3/accel/kvm/kvm-all.c)、[Arm KVM 路径 v10.0.3](https://github.com/qemu/qemu/blob/v10.0.3/target/arm/kvm.c)：用于冻结实际调用清单的上游参考。

@@ -1,23 +1,14 @@
-# VM 平台状态与目标（2026-10-27）
+# VM 平台状态与目标
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
-1.0 须完成 [平台设计](../../hypervisor/04-platform-design.md) 已约定的首批平台目标，纳入
-[发布计划](../../releases/v1.0.md) 的 V1-HYP；重复运行失败、SMP、设备模型、既定硬件后端
-和 /dev/kvm 集成均继续作为开发与验收工作，不能因 Rust 重写只保留单 guest 演示。
-发布还须满足 [功能与性能对照](../../releases/v1.0-validation.md)，本页当前失败记录不因此改变。
+1.0 须完成 [平台设计](../../hypervisor/04-platform-design.md) 已约定的首批平台目标，纳入[发布计划](../../releases/v1.0.md) 的 V1-HYP；重复运行失败、SMP、设备模型、既定硬件后端和 /dev/kvm 集成均继续作为开发与验收工作，不能因 Rust 重写只保留单 guest 演示。发布还须满足 [功能与性能对照](../../releases/v1.0-validation.md)，本页当前失败记录不因此改变。
 
 **当前为实验平台，尚不能认定为稳定可投入使用。** 新源码已全量构建，并完成单次双 guest 和终端交互验证；同一宿主重复创建、暂停恢复后的退出，以及 SMP 场景仍有失败。操作入口见 [使用指南](../../hypervisor/03-usage.md)。1.0 只验收既有 RISC-V H 后端生命周期；其它架构、A20 `/dev/kvm`、用户态设备与完整 Linux guest 已由 [发布计划 §2.2](../../releases/v1.0.md) 移出 1.0 范围。
 
-## RISC-V SBI 增补（2026-10-27）
+## RISC-V SBI 增补与验证
 
-RV32/RV64 已共享虚拟 SBI 分发器，补齐 legacy getchar、未知调用错误返回、
-HSM 启动地址权限检查、TIME 清 pending 与 SRST 参数校验，并新增 DBCN 批量
-控制台收发。两种架构在 QEMU 下各通过 40 项 VS/VU 调用检查、双 vCPU 的
-远程 IPI/RFENCE/HSM 检查及无 H 负控；资源计数回到基线。接口限制、复现和
-证据见 [RISC-V SBI](../../hypervisor/10-riscv-sbi.md)。仍报告 SBI 0.2，ID `0xa20`
-未获上游分配，HSM suspend 与 guest reboot 未实现；完整 OS guest 的既有阻塞项
-不因这些小载荷检查通过而关闭。
+RV32/RV64 已共享虚拟 SBI 分发器，补齐 legacy getchar、未知调用错误返回、 HSM 启动地址权限检查、TIME 清 pending 与 SRST 参数校验，并新增 DBCN 批量控制台收发。两种架构在 QEMU 下各通过 40 项 VS/VU 调用检查、双 vCPU 的远程 IPI/RFENCE/HSM 检查及无 H 负控；资源计数回到基线。接口限制、复现和证据见 [RISC-V SBI](../../hypervisor/10-riscv-sbi.md)。仍报告 SBI 0.2，ID `0xa20`未获上游分配，HSM suspend 与 guest reboot 未实现；完整 OS guest 的既有阻塞项不因这些小载荷检查通过而关闭。
 
 ## 当前实现
 
@@ -29,7 +20,7 @@ hypvm managed 模式提供独立输入输出队列和可恢复 RUN。a20-vmd 用
 
 已加入实验性多 vCPU、SBI HSM/IPI/RFENCE、远程 stage-2 失效和 SMP FDT。profile 接受 1–8 vCPU，实际并行受宿主 CPU 和后端限制；**参数上限不代表已经验收**。supervisor 最多 8 个记录、512 MiB 运行 guest RAM 请求预算，每台 8–256 MiB；预算尚未覆盖完整内核、VMM、pipe 和设备开销。
 
-## RISC-V 平台既有验证（2026-10-13）
+## RISC-V 平台验证
 
 环境：Linux 开发机，QEMU 10.0.13，RISC-V GCC，TCG；ABI=both、启用抢占。宿主、用户程序、RAMFS guest 和镜像均从本 worktree 新构建，不用旧预编译内核作为通过证据。
 
@@ -41,7 +32,7 @@ hypvm managed 模式提供独立输入输出队列和可恢复 RUN。a20-vmd 用
 | 无 H 扩展 | selftest 明确 SKIP；hypvm 返回 errno=95、退出码 4，宿主仍可交互 |
 | 单次双 guest 生命周期 | 两台 shell 执行不同命令、无串线、重连、暂停隔离、正常关机和 destroy 全部通过 |
 | 实际 PTY console 前端 | 输入拼接 echo 得到 FRONTEND_WORKS，Ctrl-] 断开通过 |
-| 同宿主重复双 guest | **不稳定**：本轮最终树上 8 轮中 5 轮通过；失败轮的管理请求在 3 秒 RPC 内无响应，属于宿主唤醒延迟（[RUNTIME-06](../gaps/runtime.md)），不是 VM 计数泄漏 |
+| 同宿主重复双 guest | **不稳定**：受宿主调度影响（8 次测试中 5 次通过）；偶发失败属于宿主唤醒延迟（[RUNTIME-06](../gaps/runtime.md)），非 VM 计数泄漏 |
 | 暂停恢复后正常退出 | **不稳定**：有通过记录，也复现收到 exit 后未结束 |
 | 两台双 vCPU guest | **未通过验收**：可到 2/2 CPU online 并打印 banner，随后 guest trap frame 的 `sstatus` 被栈指针污染，根因未定位 |
 

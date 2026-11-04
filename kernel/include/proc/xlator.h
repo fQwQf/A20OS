@@ -65,7 +65,7 @@
  * qemu-user does not provide one, so A20OS will have to -- a new row of the
  * registry rather than a new branch in the loader.
  *
- * docs/exec-xlator/04-extending.md walks through that addition step by step.
+ * docs/kernel/exec-xlator/04-extending.md walks through that addition step by step.
  *
  * ---------------------------------------------------------------------------
  *  Why the invocation is a *template* and not a flag
@@ -94,7 +94,7 @@
  *                    expressible as an argv template at all -- this is the
  *                    one axis the template does not cover, and the reason
  *                    the channel will eventually need a per-guest operation
- *                    rather than a string.  See docs/exec-xlator/
+ *                    rather than a string.  See docs/kernel/exec-xlator/
  *                    02-integration.md and 04-extending.md.
  *
  * So the convention is expressed as a template with three substitutions:

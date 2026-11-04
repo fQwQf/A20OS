@@ -6,7 +6,7 @@
  * kernel no command line at all, so there is no way to configure any `a20.*`
  * key -- no a20.wx, no a20.tcpmode, no a20.xlator.  LoongArch64 under QEMU's
  * virt machine is exactly that, and QEMU offers no other route (see
- * docs/exec-xlator/01-usage.md); on a board whose UEFI does populate
+ * docs/kernel/exec-xlator/01-usage.md); on a board whose UEFI does populate
  * /chosen/bootargs this is redundant and stays off.
  *
  * WHY THIS IS OFF BY DEFAULT, and not just "for performance"

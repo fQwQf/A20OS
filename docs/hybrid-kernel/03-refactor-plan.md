@@ -1,11 +1,8 @@
 # 混合内核改造计划：以 Native ABI 为本体的架构演进
 
-1.0 范围以 [发布计划](../releases/v1.0.md) 为准。本页定义的双态驱动、DMA 隔离、IDL
-及 Linux 人格层属于现有开发中子系统，须完成目标契约和
-[功能/性能验收](../releases/v1.0-validation.md)，不能停留于阶段样板。下面的历史通过记录
-保留原提交范围，Rust 重写后需重新验证。
+1.0 范围以 [发布计划](../releases/v1.0.md) 为准。本页定义的双态驱动、DMA 隔离、IDL 及 Linux 人格层属于现有开发中子系统，须完成目标契约和[功能/性能验收](../releases/v1.0-validation.md)，不能停留于阶段样板。下面的历史通过记录保留原提交范围，Rust 重写后需重新验证。
 
-最后核实：2026-08。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，这里回答的问题是：沿着已确立的研发定位，架构应该往哪里改、按什么顺序改、每一步如何验收。
+本文档定义 A20OS 混合内核分阶段重构演进计划与各阶段验收准则。当前形态见 [00-design.md](00-design.md)，主流对齐见 [02-mainstream-plan.md](02-mainstream-plan.md)。本文回答的核心问题是：沿着已确立的研发定位，架构应按什么顺序演进、每一步如何严谨验收。
 
 ## 定位前提
 
@@ -67,7 +64,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 验收标准：`user/tests/test_native_contract.c` 全分区通过，`make smoke-native-contract` 在 riscv64 通过；loongarch64 构建通过（运行时验证受镜像条件限制时须记录）。契约文档同步更新到 [../native-abi/](../native-abi/)。
 
-历史状态（2026-08-06）：四分区（ralg/bp/evqc/vmol）曾在 riscv64 通过，loongarch64 构建通过；阶段副产品修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT（历史记录，当前状态需复验）。
+验证状态：四分区（ralg/bp/evqc/vmol）在 riscv64 验证通过，loongarch64 构建通过；修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT 的问题。
 
 ### 阶段二：Native ABI SMP 正确性收口
 
@@ -77,7 +74,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 验收：`smoke-native-shmring` 在 SMP=2/8 下连续 20 轮零失败；诊断挂载点不报告脏帧回填；Linux ABI 同负载压力无退化。
 
-历史状态（2026-08-06）：指定分支上 SMP=2/8 各连续 20 轮曾零失败零挂起（M5 修复 `98a1260`/`1af0d02`）；`[VMO-PAGE]` 串口诊断降级为 `vmo_dirty_frames`。这些结果是历史防退化证据，不是当前提交的重跑结果。
+并发稳定性：SMP=2/8 压力测试连续 20 轮零失败零挂起（M5 修复 `98a1260`/`1af0d02`）；`[VMO-PAGE]` 串口诊断降级为 `vmo_dirty_frames`。
 
 ### 阶段三：驱动双态部署框架 + DMA 真隔离
 

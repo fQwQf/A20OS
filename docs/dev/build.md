@@ -1,31 +1,20 @@
 # 构建与运行指南
 
-本指南列出工具链前提、构建/运行命令和常用配置。当前实现与验证概况见 [模块状态](../status/current/module-status-2026-10-19.md)，实现选择与发布条件见 [1.0 计划](../releases/v1.0.md)。
-[1.0 平台范围](../releases/v1.0.md#2-平台范围) 已排除 LoongArch32/PPC64LE。活跃 Make、
-实例、CI 和测试矩阵已停止列入这两个历史目标；默认构建会明确拒绝它们。历史源码与
-实例保留供追溯。需要复现时，在干净 checkout 中切到 `v0.18`，再按各平台文档操作；
-不要把历史构建记录解读为当前支持承诺。
+本指南列出工具链前提、构建/运行命令和常用配置。当前实现与验证概况见 [模块状态](../status/current/module-status.md)，实现选择与发布条件见 [1.0 计划](../releases/v1.0.md)。[1.0 平台范围](../releases/v1.0.md#2-平台范围) 已排除 LoongArch32/PPC64LE。活跃 Make、实例、CI 和测试矩阵已停止列入这两个历史目标；默认构建会明确拒绝它们。历史源码与实例保留供追溯。需要复现时，在干净 checkout 中切到 `v0.18`，再按各平台文档操作；不要把历史构建记录解读为当前支持承诺。
 
-A20OS 最常用的构建和运行命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](../OS-Design.md)。
+A20OS 最常用的构建和运行命令都在项目根目录执行。更详细的架构设计说明见 [architecture.md](../architecture.md)。
 
 > 构建/运行/冒烟配置也可以用 `instances/` 下的 TOML 实例文件声明，
 > 通过 `tools/a20 run|build|debug|test <实例>` 驱动；逐架构的 `run-*`/`debug-*`/`smoke-*`
 > make 目标已是它的薄包装。字段参考、组件注册表与门禁说明见 [instances.md](instances.md)。
 
-> 把构建产物打成 apk 包、按清单组合镜像、发布到仓库的体系见
-> [packaging/overview.md](../packaging/overview.md)；CI 容器（可复现构建环境）见
-> [packaging/ci.md](../packaging/ci.md)。
+> 把构建产物打成 apk 包、按清单组合镜像、发布到仓库的体系见[packaging/overview.md](../packaging/overview.md)；CI 容器（可复现构建环境）见[packaging/ci.md](../packaging/ci.md)。
 
 ## 首次运行：Linux + RISC-V 64 {#首次运行linux--risc-v-64}
 
-推荐先完成这一条串口路径，再选择桌面或其他架构。无需开发板、宿主图形界面或
-硬件虚拟化；QEMU 使用软件模拟。本文的原生工具链基线是 x86_64 Debian 13、
-GCC 14.2、QEMU 10.0.13、Python 3.13、Rust 1.96.0。Ubuntu 24.04 的安装入口
-也列在下方，但其发行版工具链组合应以实际构建和 smoke 结果为准。
+推荐先完成这一条串口路径，再选择桌面或其他架构。无需开发板、宿主图形界面或硬件虚拟化；QEMU 使用软件模拟。本文的原生工具链基线是 x86_64 Debian 13、 GCC 14.2、QEMU 10.0.13、Python 3.13、Rust 1.96.0。Ubuntu 24.04 的安装入口也列在下方，但其发行版工具链组合应以实际构建和 smoke 结果为准。
 
-推荐宿主 8 GiB 内存、20 GiB 可用磁盘，初次用 `-j4` 控制编译并发；容器镜像还会
-占用 Docker 存储空间。实际用量与配置有关，这些是准备预算。串口 guest 默认 1 GiB
-内存；运行前会检查可用内存、磁盘及其他实例，资源不足时可能等待，见下方排查表。
+推荐宿主 8 GiB 内存、20 GiB 可用磁盘，初次用 `-j4` 控制编译并发；容器镜像还会占用 Docker 存储空间。实际用量与配置有关，这些是准备预算。串口 guest 默认 1 GiB 内存；运行前会检查可用内存、磁盘及其他实例，资源不足时可能等待，见下方排查表。
 
 ### 1. 获取完整源码
 
@@ -36,10 +25,7 @@ git clone --recurse-submodules https://github.com/fQwQf/A20OS.git
 cd A20OS
 ```
 
-已有普通 clone 时执行 `git submodule update --init --recursive`。
-fastfetch 是固定 commit 的子模块，普通 clone 或 GitHub 源码 ZIP 不包含它的内容。
-当前基础用户态构建会跳过缺席的 fastfetch，所以“编译完成”不保证拿到了完整程序集合；
-下方环境检查会明确报出这个缺项。更新代码后再次执行子模块初始化命令。
+已有普通 clone 时执行 `git submodule update --init --recursive`。 fastfetch 是固定 commit 的子模块，普通 clone 或 GitHub 源码 ZIP 不包含它的内容。当前基础用户态构建会跳过缺席的 fastfetch，所以“编译完成”不保证拿到了完整程序集合；下方环境检查会明确报出这个缺项。更新代码后再次执行子模块初始化命令。
 
 ### 2. 安装单架构依赖
 
@@ -59,10 +45,7 @@ sudo apt-get install -y qemu-system-riscv
 # sudo apt-get install -y qemu-system-misc
 ```
 
-Python 必须为 3.11 或更新版本，仅需标准库；此路径不需要 pip、Conda、CMake 或 GRUB。
-`riscv64-unknown-elf-gcc` 编译内核和静态用户态；Linux 交叉工具链与交叉头文件供
-包括 fastfetch 在内的构建使用。显式安装交叉 libc 头，避免 `--no-install-recommends`
-下出现编译器在而头文件不在的情况。
+Python 必须为 3.11 或更新版本，仅需标准库；此路径不需要 pip、Conda、CMake 或 GRUB。`riscv64-unknown-elf-gcc` 编译内核和静态用户态；Linux 交叉工具链与交叉头文件供包括 fastfetch 在内的构建使用。显式安装交叉 libc 头，避免 `--no-install-recommends`下出现编译器在而头文件不在的情况。
 
 Rust 使用 rustup 管理。尚未安装 rustup 时执行：
 
@@ -82,12 +65,7 @@ rustc --version
 python3 tools/check_quickstart.py
 ```
 
-仓库的 `rust-toolchain.toml` 选择 1.96.0，不改变仓库外的默认版本。确保
-`$HOME/.cargo/bin` 在 PATH 前部；已有 `RUSTUP_TOOLCHAIN` 环境变量或 rustup 目录覆盖
-会优先于该文件，应清除不再需要的覆盖。发行版 `rustc` 不会读取 rustup 的版本选择。
-RISC-V64 首次运行只需要上述两个预编译 core，不需要 `rust-src`。
-环境检查使用临时文件试编译，检查工具、目标 core、交叉头文件与子模块；不会安装依赖，
-也不证明整个内核可以编译。
+仓库的 `rust-toolchain.toml` 选择 1.96.0，不改变仓库外的默认版本。确保`$HOME/.cargo/bin` 在 PATH 前部；已有 `RUSTUP_TOOLCHAIN` 环境变量或 rustup 目录覆盖会优先于该文件，应清除不再需要的覆盖。发行版 `rustc` 不会读取 rustup 的版本选择。 RISC-V64 首次运行只需要上述两个预编译 core，不需要 `rust-src`。环境检查使用临时文件试编译，检查工具、目标 core、交叉头文件与子模块；不会安装依赖，也不证明整个内核可以编译。
 
 ### 3. 编译、启动与退出
 
@@ -97,18 +75,14 @@ RISC-V64 首次运行只需要上述两个预编译 core，不需要 `rust-src`�
 tools/a20 run qemu-riscv64 -- -j4
 ```
 
-这会构建内核、用户态及磁盘镜像，再启动串口 QEMU。首次构建比后续增量构建慢；
-不要同时在同一 checkout 启动多个构建或修改正在被 guest 使用的磁盘镜像。
-看到 shell 提示符后执行：
+这会构建内核、用户态及磁盘镜像，再启动串口 QEMU。首次构建比后续增量构建慢；不要同时在同一 checkout 启动多个构建或修改正在被 guest 使用的磁盘镜像。看到 shell 提示符后执行：
 
 ```sh
 /bin/echo hello
 poweroff
 ```
 
-应看到单独一行 `hello`，随后看到 `System is going down for power-off NOW`，
-QEMU 退出并返回宿主 shell。`poweroff` 是正常退出方式；如 guest 已无响应，
-串口 QEMU 可以先按 `Ctrl-a`、再按 `x` 强制退出，但这不算正常关机验收。
+应看到单独一行 `hello`，随后看到 `System is going down for power-off NOW`， QEMU 退出并返回宿主 shell。`poweroff` 是正常退出方式；如 guest 已无响应，串口 QEMU 可以先按 `Ctrl-a`、再按 `x` 强制退出，但这不算正常关机验收。
 
 也可以自动检查完整流程：
 
@@ -116,19 +90,13 @@ QEMU 退出并返回宿主 shell。`poweroff` 是正常退出方式；如 guest 
 make -j4 smoke-quickstart
 ```
 
-该门禁使用与首次运行相同的 both ABI 开发镜像，验证 shell 内置命令、外部程序
-`/bin/echo`、关机标记和 QEMU 的 0 退出码；超时或异常退出都失败。
-结果在 `.kernel-build/smoke/smoke-quickstart.log`。`make smoke-riscv64` 只验证
-kernel-only bring-up，不能代替这项用户态验收。
+该门禁使用与首次运行相同的 both ABI 开发镜像，验证 shell 内置命令、外部程序`/bin/echo`、关机标记和 QEMU 的 0 退出码；超时或异常退出都失败。结果在 `.kernel-build/smoke/smoke-quickstart.log`。`make smoke-riscv64` 只验证 kernel-only bring-up，不能代替这项用户态验收。
 
-裸 `make` / `make all` 是 RISC-V64 + LoongArch64 双架构发布构建，不是首次体验入口。
-只编译不启动可用 `tools/a20 build qemu-riscv64 -- -j4`。
+裸 `make` / `make all` 是 RISC-V64 + LoongArch64 双架构发布构建，不是首次体验入口。只编译不启动可用 `tools/a20 build qemu-riscv64 -- -j4`。
 
 ### 可选：使用构建容器
 
-有 Docker 的用户可在获取完整源码后，用仓库内 Dockerfile 构建单架构环境，省去
-宿主工具链安装。需要 Docker daemon 可用，且能访问 Debian 仓库和 Rust 下载服务。
-不依赖预先发布的 GHCR tag；本地旧镜像不会因为源码更新而自动更新。
+有 Docker 的用户可在获取完整源码后，用仓库内 Dockerfile 构建单架构环境，省去宿主工具链安装。需要 Docker daemon 可用，且能访问 Debian 仓库和 Rust 下载服务。不依赖预先发布的 GHCR tag；本地旧镜像不会因为源码更新而自动更新。
 
 ```bash
 tools/ci/build-image.sh riscv
@@ -138,10 +106,7 @@ python3 tools/check_quickstart.py
 tools/a20 run qemu-riscv64 -- -j4
 ```
 
-脚本先构建镜像，再自检其工具链；Dockerfile 固定 Rust 版本，但 Debian 包随仓库更新，
-这不是按包哈希冻结的环境。容器默认以 root 写挂载目录，产物可能归 root；需要改回
-宿主构建时，在退出容器后按需执行 `sudo chown -R "$(id -u):$(id -g)" .kernel-build user/build build`。
-更多镜像、缓存和 CI 说明见 [CI/CD](../packaging/ci.md)。
+脚本先构建镜像，再自检其工具链；Dockerfile 固定 Rust 版本，但 Debian 包随仓库更新，这不是按包哈希冻结的环境。容器默认以 root 写挂载目录，产物可能归 root；需要改回宿主构建时，在退出容器后按需执行 `sudo chown -R "$(id -u):$(id -g)" .kernel-build user/build build`。更多镜像、缓存和 CI 说明见 [CI/CD](../packaging/ci.md)。
 
 ### 常见阻塞
 
@@ -160,12 +125,7 @@ tools/a20 run qemu-riscv64 -- -j4
 
 ## 其他平台与当前边界
 
-Linux 原生快速路径是本页的验收重点。Windows 用户可在 Linux 虚拟机或 WSL2 中尝试，
-macOS 用户可尝试 Linux 容器；本页没有对这些宿主组合做端到端验收，不承诺原生命令通用。
-桌面能启动、内核 bring-up 通过、普通 shell 可用和真机可用是不同层级，
-请同时核对 [交付基线](../status/current/delivery-baseline.md) 与 [缺口台账](../status/gaps/README.md)。
-STM32 当前有 `ARCH=armv7m` 的 Rust target 解析期阻塞，安装 ARM gcc 不会解决它；
-相关命令仅是维护入口，状态见 [驱动缺口](../status/gaps/drivers.md)。
+Linux 原生快速路径是本页的验收重点。Windows 用户可在 Linux 虚拟机或 WSL2 中尝试， macOS 用户可尝试 Linux 容器；本页没有对这些宿主组合做端到端验收，不承诺原生命令通用。桌面能启动、内核 bring-up 通过、普通 shell 可用和真机可用是不同层级，请同时核对 [交付基线](../status/current/delivery-baseline.md) 与 [缺口台账](../status/gaps/README.md)。 STM32 当前有 `ARCH=armv7m` 的 Rust target 解析期阻塞，安装 ARM gcc 不会解决它；相关命令仅是维护入口，状态见 [驱动缺口](../status/gaps/drivers.md)。
 
 需要扩展架构时，在通用工具与 rustup 已安装的基础上按目标补依赖：
 
@@ -178,34 +138,20 @@ STM32 当前有 `ARCH=armv7m` 的 Rust target 解析期阻塞，安装 ARM gcc �
 | RISC-V32 | 与 RISC-V64 共用工具链和 QEMU | 自定义目标，另装 `rust-src` |
 | ARMv7-M | `gcc-arm-none-eabi binutils-arm-none-eabi qemu-system-arm openocd` | `thumbv7m-none-eabi`，当前仍有上述构建阻塞 |
 
-按所选架构执行 `rustup target add --toolchain 1.96.0 <表中的目标>`。
-AArch64 内核使用 `aarch64-unknown-none-softfloat` 自建 core，用户态使用
-`aarch64-unknown-none`；RISC-V32 使用自定义 JSON 目标
-`tools/rust-targets/riscv32imafdc-a20.json`。这两种内核构建需要：
+按所选架构执行 `rustup target add --toolchain 1.96.0 <表中的目标>`。 AArch64 内核使用 `aarch64-unknown-none-softfloat` 自建 core，用户态使用`aarch64-unknown-none`；RISC-V32 使用自定义 JSON 目标`tools/rust-targets/riscv32imafdc-a20.json`。这两种内核构建需要：
 
 ```bash
 rustup component add --toolchain 1.96.0 rust-src
 ```
 
-构建入口会设置 `RUSTC_BOOTSTRAP=1`，通过 `-Z build-std=core` 构建 core，
-首次运行 Cargo 可能需要联网下载依赖。不需要另装 nightly。
-技术依据见 [目标运行库](tooling-internals.md#target-runtime)。
+构建入口会设置 `RUSTC_BOOTSTRAP=1`，通过 `-Z build-std=core` 构建 core，首次运行 Cargo 可能需要联网下载依赖。不需要另装 nightly。技术依据见 [目标运行库](tooling-internals.md#target-runtime)。
 
 注意：
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
 - LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出；历史资料不代表当前支持，如需复现，使用 `v0.18` 的干净 checkout。
-- 交叉 gcc 只把 `libc6-dev-*-cross` 列为 **Recommends**：用
-  `--no-install-recommends` 装出来的是一个头文件不全的编译器。内核里有几处
-  会包含 libc 头（例如 `kernel/ipc/keyring.c` 的 `<limits.h>`），所以上面把
-  对应的 `libc6-dev-*-cross` 显式写进来；它们同时带来
-  `linux-libc-dev-*-cross`（UAPI 头）。
-- arm32：`libc6-dev-armhf-cross` 提供内核与用户态需要的 libc/UAPI 头。若只把
-  交叉工具链解包到临时目录，可把 `FF_LINUX_UAPI_ROOT` 指向包含
-  `<triple>/include` 的根目录，例如
-  `make FF_LINUX_UAPI_ROOT=/tmp/arm-root/usr check-build-matrix`；这个变量只
-  影响**用户态**的 UAPI 头搜索（`user/Makefile`），不解决内核侧的 libc 头。
-  ARMv7-M 另走 STM32 目标，工具链不同。
+- 交叉 gcc 只把 `libc6-dev-*-cross` 列为 **Recommends**：用`--no-install-recommends` 装出来的是一个头文件不全的编译器。内核里有几处会包含 libc 头（例如 `kernel/ipc/keyring.c` 的 `<limits.h>`），所以上面把对应的 `libc6-dev-*-cross` 显式写进来；它们同时带来`linux-libc-dev-*-cross`（UAPI 头）。
+- arm32：`libc6-dev-armhf-cross` 提供内核与用户态需要的 libc/UAPI 头。若只把交叉工具链解包到临时目录，可把 `FF_LINUX_UAPI_ROOT` 指向包含`<triple>/include` 的根目录，例如`make FF_LINUX_UAPI_ROOT=/tmp/arm-root/usr check-build-matrix`；这个变量只影响**用户态**的 UAPI 头搜索（`user/Makefile`），不解决内核侧的 libc 头。 ARMv7-M 另走 STM32 目标，工具链不同。
 - ARM32 定时器回归夹具的维护约束见 [时间 ABI](tooling-internals.md#arm32-time-abi)。
 - Python：Makefile 默认调用 `python3`（Python 3.11 或更新版本，仅需标准库）。不需要 Conda，也不会因机器安装了 Conda 而自动切换解释器。可通过 `make PYTHON=/path/to/python3 ...` 显式指定其他解释器。
 - `grub-pc-bin` / `grub-efi-amd64-bin` / `xorriso`：只有 x86_64 瘦客户机部署用得到。`tools/a20 package x86_64-pc` 生成 GRUB rescue ISO 时，`grub-mkrescue` 会调用 `xorriso`；缺了它会在打包这一步报 `grub-mkrescue: 未找到 xorriso`。riscv64/aarch64 板和 QEMU 虚拟机都不需要这三个包。
@@ -235,9 +181,7 @@ rustup component add --toolchain 1.96.0 rust-src
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为六架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译六个 hosted 架构的内核 bring-up 和用户态 | 完整活跃架构构建检查 |
 
-STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名；目前仍受上述 Rust target 阻塞影响。
-QEMU 运行和实板烧录还分别依赖 `qemu-system-arm`、OpenOCD 与实际调试硬件。
-准确产物路径见 [STM32F103 移植说明](../platforms/stm32f103-port.md)。
+STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名；目前仍受上述 Rust target 阻塞影响。 QEMU 运行和实板烧录还分别依赖 `qemu-system-arm`、OpenOCD 与实际调试硬件。准确产物路径见 [STM32F103 移植说明](../platforms/stm32f103-port.md)。
 
 ## 声明式构建配置（instances/ 与 components/trim.toml）
 

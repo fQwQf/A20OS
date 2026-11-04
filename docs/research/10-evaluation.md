@@ -1,8 +1,6 @@
 # 评估：计划与结果记录
 
-> 把"评估"当作论文的最硬证据来设计。核心变化：(1) 所有实验区分为 [计划]（尚未执行）与 [实测]（有数据）；(2) 新增与核心贡献（能力信封、预算能力、供应链场景）直接挂钩的评估；(3) 明确每个实验结果在论文中对应哪条主张。
->
-> 现状声明：截至本文写作，Native ABI 侧没有任何已实测数据。旧文档中的所有数字都是待验证方案。以下所有 [计划] 条目都不构成当前性能结论。工程侧（Linux ABI）的实测数据见 `docs/roadmap/perf-overhaul.md`。
+> 把"评估"当作论文的最硬证据来设计。核心变化：(1) 所有实验区分为 [计划]（尚未执行）与 [实测]（有数据）；(2) 新增与核心贡献（能力信封、预算能力、供应链场景）直接挂钩的评估；(3) 明确每个实验结果在论文中对应哪条主张。现状声明：截至本文写作，Native ABI 侧没有任何已实测数据。旧文档中的所有数字都是待验证方案。以下所有 [计划] 条目都不构成当前性能结论。工程侧（Linux ABI）的实测数据见 `docs/roadmap/perf-overhaul.md`。
 
 ---
 
@@ -141,7 +139,7 @@
 
 ## 6. E4 [计划] 微基准：Native syscall 延迟
 
-复用旧 05 §2-§7 的矩阵（handle_dup/close/query、path_open、vm_alloc、event_wait、msg_send/recv、task_spawn vs fork+exec、clock_get），逐一对照 Linux 等价操作。注意：不要在评估里声称"spawn 一定快于 fork+exec"，结果说话。
+复用旧 05 §2-§7 的矩阵（handle_dup/close/query、path_open、vm_alloc、event_wait、msg_send/recv、task_spawn vs fork+exec、clock_get），逐一对照 Linux 等价操作。注意：spawn 与 fork+exec 的相对开销需以实测 benchmark 数据为准。
 
 ---
 

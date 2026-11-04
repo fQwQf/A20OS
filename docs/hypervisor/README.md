@@ -1,23 +1,27 @@
-# Hypervisor 文档入口
+# 虚拟化与 Hypervisor 子系统 (Hypervisor Subsystem)
 
-A20OS 提供共享 VM/vCPU 核心与多架构硬件后端。当前可运行 RV64 H、RV32 H、
-AArch64 EL2、ARM32 HYP、AMD SVM 和 Intel VMX；LoongArch LVZ 为默认关闭的
-实验实现。多架构小载荷双 vCPU SMP 已验证，完整 OS guest 工作流仍面向 RV64。
+A20OS Hypervisor 子系统提供轻量级硬件辅助虚拟化能力，基于共享 VM / vCPU 核心抽象支持主流硬件架构后端（RV64 H、RV32 H、AArch64 EL2、ARM32 HYP、AMD SVM 与 Intel VMX）。
 
-- [使用指南](03-usage.md)：依赖、构建、QEMU / Bochs 运行、输出判据、用户态
-  `hyp_test`、VMM/SMP 调用顺序、RISC-V 管理器、排查与清理。
-- [RISC-V 虚拟 SBI](10-riscv-sbi.md)：RV32/RV64 统一分发、扩展边界、DBCN、
-  错误处理和真实调用验证。
-- [后端能力](08-multiarch-backends.md)：guest 模式、内存与架构接口边界。
-- [运行验证](09-smp-validation.md)：本轮实际执行矩阵、SMP 方法、限制与复现。
-- [验证证据](validation-2026-10-25.json)、[main 复测](validation-main-2026-10-25.json)：
-  镜像/日志 SHA-256 与 PASS/SKIP 标记。
-- [实现状态](../status/current/hypervisor-implementation-status.md)：当前能力、
-  完整 guest 既有问题与未完成项。
-- [命名宿主](06-host-runtime.md)、[guest supervisor](07-guest-supervisor.md)：
-  RV64 完整 guest、实例隔离、控制协议与生命周期。
+---
 
-[基础设计](00-design.md)、[A20OS guest 设计](01-a20os-guest.md)、
-[路线图](02-roadmap.md) 与 [平台设计](04-platform-design.md) 包含历史描述或
-未来目标。使用方式与验收范围以本目录的使用指南、后端说明和验证记录为准。
-VMX 本轮使用 Bochs，没有 Intel 实机验证；LoongArch 没有 LVZ 正控执行证据。
+## 规范与文档导航
+
+| 领域 | 核心文档 | 内容概要 |
+| :--- | :--- | :--- |
+| **系统架构** | [overview.md](overview.md) | **架构总览**：轻量级地基定位、Stage-2 单级内存复用、页帧出借语义与设备模型 |
+| **部署与操作** | [03-usage.md](03-usage.md) | **使用指南**：构建流程、QEMU / Bochs 运行配置、用户态测试与故障排查 |
+| **架构后端** | [08-multiarch-backends.md](08-multiarch-backends.md) | **多架构后端**：RV64/RV32/AArch64/ARM32/x86 硬件虚拟化接口与寄存器边界 |
+| **虚拟 SBI 规范** | [10-riscv-sbi.md](10-riscv-sbi.md) | **RISC-V SBI**：Base / DBCN / HSM / RFENCE / IPI / TIME 规范实现与测试断言 |
+| **宿主与控制平面** | [06-host-runtime.md](06-host-runtime.md) | **宿主运行时**：实例隔离、资源命名空间与生命周期管理 |
+| | [07-guest-supervisor.md](07-guest-supervisor.md) | **监管协议**：控制平面协议、动态装载与监控管道 |
+| **多核验证** | [09-smp-validation.md](09-smp-validation.md) | **运行验证**：多架构双核 SMP 运行矩阵、正反向门禁判据与环境复现 |
+| **代码契约规范** | [00-design.md](00-design.md) | 基础设计契约（C 代码显式引用） |
+| | [01-a20os-guest.md](01-a20os-guest.md) | Guest 运行协议契约（C 代码显式引用） |
+| | [02-roadmap.md](02-roadmap.md) | 远期演进规划与后续扩展切片 |
+| | [04-platform-design.md](04-platform-design.md) | 板级平台模拟与总线设计参考 |
+
+---
+
+## 历史证据与数据归档
+
+相关历史运行日志清单与测试证据已归档至目录 `docs/archive/hypervisor/`。当前实现状态与缺口台账请参考 [Hypervisor 实现状态](../status/current/hypervisor-implementation-status.md)。

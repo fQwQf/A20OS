@@ -220,7 +220,7 @@ void *a20_mmap_nommu_alloc(uintptr_t len, uintptr_t *addr_out)
 }
 
 /* ------------------------------------------------------------------ *
- * Backing-object segments  (P6, docs/status/history/mm-single-level-migration-log.md 12.6)
+ * Backing-object segments  (P6, docs/archive/mm/mm-single-level-migration-log.md 12.6)
  * ------------------------------------------------------------------ *
  * A mapping's backing object -- the vnode, the file offset, whether it is
  * MAP_SHARED -- is currently only reachable through the VMA, which is why the

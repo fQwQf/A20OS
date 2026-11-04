@@ -4010,7 +4010,7 @@ CASES: dict[str, dict] = {
     # The same channel on loongarch64, where the interesting part is not the
     # translation but the *configuration surface*: QEMU's loongarch virt hands
     # the guest no kernel command line by any route (four routes tried and all
-    # negative -- see docs/exec-xlator/01-usage.md), so until now `a20.*` keys
+    # negative -- see docs/kernel/exec-xlator/01-usage.md), so until now `a20.*` keys
     # were compiled in and unreachable on this architecture: CONFIG_XLATOR=y,
     # /proc/a20/xlator registered, and no way to ever turn it on.
     #

@@ -1,8 +1,6 @@
 # 系统文献综述（Systematic Literature Review）——工作文档
 
-> 旧版研究笔记在每处新颖性声明后都写"据当前调研……尚需系统文献复核"，这个"复核"就是本文。目标：把三个贡献层面（预算能力 03、类型化通道 04、能力信封 05）逐一放到文献谱系里，给出已确立 / 候选差异 / 被覆盖的明确分级，消灭一切含糊的"可能是首次"。
->
-> 覆盖范围：本工作文档基于作者掌握的文献知识整理，**尚未完成逐篇全文核对与穷尽式检索**（本次写作时外网检索不可用）。投稿前必须按 §6 的检索协议补全。条目凡未亲自核对的都标 `[待核]`。
+> 旧版研究笔记在每处新颖性声明后都写"据当前调研……尚需系统文献复核"，这个"复核"就是本文。目标：把三个贡献层面（预算能力 03、类型化通道 04、能力信封 05）逐一放到文献谱系里，给出已确立 / 候选差异 / 被覆盖的明确分级，消灭一切含糊的"可能是首次"。覆盖范围：本工作文档基于作者掌握的文献知识整理，**尚未完成逐篇全文核对与穷尽式检索**（本次写作时外网检索不可用）。投稿前必须按 §6 的检索协议补全。条目凡未亲自核对的都标 `[待核]`。
 
 ---
 
@@ -154,7 +152,7 @@ A20OS 信封的回答：包安装脚本放进信封（05 §4 场景），内核�
 | 工作 | 内容 | 对信封的含义 |
 |------|------|-------------|
 | RingGuard (He et al., eBPF'23) | io_uring 请求绕过 seccomp 是公认漏洞；用 eBPF 在 SQE 执行点审计 + 批量化降开销（文件 I/O 场景 7.8%，最坏 25%） | 证明 SQE 执行点调解可行且有开销数据可对照；信封的 io_uring 调解按同思路落在 op 执行点而非提交点 |
-| 上游 io_uring task restrictions (Axboe patch series, LWN 2026-01) | Linux 正在加 per-task io_uring 操作限制 + cBPF 过滤（IORING_REGISTER_RESTRICTIONS_TASK / BPF_FILTER），deny-by-default 方向演进 | 审稿人必引：Linux 正在补粗粒度洞。反驳要点：操作级白名单 ≠ 对象级预算，无时间/次数/数据维度、无影子 handle 审计、无法按 fd 收紧；且该机制不能表达"300 秒后全部失效" |
+| 上游 io_uring task restrictions (Axboe patch series, LWN 2026-01) | Linux 正在加 per-task io_uring 操作限制 + cBPF 过滤（IORING_REGISTER_RESTRICTIONS_TASK / BPF_FILTER），deny-by-default 方向演进 | 对比分析：操作级白名单不同于对象级预算，缺乏时间/次数/数据维度与影子 handle 审计机制，无法按 fd 细粒度收紧，且无法表达时效失效语义 |
 | MSG_RING SEND_FD 绕过 security_file_receive()（公开披露，2025-26） | io_uring 跨环传 fd 不走 receive_fd() 的 LSM 钩子，低权进程经 fixed-file slot 拿到被拒文件的可用权限 | fd 传递逃逸类的实锤案例：任何"每次获取过钩子"的设计都必须覆盖所有 fd 安装路径；信封的影子 handle 表必须把 io_uring fixed-file 安装视为一等 fd 接收事件 |
 | SCM_RIGHTS 经典语义 | Unix 域 socket 传 fd；接收方获得与发送方等价的持久 authority | 预算随渡问题：发送方过期后接收方仍持有可用 fd ⇒ 击穿"过期原子性"（03 定理 3.3）。必须定义"预算随渡/引用计数回收"语义 |
 | Linux revocable 框架（LKML 2025-09） | 内核内部 provider/consumer 可撤销资源引用（SRCU 实现），面向热插拔 | 内核已有"撤销"原语词汇；信封的全局 handle 失效是同一思想在能力空间的推广，主动撤销故事有工程先例可引 |

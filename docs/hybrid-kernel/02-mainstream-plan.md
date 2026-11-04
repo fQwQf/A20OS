@@ -1,6 +1,6 @@
 # 混合内核演进方向
 
-内容已按 2026-08 源码核对。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
+本文档分析 A20OS 混合内核设计与主流架构的技术对齐。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
 
 ## 目标能力
 
@@ -73,13 +73,13 @@ RISC-V64/LoongArch64 整体发布流程曾完成（历史记录），但不覆�
 ## 已做出的设计决策
 
 - **主存储数据面不外迁，scratch 设备外迁**：TCG 数据显示块/网驱动的 I/O 路径是多次上下文切换 + 数据拷贝的长链路，在现有调度成本下外迁必然劣化。因此主存储 virtio-blk 数据面保持内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），仅 scratch 盘走用户态 udisk（`user/svc/ubd.c`），两者并存。该决策应在使用优先级捐赠/直接切换降低切换成本后重估。
-- **页缓存留内核；文件系统实现双态放置**：udisk 形态是"页缓存留内核 + 块请求进用户驱动"，与主流存储栈一致。文件系统实现自 2026-08 起具备用户态放置（uxfs 代理 + ufsd 宿主，fat/ext4 读写、iso9660/ntfs 只读，见 [06-user-fs.md](06-user-fs.md)）；内核副本因引导期 `/bin` 挂载和 EXTERNAL_ROOT 发行版根依赖而保留并存。
+- **页缓存留内核；文件系统实现双态放置**：udisk 形态是"页缓存留内核 + 块请求进用户驱动"，与主流存储栈一致。文件系统实现具备用户态放置（uxfs 代理 + ufsd 宿主，fat/ext4 读写、iso9660/ntfs 只读，见 [06-user-fs.md](06-user-fs.md)）；内核副本因引导期 `/bin` 挂载和 EXTERNAL_ROOT 发行版根依赖而保留并存。
 - **捐赠仅限 UP**：SMP 捐赠需要跨核唤醒/IPI 簿记的完整实现（`PER_CPU_CURRENT_VALIDATION`），在完成前不开放。
-- **外来架构二进制走 execve 就地 re-exec，不走人格服务**：`execve` 的语义要求调用者变成目标进程，转发给常驻服务就必须写一层 syscall 代理人格（starnix 式，量级完全不同），且请求响应要穿过 `kernel/ipc/channel_fd.c:68-72` 丢弃消息携带句柄的缺口。改为在 `exec.c` 的 `ENOEXEC` 回退循环里把 `bprm` 改写成宿主 qemu-user 并重来，guest 对内核完全是一个原生进程。W^X 只对被内核标记的那一个 task 放行，不动全局策略。可翻译的架构集合由 `kernel/proc/xlator_guests.def` 一处注册、由 `check-xlator-guests` 门禁保证与交叉编译器表一致，而不是编译期写死的白名单——加一个外来架构要改两行、不改内核逻辑。控制面分三层且互不依赖：编译期 `CONFIG_XLATOR`（可整块裁掉，`CONFIG_XLATOR=0` 时该文件不参与构建、符号表里搜不到 `xlator_*`）、启动时 `a20.xlator=*`、运行期 `/proc/a20/xlator`。分界与代价见 [../exec-xlator/03-internals.md](../exec-xlator/03-internals.md)。
+- **外来架构二进制走 execve 就地 re-exec，不走人格服务**：`execve` 的语义要求调用者变成目标进程，转发给常驻服务就必须写一层 syscall 代理人格（starnix 式，量级完全不同），且请求响应要穿过 `kernel/ipc/channel_fd.c:68-72` 丢弃消息携带句柄的缺口。改为在 `exec.c` 的 `ENOEXEC` 回退循环里把 `bprm` 改写成宿主 qemu-user 并重来，guest 对内核完全是一个原生进程。W^X 只对被内核标记的那一个 task 放行，不动全局策略。可翻译的架构集合由 `kernel/proc/xlator_guests.def` 一处注册、由 `check-xlator-guests` 门禁保证与交叉编译器表一致，而不是编译期写死的白名单——加一个外来架构要改两行、不改内核逻辑。控制面分三层且互不依赖：编译期 `CONFIG_XLATOR`（可整块裁掉，`CONFIG_XLATOR=0` 时该文件不参与构建、符号表里搜不到 `xlator_*`）、启动时 `a20.xlator=*`、运行期 `/proc/a20/xlator`。分界与代价见 [../kernel/exec-xlator/03-internals.md](../kernel/exec-xlator/03-internals.md)。
 
 ## 能力边界与不承诺项
 
 - 网络协议栈保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
 - loongarch64：有整体平台运行的历史证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前结论需逐项复验；
 - 性能数据全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- IOMMU/DMA 安全：RISC-V 侧在 QEMU `riscv-iommu-pci` 上完成动态 per-device domain（claim/map/unmap/release）+ fault queue 消费（fail-closed 阻断 + `/proc/a20/iommu` 计数器）+ `drv_dma` 接线，edu/uedud 样板端到端验证授权内 DMA 成功、窗口外 fault 被硬件拒绝并消费（`smoke-iommu-udriver-isolation`，2026-09-24 PASS）。边界：fault 拉取式消费、单 domain 实例、virtio-mmio 设备未接入；其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。
+- IOMMU/DMA 安全：RISC-V 侧在 QEMU `riscv-iommu-pci` 上完成动态 per-device domain（claim/map/unmap/release）+ fault queue 消费（fail-closed 阻断 + `/proc/a20/iommu` 计数器）+ `drv_dma` 接线，edu/uedud 样板端到端验证授权内 DMA 成功、窗口外 fault 被硬件拒绝并消费（`smoke-iommu-udriver-isolation` 验证通过）。边界：fault 拉取式消费、单 domain 实例、virtio-mmio 设备未接入；其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。

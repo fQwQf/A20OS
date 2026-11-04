@@ -1,6 +1,6 @@
 # A20OS Native ABI：错误码与返回约定
 
-> 错误码、返回值约定和错误处理策略按 2026-08 的 `errno.h`、handle-table quota 与活跃 mlibc 映射核对。
+本文档定义 Native ABI 的统一错误码体系、返回值约定及向 POSIX errno 的映射规则。
 
 ---
 
@@ -77,9 +77,7 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 
 ---
 
-30–48 为 Native 1.1 新增的对象/网络/范围状态，仍使用 A20 自己的编号。
-Linux errno 只在 libc 映射；新增细分错误的旧调用者处理规则见
-[运行时扩展 §2](10-runtime-extensions.md#2-协商与布局)。
+30–48 为 Native 1.1 新增的对象/网络/范围状态，仍使用 A20 自己的编号。 Linux errno 只在 libc 映射；新增细分错误的旧调用者处理规则见[运行时扩展 §2](10-runtime-extensions.md#2-协商与布局)。
 
 ## 3. 错误码分类
 

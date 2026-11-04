@@ -41,7 +41,7 @@ user/external/sbase/id
 *.blg
 *.fls
 *.fdb_latexmk
-/docs/paper/*.pdf
+/paper/*.pdf
 # OpenCode work plans / session state
 .omo/
 # GitHub Pages 组装产物（site/build.sh 生成）

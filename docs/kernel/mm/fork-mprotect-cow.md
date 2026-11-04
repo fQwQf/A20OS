@@ -1,15 +1,6 @@
 # Fork 与 mprotect 的 COW 并发约束
 
-共享文件映射还必须保留 dirty-state 跨权限变化和 shutdown 的语义：已写入的共享页在
-`mprotect(PROT_READ)`、unmap 或关闭映射时不能因 dirty bit 丢失而漏写。RV64 曾出现
-“共享写入 → 只读保护 → clean shutdown → coldboot 读回全零”的数据丢失；已修复路径通过
-字节精确冷启动读回与 `e2fsck` 验证。该结论现在是可复跑门禁而不是一次性记录：
-`make smoke-mm-shared-write-coldboot` 对同一张 ext4 镜像启动两次，第一次覆盖
-“写后 `mprotect(PROT_READ)`”“写后 `munmap`”“映射在关机时仍然活着”三种形态并 `poweroff`，
-宿主机对镜像跑 `e2fsck -fn`，第二次冷启动逐字节读回比对；写入路径不调用 `msync`，要证明的正是
-shutdown 路径自己保留了 dirty 状态。riscv64 与 aarch64 都通过。Linux RESTART 的 checked
-`vfs_sync` 不是完整 CLEAN shutdown；失败恢复后重新 fault 的 guest 覆盖仍是证据缺口。实现和验收
-边界见 [`fs-consistency-model.md`](../../fs/fs-consistency-model.md)。
+共享文件映射还必须保留 dirty-state 跨权限变化和 shutdown 的语义：已写入的共享页在`mprotect(PROT_READ)`、unmap 或关闭映射时不能因 dirty bit 丢失而漏写。RV64 曾出现“共享写入 → 只读保护 → clean shutdown → coldboot 读回全零”的数据丢失；已修复路径通过字节精确冷启动读回与 `e2fsck` 验证。该结论现在是可复跑门禁而不是一次性记录：`make smoke-mm-shared-write-coldboot` 对同一张 ext4 镜像启动两次，第一次覆盖“写后 `mprotect(PROT_READ)`”“写后 `munmap`”“映射在关机时仍然活着”三种形态并 `poweroff`，宿主机对镜像跑 `e2fsck -fn`，第二次冷启动逐字节读回比对；写入路径不调用 `msync`，要证明的正是 shutdown 路径自己保留了 dirty 状态。riscv64 与 aarch64 都通过。Linux RESTART 的 checked `vfs_sync` 不是完整 CLEAN shutdown；失败恢复后重新 fault 的 guest 覆盖仍是证据缺口。实现和验收边界见 [`fs-consistency-model.md`](../../fs/fs-consistency-model.md)。
 
 fork 复制私有映射时，父页表的叶节点锁保护源 PTE 快照、子映射所需的帧引用和父 PTE 的 COW 降权。子页表映射在释放父叶节点锁后完成，避免在节点锁内分配页表；若子映射失败，父映射保留 COW 仍可安全写入。
 
@@ -29,87 +20,39 @@ RV64 内核态 trap 入口在分配 trap frame 后，需要先保存原始 `t0`�
 
 ## fork 写保护与 TLB 完成边界
 
-页表叶锁只保护 PTE，不能阻止另一 CPU 继续使用旧的可写 TLB。fork 释放
-地址空间锁后、远端 shootdown 完成前，COW 若提前复制旧帧，父进程其他线程
-随后写入旧帧的内容就会丢失。COW 现在先取得该地址空间的 `tlb_lock`，等待
-先前事务完成，再取得 `mm->lock`；复制、shootdown 和旧帧释放都在这一边界内。
+页表叶锁只保护 PTE，不能阻止另一 CPU 继续使用旧的可写 TLB。fork 释放地址空间锁后、远端 shootdown 完成前，COW 若提前复制旧帧，父进程其他线程随后写入旧帧的内容就会丢失。COW 现在先取得该地址空间的 `tlb_lock`，等待先前事务完成，再取得 `mm->lock`；复制、shootdown 和旧帧释放都在这一边界内。
 
-缺页处理的第一次 COW 检查与最后的 present 检查之间也可能发生 fork。最后
-检查若见到 VMA 允许写入的 COW 叶，会重新执行 COW，避免把有效写入报告为
-SIGSEGV。批量 TLB 完成路径则固定当前 CPU，直到本地刷新与各 CPU generation
-记账完成；释放延迟帧前恢复抢占。
+缺页处理的第一次 COW 检查与最后的 present 检查之间也可能发生 fork。最后检查若见到 VMA 允许写入的 COW 叶，会重新执行 COW，避免把有效写入报告为 SIGSEGV。批量 TLB 完成路径则固定当前 CPU，直到本地刷新与各 CPU generation 记账完成；释放延迟帧前恢复抢占。
 
-`vm_fault_test` 新增三个线程持续原子递增、主线程执行 64 次 fork 的检查。
-旧内核记录 `actual=26810828 expected=26812229`；修复后的完整 x86_64 smoke
-记录 `actual=13837809 expected=13837809`，其余 MM、信号、GS、eventfd、SCM
-和 socket 检查通过，关机审计为 0。宿主确定性交错检查运行命令为：
+`vm_fault_test` 新增三个线程持续原子递增、主线程执行 64 次 fork 的检查。旧内核记录 `actual=26810828 expected=26812229`；修复后的完整 x86_64 smoke 记录 `actual=13837809 expected=13837809`，其余 MM、信号、GS、eventfd、SCM 和 socket 检查通过，关机审计为 0。宿主确定性交错检查运行命令为：
 
 ```sh
 python3 tools/tests/test_tlb_transaction_races.py
 ```
 
-本机原始日志保存在 `build/browser-followup/cow-race-negative-guest.log` 与
-`cow2-full-guest.log`，不纳入源码提交。
+本机原始日志保存在 `build/browser-followup/cow-race-negative-guest.log` 与`cow2-full-guest.log`，不纳入源码提交。
 
-活 PTE 的拆除在 guest 侧由 `make smoke-mm-tlb-teardown` 把守：8 核 guest 上 3 个读者线程反复读
-主线程正在 `munmap` 的同一批页，读者只在“已填充”窗口内被放行；`munmap` 之后主线程立刻把刚释放
-的帧回收进另一个保留区间并写满毒值，因此“帧在 shootdown 完成前被释放并复用”会让还在使用旧 TLB
-项的读者读到毒值而不是该页的填充值。该门禁还要求读者确实发生过缺页竞争、`MAP_FIXED_NOREPLACE`
-探针证明释放后不再映射、RSS 不增长，所以绿灯不可能来自线程从未相撞。负控已实测：去掉
-`mm_tlb_invalidate_finish()` 的远端 shootdown 后，读者观测到 573 次毒值，门禁转红。
+活 PTE 的拆除在 guest 侧由 `make smoke-mm-tlb-teardown` 把守：8 核 guest 上 3 个读者线程反复读主线程正在 `munmap` 的同一批页，读者只在“已填充”窗口内被放行；`munmap` 之后主线程立刻把刚释放的帧回收进另一个保留区间并写满毒值，因此“帧在 shootdown 完成前被释放并复用”会让还在使用旧 TLB 项的读者读到毒值而不是该页的填充值。该门禁还要求读者确实发生过缺页竞争、`MAP_FIXED_NOREPLACE`探针证明释放后不再映射、RSS 不增长，所以绿灯不可能来自线程从未相撞。负控已实测：去掉`mm_tlb_invalidate_finish()` 的远端 shootdown 后，读者观测到 573 次毒值，门禁转红。
 
 ## Reclaim hints retain live contents
 
-Linux `MADV_COLD` and `MADV_PAGEOUT` previously entered the same PTE-discard
-loop as `MADV_DONTNEED`. Private anonymous data became zero on the next fault,
-and shared anonymous mappings could lose their backing as well. These hints
-now validate the range and reject locked/PFN mappings, while keeping resident
-contents intact. This is a conservative hint implementation, consistent with
-the Native ABI; it does not force per-range swapout or implement page aging.
-The existing global pressure reclaimer remains responsible for eviction.
-See [madvise(2)](https://man7.org/linux/man-pages/man2/madvise.2.html).
+Linux `MADV_COLD` and `MADV_PAGEOUT` previously entered the same PTE-discard loop as `MADV_DONTNEED`. Private anonymous data became zero on the next fault, and shared anonymous mappings could lose their backing as well. These hints now validate the range and reject locked/PFN mappings, while keeping resident contents intact. This is a conservative hint implementation, consistent with the Native ABI; it does not force per-range swapout or implement page aging. The existing global pressure reclaimer remains responsible for eviction. See [madvise(2)](https://man7.org/linux/man-pages/man2/madvise.2.html).
 
-`vm_fault_test` fills both private and shared anonymous ranges, issues both
-hints, checks every word, and writes a new pattern between hints. With the
-previous kernel the added test reports `reclaim-hints FAIL`
-(`build/browser-followup/reclaim-negative-guest.log`). The corrected x86_64
-and RISC-V 4-CPU preemptible kernels and a Linux host pass; the full x86 smoke also passes
-its signal, COW, eventfd, Unix descriptor passing, socket registry and network
-option probes (`reclaim-full-guest.log`, `reclaim-host.log`, `reclaim-rv-guest.log`). This establishes
-the data-loss regression, not a diagnosis of Firefox's remaining heap crash.
+`vm_fault_test` fills both private and shared anonymous ranges, issues both hints, checks every word, and writes a new pattern between hints. With the previous kernel the added test reports `reclaim-hints FAIL` (`build/browser-followup/reclaim-negative-guest.log`). The corrected x86_64 and RISC-V 4-CPU preemptible kernels and a Linux host pass; the full x86 smoke also passes its signal, COW, eventfd, Unix descriptor passing, socket registry and network option probes (`reclaim-full-guest.log`, `reclaim-host.log`, `reclaim-rv-guest.log`). This establishes the data-loss regression, not a diagnosis of Firefox's remaining heap crash.
 
 ## User copies and sleeping positional I/O
 
-User-copy helpers now hold the address-space lock from translation lookup through
-one base-page copy (also for huge mappings). This prevents COW, unmap or remap
-from retiring the translated frame before the copy finishes. Fault resolution
-runs outside the lock, followed by a fresh permission and translation lookup.
-The same lifetime rule covers user string helpers and records accessed/dirty
-bits when the direct map is used.
+User-copy helpers now hold the address-space lock from translation lookup through one base-page copy (also for huge mappings). This prevents COW, unmap or remap from retiring the translated frame before the copy finishes. Fault resolution runs outside the lock, followed by a fresh permission and translation lookup. The same lifetime rule covers user string helpers and records accessed/dirty bits when the direct map is used.
 
-The internal `user_buffer_segment` borrowed-pointer interface has been removed.
-Its sole caller, positional AIO, now uses a kernel bounce page: device I/O may
-sleep while another thread changes the submitting process's mappings. User
-copies run outside the file-position lock, allowing faults on mappings of that
-same file, and each chunk saves/restores the shared file position under its lock.
+The internal `user_buffer_segment` borrowed-pointer interface has been removed. Its sole caller, positional AIO, now uses a kernel bounce page: device I/O may sleep while another thread changes the submitting process's mappings. User copies run outside the file-position lock, allowing faults on mappings of that same file, and each chunk saves/restores the shared file position under its lock.
 
-Deterministic host probes exercise a pending mapping replacement at the copy
-boundary and a replacement during VFS I/O:
+Deterministic host probes exercise a pending mapping replacement at the copy boundary and a replacement during VFS I/O:
 
 ```sh
 python3 tools/tests/test_usercopy_mapping_races.py
 python3 tools/tests/test_aio_user_mapping_races.py
 ```
 
-The 4-CPU preemptible x86_64 full VM smoke and RISC-V VM/AIO probes pass
-(`build/browser-followup/usercopy-aio-guest.log`, `usercopy-rv-guest.log`). The
-added guest `copy-protection` case also passed on the preceding kernel; it is
-permission regression coverage, not evidence of reproducing the copy race.
-Firefox ESR still crashes after this change, so this fix does not establish the
-cause of its heap corruption.
+The 4-CPU preemptible x86_64 full VM smoke and RISC-V VM/AIO probes pass (`build/browser-followup/usercopy-aio-guest.log`, `usercopy-rv-guest.log`). The added guest `copy-protection` case also passed on the preceding kernel; it is permission regression coverage, not evidence of reproducing the copy race. Firefox ESR still crashes after this change, so this fix does not establish the cause of its heap corruption.
 
-ARM32 cross-compilation additionally caught a direct conversion from the 64-bit
-user-address arithmetic to a native pointer. Converting through `uintptr_t`
-keeps that generic helper valid for 32-bit kernels. The ARM32 Linux kernel build
-passes with this conversion; the AArch64 dual-ABI kernel also builds. These are
-compile checks, not desktop or boot validation for either architecture.
+ARM32 cross-compilation additionally caught a direct conversion from the 64-bit user-address arithmetic to a native pointer. Converting through `uintptr_t` keeps that generic helper valid for 32-bit kernels. The ARM32 Linux kernel build passes with this conversion; the AArch64 dual-ABI kernel also builds. These are compile checks, not desktop or boot validation for either architecture.

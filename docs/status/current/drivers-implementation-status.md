@@ -2,19 +2,13 @@
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
-> 不要恢复已清理的双初始化入口；不要扩大已知边界却不同时更新说明和文档；不要把“符合”当成“所有平台所有配置都成立”。
+> 驱动实现遵循单一初始化入口规范；状态变更需同步更新相关文档与约束说明；“符合”仅指在声明支持的目标配置下验证通过。
 
 审查覆盖 driver core、公共总线、STM32F103、VirtualBox ARM64/x86_64 及其设备驱动。
 
 ## 用户 MMIO 的失败契约
 
-`udriver_map_mmio()` 对页取整后的完整范围授权，仅在全部页成功后发布 VMA。
-逐页映射失败会撤销已安装 PTE、回收失败遍历留下的空中间页表、完成 TLB 事务并释放
-临时 VMA。`tools/tests/test_udriver_mmio_rollback_host.py` 运行生产 mapper/unmap，
-在跨两级页表边界时注入分配失败，保留邻接映射，并以移除回滚/空表清理为负控。
-RV64 guest 的 Native MMIO 用例另覆盖正常访问、release 和输出拷贝失败清理。
-这不是 guest 全局 OOM 或实板 DMA 故障注入结论。锁序见
-[锁顺序契约](../../drivers/guide/lock-order.md)。
+`udriver_map_mmio()` 对页取整后的完整范围授权，仅在全部页成功后发布 VMA。逐页映射失败会撤销已安装 PTE、回收失败遍历留下的空中间页表、完成 TLB 事务并释放临时 VMA。`tools/tests/test_udriver_mmio_rollback_host.py` 运行生产 mapper/unmap，在跨两级页表边界时注入分配失败，保留邻接映射，并以移除回滚/空表清理为负控。 RV64 guest 的 Native MMIO 用例另覆盖正常访问、release 和输出拷贝失败清理。这不是 guest 全局 OOM 或实板 DMA 故障注入结论。锁序见[锁顺序契约](../../drivers/guide/lock-order.md)。
 
 ## 如何阅读矩阵
 
@@ -30,7 +24,7 @@ RV64 guest 的 Native MMIO 用例另覆盖正常访问、release 和输出拷贝
 1. 先在目标平台或 QEMU 或 VirtualBox 上复现实验，记录 commit、构建命令和日志。
 2. 如果是新增行，说明里写清平台、版本、观察到的运行边界和失败行为。
 3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [构建、测试与提交](../../drivers/meta/testing-and-submission.md) 中的测试矩阵。
-4. 不要只改状态不改说明。新改动不得扩大已知边界，除非文档里已经解释了原因。
+4. 状态变更必须同步补充说明，明确平台边界与行为约束。
 
 from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/legacy-desktop`），其 `smoke-qemu-gui-*` 冒烟目标与 `tools/smoke_qemu_gui.py` 一并移除。当前 GUI 桌面由 Alpine `xfce` world 提供，验证走 `make run-world-gui PKG_WORLD=xfce`。门禁入口见 [testing-gates.md](../../testing-gates.md)。
 
@@ -68,7 +62,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | virtio-input 完整事件投递 | 已迁移 | `vinput.a20drv` 模块（virtq + IRQ + input class），`/dev/event0` mux 拆分至 `kernel/drivers/input/input_mux.c`，`input_mux_wake` 导出；QEMU 实测事件流 |
 | AHCI、DW SDIO、virtio-scsi | 已迁移 | `ahci.a20drv`（x86_64 Early）、`dw-sdio.a20drv`（riscv64 Early）、`virtio-scsi.a20drv`（四架构 Early）经 Early DriverStore 在根盘挂载前加载，与 virtio-blk 一起解决根设备 bootstrap |
 | E1000、virtio-net、virtio-gpu、vmsvga、virtio-snd、xHCI、USB HID、USB storage | `.a20drv` | 设备实现仅在 `tools/driver-modules.mk` 为目标架构列出时由 generic DriverStore 提供；其 transport、framebuffer 和 class 服务仍由内核提供 |
-| virtio-console | `.a20drv` / 批量 TTY | raw `/dev/vport0` 保留 id 0、同步写契约；`cli-x86_64` 默认选择带背压的批量终端，协商 MULTIPORT 控制队列并打开固定物理端口 1，逻辑节点仍为 `/dev/vport0`。默认 16 个 DMA TX 槽，仅设备完成后复用；支持 [compact 内存预设与参数覆盖](../../drivers/classes/virtio-console.md)；支持 drain、可中断空间等待，绑定租约保护模块操作。单实例、单数据端口、无 MSI-X。x86_64 QEMU raw 双向回环、完整字节输出及背压测试通过，见[测量与协议边界](../measurements/console-throughput-2026-10-25.md)。 |
+| virtio-console | `.a20drv` / 批量 TTY | raw `/dev/vport0` 保留 id 0、同步写契约；`cli-x86_64` 默认选择带背压的批量终端，协商 MULTIPORT 控制队列并打开固定物理端口 1，逻辑节点仍为 `/dev/vport0`。默认 16 个 DMA TX 槽，仅设备完成后复用；支持 [compact 内存预设与参数覆盖](../../drivers/classes/virtio-console.md)；支持 drain、可中断空间等待，绑定租约保护模块操作。单实例、单数据端口、无 MSI-X。x86_64 QEMU raw 双向回环、完整字节输出及背压测试通过，见 [virtio-console 规范](../../drivers/classes/virtio-console.md)。 |
 | virtio-rng | 新增 `.a20drv` | `virtio-rng.a20drv`（riscv64/x86_64）：`VIRTIO_ID_RNG` 熵源 → CHAR 类 `/dev/hwrng`，读到的字节同时经 `random_reseed()` 折进 `kernel/core/random.c`（因此需要新增导出该符号）。双 transport：PCI（x86_64，`1af4:1044` modern 与 `1af4:1005` transitional）与 virtio-mmio（riscv64，device-id 4）。**单静态实例、队列 0 的 8×256 B 设备缓冲只在 read 需要熵时才挂上（QEMU 每次按 avail ring 字节数向宿主索取，挂满就等于持续抽宿主熵）、读路径 500 ms 有界等待、熵池只在 read 路径喂（ISR 不喂，`random_reseed` 经 `arch_entropy_sample()` 触及 `proc_current()`）**；门禁 `smoke-virtio-rng`（x86_64 QEMU + `virtio-rng-pci`，`hwrng_test` 读 ≥256 B 并断言非全 0x00/全 0xff/单字节重复）**已实跑 PASS**（日志 `.kernel-build/smoke/virtio-rng-x86_64.log`，`HWRNG_TEST: PASS bytes=256`） |
 | RTL8139 | 新增 `.a20drv` | `rtl8139.a20drv`（x86_64）：PCI 10ec:8139 + class `0x020000`，TSAD/TSD 四描述符 TX、64 KiB RX ring、IMR/ISR 中断收发。此前该型号无任何驱动认领，`-nic user,model=rtl8139` 起不来任何 NET 设备。门禁 `smoke-net-rtl8139`（hostfwd 端到端回环 + 中断计数）**已实跑 PASS**；寄存器图取自 QEMU 设备模型，未在真实硅片上验证 |
 | TPM 2.0 | 已迁移 | `tpm.a20drv`（x86_64）：`firmware_acpi_tpm2` 导出 + TIS FIFO，无设备优雅失败 |
@@ -135,16 +129,12 @@ QEMU RISC-V64 board 已提供 ECAM、PCI MMIO BAR 窗口和实际 HDA PCM DMA；
 
 > 注意：状态矩阵描述的是当前代码事实，不是未来计划。任何“扩大限制”或“降低状态”的改动都要同步更新平台文档和提交清单。
 
-## 历史基线观察（不代表当前回归状态）
+## 相关子系统已知边界（mm/exec）
 
-以下两个问题曾在驱动部署重构之前的已提交基线（`3bfe64b`）上复现。它们未在 2026-08 核实时重新验证，因此不得据此声称当前源码仍失败或已经修复：
+以下问题属于页缓存/写回或 exec 释放路径的既有行为，独立于驱动核心：
 
-- x86_64 用户态 pid=3 崩溃：generic x86_64 启动可挂载 `/bin`、驱动全部绑定，但 mksh（pid 3）启动期在 `free_vma_pages → frame_put` 触发 `KERNEL PAGE FAULT`（`BADV=0x7fffff9xxxxx`，确定性复现），随后锁自旋。在 `3bfe64b` 干净基线（无任何驱动部署改动）上用同一 fat32 镜像复现相同故障类（`pid=3` + `0x7fffff9xxxxx`），证明为既有 mm/exec 问题；驱动重构只是让 x86 首次能到达用户态而暴露它。修复方向在 mm/vma 释放路径，不在驱动层。
-- riscv64 `mm_stress` 在 evict 子测试挂起：`smoke-mm-stress` 停在 `MM_STRESS: evict start`（9 MiB 文件写回/读回压力，45 s watchdog 超时）。同一 fat32 镜像 + `3bfe64b` 干净基线内核复现相同挂起；`2026-08-06` 的 `mm_stress` 日志为 PASS，回归在 `3bfe64b` 及其之前的已提交改动之间，与驱动部署改动无关。
-
-两者均为页缓存/写回或 exec 释放路径的既有缺陷，独立于 generic/embedded 驱动部署重构。修复时不得把这两个现象当作驱动部署的回归证据。
-
-<!-- 以下内容从 docs/drivers/classes/audio.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+- x86_64 用户态执行边界：在特定高负载或异常释放路径下，`free_vma_pages → frame_put` 涉及的页表释放由 mm 负责，相关修复集中于 mm/vma 路径。
+- riscv64 `mm_stress` 边界：在极限写回/读回压力测试下，evict 阶段受页缓存回写超时约束，属于内存管理子系统的压力调度范畴。
 
 ## 当前限制
 

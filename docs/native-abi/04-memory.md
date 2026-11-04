@@ -1,36 +1,16 @@
 # A20OS Native ABI：内存子系统设计
 
-> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
-> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
-
-> 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
-> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 验证记录。
->
-> **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
-> `docs/status/history/mm-single-level-migration-log.md` §13.18）。原先并存的两种映射记录
-> ——地址空间区间 `vm_area_t` 与页表节点条目命名的 `mm_seg_t`——已合并为**一条**
-> `struct mm_seg`。本文先前引用的 `vm_area_t`、`file_offset`/`vmo_offset` 两个字段、
-> `base_va`/`len` 拼写均已不存在，下文按现状重写。
+本文档定义 Native ABI 的虚拟内存子系统架构，包括虚拟内存地址区域（VMAR）、虚拟内存对象（VMO）、内存映射接口与单级页表模型的对接。核心内存架构规范见 [单级页表规范](../kernel/mm/single-level-page-table.md)。
 
 ---
 
 ## 1. 内存模型概述
 
-核心地址空间里，一个映射只有**一条记录** `struct mm_seg`（`kernel/include/mm/vm.h`）：
-它既在 `mm->mmap` 链表上、表示地址空间区间，又被页表节点条目按名字引用。**不存在
-第二份映射表示**——这正是本次迁移删除的东西。此前 `vm_area_t`（区间）与 `mm_seg_t`
-（后端对象描述符）是两个结构体，必须逐字保持一致，还带一个 `->seg` 回指。
+核心地址空间里，一个映射由单一记录 `struct mm_seg`（`kernel/include/mm/vm.h`）表示：它既在 `mm->mmap` 链表上维护地址空间区间，又被页表节点条目按名字引用。系统不存在第二份冗余映射表示。
 
-每页的状态由挂在覆盖该页的页表页上的元数据承载，是页状态的**唯一权威**；页表条目
-与映射记录只提供区间与后端对象，**不是**页状态的副本。查找一次映射用
-`mm_seg_find()`，没有第二种查询。
+每页的状态由挂在覆盖该页的页表页上的元数据承载，是页状态的**唯一权威**；页表条目与映射记录只提供区间与后端对象，**不是**页状态的副本。查找一次映射用`mm_seg_find()`，没有第二种查询。
 
-VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，独立于地址空间；
-`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。VMAR (Virtual Memory
-Address Region) 当前只是 Native syscall 对核心 `mm_seg_t`/`mm_mmap_*` 的称呼和薄包装，
-不存在独立 VMAR handle 或层级树；VMO 通过 `vm_map` 建立 `VM_VMO` 映射记录。除此之外
-还有普通映射：`vm_alloc` 建立普通匿名记录，FILE/DEVICE source 建立 `VM_FILE` 记录，
-二者都不是 MEMORY-handle-backed VMO。
+VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，独立于地址空间；`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。VMAR (Virtual Memory Address Region) 当前只是 Native syscall 对核心 `mm_seg_t`/`mm_mmap_*` 的称呼和薄包装，不存在独立 VMAR handle 或层级树；VMO 通过 `vm_map` 建立 `VM_VMO` 映射记录。除此之外还有普通映射：`vm_alloc` 建立普通匿名记录，FILE/DEVICE source 建立 `VM_FILE` 记录，二者都不是 MEMORY-handle-backed VMO。
 
 ```text
 进程地址空间 (VMAR)
@@ -105,7 +85,7 @@ VMO 的核心属性可以形式化为四元组 `(pages, size, type, physical lay
 
 ### 3.1 定义
 
-层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查，越界在任何替换映射之前返回 NO_SPACE。关闭句柄仅减引用：子节点持有父引用，映射持有所属节点引用，树随最后一个引用消亡。
+层级 VMAR 的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查，越界在任何替换映射之前返回 NO_SPACE。关闭句柄仅减引用：子节点持有父引用，映射持有所属节点引用，树随最后一个引用消亡。
 
 Native VMAR 操作的地址空间语义仍直接作用于核心映射记录，与后端相关的字段可简化为：
 
@@ -121,10 +101,7 @@ struct mm_seg {
 };
 ```
 
-原先这里是 `vm_area_t`，并且 `file_offset` 与 `vmo_offset` 是两个字段。二者从来不会
-同时有效（`mmap.c` 已按 `VM_VMO` 二选一），所以现在是一个 `backing_offset`。
-记录由 `mm_seg_new()` 构造，**必须**走这个构造函数：`magic` 与初始 refcount 在那里
-设置，漏掉会让后续 `mm_seg_put()` 把一条从未初始化的记录当作已释放对象而 panic。
+原先这里是 `vm_area_t`，并且 `file_offset` 与 `vmo_offset` 是两个字段。二者从来不会同时有效（`mmap.c` 已按 `VM_VMO` 二选一），所以现在是一个 `backing_offset`。记录由 `mm_seg_new()` 构造，**必须**走这个构造函数：`magic` 与初始 refcount 在那里设置，漏掉会让后续 `mm_seg_put()` 把一条从未初始化的记录当作已释放对象而 panic。
 
 ### 3.2 VMAR 三元组
 
@@ -145,8 +122,7 @@ $$VMAR = ([base, base+len), prot, backing)$$
 | `A20_VMAR_CAN_MAP_EXEC` | 允许映射为可执行 |
 | `A20_VMAR_CAN_MAP_SPECIFIC` | 允许在指定地址映射 |
 
-这些常量即 `vm_create_vmar` 的 `flags` 天花板位与 `vm_map` 路由的授权依据；
-定点映射（MAP_FIXED）额外要求 `SPECIFIC` 位。
+这些常量即 `vm_create_vmar` 的 `flags` 天花板位与 `vm_map` 路由的授权依据；定点映射（MAP_FIXED）额外要求 `SPECIFIC` 位。
 
 ---
 
@@ -183,7 +159,7 @@ int64_t vm_map(a20_vm_map_args_t *args);
 
 与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE/EXEC rights 都会收紧对应保护位；此外经 VMAR 路由的映射还要满足节点天花板与 `MAP_FIXED` 的 `VMAR_CAN_MAP_SPECIFIC` 要求（`vmar_cap_allows`）。
 
-实现分层（2026-08 更新）：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
+实现分层：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
 
 ### 4.3 vm_unmap — 解除映射
 
@@ -265,8 +241,7 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 
 ### 6.2 缺页处理
 
-1. CPU 触发 page fault。分派先读**该页的每页元数据**（`Status` 字节）与页表节点条目
-   命名的记录；`mm_seg_find()` 只在需要区间策略时按地址查一次链表。
+1. CPU 触发 page fault。分派先读**该页的每页元数据**（`Status` 字节）与页表节点条目命名的记录；`mm_seg_find()` 只在需要区间策略时按地址查一次链表。
 2. `VM_VMO` 映射从 VMO 的 `pages[]` 获取或首次物化 canonical frame
 3. `VM_FILE` 映射通过 vnode/page cache 填充；当前不会创建 `VMO_PAGED`
 4. 普通匿名映射走核心匿名 fault/COW 路径

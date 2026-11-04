@@ -207,6 +207,5 @@ Phase 3（未来计划，未实现）：hub 与其它 HCD。
 ## 13. 与"设计原则"的一致性
 
 - 分层薄接口、无 ABI 互相包装依赖（USB core 不碰 Linux/native ABI）。
-- 不引入 POSIX 异步信号；HID 完成由 controller 的 INTx 驱动，class 回调仍走
-  同步的 `read`/`poll` 路径，不新增异步完成回调接口。
+- 不引入 POSIX 异步信号；HID 完成由 controller 的 INTx 驱动，class 回调仍走同步的 `read`/`poll` 路径，不新增异步完成回调接口。
 - 能力/权限、时间约束等 native 概念不进入 USB core。

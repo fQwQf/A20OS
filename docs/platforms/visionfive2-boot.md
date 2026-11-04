@@ -1,9 +1,6 @@
 # StarFive VisionFive 2 / JH7110
 
-本页适用于 VisionFive 2 的 v1.2a/v1.3b 板型和 2/4/8 GiB RAM 配置。
-A20OS 提供内核板级实现、OpenSBI/U-Boot SPL 构建脚本、直接引导 FIT 和 SD 镜像目标。
-NOMMU 上板启动已有真机验证基线；默认 MMU 用户态组合、SDIO 中断、GMAC 数据面和
-SMP 仍须分别验收，不能从一次基础启动推定全部设备可用。
+本页适用于 VisionFive 2 的 v1.2a/v1.3b 板型和 2/4/8 GiB RAM 配置。 A20OS 提供内核板级实现、OpenSBI/U-Boot SPL 构建脚本、直接引导 FIT 和 SD 镜像目标。 NOMMU 上板启动已有真机验证基线；默认 MMU 用户态组合、SDIO 中断、GMAC 数据面和 SMP 仍须分别验收，不能从一次基础启动推定全部设备可用。
 
 ## 系统和设备范围
 
@@ -18,10 +15,7 @@ SMP 仍须分别验收，不能从一次基础启动推定全部设备可用。
 | 有线网络 | `starfive_gmac.c` 对接 GMAC1 `0x16040000`、Motorcomm PHY；数据面为轮询，仅支持 embedded 驱动部署，需实机网络验收 |
 | 其他设备 | 不由此页承诺 HDMI、GPU、USB、无线、PCIe 或音频可用；软件 world 的存在也不证明显示设备可用 |
 
-MMU 默认镜像带 FAT32 用户态，挂载到 `/bin`；可选 ext4 软件分区挂载到 `/extra`。
-NOMMU 配置用于兼容/启动对照，不具备与 MMU 配置相同的进程隔离和程序兼容性。
-实际可分配内存以启动日志为准：当前单区间分配器在内核之后的首个保留区处裁剪，
-其中包括位于 `0x46000000` 的 DTB，因此不能把硬件 2/4/8 GiB 容量当成当前可分配容量。
+MMU 默认镜像带 FAT32 用户态，挂载到 `/bin`；可选 ext4 软件分区挂载到 `/extra`。 NOMMU 配置用于兼容/启动对照，不具备与 MMU 配置相同的进程隔离和程序兼容性。实际可分配内存以启动日志为准：当前单区间分配器在内核之后的首个保留区处裁剪，其中包括位于 `0x46000000` 的 DTB，因此不能把硬件 2/4/8 GiB 容量当成当前可分配容量。
 
 ## 依赖和启动链
 
@@ -55,11 +49,9 @@ rustup target add --toolchain 1.96.0 \
   riscv64imac-unknown-none-elf riscv64gc-unknown-none-elf
 ```
 
-已有 rustup 可跳过下载安装器，但仍执行 `toolchain install` 和 `target add`。
-构建使用仓库 `rust-toolchain.toml`，不要求另外安装 nightly。
+已有 rustup 可跳过下载安装器，但仍执行 `toolchain install` 和 `target add`。构建使用仓库 `rust-toolchain.toml`，不要求另外安装 nightly。
 
-固件脚本默认使用 `riscv64-linux-gnu-`，内核使用仓库选择的 RV64 工具链。
-首次固件/子模块/world 获取需要网络；更完整的宿主选项见[构建指南](../dev/build.md)。
+固件脚本默认使用 `riscv64-linux-gnu-`，内核使用仓库选择的 RV64 工具链。首次固件/子模块/world 获取需要网络；更完整的宿主选项见[构建指南](../dev/build.md)。
 
 ```text
 BootROM → U-Boot SPL → FIT：OpenSBI fw_dynamic → A20OS
@@ -67,10 +59,7 @@ BootROM → U-Boot SPL → FIT：OpenSBI fw_dynamic → A20OS
 SD FAT32 → /bin；可选 ext4 → /extra
 ```
 
-此路径由 SPL 直接进入 OpenSBI/A20OS，正常启动时**没有 U-Boot proper 提示符**。
-FIT 将内核标为 `os = "U-Boot"`，用于满足 SPL 查找下一入口的协议；这不改变内核类型。
-OpenSBI 位于 `0x40000000`，内核位于 `0x40200000`，DTB 位于 `0x46000000`。
-EEPROM 板型选择对应 FIT 配置；EEPROM 无法读取时的默认配置为 v1.3b，应核对实际板型。
+此路径由 SPL 直接进入 OpenSBI/A20OS，正常启动时**没有 U-Boot proper 提示符**。 FIT 将内核标为 `os = "U-Boot"`，用于满足 SPL 查找下一入口的协议；这不改变内核类型。 OpenSBI 位于 `0x40000000`，内核位于 `0x40200000`，DTB 位于 `0x46000000`。 EEPROM 板型选择对应 FIT 配置；EEPROM 无法读取时的默认配置为 v1.3b，应核对实际板型。
 
 ## 从源码生成镜像
 
@@ -90,10 +79,7 @@ tools/a20 package vf2-minimal
 tools/a20 package vf2-sdcard -- VF2_WORLD=devel
 ```
 
-它们复用下方 Make 镜像目标与同名产物，不额外构建启动固件。
-VF2 没有 `a20 prepare` 分派；先执行 `make vf2-firmware`。
-实例名是 `vf2-minimal`/`vf2-sdcard`，不能用板名 `visionfive2` 代替。
-本页默认采用显式 Make 构建、独立写卡和串口记录流程：
+它们复用下方 Make 镜像目标与同名产物，不额外构建启动固件。 VF2 没有 `a20 prepare` 分派；先执行 `make vf2-firmware`。实例名是 `vf2-minimal`/`vf2-sdcard`，不能用板名 `visionfive2` 代替。本页默认采用显式 Make 构建、独立写卡和串口记录流程：
 
 ```sh
 make vf2-firmware
@@ -101,10 +87,7 @@ VF2_GIT_TRANSPORT=https make vf2-extra-sources
 make vf2-minimal
 ```
 
-`vf2-firmware` 按脚本锁定的上游提交构建 OpenSBI、SPL、救援 U-Boot 和两份 DTB，
-工作树位于 `build/vf2-work/`；产物位于 `build/vf2-firmware/`。
-`vf2-minimal` 默认构建 MMU 内核、FAT32 用户态与 fastfetch，不创建 `/extra`。
-没有 SSH key 时用上面的 HTTPS 子模块获取方式。
+`vf2-firmware` 按脚本锁定的上游提交构建 OpenSBI、SPL、救援 U-Boot 和两份 DTB，工作树位于 `build/vf2-work/`；产物位于 `build/vf2-firmware/`。`vf2-minimal` 默认构建 MMU 内核、FAT32 用户态与 fastfetch，不创建 `/extra`。没有 SSH key 时用上面的 HTTPS 子模块获取方式。
 
 其他组合：
 
@@ -123,9 +106,7 @@ make vf2-sdcard VF2_EXTRA_IMAGE=/absolute/path/extra.ext4.img
 make vf2-image VF2_WORLD=devel
 ```
 
-`vf2-minimal`、`vf2-sdcard` 读取 `VF2_MMU`，默认 `1`；`vf2-image` 固定为 NOMMU。
-不要把它们当成三个完全相同的目标。所有组合都会覆盖同名 `a20os.itb` 和 `a20os-sd.img`。
-`VF2_WORLD=xfce` 只选择软件包，不启用此板显示驱动。
+`vf2-minimal`、`vf2-sdcard` 读取 `VF2_MMU`，默认 `1`；`vf2-image` 固定为 NOMMU。不要把它们当成三个完全相同的目标。所有组合都会覆盖同名 `a20os.itb` 和 `a20os-sd.img`。`VF2_WORLD=xfce` 只选择软件包，不启用此板显示驱动。
 
 | 产物（`build/vf2-firmware/`） | 用途 |
 | --- | --- |
@@ -144,21 +125,13 @@ sgdisk -v build/vf2-firmware/a20os-sd.img
 sha256sum build/vf2-firmware/a20os-sd.img
 ```
 
-FIT 内核 load/entry 应为 `0x40200000`，DTB load 应为 `0x46000000`。
-当前 FIT 配方没有签名节点或已配置的 SPL 验签链，不提供启动真实性保证。
+FIT 内核 load/entry 应为 `0x40200000`，DTB load 应为 `0x46000000`。当前 FIT 配方没有签名节点或已配置的 SPL 验签链，不提供启动真实性保证。
 
 ## 写卡、拨码与串口
 
-`vf2-physical` 不应直接作为无人值守部署/验收入口：它把
-`target.media_device` 固定为 `/dev/sda`，可能指向宿主系统盘；
-`kernel.bringup=true` 的单独 build 不提供 shell，却配置了 `cat`/`ps`/`poweroff`
-命令及 `SMC: System ready` 期望。它的 package 又转入独立的 VF2 开发镜像编排，
-不能把单独 build 的配置和 package 产物混为同一候选。
-实例语法检查不会消除这些语义和目的盘问题。本页改用明确选择整卡的写入命令，
-并用终端记录实际镜像的启动，不照用该实例的默认 deploy 或 shell 检查。
+`vf2-physical` 不应直接作为无人值守部署/验收入口：它把`target.media_device` 固定为 `/dev/sda`，可能指向宿主系统盘；`kernel.bringup=true` 的单独 build 不提供 shell，却配置了 `cat`/`ps`/`poweroff`命令及 `SMC: System ready` 期望。它的 package 又转入独立的 VF2 开发镜像编排，不能把单独 build 的配置和 package 产物混为同一候选。实例语法检查不会消除这些语义和目的盘问题。本页改用明确选择整卡的写入命令，并用终端记录实际镜像的启动，不照用该实例的默认 deploy 或 shell 检查。
 
-准备独立电源、microSD/读卡器和 3.3 V 逻辑 USB-TTL。
-先确认目的盘、卸载其所有已挂载分区，再写入整卡：
+准备独立电源、microSD/读卡器和 3.3 V 逻辑 USB-TTL。先确认目的盘、卸载其所有已挂载分区，再写入整卡：
 
 ```sh
 lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,MOUNTPOINTS
@@ -169,8 +142,7 @@ sudo sgdisk -e /dev/disk/by-id/REPLACE_WITH_VF2_SD
 sudo sgdisk -v /dev/disk/by-id/REPLACE_WITH_VF2_SD
 ```
 
-占位符必须替换为实际 TF 整卡，写入会覆盖其数据。
-`sgdisk -e` 将备份 GPT 移到更大物理卡的末尾；它不扩展文件系统。
+占位符必须替换为实际 TF 整卡，写入会覆盖其数据。`sgdisk -e` 将备份 GPT 移到更大物理卡的末尾；它不扩展文件系统。
 
 断电后按 **RGPIO_1、RGPIO_0** 的顺序设置拨码：
 
@@ -181,14 +153,9 @@ sudo sgdisk -v /dev/disk/by-id/REPLACE_WITH_VF2_SD
 | eMMC | 1 / H | 0 / L |
 | UART ROM 恢复 | 1 / H | 1 / H |
 
-这是[StarFive 官方启动表](https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_SDK_QSG/boot_mode_settings.html)
-的逻辑值；不同板版的开关丝印可能不同，不要用“两个都向右”代替逻辑值。
-本镜像选择 SDIO3.0；官方提示该模式偶尔可能需要重新上电。
+这是[StarFive 官方启动表](https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_SDK_QSG/boot_mode_settings.html)的逻辑值；不同板版的开关丝印可能不同，不要用“两个都向右”代替逻辑值。本镜像选择 SDIO3.0；官方提示该模式偶尔可能需要重新上电。
 
-[官方 40-pin 表](https://doc-en.rvspace.org/VisionFive2/40-Pin_GPIO_Header_UG/VisionFive2_40pin_UG/gpio_pinout%20-%20vf2.html)
-给出 pin 6 为 GND、pin 8 为 GPIO5/UART TX、pin 10 为 GPIO6/UART RX。
-板 TX 接适配器 RX，板 RX 接适配器 TX；115200、8N1、无流控。
-板子独立供电，不将 5 V UART 或 RS-232 电平接入。
+[官方 40-pin 表](https://doc-en.rvspace.org/VisionFive2/40-Pin_GPIO_Header_UG/VisionFive2_40pin_UG/gpio_pinout%20-%20vf2.html)给出 pin 6 为 GND、pin 8 为 GPIO5/UART TX、pin 10 为 GPIO6/UART RX。板 TX 接适配器 RX，板 RX 接适配器 TX；115200、8N1、无流控。板子独立供电，不将 5 V UART 或 RS-232 电平接入。
 
 先开终端并开始记录，再插卡上电，例如：
 
@@ -196,15 +163,9 @@ sudo sgdisk -v /dev/disk/by-id/REPLACE_WITH_VF2_SD
 picocom --baud 115200 --flow n --logfile vf2-serial.log /dev/ttyUSB0
 ```
 
-预期顺序是 SPL → OpenSBI → A20OS 内存/定时器初始化 → init/shell。
-`BRINGUP=1` 且未配置 RAMFS_USER 的内核只会运行自检后结束，不会出现 shell；
-本页 `vf2-minimal`/`vf2-sdcard` 使用的是带用户态的开发配置。
+预期顺序是 SPL → OpenSBI → A20OS 内存/定时器初始化 → init/shell。`BRINGUP=1` 且未配置 RAMFS_USER 的内核只会运行自检后结束，不会出现 shell；本页 `vf2-minimal`/`vf2-sdcard` 使用的是带用户态的开发配置。
 
-进入 shell 后先检查 `cat /etc/os-release`、`mount`、`ls /bin`；
-有 `/extra` 时再核对其实际内容。网络需接 RJ45 后检查 PHY/link、
-`cat /proc/net/config` 和同网段 ping。默认 DHCP 也依赖真实可用的数据面。
-SMP 要单独设置 `NR_CPUS=2/4 ALLOW_UNVERIFIED_SMP=1` 并检查 secondary、IPI 和调度；
-默认单核启动不证明多核已验收。
+进入 shell 后先检查 `cat /etc/os-release`、`mount`、`ls /bin`；有 `/extra` 时再核对其实际内容。网络需接 RJ45 后检查 PHY/link、`cat /proc/net/config` 和同网段 ping。默认 DHCP 也依赖真实可用的数据面。 SMP 要单独设置 `NR_CPUS=2/4 ALLOW_UNVERIFIED_SMP=1` 并检查 secondary、IPI 和调度；默认单核启动不证明多核已验收。
 
 ## 救援控制台与可选 QSPI 更新
 
@@ -217,11 +178,9 @@ dd if=build/vf2-firmware/u-boot.itb of=build/vf2-firmware/u-boot-rescue-sd.img \
   bs=512 seek=8192 conv=notrunc
 ```
 
-按前面的写卡步骤改用 `u-boot-rescue-sd.img`，SD 模式上电并截停 U-Boot。
-这张卡保留 SPL/GPT，只将第二分区换成 U-Boot proper FIT。
+按前面的写卡步骤改用 `u-boot-rescue-sd.img`，SD 模式上电并截停 U-Boot。这张卡保留 SPL/GPT，只将第二分区换成 U-Boot proper FIT。
 
-只有在已保存原固件、救援卡可启动并确认 `sf probe` 的容量后，才考虑更新 QSPI。
-将产物放到同网段 TFTP 服务器；以下操作会实际覆盖 Flash：
+只有在已保存原固件、救援卡可启动并确认 `sf probe` 的容量后，才考虑更新 QSPI。将产物放到同网段 TFTP 服务器；以下操作会实际覆盖 Flash：
 
 ```text
 sf probe
@@ -233,14 +192,9 @@ tftpboot ${kernel_addr_r} a20os.itb
 sf update ${kernel_addr_r} 0x100000 ${filesize}
 ```
 
-每次 `tftpboot` 成功后核对文件长度/校验值和目标范围，失败不继续；
-FIT 的末尾 `0x100000 + filesize` 必须落在实际 Flash 容量内。
-更新后断电，选择 QSPI 的 **L,L**。内核位于 QSPI 并不消除 `/bin` 和 `/extra`
-的 SD 依赖，默认开发配置不能据此声称完整脱卡运行。
+每次 `tftpboot` 成功后核对文件长度/校验值和目标范围，失败不继续； FIT 的末尾 `0x100000 + filesize` 必须落在实际 Flash 容量内。更新后断电，选择 QSPI 的 **L,L**。内核位于 QSPI 并不消除 `/bin` 和 `/extra`的 SD 依赖，默认开发配置不能据此声称完整脱卡运行。
 
-Flash 启动失败时切回 SD 救援卡，不继续反复擦写。
-SD 也不能启动时，UART 恢复为 **H,H**，使用[官方恢复说明](https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_SDK_QSG/recovering_bootloader%20-%20vf2.html)
-及匹配的恢复固件。仓库没有 VF2 ROM UART 自动恢复脚本。
+Flash 启动失败时切回 SD 救援卡，不继续反复擦写。 SD 也不能启动时，UART 恢复为 **H,H**，使用[官方恢复说明](https://doc-en.rvspace.org/VisionFive2/Quick_Start_Guide/VisionFive2_SDK_QSG/recovering_bootloader%20-%20vf2.html)及匹配的恢复固件。仓库没有 VF2 ROM UART 自动恢复脚本。
 
 ## 故障定位与轻量构建
 
@@ -261,16 +215,6 @@ make ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=1 NOMMU=1 \
   DRIVER_DEPLOYMENT=embedded LDSCRIPT=kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld kernel-only
 ```
 
-不要手写可能变化的 `.kernel-build` 子目录；用相同选项执行 `make -s ... print-build-dir`
-查出目录，再用其中的 ELF 做 `addr2line`。
-平台构建检查为 `make check-visionfive2-build`。
-相关接口见[板级接口参考](physical-boards.md)、[平台约定](README.md)。
+不要手写可能变化的 `.kernel-build` 子目录；用相同选项执行 `make -s ... print-build-dir`查出目录，再用其中的 ELF 做 `addr2line`。平台构建检查为 `make check-visionfive2-build`。相关接口见[板级接口参考](physical-boards.md)、[平台约定](README.md)。
 
-SD 时钟 glue 位于 `kernel/arch/riscv64/boards/visionfive2/storage.c`，只配置 SDIO1
-局部分频和门控，不重编程共享 PLL 或总线。保留由 SD 启动固件设置的 pinmux、供电和
-采样相位；不宣称从未配置的裸 SoC 或其他启动介质恢复 SD 接口。卡协议和 PIO
-收敛到通用 DW-MSHC 驱动；当前不支持 eMMC、SDIO function、UHS 电压切换或热插卡。
-CRC/数据超时会使当前卡停止传输并返回错误，显式重新绑定后重新枚举。
-依据为 [Linux v6.12 StarFive MMC](https://github.com/torvalds/linux/blob/v6.12/drivers/mmc/host/dw_mmc-starfive.c)、
-[系统时钟](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/starfive/clk-starfive-jh7110-sys.c) 和
-[PLL 寄存器计算](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/starfive/clk-starfive-jh7110-pll.c)。
+SD 时钟 glue 位于 `kernel/arch/riscv64/boards/visionfive2/storage.c`，只配置 SDIO1 局部分频和门控，不重编程共享 PLL 或总线。保留由 SD 启动固件设置的 pinmux、供电和采样相位；不宣称从未配置的裸 SoC 或其他启动介质恢复 SD 接口。卡协议和 PIO 收敛到通用 DW-MSHC 驱动；当前不支持 eMMC、SDIO function、UHS 电压切换或热插卡。 CRC/数据超时会使当前卡停止传输并返回错误，显式重新绑定后重新枚举。依据为 [Linux v6.12 StarFive MMC](https://github.com/torvalds/linux/blob/v6.12/drivers/mmc/host/dw_mmc-starfive.c)、[系统时钟](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/starfive/clk-starfive-jh7110-sys.c) 和[PLL 寄存器计算](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/starfive/clk-starfive-jh7110-pll.c)。

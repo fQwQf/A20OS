@@ -1,15 +1,10 @@
 # 内核调试技术参考
 
-本页描述调试状态、ABI 适配和符号表接线。GDB 操作、日志判读与用户态调试入口见
-[调试指南](../dev/debug.md)。
+本页描述调试状态、ABI 适配和符号表接线。GDB 操作、日志判读与用户态调试入口见[调试指南](../dev/debug.md)。
 
 ## 内核调试状态机 {#debug-state}
 
-`kernel/proc/debug.c` 提供与 ABI 无关的观察者-被观察者调试模型。基础操作包括
-`proc_debug_traceme`、`proc_debug_attach`、`proc_debug_detach`、`proc_debug_resume`、
-`proc_debug_singlestep` 与 `proc_debug_kill`。接口还提供寄存器读写、地址空间 PEEK/POKE、
-siginfo 快照、`PT_DEBUG_EVENT_EXEC` / `PT_DEBUG_EVENT_EXIT` 事件停止，以及
-`proc_debug_syscall_entry` / `proc_debug_syscall_exit` 的 syscall 边界停止。
+`kernel/proc/debug.c` 提供与 ABI 无关的观察者-被观察者调试模型。基础操作包括`proc_debug_traceme`、`proc_debug_attach`、`proc_debug_detach`、`proc_debug_resume`、`proc_debug_singlestep` 与 `proc_debug_kill`。接口还提供寄存器读写、地址空间 PEEK/POKE、 siginfo 快照、`PT_DEBUG_EVENT_EXEC` / `PT_DEBUG_EVENT_EXIT` 事件停止，以及`proc_debug_syscall_entry` / `proc_debug_syscall_exit` 的 syscall 边界停止。
 
 Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。Native ABI 的调试对象也映射到同一接口面，见 [Native 调试接口](../native-abi/06-security.md)。
 
@@ -19,10 +14,7 @@ Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_pt
 - 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
 - `PTRACE_CONT` 带信号恢复时通过一次性 `ptrace_deliver_sig` 标记避免二次停止。
 
-Native ABI 的 `A20_OBJ_DEBUG` 会话复用同一状态机，syscall 包装位于
-`kernel/abi/native/sys_native_debug.c`，用户态 SDK 位于 `user/liba20rt/a20_debug.h`。
-`debug_resume` 的 CONT/SYSCALL 模式对应内核 `PT_DEBUG_RESUME_*`。
-native 线程共享信号状态，因此进程级 SIGSTOP 会停住整个进程；操作页据此要求附加独立进程。
+Native ABI 的 `A20_OBJ_DEBUG` 会话复用同一状态机，syscall 包装位于`kernel/abi/native/sys_native_debug.c`，用户态 SDK 位于 `user/liba20rt/a20_debug.h`。`debug_resume` 的 CONT/SYSCALL 模式对应内核 `PT_DEBUG_RESUME_*`。 native 线程共享信号状态，因此进程级 SIGSTOP 会停住整个进程；操作页据此要求附加独立进程。
 
 ## 符号表与回溯接线 {#symbolization}
 

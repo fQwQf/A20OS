@@ -1,9 +1,6 @@
 # A20OS 包管理与镜像分发
 
-A20OS 使用 apk（Alpine 包格式）作为包管理与镜像组装体系：
-自有组件（内核/用户态/驱动/移植软件）由 recipe 打成 apk 包，
-与 Alpine 上游包在同一个解析器下按 world 清单组合成镜像，
-经 GitHub Actions 构建、签名、发布。
+A20OS 使用 apk（Alpine 包格式）作为包管理与镜像组装体系：自有组件（内核/用户态/驱动/移植软件）由 recipe 打成 apk 包，与 Alpine 上游包在同一个解析器下按 world 清单组合成镜像，经 GitHub Actions 构建、签名、发布。
 
 ## 阅读顺序
 
@@ -26,5 +23,4 @@ A20OS 使用 apk（Alpine 包格式）作为包管理与镜像组装体系：
 | `tools/ensure-apk-static.sh` | 获取/缓存静态 apk 二进制 |
 | `tools/mkrootfs.py` | world 清单 → ext4 rootfs 镜像 |
 
-Make 入口：`make pkgs` / `make pkg-repo` / `make image-world` /
-`make pkgs-check` / `make pkg-key`（变量见 `tools/targets-pkg.mk` 头部注释）。
+Make 入口：`make pkgs` / `make pkg-repo` / `make image-world` / `make pkgs-check` / `make pkg-key`（变量见 `tools/targets-pkg.mk` 头部注释）。

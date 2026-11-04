@@ -1,7 +1,7 @@
 /*
  * A20OS core — internal IPC subsystem and object model.
  *
- * Ownership principle (docs/OS-Design.md): the internal kernel
+ * Ownership principle (docs/architecture.md): the internal kernel
  * implementation (kernel/ipc, kernel/proc, kernel/mm, kernel/drivers)
  * is self-contained and exposes its API here; the ABI layers
  * (kernel/abi/native, kernel/abi/linux) are thin wrappers that call into

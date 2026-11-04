@@ -1,28 +1,22 @@
 # A20 Native ABI 设计
 
-外部 Native ABI 尚未正式冻结。1.0 按 [发布计划](../releases/v1.0.md) 完成语义、运行时
-和 C/Rust 绑定后冻结 v1；内部 Rust 类型与函数不承诺稳定二进制布局。已有正确行为须通过
-[新旧实现对照](../releases/v1.0-validation.md)，有意变更须记录版本、迁移方式并同步调用者。
+外部 Native ABI 尚未正式冻结。1.0 按 [发布计划](../releases/v1.0.md) 完成语义、运行时和 C/Rust 绑定后冻结 v1；内部 Rust 类型与函数不承诺稳定二进制布局。已有正确行为须通过[新旧实现对照](../releases/v1.0-validation.md)，有意变更须记录版本、迁移方式并同步调用者。
 
-A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。本页覆盖设计定位与 syscall 编号分区，详细规范见各子文档。内容按 2026-08 源码核对，Native 入口计数更新至 2026-10-13；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
+A20OS 的混合内核设计动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [architecture.md](../architecture.md)。本页定义 Native ABI 的设计定位与系统调用编号分区，详细规范见各子文档。当前 Native 运行时机制、版本迁移与兼容边界见[运行时扩展规范](10-runtime-extensions.md)。
 
 ## 设计定位
 
-> 注：`user/archive/` 已于 2026-10 从仓库删除，下文与表格中的 archive 相关内容均为历史记录。
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 170 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不直接复制 POSIX 或 Linux syscall 编号。Native ABI 提供统一基于对象句柄（Handle）的调用接口，活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。
 
-长期布局：
+系统架构分层如下：
 
 ```text
-kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）
-kernel/abi/native/   A20OS native ABI（170 个登记入口，部分功能仍有边界）
-user/external/mlibc/sysdeps/a20/  活跃的 Native 完整 libc 移植（RISC-V64/AArch64 的静态与动态入口）
+kernel/abi/linux/    Linux-compatible ABI subset（Linux 用户态兼容层）
+kernel/abi/native/   A20OS native ABI（内核原生对象能力接口）
+user/external/mlibc/sysdeps/a20/  Native 完整 libc 移植（RISC-V64/AArch64 静态与动态运行库）
 ```
 
-Debug 分区（0x0900）的停止/恢复/观察语义已经完整：`debug_attach/traceme/detach/ resume`、`debug_wait/event` 停止报告（含退出事件）、`debug_read/write` 地址空间访问、寄存器读写。底层复用 ABI 无关的内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`），与 Linux ABI 的 ptrace(2) 共享同一状态机。 （历史阶段标记：Debug 分区受限实现——NATIVE_DEBUG_LIMITED_CONTRACT—— 已于 sys_native_debug.c 落地后结束。）
-
-2026-10-23 工作树新增的 Native **1.1.0** 运行时机制、版本迁移与兼容边界见
-[运行时扩展规范](10-runtime-extensions.md)。它遵守下列原则；POSIX 翻译不属于内核接口。
+Debug 分区（0x0900）具备完整的停止/恢复/观察语义：`debug_attach/traceme/detach/resume`、`debug_wait/event` 停止报告、`debug_read/write` 地址空间访问与寄存器读写，复用内核通用调试状态机。
 
 ## 核心原则
 
@@ -121,12 +115,13 @@ Native ABI syscall 编号按子系统分区：
 0x1000 - 0x1fff  experimental, not stable
 ```
 
-稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 syscall 编号表见 [handle.md](03-handle.md) §6。
+稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 173 个系统调用速查矩阵、跨架构寄存器陷入约定与 C 代码调用示例详见专门手册：[系统调用手册与调用指南](syscalls.md)（历史编号表亦保留在 [handle.md](03-handle.md) §6）。
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
+| [syscalls.md](syscalls.md) | **系统调用速查与调用指南**：全量 173 个系统调用矩阵、跨架构陷入指令与调用代码示例 |
 | [types.md](01-types.md) | 基础类型定义、ABI 头约定、所有 syscall 参数结构体 |
 | [errors.md](02-errors.md) | 错误码定义、返回值约定、错误处理策略 |
 | [handle.md](03-handle.md) | Handle 生命周期状态机、handle table 规范、14 种对象类型映射 |
@@ -181,7 +176,7 @@ Native ABI：
 - `user/external/mlibc/sysdeps/a20/`：当前活跃的较完整 libc 适配，支持静态链接、线程、pipe/poll/socketpair、`posix_spawn` 等已接入子集；静态/动态运行已覆盖 RISC-V64、AArch64；具体范围见本次验收记录。
 - `user/archive/`：保存历史上的 musl 移植参考代码和旧版 coreutils，不参与当前构建。
 
-不要一开始就承诺完整 POSIX。详见 [startup.md](07-startup.md)。
+POSIX 兼容层通过用户态 mlibc 逐步映射提供，内核原生接口保持精简对象模型，详见 [startup.md](07-startup.md)。
 
 ## 兼容策略
 
@@ -198,7 +193,7 @@ Native ABI 一旦稳定，需要遵守：
 
 ```text
 kernel/abi/native/syscall_table.c      syscall 分发表
-syscall_table.def                      syscall 编号宏定义（170 条）
+syscall_table.def                      syscall 编号宏定义（173 条）
 sys_core.c                             核心 syscall 实现
 sys_native_{handle,task,mm,fs,ipc,net,time,security,debug,system,sync,device,ext}.c  分区 syscall
 sys_native_debug.c                     Debug (0x0900) syscall（包装 proc_debug_*）
@@ -258,8 +253,8 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 当前登记 170 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
+Native ABI 当前登记 173 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
 
 `event_queue` 为 channel/timer/task 等对象提供统一等待模型，但 file/socket readiness 与 `event_watch_fs` 事件源尚未完整接入，不能视为已覆盖 epoll/signalfd/inotify 全语义。
 
-完整分类对比、未覆盖 Linux 功能（由兼容层模拟）以及形式化讨论，见 [OS-Design.md](../OS-Design.md) §4 与 `docs/research/05-capability-envelopes.md`。
+完整分类对比、未覆盖 Linux 功能（由兼容层模拟）以及形式化讨论，见 [architecture.md](../architecture.md) §4 与 `docs/research/05-capability-envelopes.md`。

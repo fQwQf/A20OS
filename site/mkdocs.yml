@@ -30,7 +30,6 @@ docs_dir: ../docs
 exclude_docs: |
   research/
   archive/
-  paper/
 
 theme:
   name: material
@@ -125,8 +124,9 @@ copyright: Copyright &copy; 2026 A20OS contributors · Apache-2.0 License
 nav:
   - 首页: README.md
   - 总体设计:
-      - 设计方案总览: OS-Design.md
+      - 设计方案总览: architecture.md
       - 混合内核架构:
+          - 索引与总览: hybrid-kernel/README.md
           - 概览与设计: hybrid-kernel/00-design.md
           - 核心机制: hybrid-kernel/01-mechanisms.md
           - 主流化计划: hybrid-kernel/02-mainstream-plan.md
@@ -135,7 +135,9 @@ nav:
           - IDL 与 Personality: hybrid-kernel/05-idl-and-personality.md
           - 用户态文件系统: hybrid-kernel/06-user-fs.md
   - 原生 ABI:
-      - 总览: native-abi/00-overview.md
+      - 规范索引: native-abi/README.md
+      - 总览与架构: native-abi/00-overview.md
+      - 系统调用速查与调用指南: native-abi/syscalls.md
       - 类型系统: native-abi/01-types.md
       - 错误处理: native-abi/02-errors.md
       - Handle 与能力: native-abi/03-handle.md
@@ -144,11 +146,16 @@ nav:
       - 安全模型: native-abi/06-security.md
       - 启动流程: native-abi/07-startup.md
       - ABI 深化: native-abi/09-native-abi-deepening.md
+      - 运行时扩展: native-abi/10-runtime-extensions.md
+      - CMSIS-RTOS2 人格: native-abi/11-cmsis-rtos2.md
   - 内核子系统:
+      - 核心机制总览: kernel/README.md
       - 调度:
           - EEVDF 调度器: kernel/eevdf-scheduler.md
           - 进程调度: kernel/process-scheduler.md
       - 内存管理:
+          - 索引与总览: kernel/mm/README.md
+          - 单级页表模型: kernel/mm/single-level-page-table.md
           - Fork 与 COW 并发约束: kernel/mm/fork-mprotect-cow.md
           - Slab CPU 缓存归属: kernel/mm/slab-cpu-cache.md
       - Linux ABI 兼容细节:
@@ -156,23 +163,88 @@ nav:
           - 接口枚举语义: kernel/linux-abi/interface-enumeration.md
           - Unix 附属数据: kernel/linux-abi/unix-ancillary.md
           - 子进程退出通知: kernel/linux-abi/child-exit-notification.md
+          - 内核密钥环 (Keyring): kernel/linux-abi/keyring.md
       - 资源命名空间: kernel/resource-namespaces.md
       - 内核扩展: kernel/extensions.md
+      - Kexec 热更新: kernel/kexec-hot-update.md
       - 架构特性:
           - AArch64 FEX 前置条件: kernel/arch/aarch64-fex-preconditions.md
           - x86_64 CPU ID: kernel/arch/x86_64-cpu-id.md
+      - 外来架构翻译 (exec-xlator):
+          - 索引与机制说明: kernel/exec-xlator/README.md
+          - 使用手册: kernel/exec-xlator/01-usage.md
+          - 接入指南: kernel/exec-xlator/02-integration.md
+          - 内核内部实现: kernel/exec-xlator/03-internals.md
+          - 扩展手册: kernel/exec-xlator/04-extending.md
       - 文件系统:
+          - 索引与总览: fs/README.md
           - VFS 边界语义: fs/vfs-edge-semantics.md
           - 一致性模型: fs/fs-consistency-model.md
+          - UFS 关闭令牌: fs/ufs-close-token.md
           - NTFS 实现: fs/ntfs.md
       - 网络:
+          - 索引与总览: net/README.md
           - 网络架构: net/architecture.md
+          - 路由与转发: net/routing.md
+          - 路由器实现: net/router.md
+          - 连接跟踪与 NAT: net/conntrack-nat.md
+          - NAT 状态与边界: net/nat.md
+          - NAT 宿主探针: net/nat-host-oracle.md
           - 后端接口契约: net/backend-interface.md
-          - 实例配置: net/instance-config.md
-          - 网络配置设计: net/network-config-design.md
+          - 后端选择策略: net/backend-policy.md
+          - 校验和卸载: net/checksum-offload.md
+          - LAN 局域网服务: net/lan-services.md
+          - lwIP 上游适配: net/lwip-upstream.md
+          - lwIP 分配器与锁: net/lwip-allocator-locks.md
+          - 多 Lane 并发: net/net-lanes.md
           - 网络锁契约: net/network-lock-contract.md
+          - 网络配置设计: net/network-config-design.md
+          - 实例配置: net/instance-config.md
+          - 基准测试方法: net/benchmark-method.md
+          - BSD 协议栈移植: net/bsd-port.md
       - 图形:
+          - 索引与总览: graphics/README.md
           - 3D 图形栈: graphics/3d-graphics.md
+          - 3D GPU 路线图: graphics/gpu-3d-roadmap.md
+          - 物理硬件 GPU: graphics/real-hardware-gpu.md
+          - VirtGPU 原生分配: graphics/virtgpu-native-allocation.md
+          - VirtGPU 共享与同步: graphics/virtgpu-sharing-and-sync.md
+          - DRM sysfs 发现: graphics/drm-sysfs-discovery.md
+          - 固件视频: graphics/firmware-video.md
+          - 宿主图形工具: graphics/host-tools.md
+      - 虚拟化:
+          - 索引与总览: hypervisor/README.md
+          - 架构规范: hypervisor/overview.md
+          - 使用指南: hypervisor/03-usage.md
+          - 多架构后端: hypervisor/08-multiarch-backends.md
+          - 虚拟 SBI 规范: hypervisor/10-riscv-sbi.md
+          - 宿主运行时: hypervisor/06-host-runtime.md
+          - 监管协议: hypervisor/07-guest-supervisor.md
+          - 多核验证: hypervisor/09-smp-validation.md
+          - 基础设计契约: hypervisor/00-design.md
+          - Guest 运行契约: hypervisor/01-a20os-guest.md
+          - 演进路线图: hypervisor/02-roadmap.md
+          - 平台设计: hypervisor/04-platform-design.md
+  - 集群系统:
+      - 索引与总览: cluster/README.md
+      - 核心规范:
+          - 架构与拓扑: cluster/overview.md
+          - 线缆帧协议与事务: cluster/02-wire-protocol.md
+          - 单系统映像 (SSI): cluster/runtime-ssi.md
+          - 多 MCU 共享内存内核: cluster/mcu-shared-kernel.md
+          - 应用开发与工作负载: cluster/cluster-apps.md
+      - 技术参考:
+          - 集群 ABI 契约: cluster/01-abi.md
+          - 内核内部实现: cluster/03-kernel-impl.md
+          - 传输层抽象: cluster/04-transports.md
+          - 用户态服务契约: cluster/05-userspace.md
+          - 运维部署手册: cluster/10-operator-guide.md
+          - 双节点 UDP 示例: cluster/02-udp-demo.md
+  - 安全与加固:
+      - 索引与总览: security/README.md
+      - 系统加固指南: security/hardening.md
+      - 内核 W^X 保护: security/kernel-wx.md
+      - 发布验收标准: security/release-acceptance.md
   - 驱动开发:
       - 驱动文档总览: drivers/README.md
       - 开发指南:
@@ -190,25 +262,54 @@ nav:
           - 输入: drivers/classes/input.md
           - 显示: drivers/classes/display.md
           - 音频: drivers/classes/audio.md
+          - TUN 虚拟网卡: drivers/classes/tun.md
+          - VirtIO 控制台: drivers/classes/virtio-console.md
           - USB 设计: drivers/classes/usb-design.md
           - 用户态与 devfs: drivers/classes/userspace-and-devfs.md
       - 工程实践:
           - 测试与提交: drivers/meta/testing-and-submission.md
   - 平台移植:
+      - 索引与开发板全景: platforms/README.md
       - 移植指南: platforms/porting-guide.md
-      - VisionFive 2 启动: platforms/visionfive2-boot.md
-      - LS2K1000: platforms/2k1000.md
-      - STM32F103 移植: platforms/stm32f103-port.md
-      - 物理开发板: platforms/physical-boards.md
-      - VirtualBox: platforms/virtualbox.md
-      - VirtualBox x86_64: platforms/virtualbox-x86_64.md
-      - VirtualBox AArch64: platforms/virtualbox-aarch64.md
+      - 物理开发板清单: platforms/physical-boards.md
+      - 待移植硬件清单: platforms/not-yet-ported.md
+      - RISC-V 平台:
+          - 昉·星光 2 (VisionFive 2): platforms/visionfive2-boot.md
+          - 嘉楠勘智 K230: platforms/k230.md
+          - 算能 Milk-V Duo: platforms/milk-v-duo.md
+          - 矽速 LicheeRV Nano: platforms/licheerv-nano.md
+          - 全志 D1s / F133: platforms/d1s-f133.md
+          - 矽速 Ox64: platforms/ox64.md
+          - 乐鑫 ESP32-C3: platforms/esp32-c3.md
+          - 博流 BL702 / M0sense: platforms/m0sense-bl702.md
+      - ARM / AArch64 平台:
+          - 树莓派 Raspberry Pi 4: platforms/raspberrypi4.md
+          - Pine64 PINE A64: platforms/pine-a64.md
+          - Pine64 Quartz64-Zero: platforms/quartz64-zero.md
+          - 友善 NanoPi R2S (RK3328): platforms/rk3328.md
+          - 全志 H616 (Orange Pi Zero 2): platforms/sun50i-h616.md
+          - 华为 CT5100 瘦客户机: platforms/huawei-ct5100.md
+          - 矽速 Lichee Pi Zero: platforms/lichee-pi-zero.md
+          - STM32F103 移植: platforms/stm32f103-port.md
+          - 海思 Hi3861: platforms/hi3861.md
+      - 龙芯 LoongArch 平台:
+          - 龙芯 LS2K1000: platforms/2k1000.md
+          - 龙芯 2K0300: platforms/2k0300.md
+      - x86_64 与虚拟化:
+          - x86_64 PC 通用机: platforms/x86_64-pc.md
+          - Intel J1900 工控机: platforms/j1900.md
+          - VirtualBox: platforms/virtualbox.md
+          - VirtualBox x86_64: platforms/virtualbox-x86_64.md
+          - VirtualBox AArch64: platforms/virtualbox-aarch64.md
   - 构建与测试:
+      - 开发者总览: dev/README.md
       - 构建指南: dev/build.md
+      - 启动模型: dev/boot-model.md
       - 测试门禁: testing-gates.md
       - 调试指南: dev/debug.md
       - 内核调试技术参考: kernel/debugging-internals.md
       - 实例化构建与运行: dev/instances.md
+      - 用户态子模块: dev/userland-submodules.md
       - 构建与宿主工具技术参考: dev/tooling-internals.md
       - 外部依赖: dev/external-dependencies.md
   - 打包与发行:
@@ -227,9 +328,12 @@ nav:
           - 构建: distro/build.md
           - 内核要求: distro/kernel-requirements.md
           - 源码软件移植: distro/source-software-porting.md
+          - XFCE 输入与热键: distro/xfce-input.md
+          - Minecraft 运行: distro/minecraft.md
+          - Minecraft 组件状态: distro/minecraft-components.md
   - 状态与进度:
       - 状态目录说明: status/README.md
-      - 模块状态: status/current/module-status-2026-10-19.md
+      - 模块状态: status/current/module-status.md
       - 文档与门禁: status/current/docs-gates.md
       - 服务器就绪度: status/current/server-readiness.md
       - 1.0 进度台账: status/current/v1.0-progress.md
@@ -248,18 +352,22 @@ nav:
           - 桌面: status/gaps/desktop.md
           - 安全: status/gaps/security.md
           - 文档与门禁: status/gaps/docs.md
-          - 2026-10-14 triage 明细: status/gaps/requirements-2026-10-14.md
+          - 人工 Triage 需求明细: status/gaps/triage-matrix.md
+          - 集群 SSI 缺口: status/gaps/cluster-ssi.md
           - 诊断笔记:
               - 索引: status/gaps/notes/README.md
               - arm32 FP: status/gaps/notes/core-arm32-fp.md
               - IPv6 pbuf: status/gaps/notes/net-ipv6-pbuf.md
               - ext4 孤儿: status/gaps/notes/fs-ext4-orphan.md
       - 各子系统实现状态:
+          - 交付基线: status/current/delivery-baseline.md
           - 集群与服务: status/current/cluster-implementation-status.md
           - 驱动: status/current/drivers-implementation-status.md
           - Hypervisor: status/current/hypervisor-implementation-status.md
           - 混合内核: status/current/hybrid-kernel-status.md
           - Native ABI 运行时: status/current/native-abi-runtime-status.md
+          - Native 运行时 1.0: status/current/native-runtime-1.0.md
+          - 安全状态: status/current/security-status.md
           - 图形: status/current/graphics-status.md
           - 网络: status/current/net-status.md
           - 文件系统: status/current/fs-status.md
@@ -269,17 +377,27 @@ nav:
           - Ext4 孤儿 inode: status/current/ext4-orphan-gap.md
           - DONTUNMAP 验证范围: status/current/validation-dontunmap.md
       - 历史记录:
-          - 单级内存模型迁移: status/history/mm-single-level-migration-log.md
+          - 历史索引: status/history/README.md
+          - 桌面 1.0 验证: status/history/desktop-1.0-2026-10-23.md
+          - 桌面应用与 apk 集成: status/history/desktop-apps-apk-2026-10-23.md
+          - 桌面回归排查: status/history/desktop-regressions-2026-10-22.md
+          - mlibc Native 加固: status/history/mlibc-native-hardening-2026-10-23.md
           - 串口保真度: status/history/serial-fidelity.md
           - XFCE x86_64 验证: status/history/xfce-x86_64-validation.md
-      - 测量与协议:
-          - 锁竞争基线: status/measurements/lock-baseline.md
-          - 锁竞争改造后: status/measurements/lock-after.md
-          - Native task object 协议: status/measurements/native-task-object-performance-protocol.md
+  - 版本发布:
+      - 发行版本说明: releases/README.md
+      - v1.0 正式版: releases/v1.0.md
+      - v1.0 验证报告: releases/v1.0-validation.md
+      - v1.0 对照基准: releases/v1.0-comparison.md
+      - v0.18 里程碑: releases/v0.18.md
+      - v0.17 里程碑: releases/v0.17.md
   - 路线图:
+      - 索引与总览: roadmap/README.md
       - 工程改进 TODO: roadmap/a20os-improvement-todo.md
       - 性能大修: roadmap/perf-overhaul.md
       - Park/Wake 协议拆分: roadmap/park-wake-protocol-split.md
+      - 锁串行化拆分: roadmap/lock-serialization-split.md
+      - 远期演进规划: roadmap/next-horizon.md
   - 参与贡献:
       - 贡献指南: CONTRIBUTING.md
       - 致谢: ACKNOWLEDGMENTS.md

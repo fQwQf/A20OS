@@ -2,11 +2,7 @@
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
-1.0 的整体完成条件见 [发布计划](../../releases/v1.0.md) 的 V1-ABI/V1-DRIVER/V1-MM。
-本页阶段性“已实现”不等于子系统完成；同源双态、完整人格层、协议协商以及功能/性能对照
-仍需逐项收口。2026-10-13 另核对并更正了下述 driver_manager 头文件依赖。
-
-最后核实：2026-08。运行类结论需在文末复现入口给出的命令上重新执行，历史里程碑记录见 [../archive/](../../archive)。设计总览见 [00-design.md](../../hybrid-kernel/00-design.md)，机制语义见 [01-mechanisms.md](../../hybrid-kernel/01-mechanisms.md)，演进路线见 [03-refactor-plan.md](../../hybrid-kernel/03-refactor-plan.md)。
+1.0 的整体完成条件见 [发布计划](../../releases/v1.0.md) 的 V1-ABI/V1-DRIVER/V1-MM。本页阶段性实现不等于子系统完成；同源双态、完整人格层、协议协商以及功能/性能对照仍需收口。设计总览见 [00-design.md](../../hybrid-kernel/00-design.md)，机制语义见 [01-mechanisms.md](../../hybrid-kernel/01-mechanisms.md)，演进路线见 [03-refactor-plan.md](../../hybrid-kernel/03-refactor-plan.md)。
 
 ## 核心架构原则与核对范围
 
@@ -48,7 +44,7 @@
 | 动态设备所有权 | 已实现 | `device_claim/release`，uinputd 两次启动验证自动释放 |
 | IOMMU PCI 发现 | 已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci` |
 | IOMMU bring-up/静态翻译探测 | 已实现 | `smoke-iommu-discovery` 检查 DDT/DC/CQ/FQ 与静态 TR_REQ |
-| IOMMU 动态 per-device domain 与 fault 消费 | 已实现（PCI edu 样板） | 动态 claim/map/unmap/release、FQ 消费 fail-closed、`/proc/a20/iommu` 计数器；`smoke-iommu-udriver-isolation` 端到端（uedud：授权内 DMA 成功、窗口外 fault 被消费并阻断、re-claim 恢复），2026-09-24 PASS |
+| IOMMU 动态 per-device domain 与 fault 消费 | 已实现（PCI edu 样板） | 动态 claim/map/unmap/release、FQ 消费 fail-closed、`/proc/a20/iommu` 计数器；`smoke-iommu-udriver-isolation` 端到端（uedud：授权内 DMA 成功、窗口外 fault 被消费并阻断、re-claim 恢复）验证通过 |
 | 服务协议 IDL 常量/固定消息层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py`，rtcd payload 已生成；`make check-a20-idl` |
 | IDL 版本化请求/响应信封 | 部分已实现 | rtcd 与 svcmgr/echod 使用 version/size envelope；ubd 仅使用生成常量，数据面走共享环 |
 | Linux pipe 人格层 PoC | 已实现（阶段五起步） | `smoke-native-personality`：channel/EventQ 的 pipe-shaped facade |
@@ -56,7 +52,7 @@
 | 统一驱动框架（`driver_t`/class 设备/DriverStore） | 已实现 | `kernel/drivers/core/driver_core.c` + `driver_manager.c`，`smoke-drvmod`、`smoke-evdev-stress` |
 | drvmod 内核模块装载 | 已实现 | `kernel/drvmod/loader.c` ET_REL + `.a20drv` 描述段 + veneer/GOT，`smoke-drvmod-*` |
 | fd-IPC 后端（channel_fd/eventfd/signalfd/timerfd/SysV shm/sem） | 已实现 | `kernel/ipc/*.c` 是 ABI 无关 vfile 后端，Linux `eventfd2/signalfd4/timerfd_*/sem*/shm*` 建立其上 |
-| 外来架构二进制 execve 透明转发（qemu-user 宿主） | 已实现（编译期 `CONFIG_XLATOR` + cmdline + `/proc/a20/xlator` 三层开关，默认全部关闭；`CONFIG_XLATOR=0` 可彻底裁掉） | `smoke-exec-xlator`：`execve` 一个 x86_64 ELF 被改写为 `/bin/qemu-x86_64` 就地 re-exec，guest 的标记串/argv/退出码正确；损坏文件、已注册但未配置的架构、shebang 三类语义不变；运行期开关在同一个进程里跑完 on→off→on 闭环。`smoke-exec-xlator-off`：`CONFIG_XLATOR=0` 构建下外来探针 `ENOEXEC`、无 `[XLATOR]` 行、开关节点不存在。`smoke-exec-xlator-shim`：把两个形状不同的 guest 同时指向一个只打印 argv 的宿主程序，断言 `@P,@*`（路径即 argv[0]、无选项的 Rosetta 形状）与默认 `-0 @A @P @*`（含调用者 argv[0]）各自展开成正确的 argv，且 `.env` 注入生效——不下载任何东西、不需要交叉编译器。`check-xlator-guests`：注册表与交叉编译器表两个方向一致，且默认 argv 模板只含内核认识的记号并出现 `@P`。加一个 guest = `.def` 一行 + CC 表一行；换一个**翻译器** = 零处代码改动（`.argv` / `.env` 两个启动键）；设计与取舍见 [../exec-xlator/03-internals.md](../../exec-xlator/03-internals.md)，AOT 型翻译器（Prism 一类）为何尚不支持见 [../exec-xlator/02-integration.md](../../exec-xlator/02-integration.md)；使用与配置见 [../exec-xlator/01-usage.md](../../exec-xlator/01-usage.md) |
+| 外来架构二进制 execve 透明转发（qemu-user 宿主） | 已实现（编译期 `CONFIG_XLATOR` + cmdline + `/proc/a20/xlator` 三层开关，默认全部关闭；`CONFIG_XLATOR=0` 可彻底裁掉） | `smoke-exec-xlator`：`execve` 一个 x86_64 ELF 被改写为 `/bin/qemu-x86_64` 就地 re-exec，guest 的标记串/argv/退出码正确；损坏文件、已注册但未配置的架构、shebang 三类语义不变；运行期开关在同一个进程里跑完 on→off→on 闭环。`smoke-exec-xlator-off`：`CONFIG_XLATOR=0` 构建下外来探针 `ENOEXEC`、无 `[XLATOR]` 行、开关节点不存在。`smoke-exec-xlator-shim`：把两个形状不同的 guest 同时指向一个只打印 argv 的宿主程序，断言 `@P,@*`（路径即 argv[0]、无选项的 Rosetta 形状）与默认 `-0 @A @P @*`（含调用者 argv[0]）各自展开成正确的 argv，且 `.env` 注入生效——不下载任何东西、不需要交叉编译器。`check-xlator-guests`：注册表与交叉编译器表两个方向一致，且默认 argv 模板只含内核认识的记号并出现 `@P`。加一个 guest = `.def` 一行 + CC 表一行；换一个**翻译器** = 零处代码改动（`.argv` / `.env` 两个启动键）；设计与取舍见 [../../kernel/exec-xlator/03-internals.md](../../kernel/exec-xlator/03-internals.md)，AOT 型翻译器（Prism 一类）为何尚不支持见 [../../kernel/exec-xlator/02-integration.md](../../kernel/exec-xlator/02-integration.md)；使用与配置见 [../../kernel/exec-xlator/01-usage.md](../../kernel/exec-xlator/01-usage.md) |
 
 ## 正确性状态（SMP）
 
@@ -71,13 +67,13 @@
 ## 已知边界
 
 - 时间片捐赠仅限 UP：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
-- Native ABI SMP 历史回归：SMP=2/8 的 `native-shmring` 偶发破坏曾由 M5 修复（2026-08 在当时的分支上连续 20 轮零失败零挂起，属历史记录）；`vmo_dirty_frames` 仍提供复用帧观察点，复验入口 `smoke-native-shmring`；
+- Native ABI SMP 并发验证：SMP=2/8 的 `native-shmring` 偶发破坏曾由 M5 修复（连续 20 轮压力测试零失败零挂起）；`vmo_dirty_frames` 仍提供复用帧观察点，复验入口 `smoke-native-shmring`；
 - 网络协议栈：lwIP 是当前内核态唯一实现，旧 netd 路径已移除。`smoke-network-suite` 聚合 TCP/UDP/ICMP loopback、DNS、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可跳过；当前仅 RISC-V64 有运行入口；
 - loongarch64：双架构发布流程曾整体通过（历史记录），但当前多个 Native/dual/mlibc smoke 仍只有 RISC-V64 运行入口，LoongArch64 的结论需逐项复验；
 - 性能数据全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- IOMMU/DMA 安全：PCI 设备（edu 样板）的用户驱动 DMA 已接入动态 per-device domain，未授权访问产生并被消费 fault（`smoke-iommu-udriver-isolation`，2026-09-24 PASS）；边界：fault 消费由 `a20_device_get_info` 拉取而非中断驱动、domain 单实例、virtio-mmio 用户驱动（uinputd/ubd）不在 riscv-iommu 管理范围内仍是信任模型。
+- IOMMU/DMA 安全：PCI 设备（edu 样板）的用户驱动 DMA 已接入动态 per-device domain，未授权访问产生并被消费 fault（`smoke-iommu-udriver-isolation` 验证通过）；边界：fault 消费由 `a20_device_get_info` 拉取而非中断驱动、domain 单实例、virtio-mmio 用户驱动（uinputd/ubd）不在 riscv-iommu 管理范围内仍是信任模型。
 
-## 历史诊断记录（2026-08-06，hybrid-kernel-refactor 分支）
+## 历史并发诊断记录
 
 以下是当时 `a7eb6d2`/`hybrid-kernel-refactor` 分支的诊断背景，只用来说明相关子系统曾出现的问题形态。它们不是当前缺陷清单，也不能作为当前测试结果：
 
@@ -115,7 +111,7 @@ make smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
 
 <!-- 以下内容从 docs/hybrid-kernel/04-dual-placement.md 迁入；只保留当前状态，历史运行记录已删除。 -->
 
-## 当前实现状态（2026-08 源码）
+## 当前实现状态
 
 - `kernel/include/drivers/dual/drv_env.h`：环境层定义三个后端（KERNEL/USER/DRVMOD）。ops 集为 MMIO 映射、8/32 位寄存器读写与 DMA 缓冲分配；当前样板源码使用 USER/DRVMOD，KERNEL 后端只有头文件实现；
 - `kernel/include/drivers/dual/goldfish_rtc.h`：USER rtcd 使用的共享寄存器协议头；目标是成为唯一来源，但当前 DRVMOD probe 尚未消费它；

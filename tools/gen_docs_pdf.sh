@@ -168,9 +168,40 @@ if [[ ${#missing_tools[@]} -gt 0 || ${#missing_fonts[@]} -gt 0 ]]; then
 fi
 
 # --- assemble the document list -------------------------------------------
-# Every tracked Markdown file under docs/, in lexicographic order. Files are read from git so the build works on a clean checkout without relying on untracked scratch files.
+# Build from the curated document navigation in site/mkdocs.yml so standard-reference.pdf
+# matches the official documentation structure and excludes raw historical logs/scraps.
 mapfile -t DOCS < <(
-    git ls-files 'docs/**/*.md' 'docs/*.md' | sort
+    python3 -c "
+import os, sys, yaml
+class IgnoreTagLoader(yaml.SafeLoader): pass
+IgnoreTagLoader.add_constructor(None, lambda loader, node: None)
+try:
+    with open('site/mkdocs.yml', 'r') as f:
+        config = yaml.load(f, Loader=IgnoreTagLoader)
+    nav = config.get('nav', [])
+    docs = []
+    def extract_docs(item):
+        if isinstance(item, str) and item.endswith('.md'):
+            docs.append(item)
+        elif isinstance(item, dict):
+            for v in item.values(): extract_docs(v)
+        elif isinstance(item, list):
+            for x in item: extract_docs(x)
+    extract_docs(nav)
+    seen = set()
+    for d in docs:
+        p = os.path.join('docs', d)
+        if p not in seen and os.path.exists(p):
+            seen.add(p)
+            print(p)
+except Exception:
+    import subprocess
+    cmd = ['git', 'ls-files', 'docs/**/*.md', 'docs/*.md']
+    out = subprocess.check_output(cmd).decode().splitlines()
+    for line in sorted(out):
+        if not any(skip in line for skip in ['archive/', 'paper/', 'research/', 'status/history/']):
+            print(line)
+"
 )
 
 # --- build ----------------------------------------------------------------

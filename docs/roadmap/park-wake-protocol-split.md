@@ -1,10 +1,6 @@
 # Park/Wake 协议按任务分锁：设计推导与实现说明
 
-> 分支：`fqwqf/performance-overhaul`。目标：把 tokenized Park/Wake 状态机从单一全局 `proc_lock` 拆到 per-task `park_lock` + 独立 timer-heap 锁，在**不破坏无丢失唤醒不变量**的前提下消除 park/wake 路径的全局锁竞争。
->
-> 状态：**已实现并验证**（riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下 futex/proc/sched/vfs/mm 压力连续多轮 PASS；loongarch64 编译通过；网络套件与基线逐字节一致）。`kernel/proc/park.c` **已完全不再取 `proc_lock`**：prepare/commit/cancel/interrupt/wake/`proc_wake_q_flush`/donate 全部走 `task->park_lock`；`sched()` 返回后的 wake_reason 读取用无锁原子读（带归因实验证明：park 状态迁出 proc_lock 后，该读的无锁化是净收益，不再是旧代码里充当背压的负优化）。
->
-> SMP8 mm_stress 测量：`proc` 竞争从基线 16-30K 降到 5.6-6.7K（futex+proc+mm 合跑约 17-21K），较最初 51K 改善约 4 倍。
+> 分支：`fqwqf/performance-overhaul`。目标：把 tokenized Park/Wake 状态机从单一全局 `proc_lock` 拆到 per-task `park_lock` + 独立 timer-heap 锁，在**不破坏无丢失唤醒不变量**的前提下消除 park/wake 路径的全局锁竞争。状态：**已实现并验证**（riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下 futex/proc/sched/vfs/mm 压力连续多轮 PASS；loongarch64 编译通过；网络套件与基线逐字节一致）。`kernel/proc/park.c` **已完全不再取 `proc_lock`**：prepare/commit/cancel/interrupt/wake/`proc_wake_q_flush`/donate 全部走 `task->park_lock`；`sched()` 返回后的 wake_reason 读取用无锁原子读（带归因实验证明：park 状态迁出 proc_lock 后，该读的无锁化是净收益，不再是旧代码里充当背压的负优化）。 SMP8 mm_stress 测量：`proc` 竞争从基线 16-30K 降到 5.6-6.7K（futex+proc+mm 合跑约 17-21K），较最初 51K 改善约 4 倍。
 
 ## 1. 现状：为什么所有 park/wake 都挤在 `proc_lock` 上
 
@@ -122,42 +118,12 @@ for each (task, seq):
 
 ## 7. 验证结果与风险
 
-- 实现要点回顾：`task->park_lock` 负责 PREPARING/PARKED/WOKEN 迁移；timer heap 独立
-  `g_wait_timer_lock`（`park_lock → timer_lock`）；扫描"摘出→释放→按 park_lock 唤醒"；
-  唤醒入队走 `park_lock → runq_lock`（`proc_runq_enqueue_locked` 本就只持 runq 锁）；
-  `proc_make_ready`、exit 唤醒 wait4 按 `proc_lock → park_lock` 顺序取锁；
-  `proc_wake_q_flush` 改为逐目标 park_lock。`proc_park_commit` 在 `sched()` 返回后以
-  acquire 原子读取得 `wake_reason`，不再重新获取 `proc_lock`；归因实验确认该无锁读取在
-  Park 状态迁出后是净收益。
-- riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下 `futex_stress`/`proc_stress`/
-  `sched_stress`/`mm_stress`/`vfs_stress` 连续多轮 PASS（无丢唤醒导致的挂起）；网络套件与
-  基线逐字节一致（DNS/TIMEOUT 两项失败为既有环境/语义问题）；`check-concurrency-foundation` PASS。
-- 已知未复现的罕见 flake（非本分支引入的判断）：约 9 轮组合压力中出现 1 次
-  `vfs_rename_flags` 内 `vnode_put` 的 128B slab 双释放（`cache_idx=2`）。该路径在
-  vfs/ext4 vnode 生命周期层，本分支未触碰 vnode 引用计数；单独 `vfs_stress` 与其余组合轮
-  均通过，385a 基线同样未复现。判断为 vfs_rename 的既有罕见 vnode 引用竞态，可能被
-  调度/锁时序扰动暴露；因样本太小无法严格归因，记录在案并建议后续用
-  fault-injection/长时 vfs 压力单独追查。
-- 排查续报（合并后）：修复 drvmod 的 `kallsyms_print` 导出（见下）使 dev 构建恢复可
-  boot 后，用 8 vCPU 组合压力再次复现该 flake（3 轮中 1 轮：`vfs_rename_flags` 内
-  `vnode_put` 双释放，ra 指向 `vfs_dcache_invalidate` 附近）。静态分析未找到平衡破坏点：
-  `old_victim`/`new_victim`（VFS lookup ref + dcache ref）与 `ext4_inode_remove` 的
-  `deferred_put`（ext4 vnode cache ref）各成对 put；dcache per-bucket 重构未改变
-  "锁内摘链、锁外 vnode_put"的既有模式。最可能仍是 vfs/ext4 vnode 缓存与并发 rename
-  之间的既有罕见竞态，建议后续用 vnode refcount 断言/fault-injection 专案定位。
-- drvmod 模块 ABI 修复（dev 构建可 boot）：main 的 `b29d6691` 在 `core/lock.h` 内联
-  `spin_lock_at` 的 stall 报告里新增 `kallsyms_print()` 调用，任何包含 lock.h 的 `.a20drv`
-  模块都产生该外部引用；drvmod 白名单只导出 `kallsyms_lookup`，导致
-  `virtio-blk.a20drv`/`dw-sdio.a20drv` 加载 -22、generic 部署 dev 构建找不到 FAT32 根而
-  boot panic。已在 `drvmod/framework.c` 白名单补导出 `kallsyms_print`，dev 构建恢复 boot，
-  全部压力门禁通过。
+- 实现要点回顾：`task->park_lock` 负责 PREPARING/PARKED/WOKEN 迁移；timer heap 独立`g_wait_timer_lock`（`park_lock → timer_lock`）；扫描"摘出→释放→按 park_lock 唤醒"；唤醒入队走 `park_lock → runq_lock`（`proc_runq_enqueue_locked` 本就只持 runq 锁）；`proc_make_ready`、exit 唤醒 wait4 按 `proc_lock → park_lock` 顺序取锁；`proc_wake_q_flush` 改为逐目标 park_lock。`proc_park_commit` 在 `sched()` 返回后以 acquire 原子读取得 `wake_reason`，不再重新获取 `proc_lock`；归因实验确认该无锁读取在 Park 状态迁出后是净收益。
+- riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下 `futex_stress`/`proc_stress`/ `sched_stress`/`mm_stress`/`vfs_stress` 连续多轮 PASS（无丢唤醒导致的挂起）；网络套件与基线逐字节一致（DNS/TIMEOUT 两项失败为既有环境/语义问题）；`check-concurrency-foundation` PASS。
+- 已知未复现的罕见 flake（非本分支引入的判断）：约 9 轮组合压力中出现 1 次`vfs_rename_flags` 内 `vnode_put` 的 128B slab 双释放（`cache_idx=2`）。该路径在 vfs/ext4 vnode 生命周期层，本分支未触碰 vnode 引用计数；单独 `vfs_stress` 与其余组合轮均通过，385a 基线同样未复现。判断为 vfs_rename 的既有罕见 vnode 引用竞态，可能被调度/锁时序扰动暴露；因样本太小无法严格归因，记录在案并建议后续用 fault-injection/长时 vfs 压力单独追查。
+- 排查续报（合并后）：修复 drvmod 的 `kallsyms_print` 导出（见下）使 dev 构建恢复可 boot 后，用 8 vCPU 组合压力再次复现该 flake（3 轮中 1 轮：`vfs_rename_flags` 内`vnode_put` 双释放，ra 指向 `vfs_dcache_invalidate` 附近）。静态分析未找到平衡破坏点：`old_victim`/`new_victim`（VFS lookup ref + dcache ref）与 `ext4_inode_remove` 的`deferred_put`（ext4 vnode cache ref）各成对 put；dcache per-bucket 重构未改变"锁内摘链、锁外 vnode_put"的既有模式。最可能仍是 vfs/ext4 vnode 缓存与并发 rename 之间的既有罕见竞态，建议后续用 vnode refcount 断言/fault-injection 专案定位。
+- drvmod 模块 ABI 修复（dev 构建可 boot）：main 的 `b29d6691` 在 `core/lock.h` 内联`spin_lock_at` 的 stall 报告里新增 `kallsyms_print()` 调用，任何包含 lock.h 的 `.a20drv`模块都产生该外部引用；drvmod 白名单只导出 `kallsyms_lookup`，导致`virtio-blk.a20drv`/`dw-sdio.a20drv` 加载 -22、generic 部署 dev 构建找不到 FAT32 根而 boot panic。已在 `drvmod/framework.c` 白名单补导出 `kallsyms_print`，dev 构建恢复 boot，全部压力门禁通过。
 - `/proc/a20/lock_contention` 的 `proc` 竞争从 16-30K 降到 5.6-6.7K（mm 单跑）。
 - 通用代码，loongarch64 也能编译通过，不依赖 riscv64 专有路径。
-- 这是全项目最核心的协议，任何一步不满足 §2 不变量都会造成隐藏丢唤醒。已用 A/B 确认
-  网络/时间测试无回归，且 `proc_park_finish` 与 `proc_park_commit` 的读路径保留了此前
-  测量得到的正确取舍。
-- 剩余 `proc_lock` 来源（测量归因）：切换发布（`sched()` 内联的
-  `spin_lock(&proc_lock)`，每次上下文切换 1 次，结构性且移动有损 "neither selected nor owned"
-  不变量）与 fork/exit 的任务表扫描（O(tasks)，但按进程生命周期触发、频率低）。
-  per-parent 子进程链表与切换发布无锁化均评估为高复杂度/高风险且当前测量价值低，
-  留待更多端到端基准证据再定。
+- 这是全项目最核心的协议，任何一步不满足 §2 不变量都会造成隐藏丢唤醒。已用 A/B 确认网络/时间测试无回归，且 `proc_park_finish` 与 `proc_park_commit` 的读路径保留了此前测量得到的正确取舍。
+- 剩余 `proc_lock` 来源（测量归因）：切换发布（`sched()` 内联的`spin_lock(&proc_lock)`，每次上下文切换 1 次，结构性且移动有损 "neither selected nor owned"不变量）与 fork/exit 的任务表扫描（O(tasks)，但按进程生命周期触发、频率低）。 per-parent 子进程链表与切换发布无锁化均评估为高复杂度/高风险且当前测量价值低，留待更多端到端基准证据再定。

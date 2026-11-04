@@ -6,10 +6,10 @@ asynchronous port; `a20_shared_ram.sv` provides inferred FPGA RAM and
 `a20_shared_top.sv` connects them. This is RTL and firmware integration
 simulation evidence; no synthesized FPGA image, PCB or physical MCU run is claimed.
 
-The register contract is in [the kernel design](../../docs/cluster/25-native-shared-kernel.md).
+The register contract is in [the kernel design](../../docs/cluster/mcu-shared-kernel.md).
 The common software driver is architecture independent; STM32 FSMC is one
-bus adapter. See [portable execution domains](../../docs/cluster/27-portable-domains.md)
-and [native application integration](../../docs/cluster/26-native-programs.md).
+bus adapter. See [portable execution domains](../../docs/cluster/runtime-ssi.md)
+and [native application integration](../../docs/cluster/mcu-shared-kernel.md).
 CPU count is 2–16. Each port has its own hardwired CPU ID (array index). All
 requests share a round-robin serialization point; an unfinished RAM write
 prevents a later semaphore grant/release from passing it. There are separate

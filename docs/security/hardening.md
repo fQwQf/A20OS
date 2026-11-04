@@ -1,9 +1,6 @@
 # A20OS 安全加固状态
 
-安全候选核实：2026-10-23。逐项当前结果见 [SECURITY 现状](../status/current/security-status.md)，
-接口与可复制命令见 [候选验收](release-acceptance.md)。RV64 1 CPU/SMP2 候选的
-Landlock、WX deny 信号返回与隔离组合通过；其余平台与完整 Linux Landlock 语义
-不在该结论内。下面未列入本轮验收表的其他模块验证记录不作为本次候选的通过依据。
+本文档定义 A20OS 安全加固规范与控制面契约。逐项当前结果见 [SECURITY 现状](../status/current/security-status.md)，接口与验证命令见 [候选验收](release-acceptance.md)。RV64 1 CPU/SMP2 候选的 Landlock、WX deny 信号返回与隔离组合通过；其余平台与完整 Linux Landlock 语义不在该结论内。
 
 ## 诚实性原则（fail-closed）
 
@@ -11,11 +8,9 @@ Landlock、WX deny 信号返回与隔离组合通过；其余平台与完整 Lin
 
 这是 A20OS 对安全相关接口的第一原则。理由不是洁癖，而是失效模式的不对称：
 
-一个**缺失**的能力，调用方会得到错误并走降级路径。
-一个**返回成功的桩**，调用方无从察觉，会带着错误信念继续执行；
-而且往往正是它最脆弱的地方在相信内核。
+一个**缺失**的能力，调用方会得到错误并走降级路径。一个**返回成功的桩**，调用方无从察觉，会带着错误信念继续执行；而且往往正是它最脆弱的地方在相信内核。
 
-本轮修复的每一处都属于后者，且都属于「看起来实现了、实际没有」：
+历史实现中对伪桩和未闭合项的集中修正如下：
 
 | 接口 | 修复前的行为 | 现在 |
 |---|---|---|
@@ -32,13 +27,9 @@ Landlock、WX deny 信号返回与隔离组合通过；其余平台与完整 Lin
 | `prlimit64(pid, ...)` | 丢弃 `pid`，只能操作自己 | 支持跨进程，受权限约束 |
 | `setrlimit(未实现项)` | 返回 0 | 返回 `-EINVAL` |
 
-`make check-honesty-policy` 以否定断言锁定上述性质：它检查这些反模式
-不会重新出现，而不只是检查某个标记字符串存在。该门禁本身经过「故意引入
-回归」的验证。改回旧行为后它会报错并非零退出。
+`make check-honesty-policy` 以否定断言锁定上述性质：它检查这些反模式不会重新出现，而不只是检查某个标记字符串存在。该门禁本身经过「故意引入回归」的验证。改回旧行为后它会报错并非零退出。
 
-一条推论适用于所有枚举型接口：未被显式处理的取值应各自返回
-`-EOPNOTSUPP`/`-EINVAL`，**不要落进统一的 `return 0` 兜底**。否则下一个
-新增的取值会自动被兜底吞掉，这正是 `SOL_SOCKET` 曾发生的事。
+一条推论适用于所有枚举型接口：未被显式处理的取值应各自返回 `-EOPNOTSUPP` 或 `-EINVAL`，禁止落入统一的 `return 0` 兜底。否则下一个新增的取值会自动被兜底吞掉，这正是 `SOL_SOCKET` 曾发生的事。
 
 ## 已落地
 
@@ -62,100 +53,47 @@ Landlock、WX deny 信号返回与隔离组合通过；其余平台与完整 Lin
 
 ## 存储持久性
 
-`fsync()` 此前只保证「数据到达设备」，而设备的易失写缓存仍会在断电时丢失
-内容：即向调用方承诺了它无法兑现的持久性。对服务器上的数据库而言这是
-第一红线：被告知已提交的事务可能在断电后消失。
+`fsync()` 此前只保证「数据到达设备」，而设备的易失写缓存仍会在断电时丢失内容：即向调用方承诺了它无法兑现的持久性。对服务器上的数据库而言这是第一红线：被告知已提交的事务可能在断电后消失。
 
 现状：
 
-- `block_dev_t` 新增可选 `flush` 原语（`kernel/include/drivers/block/block_dev.h`）。
-  指针为 NULL 明确表示「无持久性保证」，而非「尚未实现」。
+- `block_dev_t` 新增可选 `flush` 原语（`kernel/include/drivers/block/block_dev.h`）。指针为 NULL 明确表示「无持久性保证」，而非「尚未实现」。
 - `bcache_sync_common()` 在写完数据之后、且在缓存锁之外调用它。
-- 实现：virtio-blk 的 `VIRTIO_BLK_T_FLUSH`（按 virtio-blk 1.1 5.2.6 只挂
-  header + status，不带数据描述符）、loop 转发到 backing file 的 fsync、
-  AHCI 的 `FLUSH CACHE EXT`（0xE7，LBA=0xFFFFFFFF + count=0 表示全盘刷新）。
-- **易复发点**：`fs/mount_setup.c` 的 `partition_block_dev` 与
-  `class_block_dev` 两层包装原先只转发 read/write 而不转发 `flush`。由于
-  所有挂载都位于分区之上，这会静默剥离整个文件树的持久性能力。现已修复；
-  新增包装层时必须转发全部能力。
+- 实现：virtio-blk 的 `VIRTIO_BLK_T_FLUSH`（按 virtio-blk 1.1 5.2.6 只挂 header + status，不带数据描述符）、loop 转发到 backing file 的 fsync、 AHCI 的 `FLUSH CACHE EXT`（0xE7，LBA=0xFFFFFFFF + count=0 表示全盘刷新）。
+- **易复发点**：`fs/mount_setup.c` 的 `partition_block_dev` 与`class_block_dev` 两层包装原先只转发 read/write 而不转发 `flush`。由于所有挂载都位于分区之上，这会静默剥离整个文件树的持久性能力。现已修复；新增包装层时必须转发全部能力。
 
-验证入口：`make smoke-fsync-durability`（virtio-blk）与 `make smoke-ahci-ich9`
-（x86_64 QEMU q35 挂 `-device ich9-ahci` + `ide-hd`，ext4 落在该控制器上）。
-两者都断言 `block_flushes` 计数器确实增长，而非仅检查 `fsync()` 返回 0。后者
-在修复前同样返回 0，所以只检查返回值等于什么都没验证。
+验证入口：`make smoke-fsync-durability`（virtio-blk）与 `make smoke-ahci-ich9`（x86_64 QEMU q35 挂 `-device ich9-ahci` + `ide-hd`，ext4 落在该控制器上）。两者都断言 `block_flushes` 计数器确实增长，而非仅检查 `fsync()` 返回 0。后者在修复前同样返回 0，所以只检查返回值等于什么都没验证。
 
-未覆盖：AHCI 中断路径的运行验证**已在 QEMU 上拿到**——`make smoke-ahci-ich9`
-实跑 PASS（日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`，`FSYNC_TEST: PASS`
-且 `ahci_irq_completions > 0`）。**真实 SATA PHY 上的中断送达仍无任何证据**，
-AHCI 也仍只走 INTx、没有 MSI-X 路径（详见
-[server-readiness.md](../status/current/server-readiness.md) 第一节「仍缺」）。ext4 已有可写
-JBD2 ordered journal 并通过 `make smoke-ext4-journal` 的崩溃注入门禁；仍未覆盖
-的是文件数据块本身的校验和（`crc32c` 只覆盖 JBD2 日志与 ext4 元数据），见
-[server-readiness.md](../status/current/server-readiness.md)。
+未覆盖：AHCI 中断路径的运行验证**已在 QEMU 上拿到**——`make smoke-ahci-ich9`实跑 PASS（日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`，`FSYNC_TEST: PASS`且 `ahci_irq_completions > 0`）。**真实 SATA PHY 上的中断送达仍无任何证据**， AHCI 也仍只走 INTx、没有 MSI-X 路径（详见[server-readiness.md](../status/current/server-readiness.md) 第一节「仍缺」）。ext4 已有可写 JBD2 ordered journal 并通过 `make smoke-ext4-journal` 的崩溃注入门禁；仍未覆盖的是文件数据块本身的校验和（`crc32c` 只覆盖 JBD2 日志与 ext4 元数据），见[server-readiness.md](../status/current/server-readiness.md)。
 
 ## 已评估、暂缓或进行中的项
 
 ### KASLR（暂缓，前置重构成本大）
 
-内核链接地址固定（如 riscv64 `VIRT_BASE = 0xFFFFFFC080200000`）。
-真 KASLR 的障碍不是代码重定位（`-mcmodel=medany` 的文本基本可搬），
-而是直映射偏移 `PAGE_OFFSET` 是编译期常量并在全内核内联使用
-（所有 `pa + PAGE_OFFSET` 形式的直映射访问、外设 MMIO 基址、页表
-遍历宏）。可行路线：先把 PAGE_OFFSET 变成 per-boot 运行时变量
-（所有引用点收编为 `phys_to_virt()` 类访问器），再在入口汇编按熵源
-随机选取偏移并重建引导页表。这是一次横跨 arch/mm/drivers 的大型
-重构，收益主要在远程内核信息泄漏威胁模型下；当前威胁模型（研究型
-OS、无远程攻击面压力）下暂缓，先完成直映射访问器化作为前置。
+内核链接地址固定（如 riscv64 `VIRT_BASE = 0xFFFFFFC080200000`）。真 KASLR 的障碍不是代码重定位（`-mcmodel=medany` 的文本基本可搬），而是直映射偏移 `PAGE_OFFSET` 是编译期常量并在全内核内联使用（所有 `pa + PAGE_OFFSET` 形式的直映射访问、外设 MMIO 基址、页表遍历宏）。可行路线：先把 PAGE_OFFSET 变成 per-boot 运行时变量（所有引用点收编为 `phys_to_virt()` 类访问器），再在入口汇编按熵源随机选取偏移并重建引导页表。这是一次横跨 arch/mm/drivers 的大型重构，收益主要在远程内核信息泄漏威胁模型下；当前威胁模型（研究型 OS、无远程攻击面压力）下暂缓，先完成直映射访问器化作为前置。
 
 ### 内核栈 guard page（未做，替代缓解已部分就位）
 
-内核栈是 kmalloc 对象（`kernel/proc/fork.c`），相邻对象间无隔离页。
-在 slab 体系下加 guard page 需要分配器支持（对齐翻倍分配 + 底部页
-取消映射），成本中等。已有的替代缓解：栈 canary（已落地）、slab
-大块尾部哨兵（`kernel/mm/slab.c`）、trap 入口 sp 双界校验（取证硬化
-的一部分）。guard page 仍是深度防御缺口，待内存损坏根因收口后评估。
+内核栈是 kmalloc 对象（`kernel/proc/fork.c`），相邻对象间无隔离页。在 slab 体系下加 guard page 需要分配器支持（对齐翻倍分配 + 底部页取消映射），成本中等。已有的替代缓解：栈 canary（已落地）、slab 大块尾部哨兵（`kernel/mm/slab.c`）、trap 入口 sp 双界校验（取证硬化的一部分）。guard page 仍是深度防御缺口，待内存损坏根因收口后评估。
 
 ### loongarch64 / ppc64le 的监督模式访问防护（硬件机制缺口）
 
-LoongArch 无 SUM/PAN 等价 CSR 机制；ppc64le 的 KUAP（AMR/IAMR）
-需要 key 管理体系，均未实现。两架构当前依赖直映射拷贝集中化 +
-软件权限校验，与 SMAP 前的 x86 形态相同。
+LoongArch 无 SUM/PAN 等价 CSR 机制；ppc64le 的 KUAP（AMR/IAMR）需要 key 管理体系，均未实现。两架构当前依赖直映射拷贝集中化 +软件权限校验，与 SMAP 前的 x86 形态相同。
 
 ### user namespace（已实现，nsproxy 仍缺）
 
-`kernel/proc/userns.c` 提供完整的 user namespace：`unshare(CLONE_NEWUSER)`
-与 `clone(CLONE_NEWUSER)` 创建命名空间，`/proc/<pid>/{uid,gid}_map` 与
-`setgroups` 由父命名空间写入，`setns(2)` / `listns(2)` 支持 user 类型，
-`/proc/<pid>/ns/user` 已实现。门禁 `smoke-userns`。
+`kernel/proc/userns.c` 提供完整的 user namespace：`unshare(CLONE_NEWUSER)`与 `clone(CLONE_NEWUSER)` 创建命名空间，`/proc/<pid>/{uid,gid}_map` 与`setgroups` 由父命名空间写入，`setns(2)` / `listns(2)` 支持 user 类型，`/proc/<pid>/ns/user` 已实现。门禁 `smoke-userns`。
 
-`task_t::cred` 存**全局**（宿主）id，在 syscall 与 procfs 边界翻译，
-与 Linux 的 `kuid_t`/`kgid_t` 同构；未映射的全局 id 呈现为
-`USERNS_OVERFLOW_UID/GID`（65534），文件属主判定另用
-`userns_kuid_mapped()` 区分"无表示"与"恰好是 65534"。
+`task_t::cred` 存**全局**（宿主）id，在 syscall 与 procfs 边界翻译，与 Linux 的 `kuid_t`/`kgid_t` 同构；未映射的全局 id 呈现为`USERNS_OVERFLOW_UID/GID`（65534），文件属主判定另用`userns_kuid_mapped()` 区分"无表示"与"恰好是 65534"。
 
-能力作用域集中在 `userns_capable()` 一处：自 `@ns` 沿 parent 链上溯，
-只有正好落到调用者自己的命名空间时才按其 `cap_effective` 判定；越过
-自己的层级即为拒绝。**没有**"创建者对父命名空间保有权限"这一条——
-加上它就等于任何用户都能靠 `unshare -U` 拿到宿主 root。无特权的例外
-只有一条，且必须由写入者本人发起：恰好一段、长度为一、映射自己的 id
-（`unshare -U; echo $USER > /proc/self/uid_map`）。
+能力作用域集中在 `userns_capable()` 一处：自 `@ns` 沿 parent 链上溯，只有正好落到调用者自己的命名空间时才按其 `cap_effective` 判定；越过自己的层级即为拒绝。**没有**"创建者对父命名空间保有权限"这一条——加上它就等于任何用户都能靠 `unshare -U` 拿到宿主 root。无特权的例外只有一条，且必须由写入者本人发起：恰好一段、长度为一、映射自己的 id （`unshare -U; echo $USER > /proc/self/uid_map`）。
 
-capabilities 本身仍是 15 个子集（缺 CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG
-等）；`nsproxy` 未实现，所以 `setns()` 一次只能切一种命名空间。
+capabilities 本身仍是 15 个子集（缺 CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG 等）；`nsproxy` 未实现，所以 `setns()` 一次只能切一种命名空间。
 
 ### user namespace 的引用模型
 
-每个命名空间持有 parent 的一份引用（在 `g_userns_lock` 下取得），
-`task_t::user_ns` 持一份，字段为 NULL 表示初始命名空间（静态钉住）。
-释放只发生在真正的 task teardown：新拆出的 `fdtable_release_files()`
-把"交出描述符表"和"task 消失"分开，因为 `fdtable_share()`（线程共享
-表）原先走 `fdtable_close_all()`，会在一个活着的 task 上清空
-mntns / pidns / userns 指针。
+每个命名空间持有 parent 的一份引用（在 `g_userns_lock` 下取得），`task_t::user_ns` 持一份，字段为 NULL 表示初始命名空间（静态钉住）。释放只发生在真正的 task teardown：新拆出的 `fdtable_release_files()`把"交出描述符表"和"task 消失"分开，因为 `fdtable_share()`（线程共享表）原先走 `fdtable_close_all()`，会在一个活着的 task 上清空 mntns / pidns / userns 指针。
 
 ## 熵源说明
 
-`kernel/core/random.c`（xoshiro128+）每 64 次提取混合一次熵源：
-timer 节拍、内核地址、空闲帧计数、当前任务指针；x86_64 另有
-RDRAND/RDSEED（`arch_hw_entropy_sample()`）。riscv64/aarch64 启动
-早期熵质量有限，ASLR/guard 的不可预测性在真实硬件上依赖时钟噪声，
-属常见启动期熵不足问题，暂无 virtio-rng 接入。
+`kernel/core/random.c`（xoshiro128+）每 64 次提取混合一次熵源： timer 节拍、内核地址、空闲帧计数、当前任务指针；x86_64 另有 RDRAND/RDSEED（`arch_hw_entropy_sample()`）。riscv64/aarch64 启动早期熵质量有限，ASLR/guard 的不可预测性在真实硬件上依赖时钟噪声，属常见启动期熵不足问题，暂无 virtio-rng 接入。

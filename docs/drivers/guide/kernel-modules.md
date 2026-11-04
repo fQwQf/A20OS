@@ -168,9 +168,7 @@ make smoke-virtio-rng                                # virtio-rng.a20drv + /dev/
 make smoke-net-rtl8139                               # rtl8139.a20drv + hostfwd 端到端回环与中断计数
 ```
 
-`smoke-rtc-cmos` 额外做了一件其它门禁不做的事：门禁内的 `expect` 只能证明来客
-打出了某一行，无法证明那行里的时间是真实时间，所以它把 `/bin/date` 的输出交给宿主
-侧的 `tools/check_rtc_wallclock.py` 复核（≥ 2026-01-01，与宿主相差 ≤ 300s）。
+`smoke-rtc-cmos` 额外做了一件其它门禁不做的事：门禁内的 `expect` 只能证明来客打出了某一行，无法证明那行里的时间是真实时间，所以它把 `/bin/date` 的输出交给宿主侧的 `tools/check_rtc_wallclock.py` 复核（≥ 2026-01-01，与宿主相差 ≤ 300s）。
 
 这些门禁构建 dev 镜像、在对应架构 QEMU 中验证模块加载、DriverEntry、绑定与 probe。
 
