@@ -23,14 +23,14 @@ user/cmsis_rtos2        ← 本文
         │  后端契约（os_impl.h）：
         │  thread / clock / alloc / kernel-lock / blocking-queue
         ▼
-Linux ABI（pthread + futex）   或   Native ABI（thread/futex/atomic/vm_alloc）
+Linux ABI（pthread + futex）   或   Native ABI（thread/sched/futex/atomic/vm_alloc）
         ▼
 A20OS 内核机制（调度、futex、VM、定时器）
 ```
 
 对象语义（互斥锁归属与递归、信号量计数、队列、事件标志、内存池、软件定时器）全部在可移植核心里实现。后端只提供四类原语，因此换 ABI 不需要改任何 `os*`函数：
 
-1. 线程：创建/退出/join/detach/yield/睡眠/优先级/亲和性；
+1. 线程：创建/退出/join/detach/yield/睡眠/优先级/亲和性/调度器锁；
 2. 时钟：单调纳秒；
 3. 分配器；
 4. 阻塞队列：互斥 + 定时等待（对象状态就由它保护）。
@@ -54,9 +54,30 @@ A20OS 内核机制（调度、futex、VM、定时器）
 已知边界：
 
 - `osThreadSuspend/Resume` 在 POSIX 后端是协作式（信号触发），Native 后端不支持并返回 `osError`；
-- POSIX 后端的 `osKernelLock` 是递归互斥，不能阻止显式阻塞调用——在锁内阻塞属于应用错误；
 - 消息队列为 FIFO，`msg_prio` 接受但忽略；
-- `osMutexPrioInherit` 只会被记录，是否生效取决于后端调度器。
+- 初始/main 线程没有 handle，不能被其他线程作为优先级继承的目标；它可以给自己 `osThreadSetPriority`、`osKernelLock` 或查询优先级；
+- 线程正在执行优先级捐赠时，`osThreadSetPriority` 返回 `osError`：内核保存的 base 快照不能在不丢失的情况下改写；
+- `osKernelLock` 只推迟调度器抢占，不屏蔽中断；锁内阻塞仍是应用错误。POSIX 后端的 `osKernelLock` 仍是递归互斥，不能阻止锁内显式阻塞。
+
+## 实时性模型（Native / MCU 后端）
+
+POSIX 后端把 CMSIS 线程映射到 pthread，优先级由宿主 pthread 策略决定，不在本节保证范围内。使用 Native ABI 的 MCU 镜像（`qemu-riscv32-mcu`、Hi3861）不是"在分时调度器上套一层 CMSIS"，CMSIS 线程本身就是内核的 `SCHED_FIFO` 任务：
+
+| 属性 | 实现 |
+|---|---|
+| 优先级 | `osPriorityIdle(1)`..`osPriorityRealtime7(55)` 与内核 RT 优先级 1:1；MCU 的 `PROC_RT_PRI_LEVELS=64`，每个 CMSIS 级别是独立 FIFO 桶 |
+| 创建 | `osThreadNew` 经 `thread_create` 的 sched 字段，在 `proc_publish_deferred_task()` 之前调用 `proc_sched_set()`；新线程不会先以创建者优先级跑一步 |
+| 抢占 | 高优先级线程就绪后，在 syscall 返回 / IRQ 返回的 safe point 立即抢占，不需要等 tick；MCU 的 `riscv_mcu_syscall()` 和 `kernel_preempt_at_irq_return()` 都走这条路径 |
+| 唤醒 | 信号量/互斥量释放用 broadcast wake；RT 队列按优先级选最高者先跑，低优先级等待者重新检查并继续睡 |
+| 优先级继承 | 内核 `proc_sched_rt_donate()` / `proc_sched_rt_restore()`：等待者在阻塞前对 owner 捐赠，owner 释放最后一个 mutex 时恢复。内核保存 base policy/priority/nice，READY owner 通过 `proc_sched_set()` 同一套 detach/re-enqueue 路径重排 |
+| `osKernelLock` | 内核 per-task `sched_lock_depth`；safe point 和 IRQ 返回点看到非零就推迟 pending reschedule，解锁到 0 时立即消费它 |
+| tick | 时间分辨率仍是内核 tick：Hi3861 100 Hz（10 ms），QEMU MCU 1 kHz。`osDelay(1)`、超时和软件定时器不会优于该粒度 |
+| RT 带宽 | MCU 构建关闭 hosted 的 5%/秒保留，RT 线程不会每秒被强制让出约 50 ms |
+
+Hi3861 保持 100 Hz 是硬件决定：`board_config.h` 记录了 1 kHz tick 在 160 MHz 核上会让 IRQ 处理接近周期、并可能在 `__switch` 的 `ret` 前重入中断。LiteOS 默认也是 100 Hz，因此这里的粒度与教材环境一致。
+
+GUI/控制环如果需要 sub-tick 截止期，应使用硬件定时器或单独的 high-resolution timer，而不是依赖 `osDelay`。
+
 
 ## 裁剪
 
@@ -79,7 +100,7 @@ python3 tools/cmsis_trim.py list --profile mcu
 | Profile | 对象族 | syscall 数 |
 |---|---|---|
 | `full` | 全部 | 主表全部 |
-| `mcu` | thread、mutex、semaphore、timer、event flags、message queue | 12 |
+| `mcu` | thread、mutex、semaphore、timer、event flags、message queue | 14 |
 | `mcu-min` | thread、semaphore、timer（不含 join/terminate/priority 的最小集合） | 9 |
 
 被裁掉的对象族仍保留入口（返回 `osErrorResource`），因此"链接兼容、镜像裁剪"：
@@ -88,7 +109,7 @@ python3 tools/cmsis_trim.py list --profile mcu
 - 不会因为少一个对象族而让应用链接失败；
 - 不会把未使用的内核 syscall 带进镜像。
 
-在 riscv32imc/ilp32、`-Os`、`-ffunction-sections`（链接 GC 前）下测得库 text：`full` 11.7 KiB、`mcu` 11.0 KiB、`mcu-min` 9.8 KiB。
+在 riscv32imc/ilp32、`-Os`、`-ffunction-sections`（链接 GC 前）下测得库 text：`full` 12.2 KiB、`mcu` 11.6 KiB、`mcu-min` 10.3 KiB。
 
 `check` 是裁剪的闭环：它读 ELF 的 `sys_a20_*` 符号集合，与 manifest 比较，多一个或少一个都失败。因此"镜像里只有声明的 syscall"由构建检查保证，而不是靠代码评审。
 
@@ -127,6 +148,7 @@ QEMU 板 `qemu-virt-riscv32-mcu` 与 Hi3861 使用同一条路径：
 |---|---|
 | `demo.c` | 4.1 线程、4.2 信号量、4.3 软件定时器（只用 `cmsis_os2.h`） |
 | `interrupt.c` | 4.4 中断，只用 `cmsis_os2.h` + `hi_isr.h`/`iot_gpio.h`/`iot_pwm.h` |
+| `rt.c` | 4.5 创建优先级、`osThreadSetPriority`、`osKernelLock`、互斥量优先级继承 |
 | `runtime.c` | freestanding 启动、日志环、64 位除法 |
 | `start.c` | `_start`，a0 = run record |
 
@@ -147,13 +169,14 @@ kernel/arch/riscv32/mcu/vendor_hi.c
 # 宿主行为用例（POSIX + Native 两个后端）
 make -C user/cmsis_rtos2 test
 
-# RV32 M 态实跑：内核自检 + 4.1/4.2/4.3/4.4
+# RV32 M 态实跑：内核自检 + 4.1/4.2/4.3/4.4/4.5
 tools/a20 test qemu-riscv32-mcu
 #   [4.1] PASS steps=5/5
 #   [4.2] PASS taken=5 produced=5
 #   [4.3] PASS once=1 periodic=12
 #   [4.4] PASS irq=5
-#   [DEMO] experiments 4.1-4.4: PASS
+#   [4.5] PASS create=1 setprio=1 lock=1 inherit=1
+#   [DEMO] experiments 4.1-4.5: PASS
 
 # 裁剪闭环：内核 ELF 只含 manifest 声明的 syscall
 python3 tools/cmsis_trim.py check --profile mcu --elf <kernel.elf>

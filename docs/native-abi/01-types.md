@@ -194,10 +194,18 @@ typedef struct a20_thread_create_args {
     uint64_t stack_size;         /* 栈大小 */
     uint64_t tls_base;           /* TLS 基址 */
     uint32_t flags;
-    uint32_t reserved;
     a20_handle_t out_thread;     /* 输出：新线程 handle */
+    /* v1 append（E-APPEND）：sched_flags 非零时在 publish 前应用 */
+    uint32_t sched_flags;        /* A20_SCHED_POLICY | A20_SCHED_PRIORITY */
+    int32_t  sched_policy;       /* A20_SCHED_NORMAL/FIFO/RR */
+    int32_t  sched_priority;     /* RT 优先级 1..99 */
+    uint32_t reserved0;
 } a20_thread_create_args_t;
+
+#define A20_THREAD_CREATE_V1_SIZE 56U
 ```
+
+`size` 为 56（原始版本）时仍被接受，调度字段按 0 处理；新调用方传完整结构即可在子线程发布前设置策略与优先级。
 
 线程入口是接收 `arg` 的本机 C 函数，必须显式调用 `thread_exit`，不能返回。调用者在所有 ISA 上提供 16 字节对齐的栈顶；架构入口负责本机调用约定所需的偏移，例如 x86-64 在直接函数入口预留 8 字节，使 RSP 模 16 为 8。此规则仅用于 Native `thread_create`，不修改 Linux clone 或进程启动。
 
@@ -611,19 +619,19 @@ typedef struct a20_xattr_list_args {
 priority / policy / affinity / scheduler 等调度参数集中在一处。
 
 ```c
-/* 调度策略 */
-#define A20_SCHED_OTHER     0
+/* 调度策略（task_set_sched / thread_create 使用） */
+#define A20_SCHED_NORMAL    0
 #define A20_SCHED_FIFO      1
 #define A20_SCHED_RR        2
-#define A20_SCHED_BATCH     3
-#define A20_SCHED_IDLE      5
-#define A20_SCHED_DEADLINE  6
 
 /* 调度标志 */
 #define A20_SCHED_POLICY        (1u << 0)
 #define A20_SCHED_PRIORITY      (1u << 1)
 #define A20_SCHED_AFFINITY      (1u << 2)
 #define A20_SCHED_NICE          (1u << 3)
+/* task_set_sched-only：RT 优先级继承捐赠/恢复 */
+#define A20_SCHED_DONATE        (1u << 4)
+#define A20_SCHED_UNDONATE      (1u << 5)
 
 typedef struct a20_sched_args {
     uint32_t size;
@@ -639,6 +647,18 @@ typedef struct a20_sched_args {
 ```
 
 Linux 的 `sched_setparam`/`sched_getparam`/`sched_setscheduler`/`sched_getscheduler`/`sched_setaffinity`/`sched_getaffinity`/`setpriority`/`getpriority`/`sched_setattr`/`sched_getattr` 是 10 个独立 syscall，A20 收成 `task_set_sched` 与 `task_get_sched` 两个 syscall，通过 flags 组合指定要操作的调度参数。`task_get_sched` 复用同一个 args struct，由内核填充请求的字段。
+
+`A20_SCHED_DONATE`/`A20_SCHED_UNDONATE` 是 `task_set_sched` 的内部操作：`DONATE` 把目标提升到至少 `priority` 并在首次捐赠时保存 base 策略/优先级/nice；`UNDONATE` 恢复该快照。它们是内核 RT PI 的 ABI，不是普通应用设置优先级的方式。
+
+`task` 为 `A20_HANDLE_NULL` 时表示调用者自己（仅 set/get；捐赠仍需要目标 handle）。
+
+### sched_lock — per-task 调度器锁
+
+```c
+int64_t sched_lock(int32_t mode, int32_t depth);
+```
+
+`mode` 为 `A20_SCHED_LOCK_ACQUIRE`(0) / `RELEASE`(1) / `RESTORE`(2)，返回操作前的深度。它是 `osKernelLock` 的内核实现：深度非零时，syscall 返回点和 IRQ 返回点的抢占会被推迟，释放到 0 时立即消费 pending reschedule。它只推迟调度器抢占，不屏蔽中断。
 
 ---
 
