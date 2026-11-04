@@ -4,6 +4,7 @@ Only hardware, scheduler synchronization, allocation, and the class publication
 backend are host substitutes. Registration, reference counting, discovery,
 unbind/devres ordering, native bus publication and rollback are production C.
 """
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -235,6 +236,13 @@ class NativeBusLifetimeTests(unittest.TestCase):
     def setUpClass(cls):
         if not shutil.which('cc'):
             raise unittest.SkipTest('host C compiler required')
+        machine = platform.machine().lower()
+        if machine in ('x86_64', 'amd64'):
+            arch, macro = 'x86_64', 'CONFIG_X86_64'
+        elif machine in ('aarch64', 'arm64'):
+            arch, macro = 'aarch64', 'CONFIG_AARCH64'
+        else:
+            raise unittest.SkipTest(f'no host arch header for {machine}')
         cls.tmp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.tmp.cleanup)
         work = Path(cls.tmp.name)
@@ -245,8 +253,8 @@ class NativeBusLifetimeTests(unittest.TestCase):
             'cc', '-std=gnu99', '-Wall', '-Wextra', '-Werror', '-ffreestanding',
             '-fno-builtin', '-ffunction-sections', '-fdata-sections',
             '-fsanitize=undefined', '-fno-sanitize-recover=all', '-Wl,--gc-sections',
-            '-DCONFIG_X86_64', '-DCONFIG_NR_CPUS=1', '-DCONFIG_DRIVER_LIFECYCLE_TEST',
-            f'-I{ROOT}/kernel/arch/x86_64/include', f'-I{ROOT}/kernel/include',
+            f'-D{macro}', '-DCONFIG_NR_CPUS=1', '-DCONFIG_DRIVER_LIFECYCLE_TEST',
+            f'-I{ROOT}/kernel/arch/{arch}/include', f'-I{ROOT}/kernel/include',
             f'-I{ROOT}/kernel', str(source), '-o', str(cls.exe)
         ], capture_output=True, text=True)
         if result.returncode:
