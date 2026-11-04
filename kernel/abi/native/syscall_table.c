@@ -66,6 +66,7 @@ int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args);
 int64_t sys_a20_thread_yield(const a20_syscall_args_t *args);
 int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args);
 int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args);
+int64_t sys_a20_sched_lock(const a20_syscall_args_t *args);
 int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args);
 int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args);
 int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args);

@@ -21,13 +21,38 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
 
+    /*
+     * A20_HANDLE_NULL names the calling task.  The personality needs this
+     * for the initial thread, which has no handle in any table, and for
+     * restoring a boosted owner after its last mutex is released.
+     */
+    int is_self = task_h == A20_HANDLE_NULL;
     task_t *target = NULL;
-    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
-                                    A20_RIGHT_CONTROL, &target);
-    if (r < 0)
-        return r;
-    if (!target)
-        return -A20_ERR_BAD_HANDLE;
+    if (is_self) {
+        target = cur;
+    } else {
+        int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                        A20_RIGHT_CONTROL, &target);
+        if (r < 0)
+            return r;
+        if (!target)
+            return -A20_ERR_BAD_HANDLE;
+    }
+
+    if ((kargs.flags & (A20_SCHED_DONATE | A20_SCHED_UNDONATE)) != 0) {
+        int rc;
+        if (kargs.flags == A20_SCHED_DONATE)
+            rc = proc_sched_rt_donate(target, kargs.priority);
+        else if (kargs.flags == A20_SCHED_UNDONATE)
+            rc = proc_sched_rt_restore(target);
+        else
+            rc = -EINVAL;
+        if (!is_self)
+            proc_put(target);
+        return rc == 0 ? A20_OK
+                       : (rc == -EPERM ? -A20_ERR_ACCESS
+                                       : -A20_ERR_INVALID_ARGUMENT);
+    }
 
     proc_sched_config_t config = {
         .fields = kargs.flags,
@@ -38,13 +63,15 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args) {
     };
     if ((kargs.flags & A20_SCHED_AFFINITY) &&
         (kargs.affinity_size < sizeof(uint64_t) || (kargs.affinity >> 32))) {
-        proc_put(target);
+        if (!is_self)
+            proc_put(target);
         return -A20_ERR_INVALID_ARGUMENT;
     }
     int sr = proc_sched_set(target, &config);
     int64_t result = sr == -EPERM ? -A20_ERR_ACCESS :
                      (sr < 0 ? -A20_ERR_INVALID_ARGUMENT : A20_OK);
-    proc_put(target);
+    if (!is_self)
+        proc_put(target);
     return result;
 }
 
@@ -59,11 +86,17 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
 
+    /* A20_HANDLE_NULL names the caller, matching task_set_sched. */
+    int is_self = task_h == A20_HANDLE_NULL;
     task_t *target = NULL;
-    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID, A20_RIGHT_STAT,
-                                    &target);
-    if (r < 0)
-        return r;
+    if (is_self) {
+        target = cur;
+    } else {
+        int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                        A20_RIGHT_STAT, &target);
+        if (r < 0)
+            return r;
+    }
     a20_sched_args_t kinfo;
     memset(&kinfo, 0, sizeof(kinfo));
     kinfo.size = sizeof(kinfo);
@@ -77,9 +110,21 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args) {
         kinfo.affinity = config.affinity;
         kinfo.affinity_size = sizeof(uint64_t);
     }
-    proc_put(target);
+    if (!is_self)
+        proc_put(target);
     if (copy_to_user(out, &kinfo, sizeof(kinfo)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
+}
+
+int64_t sys_a20_sched_lock(const a20_syscall_args_t *args) {
+    if (!proc_has_cap(proc_current(), CAP_SYS_NICE))
+        return -A20_ERR_ACCESS;
+    int32_t mode = (int32_t)args->arg[0];
+    int32_t depth = (int32_t)args->arg[1];
+    int previous = proc_sched_lock_set(mode, depth);
+    if (previous < 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+    return previous;
 }
 #endif

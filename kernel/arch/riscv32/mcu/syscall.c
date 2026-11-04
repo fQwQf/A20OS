@@ -11,12 +11,27 @@
 #include "core/types.h"
 #include "core/arch.h"
 #include "core/errno.h"
+#include "proc/proc.h"
 #include "trap_frame.h"
 #include "abi/native/syscall_entry.h"
 #include "abi/native/errno.h"
 
 extern int64_t riscv_hi_vendor_call(uint64_t nr, trap_context_t *ctx);
 extern int riscv_hi_vendor_is_call(uint64_t nr);
+
+/*
+ * Consume a reschedule request before returning to U-mode.  Without this the
+ * only safe point on the MCU path is the next timer tick, so a thread woken
+ * by futex (a CMSIS semaphore release, a mutex handoff) would wait up to a
+ * full tick even when it outranks the caller.  The trap frame and sepc are
+ * already committed, so yielding here resumes at the instruction after ecall.
+ */
+static inline void mcu_syscall_return(int64_t *ret, trap_context_t *ctx)
+{
+    TRAP_CTX_SET_RET(ctx, *ret);
+    arch_advance_syscall_epc(ctx);
+    (void)proc_sched_safe_point();
+}
 
 int64_t riscv_mcu_syscall(trap_context_t *ctx)
 {
@@ -26,8 +41,7 @@ int64_t riscv_mcu_syscall(trap_context_t *ctx)
      * table; the CMSIS manifest therefore cannot accidentally grow them. */
     if (riscv_hi_vendor_is_call(nr)) {
         int64_t vret = riscv_hi_vendor_call(nr, ctx);
-        TRAP_CTX_SET_RET(ctx, vret);
-        arch_advance_syscall_epc(ctx);
+        mcu_syscall_return(&vret, ctx);
         return vret;
     }
     const a20_syscall_entry_t *entry = a20_syscall_lookup(nr);
@@ -50,8 +64,7 @@ int64_t riscv_mcu_syscall(trap_context_t *ctx)
     }
 
     /* A thread_exit never reaches here: proc_exit() does not return. */
-    TRAP_CTX_SET_RET(ctx, ret);
-    arch_advance_syscall_epc(ctx);
+    mcu_syscall_return(&ret, ctx);
     return ret;
 }
 #endif

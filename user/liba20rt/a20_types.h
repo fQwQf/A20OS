@@ -712,7 +712,13 @@ typedef struct a20_thread_create_args {
     uint64_t       tls_base;
     uint32_t       flags;
     a20_handle_t   out_thread;
+    uint32_t       sched_flags;
+    int32_t        sched_policy;
+    int32_t        sched_priority;
+    uint32_t       reserved0;
 } a20_thread_create_args_t;
+
+#define A20_THREAD_CREATE_V1_SIZE 56U
 
 typedef struct a20_sched_args {
     uint32_t       size;
@@ -730,6 +736,15 @@ typedef struct a20_sched_args {
 #define A20_SCHED_PRIORITY (1U << 1)
 #define A20_SCHED_AFFINITY (1U << 2)
 #define A20_SCHED_NICE     (1U << 3)
+#define A20_SCHED_DONATE   (1U << 4)
+#define A20_SCHED_UNDONATE (1U << 5)
+#define A20_SCHED_LOCK_ACQUIRE 0
+#define A20_SCHED_LOCK_RELEASE 1
+#define A20_SCHED_LOCK_RESTORE 2
+
+#define A20_SCHED_NORMAL   0
+#define A20_SCHED_FIFO     1
+#define A20_SCHED_RR       2
 
 typedef struct a20_rlimit_args {
     uint32_t       size;

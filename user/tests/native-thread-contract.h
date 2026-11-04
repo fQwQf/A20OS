@@ -166,7 +166,9 @@ static int native_thread_contract(void) {
         if (!(test))                                                           \
             return code;                                                       \
     } while (0)
-    _Static_assert(sizeof(a20_thread_create_args_t) == 56, "thread ABI");
+    _Static_assert(sizeof(a20_thread_create_args_t) == 72, "thread ABI");
+    _Static_assert(__builtin_offsetof(a20_thread_create_args_t, sched_flags) == 56,
+                   "v1 append offset");
     a20_execution_info_t execution;
     T_CHECK(a20_execution_info(&execution) == A20_OK &&
                 (execution.features & A20_EXEC_THREAD_CREATE),

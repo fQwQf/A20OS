@@ -98,6 +98,12 @@ static inline a20_status_t a20_sched_get(a20_handle_t task,
                         0, 0, 0, 0);
 }
 
+static inline a20_status_t a20_sched_lock(int32_t mode, int32_t depth)
+{
+    return a20_syscall6(A20_SYS_sched_lock, (uint32_t)mode, (uint32_t)depth,
+                        0, 0, 0, 0);
+}
+
 static inline a20_status_t a20_task_set_limit(a20_handle_t task,
                                                a20_resource_limits_t *limits)
 {
