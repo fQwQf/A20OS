@@ -86,6 +86,14 @@ osThreadId_t osb_thread_self(void);
 void     osb_thread_set_self(osThreadId_t t);
 int      osb_thread_set_priority(osThreadId_t t, osPriority_t prio);
 osPriority_t osb_thread_get_priority(osThreadId_t t);
+/*
+ * Priority inheritance hooks.  The donation itself (maximum priority, base
+ * snapshot, re-key and restore) is implemented by the kernel scheduler; the
+ * personality only decides when a mutex waiter needs a donation and when the
+ * owner's last mutex has been released.
+ */
+int      osb_thread_boost(osThreadId_t owner, osPriority_t prio);
+void     osb_thread_unboost(osThreadId_t t);
 int      osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set);
 uint32_t osb_thread_get_affinity(osThreadId_t t);
 uint32_t osb_thread_stack_space(osThreadId_t t);
@@ -140,7 +148,8 @@ struct os_thread_cb {
     uint32_t        stack_size;
     int             static_stack;
     void           *owned_stack;   /* allocated by the backend, freed on release */
-    osPriority_t    priority;
+    osPriority_t    priority;       /* base priority requested by the app */
+    uint32_t        held_mutexes;   /* mutexes owned; PI is dropped at zero */
     uint32_t        attr_bits;
     volatile int32_t state;
     volatile uint32_t flags;

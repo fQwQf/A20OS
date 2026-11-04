@@ -108,6 +108,7 @@ class CmsisTrim(unittest.TestCase):
         called.discard("time_ns_t")           # type name
         mapping = {
             "sched_set": "task_set_sched",
+            "sched_get": "task_get_sched",
             "hdl_close": "handle_close",
         }
         mapped = {mapping.get(name, name) for name in called}

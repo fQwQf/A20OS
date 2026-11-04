@@ -152,6 +152,7 @@ int osb_thread_start(osThreadId_t t)
      * itself up by stack address. */
     self_register(t);
     if (osn_thread_create(native_entry, t, t->stack_mem, t->stack_size,
+                          OSN_SCHED_FIFO, (int32_t)t->priority,
                           &t->bhandle) != 0) {
         self_unregister(t);
         return -OS_EAGAIN;
@@ -251,19 +252,61 @@ void osb_thread_set_self(osThreadId_t t)
 
 int osb_thread_set_priority(osThreadId_t t, osPriority_t prio)
 {
-    return osn_task_set_sched(t->bhandle, OSN_SCHED_PRIORITY, (int32_t)prio, 0)
-               == 0 ? 0 : -OS_EIO;
+    if (!t)
+        return -OS_EINVAL;
+    /*
+     * A CMSIS-created thread owns a handle.  The initial thread has none,
+     * but it can still set its own priority through the A20_HANDLE_NULL
+     * self form; it cannot be the target of another thread's inheritance
+     * donation.
+     */
+    if (!t->bhandle && osb_thread_self() != t)
+        return -OS_EINVAL;
+    int rc = osn_task_set_sched(
+        t->bhandle, OSN_SCHED_POLICY | OSN_SCHED_PRIORITY,
+        OSN_SCHED_FIFO, (int32_t)prio, 0);
+    return rc == 0 ? 0 : -OS_EIO;
 }
 
 osPriority_t osb_thread_get_priority(osThreadId_t t)
 {
-    (void)t;
-    return osPriorityNone;
+    if (!t || (!t->bhandle && osb_thread_self() != t))
+        return osPriorityNone;
+    int32_t policy = 0, priority = 0;
+    if (osn_task_get_sched(t->bhandle, &policy, &priority) != 0)
+        return osPriorityNone;
+    /* The ABI returns 0 for a non-RT task.  A CMSIS-created thread in that
+     * state did not get its kernel priority and must not look correctly
+     * scheduled; the initial thread has no handle and legitimately starts as
+     * a normal kernel task, so let the core report its cached CMSIS base. */
+    if (priority <= osPriorityNone)
+        return t->bhandle ? osPriorityError : osPriorityNone;
+    return (osPriority_t)priority;
+}
+
+int osb_thread_boost(osThreadId_t owner, osPriority_t prio)
+{
+    if (!owner || !owner->bhandle || prio <= osPriorityNone)
+        return -OS_EINVAL;
+    /* The scheduler owns the donation: maximum priority, base snapshot and
+     * the READY/RUNNING re-key through proc_sched_set(). */
+    int rc = osn_task_set_sched(owner->bhandle, OSN_SCHED_DONATE, 0,
+                                (int32_t)prio, 0);
+    return rc == 0 ? 0 : -OS_EIO;
+}
+
+void osb_thread_unboost(osThreadId_t t)
+{
+    if (!t)
+        return;
+    /* The owner is the caller here; a thread with no handle (the initial
+     * thread) uses the ABI's self form. */
+    (void)osn_task_set_sched(t->bhandle, OSN_SCHED_UNDONATE, 0, 0, 0);
 }
 
 int osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set)
 {
-    return osn_task_set_sched(t->bhandle, OSN_SCHED_AFFINITY, 0, cpu_set) == 0
+    return osn_task_set_sched(t->bhandle, OSN_SCHED_AFFINITY, 0, 0, cpu_set) == 0
                ? 0 : -OS_EIO;
 }
 
@@ -280,30 +323,23 @@ uint32_t osb_thread_stack_space(osThreadId_t t)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Kernel lock (uniprocessor: recursion bookkeeping only)                    */
 /* ------------------------------------------------------------------------- */
-
-static int g_kernel_depth;
+/* Scheduler lock: kernel-owned per-task depth                              */
+/* ------------------------------------------------------------------------- */
 
 int osb_kernel_lock(void)
 {
-    int prev = g_kernel_depth;
-    g_kernel_depth++;
-    return prev;
+    return osn_sched_lock(OSN_LOCK_ACQUIRE, 0);
 }
 
 int osb_kernel_unlock(void)
 {
-    if (g_kernel_depth > 0)
-        g_kernel_depth--;
-    return g_kernel_depth;
+    return osn_sched_lock(OSN_LOCK_RELEASE, 0);
 }
 
 int osb_kernel_restore(int depth)
 {
-    int prev = g_kernel_depth;
-    g_kernel_depth = depth;
-    return prev;
+    return osn_sched_lock(OSN_LOCK_RESTORE, depth);
 }
 
 /* ------------------------------------------------------------------------- */

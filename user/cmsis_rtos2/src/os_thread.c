@@ -69,6 +69,13 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
     t->arg = argument;
     t->priority = (attr && attr->priority != osPriorityNone)
                       ? attr->priority : osPriorityNormal;
+    /* osPriorityNone and osPriorityISR are not thread priorities. */
+    if (t->priority < osPriorityIdle || t->priority >= osPriorityISR) {
+        osb_bq_destroy(t->obj.q);
+        if (!static_cb)
+            osb_free(t);
+        return NULL;
+    }
     t->attr_bits = attr ? attr->attr_bits : 0U;
     t->stack_size = (attr && attr->stack_size)
                         ? attr->stack_size : OS_CFG_DEFAULT_STACK_SIZE;
@@ -122,9 +129,19 @@ osStatus_t osThreadSetPriority(osThreadId_t thread_id, osPriority_t priority)
         return osErrorParameter;
     if (priority <= osPriorityNone || priority >= osPriorityISR)
         return osErrorParameter;
-    if (osb_thread_set_priority(thread_id, priority) != 0)
+    /*
+     * A task that is currently executing a priority donation reports the
+     * donated (higher) priority.  Changing its base underneath the kernel's
+     * saved snapshot would make the later restore resurrect the old base, so
+     * reject it instead of silently applying a change that cannot survive.
+     */
+    osPriority_t effective = osb_thread_get_priority(thread_id);
+    if (effective != osPriorityNone && effective != osPriorityError &&
+        effective > thread_id->priority)
         return osError;
     thread_id->priority = priority;
+    if (osb_thread_set_priority(thread_id, priority) != 0)
+        return osError;
     return osOK;
 }
 

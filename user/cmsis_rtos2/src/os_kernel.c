@@ -157,6 +157,8 @@ int32_t osKernelLock(void)
     if (g_state != osKernelRunning)
         return (int32_t)osErrorISR;
     int prev = osb_kernel_lock();
+    if (prev < 0)
+        return (int32_t)osError;
     g_lock_depth++;
     return prev > 0 ? 1 : 0;
 }
@@ -168,8 +170,12 @@ int32_t osKernelUnlock(void)
     if (g_lock_depth <= 0)
         return (int32_t)osError;
     g_lock_depth--;
-    int now = osb_kernel_unlock();
-    return now > 0 ? 1 : 0;
+    int previous = osb_kernel_unlock();
+    if (previous < 0)
+        return (int32_t)osError;
+    /* The backend returns the depth before the release; g_lock_depth is the
+     * authoritative post-release value. */
+    return g_lock_depth > 0 ? 1 : 0;
 }
 
 int32_t osKernelRestoreLock(int32_t lock)
@@ -179,6 +185,8 @@ int32_t osKernelRestoreLock(int32_t lock)
     if (lock < 0)
         return (int32_t)osErrorParameter;
     int prev = osb_kernel_restore(lock);
+    if (prev < 0)
+        return (int32_t)osError;
     g_lock_depth = lock;
     return prev;
 }

@@ -48,6 +48,8 @@ thread_yield     = "osThreadYield / osDelay(0) / mutex handoff"
 task_wait        = "process-child wait (osThreadJoin uses its own exit word)"
 task_kill        = "osThreadTerminate"
 task_set_sched   = "osThreadSetPriority / osThreadSetAffinity"
+task_get_sched   = "osThreadGetPriority reports the effective RT priority"
+sched_lock       = "osKernelLock defers preemption in the kernel scheduler"
 handle_close     = "osThreadJoin / osThreadDetach reaps the thread handle"
 futex_wait       = "blocking queue: sleep"
 futex_wake       = "blocking queue: wake"
@@ -71,7 +73,8 @@ features = ["thread", "mutex", "semaphore", "timer", "event_flags",
 syscalls = [
     "clock_get", "vm_alloc",
     "thread_create", "thread_exit", "thread_sleep", "thread_yield",
-    "task_kill", "task_set_sched", "handle_close",
+    "task_kill", "task_set_sched", "task_get_sched", "sched_lock",
+    "handle_close",
     "futex_wait", "futex_wake", "atomic32",
 ]
 

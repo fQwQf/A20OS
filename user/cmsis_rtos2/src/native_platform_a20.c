@@ -28,6 +28,8 @@ static const char *const g_call_names[OSN_CALL_COUNT] = {
     "thread_yield",
     "task_kill",
     "task_set_sched",
+    "task_get_sched",
+    "sched_lock",
     "handle_close",
     "futex_wait",
     "futex_wake",
@@ -61,7 +63,8 @@ int osn_vm_alloc(size_t size, void **out_ptr)
 void osn_vm_free(void *ptr) { a20_free(ptr); }
 
 int osn_thread_create(void (*entry)(void *), void *arg, void *stack,
-                      size_t stack_size, void **out_handle)
+                      size_t stack_size, int32_t policy, int32_t priority,
+                      void **out_handle)
 {
     g_calls[OSN_THREAD_CREATE]++;
     a20_thread_create_args_t args = {0};
@@ -73,6 +76,11 @@ int osn_thread_create(void (*entry)(void *), void *arg, void *stack,
      * allocator returns the low address. */
     args.stack_base = (uint64_t)(uintptr_t)stack + stack_size;
     args.stack_size = stack_size;
+    if (policy && priority > 0) {
+        args.sched_flags = A20_SCHED_POLICY | A20_SCHED_PRIORITY;
+        args.sched_policy = policy;
+        args.sched_priority = priority;
+    }
     /* sys_a20_thread_create returns the handle itself (0 is a valid slot),
      * while the backend uses a void* where NULL means "no handle".  Bias by
      * one so handle 0 stays representable. */
@@ -114,20 +122,49 @@ int osn_task_kill(void *handle)
     return a20_task_kill((a20_handle_t)((uintptr_t)handle - 1), 0) == A20_OK ? 0 : -1;
 }
 
-int osn_task_set_sched(void *handle, uint32_t fields, int32_t priority,
-                       uint32_t affinity)
+int osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
+                       int32_t priority, uint32_t affinity)
 {
     g_calls[OSN_TASK_SET_SCHED]++;
     a20_sched_args_t args = {0};
     args.size = sizeof(args);
     args.version = 1;
-    args.task = (a20_handle_t)((uintptr_t)handle - 1);
+    /* NULL names the calling task on the Native backend. */
+    a20_handle_t target = handle
+                              ? (a20_handle_t)((uintptr_t)handle - 1)
+                              : A20_HANDLE_NULL;
+    args.task = target;
     args.flags = fields;
+    args.policy = policy;
     args.priority = priority;
     args.affinity = affinity;
     args.affinity_size = sizeof(affinity);
-    return a20_sched_set((a20_handle_t)((uintptr_t)handle - 1), &args) == A20_OK
-               ? 0 : -1;
+    return a20_sched_set(target, &args) == A20_OK ? 0 : -1;
+}
+
+int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority)
+{
+    g_calls[OSN_TASK_GET_SCHED]++;
+    if (!policy || !priority)
+        return -1;
+    a20_sched_args_t args = {0};
+    args.size = sizeof(args);
+    args.version = 1;
+    a20_handle_t target = handle
+                              ? (a20_handle_t)((uintptr_t)handle - 1)
+                              : A20_HANDLE_NULL;
+    if (a20_sched_get(target, &args) != A20_OK)
+        return -1;
+    *policy = args.policy;
+    *priority = args.priority;
+    return 0;
+}
+
+int osn_sched_lock(int32_t mode, int32_t depth)
+{
+    g_calls[OSN_SCHED_LOCK]++;
+    int64_t rc = a20_sched_lock(mode, depth);
+    return rc < 0 ? -1 : (int)rc;
 }
 
 int osn_handle_close(void *handle)
