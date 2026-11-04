@@ -56,19 +56,58 @@ Documented limits:
 
 * `osThreadSuspend/Resume` is cooperative on the POSIX backend (signal based)
   and not supported by the Native backend; it returns `osError` there.
-* The POSIX backend cannot honour `osKernelLock` for code that blocks while
-  locked; the lock is a recursive mutex, so the API contract holds but a
-  blocking call inside a locked region is the usual application error.
+* The POSIX backend keeps the host's pthread scheduling policy; CMSIS
+  priorities and priority inheritance are guaranteed by the Native/MCU
+  backend, not by a hosted process.
 * Message queues are FIFO; `msg_prio` is accepted and ignored.
-* Priority inheritance (`osMutexPrioInherit`) depends on the backend's
-  scheduler; the flag is stored and the POSIX backend does not enable PI.
+* The POSIX backend implements `osKernelLock` as a recursive mutex; a
+  blocking call inside the lock is still an application error.
+* The initial thread has no handle and cannot be the target of another
+  thread's inheritance donation.  It can still set/query its own priority.
+* `osThreadSetPriority` returns `osError` while the target is executing a
+  donation: the kernel's saved base snapshot cannot be rewritten without
+  losing the restore point.
+
+## Real-time model (Native / MCU backend)
+
+A Native-ABI MCU image does not run CMSIS threads on a fair-share scheduler.
+`osThreadNew` maps every thread to the kernel's `SCHED_FIFO` class and the
+CMSIS priority is the kernel RT priority (1:1, `osPriorityIdle(1)` through
+`osPriorityRealtime7(55)`):
+
+* the scheduling attributes travel in `a20_thread_create_args_t` and are
+  applied by `proc_sched_set()` **before** the task is published, so a new
+  thread never takes a step at the creator's priority;
+* a woken higher-priority thread preempts at the syscall/IRQ-return safe
+  point, not at the next tick;
+* semaphore/mutex release broadcasts; the RT runqueue picks the highest
+  waiter, and lower waiters re-check and sleep again;
+* mutex inheritance is kernel-owned (`proc_sched_rt_donate/restore`): the
+  scheduler stores the maximum donation and the base policy/priority/nice,
+  re-keys a READY owner through the normal `proc_sched_set()` path, and
+  restores it when the owner releases its last mutex;
+* `osKernelLock` is a per-task `sched_lock_depth` checked by the kernel's
+  preemption points, not a user-space priority trick.  It defers the
+  scheduler, not interrupts; blocking inside the lock is still an
+  application error;
+* the MCU profile disables the hosted 5%-per-second RT bandwidth reserve, so
+  a CMSIS RT thread is not forced to yield 50 ms every second.
+
+Time resolution remains the kernel tick: 100 Hz on Hi3861 (10 ms, the LiteOS
+default) and 1 kHz on the QEMU MCU board.  `osDelay(1)`, timeouts and software
+timers cannot be finer than that; a sub-tick control loop needs a hardware
+timer or a faster tick.
+
+`user/tests/liteos-demos/rt.c` exercises this model as experiment 4.5:
+creation priority, `osThreadSetPriority`, `osKernelLock` deferral and mutex
+inheritance.
 
 ## Two backends
 
 | Backend | Use | Primitives |
 |---|---|---|
 | POSIX | hosted A20OS (Linux ABI), host self-test | pthreads, condvars, `CLOCK_MONOTONIC` |
-| Native | NOMMU/MCU builds | `thread_*`, `futex_*`, `atomic32`, `vm_alloc`, `clock_get` |
+| Native | NOMMU/MCU builds | `thread_*`, `task_*_sched`, `sched_lock`, `futex_*`, `atomic32`, `vm_alloc`, `clock_get` |
 
 A port to a third ABI implements `os_impl.h`'s backend contract; no `os*`
 function needs to change.
@@ -97,12 +136,12 @@ Profiles:
 | Profile | Object families | Syscalls |
 |---|---|---|
 | `full` | all | all (mirrors the master table) |
-| `mcu` | thread, mutex, semaphore, timer, event flags, message queue | 12 |
+| `mcu` | thread, mutex, semaphore, timer, event flags, message queue | 14 |
 | `mcu-min` | thread, semaphore, timer (no join/terminate/priority control) | 9 |
 
 Measured library text for the Native backend, riscv32imc/ilp32, `-Os`
-(`-ffunction-sections`, before link GC): `full` 11.7 KiB, `mcu` 11.0 KiB,
-`mcu-min` 9.8 KiB.
+(`-ffunction-sections`, before link GC): `full` 12.2 KiB, `mcu` 11.6 KiB,
+`mcu-min` 10.3 KiB.
 
 A family compiled out keeps its entry points (they return `osErrorResource`),
 so an application built against the full header links against every profile;
@@ -144,7 +183,8 @@ tools/a20 test qemu-riscv32-mcu
 # [4.2] PASS taken=5 produced=5
 # [4.3] PASS once=1 periodic=12
 # [4.4] PASS irq=5
-# [DEMO] experiments 4.1-4.4: PASS
+# [4.5] PASS create=1 setprio=1 lock=1 inherit=1
+# [DEMO] experiments 4.1-4.5: PASS
 ```
 
 Experiments 4.1-4.3 include only `cmsis_os2.h`.  Experiment 4.4 adds the
