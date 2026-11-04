@@ -97,11 +97,22 @@ park_lock -> a20_handle_table.lock
 
 > 与算法文档的关系：本节只讲 runqueue 的**结构、所有权与锁**。普通任务“选谁”（加权公平、资格门控、虚拟截止时间、虚拟 slice 旋钮）与 SMP 空闲窃取的**策略**细节见 [EEVDF 调度器设计](eevdf-scheduler.md)。
 
-每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 沿按 deadline 排序的 treap 下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务，最坏 O(log n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
+每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），按优先级分成独立 FIFO 桶（`PROC_RT_PRI_LEVELS`：hosted 100，MCU 64；`a20_rt_priority_slot()` 在 `levels` 处截断，所以 MCU 从 8 提到 64 是为了让 CMSIS 的 1..55 不塌缩）；级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 沿按 deadline 排序的 treap 下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务，最坏 O(log n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
 
 设置 RT policy/priority 的核心入口 `proc_sched_set()` 在目标 `park_lock` 内检查`CAP_SYS_NICE` 或 `RLIMIT_RTPRIO` 软上限；已有 RT 任务允许降优先级，不能借此越过当前优先级与软上限的较大值。RTPRIO 默认软硬上限均为零，fork 继承快照，提高硬上限要求 `CAP_SYS_RESOURCE`。Linux 修改其他用户任务还检查属主， Native 仍要求相应 TASK handle rights。
 
-RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在 runqueue 锁内计量。预算耗尽后暂停选择 RT 任务，`sched()` 也不得因 current 的 RT 优先级保留它；下周期恢复。暂停的任务保留队列引用和调度策略；无普通任务时 idle 允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数（需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。`sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；配置和日志见测试记录，目前尚不覆盖长 syscall 有界延迟。
+hosted 构建的 RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在 runqueue 锁内计量。预算耗尽后暂停选择 RT 任务，`sched()` 也不得因 current 的 RT 优先级保留它；下周期恢复。暂停的任务保留队列引用和调度策略；无普通任务时 idle 允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数（需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。`sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；配置和日志见测试记录，目前尚不覆盖长 syscall 有界延迟。
+
+**MCU 镜像不启用这项预算。** `CONFIG_MCU` 的 RT 选择走 `a20_rt_take_best()` 而不是带带宽记账的 controller：专用 RTOS 镜像没有需要保留 CPU 的普通工作类，5%/秒的让出会让 CMSIS 最高优先级线程每秒被暂停约 50 ms，反而破坏实时性。hosted 的预算保持不变。
+
+### RT 优先级继承与 per-task 调度器锁
+
+固定优先级 personality（当前是 CMSIS-RTOS2，Native/MCU 后端）需要两种调度器服务，二者都在 `kernel/proc/sched.c`，不在用户态重复实现：
+
+- **RT PI**：`proc_sched_rt_donate(t, priority)` 在首次捐赠时通过 `proc_sched_get()` 保存 base policy/priority/nice，记录最大捐赠优先级，并用 `proc_sched_set()` 完成 READY/RUNNING/BLOCKED owner 的重排；`proc_sched_rt_restore(t)` 恢复快照。`priority == 0` 表示“捐赠调用者的有效 RT 优先级”，供链式等待使用。Native ABI 通过 `task_set_sched` 的 `A20_SCHED_DONATE`/`UNDONATE` 暴露；等待图（A 等 B、B 等 C）属于 mutex 语义，由人格层遍历，内核只负责每一跳的捐赠。
+- **调度器锁**：`sched_lock` syscall 维护当前 task 的 `sched_lock_depth`。`proc_sched_safe_point()` 和 `kernel_preempt_at_irq_return()` 在深度非零时保留 `need_resched`，不切换；释放到 0 时立即消费 pending 请求。它只推迟调度器抢占，不屏蔽 IRQ；锁内阻塞仍是调用方错误。
+
+这两项与 CMSIS 的对应、tick 粒度和 4.5 验证见 [CMSIS-RTOS2 执行模型](../rtos/execution-model.md)。
 
 本地选择分两段：
 

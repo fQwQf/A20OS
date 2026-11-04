@@ -95,7 +95,7 @@ governing five dimensions:
 Envelopes are implemented in A20OS, a research operating system with a
 dual-ABI architecture: a Linux compatibility layer (384 registered
 syscalls) runs unmodified musl-linked binaries alongside a native
-capability-aware ABI (173 syscalls) for trusted components.  A hybrid
+capability-aware ABI (175 syscalls) for trusted components.  A hybrid
 kernel mediator (914 lines of C dispatch adapter and 634 lines of
 memory-safe \texttt{no\_std} Rust policy core) intercepts every resource
 acquisition and consumption path, enforcing budget policies via
@@ -248,7 +248,7 @@ A20OS exposes two system-call interfaces sharing a common kernel core:
 \begin{itemize}
 \item \textbf{Linux ABI} (384 entries): binary-compatible with musl,
       enabling unmodified static binaries to execute normally.
-\item \textbf{Native ABI} (173 entries): capability-aware interface
+\item \textbf{Native ABI} (175 entries): capability-aware interface
       exposing typed handles, synchronous fused RPC channels, and unified
       event queues for native system services.
 \end{itemize}

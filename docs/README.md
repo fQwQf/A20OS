@@ -85,6 +85,20 @@
 - [distro/README.md](distro/README.md)：Alpine rootfs 发行版路径（A20OS 作内核、原生发行版作用户态）
 - [distro/source-software-porting.md](distro/source-software-porting.md)：把新软件接进 A20OS（Alpine 上游包写进 world 清单；仍需从源码构建的只有 `user/cmds/` 与 fastfetch）与运行时验证
 
+## 实时操作系统（RTOS）
+
+CMSIS-RTOS2 是独立的第三方 source-level ABI，不属于 Native ABI；完整子系统见 [实时执行与 RTOS 子系统](rtos/README.md)。
+
+- [rtos/overview.md](rtos/overview.md)：**A20OS 实时执行模型与系统架构总览**
+- [rtos/cmsis-rtos2.md](rtos/cmsis-rtos2.md)：第三方 ABI 定位、API 覆盖、Native ABI 表面与精简裁剪
+- [rtos/execution-model.md](rtos/execution-model.md)：线程映射、优先级分桶、双安全点抢占、tick 与调度器锁
+- [rtos/synchronization.md](rtos/synchronization.md)：同步对象、PI 等待链回溯、内核捐赠与基准快照恢复
+- [rtos/interrupts.md](rtos/interrupts.md)：用户态 ISR 约束、厂商 Dispatcher 线程与延迟投递
+- [rtos/porting-guide.md](rtos/porting-guide.md)：最小应用模板、tick 对齐、栈内存量化与 LiteOS API 对照
+- [rtos/experiments.md](rtos/experiments.md)：4.1–4.5 实验套件、QEMU/实板运行与负向对照
+- [rtos/latency.md](rtos/latency.md)：实时时延理论推导与自由运行计数器测量规划
+- [kernel/process-scheduler.md](kernel/process-scheduler.md)：内核调度契约（RT 分桶、EEVDF、持久抢占、RT PI、调度器锁）
+
 ## Native ABI 与子系统细节
 
 如果你想深入 Native ABI 或具体内核子系统：

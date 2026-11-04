@@ -1,17 +1,34 @@
-# CMSIS-RTOS2 兼容层（personality）
+# CMSIS-RTOS2 第三方 ABI 兼容层（personality）
 
-本文说明 A20OS 如何提供 Arm CMSIS-RTOS2 API。结论先行：**它是一套用户态兼容库，不是第三种 syscall ABI**。内核不新增 CMSIS 编号，`os*` 函数位于`user/cmsis_rtos2/`，通过一个很窄的后端接口落到 Linux ABI 或 Native ABI 上。
+> 实时子系统架构与微内核机制分工参见 [A20OS 实时执行模型与系统架构](overview.md)。本文是 CMSIS-RTOS2 人格层实现、API 支持矩阵与静态裁剪参考。
 
-## 为什么不是"第三个 ABI"
+CMSIS-RTOS2 是 Arm 定义的**独立第三方 ABI**（source-level：头文件 + 库 + 语义），不是 A20OS Native ABI 的一部分，也不是第三种 syscall ABI。A20OS 在 `user/cmsis_rtos2/` 以用户态人格库实现它；Native ABI 只为“固定优先级 personality”增加了一小组通用调度原语（两个新 syscall + 两个既有接口的扩展），其中不包含任何 CMSIS 类型或 CMSIS 编号。
+
+在 Native/MCU 后端下，CMSIS 线程不是“分时调度器上的一层线程库”：它们就是内核的 `SCHED_FIFO` 任务，具备固定优先级抢占、优先级继承和真正的 `osKernelLock`。时间粒度仍是内核 tick；具体保证与边界见下文“实时性模型”。
+
+## 定位：第三方 ABI，不是 Native ABI
 
 | | Linux ABI / Native ABI | CMSIS-RTOS2 |
 |---|---|---|
-| 形态 | syscall 编号 + 线格式 + 语义 | C 头文件 + 库 + 语义 |
+| 归属 | A20OS 内核接口 | Arm 规范，A20OS 以人格库提供 |
+| 形态 | syscall 编号 + 线格式 + 语义 | C 头文件 + 库 + 语义（source-level ABI） |
 | 调用方式 | `ecall`/`svc`/`int` 陷入内核 | 普通函数调用，库内部再发起 syscall |
 | 可移植性 | 预编译二进制可换内核 | 源码级可移植，必须链接实现 |
 | 标准来源 | Linux / A20OS 自有规范 | Arm CMSIS 规范（事实标准，非 ISO） |
 
-CMSIS-RTOS2 没有标准的 trap 编号或二进制接口，把它做成 syscall ABI 只能自造一套编号，收益是把"源码可移植"降级成"并不存在的二进制兼容"。因此本层遵循`docs/architecture.md` 的分层原则：内部实现与 ABI 无关，人格层在用户态。
+因此它**不能**被当作 Native ABI 的扩展章节；本文放在 `docs/rtos/`，Native ABI 文档只保留那些通用调度原语的 ABI 定义。
+
+实现 CMSIS-RTOS2 实际用到的 Native ABI 表面：
+
+| Native ABI 项 | 类型 | 用途 |
+|---|---|---|
+| `thread_create` 的 sched 追加字段 | 既有 syscall 的 E-APPEND 扩展 | 在 publish 前设置 CMSIS 优先级/策略 |
+| `task_set_sched` 的 `A20_SCHED_DONATE` / `UNDONATE` | 既有 syscall 的新 flags | 内核 RT 优先级继承 |
+| `task_get_sched` | 既有 syscall | `osThreadGetPriority` 读取有效优先级 |
+| `sched_lock`（0x0219） | 新 syscall | `osKernelLock` 的 per-task 调度器锁 |
+| `task_self`（0x021A） | 新 syscall | 初始线程安装自己的 handle，作为 PI 目标 |
+
+这些原语是通用的：它们不依赖 `cmsis_os2.h`，也不进入 Native ABI 的 CMSIS 专属编号；未来其他 RTOS personality 可以复用同一组调度原语。
 
 ## 分层
 
@@ -51,33 +68,26 @@ A20OS 内核机制（调度、futex、VM、定时器）
 
 控制块支持 `cb_mem`/`cb_size` 静态放置；线程支持 `stack_mem`/`stack_size`。
 
-已知边界：
+执行、抢占、tick、PI、`osKernelLock` 的完整语义在独立页面：
 
-- `osThreadSuspend/Resume` 在 POSIX 后端是协作式（信号触发），Native 后端不支持并返回 `osError`；
-- 消息队列为 FIFO，`msg_prio` 接受但忽略；
-- 初始/main 线程在 `osKernelInitialize()` 时通过 `task_self` 安装自己的 handle，因此也可以作为优先级继承的目标；如果初始化是在已创建的 CMSIS 线程里调用的，该线程本来就有 handle；
-- 线程正在执行优先级捐赠时，`osThreadSetPriority` 返回 `osError`：内核保存的 base 快照不能在不丢失的情况下改写；
-- `osKernelLock` 只推迟调度器抢占，不屏蔽中断；锁内阻塞仍是应用错误。POSIX 后端的 `osKernelLock` 仍是递归互斥，不能阻止锁内显式阻塞。
+- [执行模型](execution-model.md)：线程→内核 RT 任务的映射、优先级表、publish 前设置、syscall/IRQ 返回点抢占、broadcast wake、tick、`osKernelLock`、保证/不保证；
+- [同步与优先级继承](synchronization.md)：mutex/semaphore/event/queue/pool、`wait_owner` 链、内核捐赠/恢复、超时、已知边界；
+- [中断与 ISR 模型](interrupts.md)：为什么用户态不能直接执行 ISR、4.4 厂商 dispatcher、临界区、移植厂商 IRQ。
 
-## 实时性模型（Native / MCU 后端）
+简表：
 
-POSIX 后端把 CMSIS 线程映射到 pthread，优先级由宿主 pthread 策略决定，不在本节保证范围内。使用 Native ABI 的 MCU 镜像（`qemu-riscv32-mcu`、Hi3861）不是"在分时调度器上套一层 CMSIS"，CMSIS 线程本身就是内核的 `SCHED_FIFO` 任务：
-
-| 属性 | 实现 |
+| 属性 | Native/MCU 后端 |
 |---|---|
-| 优先级 | `osPriorityIdle(1)`..`osPriorityRealtime7(55)` 与内核 RT 优先级 1:1；MCU 的 `PROC_RT_PRI_LEVELS=64`，每个 CMSIS 级别是独立 FIFO 桶 |
-| 创建 | `osThreadNew` 经 `thread_create` 的 sched 字段，在 `proc_publish_deferred_task()` 之前调用 `proc_sched_set()`；新线程不会先以创建者优先级跑一步 |
-| 抢占 | 高优先级线程就绪后，在 syscall 返回 / IRQ 返回的 safe point 立即抢占，不需要等 tick；MCU 的 `riscv_mcu_syscall()` 和 `kernel_preempt_at_irq_return()` 都走这条路径 |
-| 唤醒 | 信号量/互斥量释放用 broadcast wake；RT 队列按优先级选最高者先跑，低优先级等待者重新检查并继续睡 |
-| 优先级继承 | 内核 `proc_sched_rt_donate()` / `proc_sched_rt_restore()`：等待者在阻塞前沿 mutex 等待链（`wait_owner`）逐 link 捐赠自己的**有效** RT 优先级，owner 释放最后一个 mutex 时恢复。等待图是 mutex 语义，留在人格层；最大捐赠、base 快照和重排在内核，READY owner 走 `proc_sched_set()` 同一套 detach/re-enqueue 路径 |
-| `osKernelLock` | 内核 per-task `sched_lock_depth`；safe point 和 IRQ 返回点看到非零就推迟 pending reschedule，解锁到 0 时立即消费它 |
-| tick | 时间分辨率仍是内核 tick：Hi3861 100 Hz（10 ms），QEMU MCU 1 kHz。`osDelay(1)`、超时和软件定时器不会优于该粒度。freestanding 构建必须用 `OS_NATIVE_TICK_HZ` 对齐 `ARCH_TIMER_FREQ`；镜像构建从 `MCU_TICK_HZ` 传入 |
-| RT 带宽 | MCU 构建关闭 hosted 的 5%/秒保留，RT 线程不会每秒被强制让出约 50 ms |
+| 调度类 | `SCHED_FIFO`，CMSIS 优先级 1..55 直接等于内核 RT 优先级 |
+| 创建 | `thread_create` sched 字段在 publish 前应用 |
+| 抢占 | syscall / IRQ 返回 safe point，不等 tick |
+| 唤醒 | broadcast + RT 队列选最高 |
+| PI | 内核 `proc_sched_rt_donate/restore`，人格层遍历 `wait_owner` 链 |
+| `osKernelLock` | 内核 per-task `sched_lock_depth` |
+| tick | Hi3861 100 Hz / QEMU 1 kHz；`OS_NATIVE_TICK_HZ` 必须匹配 `ARCH_TIMER_FREQ` |
+| RT 带宽 | hosted 95%/秒；MCU 构建关闭 |
 
-Hi3861 保持 100 Hz 是硬件决定：`board_config.h` 记录了 1 kHz tick 在 160 MHz 核上会让 IRQ 处理接近周期、并可能在 `__switch` 的 `ret` 前重入中断。LiteOS 默认也是 100 Hz，因此这里的粒度与教材环境一致。
-
-GUI/控制环如果需要 sub-tick 截止期，应使用硬件定时器或单独的 high-resolution timer，而不是依赖 `osDelay`。
-
+POSIX 后端不在实时保证范围内。
 
 ## 裁剪
 
@@ -128,7 +138,7 @@ python3 -m unittest tools.tests.test_cmsis_trim   # manifest/生成器/校验器
 
 Native 运行结束会输出 `osn-used:...`。单元测试另外把`src/native_platform_a20.c` 里的 `a20_*` 调用集合与 `mcu` profile 的 syscall 清单逐项比对，因此"后端实际用到的 syscall"和"manifest 声明的 syscall"不会漂移。
 
-用例覆盖线程与 join、信号量、递归互斥（4 个竞争者）、事件/线程标志、队列满/空/reset、内存池容量与双重释放、周期与单次软件定时器。
+用例覆盖线程与 join、信号量、递归互斥（4 个竞争者）、事件/线程标志、队列满/空/reset、内存池容量与双重释放、周期与单次软件定时器。宿主用例验证对象语义；**优先级、PI、`osKernelLock` 的调度语义由 QEMU MCU 的 4.5 实验验证**，因为宿主 pthread 不保证 RT 策略。
 
 `osThreadJoin` 在 Native 后端使用线程控制块里的 **exit_word**（futex 唤醒）等待，而不是内核 `task_wait`：A20 的 wait4 模型描述的是进程子任务，兄弟线程不是可等待子任务。该决定删除了 `task_wait` 这个 syscall，manifest、生成的分发表和内核镜像随之一起缩小。
 
@@ -142,44 +152,28 @@ QEMU 板 `qemu-virt-riscv32-mcu` 与 Hi3861 使用同一条路径：
 4. 每个线程首次运行 `arch_flat_program_enter()`，把自己的内核栈顶写入`mscratch`，从 U 态陷入时硬件栈切换回该内核栈；
 5. 实验输出写入栈上的 run record，由内核 launcher 排空并打印，用户程序不需要非 CMSIS 的控制台 API。
 
-实验源码在 `user/tests/liteos-demos/`，这是一份镜像、四段实验：
+实验镜像、4.1–4.5 的预期输出、Hi3861 烧录和负向对照见 [实验 4.1–4.5](experiments.md)。4.4 的厂商 dispatcher 模型见 [中断与 ISR 模型](interrupts.md)；厂商接口位于独立目录，不进入标准 CMSIS 库：
 
-| 文件 | 内容 |
-|---|---|
-| `demo.c` | 4.1 线程、4.2 信号量、4.3 软件定时器（只用 `cmsis_os2.h`） |
-| `interrupt.c` | 4.4 中断，只用 `cmsis_os2.h` + `hi_isr.h`/`iot_gpio.h`/`iot_pwm.h` |
-| `rt.c` | 4.5 创建优先级、`osThreadSetPriority`、`osKernelLock`、互斥量优先级继承与链式继承 |
-| `runtime.c` | freestanding 启动、日志环、64 位除法 |
-| `start.c` | `_start`，a0 = run record |
-
-4.4 的厂商接口**不进入标准库**：
-
-```
+```text
 user/cmsis_rtos2/          标准 CMSIS-RTOS2（不出现 hi_*/IoT*）
 user/port/hi3861_hal/      厂商扩展（hi_irq_* / IoTGpio* / IoTPwm*）
 kernel/arch/riscv32/mcu/vendor_hi.c
                            厂商 syscall 区间 0x7F00..，不进标准分发表
 ```
 
-厂商区间由 `riscv_mcu_syscall()` 在标准查表之前分流，因此 CMSIS 的裁剪检查不可能把厂商调用算进 Native ABI。中断模型是"内核 raise → 唤醒用户 futex word → 厂商 dispatcher 线程执行 handler"：用户态不能真正执行 ISR，延迟处理是 NOMMU 用户驱动的唯一正确形态；QEMU 没有 GPIO，实验用`hi_irq_trigger()` 产生边沿，Hi3861 上同一 raise 路径可由真实引脚中断驱动。
-
 ## 验收
 
 ```sh
-# 宿主行为用例（POSIX + Native 两个后端）
+# 宿主对象语义（POSIX + Native 后端）
 make -C user/cmsis_rtos2 test
 
-# RV32 M 态实跑：内核自检 + 4.1/4.2/4.3/4.4/4.5
+# RV32 M 态 4.1–4.5
 tools/a20 test qemu-riscv32-mcu
-#   [4.1] PASS steps=5/5
-#   [4.2] PASS taken=5 produced=5
-#   [4.3] PASS once=1 periodic=12
-#   [4.4] PASS irq=5
-#   [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1 init=1
-#   [DEMO] experiments 4.1-4.5: PASS
 
-# 裁剪闭环：内核 ELF 只含 manifest 声明的 syscall
+# 裁剪闭环
 python3 tools/cmsis_trim.py check --profile mcu --elf <kernel.elf>
 ```
+
+调度语义的预期输出与失败语义见 [实验 4.1–4.5](experiments.md)。
 
 Hi3861 构建已编入同一套 flat-program 基础设施与 syscall 子集；实验镜像默认不在实板启动，确认 U-mode 后用`tools/a20 package hi3861 -- HI3861_LITEOS_DEMO=1` 构建、用同样的 make 参数烧录即可。烧录只写 kernel A，不带参数重新构建会回到纯 shell 镜像。

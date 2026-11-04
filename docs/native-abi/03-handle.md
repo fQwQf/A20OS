@@ -476,6 +476,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0216 | `task_adopt` | `int64_t task_adopt(const a20_handle_t handles[6])` | 接管当前 task 的 stdio/root/cwd/self 句柄，顺序固定 |
 | 0x0217 | `task_checkpoint` | `int64_t task_checkpoint(int pid, const char *path, uint32_t path_len, uint32_t flags)` | 冻结单线程 task 并序列化寄存器/地址空间/fd 表为 A20CKPT1 镜像（见 docs/kernel/kexec-hot-update.md） |
 | 0x0218 | `task_restore` | `int64_t task_restore(const char *path, uint32_t path_len)` | restore-as-exec：以检查点镜像替换当前 task，成功不返回 |
+| 0x0219 | `sched_lock` | `int64_t sched_lock(int32_t mode, int32_t depth)` | per-task 调度器锁（osKernelLock）；0 获取/1 释放/2 恢复，需 `CAP_SYS_NICE` |
+| 0x021A | `task_self` | `int64_t task_self(void)` | 在当前 task 的共享句柄表中安装并返回自己的 THREAD handle |
 
 ### Memory (0x0300)
 
@@ -688,4 +690,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F0D | `hyp_stats` | `int64_t hyp_stats(struct hyp_stats *out)` | 读取 hypervisor 统计快照 |
 | 0x0F0E | `hyp_vm_smp` | `int64_t hyp_vm_smp(a20_handle_t vm, uint64_t count)` | 配置有上限的 guest vCPU 数量 |
 
-总计：173 个 syscall（`syscall_table.def` 当前登记数）。
+总计：175 个 syscall（`syscall_table.def` 当前登记数）。

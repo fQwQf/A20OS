@@ -2,7 +2,7 @@
 
 A20OS Native ABI 是面向对象能力、统一句柄与异步事件驱动的新一代原生系统调用接口。与 Linux 兼容层（`abi/linux`）不同，Native ABI 基于面向对象权能模型（Capability-based Handle）、结构体版本协商（`a20_abi_header_t`）与显式异步事件分发机制构建。
 
-本文档是 Native ABI 的**总览参考手册与系统调用速查矩阵**，涵盖全架构调用约定、硬件陷入指令、参数传递规范、C 语言调用代码示例以及全量 173 个系统调用的详细说明。
+本文档是 Native ABI 的**总览参考手册与系统调用速查矩阵**，涵盖全架构调用约定、硬件陷入指令、参数传递规范、C 语言调用代码示例以及全量 175 个系统调用的详细说明。
 
 ---
 
@@ -22,7 +22,7 @@ A20OS Native ABI 是面向对象能力、统一句柄与异步事件驱动的新
   - [4.5 模式四：权能屏蔽与不可逃逸沙箱（Rights Attenuation）](#45-模式四权能屏蔽与不可逃逸沙箱rights-attenuation)
 - [5. 头文件与 SDK 组织](#5-头文件与-sdk-组织)
 - [6. 系统调用分区概览](#6-系统调用分区概览)
-- [7. 全量 173 个系统调用速查矩阵](#7-全量-173-个系统调用速查矩阵)
+- [7. 全量 175 个系统调用速查矩阵](#7-全量-175-个系统调用速查矩阵)
 
 ---
 
@@ -422,7 +422,7 @@ A20OS 在内核与用户态提供了分层的头文件支持：
 
 | 头文件路径 | 层次与说明 |
 |---|---|
-| [kernel/include/abi/native/syscall_nr.h](../../kernel/include/abi/native/syscall_nr.h) | 内核系统调用号宏定义（`A20_SYS_*`，共 173 个） |
+| [kernel/include/abi/native/syscall_nr.h](../../kernel/include/abi/native/syscall_nr.h) | 内核系统调用号宏定义（`A20_SYS_*`，共 175 个） |
 | [kernel/abi/native/syscall_table.def](../../kernel/abi/native/syscall_table.def) | 内核系统调用 X-Macro 派发表 |
 | [user/liba20rt/a20_syscall.h](../../user/liba20rt/a20_syscall.h) | 用户态全架构陷入指令与底层 `a20_syscall6` 辅助宏 |
 | [user/liba20rt/a20_types.h](../../user/liba20rt/a20_types.h) | 用户态原生数据结构、参数结构体、错误码与状态宏定义 |
@@ -453,11 +453,11 @@ A20 Native ABI 采用十六进制高位分区（Class），稳定系统调用严
 | `0x0D00 - 0x0DFF` | **Pager / Monitor** | 用户态分页异常代理与内核度量监控 | 5 |
 | `0x0E00 - 0x0EFF` | **Kernel Extension** | 内核 eBPF 风格原生扩展程序加载与拦截点挂载 | 5 |
 | `0x0F00 - 0x0FFF` | **Hypervisor / vCPU** | 原生轻量硬件虚拟机（RISC-V H / 虚拟化扩展）生命周期与 vCPU 控制 | 15 |
-| **总计** | | **共 17 个子系统分类** | **173** |
+| **总计** | | **共 17 个子系统分类** | **175** |
 
 ---
 
-## 7. 全量 173 个系统调用速查矩阵
+## 7. 全量 175 个系统调用速查矩阵
 
 ### Core (0x0000)
 

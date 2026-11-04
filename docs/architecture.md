@@ -13,7 +13,7 @@ A20OS 是一款混合内核操作系统。当前 hosted 构建矩阵包含 `risc
 A20OS 是一个内核、两套用户接口：
 
 * **Linux ABI**（`kernel/abi/linux/`）：384 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
-* **Native ABI**（`kernel/abi/native/`）：173 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
+* **Native ABI**（`kernel/abi/native/`）：175 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
 
 内核代码位于 `kernel/`，约 18 万行（含头文件），分布在 800 余个源文件中；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
 
@@ -43,13 +43,13 @@ A20OS 在运行空间上更像宏内核：
 | ABI | 系统调用数 | 路径 | 使用场景 |
 |-----|-----------|------|---------|
 | Linux ABI | 384 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
-| Native ABI | 173 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
+| Native ABI | 175 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
 两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。
 
 当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](status/current/hybrid-kernel-status.md)。
 
-CMSIS-RTOS2 **不是**第三种 syscall ABI：它是用户态人格库，`user/cmsis_rtos2/` 通过 POSIX 或 Native 后端复用上述机制；对象族与 syscall 子集由 `cmsis_rtos2.toml` 声明，`tools/cmsis_trim.py` 生成并校验，见 [CMSIS-RTOS2 兼容层](native-abi/11-cmsis-rtos2.md)。
+CMSIS-RTOS2 是独立的第三方 source-level ABI（不属于 Native ABI），**不是**第三种 syscall ABI：A20OS 用用户态人格库 `user/cmsis_rtos2/` 实现它，通过 POSIX 或 Native 后端复用上述机制；Native/MCU 后端把 CMSIS 线程映射为内核 `SCHED_FIFO` 任务，RT 优先级继承和 `osKernelLock` 由内核调度器实现。对象族与 syscall 子集由 `cmsis_rtos2.toml` 声明，`tools/cmsis_trim.py` 生成并校验，见 [A20OS 实时执行模型与系统架构](rtos/overview.md) 与 [CMSIS-RTOS2 第三方 ABI](rtos/cmsis-rtos2.md)。
 
 ### 分层原则（内部实现 ↔ ABI 薄包装）
 
@@ -259,7 +259,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 什么时候用 Linux ABI？需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。什么时候用 Native ABI？编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-两套 ABI 各有多少系统调用？Linux ABI 384 个，Native ABI 173 个（均为 `syscall_table.def` 当前登记数）。
+两套 ABI 各有多少系统调用？Linux ABI 384 个，Native ABI 175 个（均为 `syscall_table.def` 当前登记数）。
 
 支持哪些构建目标？六个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32；另有 ARMv7-M STM32 MCU profile。LoongArch32/PPC64LE 是不参与当前构建的历史移植。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
 

@@ -1,5 +1,5 @@
 /*
- * LiteOS textbook experiments 4.1, 4.2 and 4.3, ported to A20OS.
+ * LiteOS textbook experiments 4.1–4.5, ported to A20OS.
  *
  * The programs use only the standard CMSIS-RTOS2 API (osThread/osSemaphore/
  * osTimer).  They run as ordinary U-mode flat programs under the MCU kernel:

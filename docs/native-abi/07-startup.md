@@ -1096,7 +1096,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
 
 ### 7.2 通用约定
 
-- 完整的 173 个系统调用速查矩阵、参数形式与 C 语言调用示例参见 [系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
+- 完整的 175 个系统调用速查矩阵、参数形式与 C 语言调用示例参见 [系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
 - 所有复杂 syscall 传结构体指针（通过 `a20_abi_header_t` 声明 `size` 与 `version` 版本化）。
 - 简单 syscall（如 `handle_close(handle)`）可以直接通过标量寄存器传参。
 - 返回 `a20_status_t`（>= 0 成功，< 0 为正数错误码的负值 `-A20_ERR_*`）。

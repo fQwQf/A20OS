@@ -1,8 +1,8 @@
 # LiteOS textbook experiments on A20OS
 
-The four experiments from the LiteOS/OpenHarmony course, ported to the
-A20OS CMSIS-RTOS2 personality.  One static-PIE image contains all four; the
-kernel loads it into an owned flat space and runs it in U-mode.
+The five experiments from the LiteOS/OpenHarmony course and real-time validation,
+ported to the A20OS CMSIS-RTOS2 personality. One static-PIE image contains all
+five; the kernel loads it into an owned flat space and runs it in U-mode.
 
 | Experiment | Source | API surface |
 |---|---|---|
@@ -10,6 +10,7 @@ kernel loads it into an owned flat space and runs it in U-mode.
 | 4.2 semaphore | `demo.c` | `cmsis_os2.h` only |
 | 4.3 software timers | `demo.c` | `cmsis_os2.h` only |
 | 4.4 interrupts | `interrupt.c` | `cmsis_os2.h` + `hi_isr.h` / `iot_gpio.h` / `iot_pwm.h` |
+| 4.5 real-time | `rt.c` | `cmsis_os2.h` only (creation priority, SetPriority, osKernelLock, mutex PI, chain PI, initial thread PI) |
 
 `runtime.c` is a freestanding runtime (log ring, 64-bit division, assertions)
 and `start.c` is the ELF entry point.  The run record is placed on the user
@@ -49,7 +50,8 @@ Expected tail:
 [4.2] PASS taken=5 produced=5
 [4.3] PASS once=1 periodic=12
 [4.4] PASS irq=5
-[DEMO] experiments 4.1-4.4: PASS
+[4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1 init=1
+[DEMO] experiments 4.1-4.5: PASS
 ```
 
 The QEMU board enables `CONFIG_MCU_USER_DEMO` in
