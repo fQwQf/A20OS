@@ -147,7 +147,16 @@ nav:
       - 启动流程: native-abi/07-startup.md
       - ABI 深化: native-abi/09-native-abi-deepening.md
       - 运行时扩展: native-abi/10-runtime-extensions.md
-      - CMSIS-RTOS2 人格: native-abi/11-cmsis-rtos2.md
+  - 实时操作系统:
+      - 索引与总览: rtos/README.md
+      - 架构与执行模型: rtos/overview.md
+      - CMSIS-RTOS2 人格层: rtos/cmsis-rtos2.md
+      - 任务与执行机制: rtos/execution-model.md
+      - 同步与优先级继承: rtos/synchronization.md
+      - 中断模型与分发器: rtos/interrupts.md
+      - 移植与配置指南: rtos/porting-guide.md
+      - 实验 4.1–4.5: rtos/experiments.md
+      - 时延分析与基准: rtos/latency.md
   - 内核子系统:
       - 核心机制总览: kernel/README.md
       - 调度:
