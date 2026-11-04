@@ -71,7 +71,7 @@ POSIX 后端把 CMSIS 线程映射到 pthread，优先级由宿主 pthread 策�
 | 唤醒 | 信号量/互斥量释放用 broadcast wake；RT 队列按优先级选最高者先跑，低优先级等待者重新检查并继续睡 |
 | 优先级继承 | 内核 `proc_sched_rt_donate()` / `proc_sched_rt_restore()`：等待者在阻塞前沿 mutex 等待链（`wait_owner`）逐 link 捐赠自己的**有效** RT 优先级，owner 释放最后一个 mutex 时恢复。等待图是 mutex 语义，留在人格层；最大捐赠、base 快照和重排在内核，READY owner 走 `proc_sched_set()` 同一套 detach/re-enqueue 路径 |
 | `osKernelLock` | 内核 per-task `sched_lock_depth`；safe point 和 IRQ 返回点看到非零就推迟 pending reschedule，解锁到 0 时立即消费它 |
-| tick | 时间分辨率仍是内核 tick：Hi3861 100 Hz（10 ms），QEMU MCU 1 kHz。`osDelay(1)`、超时和软件定时器不会优于该粒度 |
+| tick | 时间分辨率仍是内核 tick：Hi3861 100 Hz（10 ms），QEMU MCU 1 kHz。`osDelay(1)`、超时和软件定时器不会优于该粒度。freestanding 构建必须用 `OS_NATIVE_TICK_HZ` 对齐 `ARCH_TIMER_FREQ`；镜像构建从 `MCU_TICK_HZ` 传入 |
 | RT 带宽 | MCU 构建关闭 hosted 的 5%/秒保留，RT 线程不会每秒被强制让出约 50 ms |
 
 Hi3861 保持 100 Hz 是硬件决定：`board_config.h` 记录了 1 kHz tick 在 160 MHz 核上会让 IRQ 处理接近周期、并可能在 `__switch` 的 `ret` 前重入中断。LiteOS 默认也是 100 Hz，因此这里的粒度与教材环境一致。

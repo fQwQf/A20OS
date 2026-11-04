@@ -375,10 +375,14 @@ MCU_DEMO_SRC := \
     user/cmsis_rtos2/src/native_platform_a20.c \
     user/liba20rt/a20_malloc.c
 MCU_DEMO_CC := $(RISCV_ELF_PREFIX)gcc
+# OS_NATIVE_TICK_HZ is the CMSIS tick used for osDelay/timeouts; it must be
+# the kernel's ARCH_TIMER_FREQ or the personality reports the wrong frequency.
+MCU_TICK_HZ ?= 1000
 MCU_DEMO_CFLAGS := -march=rv32imc_zicsr_zifencei -mabi=ilp32 \
     -mcmodel=medany -msmall-data-limit=0 -mno-relax \
     -Os -ffreestanding -fno-builtin -fno-stack-protector -fPIE \
     -ffunction-sections -fdata-sections -DOS_CFG_TIMER_THREAD_STACK=4096 \
+    -DOS_NATIVE_TICK_HZ=$(MCU_TICK_HZ) \
     -Iuser/liba20rt -Iuser/cmsis_rtos2/include -Iuser/cmsis_rtos2/src \
     -Iuser/port/hi3861_hal/include -Ikernel/include/uapi/a20 -I$(CMSIS_TRIM_DIR)
 MCU_DEMO_LDFLAGS := -nostdlib \
