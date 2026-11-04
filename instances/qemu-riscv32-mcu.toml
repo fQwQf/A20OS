@@ -12,7 +12,7 @@ smp = 1
 memory = "4M"  # kernel window is 320K; QEMU needs the rest for the DTB
 [test]
 timeout = "15s"
-expect = ["[MCU TEST] PASS", "A20OS MCU READY", "[DEMO] experiments 4.1-4.4: PASS"]
+expect = ["[MCU TEST] PASS", "A20OS MCU READY", "[DEMO] experiments 4.1-4.5: PASS"]
 
 [net]
 # No TCP/IP in this footprint; cluster transports still use UART.

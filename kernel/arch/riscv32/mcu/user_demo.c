@@ -58,7 +58,7 @@ static void demo_runner(void)
     }
     while (r->tail != r->head)
         print_line(r);
-    printf("[DEMO] experiments 4.1-4.4: %s (checks=%u, heap-free=%u)\n",
+    printf("[DEMO] experiments 4.1-4.5: %s (checks=%u, heap-free=%u)\n",
            r->status == 0 ? "PASS" : "FAIL", (unsigned)r->checks,
            (unsigned)mcu_heap_available());
     proc_put(task);
