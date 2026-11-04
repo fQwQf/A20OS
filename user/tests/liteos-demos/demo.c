@@ -17,6 +17,7 @@ void demo_log(const char *fmt, ...);
 int demo_check(int condition, const char *what);
 void demo_finish(int status);
 int experiment_44(void);
+int experiment_45(void);
 
 #define WORKER_STACK 2048U
 
@@ -176,7 +177,7 @@ static int experiment_43(void)
 int demo_main(a20_mcu_demo_record_t *record)
 {
     demo_runtime_init(record);
-    demo_log("A20OS CMSIS-RTOS2 experiments 4.1-4.4");
+    demo_log("A20OS CMSIS-RTOS2 experiments 4.1-4.5");
     if (osKernelInitialize() != osOK) {
         demo_log("osKernelInitialize failed");
         demo_finish(1);
@@ -193,6 +194,7 @@ int demo_main(a20_mcu_demo_record_t *record)
     ok &= experiment_42();
     ok &= experiment_43();
     ok &= experiment_44();
+    ok &= experiment_45();
 
     demo_log("RESULT %s checks=%u", ok ? "PASS" : "FAIL",
              (unsigned)record->checks);

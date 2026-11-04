@@ -362,6 +362,7 @@ MCU_DEMO_SRC := \
     user/tests/liteos-demos/runtime.c \
     user/tests/liteos-demos/demo.c \
     user/tests/liteos-demos/interrupt.c \
+    user/tests/liteos-demos/rt.c \
     user/port/hi3861_hal/src/hi_isr.c \
     user/port/hi3861_hal/src/iot_gpio.c \
     user/port/hi3861_hal/src/iot_pwm.c \
@@ -384,7 +385,17 @@ MCU_DEMO_LDFLAGS := -nostdlib \
     -Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 \
     -Wl,-T,user/tests/liteos-demos/link.ld
 
-$(BUILD_DIR)/liteos-demo.elf: $(MCU_DEMO_SRC) user/tests/liteos-demos/link.ld \
+# The demo one-shot compile does not emit .d files, so list the headers it
+# includes.  Without this a changed syscall number (or CMSIS header) leaves a
+# stale ELF that still calls the old ABI value.
+MCU_DEMO_HDRS := $(wildcard user/cmsis_rtos2/include/*.h) \
+                 $(wildcard user/cmsis_rtos2/src/*.h) \
+                 $(wildcard user/liba20rt/*.h) \
+                 $(wildcard user/port/hi3861_hal/include/*.h) \
+                 $(wildcard kernel/include/uapi/a20/*.h) \
+                 user/tests/liteos-demos/link.ld
+
+$(BUILD_DIR)/liteos-demo.elf: $(MCU_DEMO_SRC) $(MCU_DEMO_HDRS) \
         $(CMSIS_TRIM_DIR)/.stamp user/cmsis_rtos2/cmsis_rtos2.toml
 	@mkdir -p $(@D)
 	$(MCU_DEMO_CC) $(MCU_DEMO_CFLAGS) \
