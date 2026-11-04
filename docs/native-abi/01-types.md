@@ -648,7 +648,7 @@ typedef struct a20_sched_args {
 
 Linux 的 `sched_setparam`/`sched_getparam`/`sched_setscheduler`/`sched_getscheduler`/`sched_setaffinity`/`sched_getaffinity`/`setpriority`/`getpriority`/`sched_setattr`/`sched_getattr` 是 10 个独立 syscall，A20 收成 `task_set_sched` 与 `task_get_sched` 两个 syscall，通过 flags 组合指定要操作的调度参数。`task_get_sched` 复用同一个 args struct，由内核填充请求的字段。
 
-`A20_SCHED_DONATE`/`A20_SCHED_UNDONATE` 是 `task_set_sched` 的内部操作：`DONATE` 把目标提升到至少 `priority` 并在首次捐赠时保存 base 策略/优先级/nice；`UNDONATE` 恢复该快照。它们是内核 RT PI 的 ABI，不是普通应用设置优先级的方式。
+`A20_SCHED_DONATE`/`A20_SCHED_UNDONATE` 是 `task_set_sched` 的内部操作：`DONATE` 把目标提升到至少 `priority` 并在首次捐赠时保存 base 策略/优先级/nice；`priority` 为 0 时使用调用者当前的有效 RT 优先级（链式捐赠）；`UNDONATE` 恢复该快照。它们是内核 RT PI 的 ABI，不是普通应用设置优先级的方式。
 
 `task` 为 `A20_HANDLE_NULL` 时表示调用者自己（仅 set/get；捐赠仍需要目标 handle）。
 

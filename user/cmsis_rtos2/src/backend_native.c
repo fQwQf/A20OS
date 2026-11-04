@@ -284,14 +284,13 @@ osPriority_t osb_thread_get_priority(osThreadId_t t)
     return (osPriority_t)priority;
 }
 
-int osb_thread_boost(osThreadId_t owner, osPriority_t prio)
+int osb_thread_boost(osThreadId_t owner)
 {
-    if (!owner || !owner->bhandle || prio <= osPriorityNone)
+    if (!owner || !owner->bhandle)
         return -OS_EINVAL;
-    /* The scheduler owns the donation: maximum priority, base snapshot and
-     * the READY/RUNNING re-key through proc_sched_set(). */
-    int rc = osn_task_set_sched(owner->bhandle, OSN_SCHED_DONATE, 0,
-                                (int32_t)prio, 0);
+    /* Priority 0 tells the kernel to donate the caller's effective RT
+     * priority.  That is what makes a chained donation propagate. */
+    int rc = osn_task_set_sched(owner->bhandle, OSN_SCHED_DONATE, 0, 0, 0);
     return rc == 0 ? 0 : -OS_EIO;
 }
 

@@ -928,7 +928,22 @@ invalid:
 
 int proc_sched_rt_donate(task_t *t, int priority)
 {
-    if (!t || priority < 1 || priority > 99)
+    if (!t)
+        return -EINVAL;
+    /*
+     * priority 0 means "donate the caller's effective RT priority".  A waiter
+     * that is itself executing a donation must propagate that higher value,
+     * otherwise chained inversions (A waits on B, B waits on C) would
+     * under-donate.  The scheduler owns the effective value, so the caller
+     * does not have to cache it.
+     */
+    if (priority == 0) {
+        task_t *donor = proc_current();
+        if (!donor || !sched_task_rt(donor) || donor->priority <= 0)
+            return -EINVAL;
+        priority = donor->priority;
+    }
+    if (priority < 1 || priority > 99)
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&t->pi_lock);
