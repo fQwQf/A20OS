@@ -15,7 +15,7 @@ raw socket、IP_PKTINFO/IP_SEND*、PMTU、TCP_CONGESTION、IPv6 地址事务、
 SO_BINDTODEVICE（单 NIC 语义）和 A20 netfilter/NAT 桥；TUN、router、
 外部 IPv6/RA、DHCP 和完整关闭/性能验收仍缺失。这里
 不链接 lwIP，也不调用宿主 socket 冒充 BSD。后端接口见 [网络后端接口契约](../../../../docs/net/backend-interface.md)，
-接入细节见 [BSD 桌面联网垂直切片](../../../../docs/net/bsd-desktop-internet-2026-10-29.md)。
+接入细节见 [BSD 接入记录](../../../../docs/net/bsd-port.md)。
 
 具体边界、源码入口和验收顺序见 [BSD 接入记录](../../../../docs/net/bsd-port.md)。
 
@@ -32,7 +32,7 @@ SO_BINDTODEVICE（单 NIC 语义）和 A20 netfilter/NAT 桥；TUN、router、
 FS/TLS。原生 TLS 的 GCC 编译仍只用于依赖探测，不是内核运行格式。内存与 TLS 的
 配额、生命周期及测试命令见 [BSD 接入记录](../../../../docs/net/bsd-port.md)。
 
-最新交接与复现入口：[BSD-HANDOFF.md](../../../../docs/net/BSD-HANDOFF.md)。
+运行状态与复现入口参见 [BSD 接入记录](../../../../docs/net/bsd-port.md) 及 [网络协议栈状态](../../../../docs/status/current/net-status.md)。
 BSD 已在真实 A20OS KVM 中执行初始化、TCP/UDP 回环、公共 Linux socket ABI
 和公网 HTTP/HTTPS；`BSD_BOOTSTRAP_OBJECT` 仅是显式诊断，不是可用后端选择。
 物理板卡、TUN/router 和完整性能验收仍未完成。

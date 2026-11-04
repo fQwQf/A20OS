@@ -1,9 +1,6 @@
 # A20OS Native ABI：类型与结构体定义
 
-> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
-> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
-
-> 内容已按 2026-08 的内核头与 `user/liba20rt/a20_types.h` 核对。带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
+本文档定义 Native ABI 的核心数据类型、结构体内存布局与二进制接口规范。运行时扩展与版本规则见[运行时扩展规范](10-runtime-extensions.md)，对象权限模型见 [security.md](06-security.md)，句柄生命周期见 [handle.md](03-handle.md)。
 
 ---
 
@@ -22,7 +19,7 @@ typedef uint64_t a20_size_t;       /* 大小 */
 typedef uint64_t a20_vaddr_t;      /* 虚拟地址 */
 ```
 
-指针大小由 `a20_abi_info.pointer_bits` 指示，处理函数读取实际指针宽度。64 位架构使用 64 位用户指针；32 位用户态和 MCU Native 实验端口使用独立 ABI profile。更详细的 ISA/调用约定、内存模型与接口可用性由 [execution_info](../cluster/28-execution-capabilities.md) 查询；MCU 已接入公共 futex/atomic32/匿名堆，尚未提供完整 abi_info 与句柄接口。
+指针大小由 `a20_abi_info.pointer_bits` 指示，处理函数读取实际指针宽度。64 位架构使用 64 位用户指针；32 位用户态和 MCU Native 实验端口使用独立 ABI profile。更详细的 ISA/调用约定、内存模型与接口可用性由 [execution_info](../cluster/runtime-ssi.md) 查询；MCU 已接入公共 futex/atomic32/匿名堆，尚未提供完整 abi_info 与句柄接口。
 
 ---
 
@@ -202,10 +199,7 @@ typedef struct a20_thread_create_args {
 } a20_thread_create_args_t;
 ```
 
-线程入口是接收 `arg` 的本机 C 函数，必须显式调用 `thread_exit`，不能返回。
-调用者在所有 ISA 上提供 16 字节对齐的栈顶；架构入口负责本机调用约定所需的
-偏移，例如 x86-64 在直接函数入口预留 8 字节，使 RSP 模 16 为 8。
-此规则仅用于 Native `thread_create`，不修改 Linux clone 或进程启动。
+线程入口是接收 `arg` 的本机 C 函数，必须显式调用 `thread_exit`，不能返回。调用者在所有 ISA 上提供 16 字节对齐的栈顶；架构入口负责本机调用约定所需的偏移，例如 x86-64 在直接函数入口预留 8 字节，使 RSP 模 16 为 8。此规则仅用于 Native `thread_create`，不修改 Linux clone 或进程启动。
 
 ### a20_task_status_t — 进程退出状态
 
@@ -1053,8 +1047,7 @@ typedef struct a20_futex_wake_args {
 能力发现：`abi_info.feature_bits[0]` 的 bit 2 表示 Sync (0x0B00) 分区可用。
 
 
-`atomic32`（0x0B02）使用以下固定 40 B 结构，所有操作均顺序一致；
-LOAD=0、STORE=1、EXCHANGE=2、COMPARE_EXCHANGE=3。
+`atomic32`（0x0B02）使用以下固定 40 B 结构，所有操作均顺序一致； LOAD=0、STORE=1、EXCHANGE=2、COMPARE_EXCHANGE=3。
 
 ```c
 typedef struct a20_atomic32_args {
@@ -1065,13 +1058,6 @@ typedef struct a20_atomic32_args {
 } a20_atomic32_args_t;
 ```
 
-`observed` 是观察到的旧值，CAS 成功时 `exchanged=1`，其他情况为 0。
-`abi_info.feature_bits[0]` bit 3 与 `execution_info` 的 ATOMIC32 位分别公布
-接口可用性。地址权限、超时与副作用错误语义及跨平台实现见
-[公共应用同步](../cluster/29-native-sync.md)。
+`observed` 是观察到的旧值，CAS 成功时 `exchanged=1`，其他情况为 0。`abi_info.feature_bits[0]` bit 3 与 `execution_info` 的 ATOMIC32 位分别公布接口可用性。地址权限、超时与副作用错误语义及跨平台实现见[公共应用同步](../cluster/mcu-shared-kernel.md)。
 
-`abi_info.feature_bits[0]` bit 4（`A20_ABI_FEATURE_LINUX_EXEC`）表示当前
-BOTH 构建提供 Native 根任务通过 exec 替换为 Linux ABI 程序的能力，
-`feature_test(4)` 返回 0；纯 Native 返回 NOT_SUPPORTED。该索引与
-`execution_info` 位图分开编号。使用与生命周期见
-[统一应用执行](../cluster/53-linux-application-execution.md)。
+`abi_info.feature_bits[0]` bit 4（`A20_ABI_FEATURE_LINUX_EXEC`）表示当前 BOTH 构建提供 Native 根任务通过 exec 替换为 Linux ABI 程序的能力，`feature_test(4)` 返回 0；纯 Native 返回 NOT_SUPPORTED。该索引与`execution_info` 位图分开编号。使用与生命周期见[统一应用执行](../cluster/cluster-apps.md)。

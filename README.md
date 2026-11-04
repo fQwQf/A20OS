@@ -32,31 +32,18 @@
 
 **高性能、高兼容性的混合内核操作系统**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20ARMv7-orange.svg)](#)
-[![Boards](https://img.shields.io/badge/Boards-18-in--tree-blue.svg)](#)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20ARMv7-orange.svg)](#) [![Boards](https://img.shields.io/badge/Boards-18-in--tree-blue.svg)](#)
 
 </div>
 
 ## 项目简介
 
-**1.0 开发方向**：以 Rust 为主要内核实现语言完成核心重写，同时完成现有开发中子系统、
-修复缺陷，并通过既有功能对照与性能不回退验收。当前实现仍以 C/汇编为主，外部接口尚未
-正式冻结。LoongArch32、PPC64LE 已退出 1.0 支持范围，活跃构建入口已清理；旧源码与验证记录保留追溯。
-范围与完成定义见 [1.0 计划](docs/releases/v1.0.md)，比较基线和判定规则见
-[功能与性能验收](docs/releases/v1.0-validation.md)。
+A20OS 是一款探索现代操作系统架构边界的高性能混合内核 (Hybrid Kernel)。它在同一个微结构底座上融合了宏内核的极速性能与微内核的高容错、能力安全特性：
 
-A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)，具备长期的演进与迭代计划。
-
-在架构选型上，A20OS 兼具宏内核与微内核的双重优势：调度、MM、VFS 核心、页缓存与 TCP/IP 数据面等性能关键路径留在内核态，保留极速的函数调用性能；同时深度融合微内核理念——面向能力的 Handle、VMO/VMAR 内存容器与 Channel 通信之上，设备驱动（RTC/input/virtio-blk scratch）与文件系统实现（FAT/ext4/ISO9660/NTFS 只读）均可作为可崩溃、可重启的用户态服务运行。
-
-集群机制通过同一套身份、会话事务、服务发现和算子协议连接 MCU 与服务器：主机使用
-Native channel，STM32 叶子通过专用 UART 和静态缓冲执行相同算子，网关可跨 UDP/UART
-转发。独立内核及生产叶子代码的混合仿真已验证可靠调用、成员恢复和 16 片/8 节点词频
-作业；物理板联调仍待验证。参见[统一设计](docs/cluster/07-unified-runtime.md)、
-[实现证据](docs/status/current/cluster-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)、
-[服务开发教程](docs/cluster/11-api-tutorial.md)
-、[性能测量口径](docs/cluster/21-performance.md)
-、[统一单向 SEND](docs/cluster/22-oneway.md)。
+- **混合内核架构**：调度、MM、VFS 核心、页缓存与 TCP/IP 数据面等性能关键路径留在内核态，保留极速的函数调用性能；同时深度融合微内核理念——基于面向能力的 Handle、VMO/VMAR 内存容器与 Channel 通信机制，设备驱动（RTC/input/virtio-blk）与文件系统实现（FAT/ext4/ISO9660/NTFS 只读）均可作为故障隔离、可崩溃重启的用户态服务运行。
+- **双 ABI 生态**：同时提供兼容上游未修改 musl 程序与常用发行版工具链的 Linux ABI，以及面向能力、事件驱动的 A20 Native 原生 ABI。
+- **跨平台与统一集群**：支持 RISC-V、ARM64、x86_64、LoongArch64 以及嵌入式 ARMv7-M / RISC-V 32 等多元体系；通过统一节点身份与算子协议，将低功耗 MCU 到高性能服务器无缝接入分布式运行时与共享内存多机内核。详见[统一集群架构](docs/cluster/README.md)。
+- **1.0 演进目标**：核心调度与状态机逐步引入 Rust 强化内存安全与复杂生命周期管理，并通过严格的功能与性能回归验证，详细规划见 [1.0 计划](docs/releases/v1.0.md) 与 [验收基线](docs/releases/v1.0-validation.md)。
 
 ## Linux ABI 兼容性
 
@@ -72,43 +59,25 @@ A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以�
 
 ## 硬件与虚拟机平台
 
-各目标的硬件范围、运行模式、依赖、构建和部署方法由
-[`docs/platforms/`](docs/platforms/README.md) 中的单平台文档说明。
-README 不维护设备清单、价格或统一的“已支持”标签。
-发布承诺范围见 [平台范围](docs/releases/v1.0.md#2-平台范围)。
+各目标的硬件范围、运行模式、依赖、构建和部署方法由[`docs/platforms/`](docs/platforms/README.md) 中的单平台文档说明。 README 不维护设备清单、价格或统一的“已支持”标签。发布承诺范围见 [平台范围](docs/releases/v1.0.md#2-平台范围)。
 
-`tools/a20 boards` 查询板级源码，`tools/a20 list` 查询实例，
-`tools/a20 show <实例名>` 查询对应动作与资源需求；这些查询不证明真机可用。
-NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定某块板已经具备该移植。
+`tools/a20 boards` 查询板级源码，`tools/a20 list` 查询实例，`tools/a20 show <实例名>` 查询对应动作与资源需求；这些查询不证明真机可用。 NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定某块板已经具备该移植。
 
 ## 网络栈的当前边界
-- `NET_STACK=lwip` 默认使用未修改的上游 lwIP 2.2.1 submodule，核心串行执行，
-  `NET_LANES=1`；SMP 仍可用于应用与 I/O。`NET_STACK=native` 是从旧分叉提取并由
-  A20OS 维护的 lwIP 衍生实现，保留 lane/CUBIC 等扩展与原始版权。
-- BSD 候选使用独立 F-Stack 项目的固定版本 submodule，尚未完成内核运行时与设备
-  适配；`NET_STACK=bsd` 明确报错。没有独立 legacy 后端，也不会静默回退。
-- TCP 默认走真实协议 LISTEN/连接路径。`a20.tcpmode=fast` 是历史测试用的本地
-  socket 配对捷径，不用于协议性能或外部服务验收。
-- `NET_ROLE=router` 开启 IPv4/IPv6 转发。真实 KVM 三节点已覆盖双网卡、动态 NAPT
-  源端口冲突、网关/源策略路由及 Linux dnsmasq DHCP/DNS。原版 DHCP 使用
-  `--dhcp-broadcast`；其动态 SIOCSARP 尚不支持。
-- 已接入 ICMP RELATED 翻译与转发 MTU 差错；完整分片 NAT、本机 PMTU/差错队列
-  仍未完成，当前不能宣称生产软路由成熟。
-  默认 conntrack=256 是已实测的连接容量限制，服务器档原版在保持跟踪开启时通过
-  320连接；固定 INET 暂存区仍有约30 KiB/连接的成本。
-- 原版提供 Reno，CUBIC 和部分 per-socket TCP 缓冲调整属于 native 能力；不支持
-  的选项返回错误。NIC checksum offload 目前关闭，原版转发由端口层完成软件校验和。
+- `NET_STACK=lwip` 默认使用未修改的上游 lwIP 2.2.1 submodule，核心串行执行，`NET_LANES=1`；SMP 仍可用于应用与 I/O。`NET_STACK=native` 是从旧分叉提取并由 A20OS 维护的 lwIP 衍生实现，保留 lane/CUBIC 等扩展与原始版权。
+- BSD 候选使用独立 F-Stack 项目的固定版本 submodule，尚未完成内核运行时与设备适配；`NET_STACK=bsd` 明确报错。没有独立 legacy 后端，也不会静默回退。
+- TCP 默认走真实协议 LISTEN/连接路径。`a20.tcpmode=fast` 是历史测试用的本地 socket 配对捷径，不用于协议性能或外部服务验收。
+- `NET_ROLE=router` 开启 IPv4/IPv6 转发。真实 KVM 三节点已覆盖双网卡、动态 NAPT 源端口冲突、网关/源策略路由及 Linux dnsmasq DHCP/DNS。原版 DHCP 使用`--dhcp-broadcast`；其动态 SIOCSARP 尚不支持。
+- 已接入 ICMP RELATED 翻译与转发 MTU 差错；完整分片 NAT、本机 PMTU/差错队列仍未完成，当前不能宣称生产软路由成熟。默认 conntrack=256 是已实测的连接容量限制，服务器档原版在保持跟踪开启时通过 320连接；固定 INET 暂存区仍有约30 KiB/连接的成本。
+- 原版提供 Reno，CUBIC 和部分 per-socket TCP 缓冲调整属于 native 能力；不支持的选项返回错误。NIC checksum offload 目前关闭，原版转发由端口层完成软件校验和。
 
-架构、构建选项和剩余工作见 [网络架构](docs/net/architecture.md)、
-[原版适配](docs/net/lwip-upstream.md)、[BSD 接入](docs/net/bsd-port.md) 与
-[对照方法及数据](docs/net/benchmark-method.md)。
+架构、构建选项和剩余工作见 [网络架构](docs/net/architecture.md)、[原版适配](docs/net/lwip-upstream.md)、[BSD 接入](docs/net/bsd-port.md) 与[对照方法及数据](docs/net/benchmark-method.md)。
 
 ## 构建与运行
 
 ### 1. 第一次运行：RISC-V 64 串口系统
 
-首次体验推荐 Linux 上的 RISC-V 64 QEMU 实例。它不需要开发板、图形界面或其他架构的工具链。
-当前属于开发版本；桌面、服务器与真机的验证范围见 [状态与缺口](docs/status/README.md)。
+首次体验推荐 Linux 上的 RISC-V 64 QEMU 实例。它不需要开发板、图形界面或其他架构的工具链。当前属于开发版本；桌面、服务器与真机的验证范围见 [状态与缺口](docs/status/README.md)。
 
 ```bash
 git clone --recurse-submodules https://github.com/fQwQf/A20OS.git
@@ -116,20 +85,16 @@ cd A20OS
 # 已经普通 clone 的用户补执行：git submodule update --init --recursive
 ```
 
-先按 [首次运行指南](docs/dev/build.md#首次运行linux--risc-v-64) 安装单架构依赖与 Rust，
-或按该页的容器方式准备环境，再执行：
+先按 [首次运行指南](docs/dev/build.md#首次运行linux--risc-v-64) 安装单架构依赖与 Rust，或按该页的容器方式准备环境，再执行：
 
 ```bash
 python3 tools/check_quickstart.py             # 缺工具、Rust target、子模块时给出提示
 tools/a20 run qemu-riscv64 -- -j4             # 编译完整用户态并启动，保持默认 both ABI
 ```
 
-看到 shell 提示符后，输入 `/bin/echo hello` 应输出 `hello`；输入 `poweroff` 正常关机并返回宿主终端。
-自动验收可运行 `make -j4 smoke-quickstart`：检查 shell、外部程序输出和 QEMU 正常退出。
-该验收覆盖完整开发镜像；`smoke-riscv64` 只覆盖内核 bring-up。
+看到 shell 提示符后，输入 `/bin/echo hello` 应输出 `hello`；输入 `poweroff` 正常关机并返回宿主终端。自动验收可运行 `make -j4 smoke-quickstart`：检查 shell、外部程序输出和 QEMU 正常退出。该验收覆盖完整开发镜像；`smoke-riscv64` 只覆盖内核 bring-up。
 
-推荐预留 8 GiB 宿主内存、20 GiB 可用磁盘；这是准备预算，不是最低硬件规格。
-完整步骤、资源等待说明、退出方式及故障排查见 [构建与运行指南](docs/dev/build.md)。
+推荐预留 8 GiB 宿主内存、20 GiB 可用磁盘；这是准备预算，不是最低硬件规格。完整步骤、资源等待说明、退出方式及故障排查见 [构建与运行指南](docs/dev/build.md)。
 
 ### 2. 其他构建入口
 
@@ -196,7 +161,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 ## 设计文档
 
 有关操作系统设计的完整方案、开发过程中的技术瓶颈、解决思路以及并发模型设计，请参阅：
-* [操作系统设计方案文档 (OS-Design.md)](docs/OS-Design.md)
+* [操作系统架构设计方案 (architecture.md)](docs/architecture.md)
 
 ## 目录结构
 ```text

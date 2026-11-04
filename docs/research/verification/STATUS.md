@@ -1,8 +1,6 @@
 # Capability Envelope Research Status
 
-> Consolidated reference for all artifacts, verification results, and
-> remaining work items on branch `research/osdi-envelopes`.
-> Last updated: 2026-08-25.
+> Consolidated reference for all artifacts, verification results, and remaining work items on branch `research/osdi-envelopes`. Last updated: 2026-08-25.
 
 ---
 
@@ -47,27 +45,19 @@ Gate: `make smoke-envelope`
 
 ### 1.3 Pilot Experiment (`user/cmds/core/envelope_pilot.c`, QEMU verified)
 
-Five scenarios × four defense arms = 20 cells, all matching expected
-outcomes (docs/research/10-evaluation.md §4.1).
+Five scenarios × four defense arms = 20 cells, all matching expected outcomes (docs/research/10-evaluation.md §4.1).
 
-Key finding quantified: LL-permissive admits all attacks; LL-strict
-kills benign installs; **envelope holds both dimensions simultaneously**.
+Key finding quantified: LL-permissive admits all attacks; LL-strict kills benign installs; **envelope holds both dimensions simultaneously**.
 
 Additional real-binary cells:
 - G1 mksh-flow: execve-preserved mediation proven on real static binary
 - G2 wget-blocked: network authority denied on real binary (SOCKET ∉ allowed)
 - G3 shmat-deny: MEMORY class enforcement confirmed
-- G4 pipe-flow: multi-process pipeline under ONE shared envelope ——
-  pipe2 获取 ×2（A3 PIPE_ENDPOINT R|W|STAT）、每段 fork 继承（05 §2.3 v1
-  shared root）、execve 保持、末端重定向 openat+write USE 计费，三进程全
-  被中介；纯 builtin 实现，零外部二进制依赖
+- G4 pipe-flow: multi-process pipeline under ONE shared envelope —— pipe2 获取 ×2（A3 PIPE_ENDPOINT R|W|STAT）、每段 fork 继承（05 §2.3 v1 shared root）、execve 保持、末端重定向 openat+write USE 计费，三进程全被中介；纯 builtin 实现，零外部二进制依赖
 
 Gate: `make smoke-envelope-pilot`
 
-E8 盘点备注：预构建 extra.img（256 MB ext4，176 个静态 musl 二进制，
-含 mksh 与 coreutils 全套）**不含 git/vim**：staging 目录从未填充，
-包获取在本环境被网络限制阻塞。真实负载深化因此以多进程 shell 管道
-（G4）推进，而非重型工具接入。
+E8 盘点备注：预构建 extra.img（256 MB ext4，176 个静态 musl 二进制，含 mksh 与 coreutils 全套）**不含 git/vim**：staging 目录从未填充，包获取在本环境被网络限制阻塞。真实负载深化因此以多进程 shell 管道（G4）推进，而非重型工具接入。
 
 ### 1.4 Overhead Microbenchmark (`user/cmds/core/envelope_bench.c`, QEMU directional)
 
@@ -79,8 +69,7 @@ E8 盘点备注：预构建 extra.img（256 MB ext4，176 个静态 musl 二进�
 | lseek control (unmediated) | 11,383 | 11,507 | +1.1% noise |
 | socket sendto+drain 64B（AF_UNIX 对，含排空） | 96,051 | 104,795 | +9.1% |
 
-Gate: `make smoke-envelope-bench`
-数字即最终报告数字：固定 QEMU/TCG 配置、公开可复现；安全与性能结论均不依赖特定宿主硬件。
+Gate: `make smoke-envelope-bench`数字即最终报告数字：固定 QEMU/TCG 配置、公开可复现；安全与性能结论均不依赖特定宿主硬件。
 
 ---
 
@@ -100,11 +89,9 @@ Gate: `make smoke-envelope-bench`
 | ExpiryLiveness `<>expired` (fairness-liveness) | holds |
 | KillLiveness `expired ~> killSent` (fairness-liveness) | holds |
 
-Fairness assumptions: WF_vars(Tick) ∧ WF_vars(LazyExpire) ∧ WF_vars(Kill)
-——对应内核 sweeper 行为（syscall 入口惰性清扫 + 时钟推进 + KILL_ON_EXPIRE）。
+Fairness assumptions: WF_vars(Tick) ∧ WF_vars(LazyExpire) ∧ WF_vars(Kill) ——对应内核 sweeper 行为（syscall 入口惰性清扫 + 时钟推进 + KILL_ON_EXPIRE）。
 
-TLC stats: 27,829 generated / 4,620 distinct states / depth 14 / <1s.
-Reproduce: `java -cp tla2tools.jar tlc2.TLC -cleanup Envelope.tla`
+TLC stats: 27,829 generated / 4,620 distinct states / depth 14 / <1s. Reproduce: `java -cp tla2tools.jar tlc2.TLC -cleanup Envelope.tla`
 
 ### 2.2 Lean 4 Proofs (`BudgetLattice.lean`, zero sorry, v4.33.1)
 

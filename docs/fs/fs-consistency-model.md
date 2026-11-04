@@ -1,12 +1,8 @@
 # A20OS 文件系统一致性模型
 
-“支持”表示当前代码路径存在，**不等于每个后端、架构和崩溃场景都已有运行时测试**。矩阵内容已按 2026-08 的 `kernel/fs/` 与 VFS wrapper 做过源码核对；当前提交没有匹配的完整干净双架构平台复验。
+本文档定义 A20OS 文件系统的一致性模型与故障恢复保证。“支持”表示当前代码路径存在，具体后端、架构及崩溃场景的验证覆盖度见各节说明。
 
-当前候选的持久化限制和失败必须与下方实现矩阵分开阅读：ext4 no-journal deferred-orphan 的
-EIO 根因仍未定位；NTFS crash/remount 目前在 C/R 两侧均失败，不能记作已修或由双侧同错豁免。
-共享写 shutdown 的已修 RV64 数据完整性场景见 [MM/COW 契约](../kernel/mm/fork-mprotect-cow.md)，
-但 Linux RESTART 只做 checked sync，不等同全局 CLEAN。UFSD 的 CLOSE 确认协议及重启边界见
-[close-token 契约](ufs-close-token.md)。ISOFS pressure 测试若以 `-ENODEV` 退出也不构成通过。
+当前候选的持久化限制和失败必须与下方实现矩阵分开阅读：ext4 no-journal deferred-orphan 的 EIO 根因仍未定位；NTFS crash/remount 目前在 C/R 两侧均失败，不能记作已修或由双侧同错豁免。共享写 shutdown 的已修 RV64 数据完整性场景见 [MM/COW 契约](../kernel/mm/fork-mprotect-cow.md)，但 Linux RESTART 只做 checked sync，不等同全局 CLEAN。UFSD 的 CLOSE 确认协议及重启边界见[close-token 契约](ufs-close-token.md)。ISOFS pressure 测试若以 `-ENODEV` 退出也不构成通过。
 
 ## 1. 范围
 
@@ -130,12 +126,7 @@ ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblo
 - 日志 superblock 侧同样只接受 `REVOKE | 64BIT | CSUM_V3` + crc32c；`async_commit`(0x4) 与 `fast_commit`(0x20) 的镜像在 `jbd2_load_superblock()` 就被拒绝，不会进入重放。
 - 崩溃注入覆盖的就是这个已实现的模式：`make smoke-ext4-journal` 在 recover-flag / journal / commit / checkpoint 四个点各崩溃一次，断言承诺过的写入存活、未承诺的不出现、恢复前后 `e2fsck -fn` 都干净。`data=journal` 之类的模式不在契约内，因此没有、也不声称有对应用例。
 
-完整性边界（有意的，不是待办）：ext4 的 on-disk 格式没有 per-file 数据块校验和，Linux 的 ext4 也没有。
-本驱动校验的是**元数据**（`metadata_csum`：superblock、group descriptor、bitmap、inode）和**日志记录**
-（JBD2 csum_v3），文件内容本身不做校验。要检测静默数据损坏需要另一种兼容机制（例如 fs-verity 的
-Merkle 树，一种只读文件的独立特性），或换用支持数据校验和的文件系统；为了"有数据校验和"而往 ext4
-镜像里塞私有字段会造出 e2fsprogs 读不了的格式，因此不做。`e2fsck -fn` 能发现元数据不一致，但发现
-不了文件内容里被翻转的字节。
+完整性边界（有意的，不是待办）：ext4 的 on-disk 格式没有 per-file 数据块校验和，Linux 的 ext4 也没有。本驱动校验的是**元数据**（`metadata_csum`：superblock、group descriptor、bitmap、inode）和**日志记录**（JBD2 csum_v3），文件内容本身不做校验。要检测静默数据损坏需要另一种兼容机制（例如 fs-verity 的 Merkle 树，一种只读文件的独立特性），或换用支持数据校验和的文件系统；为了"有数据校验和"而往 ext4 镜像里塞私有字段会造出 e2fsprogs 读不了的格式，因此不做。`e2fsck -fn` 能发现元数据不一致，但发现不了文件内容里被翻转的字节。
 
 ext4 相对 Linux ABI 的缺口：
 
@@ -145,12 +136,7 @@ ext4 相对 Linux ABI 的缺口：
 - 支持的 JBD2 校验和格式是 v3 + `INCOMPAT_64BIT`（与 mke2fs 默认一致）。更旧的 v1/v2 日志**不支持重放或写入**：干净的 v1/v2 镜像可以被**只读**挂载，走的是一条显式降级路径（日志打印 `clean legacy checksum journal; explicit read-only downgrade`），日志非空的旧格式镜像连只读挂载都拒绝。判定逻辑在 `user/svc/jbd2_legacy_policy.rs`；内核构建不链接该 crate，因此 `kernel/fs/diskfs/ext4_journal.c` 里有一份等价实现，两边的条件必须同步。门禁是 `make smoke-ext4-legacy-journal`。
 - 无日志镜像（`^has_journal`）没有重放路径，但崩溃后仍然可以挂载：`s_state` 缺 `VALID_FS` 且没有 `ERROR_FS` 时，挂载先跑孤儿 recovery 把被打断的 unlink 做完再发布。带 `ERROR_FS` 的镜像仍然拒绝——那表示驱动在上一会话里发现过不可信元数据，挂载期恢复修不了。门禁是 `make smoke-ext4-recovery`（open+unlink → kill → 重启同一张镜像 → inode 被回收、`e2fsck -fn` 干净）。
 - 崩溃一致性由 `make smoke-ext4-journal` 把守：四个注入点各做一次崩溃—重启往返，断言承诺过的写入没丢、没承诺的写入没回来，并在宿主机上用 `e2fsck -fn` 检查崩溃后的镜像和恢复后的镜像都干净。
-- xattr 持久化只做 in-inode：`user.*`、`system.posix_acl_access`、`system.posix_acl_default` 存放在
-  256 字节 inode 的尾部（`i_extra_isize` 取 mke2fs 的 32，magic 在 `128+extra` 处），布局与 e2fsprogs
-  一致，`debugfs ea_list` 和 `e2fsck -fn` 都接受。一个 inode 的属性区约 90 字节；放不下时 `setxattr`
-  返回 `ENOSPC`，且不改动已有属性（每次修改都在内存里重建整块属性区再一次性写回，失败不留半写）。
-  **没有外部 EA 块**（`i_file_acl`），所以属性总量超过 inode 尾部空间的文件会失败，而不是换块存储。
-  `trusted.*` / `security.*` 仍走 VFS 的易失表。ACL 只做存储与读回，不做权限判定。
+- xattr 持久化只做 in-inode：`user.*`、`system.posix_acl_access`、`system.posix_acl_default` 存放在 256 字节 inode 的尾部（`i_extra_isize` 取 mke2fs 的 32，magic 在 `128+extra` 处），布局与 e2fsprogs 一致，`debugfs ea_list` 和 `e2fsck -fn` 都接受。一个 inode 的属性区约 90 字节；放不下时 `setxattr`返回 `ENOSPC`，且不改动已有属性（每次修改都在内存里重建整块属性区再一次性写回，失败不留半写）。**没有外部 EA 块**（`i_file_acl`），所以属性总量超过 inode 尾部空间的文件会失败，而不是换块存储。`trusted.*` / `security.*` 仍走 VFS 的易失表。ACL 只做存储与读回，不做权限判定。
 - mount 时做 fail-closed feature 检查：不支持的 incompat 特性（meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
 
 ### 3.3 NTFS（`kernel/fs/diskfs/ntfs.c`）

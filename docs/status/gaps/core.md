@@ -1,6 +1,6 @@
 # CORE 缺口
 
-对应 V1-CORE。现状见 [current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
+对应 V1-CORE。现状见 [current/module-status.md](../current/module-status.md)。
 
 ### CORE-07 arm32 的 FP 上下文
 

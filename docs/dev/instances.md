@@ -1,14 +1,8 @@
 # 实例化构建与运行（instances/ 与 tools/a20）
 
-1.0 的 [平台决策](../releases/v1.0.md#2-平台范围) 已将 LoongArch32/PPC64LE 退出支持。
-当前 `instances/` 只登记活跃目标；旧 PPC64LE 清单归档在
-已退役平台的实例清单与文档已删除，LoongArch32 的历史运行
-记录见平台文档。Makefile 和 `tools/a20` 都会拒绝这两个目标，并指向干净的 `v0.18`
-checkout 作为历史复现基线。功能与性能实例的证据要求见
-[1.0 验收](../releases/v1.0-validation.md)。
+1.0 的 [平台决策](../releases/v1.0.md#2-平台范围) 已将 LoongArch32/PPC64LE 退出支持。当前 `instances/` 只登记活跃目标；旧 PPC64LE 清单归档在已退役平台的实例清单与文档已删除，LoongArch32 的历史运行记录见平台文档。Makefile 和 `tools/a20` 都会拒绝这两个目标，并指向干净的 `v0.18` checkout 作为历史复现基线。功能与性能实例的证据要求见[1.0 验收](../releases/v1.0-validation.md)。
 
-A20OS 的构建、运行与冒烟测试配置统一由 `instances/` 下的 TOML 清单声明。
-每份清单指定架构、板卡、ABI、内核选项、根文件系统、网络、GUI 与测试期望。
+A20OS 的构建、运行与冒烟测试配置统一由 `instances/` 下的 TOML 清单声明。每份清单指定架构、板卡、ABI、内核选项、根文件系统、网络、GUI 与测试期望。
 
 - 未写的字段沿用 Makefile 默认值；能力范围可用 `tools/a20 trim <实例>` 查询。
 - 架构、板卡、ABI、SMP、NOMMU 和驱动组件配置在构建前校验；失败会指出具体字段。
@@ -219,9 +213,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | OpenOCD：`STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL`；esptool 的 `serial` → `ESPTOOL_PORT` |
 | `target.serial` / `boot_media` / `media_device` | `TARGET_SERIAL` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` |
 
-`kernel.virtio_console_*` 是驱动构建配置：`throughput` 默认保持吞吐配置，
-`compact` 将当前 x86_64 批量 TTY 的 DMA 分配从 200 KiB 降至 16 KiB。
-预设、覆盖参数、Make 用法及完整内存预算见 [Virtio-console 内存配置](../drivers/classes/virtio-console.md)。
+`kernel.virtio_console_*` 是驱动构建配置：`throughput` 默认保持吞吐配置，`compact` 将当前 x86_64 批量 TTY 的 DMA 分配从 200 KiB 降至 16 KiB。预设、覆盖参数、Make 用法及完整内存预算见 [Virtio-console 内存配置](../drivers/classes/virtio-console.md)。
 
 `gui.enabled`、`test.commands`、`test.expect`、`test.require_clean_exit`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 
@@ -304,15 +296,7 @@ vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 cons
 
 ## 物理目标与上板验证（`[target]`）
 
-板级支持范围、默认实例和部署方法由 `docs/platforms/` 中对应的单平台页面说明；
-文档范围见 [平台文档约定](../platforms/README.md)。
-`console` / `deploy` 支持 `--serial DEVICE` 覆盖串口；`deploy` 支持
-`--media-device DEVICE` 覆盖目的盘、`--no-console` 将介质准备与上板验证分开、
-`--no-build` 复用已构建产物（带烧录后端时还需 `--no-flash`）。
-`deploy ls2k0300 --stage-mount DIRECTORY --no-console` 将校验后的 ELF 放到显式指定的已挂载 FAT 卷；
-`deploy m0sense-bl702-probe --uf2-mount DIRECTORY --no-console` 上传原厂 UF2 应用，未指定卷时自动识别。
-`--interactive` 在同一串口连接转发人工输入，供操作 U-Boot，同时记录日志并检查启动断言；
-Ctrl-] 退出，等待仍受 `target.boot_timeout` 限制，不能与 `--no-console` 合用。
+板级支持范围、默认实例和部署方法由 `docs/platforms/` 中对应的单平台页面说明；文档范围见 [平台文档约定](../platforms/README.md)。`console` / `deploy` 支持 `--serial DEVICE` 覆盖串口；`deploy` 支持`--media-device DEVICE` 覆盖目的盘、`--no-console` 将介质准备与上板验证分开、`--no-build` 复用已构建产物（带烧录后端时还需 `--no-flash`）。`deploy ls2k0300 --stage-mount DIRECTORY --no-console` 将校验后的 ELF 放到显式指定的已挂载 FAT 卷；`deploy m0sense-bl702-probe --uf2-mount DIRECTORY --no-console` 上传原厂 UF2 应用，未指定卷时自动识别。`--interactive` 在同一串口连接转发人工输入，供操作 U-Boot，同时记录日志并检查启动断言； Ctrl-] 退出，等待仍受 `target.boot_timeout` 限制，不能与 `--no-console` 合用。
 
 其余所有段描述的要么是构建，要么是 QEMU 里的 guest。`[target]` 描述的是串口线那头那块板：控制台在哪、怎么让它重启、它的启动日志必须出现什么才算真的起来。这个段存在，就意味着这是一个物理目标；所以没有 `kind` 字段可以跟它自相矛盾。
 
@@ -327,9 +311,7 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 
 ### 串口前提
 
-`tools/a20 console` / `deploy` 只需 Python 标准库，无需安装 pyserial。
-串口设备必须可访问，所选波特率必须受宿主平台支持；不支持时命令会报告可用波特率。
-串口传输与平台编码的实现说明见 [串口技术参考](tooling-internals.md#serial-transport)。
+`tools/a20 console` / `deploy` 只需 Python 标准库，无需安装 pyserial。串口设备必须可访问，所选波特率必须受宿主平台支持；不支持时命令会报告可用波特率。串口传输与平台编码的实现说明见 [串口技术参考](tooling-internals.md#serial-transport)。
 
 ### 安全边界
 
@@ -340,12 +322,7 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 
 ## 固件装载内核与自动交接（`[handoff]`）
 
-没有内核块驱动时，仍可由固件通过 SD FAT、USB 或网络载入内核；A20OS 启动后的块设备能力需另行验证。
-`board-sdcard` 生成板级 SD 镜像；固件、DTB 和启动脚本的组成由平台打包器决定。
-其中 `board=quartz64-zero` 可选择 `package.variant="video"`：prepare 与 package
-共同使用独立的 `firmware-video`，manifest 也记录该固件来源。其他板型不接受此 variant。
-`quartz64-zero-media` 已提供该配置；其显示前提和音频限制见对应 platform 文档。
-`prepare` 取得固件依赖，`package` 生成可写介质。完整操作由对应单平台页面说明。
+没有内核块驱动时，仍可由固件通过 SD FAT、USB 或网络载入内核；A20OS 启动后的块设备能力需另行验证。`board-sdcard` 生成板级 SD 镜像；固件、DTB 和启动脚本的组成由平台打包器决定。其中 `board=quartz64-zero` 可选择 `package.variant="video"`：prepare 与 package 共同使用独立的 `firmware-video`，manifest 也记录该固件来源。其他板型不接受此 variant。`quartz64-zero-media` 已提供该配置；其显示前提和音频限制见对应 platform 文档。`prepare` 取得固件依赖，`package` 生成可写介质。完整操作由对应单平台页面说明。
 
 ```sh
 tools/a20 prepare pine-a64
@@ -355,12 +332,7 @@ tools/a20 deploy pine-a64 --no-build --no-console --media-device /dev/disk/by-id
 tools/a20 console pine-a64 --serial /dev/serial/by-id/实际串口
 ```
 
-`kernel-bundle` 只生成交接目录。通用 Image 包含 `kernel.bin`、`kernel.elf`、`uboot.cmd`、
-`manifest.json` 与操作说明；LS2K0300 使用核对过的 ELF 和独立装载器，M0Sense 使用独立 RV32 M-mode UF2 探针。
-打包器从 ELF `PT_LOAD` 读取地址范围；Image 包核对镜像头覆盖含 BSS 的内存占用。
-Lichee Pi Zero 使用 ARM32 uImage/`bootm`，分别检查载荷暂存区和实际内核装载区，
-不将 `bootm` 暂存地址当作 ELF 入口。
-`[handoff].commands` 描述载入命令；包内 `uboot.cmd` 包含核对后的实际地址。
+`kernel-bundle` 只生成交接目录。通用 Image 包含 `kernel.bin`、`kernel.elf`、`uboot.cmd`、`manifest.json` 与操作说明；LS2K0300 使用核对过的 ELF 和独立装载器，M0Sense 使用独立 RV32 M-mode UF2 探针。打包器从 ELF `PT_LOAD` 读取地址范围；Image 包核对镜像头覆盖含 BSS 的内存占用。 Lichee Pi Zero 使用 ARM32 uImage/`bootm`，分别检查载荷暂存区和实际内核装载区，不将 `bootm` 暂存地址当作 ELF 入口。`[handoff].commands` 描述载入命令；包内 `uboot.cmd` 包含核对后的实际地址。
 
 SD 实例默认通过卡内配置启动。支持 `--auto-handoff` 的平台可从正在运行的 U-Boot 重新载入：
 
@@ -371,17 +343,9 @@ tools/a20 deploy ls2k0300 --stage-mount /media/用户名/实际FAT卷 --no-conso
 tools/a20 console ls2k0300 --auto-handoff --transfer usb --serial /dev/serial/by-id/实际串口
 ```
 
-`--auto-handoff` 独占同一串口，停止倒计时，逐条验证装载回应、传输长度与 CRC，
-再执行启动并检查内核标记。Image/uImage 交接还核对实例与包的身份、DTB 与内核/BSS 分离；
-LS2K0300 依据完整 DDR/LMB 信息选择 ELF 暂存地址。
-自动路径不写固件、不执行 `saveenv`；不支持的固件命令、缺少文件或校验失败会停止。
-`[handoff].prompt_timeout`、`command_timeout` 可设正的时间值（如 `30s`）；内核等待使用 `[target]` 的超时。
+`--auto-handoff` 独占同一串口，停止倒计时，逐条验证装载回应、传输长度与 CRC，再执行启动并检查内核标记。Image/uImage 交接还核对实例与包的身份、DTB 与内核/BSS 分离； LS2K0300 依据完整 DDR/LMB 信息选择 ELF 暂存地址。自动路径不写固件、不执行 `saveenv`；不支持的固件命令、缺少文件或校验失败会停止。`[handoff].prompt_timeout`、`command_timeout` 可设正的时间值（如 `30s`）；内核等待使用 `[target]` 的超时。
 
-较老固件可用 `--interactive` 在同一窗口人工粘贴包内命令；不能与 `--auto-handoff` 合用。
-`--no-console` 只准备产物，稍后先连接串口再上电。DTB 必须匹配板型并位于独立 RAM；
-Nano TFTP 路径会先复制固件控制 DTB，避免直接使用固件 malloc 区的地址。
-M0Sense 仅 USB 时加 `--no-console`，依据蓝灯心跳人工确认；有外部 UART 时部署器先监听，
-再上传 UF2，捕获 loader 重启后的首次探针标记。USB 复制成功本身不算内核验收。
+较老固件可用 `--interactive` 在同一窗口人工粘贴包内命令；不能与 `--auto-handoff` 合用。`--no-console` 只准备产物，稍后先连接串口再上电。DTB 必须匹配板型并位于独立 RAM； Nano TFTP 路径会先复制固件控制 DTB，避免直接使用固件 malloc 区的地址。 M0Sense 仅 USB 时加 `--no-console`，依据蓝灯心跳人工确认；有外部 UART 时部署器先监听，再上传 UF2，捕获 loader 重启后的首次探针标记。USB 复制成功本身不算内核验收。
 
 ## 边角但必要的开关
 
@@ -450,8 +414,7 @@ tools/a20 regen-drivers             # 写
 make ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 _qemu_argv
 ```
 
-该命令只查询、不构建。不要加 `-n`，否则得到的是打印命令而不是 QEMU 参数。
-参数生成与执行的分工见 [工具技术参考](tooling-internals.md#qemu-arguments)。
+该命令只查询、不构建。不要加 `-n`，否则得到的是打印命令而不是 QEMU 参数。参数生成与执行的分工见 [工具技术参考](tooling-internals.md#qemu-arguments)。
 
 ## 产物账本（`a20 ledger`）
 
@@ -579,11 +542,7 @@ a20: waiting to run qemu-riscv64 -- host resources are short
 
 带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 先构建并启动该实例，等待 `input_delay` 秒后经串口注入 `commands`，在 `timeout` 内等待退出或终止超时会话。`bringup = true` 只构建内核，其他实例构建开发镜像；额外的 QEMU 参数由 `machine.extra_qemu` 声明。参数生成契约见 [工具技术参考](tooling-internals.md#qemu-arguments)。
 
-默认保留旧的标记判定：日志中 `expect` 的全部子串都出现即 PASS，超时杀掉但日志已齐也算 PASS。
-需要验证完整启动和关机的实例应设置 `[test].require_clean_exit = true`，此时还要求
-QEMU 在时限内自然退出且状态为 0，打印标记后卡死或异常退出均失败。
-`smoke-quickstart` 使用此严格模式。失败打印日志末尾 80 行；日志保存在
-`.kernel-build/smoke/<实例名>.log`。
+默认保留旧的标记判定：日志中 `expect` 的全部子串都出现即 PASS，超时杀掉但日志已齐也算 PASS。需要验证完整启动和关机的实例应设置 `[test].require_clean_exit = true`，此时还要求 QEMU 在时限内自然退出且状态为 0，打印标记后卡死或异常退出均失败。`smoke-quickstart` 使用此严格模式。失败打印日志末尾 80 行；日志保存在`.kernel-build/smoke/<实例名>.log`。
 
 把旧冒烟迁移成实例只需三步：
 
@@ -683,16 +642,9 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 
 ## apk world 镜像实例（用包管理组装用户态）
 
-物理 PC 可复用相同 world：`package.kind="uefi-disk"`、`package.variant="world"`
-将原生 EFI 启动器与 ext4 world 封装到同一 GPT 盘，要求
-`kernel.ramfs_user=true`、`kernel.ramfs_distro=true` 和 `rootfs.world`。
-该路径保留 RAM 恢复环境，只自动挂载唯一有效的 `A20OS distro` Linux-data 分区，
-不依赖 QEMU 的第二块裸 ext4 盘。`build` 构建内核与 world，`package` 生成完整介质；
-具体硬件、写盘和验收步骤见 [华为 CT5100](../platforms/huawei-ct5100.md)。
+物理 PC 可复用相同 world：`package.kind="uefi-disk"`、`package.variant="world"`将原生 EFI 启动器与 ext4 world 封装到同一 GPT 盘，要求`kernel.ramfs_user=true`、`kernel.ramfs_distro=true` 和 `rootfs.world`。该路径保留 RAM 恢复环境，只自动挂载唯一有效的 `A20OS distro` Linux-data 分区，不依赖 QEMU 的第二块裸 ext4 盘。`build` 构建内核与 world，`package` 生成完整介质；具体硬件、写盘和验收步骤见 [华为 CT5100](../platforms/huawei-ct5100.md)。
 
-与宿主 Linux 做性能对比可用 `benchmark-x86_64`：其 `benchmark` world 通过 apk 安装
-sysbench、stress-ng 和 OpenSSL。相同二进制的 KVM / Linux 对照运行方法与实际结果见
-[2026-10-22 benchmark 基线](../status/measurements/apk-linux-2026-10-22.md)。
+与宿主 Linux 做性能对比可用 `benchmark-x86_64`：其 `benchmark` world 通过 apk 安装 sysbench、stress-ng 和 OpenSSL。相同二进制的 KVM / Linux 对照运行方法与基线测量协议参见 `instances/benchmark-x86_64.toml`。
 
 `[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见 [packaging/overview.md](../packaging/overview.md)）：`build` 等价于 `make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于 `run-world` / `run-world-gui`，world 镜像作为第二块盘挂载，含 `/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
 

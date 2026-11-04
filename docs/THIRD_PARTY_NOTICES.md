@@ -40,7 +40,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 ## 5. 用户态程序、静态链接与镜像
 
-基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。不能声称这些独立程序“不与 musl 静态链接”。
+基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。这些独立程序均包含与 musl 的静态链接。
 
 由源码编译的独立第三方可执行文件只余 fastfetch 一项，且它被并入 FAT32 根而非独立镜像槽。以往 `user/extra.mk` 产出的 git、Vim、GCC、binutils、Rust 与 lamina 已全部删除：GCC/binutils 曾用于自举 riscv64-musl 交叉工具链，Git 曾静态链接源码构建的 zlib 与 curl+mbedtls，lamina 依赖宿主 glibc C++ 工具链动态加载 `laminaCore`。这些能力改由 world 清单从 Alpine 上游解析。
 

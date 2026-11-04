@@ -487,7 +487,7 @@ endif
 endif
 
 # Foreign-architecture translation channel (see CONFIG_XLATOR at the top and
-# docs/exec-xlator/).  Three ways it gets forced off:
+# docs/kernel/exec-xlator/).  Three ways it gets forced off:
 #   NOMMU=1        no MMU to demand-page guest memory from;
 #   PROFILE=mcu    that build replaces the whole source list anyway;
 #   unsupported    32-bit hosts cannot host a 64-bit guest JIT at all.
@@ -3502,9 +3502,14 @@ include tools/targets-bench.mk
 # Build standard-reference.pdf from every tracked Markdown file under docs/.
 # The generator validates required tools and fonts and reports platform-specific
 # installation commands when a dependency is missing.
-.PHONY: docs
+.PHONY: docs check-docs
 docs:
 	@bash tools/gen_docs_pdf.sh
+
+check-docs:
+	@python3 tools/format_markdown.py --check docs README.md
+	@python3 tools/check_doc_citations.py
+	@python3 tools/check_doc_nav.py
 
 # The binaries the native stamp rule requires.  make owns this list so the gate
 # and the build cannot disagree about what "built" means.  This is exactly

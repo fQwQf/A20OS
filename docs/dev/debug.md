@@ -101,9 +101,7 @@ git submodule update --init --recursive
 
 ## 用户态进程调试
 
-Linux ABI 的 `ptrace(2)` 可用于附加、停止/恢复、读写寄存器与地址空间、观察 exec/exit
-事件及 syscall 边界。观察者可用不带 `WUNTRACED` 的 `wait4` 接收被调试任务的停止通知。
-支持的请求与边界如下：
+Linux ABI 的 `ptrace(2)` 可用于附加、停止/恢复、读写寄存器与地址空间、观察 exec/exit 事件及 syscall 边界。观察者可用不带 `WUNTRACED` 的 `wait4` 接收被调试任务的停止通知。支持的请求与边界如下：
 
 已实现（Linux ABI）：TRACEME/ATTACH/SEIZE/INTERRUPT/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64)、 GETREGS/SETREGS/GETFPREGS/SETFPREGS/GETREGSET(NT_PRSTATUS, NT_FPREGSET)、 PEEKDATA/POKEDATA/PEEKUSER/POKEUSER、GETSIGINFO/SETSIGINFO、SETOPTIONS (TRACESYSGOOD/TRACEEXEC/TRACEEXIT/EXITKILL)、GETEVENTMSG、KILL。
 
@@ -113,8 +111,7 @@ Linux ABI 的 `ptrace(2)` 可用于附加、停止/恢复、读写寄存器与�
 
 ## 符号化回溯
 
-内核 oops 回溯可显示 `name+0xN`。若只有裸地址，可结合本次构建的 `kernel.elf` 在 GDB
-中定位；符号表生成与降级条件见 [符号化技术参考](../kernel/debugging-internals.md#symbolization)。
+内核 oops 回溯可显示 `name+0xN`。若只有裸地址，可结合本次构建的 `kernel.elf` 在 GDB 中定位；符号表生成与降级条件见 [符号化技术参考](../kernel/debugging-internals.md#symbolization)。
 
 ## Native ABI 调试接口（Debug 0x0900）
 

@@ -23,7 +23,7 @@
 - VFS：已有很多路径和文件操作，但 mount namespace、symlink、权限、文件系统特定行为和并发语义仍不完整。
 - Sockets：AF_INET/AF_UNIX/AF_ALG 兼容面足够覆盖测试，但没有实现完整 Linux network stack 行为。
 - POSIX timers 和 timerfd：SIGEV_SIGNAL/NONE/THREAD_ID 通知已实现（SIGEV_THREAD 明确拒绝 EINVAL），overrun 计数按 pending 通知真实累计；timerfd 支持 TFD_TIMER_ABSTIME 与 TFD_TIMER_CANCEL_ON_SET（realtime 被设置后读返回 ECANCELED）；ITIMER_REAL/VIRTUAL/PROF 均有真实交付。CLOCK_PROCESS/THREAD_CPUTIME_ID 的 timer_create 与 clock_nanosleep 仍以 -EOPNOTSUPP 拒绝（范围外）；nanosleep 被信号打断后的重放仍用整条原始请求（restart_syscall 不建模剩余时间）。
-- Keyring：Rust 核心和 C 参考实现覆盖文档列出的 add/request/keyctl 子集及 session/user keyring 生命周期，但 stored permission masks 不作为完整 Linux KEYCTL access checks 执行，request callout data 被忽略，describe length query 保留既有兼容 quirk；未支持命令返回 `-EOPNOTSUPP`。详见 `docs/native-abi/keyring.md`。
+- Keyring：Rust 核心和 C 参考实现覆盖文档列出的 add/request/keyctl 子集及 session/user keyring 生命周期，但 stored permission masks 不作为完整 Linux KEYCTL access checks 执行，request callout data 被忽略，describe length query 保留既有兼容 quirk；未支持命令返回 `-EOPNOTSUPP`。详见 `docs/kernel/linux-abi/keyring.md`。
 - fanotify：基于共享 notify 后端（`kernel/fs/inotify.c`）实现 FAN_CLASS_NOTIF + FID；content/pre-content 类和 per-event fd 不在范围内。
 - acct(2)：写入 Linux v3 记账记录，但没有 BSD 风格的 `ac_btime` 高精度或完整字段集合。
 - Linux AIO：`kernel/fs/aio.c` 提供上下文与完成队列，但 pread/pwrite/fsync/fdatasync 在当前 VFS 上同步执行，不是后台异步 I/O；`io_cancel` 无法中止正在执行的 op。

@@ -1,9 +1,6 @@
 # A20OS Native ABI：用户态启动协议
 
-> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
-> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
-
-> 第 1、7、8 节描述当前协议（2026-08 核实）；第 2-3 节中的结构与代码片段混合了当前接口和说明性伪代码；第 4-6 节是早期 Native-musl 历史方案。活跃完整 libc 路线是 `user/external/mlibc/sysdeps/a20/`。
+本文档定义 Native ABI 的用户态程序启动协议、初始上下文结构（`a20_start_info_t`）与 libc 运行时接入契约。
 
 ---
 
@@ -97,8 +94,6 @@ typedef struct a20_start_info {
 ```
 应用 -> mlibc sysdeps/a20 -> Native syscall
 小型程序 -> liba20c -> liba20rt -> Native syscall
-> 注：`user/archive/` 已于 2026-10 从仓库删除，本节涉及 archive 的工作项成为历史记录。
-历史 Native-musl bridge -> user/archive/（不参与构建）
 ```
 
 当前实现路径：
@@ -228,7 +223,7 @@ POSIX 中明确不支持的操作（Phase 2 可通过 musl 移植逐步支持）
 - `ioctl()` — handle_control 替代
 - `epoll_*()` — event_queue 替代
 
-不要一开始就承诺完整 POSIX。只支持足够的子集让简单程序运行。
+Native ABI 不追求盲目全量支持 POSIX 历史包袱，而是优先提供保证确定性与安全性的系统原语。
 
 ---
 
@@ -1064,9 +1059,7 @@ int main(int argc, char *argv[]) {
 
 - [x] 静态 libc/sysroot、线程与 Native futex。
 - [x] pipe/poll/socketpair 与 `posix_spawn`/`waitpid` 的已接入子集。
-- [ ] 完整异步信号、exec 后非 stdio handle 继承和动态链接。
-  fork 的 manifest/COW continuation 与原地 execve 已在 mlibc Sysdeps 中实现，
-  对应构建目标见 `tools/targets-mlibc.mk`；不能把这两项继续记为未编码。
+- [ ] 完整异步信号、exec 后非 stdio handle 继承和动态链接。 fork 的 manifest/COW continuation 与原地 execve 已在 mlibc Sysdeps 中实现，对应构建目标见 `tools/targets-mlibc.mk`；不能把这两项继续记为未编码。
 - [ ] 将当前 RISC-V64 构建/smoke 扩展为明确的多架构矩阵。
 
 ### 关键依赖关系
@@ -1091,18 +1084,23 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
 
 ### 7.1 架构相关调用约定
 
-| 架构 | Syscall 号 | 参数 | 返回值 |
-|------|-----------|------|--------|
-| aarch64 | x8 | x0-x5 | x0 |
-| riscv64 | a7 | a0-a5 | a0 |
-| loongarch64 | a7 | a0-a5 | a0 |
+| 架构 | 陷入指令 | Syscall 编号 | 参数 (Arg 0 ~ Arg 5) | 返回值 |
+|------|---------|-------------|---------------------|--------|
+| x86_64 | `int $0x80` | `rax` | `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` | `rax` |
+| aarch64 | `svc #0` | `x8` | `x0` ~ `x5` | `x0` |
+| riscv64 | `ecall` | `a7` | `a0` ~ `a5` | `a0` |
+| riscv32 | `ecall` | `a7` | `a0` ~ `a5` | `a0` |
+| loongarch64 | `syscall 0` | `a7` | `a0` ~ `a5` | `a0` |
+| arm32 | `svc #0` | `r7` | `r0` ~ `r5` | `r0` |
+| powerpc64 | `sc` | `r0` | `r3` ~ `r8` | `r3` |
 
 ### 7.2 通用约定
 
-- 所有复杂 syscall 传结构体指针（通过 `a20_abi_header_t` 版本化）
-- 简单 syscall（如 `handle_close(handle)`）可以直接传参数
-- 返回 `a20_status_t`（>= 0 成功，< 0 错误）
-- 内核不保留用户态寄存器（除返回值外）
+- 完整的 173 个系统调用速查矩阵、参数形式与 C 语言调用示例参见 [系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
+- 所有复杂 syscall 传结构体指针（通过 `a20_abi_header_t` 声明 `size` 与 `version` 版本化）。
+- 简单 syscall（如 `handle_close(handle)`）可以直接通过标量寄存器传参。
+- 返回 `a20_status_t`（>= 0 成功，< 0 为正数错误码的负值 `-A20_ERR_*`）。
+- 内核不保留用户态通用临时寄存器（除返回值外；`execve` 与 `task_restore` 替换完整上下文）。
 
 ---
 

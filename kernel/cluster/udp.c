@@ -1,6 +1,6 @@
 /* IPv4 CL adapter. Socket ownership is independent of the configuring task;
  * all I/O runs outside registry locks. One bounded poller owns RX/control.
- * See docs/cluster/07-unified-runtime.md for trust and routing contracts. */
+ * See docs/cluster/overview.md for trust and routing contracts. */
 #include "cluster/clx_internal.h"
 #include "cluster/udp.h"
 #include "core/bootargs.h"

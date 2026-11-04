@@ -1,21 +1,14 @@
 # Router 构建与三节点验证
 
-`NET_ROLE=host` 是默认值，不转发经过本机的 IPv4/IPv6 报文。
-`NET_ROLE=router` 显式编入跨接口转发能力，产物目录与 host 隔离：
+`NET_ROLE=host` 是默认值，不转发经过本机的 IPv4/IPv6 报文。`NET_ROLE=router` 显式编入跨接口转发能力，产物目录与 host 隔离：
 
 ```sh
 make ARCH=x86_64 NR_CPUS=2 NET_LANES=4 NET_ROLE=router kernel-only
 ```
 
-这项选择和 `NET_STACK`、`NET_PROFILE` 独立。无 TCP/IP 的 MCU 不能选择 router。
-**router 表示已编入能力，不表示成熟软路由已经验收。** 分片 NAT、ICMP 差错翻译、
-PMTU、故障恢复和规模成本仍需逐项完成，不能把打开 forwarding 宏当作结论。
-LAN DHCPv4/DNS A 转发的配置与已验证范围见 [lan-services.md](./lan-services.md)。
+这项选择和 `NET_STACK`、`NET_PROFILE` 独立。无 TCP/IP 的 MCU 不能选择 router。**router 表示已编入能力，不表示成熟软路由已经验收。** 分片 NAT、ICMP 差错翻译、 PMTU、故障恢复和规模成本仍需逐项完成，不能把打开 forwarding 宏当作结论。 LAN DHCPv4/DNS A 转发的配置与已验证范围见 [lan-services.md](./lan-services.md)。
 
-BSD/F-Stack 后端现在也接受 `NET_ROLE=router`：启动时按 class NIC 顺序 attach
-全部网卡（公共名为 `en2`、`en3`…，索引 1、3…；`lo` 固定为 2），并在执行器内
-置 `V_ipforwarding=1`、`V_ip6_forwarding=1`。IPv4/IPv6 转发、TTL/hop-limit
-递减、TCP/UDP NAPT 均经过 `netfilter_bridge.c` 的同一套规则/conntrack 路径。
+BSD/F-Stack 后端现在也接受 `NET_ROLE=router`：启动时按 class NIC 顺序 attach 全部网卡（公共名为 `en2`、`en3`…，索引 1、3…；`lo` 固定为 2），并在执行器内置 `V_ipforwarding=1`、`V_ip6_forwarding=1`。IPv4/IPv6 转发、TTL/hop-limit 递减、TCP/UDP NAPT 均经过 `netfilter_bridge.c` 的同一套规则/conntrack 路径。
 
 BSD 已验证（三节点 QEMU socket 拓扑）：
 
@@ -24,19 +17,9 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 - UDP 单包经 `10.20.0.1:<port>` NAPT 到 WAN 并收到回包；
 - `ip addr`/`ip route` 在 `en2`/`en3` 上读写正常。
 
-DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：
-`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，
-随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：
-`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及
-BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`
-预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
+DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
-BSD 当前未完成：策略路由/多 FIB（`ip rule` + `table 100` 仍只落到主 RIB）、
-RA/SLAAC、内核内 DHCP 客户端；`SO_BINDTODEVICE` 目前只对主接口是真实 no-op，
-绑定次级网卡会明确 `EOPNOTSUPP` 而不是静默错路由。RA 侧已定位到：RA 报文能
-到达端口并进入 FreeBSD 输入路径，但 `ND6_IFF_ACCEPT_RTADV` 在接口的
-`nd_ifinfo` 上不能保持（写后随即被重置为 `nd6_ifattach()` 的默认值），因此
-SLAAC 地址生成尚未生效，需要继续在 nd6 侧处理。
+BSD 当前未完成：策略路由/多 FIB（`ip rule` + `table 100` 仍只落到主 RIB）、 RA/SLAAC、内核内 DHCP 客户端；`SO_BINDTODEVICE` 目前只对主接口是真实 no-op，绑定次级网卡会明确 `EOPNOTSUPP` 而不是静默错路由。RA 侧已定位到：RA 报文能到达端口并进入 FreeBSD 输入路径，但 `ND6_IFF_ACCEPT_RTADV` 在接口的`nd_ifinfo` 上不能保持（写后随即被重置为 `nd6_ifattach()` 的默认值），因此 SLAAC 地址生成尚未生效，需要继续在 nd6 侧处理。
 
 ## 最小双网卡配置
 
@@ -53,9 +36,7 @@ ip -6 addr add fd42:10::1/64 dev en2
 ip -6 addr add fd42:20::1/64 dev en3
 ```
 
-以上不是完整防火墙部署配置，也没有配置默认互联网路由、IPv6 RA 或 LAN DHCP。
-NAT 不是转发访问控制。路由/策略 API 见 [routing.md](./routing.md)，NAT 约束见
-[nat.md](./nat.md)。
+以上不是完整防火墙部署配置，也没有配置默认互联网路由、IPv6 RA 或 LAN DHCP。 NAT 不是转发访问控制。路由/策略 API 见 [routing.md](./routing.md)，NAT 约束见[nat.md](./nat.md)。
 
 ## 可复现验证
 
@@ -65,27 +46,17 @@ python3 tools/test-net-router-kvm.py \
   --binary <静态Linux net-microbench ELF> --out <新证据目录>
 ```
 
-工具创建三个独立 KVM 节点：Linux LAN → A20OS 双网卡 router → Linux WAN。
-QEMU socket 后端连接两段隔离以太网，不修改宿主 TAP、路由、iptables 或网桥。
-CPU affinity 可用 `--router-cpus/--lan-cpus/--wan-cpus` 指定；默认本机采用4,6/8,10/12,14。
-每节点2 vCPU/2 GiB，checksum/segmentation卸载关闭。此拓扑用于正确性，不能直接与
-SLIRP/宿主回环吞吐作排名。
+工具创建三个独立 KVM 节点：Linux LAN → A20OS 双网卡 router → Linux WAN。 QEMU socket 后端连接两段隔离以太网，不修改宿主 TAP、路由、iptables 或网桥。 CPU affinity 可用 `--router-cpus/--lan-cpus/--wan-cpus` 指定；默认本机采用4,6/8,10/12,14。每节点2 vCPU/2 GiB，checksum/segmentation卸载关闭。此拓扑用于正确性，不能直接与 SLIRP/宿主回环吞吐作排名。
 
-LAN 节点用两个地址模拟两个客户端，显式绑定同一 UDP 源端口53000，并发访问同一
-WAN端点。它们是同一Linux guest上的两个IP端点，并非两台LAN物理主机。当前工具验收：
+LAN 节点用两个地址模拟两个客户端，显式绑定同一 UDP 源端口53000，并发访问同一 WAN端点。它们是同一Linux guest上的两个IP端点，并非两台LAN物理主机。当前工具验收：
 
 - IPv4 ping、IPv6 ping、TCP16KiB与双客户端UDP的payload完整。
 - 出口两个NAPT端口不同；转发TTL/hop limit均从64变为63。
-- 源策略规则把192.168.10.3导向表100，经10.20.0.2网关到WAN的198.51.100.5/32；
-  匹配源TCP回显成功，不匹配源192.168.10.2无法建立连接。
+- 源策略规则把192.168.10.3导向表100，经10.20.0.2网关到WAN的198.51.100.5/32；匹配源TCP回显成功，不匹配源192.168.10.2无法建立连接。
 - 四份pcap独立重算IPv4/TCP/UDP校验和；WAN捕获证明不存在匹配UDP/TCP的LAN源地址泄漏。
 
-`tools/net-microbench.c` 的 client 模式支持末尾可选的 `SOURCE_IP SOURCE_PORT`，默认
-调用方式保持不变。构建成同一个静态Linux ELF后用于各端点；源码和ELF哈希随证据保存。
+`tools/net-microbench.c` 的 client 模式支持末尾可选的 `SOURCE_IP SOURCE_PORT`，默认调用方式保持不变。构建成同一个静态Linux ELF后用于各端点；源码和ELF哈希随证据保存。
 
 ## 当前 lwIP 分叉中的必要修正
 
-现有转发代码原本将 `CHECKSUM_GEN_*` 当成清零transit报文校验和的依据，实际
-Ethernet output不会再生成这些校验和。本轮保留未变化的传输层校验和，仅对TTL变化
-增量修正IPv4头；同时阻止TTL/hop limit为0时减法回绕成255。这是当前分叉的数据面
-修复，不是仅靠port层开关能够完成的事。恢复原版lwIP前必须对照审计并复跑这些验收。
+转发路径中，`CHECKSUM_GEN_*` 曾被误用于清零 transit 报文校验和，导致 Ethernet output 无法补齐校验。当前实现修正为：保留未变化的传输层校验和，仅对 TTL 变化增量更新 IPv4 头校验和；同时阻止 TTL/hop limit 为 0 时减法回绕成 255。这是当前分叉的关键数据面修复，独立于 port 层开关。若迁移或升级上游 lwIP，必须对照审计并复跑对应测试套件。

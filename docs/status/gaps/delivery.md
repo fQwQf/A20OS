@@ -25,32 +25,14 @@
 
 ## DELIVERY-05 已发布的构建镜像缺 armhf 开发头与 rustc
 
-- 现状：`tools/ci/Dockerfile` 已改为“共享 base + 每架构一个 target”，并显式装上
-  每个交叉架构的 `libc6-dev-*-cross`（交叉 gcc 只把它列为 Recommends，而构建用
-  `--no-install-recommends`，所以旧镜像里编译器在、`#include <limits.h>` 就死）与
-  Rust（`rustc`/`cargo`/`rust-src`/宿主 std，以及各架构的 no_std target）。
-  本地 8 个 target 全部构建并通过 `tools/ci/image-selftest.sh`；用新的 `arm32`/`riscv`
-  镜像、不挂宿主工具链，已经复现出 `check-arm32-bringup` 与
-  `check-riscv32-bringup` 与 `check-arm32-bringup`（当时它们的真实错误清单在 MM/net/fs
-  的 32 位条目里，这些条目在本轮已关闭）。
-  **但 ghcr 上的 `:latest` 仍是旧内容**——推送要靠 `buildenv.yml`，本轮没有执行。
-- 缺口：在重新发布之前，CI 里任何容器内内核构建仍会因缺 `rustc` 直接失败（Error 127），
-  而 arm32 仍会停在 `bits/libc-header-start.h`；也就是说“镜像齐全”目前只是仓库内的
-  事实，不是 CI 拿到的事实。
-- 关闭条件：跑一次 `buildenv.yml`（或用 `tools/ci/build-image.sh` 构建后推送）刷新
-  ghcr 上的 8 个 tag，然后在一个容器 job 里确认 `check-<arch>-bringup` 不再报工具链缺失
-  （源码本身的失败另计）。
+- 现状：`tools/ci/Dockerfile` 已改为“共享 base + 每架构一个 target”，并显式装上每个交叉架构的 `libc6-dev-*-cross`（交叉 gcc 只把它列为 Recommends，而构建用`--no-install-recommends`，所以旧镜像里编译器在、`#include <limits.h>` 就死）与 Rust（`rustc`/`cargo`/`rust-src`/宿主 std，以及各架构的 no_std target）。本地 8 个 target 全部构建并通过 `tools/ci/image-selftest.sh`；用新的 `arm32`/`riscv` 镜像、不挂宿主工具链，已经复现出 `check-arm32-bringup` 与 `check-riscv32-bringup`（相关 32 位错误条目已关闭）。**但 ghcr 上的 `:latest` 仍是旧内容**——推送依赖 `buildenv.yml`，尚未执行。
+- 缺口：在重新发布之前，CI 里任何容器内内核构建仍会因缺 `rustc` 直接失败（Error 127），而 arm32 仍会停在 `bits/libc-header-start.h`；也就是说“镜像齐全”目前只是仓库内的事实，不是 CI 拿到的事实。
+- 关闭条件：跑一次 `buildenv.yml`（或用 `tools/ci/build-image.sh` 构建后推送）刷新 ghcr 上的 8 个 tag，然后在一个容器 job 里确认 `check-<arch>-bringup` 不再报工具链缺失（源码本身的失败另计）。
 - 来源：32 位 bring-up 的 arm32/riscv32 复现。
 
 ## DELIVERY-06 armv7m flat-user 缺少 Rust target
 
-- 现状：`make check-mcu-program-rtl` 的 Verilator 构建完成后，ARMv7-M 固件
-  配置在 `tools/rust-kernel.mk:1613` 失败：`CONFIG_FLAT_USER_MEMORY=1` 时
-  没有 `RUST_FLAT_POLICY_TARGET_armv7m`，构建直接 `$(error ...)`。
-- 缺口：MCU 原生应用/RTL 联合验收因此无法在当前树构建；这不是 cluster
-  源码或测试断言失败，而是全局构建规则缺少 ARMv7-M 的 Rust flat 内存策略
-  目标。
-- 关闭条件：为 `ARCH=armv7m` 提供可链接的 flat-policy Rust target（或在该
-  配置下明确排除 Rust flat 策略并由 owner 记录等价保证），然后重新运行
-  `make check-mcu-program-rtl` 并保存实际 guest/RTL 结果。
+- 现状：`make check-mcu-program-rtl` 的 Verilator 构建完成后，ARMv7-M 固件配置在 `tools/rust-kernel.mk:1613` 失败：`CONFIG_FLAT_USER_MEMORY=1` 时没有 `RUST_FLAT_POLICY_TARGET_armv7m`，构建直接 `$(error ...)`。
+- 缺口：MCU 原生应用/RTL 联合验收因此无法在当前树构建；这不是 cluster 源码或测试断言失败，而是全局构建规则缺少 ARMv7-M 的 Rust flat 内存策略目标。
+- 关闭条件：为 `ARCH=armv7m` 提供可链接的 flat-policy Rust target（或在该配置下明确排除 Rust flat 策略并由 owner 记录等价保证），然后重新运行`make check-mcu-program-rtl` 并保存实际 guest/RTL 结果。
 - 来源：CLUSTER 1.0 验收尝试；本包不修改全局构建规则。

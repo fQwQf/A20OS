@@ -48,8 +48,7 @@ LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZ
 
 ## MSI-X
 
-`kernel/drivers/bus/pci_msix.c` 提供与协议无关的 MSI-X 层：解析能力、按
-平台提供的信息编排表项、分配向量。协议驱动只声明"我要几个向量"。
+`kernel/drivers/bus/pci_msix.c` 提供与协议无关的 MSI-X 层：解析能力、按平台提供的信息编排表项、分配向量。协议驱动只声明"我要几个向量"。
 
 ```c
 int r = pci_msix_enable(dev, vectors);          /* 关 Enable + 置 function mask */
@@ -60,49 +59,30 @@ pci_msix_set_vector_mask(dev, i, 0);            /* 逐项解除 mask */
 pci_msix_commit(dev);                           /* 清 function mask，置 Enable */
 ```
 
-失败一律回到 `-EOPNOTSUPP`/`-EINVAL` 等负 errno，由驱动退回 INTx 或轮询；
-不允许"半装好"的中间态存在。
+失败一律回到 `-EOPNOTSUPP`/`-EINVAL` 等负 errno，由驱动退回 INTx 或轮询；不允许"半装好"的中间态存在。
 
 ### 表在哪里：两个字段，两种编码
 
-能力头之后偏移 `0x10` 是 **Vector Control**（PCIe 形式），偏移 `0x04` 是
-**Message Address Lower**（继承自 PCI 之前的 MSI 编码）。两处都可能描述同一
-件事，且**字段决定编码，不由设备决定**：
+能力头之后偏移 `0x10` 是 **Vector Control**（PCIe 形式），偏移 `0x04` 是**Message Address Lower**（继承自 PCI 之前的 MSI 编码）。两处都可能描述同一件事，且**字段决定编码，不由设备决定**：
 
 | 字段 | BIR 位 | 偏移位 | 偏移是否缩放 |
 |---|---|---|---|
 | Vector Control | `[3:1]` | `[31:12]` | 是，字节偏移 = 值 << 4 |
 | Message Address Lower | `[2:0]` | `[31:3]` | 否，字节偏移就是值 |
 
-`pci_msix_capability()` 优先读 Vector Control，读到零则退回 Message Address
-Lower，并在 `pci_msix_info_t::from_vector_ctrl` 里记录来源。
+`pci_msix_capability()` 优先读 Vector Control，读到零则退回 Message Address Lower，并在 `pci_msix_info_t::from_vector_ctrl` 里记录来源。
 
-为什么 Vector Control 常读到零：**它由平台固件写**。用 `-kernel` 引导意味着
-没有任何固件跑过，所有设备的 Vector Control 都是零。QEMU 的 virtio-pci
-（`virtio_pci_dc_realize` → `msix_init_exclusive_bar`）和 e1000e 都走
-`msix_init()` 里的 `pci_set_long(config + PCI_MSIX_TABLE, ...)`，即把表位置
-写进 Message Address Lower，用的正是 pre-PCIe 编码。所以这不是兼容包袱而是
-实际布局。
+为什么 Vector Control 常读到零：**它由平台固件写**。用 `-kernel` 引导意味着没有任何固件跑过，所有设备的 Vector Control 都是零。QEMU 的 virtio-pci （`virtio_pci_dc_realize` → `msix_init_exclusive_bar`）和 e1000e 都走`msix_init()` 里的 `pci_set_long(config + PCI_MSIX_TABLE, ...)`，即把表位置写进 Message Address Lower，用的正是 pre-PCIe 编码。所以这不是兼容包袱而是实际布局。
 
-两处都是零时，BIR 0 / 偏移 0 与"没人配置过"无法区分，`pci_msix_enable()`
-返回 `-EOPNOTSUPP` 并保留传统中断路径——对 BAR0 是 I/O 窗口的设备，照字面
-解释会把表项写到活寄存器上。
+两处都是零时，BIR 0 / 偏移 0 与"没人配置过"无法区分，`pci_msix_enable()`返回 `-EOPNOTSUPP` 并保留传统中断路径——对 BAR0 是 I/O 窗口的设备，照字面解释会把表项写到活寄存器上。
 
-**BAR 号是实现细节，不要猜。** QEMU 的 virtio-pci 表在 BAR1（`msix_bar_idx
-= 1`），e1000e 在 BAR3，virtio spec 一个字都没规定。表项写完立刻读回，
-不符就是打错了窗口，`pci_msix_program_vector()` 因此会拒绝
-`"this window is not an MSI-X table"`。
+**BAR 号是实现细节，不要猜。** QEMU 的 virtio-pci 表在 BAR1（`msix_bar_idx = 1`），e1000e 在 BAR3，virtio spec 一个字都没规定。表项写完立刻读回，不符就是打错了窗口，`pci_msix_program_vector()` 因此会拒绝`"this window is not an MSI-X table"`。
 
 ### `queue_msix_vector` 是表索引，不是中断号
 
-common config 偏移 `0x1A`（与队列选择 `0x16` 配合使用）里的值是 **MSI-X 表的
-第几项**，不是这条中断线的号。QEMU 的 `virtio_pci_common_write()` 会判
-`val < proxy->nvectors`，超界就不调用 `msix_vector_use()`，之后
-`msix_notify()` 因为 `msix_entry_used[vector]` 为 0 直接返回——表项看起来
-编程得完全正确，永远不会有中断。把 208 写进去正是这样。
+common config 偏移 `0x1A`（与队列选择 `0x16` 配合使用）里的值是 **MSI-X 表的第几项**，不是这条中断线的号。QEMU 的 `virtio_pci_common_write()` 会判`val < proxy->nvectors`，超界就不调用 `msix_vector_use()`，之后`msix_notify()` 因为 `msix_entry_used[vector]` 为 0 直接返回——表项看起来编程得完全正确，永远不会有中断。把 208 写进去正是这样。
 
-表项本身携带的是中断号（`pci_msix_program_vector()` 写进 message data），
-两处不要混。
+表项本身携带的是中断号（`pci_msix_program_vector()` 写进 message data），两处不要混。
 
 ### 平台钩子与消息地址
 
@@ -114,28 +94,11 @@ int arch_irq_msix_vector_range(int *base, int *end);
 int arch_irq_msix_cpu_count(void);
 ```
 
-前两个是 weak 符号，默认返回负 errno；`arch_irq_msix_vector_range()` 给出
-本平台的向量窗口，`arch_irq_msix_cpu_count()` 给出合法目标 CPU 的个数，只有
-x86_64 实现了它们：向量窗口 `0xD0..0xF0`，LVT 按 `LAPIC_LVT_TIMER +
-((V - 0x10) & 0xFF) * 16` 定位，CPU 个数取 `smp_online_cpu_count()`。其他架构
-返回失败，驱动因此停在轮询或 INTx，而不会去编程一条永远不会被投递的中断。
-`arch_irq_msix_cpu_count()` 返回 1 时只有 `PCI_MSIX_CPU_BOOT` 合法，迁移请求
-会被干净地拒绝。
+前两个是 weak 符号，默认返回负 errno；`arch_irq_msix_vector_range()` 给出本平台的向量窗口，`arch_irq_msix_cpu_count()` 给出合法目标 CPU 的个数，只有 x86_64 实现了它们：向量窗口 `0xD0..0xF0`，LVT 按 `LAPIC_LVT_TIMER + ((V - 0x10) & 0xFF) * 16` 定位，CPU 个数取 `smp_online_cpu_count()`。其他架构返回失败，驱动因此停在轮询或 INTx，而不会去编程一条永远不会被投递的中断。`arch_irq_msix_cpu_count()` 返回 1 时只有 `PCI_MSIX_CPU_BOOT` 合法，迁移请求会被干净地拒绝。
 
-消息地址必须是 **APIC 自己那一页的基地址**（x86_64 上是 `LAPIC_PHYS_BASE`
-`0xFEE00000`），向量放在消息数据里，不放在地址里。真实硬件确实会忽略该页内
-的偏移，但软件没有理由去依赖这一点：LAPIC 窗口同时是寄存器文件，把向量 OR
-进地址得到的偏移落在前 1 KiB 内，实现按寄存器写解码，**什么都不投递，也不
-报错**。表项编程正确、message control 正确、function mask 已清，设备照常
-notify，就是一条中断都没有。向页基址投递是所有实现都解释为"这是一个中断"
-的唯一地址。
+消息地址必须是 **APIC 自己那一页的基地址**（x86_64 上是 `LAPIC_PHYS_BASE` `0xFEE00000`），向量放在消息数据里，不放在地址里。真实硬件确实会忽略该页内的偏移，但软件没有理由去依赖这一点：LAPIC 窗口同时是寄存器文件，把向量 OR 进地址得到的偏移落在前 1 KiB 内，实现按寄存器写解码，**什么都不投递，也不报错**。表项编程正确、message control 正确、function mask 已清，设备照常 notify，就是一条中断都没有。向页基址投递是所有实现都解释为"这是一个中断"的唯一地址。
 
-`cpu` 是这条消息要交给哪个处理器，boot CPU 是 `PCI_MSIX_CPU_BOOT`（0）。x86_64
-把它翻译成 `LAPIC_PHYS_BASE + (apic_id << 12)`（xAPIC 物理目的模式，APIC ID
-取自 `smp_logical_to_hw()`）。**LVT 住在目标处理器自己的 LAPIC 页里**，所以给
-别的 CPU 编程必须在那里执行：`arch_msix_vector_setup()` 在目标不是当前 CPU 时
-把请求经 IPI（向量 `IRQ_VECTOR_MSIX_VECTOR`）下发到目标 CPU，等它回 ack 再返回。
-没有这一步，表项会指向一个从未被 unmask 的 LVT，一条中断都不会来。
+`cpu` 是这条消息要交给哪个处理器，boot CPU 是 `PCI_MSIX_CPU_BOOT`（0）。x86_64 把它翻译成 `LAPIC_PHYS_BASE + (apic_id << 12)`（xAPIC 物理目的模式，APIC ID 取自 `smp_logical_to_hw()`）。**LVT 住在目标处理器自己的 LAPIC 页里**，所以给别的 CPU 编程必须在那里执行：`arch_msix_vector_setup()` 在目标不是当前 CPU 时把请求经 IPI（向量 `IRQ_VECTOR_MSIX_VECTOR`）下发到目标 CPU，等它回 ack 再返回。没有这一步，表项会指向一个从未被 unmask 的 LVT，一条中断都不会来。
 
 ### 把条目迁到别的 CPU
 
@@ -146,35 +109,18 @@ int pci_msix_set_all_affinity(int cpu);
 unsigned pci_msix_affinity_snapshot(pci_msix_affinity_entry_t *out, unsigned max);
 ```
 
-`index` 是表索引，和 `queue_msix_vector` 是同一个坐标系。`pci_msix_set_affinity()`
-的顺序是固定的：先让平台把**目标 CPU** 上的 LVT mask 住（平台不支持就到这里为止，
-表项一个字节都没动），再 mask 该条目、改写 `message address`、读回校验，然后解除
-目标 CPU 上的 LVT mask，最后解除条目 mask。写入与读回之间条目是 masked 的，所以
-迁移过程中不会有中断丢在两个 CPU 之间。
+`index` 是表索引，和 `queue_msix_vector` 是同一个坐标系。`pci_msix_set_affinity()`的顺序是固定的：先让平台把**目标 CPU** 上的 LVT mask 住（平台不支持就到这里为止，表项一个字节都没动），再 mask 该条目、改写 `message address`、读回校验，然后解除目标 CPU 上的 LVT mask，最后解除条目 mask。写入与读回之间条目是 masked 的，所以迁移过程中不会有中断丢在两个 CPU 之间。
 
 失败时的状态要分两种读：
 
-- **地址回读不符**（`pci_msix_program_vector()` 之外同一类"打错窗口"的错误）返回
-  `-EIO`。写本来就没进去，条目地址仍是旧 CPU 的，所以回滚按成功路径的镜像执行：先把
-  **旧 CPU** 的 LVT 重新 arm 回来，再解除条目 mask，条目与控制器两侧都回到调用前的
-  状态，`target_cpu[index]` 不动。旧 CPU 的 LVT 没能重新 arm 时打一条 `kerr` 并让
-  条目保持 masked（宁可停住也不丢中断），返回的仍是 `-EIO`。
-- **远端 LVT 没能 arm**（IPI 超时等）返回平台的 errno。**此时地址已经是新 CPU 的，
-  条目保持 masked，不再回滚**——设备被 mask 住、数据发不出去，这是唯一不丢中断的
-  落点。调用方拿到错误就应当知道这条 vector 现在是不通的，需要重试或退回。
+- **地址回读不符**（`pci_msix_program_vector()` 之外同一类"打错窗口"的错误）返回`-EIO`。写本来就没进去，条目地址仍是旧 CPU 的，所以回滚按成功路径的镜像执行：先把**旧 CPU** 的 LVT 重新 arm 回来，再解除条目 mask，条目与控制器两侧都回到调用前的状态，`target_cpu[index]` 不动。旧 CPU 的 LVT 没能重新 arm 时打一条 `kerr` 并让条目保持 masked（宁可停住也不丢中断），返回的仍是 `-EIO`。
+- **远端 LVT 没能 arm**（IPI 超时等）返回平台的 errno。**此时地址已经是新 CPU 的，条目保持 masked，不再回滚**——设备被 mask 住、数据发不出去，这是唯一不丢中断的落点。调用方拿到错误就应当知道这条 vector 现在是不通的，需要重试或退回。
 
-`cpu` 越界或平台没有 per-CPU 目的地时返回 `-EINVAL`/`-EOPNOTSUPP`，状态不变。
-目标已经是该 CPU 时直接返回 0，不产生一次多余的远端 IPI。
+`cpu` 越界或平台没有 per-CPU 目的地时返回 `-EINVAL`/`-EOPNOTSUPP`，状态不变。目标已经是该 CPU 时直接返回 0，不产生一次多余的远端 IPI。
 
-`pci_msix_set_all_affinity()` 是遍历所有已登记 MSI-X function 的便捷版本，供
-`/proc/a20/irq_affinity` 这种"整机一个值"的运行时旋钮使用；它逐条目调用上面的
-单条目版本，返回第一个失败的 errno。**批量迁移不是一个事务**：已经迁走的条目留在
-新 CPU 上，失败的条目按上面的规则留在各自的状态上。`pci_msix_get_affinity()` /
-`pci_msix_affinity_snapshot()` 读的是内核侧的记录，不是回读硬件，回读只在写入路径
-上做。
+`pci_msix_set_all_affinity()` 是遍历所有已登记 MSI-X function 的便捷版本，供`/proc/a20/irq_affinity` 这种"整机一个值"的运行时旋钮使用；它逐条目调用上面的单条目版本，返回第一个失败的 errno。**批量迁移不是一个事务**：已经迁走的条目留在新 CPU 上，失败的条目按上面的规则留在各自的状态上。`pci_msix_get_affinity()` / `pci_msix_affinity_snapshot()` 读的是内核侧的记录，不是回读硬件，回读只在写入路径上做。
 
-驱动自己调用这些接口不需要额外注册任何东西：`pci_msix_set_affinity()` 与
-`pci_msix_get_affinity()` 已在 drvmod 符号白名单里，`.a20drv` 模块可以直接用。
+驱动自己调用这些接口不需要额外注册任何东西：`pci_msix_set_affinity()` 与`pci_msix_get_affinity()` 已在 drvmod 符号白名单里，`.a20drv` 模块可以直接用。
 
 ## PCI probe 模式
 

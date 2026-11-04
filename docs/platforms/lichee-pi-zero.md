@@ -20,9 +20,7 @@ A20OS 的 `lichee-pi-zero` 实例面向搭载 Allwinner V3s、64 MiB DDR2 的原
 
 ## RAMFS 串口 shell
 
-`lichee-pi-zero-shell` 复用同一板型固件和 SD 布局，将 init、mksh 及基本命令静态
-ELF 嵌入内核，关闭 bring-up 自动停机和 swap。启动后直接通过 UART0 进入 shell，
-无需内核 SD 驱动挂载根分区。先准备板级固件，再打包 shell 实例：
+`lichee-pi-zero-shell` 复用同一板型固件和 SD 布局，将 init、mksh 及基本命令静态 ELF 嵌入内核，关闭 bring-up 自动停机和 swap。启动后直接通过 UART0 进入 shell，无需内核 SD 驱动挂载根分区。先准备板级固件，再打包 shell 实例：
 
 ```sh
 tools/a20 prepare lichee-pi-zero
@@ -32,9 +30,7 @@ sudo tools/a20 deploy lichee-pi-zero-shell --no-build --no-console \
 tools/a20 console lichee-pi-zero-shell --serial /dev/ttyUSB0 --interactive
 ```
 
-该实例生成 `build/lichee-pi-zero/a20os-lichee-pi-zero-shell-sdcard.img`；每次 package
-都会按所选实例刷新共享 handoff 目录，不可复用另一个实例的旧 bundle。启动验收先等待
-`[init] fork=0, calling execve mksh`，再实际输入以下命令确认用户程序工作：
+该实例生成 `build/lichee-pi-zero/a20os-lichee-pi-zero-shell-sdcard.img`；每次 package 都会按所选实例刷新共享 handoff 目录，不可复用另一个实例的旧 bundle。启动验收先等待`[init] fork=0, calling execve mksh`，再实际输入以下命令确认用户程序工作：
 
 ```sh
 /bin/echo FIRST
@@ -46,14 +42,9 @@ echo hello > /tmp/hello
 /bin/poweroff
 ```
 
-写入 `/tmp` 和根目录的文件只保存在 RAM，复位即消失。`poweroff` 最后输出 V3s
-停机标记，需要移除外部电源。Ethernet/SSH、显示、音频均未因本 shell 实例启用；
-ARM32 已保存 trap、调度切换和信号帧的 VFP 上下文，父子进程寄存器隔离探针已通过。
-64 MiB QEMU virt 已连续 10 轮通过每轮 40 次顺序 fork/exec、浮点隔离、抢占、空闲唤醒、
-文件操作和正常关机。该配置提供 RAM 串口 shell；V3s 外设仍待实机验收，原生显示控制器驱动尚未实现。
+写入 `/tmp` 和根目录的文件只保存在 RAM，复位即消失。`poweroff` 最后输出 V3s 停机标记，需要移除外部电源。Ethernet/SSH、显示、音频均未因本 shell 实例启用； ARM32 已保存 trap、调度切换和信号帧的 VFP 上下文，父子进程寄存器隔离探针已通过。 64 MiB QEMU virt 已连续 10 轮通过每轮 40 次顺序 fork/exec、浮点隔离、抢占、空闲唤醒、文件操作和正常关机。该配置提供 RAM 串口 shell；V3s 外设仍待实机验收，原生显示控制器驱动尚未实现。
 
-主机回归使用 **QEMU virt，而非模拟 V3s 外设**，检查 ARM32 Linux ABI 的连续 exec/
-wait、休眠唤醒、subshell、文件重定向与正常关机：
+主机回归使用 **QEMU virt，而非模拟 V3s 外设**，检查 ARM32 Linux ABI 的连续 exec/ wait、休眠唤醒、subshell、文件重定向与正常关机：
 
 ```sh
 make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 RAMFS_FPU_TESTS=1 \
@@ -62,9 +53,7 @@ python3 tools/check_serial_shell.py --arch arm32 --kernel 构建输出目录/ker
   --memory-mb 64 --fpu --timers --stress-forks 40
 ```
 
-回归以 QEMU 生成的 DTB 经 ARM Linux `r2` 协议交接，分别在 64 MiB 与 1 GiB 完成上述命令；
-64 MiB 时内核初始化后报告约 41 MiB 可用内存。它验证小内存预算，不模拟 V3s 的管脚与外设。
-V3s shell 已交叉构建；串口接线、DRAM/SD 时序与真实硬件运行仍须逐板验收。
+回归以 QEMU 生成的 DTB 经 ARM Linux `r2` 协议交接，分别在 64 MiB 与 1 GiB 完成上述命令； 64 MiB 时内核初始化后报告约 41 MiB 可用内存。它验证小内存预算，不模拟 V3s 的管脚与外设。 V3s shell 已交叉构建；串口接线、DRAM/SD 时序与真实硬件运行仍须逐板验收。
 
 ## 启动协议与地址
 
@@ -165,22 +154,11 @@ tools/a20 console lichee-pi-zero --serial /dev/ttyUSB0 --auto-handoff
 
 ## 内核 SD 驱动与边界
 
-`kernel/drivers/block/sunxi_mmc.c` 与 `sunxi_mmc_core.c` 是同一套架构无关控制器/
-SD 协议实现。V3s 板级 `configure_devices` 为 DT 中已经启用、位于 MMC0 的节点
-配置 PF0..PF5 的 function 2、30 mA 和上拉，打开 CCU AHB gate/reset，采用
-OSC24M / 4 / 15 = 400 kHz。固件设备图保留节点身份；不会通过复制静态节点绕过 DT。
-卡槽供电沿用 SPL/U-Boot；默认打包固件确实从该 MMC0 卡加载内核。
+`kernel/drivers/block/sunxi_mmc.c` 与 `sunxi_mmc_core.c` 是同一套架构无关控制器/ SD 协议实现。V3s 板级 `configure_devices` 为 DT 中已经启用、位于 MMC0 的节点配置 PF0..PF5 的 function 2、30 mA 和上拉，打开 CCU AHB gate/reset，采用 OSC24M / 4 / 15 = 400 kHz。固件设备图保留节点身份；不会通过复制静态节点绕过 DT。卡槽供电沿用 SPL/U-Boot；默认打包固件确实从该 MMC0 卡加载内核。
 
-驱动以 1-bit 低速逐扇区 PIO 避免依赖 DMA、缓存一致性和高速调谐：
-支持 SD 初始化、RCA、CSD、SDSC 字节寻址和 SDHC/SDXC 扇区寻址、CMD17/CMD24
-读写及 CMD13 flush/就绪检查。CSD 永久/临时写保护及固件 `read-only` 属性均会拒绝写入。
-所有硬件等待有上限；传输错误使当前绑定离线，后续 I/O 返回错误，需重新绑定初始化。
-探测失败和移除接入公共 devres 与 class 生命周期。
+驱动以 1-bit 低速逐扇区 PIO 避免依赖 DMA、缓存一致性和高速调谐：支持 SD 初始化、RCA、CSD、SDSC 字节寻址和 SDHC/SDXC 扇区寻址、CMD17/CMD24 读写及 CMD13 flush/就绪检查。CSD 永久/临时写保护及固件 `read-only` 属性均会拒绝写入。所有硬件等待有上限；传输错误使当前绑定离线，后续 I/O 返回错误，需重新绑定初始化。探测失败和移除接入公共 devres 与 class 生命周期。
 
-尚不支持 4-bit/高速、DMA、MMC/eMMC、SDIO、GPIO 卡检测/机械写保护或热插拔重枚举。
-不能热拔正在使用的卡。内核正常启动不等于卡片读写通过：实机应先核对
-`[SUNXI-MMC]` 容量日志，再完成扇区内容与主机对比、受控写入和断电后读回。
-固件仍负责 SPL/DDR 和加载内核，SD 驱动不替代启动固件。
+尚不支持 4-bit/高速、DMA、MMC/eMMC、SDIO、GPIO 卡检测/机械写保护或热插拔重枚举。不能热拔正在使用的卡。内核正常启动不等于卡片读写通过：实机应先核对`[SUNXI-MMC]` 容量日志，再完成扇区内容与主机对比、受控写入和断电后读回。固件仍负责 SPL/DDR 和加载内核，SD 驱动不替代启动固件。
 
 生产代码宿主测试入口为：
 
@@ -188,43 +166,19 @@ OSC24M / 4 / 15 = 400 kHz。固件设备图保留节点身份；不会通过复�
 python3 -m unittest tools.tests.test_sunxi_mmc
 ```
 
-ASan/UBSan fixtures 检查 SDHC/SDSC 读写、容量/地址边界、写保护、无卡、CRC/FIFO/
-clock/power/状态超时、分配失败及 probe/remove 清理。实际管脚时序、卡片兼容性、
-供电和持久性仍待真机验证。
+ASan/UBSan fixtures 检查 SDHC/SDSC 读写、容量/地址边界、写保护、无卡、CRC/FIFO/ clock/power/状态超时、分配失败及 probe/remove 清理。实际管脚时序、卡片兼容性、供电和持久性仍待真机验证。
 
 ## 可选音频与显示交接
 
-裸 Lichee Pi Zero 没有板载耳机插座；V3s 内部 codec 的存在不等于已连接输出。
-板级代码只在固件根节点包含 `licheepi,licheepi-zero-dock` compatible，或显式
-布尔属性 `a20,headphone-connected` 时准备音频；后者是 A20 板级接线声明，
-只应在已确认 DAC/耳机线路及供电时添加。两种情况还必须提供 enabled 的
-`allwinner,sun8i-v3s-codec`、模拟 codec、CCU 和 DMA 节点及真实 IRQ。
-默认固件不增加该声明，也不启用虚假的耳机设备。
+裸 Lichee Pi Zero 没有板载耳机插座；V3s 内部 codec 的存在不等于已连接输出。板级代码只在固件根节点包含 `licheepi,licheepi-zero-dock` compatible，或显式布尔属性 `a20,headphone-connected` 时准备音频；后者是 A20 板级接线声明，只应在已确认 DAC/耳机线路及供电时添加。两种情况还必须提供 enabled 的`allwinner,sun8i-v3s-codec`、模拟 codec、CCU 和 DMA 节点及真实 IRQ。默认固件不增加该声明，也不启用虚假的耳机设备。
 
-驱动由内部 DAC FIFO 和 sun6i 风格 DMA 组成，固定 48 kHz stereo S16_LE，
-DMA channel 0 独占，使用 DRQ15、32 KiB 环形缓冲。写入有背压，支持尾部排空，
-欠载或无法可靠判断已消费的周期返回错误；停止超时时保留仍可能被 DMA 使用的内存。
-不支持录音、混音、HDMI 或自动切换采样率。板级时钟配置仅修改音频和 DMA 相关位，
-拒绝接管不匹配的活跃音频 PLL。明确连接的设备可通过现有 `/dev/audioN` 接口播放。
+驱动由内部 DAC FIFO 和 sun6i 风格 DMA 组成，固定 48 kHz stereo S16_LE， DMA channel 0 独占，使用 DRQ15、32 KiB 环形缓冲。写入有背压，支持尾部排空，欠载或无法可靠判断已消费的周期返回错误；停止超时时保留仍可能被 DMA 使用的内存。不支持录音、混音、HDMI 或自动切换采样率。板级时钟配置仅修改音频和 DMA 相关位，拒绝接管不匹配的活跃音频 PLL。明确连接的设备可通过现有 `/dev/audioN` 接口播放。
 
-默认 shell 镜像不含播放器；验证外接音频时，可在现有 shell 构建/打包命令末尾添加
-`-- RAMFS_MEDIA=1`，将已有 `audioplay` 和 `videoplay` 一并嵌入。
-这些命令仍须使用与实际 Dock/接线匹配的 DTB；不能只改布尔属性就代替供电、引脚和线路。
-进入 shell 后可运行 `audioplay --tone 440 --duration 1000`。
-`python3 -m unittest tools.tests.test_sunxi_audio` 检查生产驱动的 codec、DMA、背压、
-欠载和错误清理；测试不代表 Dock 电气输出已经验收。
+默认 shell 镜像不含播放器；验证外接音频时，可在现有 shell 构建/打包命令末尾添加`-- RAMFS_MEDIA=1`，将已有 `audioplay` 和 `videoplay` 一并嵌入。这些命令仍须使用与实际 Dock/接线匹配的 DTB；不能只改布尔属性就代替供电、引脚和线路。进入 shell 后可运行 `audioplay --tone 440 --duration 1000`。`python3 -m unittest tools.tests.test_sunxi_audio` 检查生产驱动的 codec、DMA、背压、欠载和错误清理；测试不代表 Dock 电气输出已经验收。
 
-显示侧可消费固件提供的标准 DT simple-framebuffer，接入已有 GPU/fbdev；
-其宽高、stride、格式、显存预留均来自真实交接。ARM32 对 RAM 帧缓冲还保留其
-覆盖的完整 1 MiB section，并统一内核别名与用户映射属性；无法安全处理的映射拒绝接管。
-目前本板固件配置没有初始化具体 LCD，A20 也没有 V3s TCON/DE2 原生驱动。
-LCD 面板型号、RGB 时序、背光和复位接线确定前，默认配置仍为串口输出。
+显示侧可消费固件提供的标准 DT simple-framebuffer，接入已有 GPU/fbdev；其宽高、stride、格式、显存预留均来自真实交接。ARM32 对 RAM 帧缓冲还保留其覆盖的完整 1 MiB section，并统一内核别名与用户映射属性；无法安全处理的映射拒绝接管。目前本板固件配置没有初始化具体 LCD，A20 也没有 V3s TCON/DE2 原生驱动。 LCD 面板型号、RGB 时序、背光和复位接线确定前，默认配置仍为串口输出。
 
-实现依据为 [Linux v6.17 V3s codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun4i-codec.c)、
-[模拟 codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun8i-codec-analog.c)、
-[V3s CCU](https://github.com/torvalds/linux/blob/v6.17/drivers/clk/sunxi-ng/ccu-sun8i-v3s.c)
-和 [DMA](https://github.com/torvalds/linux/blob/v6.17/drivers/dma/sun6i-dma.c)。
-公开实现用于核对寄存器和协议；A20 内核驱动为独立实现。
+实现依据为 [Linux v6.17 V3s codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun4i-codec.c)、[模拟 codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun8i-codec-analog.c)、[V3s CCU](https://github.com/torvalds/linux/blob/v6.17/drivers/clk/sunxi-ng/ccu-sun8i-v3s.c)和 [DMA](https://github.com/torvalds/linux/blob/v6.17/drivers/dma/sun6i-dma.c)。公开实现用于核对寄存器和协议；A20 内核驱动为独立实现。
 
 ## 硬件与协议依据
 

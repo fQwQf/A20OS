@@ -685,7 +685,7 @@ static int exec_try_translator(int fd, exec_bprm_t *bprm, task_t *t)
      * over-approximation: the alternative is a per-translator "needs W^X"
      * property in the configuration, which would be a permission decision
      * made from a string on a command line.  See
-     * docs/exec-xlator/01-usage.md for the cost.
+     * docs/kernel/exec-xlator/01-usage.md for the cost.
      */
     t->xlator_host = 1;
 

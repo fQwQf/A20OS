@@ -1,16 +1,10 @@
 # A20OS Native ABI：Handle 子系统设计
 
-> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
-> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
-
-> Handle 子系统覆盖 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 2026-08 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
+本文档定义 Native ABI 的 Handle 子系统，覆盖 14 种内核对象类型、句柄表管理、生命周期状态机与并发访问协议。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
 
 ---
 
-TASK/THREAD/DEBUG 的内部身份与 PID 生命周期已分离。句柄和在途 IPC 引用持有
-小型身份对象；任务回收后旧身份失去目标，操作返回 BAD_HANDLE，PID 复用不
-改变结果。关闭旧句柄仍成功，不保留目标的整个地址空间。具体约束见
-[任务对象生命周期](../cluster/33-task-object-lifetime.md)。用户句柄布局和编号未变。
+TASK/THREAD/DEBUG 的内部身份与 PID 生命周期已分离。句柄和在途 IPC 引用持有小型身份对象；任务回收后旧身份失去目标，操作返回 BAD_HANDLE，PID 复用不改变结果。关闭旧句柄仍成功，不保留目标的整个地址空间。具体约束见[Handle 生命周期](#3-handle-生命周期)。用户句柄布局和编号未变。
 
 ## 1. 对象类型
 
@@ -383,7 +377,7 @@ int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
 
 只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
 
-类型合法权限掩码与 STAT 的关系在 2026-08 修订过一次。`handle_query` 依赖 STAT，因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT （EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c` 的 `ralg` 分区固化（`make smoke-native-contract`）。
+类型合法权限掩码与 STAT 权限严格绑定：`handle_query` 依赖 STAT，因此所有“用户可观察自身属性”的对象类型合法掩码（`a20_type_rights[]`）均包含 STAT。channel 端点创建时安装 `READ|WRITE|STAT|DUP|TRANSFER`，由 `user/tests/test_native_contract.c` 门禁断言。
 
 ---
 
@@ -419,16 +413,19 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 ## 6. 完整 Syscall 列表
 
+> [!TIP]
+> 完整的系统调用速查矩阵、宏定义常量（`A20_SYS_*`）、全架构硬件陷入约定与 C 语言调用代码示例，请参阅专门手册：[系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
+
 ### Core (0x0000)
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
 | 0x0000 | `abi_info` | `int64_t abi_info(a20_abi_info_t *out)` | 查询 ABI 版本和能力 |
 | 0x0001 | `feature_test` | `int64_t feature_test(uint64_t feature_id)` | 测试 feature 可用性 |
-| 0x0003 | `execution_domain_info` | `int64_t execution_domain_info(a20_execution_domain_info_t *out, uint32_t capacity)` | 当前原生执行域状态，见 [契约](../cluster/31-runtime-instance.md) |
-| 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/28-execution-capabilities.md) |
+| 0x0003 | `execution_domain_info` | `int64_t execution_domain_info(a20_execution_domain_info_t *out, uint32_t capacity)` | 当前原生执行域状态，见 [契约](../cluster/runtime-ssi.md) |
+| 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/runtime-ssi.md) |
 
-| 0x0004 | `runtime_info` | `int64_t runtime_info(a20_runtime_info_t *out, uint32_t capacity)` | 不可变运行实例命名空间，见 [契约](../cluster/34-runtime-namespace.md) |
+| 0x0004 | `runtime_info` | `int64_t runtime_info(a20_runtime_info_t *out, uint32_t capacity)` | 不可变运行实例命名空间，见 [契约](../cluster/runtime-ssi.md) |
 | 0x0005 | `runtime_bind` | `int64_t runtime_bind(const a20_runtime_binding_t *in, uint32_t capacity)` | 管理员显式绑定；完全相同的重试幂等 |
 
 ### Handle (0x0100)
@@ -470,8 +467,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_handle_t task, a20_resource_limits_t *args)` | 设置聚合资源限制 |
 | 0x020D | `task_get_usage` | `int64_t task_get_usage(a20_handle_t task, a20_rusage_t *out)` | 查询资源使用量 |
 | 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
-| 0x020F | `signal_check` | `int64_t signal_check(uint64_t flags, uint64_t selected_or_control)` | flags=0 消费原进程级未屏蔽 bitmap；STRUCT 固定宽度形式及 THREAD/PEEK/SELECT 见 [线程通知](../cluster/48-native-thread-signals.md) |
-| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old, uint64_t flags)` | flags=0 保留进程级 mask；THREAD/QUERY 见 [线程通知](../cluster/48-native-thread-signals.md) |
+| 0x020F | `signal_check` | `int64_t signal_check(uint64_t flags, uint64_t selected_or_control)` | flags=0 消费原进程级未屏蔽 bitmap；STRUCT 固定宽度形式及 THREAD/PEEK/SELECT 见 [01-types.md](01-types.md) 与 [09-native-abi-deepening.md](09-native-abi-deepening.md) |
+| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old, uint64_t flags)` | flags=0 保留进程级 mask；THREAD/QUERY 见 [01-types.md](01-types.md) 与 [09-native-abi-deepening.md](09-native-abi-deepening.md) |
 | 0x0211 | `task_mem_read` | `int64_t task_mem_read(a20_task_mem_args_t *args)` | 按 iovec 从目标 task 的地址空间读入本地 |
 | 0x0212 | `task_mem_write` | `int64_t task_mem_write(a20_task_mem_args_t *args)` | 按 iovec 把本地数据写入目标 task 的地址空间 |
 | 0x0213 | `task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 按 handle manifest 克隆当前 task 并安装句柄 |
@@ -542,8 +539,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 ### Cluster (0x0520)
 
-集群 ABI（docs/cluster/01-abi.md）。核心是 `cluster_connect` 返回一个普通
-`A20_OBJ_CHANNEL_ENDPOINT` 句柄，之后调用方用普通 channel 调用即可，不必知道对端在本机还是另一台机器。
+集群 ABI（docs/cluster/01-abi.md）。核心是 `cluster_connect` 返回一个普通`A20_OBJ_CHANNEL_ENDPOINT` 句柄，之后调用方用普通 channel 调用即可，不必知道对端在本机还是另一台机器。
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
@@ -617,6 +613,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0A01 | `system_random` | `int64_t system_random(void *buf, uint64_t len, uint32_t flags)` | 获取密码学安全随机字节 |
 | 0x0A02 | `system_reboot` | `int64_t system_reboot(uint32_t cmd, uint64_t arg)` | 重启/关机/电源控制 |
 | 0x0A03 | `registry_claim` | `int64_t registry_claim(a20_handle_t *out)` | 服务注册表：服务 claim 名字/端点，客户端按名解析（见 [../hybrid-kernel/01-mechanisms.md](../hybrid-kernel/01-mechanisms.md)） |
+| 0x0A04 | `system_kexec` | `int64_t system_kexec(uint32_t op, void *arg)` | 查询 kexec 状态与执行控制 |
 
 ### Sync (0x0B00)
 
@@ -691,4 +688,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F0D | `hyp_stats` | `int64_t hyp_stats(struct hyp_stats *out)` | 读取 hypervisor 统计快照 |
 | 0x0F0E | `hyp_vm_smp` | `int64_t hyp_vm_smp(a20_handle_t vm, uint64_t count)` | 配置有上限的 guest vCPU 数量 |
 
-总计：170 个 syscall（`syscall_table.def` 当前登记数）。
+总计：173 个 syscall（`syscall_table.def` 当前登记数）。

@@ -1,28 +1,16 @@
 # 线程组退出与 SIGCHLD
 
-父进程必须在线程组结束时收到退出通知。仅发布主线程的 ZOMBIE 不够：
-仍有活跃成员时，wait4(WNOHANG) 不会回收该组。若此时提前发送 SIGCHLD，
-随后最后一个成员只唤醒 wait4 等待者、没有发送信号，使用 sigsuspend 的
-shell 就可能永远等待已经结束的命令。
+父进程必须在线程组结束时收到退出通知。仅发布主线程的 ZOMBIE 不够：仍有活跃成员时，wait4(WNOHANG) 不会回收该组。若此时提前发送 SIGCHLD，随后最后一个成员只唤醒 wait4 等待者、没有发送信号，使用 sigsuspend 的 shell 就可能永远等待已经结束的命令。
 
-XFCE 实测中，zsh 等待已经成为 zombie 的 xfconf-query，信号 pending 为零，
-主线程和工作线程均已退出。该问题解释配置命令偶发没有返回提示符，
-也会影响依靠 SIGCHLD 回收子进程的桌面程序。
+XFCE 实测中，zsh 等待已经成为 zombie 的 xfconf-query，信号 pending 为零，主线程和工作线程均已退出。该问题解释配置命令偶发没有返回提示符，也会影响依靠 SIGCHLD 回收子进程的桌面程序。
 
-`proc_exit` 现在在线程组全部结束后、tasklist_lock 下认领一次通知；
-主线程先退出时，由最后一个成员发送。引用保留父进程与组长的身份直到
-完成清理和信号排队。阻塞 wait4 的唤醒仍保留。通知携带组长身份、退出状态
-和 CLD_EXITED/CLD_KILLED/CLD_DUMPED，PID 与 UID 按父进程命名空间转换。
-没有架构或应用名称判断。
+`proc_exit` 现在在线程组全部结束后、tasklist_lock 下认领一次通知；主线程先退出时，由最后一个成员发送。引用保留父进程与组长的身份直到完成清理和信号排队。阻塞 wait4 的唤醒仍保留。通知携带组长身份、退出状态和 CLD_EXITED/CLD_KILLED/CLD_DUMPED，PID 与 UID 按父进程命名空间转换。没有架构或应用名称判断。
 
 ## 验证
 
-`sigchld_group_test` 覆盖组长先退出、工作线程仍阻塞的情况：父进程验证此时
-没有 SIGCHLD 且 WNOHANG 返回零；释放工作线程后，验证收到的 SIGCHLD 包含
-正确 PID、UID、CLD_EXITED 和状态，并能 waitpid 回收。
+`sigchld_group_test` 覆盖组长先退出、工作线程仍阻塞的情况：父进程验证此时没有 SIGCHLD 且 WNOHANG 返回零；释放工作线程后，验证收到的 SIGCHLD 包含正确 PID、UID、CLD_EXITED 和状态，并能 waitpid 回收。
 
-`child_exit_matrix` 覆盖完整组合矩阵，每个用例都断言"恰好回收一次"：一次
-成功的 waitpid、随后 ECHILD、且没有第二条 pending SIGCHLD。
+`child_exit_matrix` 覆盖完整组合矩阵，每个用例都断言"恰好回收一次"：一次成功的 waitpid、随后 ECHILD、且没有第二条 pending SIGCHLD。
 
 | 用例 | 断言 |
 | --- | --- |
@@ -41,6 +29,4 @@ make smoke-sigchld-group
 make smoke-child-exit-matrix      # riscv64, ABI=linux, NR_CPUS=2 / -smp 2
 ```
 
-`smoke-child-exit-matrix` 要求 guest 日志同时出现
-`[SMP] 2/2 configured CPUs online` 与 `CHILD_EXIT_MATRIX: PASS`，并把
-`CHILD_EXIT: FAIL` 作为禁止模式。
+`smoke-child-exit-matrix` 要求 guest 日志同时出现`[SMP] 2/2 configured CPUs online` 与 `CHILD_EXIT_MATRIX: PASS`，并把`CHILD_EXIT: FAIL` 作为禁止模式。

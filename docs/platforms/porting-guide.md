@@ -106,13 +106,6 @@ make check-concurrency-foundation
 
 ## RV32 MCU 执行环境
 
-已有 RV32 MCU 板可以复用 `kernel/arch/riscv32/mcu/` 和 `tools/riscv-mcu.mk`，
-由板级 `board.mk` 显式选择这组入口，不能把 hosted S-mode 启动或 SBI/PLIC 路径混入固件。
-板级提供 `board_config.h`、链接布局及 `mcu.h` 声明的定时/IRQ/复位接口；共享设备寄存器
-协议放在 `kernel/drivers/`。`.boards` 裁剪选择不会把同架构下的 QEMU hosted 内核强制成 MCU。
-软原子运行时仅适用于单核，任务栈及堆须满足 RV32 的 16 字节 ABI 对齐。
-RV32 MCU 可以复用通用 IRQ 返回点抢占机制；ARMv7-M 继续使用其 PendSV 机制。
+已有 RV32 MCU 板可以复用 `kernel/arch/riscv32/mcu/` 和 `tools/riscv-mcu.mk`，由板级 `board.mk` 显式选择这组入口，不能把 hosted S-mode 启动或 SBI/PLIC 路径混入固件。板级提供 `board_config.h`、链接布局及 `mcu.h` 声明的定时/IRQ/复位接口；共享设备寄存器协议放在 `kernel/drivers/`。`.boards` 裁剪选择不会把同架构下的 QEMU hosted 内核强制成 MCU。软原子运行时仅适用于单核，任务栈及堆须满足 RV32 的 16 字节 ABI 对齐。 RV32 MCU 可以复用通用 IRQ 返回点抢占机制；ARMv7-M 继续使用其 PendSV 机制。
 
-新 MCU 板的验收应包括不主动 yield 的忙循环与另一个任务同时取得进展，
-以及从实际部署格式经 ROM/固件加载的启动测试。只有计数器增长或一个内核打印不能证明调度中断有效。
-参考 [ESP32-C3](esp32-c3.md) 的完整构建、打包、模拟与实机验收流程。
+新 MCU 板的验收应包括不主动 yield 的忙循环与另一个任务同时取得进展，以及从实际部署格式经 ROM/固件加载的启动测试。只有计数器增长或一个内核打印不能证明调度中断有效。参考 [ESP32-C3](esp32-c3.md) 的完整构建、打包、模拟与实机验收流程。

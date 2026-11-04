@@ -2,16 +2,14 @@
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
-最后核实：2026-10-13。共享 Native runtime smoke 已支持 RISC-V64/AArch64；实际运行与硬件专属跳过项见 本轮验证。本页是对 [00-overview.md](../../native-abi/00-overview.md) 中实现状态的补充。
+共享 Native runtime smoke 已支持 RISC-V64 与 AArch64 架构。本页是对 [00-overview.md](../../native-abi/00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
-
-> 注：`user/archive/` 目录已于 2026-10 从仓库整体删除（含 musl 桥接参考与旧 coreutils），本节与全文提及处均成历史记录，git 历史可考。
 
 | 组件 | 路径 | 状态 | 说明 |
 |------|------|------|------|
 | Linux ABI 兼容层 | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口。系统启动后实际运行的用户态程序基于 Linux ABI。 |
-| Native ABI 内核入口 | `kernel/abi/native/` | 已登记 | `syscall_table.def` 有 142 条，覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync、device、pager、monitor、kernel-ext 等分区；部分入口仍是受限语义，登记数不等于完整实现。 |
+| Native ABI 内核入口 | `kernel/abi/native/` | 已登记 | `syscall_table.def` 有 173 条，覆盖 core、handle、task、memory、path、ipc、cluster、net、time、security、debug、system info、sync、device、pager、monitor、kernel-ext、hypervisor 等分区；部分入口仍是受限语义，登记数不等于完整实现。 |
 | Typed channel | `kernel/ipc/a20_channel.c` | 已接入 | `channel_create` 接受 `a20_channel_type_t` 类型签名（每端点一份拷贝），send/recv 路径强制执行 handle 类型 bitmask 与 `max_data_size`/`max_handles` 上限，违例返回 `TYPE_MISMATCH`。 |
 | 时态能力 | `kernel/abi/native/handle_table.c` | 已接入 | `handle_control` 提供 `SET_TEMPORAL`/`GET_TEMPORAL`/`SET_LABEL` 入口（仅可增强不可减弱）；sweeper 以 deadline 驱动周期运行（约 100ms），`AUTO_CLOSE` 过期自动回收；channel 传递保留时态约束与安全标签（不可刷新）。 |
 | 阻塞 IPC | `kernel/ipc/a20_channel.c`、`kernel/ipc/a20_event.c` | 已实现 | `channel_send`（队列满）/`channel_recv`（队列空）/`event_wait`（无事件）默认阻塞，`A20_MSG_NONBLOCK`/`timeout_ns=0` 为非阻塞；`event_wait` 支持相对超时与多事件返回，基于 tokenized Park/Wake（见 `docs/kernel/process-scheduler.md`）。 |
@@ -20,8 +18,7 @@
 | liba20c 最小 C 库 | `user/liba20c/` | 活跃 | 已实现 malloc、stdio、unistd、string、time、errno、fdtable 等 ISO C 子集。`malloc.c`、`unistd.c`、`stdio.c`、`bare_alloc.c` 已改为使用带 `size` 和 `version` 的版本化 ABI 结构体调用 syscall。 |
 | 原生测试 | `user/tests/test_native_*.c`、`test_liba20c.c`、mlibc tests | 多个独立目标 | 当前有 16 个 `test_native_*.c`，覆盖 handle、MM、IPC、contract、debug、signal、futex、registry、isolation、personality 等；另有 liba20c/mlibc 测试。构建目标覆盖多架构的子集，但多数 QEMU smoke 固定为 RISC-V64；不存在历史所称“4 套 118 cases host-mode”现行套件。 |
 | mlibc Native libc | `user/external/mlibc/sysdeps/a20/` | 活跃（RISC-V64） | 当前完整 libc 路线；`make mlibc-sysroot` 与 `make smoke-mlibc` 固定使用 RISC-V64 cross file/QEMU。 |
-| musl 移植目录 | `user/musl-port/` | 不存在 | 该目录未在当前仓库中创建。相关历史材料曾移至 `user/archive/`，该目录亦已于 2026-10 一并删除。 |
-| 历史参考（已删除） | `user/archive/` | 已删除 | 曾包含旧版 musl 桥接、`a20coreutils`、`build_sysroot.sh`、`arch/a20/` 适配头等；2026-10 从仓库整体删除，路径与内容需查 git 历史。 |
+| musl 移植目录 | `user/musl-port/` | 不存在 | 该目录未在当前代码树中激活；相关实现参考可查阅 git 历史。 |
 | Debug handle | `kernel/abi/native/` 0x0900 分区 | 完整实现 | 完整停止/恢复语义（`debug_attach/traceme/wait/event/resume/detach/read/write/read_regs/write_regs/kill`），与 Linux ABI ptrace 共享同一 `proc_debug_*` 状态机；已知边界：无硬件单步、无 TRACEFORK/CLONE 事件、无 seccomp 集成、无 watchpoint。 |
 
 ## 关键偏差说明
@@ -42,15 +39,15 @@ struct a20_vm_alloc_args args = {
 int64_t r = a20_vm_alloc(&args);
 ```
 
-`smoke-native-libc` 已在本轮 RISC-V64 与 AArch64 实际运行中通过，配置见本轮验证记录。裸参数数组调用已不存在于 `user/liba20c/*.c`。
+`smoke-native-libc` 已在 RISC-V64 与 AArch64 实际运行中通过，配置见对应验证记录。裸参数数组调用已不存在于 `user/liba20c/*.c`。
 
 ### 2. liba20rt 类型头与内核类型头已对齐
 
 `user/liba20rt/a20_types.h` 与 `kernel/include/abi/native/types.h` 的结构体布局已逐字段对齐（本节为此前的偏差记录，现已修复）。channel wrapper 此前将 `version` 置 0 导致 `A20_VALIDATE_AND_COPY` 拒绝，已修正为 1；`event_wait` 已切换为与 05-ipc.md §3.4 一致的结构化多事件形式。内核侧结构体验证现遵循 01-types.md §2 的演进规则（拒绝短 version-1 结构、长结构体截断、version 0 与超版本拒绝）。
 
-### 3. archive 目录已从仓库删除
+### 3. 历史参考说明
 
-`user/archive/` 已于 2026-10 从仓库整体删除。其中的 `build_sysroot.sh` 曾引用 `user/musl-port/`、`user/archive/src/...` 等路径。不要试图运行该脚本（它已不在仓库中）。如果未来需要重新启动完整 musl 移植，应以 git 历史中的 `user/archive/` 为参考，而不是直接复用。
+历史 musl 桥接与 `build_sysroot.sh` 等材料已移出活跃代码树，相关实现参考可查阅 git 版本历史。
 
 ### 4. 测试覆盖与架构边界
 
@@ -68,7 +65,7 @@ int64_t r = a20_vm_alloc(&args);
 
 `user/external/mlibc` 以 vendor 方式引入 [managarm/mlibc](https://github.com/managarm/mlibc)，新增 `sysdeps/a20/` 移植层（约 1800 行），严格遵守 native ABI 设计取舍：fd↔handle 映射在 libc 内完成；进程创建经 `task_clone`（能力安全续体，见 §5d）；信号为**检查点式模拟**（`sigaction` 记录 handler，`kill` 经 `task_kill` 记录并在阻塞等待返回时于显式检查点投递，见 §5c）；同步原语走 native futex；线程经 `thread_create` + TCB 蹦床；静态链接（`user/mlibc/a20-mlibc.ld` 提供 init_array 边界、PT_TLS phdr 与 `PT_A20_START_INFO` 标记）。
 
-2026-08 的扩展：`fork()`/`execve()` 已基于 `task_clone` + native `A20_SYS_execve` 实现（不再 ENOSYS）；新增 `GetPgid`/`Sigsuspend`/`Ioctl`/`GetPgid` 等 sysdep 与 `sys/ioctl.h`/`paths.h` 头；`Sysdeps<Fork>` 用能力清单（当前 fd 表的 handle 集合）构建子进程 handle 表，子进程重建 fd 表并重缓存 root/cwd/self，并经 `A20_SYS_task_adopt`（0x0216）把 fd 0/1/2/root/cwd/self 声明给内核；**native→native exec 保留 handle 表**（`A20_SYS_execve` 0x0214 在 dispatch 侧跳过 SET_RET 保护 a0=start_info），使 fork+exec 保留调用方的 stdio。**mksh 已移植到 Native ABI**（`make mlibc-mksh` / `smoke-mlibc-mksh`）：内建命令与顺序外部命令（fork+exec+waitpid+SIGCHLD 检查点投递）完整可用；管道作业等待（`a|b`）已不再挂起（waitpid 任意子进程扫描 + SIGCHLD 检查点投递修复），管道数据流已修复（见 §5a-2）。
+运行时扩展：`fork()`/`execve()` 已基于 `task_clone` + native `A20_SYS_execve` 实现（不再 ENOSYS）；新增 `GetPgid`/`Sigsuspend`/`Ioctl`/`GetPgid` 等 sysdep 与 `sys/ioctl.h`/`paths.h` 头；`Sysdeps<Fork>` 用能力清单（当前 fd 表的 handle 集合）构建子进程 handle 表，子进程重建 fd 表并重缓存 root/cwd/self，并经 `A20_SYS_task_adopt`（0x0216）把 fd 0/1/2/root/cwd/self 声明给内核；**native→native exec 保留 handle 表**（`A20_SYS_execve` 0x0214 在 dispatch 侧跳过 SET_RET 保护 a0=start_info），使 fork+exec 保留调用方的 stdio。**mksh 已移植到 Native ABI**（`make mlibc-mksh` / `smoke-mlibc-mksh`）：内建命令与顺序外部命令（fork+exec+waitpid+SIGCHLD 检查点投递）完整可用；管道作业等待（`a|b`）已不再挂起（waitpid 任意子进程扫描 + SIGCHLD 检查点投递修复），管道数据流已修复（见 §5a-2）。
 
 类型化控制（A20 对 ioctl 的回答，已彻底移除 ioctl shim）：`handle_control` 的全部数据 op 使用版本化结构体，`GET_WINSIZE`/`SET_WINSIZE`（`a20_winsize_args_t`）、`TCFLUSH`（`a20_ctl_int_args_t`）、`SET_FLAGS`（`a20_ctl_flags_args_t`，替代 `fcntl(F_SETFL)`/`FIONBIO`）。**内核 Native ABI 不再有通用 ioctl**（`A20_SYS_ioctl` 0x0215 已删除；`handle_control` 的 ioctl/fcntl 垫片 op 0/1 已删除）。mlibc 的 POSIX `ioctl()` 是翻译层：`TIOCGWINSZ`→`GET_WINSIZE`、`TIOCSWINSZ`→`SET_WINSIZE`、`TCFLSH`→`TCFLUSH`、`FIONBIO`→`SET_FLAGS`，未知请求返回 `ENOTTY`；`tcgetwinsize`/`tcsetwinsize`/`tcflush` 直接走类型化 op。文件锁/owner 元数据（`fcntl` F_GETLK 等）在 Native 上返回 `ENOTSUP`。设计见 `docs/native-abi/03-handle.md §2.7`。
 
@@ -82,18 +79,11 @@ Phase 2 新增：
 
 构建与验证：`make mlibc-sysroot`（meson+ninja 构建静态 libc.a），`make smoke-mlibc`（QEMU 冒烟：stdio/malloc/文件 I/O/4 线程 mutex/pipe/poll/socketpair/posix_spawn+waitpid，测试程序 `user/tests/test_mlibc_hello.c` + `test_mlibc_child.c`）。FAT 镜像在 guest 挂到 `/bin`，注入路径按镜像根写（`::/x` 即 guest `/bin/x`）。
 
-动态链接已落地：`make mlibc-shared-sysroot` 产出真实 `ld.so`/`libc.so`，
-`make smoke-mlibc-dynamic` 在 guest 内运行带 TLS 多线程、dlopen、`$ORIGIN`、
-atexit 与 re-exec 的动态 Native 程序。实现与 exec 继承矩阵见
-[current/native-runtime-1.0.md](native-runtime-1.0.md)。
+动态链接已落地：`make mlibc-shared-sysroot` 产出真实 `ld.so`/`libc.so`，`make smoke-mlibc-dynamic` 在 guest 内运行带 TLS 多线程、dlopen、`$ORIGIN`、 atexit 与 re-exec 的动态 Native 程序。实现与 exec 继承矩阵见[current/native-runtime-1.0.md](native-runtime-1.0.md)。
 
-已知限制：task_spawn 的非 stdio handle 继承（仅 fd 0/1/2）、多架构交叉文件（当前
-构建/smoke 只有 riscv64）。private 文件映射的写权限受 handle rights 上限约束，
-rtld 因此以 O_RDWR 打开 DSO，只读介质上的可写段加载仍需 MM 层支持（见
-[native-runtime-1.0.md](native-runtime-1.0.md) §1）。工具链注意：mlibc 需要 glibc
-LP64 fast 类型与 `_GNU_SOURCE`，构建用 `MLIBC_FAST_TYPE_FLAGS` 补齐。
+已知限制：task_spawn 的非 stdio handle 继承（仅 fd 0/1/2）、多架构交叉文件（当前构建/smoke 只有 riscv64）。private 文件映射的写权限受 handle rights 上限约束， rtld 因此以 O_RDWR 打开 DSO，只读介质上的可写段加载仍需 MM 层支持（见[native-runtime-1.0.md](native-runtime-1.0.md) §1）。工具链注意：mlibc 需要 glibc LP64 fast 类型与 `_GNU_SOURCE`，构建用 `MLIBC_FAST_TYPE_FLAGS` 补齐。
 
-### 5a-2. 管道数据流修复（2026-08，已完成）
+### 5a-2. 管道数据流修复（已完成）
 
 mksh `a|b` 与 `$(...)` 捕获现已完整可用（回归门禁：`smoke-mlibc-mksh` 断言 `B3 got:1+2+3+4+5`；`smoke-mlibc` 运行 `test_mlibc_pipeexec.c` 分阶段探针）。根因有三处，均已修复：
 
@@ -118,7 +108,7 @@ A20OS 没有 fork。`task_clone` 是能力安全的"子进程续体"原语：
 
 Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dynamic()` 的 Native descriptor + conventional auxv 封装；剩余工作主要是把该路径与 mlibc rtld/共享库构建联调并形成测试，而非从零实现 loader：
 
-| 工作项 | 内容 | 状态（2026-08） |
+| 工作项 | 内容 | 状态 |
 |--------|------|------|
 | 内核：native 二进制 PT_INTERP | `elf_setup_stack_a20_dynamic()` + 解释器加载/入口切换 | 已验证：`smoke-native-dynlink`（fakeld 探针经 PT_INTERP 加载、校验 auxv 后回跳应用） |
 | 启动协议：auxv | conventional stack/auxv（AT_BASE/AT_ENTRY/AT_PHDR…），start_info 经 a0 传递给解释器并由其转发 | 已验证（同上）；AT_PHDR 计算修正为「首 LOAD 的 vaddr−offset+e_phoff」 |
@@ -128,10 +118,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 | TLS 动态模型 / dlopen | rtld + `__tls_get_addr`；插件用 global-dynamic TLS | 已验证：`smoke-mlibc-dynamic`（可执行文件 + dlopen 插件，4 线程） |
 | AT_EXECFN / `$ORIGIN` | auxv 发布可执行文件路径，rtld 以此展开 RUNPATH | 已验证：清空 `LD_LIBRARY_PATH` 后仅靠 `$ORIGIN/lib` 找到 libc.so |
 
-设计注意：静态 Native 程序不需要 PT_INTERP。动态探针 `smoke-native-dynlink`
-（fakeld）仍保留为内核装载路径的独立探针，但真实动态链接的验收以
-`smoke-mlibc-dynamic` 的真实 `ld.so`/`libc.so` 为准；细节见
-[native-runtime-1.0.md](native-runtime-1.0.md)。
+设计注意：静态 Native 程序不需要 PT_INTERP。动态探针 `smoke-native-dynlink`（fakeld）仍保留为内核装载路径的独立探针，但真实动态链接的验收以`smoke-mlibc-dynamic` 的真实 `ld.so`/`libc.so` 为准；细节见[native-runtime-1.0.md](native-runtime-1.0.md)。
 
 ### 6. 空转机制接入与缺失实现补齐（已完成）
 
@@ -153,23 +140,16 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 ### 7. 当前边界与剩余工作
 
-2026-10-13 源码修订：`event_watch_fs.path` 支持直接子项名称前缀，最长 255 字节，
-拒绝 NUL 和 `/`；空前缀监听全部名称。匹配使用生产点的完整名称，再截断输出的
-`fs_name[32]`。替换 watch 同步替换前缀。它不递归监听子目录；没有名称的事件仅匹配
-空前缀，现有 `FS_MODIFY` 生产点仍不提供名称。回归入口为 `smoke-native-deepen`，
-本轮已进入双架构实际运行；结果见 验证记录。
+2026-10-13 源码修订：`event_watch_fs.path` 支持直接子项名称前缀，最长 255 字节，拒绝 NUL 和 `/`；空前缀监听全部名称。匹配使用生产点的完整名称，再截断输出的`fs_name[32]`。替换 watch 同步替换前缀。它不递归监听子目录；没有名称的事件仅匹配空前缀，现有 `FS_MODIFY` 生产点仍不提供名称。回归入口为 `smoke-native-deepen`，已进入双架构实际运行验证；结果见验证记录。
 
 
-> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
->
-> 2026-08（Native ABI 增添与深化，见 [09-native-abi-deepening.md](../../native-abi/09-native-abi-deepening.md)）已收口：
->
-> - file/socket/pipe 事件源接线：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。
-> - event_watch_fs 深化：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。
-> - Pager（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。
-> - monitor（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。
-> - task_mem_read/write（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。
-> - vm_share_region（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
+VMO 已整合进核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 作为核心薄包装（`kernel/abi/native/vmar.c`），核心 fault 路径与 ABI 头文件解耦，两套 ABI 保持独立。各子系统契约（见 [09-native-abi-deepening.md](../../native-abi/09-native-abi-deepening.md)）：
+- file/socket/pipe 事件源接线：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。
+- event_watch_fs：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。
+- Pager（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。
+- monitor（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。
+- task_mem_read/write（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。
+- vm_share_region（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
 
 - file/socket/pipe 事件源已接线（见上），但事件为边沿触发，`handle_poll` 仍是电平快照。
 - VMO 映射已是**按需调页**：`vmar_map` 只建立 `VM_VMO` VMA，页面在首次 fault 时经核心 `handle_demand_fault_locked` 的 VMO 分支按 `vmo_get_page()` 物化；VMO 帧由 VMO 自身持有（类比 page-cache 帧），fork 时父子共享同一批 canonical 帧而非 COW。文件映射走核心 `mm_mmap_file`，经 page cache 需求填充。
@@ -189,16 +169,16 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 - 若重启，应基于 git 历史中 `user/archive/` 的参考代码重新设计，而不是直接复用旧路径。
 - Debug handle 的 stop/resume/watchpoint 能力也只在有明确调试需求时扩展。
 
-### 已批准设计、待排期的深水区（2026-08 评审通过）
+### 待推进规划
 
-- ~~动态链接联调~~ **内核侧已落地（2026-08）**：PT_INTERP 检出/解释器加载/入口切换/conventional auxv 端到端验证通过（`smoke-native-dynlink` fakeld 探针）；`vm_map` FILE 源 demand-paging 验证通过（test_native_mm 分区 7）。联调中修复两处内核缺陷：AT_PHDR 计算基准与首 LOAD 头部半页文件背书。剩余：mlibc rtld 共享库制品与应用级联调（§8a 估列）。
+- ~~动态链接联调~~ **内核侧已落地**：PT_INTERP 检出/解释器加载/入口切换/conventional auxv 端到端验证通过（`smoke-native-dynlink` fakeld 探针）；`vm_map` FILE 源 demand-paging 验证通过（test_native_mm 分区 7）。联调中修复两处内核缺陷：AT_PHDR 计算基准与首 LOAD 头部半页文件背书。剩余：mlibc rtld 共享库制品与应用级联调（§8a 估列）。
 
-## 与用户决策的对应关系
+## 与系统架构决策的对应关系
 
-- 用户已确认：Linux ABI 继续作为主用户态接口，`abi/native` 保持为辅。
-- `liba20c` 已使用版本化 ABI 结构体；这是当前代码事实，不再是待办。
-- 用户已确认：`user/archive/` 曾作为历史参考保留、不参与当前构建，该目录已于 2026-10 从仓库删除。
-- 用户已确认：Debug handle 保持受限调试接口（不盲目扩展为完整 ptrace）。当前 Debug 分区已实现完整停止/恢复语义（见能力清单），watchpoint 与 TRACEFORK/CLONE 事件不在扩展范围内。
+- Linux ABI 继续作为主用户态接口，`abi/native` 保持为辅。
+- `liba20c` 已使用版本化 ABI 结构体。
+- 历史 musl 移植草稿等参考代码已移出活跃代码树，相关实现参考可查阅 git 版本历史。
+- Debug handle 保持受限调试接口（不扩展为通用 ptrace）。当前 Debug 分区已实现完整停止/恢复语义，watchpoint 与 TRACEFORK/CLONE 事件不在扩展范围内。
 
 <!-- 以下内容从 docs/native-abi/00-overview.md 迁入；只保留当前状态，历史运行记录已删除。 -->
 
@@ -232,45 +212,28 @@ Phase 0 交付了 `liba20rt` 最小运行时，含 syscall 发射宏、142 个 s
 
 详细运行时状态与后续路线图见 [native-abi-runtime-status.md](native-abi-runtime-status.md)。
 
-## ABI 行为与差分验证（2026-10-22）
+## ABI 行为与差分验证
 
 同一份归一化 fixture 现在同时覆盖两个方向：
 
-- **ABI=linux 与 ABI=both 的交叉断言**：`user/cmds/core/abi_behavior.c` 在两种内核档位
-  运行，输出 7 条 `ABI_BEHAVIOR:` 归一化记录（pipe 字节流、fd 表与 dup 共享偏移、
-  匿名 mmap/mprotect、socketpair、电平触发 readiness、坏描述符/零长度错误类）。
-  两条 smoke 都用 `tools/tests/abi_behavior_expected.txt`（手写预期值，不由实现生成）
-  校验；覆盖的操作在两档位上没有差异。
-- **Linux 与 Native personality 的逐操作差分**：`user/tests/test_native_abi_behavior.c`
-  用原生 `a20_path_open`/`a20_hdl_*`/`a20_vm_*`/`a20_net_socketpair`/字节流 pipe
-  原语执行同一操作集并打印同样的行；`tools/abi_behavior_diff.py` 要求两个 block
-  逐行等于预期值且彼此相等。错误类按显式映射归一化（Native `BAD_HANDLE` ↔ Linux
-  `EBADF`，`INVALID_ARGUMENT` ↔ `EINVAL`）；有意差异（handle 空间、权限由 rights
-  而非 uid 判定）记录在 `docs/native-abi/` 的对应参考页。
+- **ABI=linux 与 ABI=both 的交叉断言**：`user/cmds/core/abi_behavior.c` 在两种内核档位运行，输出 7 条 `ABI_BEHAVIOR:` 归一化记录（pipe 字节流、fd 表与 dup 共享偏移、匿名 mmap/mprotect、socketpair、电平触发 readiness、坏描述符/零长度错误类）。两条 smoke 都用 `tools/tests/abi_behavior_expected.txt`（手写预期值，不由实现生成）校验；覆盖的操作在两档位上没有差异。
+- **Linux 与 Native personality 的逐操作差分**：`user/tests/test_native_abi_behavior.c`用原生 `a20_path_open`/`a20_hdl_*`/`a20_vm_*`/`a20_net_socketpair`/字节流 pipe 原语执行同一操作集并打印同样的行；`tools/abi_behavior_diff.py` 要求两个 block 逐行等于预期值且彼此相等。错误类按显式映射归一化（Native `BAD_HANDLE` ↔ Linux `EBADF`，`INVALID_ARGUMENT` ↔ `EINVAL`）；有意差异（handle 空间、权限由 rights 而非 uid 判定）记录在 `docs/native-abi/` 的对应参考页。
 
 ```sh
 make smoke-abi-behavior-linux   # ABI=linux
 make smoke-abi-behavior-both    # ABI=both：Linux + Native 两份输出互相印证
 ```
 
-IDL 版本协商与畸形 ACK 矩阵也在保留架构（AArch64）上执行；`tools/run-idl-ack-matrix.sh`
-构建 test-only adversary、组成镜像、注入后运行：
+IDL 版本协商与畸形 ACK 矩阵也在保留架构（AArch64）上执行；`tools/run-idl-ack-matrix.sh`构建 test-only adversary、组成镜像、注入后运行：
 
 ```sh
 make smoke-idl-ack-aarch64      # 正 legacy 回退 + 9 条畸形 ACK 拒绝，共 10 例
 ```
 
-RISC-V64 的同一矩阵在 SMP2 上同样通过。各消息族的未知值契约（SVCMGR 原样回显、
-RTCD 消费不回复、UFSD `-ENOSYS`、协商 ACK 拒绝）见
-[05-idl-and-personality.md](../../hybrid-kernel/05-idl-and-personality.md) §1.5。
+RISC-V64 的同一矩阵在 SMP2 上同样通过。各消息族的未知值契约（SVCMGR 原样回显、 RTCD 消费不回复、UFSD `-ENOSYS`、协商 ACK 拒绝）见[05-idl-and-personality.md](../../hybrid-kernel/05-idl-and-personality.md) §1.5。
 
 ## 安全候选的继承与信号返回
 
-RV64 MMU 的信号 restorer 由匿名 VMO 持有，以 RX 映射且权限上限固定为 RX；
-不再为信号返回请求可写栈可执行。fork 复制既有 VMA/VMO 引用，exec/退出复用 MM
-清理；分配失败不放宽 W^X。WX deny 下 shell 子进程退出、seccomp TRAP/SIGSYS
-和完整 sandbox workload 通过。NOMMU 保持原架构行为，未计作受硬件保护的 W^X。
+RV64 MMU 的信号 restorer 由匿名 VMO 持有，以 RX 映射且权限上限固定为 RX；不再为信号返回请求可写栈可执行。fork 复制既有 VMA/VMO 引用，exec/退出复用 MM 清理；分配失败不放宽 W^X。WX deny 下 shell 子进程退出、seccomp TRAP/SIGSYS 和完整 sandbox workload 通过。NOMMU 保持原架构行为，未计作受硬件保护的 W^X。
 
-Landlock 在子任务发布前 pin 父任务已安装的冻结策略，退出/创建失败释放各自引用；
-exec 保留原任务策略。适用接口与 RV64 候选矩阵见
-[安全候选现状](security-status.md)。
+Landlock 在子任务发布前 pin 父任务已安装的冻结策略，退出/创建失败释放各自引用； exec 保留原任务策略。适用接口与 RV64 候选矩阵见[安全候选现状](security-status.md)。

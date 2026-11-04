@@ -1,6 +1,6 @@
 # A20OS VFS 边界语义设计
 
-P1 Wave 1 收紧了 VFS 的 Linux 边界语义，下面按领域记录当时的决策，并区分当前实现与未完成项。内容已按 2026-08 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；运行结论需在当前提交上复验，历史平台记录不能外推。
+本文档规范 A20OS VFS 的 Linux 边界语义契约，定义各系统调用在特定标志与边界条件下的行为保证及当前实现的边界约束。
 
 > **实现状态**：核心路径已有实现，但不是完整 Linux 兼容。`RESOLVE_NO_MAGICLINKS` 已在 resolver 中执行检查（`/proc/<pid>/fd/N` 类 jump link 拒绝穿越，返回 `-ELOOP`），`RESOLVE_CACHED` 通过 dentry cache 命中检查实现（未命中返回 `-EAGAIN`），A20OS 自定义 `RESOLVE_NO_TRAILING_SYMLINKS` 已移除、不再与 Linux 的 bit 分配冲突，`renameat2` 能力取决于具体后端。`smoke-vfs-edge` 当前只在 RISC-V64、1 vCPU 上运行，覆盖选定场景，不是全 flag、全后端或双架构证明。
 
@@ -63,7 +63,7 @@ P1 Wave 1 收紧了 VFS 的 Linux 边界语义，下面按领域记录当时的�
 
 ### 3.2 决策
 
-实现 `RENAME_NOREPLACE`、`RENAME_EXCHANGE`，并记录 `RENAME_WHITEOUT` 本轮范围外，因为 A20OS 没有 overlay/whiteout 文件系统支持。
+实现 `RENAME_NOREPLACE`、`RENAME_EXCHANGE`；`RENAME_WHITEOUT` 在范围之外，因为 A20OS 没有 overlay/whiteout 文件系统支持。
 
 不带冲突 flag 的 source 与 target 为同一路径时返回成功。`RENAME_NOREPLACE` 仍按“目标已存在”规则处理，不能把普通 same-path no-op 扩展成所有 flag 组合都成功。
 
@@ -151,7 +151,7 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 - `kernel/fs/xattr.c`：`xattr_check_namespace` helper 与 capability 检查。
 - `kernel/abi/linux/sys_xattr.c`：通过 vnode xattr helper 执行 namespace 检查。
 - `kernel/include/fs/xattr.h`：namespace 常量。
-- `kernel/fs/diskfs/fat32.c` / `kernel/fs/diskfs/ext4.c`：记录本轮不增加后端 xattr hook。
+- `kernel/fs/diskfs/fat32.c` / `kernel/fs/diskfs/ext4.c`：暂不增加后端 xattr hook。
 - `user/cmds/stress/vfs_edge.c`：覆盖 user/invalid/trusted namespace 的选定行为。
 
 ## 7. Symlink loop limit

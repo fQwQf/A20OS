@@ -5,7 +5,7 @@
 #define MMIO32(addr) (*(volatile uint32_t *)(addr))
 /* Custom STM32F103Z(E) fabric wiring: NE1 shared SRAM, NE2 control registers.
  * Asynchronous 16-bit timing at the reset HSI clock; PD6 is mandatory NWAIT.
- * The fabric must implement the wait/arbitration contract in docs/cluster/25. */
+ * The fabric must implement the wait/arbitration contract in docs/cluster/mcu-shared-kernel.md. */
 void mcu_fabric_bus_init(void) {
     MMIO32(STM32_RCC_APB2ENR) |= 0x1e0U;  /* GPIOD/E/F/G */
     MMIO32(STM32_RCC_AHBENR) |= 1U << 8; /* FSMC */

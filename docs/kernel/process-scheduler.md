@@ -13,18 +13,9 @@
 - `kernel/proc/current.c`：current slot 与切换完成；
 - `kernel/proc/lifetime.c`：运行时不变量和统计。
 
-Task object identity 是独立于 task 存储和 PID 分配的引用对象。TASK/THREAD/DEBUG
-handles 与在途传递持有 identity 引用；identity 对 task 的反向关联是弱引用，pin 时必须在
-`task_object_lock` 下先核对 destroy 状态并取得 task 引用。detach 只清弱关联；task 最后引用
-释放后才释放 identity。退出通知先 pin，再在锁外调用 watcher，避免回调重入锁。对应的
-Rust 状态域由 `TASK_OBJECTS_IMPL=rust` 选择，Makefile 当前默认 `c`；这不改变 C task 存储、
-PID allocator 或 handle table 的所有权。
+Task object identity 是独立于 task 存储和 PID 分配的引用对象。TASK/THREAD/DEBUG handles 与在途传递持有 identity 引用；identity 对 task 的反向关联是弱引用，pin 时必须在`task_object_lock` 下先核对 destroy 状态并取得 task 引用。detach 只清弱关联；task 最后引用释放后才释放 identity。退出通知先 pin，再在锁外调用 watcher，避免回调重入锁。对应的 Rust 状态域由 `TASK_OBJECTS_IMPL=rust` 选择，Makefile 当前默认 `c`；这不改变 C task 存储、 PID allocator 或 handle table 的所有权。
 
-退出路径采用 `exit.c` 中的有序退出控制器；它按阶段处理子进程重挂、资源解绑、通知和
-最终引用释放。`TASK_EXIT_IMPL` 在 Makefile 中仍默认为 `c` 并保留分支，`task.c` 的最终
-task-object release 也仍受条件配置控制；因此文档不把整个 task exit 或 final release
-描述为 Rust-only。正常改动应保持 `proc_put` 的最后引用只在对象已脱离调度、父子关系和
-弱 identity 反向链接后释放。
+退出路径采用 `exit.c` 中的有序退出控制器；它按阶段处理子进程重挂、资源解绑、通知和最终引用释放。`TASK_EXIT_IMPL` 在 Makefile 中仍默认为 `c` 并保留分支，`task.c` 的最终 task-object release 也仍受条件配置控制；因此文档不把整个 task exit 或 final release 描述为 Rust-only。正常改动应保持 `proc_put` 的最后引用只在对象已脱离调度、父子关系和弱 identity 反向链接后释放。
 
 ## 1. 三个相互独立的状态维度
 
@@ -108,19 +99,9 @@ park_lock -> a20_handle_table.lock
 
 每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 沿按 deadline 排序的 treap 下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务，最坏 O(log n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
 
-设置 RT policy/priority 的核心入口 `proc_sched_set()` 在目标 `park_lock` 内检查
-`CAP_SYS_NICE` 或 `RLIMIT_RTPRIO` 软上限；已有 RT 任务允许降优先级，不能借此
-越过当前优先级与软上限的较大值。RTPRIO 默认软硬上限均为零，fork 继承快照，
-提高硬上限要求 `CAP_SYS_RESOURCE`。Linux 修改其他用户任务还检查属主，
-Native 仍要求相应 TASK handle rights。
+设置 RT policy/priority 的核心入口 `proc_sched_set()` 在目标 `park_lock` 内检查`CAP_SYS_NICE` 或 `RLIMIT_RTPRIO` 软上限；已有 RT 任务允许降优先级，不能借此越过当前优先级与软上限的较大值。RTPRIO 默认软硬上限均为零，fork 继承快照，提高硬上限要求 `CAP_SYS_RESOURCE`。Linux 修改其他用户任务还检查属主， Native 仍要求相应 TASK handle rights。
 
-RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在 runqueue 锁内
-计量。预算耗尽后暂停选择 RT 任务，`sched()` 也不得因 current 的 RT 优先级
-保留它；下周期恢复。暂停的任务保留队列引用和调度策略；无普通任务时 idle
-允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数
-（需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。
-`sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；
-配置和日志见 本轮验证，不覆盖长 syscall 有界延迟。
+RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在 runqueue 锁内计量。预算耗尽后暂停选择 RT 任务，`sched()` 也不得因 current 的 RT 优先级保留它；下周期恢复。暂停的任务保留队列引用和调度策略；无普通任务时 idle 允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数（需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。`sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；配置和日志见测试记录，目前尚不覆盖长 syscall 有界延迟。
 
 本地选择分两段：
 
@@ -148,70 +129,26 @@ IPI 是通知，不是调度决定。handler 只确认通知和建立 acquire �
 
 ### 4.1 内核态抢占点（CONFIG_KERNEL_PREEMPT）
 
-hosted 架构默认开启；MCU profile（armv7m 的 PendSV 协作模型）不编入。内核态任务在长
-syscall 里不再独占 CPU 到 syscall 返回：`kernel_trap_handler()` 的 IRQ 分支处理完
-`arch_handle_irq()` 后，`kernel_preempt_at_irq_return()` 在全部条件满足时直接
-`proc_yield()` 切换——need_resched 未决、当前任务非 idle 且为 RUNNING、
-`preempt_allowed()`（per-CPU 抢占计数为 0 且不在 hardirq 中）、被中断上下文中断是开的
-（各架构钩子 `ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx)` 读保存的状态寄存器：x86_64
-`rflags.IF`、riscv `sstatus.SPIE`、aarch64 `SPSR.I`、loongarch `PRMD.PIE`、arm32
-`CPSR.I`、ppc64le `SRR1.MSR.EE`；缺钩子的 hosted 构建是编译错误而非静默禁用）。
+hosted 架构默认开启；MCU profile（armv7m 的 PendSV 协作模型）不编入。内核态任务在长 syscall 里不再独占 CPU 到 syscall 返回：`kernel_trap_handler()` 的 IRQ 分支处理完`arch_handle_irq()` 后，`kernel_preempt_at_irq_return()` 在全部条件满足时直接`proc_yield()` 切换——need_resched 未决、当前任务非 idle 且为 RUNNING、`preempt_allowed()`（per-CPU 抢占计数为 0 且不在 hardirq 中）、被中断上下文中断是开的（各架构钩子 `ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx)` 读保存的状态寄存器：x86_64 `rflags.IF`、riscv `sstatus.SPIE`、aarch64 `SPSR.I`、loongarch `PRMD.PIE`、arm32 `CPSR.I`、ppc64le `SRR1.MSR.EE`；缺钩子的 hosted 构建是编译错误而非静默禁用）。
 
-恢复路径不需要任何新汇编：内核态 trap 落在被中断任务自己的内核栈上，被抢占任务的
-kstack 自底向上叠着 `[被中断内核帧][IRQ 帧][trap_context][handler 帧][sched() 帧]`，
-`__switch` 切回后从 `sched()` 返回、沿中断尾声 iret/eret/sret 回到断点——与 syscall 中
-阻塞的既有路径同构。
+恢复路径不需要任何新汇编：内核态 trap 落在被中断任务自己的内核栈上，被抢占任务的 kstack 自底向上叠着 `[被中断内核帧][IRQ 帧][trap_context][handler 帧][sched() 帧]`，`__switch` 切回后从 `sched()` 返回、沿中断尾声 iret/eret/sret 回到断点——与 syscall 中阻塞的既有路径同构。
 
 支撑不变量有二，均被机制强制而非仅靠约定：
 
-1. **per-CPU 抢占计数在每次 `__switch` 时必为 0**。自愿切换在持锁下被锁契约禁止，
-   `context_switch_locked()` 入口的无条件 panic 把它变成 checked fact；抢占式切换被
-   `preempt_count()==0` 挡住。计数因此无需随任务保存/恢复，`spin_lock/spin_unlock/
-   spin_trylock_irqsave` 按同一规则维护：普通自旋锁在每次尝试原子取锁**之前**增加
-   计数，失败立即回退该计数再等待，成功则一直保持到释放锁。这样不存在已经持锁但
-   仍可抢占的窗口；等待保留调用方原有的嵌套深度，不额外禁止抢占。irqsave 变体在
-   中断关闭时取锁，同样在释放锁之后减少计数。
-2. **切换窗口对中断不可见**。`sched()` 的 pick→publish→`__switch` 段全程关中断；
-   `__switch` 按任务保存/恢复 rflags/sstatus，各任务在自己的 `out:` 处恢复自己保存的
-   标志，因此任何任务都不会观察到中断落在别人的切换窗口里。
+1. **per-CPU 抢占计数在每次 `__switch` 时必为 0**。自愿切换在持锁下被锁契约禁止，`context_switch_locked()` 入口的无条件 panic 把它变成 checked fact；抢占式切换被`preempt_count()==0` 挡住。计数因此无需随任务保存/恢复，`spin_lock/spin_unlock/ spin_trylock_irqsave` 按同一规则维护：普通自旋锁在每次尝试原子取锁**之前**增加计数，失败立即回退该计数再等待，成功则一直保持到释放锁。这样不存在已经持锁但仍可抢占的窗口；等待保留调用方原有的嵌套深度，不额外禁止抢占。irqsave 变体在中断关闭时取锁，同样在释放锁之后减少计数。
+2. **切换窗口对中断不可见**。`sched()` 的 pick→publish→`__switch` 段全程关中断；`__switch` 按任务保存/恢复 rflags/sstatus，各任务在自己的 `out:` 处恢复自己保存的标志，因此任何任务都不会观察到中断落在别人的切换窗口里。
 
-`preempt_disable()` 还须保证 CPU 槽选择与计数递增之间不会迁移：它短暂保存并关闭
-本地中断，更新当前 CPU 的计数后恢复原中断状态。否则，首次递增前的 IRQ 可以把
-任务移到另一 CPU，使旧 CPU 的计数增加而新 CPU 仍允许抢占。这段保护只覆盖计数
-发布，不覆盖争用等待。宿主回归 `test_spinlock_preempt_window.c` 直接执行内核的
-锁和计数实现，在 CPU 槽读取及取锁成功边界注入中断时序；分别换回旧实现均会失败。
+`preempt_disable()` 还须保证 CPU 槽选择与计数递增之间不会迁移：它短暂保存并关闭本地中断，更新当前 CPU 的计数后恢复原中断状态。否则，首次递增前的 IRQ 可以把任务移到另一 CPU，使旧 CPU 的计数增加而新 CPU 仍允许抢占。这段保护只覆盖计数发布，不覆盖争用等待。宿主回归 `test_spinlock_preempt_window.c` 直接执行内核的锁和计数实现，在 CPU 槽读取及取锁成功边界注入中断时序；分别换回旧实现均会失败。
 
-页表 MCS 锁直接使用每 CPU 的节点池，不经过普通自旋锁包装。它必须在选取节点池
-之前禁止抢占，并保持到对应解锁完成队列交接、弹出节点后再恢复；排队等待期间也
-必须保留这份保护。否则任务迁移会让解锁访问另一 CPU 的池，即使只有一个 CPU，
-任务切换也会让不同任务交错使用同一池的嵌套深度。页表 cursor 的初始深度由同一次
-受保护的取锁操作返回，避免在保护建立前读取 CPU 本地状态。
-cursor 批量解锁先在保护下计算需要弹出的节点数；最后一次解锁允许任务迁移，
-因此后续循环只能读取本地剩余计数，不能重新检查旧 CPU 的节点池。宿主回归
-`test_pt_mcs_preempt_window.py` 在最后一次恢复抢占时模拟迁移及旧 CPU 被另一任务
-复用节点池，换回旧循环会失败。
+页表 MCS 锁直接使用每 CPU 的节点池，不经过普通自旋锁包装。它必须在选取节点池之前禁止抢占，并保持到对应解锁完成队列交接、弹出节点后再恢复；排队等待期间也必须保留这份保护。否则任务迁移会让解锁访问另一 CPU 的池，即使只有一个 CPU，任务切换也会让不同任务交错使用同一池的嵌套深度。页表 cursor 的初始深度由同一次受保护的取锁操作返回，避免在保护建立前读取 CPU 本地状态。 cursor 批量解锁先在保护下计算需要弹出的节点数；最后一次解锁允许任务迁移，因此后续循环只能读取本地剩余计数，不能重新检查旧 CPU 的节点池。宿主回归`test_pt_mcs_preempt_window.py` 在最后一次恢复抢占时模拟迁移及旧 CPU 被另一任务复用节点池，换回旧循环会失败。
 
-效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
-A/B 探针为 `user/cmds/core/preempt_lat.c`（256MB page-cache read 作为长 syscall）。
-SCHED_RR 死循环任务
-跑满 slice 后也会被 tick→need_resched→本节判定点轮转，`rt_pick_best_locked()` 的
-"只在 pick 时轮转"限制随之消失。
+效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级； A/B 探针为 `user/cmds/core/preempt_lat.c`（256MB page-cache read 作为长 syscall）。 SCHED_RR 死循环任务跑满 slice 后也会被 tick→need_resched→本节判定点轮转，`rt_pick_best_locked()` 的"只在 pick 时轮转"限制随之消失。
 
-x86 首次任务入口可能恢复开启中断的初始 flags。返回用户态的汇编入口先关闭
-maskable IRQ，再发布 TSS、GS、用户 FS 和返回帧，最终由 `iretq` 恢复用户 flags。
-内核 IRQ 尾声也恢复入口保存的 FS base，避免打断过渡窗口后遗留内核 canary stub。
-x86 的 fork/clone 会将 syscall 时的 live FP 状态保存到子任务的初始 context；
-不能复制可能过期的父任务已保存 context，也不能用新进程的默认 FP 状态替代继承。
+x86 首次任务入口可能恢复开启中断的初始 flags。返回用户态的汇编入口先关闭 maskable IRQ，再发布 TSS、GS、用户 FS 和返回帧，最终由 `iretq` 恢复用户 flags。内核 IRQ 尾声也恢复入口保存的 FS base，避免打断过渡窗口后遗留内核 canary stub。 x86 的 fork/clone 会将 syscall 时的 live FP 状态保存到子任务的初始 context；不能复制可能过期的父任务已保存 context，也不能用新进程的默认 FP 状态替代继承。
 
 ## 5. Tokenized Park/Wake
 
-子进程等待的扫描与注册也必须连续：`proc_wait4()` 在 `tasklist_lock` 下扫描，
-仍持有该锁时取得 `park_lock`，发布 `waiting_for_child` 并准备 park token，
-最后释放两把锁再提交休眠。子进程退出通知同样经过 `tasklist_lock`，不能落在
-“扫描结束但尚未注册”之间。原先在锁前检查的全局 waiter 计数快速路径已经删除：
-即使计数改成原子操作，注册前读到零仍会漏掉这次通知。僵尸 leader 仍有活动线程时，等待应继续而不是返回
-`ECHILD`；最后一个线程退出后需要唤醒 leader 的父进程。普通 pidfd 的可读条件
-同样是整个线程组退出，而不是 leader 单独成为僵尸。
+子进程等待的扫描与注册也必须连续：`proc_wait4()` 在 `tasklist_lock` 下扫描，仍持有该锁时取得 `park_lock`，发布 `waiting_for_child` 并准备 park token，最后释放两把锁再提交休眠。子进程退出通知同样经过 `tasklist_lock`，不能落在“扫描结束但尚未注册”之间。原先在锁前检查的全局 waiter 计数快速路径已经删除：即使计数改成原子操作，注册前读到零仍会漏掉这次通知。僵尸 leader 仍有活动线程时，等待应继续而不是返回`ECHILD`；最后一个线程退出后需要唤醒 leader 的父进程。普通 pidfd 的可读条件同样是整个线程组退出，而不是 leader 单独成为僵尸。
 
 所有可能丢失唤醒的阻塞路径都遵循同一顺序：
 
@@ -256,11 +193,7 @@ Park deadline 使用全局最小堆。每个活动项持有一个 task 引用，
 - heap 满、重复注册或引用获取失败必须回滚 prepare 并向调用者传播错误；
 - alarm/itimer 使用独立字段，不占用 Park timeout 项。
 
-`CONFIG_WAIT_TIMER_HEAP_MAX` 是实际容量边界，不允许为了测试静默扩容。
-通过 `make WAIT_TIMER_HEAP_MAX=N` 选择 1–8192 项；默认 hosted 配置为
-8192，MCU 为 64，受限 STM32 QEMU 配置为 4。构建会把 C 侧最终有效容量
-传给 Rust，使等待 heap 的实际静态数组也缩小，容量进入 Rust 增量构建指纹。
-算法仍为同一个最小堆，无额外运行时分派。MCU 的 alarm heap 继续使用已有的小容量 C 实现。
+`CONFIG_WAIT_TIMER_HEAP_MAX` 是实际容量边界，不允许为了测试静默扩容。通过 `make WAIT_TIMER_HEAP_MAX=N` 选择 1–8192 项；默认 hosted 配置为 8192，MCU 为 64，受限 STM32 QEMU 配置为 4。构建会把 C 侧最终有效容量传给 Rust，使等待 heap 的实际静态数组也缩小，容量进入 Rust 增量构建指纹。算法仍为同一个最小堆，无额外运行时分派。MCU 的 alarm heap 继续使用已有的小容量 C 实现。
 
 ## 8. 信号、STOPPED 与远程退出
 
