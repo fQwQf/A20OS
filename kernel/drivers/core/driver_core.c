@@ -1044,3 +1044,25 @@ int driver_core_list_drivers(char *buf, size_t sz)
     }
     return (int)off;
 }
+
+/* Format the registered devices for the MCU shell / diagnostics. */
+int driver_core_list_devices(char *buf, size_t sz)
+{
+    if (!buf)
+        return -EINVAL;
+    size_t off = 0;
+    for (int i = 0; i < g_device_count; i++) {
+        device_t *dev = g_devices[i];
+        if (!dev || !dev->name)
+            continue;
+        int n = snprintf(buf + off, sz > off ? sz - off : 0,
+                         "%s state=%d drv=%s\n", dev->name, dev->state,
+                         dev->drv && dev->drv->name ? dev->drv->name : "-");
+        if (n < 0)
+            break;
+        off += (size_t)n;
+        if (off >= sz)
+            break;
+    }
+    return (int)off;
+}
