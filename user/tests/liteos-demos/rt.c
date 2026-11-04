@@ -283,27 +283,126 @@ static int test_priority_inheritance(void)
     return ok;
 }
 
+
+/* ---------------------------------------------------------------------- */
+/* 5. chained inheritance: A waits on B, B waits on C                     */
+/* ---------------------------------------------------------------------- */
+
+static osMutexId_t g_chain_m1;
+static osMutexId_t g_chain_m2;
+static volatile int g_chain_owner_done;
+static volatile int g_chain_middle_done;
+static volatile int g_chain_high_done;
+
+static void chain_owner(void *arg)
+{
+    (void)arg;
+    osMutexAcquire(g_chain_m1, osWaitForever);
+    osSemaphoreRelease(g_ready);
+    (void)osEventFlagsWait(g_ev, 8U, osFlagsWaitAny | osFlagsNoClear,
+                           osWaitForever);
+    osMutexRelease(g_chain_m1);
+    g_chain_owner_done = 1;
+}
+
+static void chain_middle(void *arg)
+{
+    (void)arg;
+    osMutexAcquire(g_chain_m2, osWaitForever);
+    osSemaphoreRelease(g_ready);
+    /* Holds M2 while waiting on M1: the link that must inherit A's
+     * priority and pass it on to C. */
+    osMutexAcquire(g_chain_m1, osWaitForever);
+    osMutexRelease(g_chain_m1);
+    osMutexRelease(g_chain_m2);
+    g_chain_middle_done = 1;
+}
+
+static void chain_high(void *arg)
+{
+    (void)arg;
+    osMutexAcquire(g_chain_m2, osWaitForever);
+    g_chain_high_done = 1;
+    osMutexRelease(g_chain_m2);
+}
+
+static int test_chained_inheritance(void)
+{
+    demo_log("[4.5] chained-priority-inheritance");
+    g_chain_m1 = osMutexNew(NULL);
+    g_chain_m2 = osMutexNew(NULL);
+    int ok = demo_check(g_chain_m1 && g_chain_m2, "chain mutexes");
+    if (!ok)
+        return 0;
+
+    g_chain_owner_done = 0;
+    g_chain_middle_done = 0;
+    g_chain_high_done = 0;
+    osThreadAttr_t owner_attr, middle_attr, high_attr;
+    rt_attr(&owner_attr, "chain-owner", osPriorityLow, 0);
+    rt_attr(&middle_attr, "chain-middle", osPriorityBelowNormal, 1);
+    rt_attr(&high_attr, "chain-high", osPriorityHigh, 2);
+
+    osThreadId_t owner = osThreadNew(chain_owner, NULL, &owner_attr);
+    ok &= demo_check(owner != NULL, "chain owner");
+    if (!owner)
+        return ok;
+    (void)osSemaphoreAcquire(g_ready, 1000);   /* C holds M1 */
+
+    osThreadId_t middle = osThreadNew(chain_middle, NULL, &middle_attr);
+    ok &= demo_check(middle != NULL, "chain middle");
+    if (!middle)
+        return ok;
+    (void)osSemaphoreAcquire(g_ready, 1000);   /* B holds M2, waits on M1 */
+
+    osThreadId_t high = osThreadNew(chain_high, NULL, &high_attr);
+    ok &= demo_check(high != NULL, "chain high waiter");
+    /* A is blocked on M2, B on M1 and C on the event.  A's priority must
+     * have reached both B and C: the direct check is the effective kernel
+     * priority, not a timing threshold. */
+    ok &= demo_check(osThreadGetPriority(owner) == osPriorityHigh,
+                     "chained donation reached the mutex owner");
+    ok &= demo_check(osThreadGetPriority(middle) == osPriorityHigh,
+                     "chained donation reached the middle link");
+
+    if (high) {
+        (void)osEventFlagsSet(g_ev, 8U);
+        osThreadJoin(owner);
+        osThreadJoin(middle);
+        osThreadJoin(high);
+    }
+    ok &= demo_check(g_chain_owner_done && g_chain_middle_done &&
+                         g_chain_high_done,
+                     "all three chain links completed");
+    demo_log("[4.5] chained done ok=%d", ok);
+    osMutexDelete(g_chain_m1);
+    osMutexDelete(g_chain_m2);
+    g_chain_m1 = g_chain_m2 = NULL;
+    return ok;
+}
+
 int experiment_45(void)
 {
     demo_log("[4.5] static priorities and priority inheritance");
     g_ev = osEventFlagsNew(NULL);
     g_ready = osSemaphoreNew(4, 0, NULL);
     int ok = demo_check(g_ev && g_ready, "4.5 objects");
-    int p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+    int p1 = 0, p2 = 0, p3 = 0, p4 = 0, p5 = 0;
     if (g_ev && g_ready) {
         p1 = test_create_priority();
         p2 = test_set_priority();
         p3 = test_kernel_lock();
         p4 = test_priority_inheritance();
+        p5 = test_chained_inheritance();
         osEventFlagsDelete(g_ev);
         osSemaphoreDelete(g_ready);
         osMutexDelete(g_mtx);
-        ok &= p1 && p2 && p3 && p4;
+        ok &= p1 && p2 && p3 && p4 && p5;
     }
     g_ev = NULL;
     g_ready = NULL;
     g_mtx = NULL;
-    demo_log("[4.5] %s create=%d setprio=%d lock=%d inherit=%d",
-             ok ? "PASS" : "FAIL", p1, p2, p3, p4);
+    demo_log("[4.5] %s create=%d setprio=%d lock=%d inherit=%d chain=%d",
+             ok ? "PASS" : "FAIL", p1, p2, p3, p4, p5);
     return ok;
 }
