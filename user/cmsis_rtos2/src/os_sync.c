@@ -95,7 +95,7 @@ static osStatus_t mutex_acquire(osMutexId_t m, uint32_t timeout)
          * the core drops it when the owner's last mutex is released.
          */
         if (m->attr & osMutexPrioInherit)
-            (void)osb_thread_boost(m->owner, self->priority);
+            (void)osb_thread_boost(m->owner);
         self->state = osThreadBlocked;
         int rc = osb_bq_wait_until(m->obj.q, deadline);
         self->state = osThreadRunning;

@@ -210,10 +210,9 @@ osPriority_t osb_thread_get_priority(osThreadId_t t)
  * with, so inheritance has nothing to donate to.  The MCU/Native backend is
  * where CMSIS priorities and PI are real.
  */
-int osb_thread_boost(osThreadId_t t, osPriority_t prio)
+int osb_thread_boost(osThreadId_t t)
 {
     (void)t;
-    (void)prio;
     return 0;
 }
 

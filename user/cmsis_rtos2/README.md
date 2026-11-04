@@ -83,9 +83,11 @@ CMSIS priority is the kernel RT priority (1:1, `osPriorityIdle(1)` through
 * semaphore/mutex release broadcasts; the RT runqueue picks the highest
   waiter, and lower waiters re-check and sleep again;
 * mutex inheritance is kernel-owned (`proc_sched_rt_donate/restore`): the
-  scheduler stores the maximum donation and the base policy/priority/nice,
-  re-keys a READY owner through the normal `proc_sched_set()` path, and
-  restores it when the owner releases its last mutex;
+  waiter donates its **effective** RT priority (so a chained donation
+  propagates), the scheduler stores the maximum donation and the base
+  policy/priority/nice, re-keys a READY owner through the normal
+  `proc_sched_set()` path, and restores it when the owner releases its last
+  mutex;
 * `osKernelLock` is a per-task `sched_lock_depth` checked by the kernel's
   preemption points, not a user-space priority trick.  It defers the
   scheduler, not interrupts; blocking inside the lock is still an

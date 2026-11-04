@@ -92,7 +92,7 @@ osPriority_t osb_thread_get_priority(osThreadId_t t);
  * personality only decides when a mutex waiter needs a donation and when the
  * owner's last mutex has been released.
  */
-int      osb_thread_boost(osThreadId_t owner, osPriority_t prio);
+int      osb_thread_boost(osThreadId_t owner);
 void     osb_thread_unboost(osThreadId_t t);
 int      osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set);
 uint32_t osb_thread_get_affinity(osThreadId_t t);
