@@ -101,6 +101,12 @@ default) and 1 kHz on the QEMU MCU board.  `osDelay(1)`, timeouts and software
 timers cannot be finer than that; a sub-tick control loop needs a hardware
 timer or a faster tick.
 
+A freestanding target must compile with `OS_NATIVE_TICK_HZ` equal to the
+kernel's `ARCH_TIMER_FREQ`.  The in-tree demo derives it from `MCU_TICK_HZ`
+(1000 for QEMU, 100 for Hi3861); leaving the default 100 makes
+`osKernelGetTickFreq()` disagree with the kernel and stretches every CMSIS
+timeout.
+
 `user/tests/liteos-demos/rt.c` exercises this model as experiment 4.5:
 creation priority, `osThreadSetPriority`, `osKernelLock` deferral and mutex
 inheritance.
