@@ -19,7 +19,7 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 
 DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
-BSD 当前仍缺多 FIB 与源策略、DHCPv6-PD 及 LAN 前缀发布。BSD 的
+BSD 当前仍缺多 FIB 与源策略、DHCPv6-PD 续租及 LAN 前缀发布。BSD 的
 `SO_BINDTODEVICE` 当前仅接受主接口，指定次级网卡返回 `EOPNOTSUPP`。
 
 ## WAN IPv6 自动配置
@@ -43,7 +43,33 @@ python3 tools/net/tests/test-bsd-router-ipv6-ra.py \
   --kernel <路由内核的kernel.bin> --out <新的证据目录>
 ```
 
-IPv6 地址和路由的 Linux 查询接口、DHCPv6-PD 及 LAN RA 仍在补全。
+BSD 的 `RTM_GETADDR` 返回链路本地地址和 SLAAC 地址，包括作用域与
+DAD 状态。Linux 的 `ip -6 addr` 和 `getifaddrs()` 已用真实地址验证。
+IPv6 路由的 Linux 查询接口仍在补全。
+
+### DHCPv6 前缀委派互操作
+
+隔离 KVM 环境中，原版 BusyBox 1.37.0 使用 `udhcpc6 -d -r no` 向
+Kea 2.6.3 请求前缀。测试收到 /56 和 36 秒的租期，抓包校验了
+Solicit、Advertise、Request 与 Reply。测试在 A20OS 手动配置委派前缀的
+第一个 /64，并在 Linux 上配置返程路由，验证了委派地址的双向转发。
+续租和向 LAN 自动通告前缀仍在补全。
+[RFC 9915](https://www.rfc-editor.org/rfc/rfc9915.html) ·
+[Kea 前缀委派](https://kea.readthedocs.io/en/kea-2.6.4/arm/dhcp6-srv.html)
+
+```sh
+python3 tools/net/tests/build-dhcp6-peer.py \
+  --kea <kea-dhcp6路径> --radvd <radvd路径> --busybox <静态BusyBox路径> \
+  --kver <Linux内核版本> --out <新的对端目录>
+
+make ARCH=x86_64 NET_STACK=bsd NET_ROLE=router NR_CPUS=2 \
+  DRIVER_DEPLOYMENT=embedded RAMFS_USER=1 RAMFS_NET_TESTS=1 RAMFS_DISTRO=1 kernel-only
+
+python3 tools/net/tests/test-bsd-dhcp6-pd.py \
+  --kernel <A20OS的kernel.bin> --linux <匹配的Linux内核> \
+  --peer-initrd <对端目录>/peer-initramfs.cpio.gz --busybox <静态BusyBox路径> \
+  --out <新的证据目录>
+```
 
 ## 最小双网卡配置
 

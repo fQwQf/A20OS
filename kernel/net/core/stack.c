@@ -143,6 +143,14 @@ int net_stack_interface_snapshot(void *out, int maximum) {
     return -EOPNOTSUPP;
 }
 
+int net_stack_addr6_snapshot(nl_addr6_out_t *out, int maximum)
+{
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->snapshot_addr6)
+        return b->iface->snapshot_addr6(out, maximum);
+    return 0;
+}
+
 int net_stack_if_up(unsigned index) {
     const net_backend_t *b = selected();
     /* Boolean by contract: 0 means down or unavailable.  Never return a

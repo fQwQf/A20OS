@@ -524,6 +524,54 @@ int port_nic_send_raw(void *context, const void *frame, size_t length)
     return 0;
 }
 
+/* The isolated port returns slot-plus-one (zero for loopback). The
+ * runtime translates it to the Linux-facing interface index. */
+typedef struct {
+    uint32_t index;
+    uint8_t address[16];
+    uint8_t prefix, flags, scope, reserved;
+} port_addr6_out_t;
+
+int port_addr6_snapshot(port_addr6_out_t *out, int maximum)
+{
+    struct epoch_tracker et;
+    struct ifnet *ifp;
+    int count = 0;
+    NET_EPOCH_ENTER(et);
+    CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link) {
+        int loopback = (ifp->if_flags & IFF_LOOPBACK) != 0;
+        struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
+        int slot = ctx ? ctx->port_id : port_tun_filter_index(ifp);
+        if (!loopback && slot < 0)
+            continue;
+        struct ifaddr *ifa;
+        CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
+            if (ifa->ifa_addr->sa_family != AF_INET6)
+                continue;
+            if (count == maximum) {
+                NET_EPOCH_EXIT(et);
+                return -ENOSPC;
+            }
+            struct in6_ifaddr *ia = (struct in6_ifaddr *)ifa;
+            struct in6_addr address = ia->ia_addr.sin6_addr;
+            in6_clearscope(&address);
+            port_addr6_out_t *entry = &out[count++];
+            entry->index = loopback ? 0 : slot + 1;
+            memcpy(entry->address, &address, sizeof(address));
+            entry->prefix = in6_mask2len(&ia->ia_prefixmask.sin6_addr, NULL);
+            /* Linux IFA_F_PERMANENT, TENTATIVE, DEPRECATED and DADFAILED. */
+            entry->flags = ia->ia6_lifetime.ia6t_vltime == ND6_INFINITE_LIFETIME ? 0x80 : 0;
+            if (ia->ia6_flags & IN6_IFF_TENTATIVE) entry->flags |= 0x40;
+            if (ia->ia6_flags & IN6_IFF_DEPRECATED) entry->flags |= 0x20;
+            if (ia->ia6_flags & IN6_IFF_DUPLICATED) entry->flags |= 0x08;
+            entry->scope = loopback ? 254 : IN6_IS_ADDR_LINKLOCAL(&address) ? 253 : 0;
+            entry->reserved = 0;
+        }
+    }
+    NET_EPOCH_EXIT(et);
+    return count;
+}
+
 int port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add)
 {

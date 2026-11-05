@@ -967,6 +967,36 @@ static const net_backend_event_ops_t bsd_event_ops = {
     .poll_waiter = poll_waiter,
 };
 
+typedef struct {
+    nl_addr6_out_t *out;
+    int maximum;
+} addr6_snapshot_job_t;
+
+static int addr6_snapshot_run(void *argument)
+{
+    addr6_snapshot_job_t *job = argument;
+    int count = a20_bsd_port_addr6_snapshot(job->out, job->maximum);
+    for (int i = 0; i < count; ++i) {
+        nl_addr6_out_t *entry = &job->out[i];
+        if (entry->index == 0) {
+            entry->index = 2;
+        } else {
+            unsigned slot = entry->index - 1;
+            entry->index = slot < BSD_MAX_NICS ? nic_index_for_slot(slot) :
+                           A20_BSD_TUN_BASE + slot - BSD_MAX_NICS;
+        }
+    }
+    return count;
+}
+
+static int addr6_snapshot(nl_addr6_out_t *out, int maximum)
+{
+    if (!a20_bsd_executor_ready())
+        return 0;
+    addr6_snapshot_job_t job = {out, maximum};
+    return a20_bsd_executor_call(addr6_snapshot_run, &job);
+}
+
 static const net_backend_if_ops_t bsd_iface_ops = {
     .up = if_up,
     .default_index = if_default_index,
@@ -974,6 +1004,7 @@ static const net_backend_if_ops_t bsd_iface_ops = {
     .mtu = if_mtu,
     .hwaddr = if_hwaddr,
     .snapshot = interface_snapshot,
+    .snapshot_addr6 = addr6_snapshot,
     .config_snapshot = config_snapshot,
     .set_mtu = if_set_mtu,
     .set_flags = if_set_flags,

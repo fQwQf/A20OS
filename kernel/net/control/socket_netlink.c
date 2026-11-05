@@ -259,6 +259,13 @@ int a20_net_netlink_snapshot(void *nsp, void *outp, int max)
     return net_stack_interface_snapshot(outp, max);
 }
 
+int a20_net_netlink_addr6_snapshot(void *ns, nl_addr6_out_t *out, int max)
+{
+    if (!resource_ns_is_initial(ns))
+        return 0;
+    return net_stack_addr6_snapshot(out, max);
+}
+
 uint32_t a20_net_netlink_event_index(const void *eventsp, int i)
 {
     const nlrt_link_event_t *events = (const nlrt_link_event_t *)eventsp;

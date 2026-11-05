@@ -244,6 +244,23 @@ impl NlrtLink {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NlrtAddr6 {
+    index: u32,
+    address: [u8; 16],
+    prefix: u8,
+    flags: u8,
+    scope: u8,
+    reserved: u8,
+}
+
+impl NlrtAddr6 {
+    const ZERO: Self = Self { index: 0, address: [0; 16], prefix: 0,
+                              flags: 0, scope: 0, reserved: 0 };
+}
+const NLRT_MAX_ADDR6: usize = 64;
+
 /// Borrowed view of the socket fields these transactions read.
 #[repr(C)]
 pub struct NetlinkView {
@@ -285,6 +302,7 @@ unsafe extern "C" {
     fn a20_net_netlink_class_subsystem(cdev: *mut c_void) -> *const i8;
     fn a20_net_netlink_class_devt(cdev: *mut c_void) -> u64;
     fn a20_net_netlink_class_put(cdev: *mut c_void);
+    fn a20_net_netlink_addr6_snapshot(ns: *mut c_void, out: *mut NlrtAddr6, max: i32) -> i32;
     fn a20_net_netlink_snapshot(ns: *mut c_void, out: *mut NlrtLink, max: i32) -> i32;
     fn a20_net_route_add(dst: u32, prefix: u8, ifindex: u16) -> i32;
     fn a20_net_route_del(dst: u32, prefix: u8, ifindex: u16) -> i32;
@@ -1010,21 +1028,20 @@ unsafe fn build_addrmsg(buf: &mut [u8], ifindex: u32, addr: &[u8; 4],
     total
 }
 
-unsafe fn build_addrmsg6(buf: &mut [u8], ifindex: u32, addr: &[u8; 16],
-                         prefixlen: u8, name: &[u8], loopback: u8,
+unsafe fn build_addrmsg6(buf: &mut [u8], entry: &NlrtAddr6, name: &[u8],
                          msg_type: u16, pid: u32, seq: u32) -> usize {
     let mut off = core::mem::size_of::<NlMsghdr>();
     let ifa = IfAddrMsg {
         family: AF_INET6 as u8,
-        prefixlen,
-        flags: 0,
-        scope: if loopback != 0 { 254 } else { NLRT_SCOPE_UNIVERSE },
-        index: ifindex,
+        prefixlen: entry.prefix,
+        flags: entry.flags,
+        scope: entry.scope,
+        index: entry.index,
     };
     ptr::write_unaligned(buf.as_mut_ptr().add(off) as *mut IfAddrMsg, ifa);
     off += core::mem::size_of::<IfAddrMsg>();
-    off = put_attr(buf, off, IFA_ADDRESS, addr);
-    off = put_attr(buf, off, IFA_LOCAL, addr);
+    off = put_attr(buf, off, IFA_ADDRESS, &entry.address);
+    off = put_attr(buf, off, IFA_LOCAL, &entry.address);
     if !name.is_empty() {
         let mut label = [0u8; 17];
         let n = name.len().min(16);
@@ -1782,6 +1799,13 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
     if nlinks < 0 {
         return nlinks;
     }
+    let mut addresses6 = [NlrtAddr6::ZERO; NLRT_MAX_ADDR6];
+    let naddr6 = if type_ == RTM_GETADDR && family != AF_INET {
+        let count = a20_net_netlink_addr6_snapshot(*rv.net_ns, addresses6.as_mut_ptr(),
+                                                  NLRT_MAX_ADDR6 as i32);
+        if count < 0 { return count; }
+        count as usize
+    } else { 0 };
     let mut from = [0u8; NET_SOCKADDR_NL_SIZE];
     ptr::write_unaligned(from.as_mut_ptr() as *mut u16, AF_NETLINK);
 
@@ -1811,9 +1835,11 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
     let mut want_index = 0u32;
     let mut want_name = [0u8; 16];
     let mut have_name = false;
-    if !is_dump
-        && (type_ == RTM_GETLINK || type_ == RTM_GETADDR)
-        && payload >= core::mem::size_of::<IfInfoMsg>()
+    if !is_dump && type_ == RTM_GETADDR && payload >= core::mem::size_of::<IfAddrMsg>() {
+        let body = (buf as *const u8).add(hdr_size);
+        want_index = ptr::read_unaligned(body as *const IfAddrMsg).index;
+    }
+    if !is_dump && type_ == RTM_GETLINK && payload >= core::mem::size_of::<IfInfoMsg>()
     {
         let body = (buf as *const u8).add(hdr_size);
         let ifi = ptr::read_unaligned(body as *const IfInfoMsg);
@@ -1855,6 +1881,16 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
         rc=a20_net_netlink_enqueue(requester,msg.0.as_ptr(),total,
             from.as_ptr() as *const c_void,NET_SOCKADDR_NL_SIZE);
         if rc<0 {break;}
+    }
+    for entry in addresses6.iter().take(naddr6) {
+        if rc < 0 { break; }
+        if want_index != 0 && entry.index != want_index { continue; }
+        let name = links.iter().take(nlinks as usize).find(|e| e.index == entry.index)
+            .map(name_bytes).unwrap_or(&[]);
+        let total = build_addrmsg6(&mut msg.0, entry, name, reply_type, pid, req.seq);
+        if !is_dump { ptr::write_unaligned(msg.0.as_mut_ptr().add(6) as *mut u16, 0); }
+        rc = a20_net_netlink_enqueue(requester, msg.0.as_ptr(), total,
+                                      from.as_ptr() as *const c_void, NET_SOCKADDR_NL_SIZE);
     }
     while i < nlinks && rc >= 0
         && !(type_==RTM_GETROUTE && !is_dump && installed_route_found) {
@@ -2097,8 +2133,12 @@ pub unsafe extern "C" fn a20_net_netlink_addr6_notify(ifindex: u32,
     }
     let Some(e) = found else { return };
     let mut msg = MsgBuf::new();
-    let total = build_addrmsg6(&mut msg.0, e.index, &a16, prefixlen,
-                               name_bytes(e), e.loopback, msg_type, 0,
+    let scope = if e.loopback != 0 { 254 }
+                else if a16[0] == 0xfe && a16[1] & 0xc0 == 0x80 { 253 }
+                else { NLRT_SCOPE_UNIVERSE };
+    let entry = NlrtAddr6 { index: e.index, address: a16, prefix: prefixlen,
+                           scope, ..NlrtAddr6::ZERO };
+    let total = build_addrmsg6(&mut msg.0, &entry, name_bytes(e), msg_type, 0,
                                nlrt_next_seq());
     if total == 0 {
         return;
@@ -2391,6 +2431,12 @@ mod tests {
             *out.add(i) = T_SNAPSHOT[i];
         }
         n
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_netlink_addr6_snapshot(_ns: *mut c_void,
+                                                        _out: *mut NlrtAddr6,
+                                                        _max: i32) -> i32 {
+        0
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_netlink_event_index(_e: *const c_void, i: i32) -> u32 {
@@ -3253,8 +3299,8 @@ mod tests {
             assert!(find(&msg.0[..total], b"eth0"));
 
             let mut msg = MsgBuf::new();
-            let _total = build_addrmsg6(&mut msg.0, 2, &[0u8; 16], 64, b"eth0", 0,
-                                       RTM_NEWADDR, 0, 0);
+            let entry = NlrtAddr6 { index: 2, prefix: 64, ..NlrtAddr6::ZERO };
+            let _total = build_addrmsg6(&mut msg.0, &entry, b"eth0", RTM_NEWADDR, 0, 0);
             let ifa_out = &*(msg.0.as_ptr().add(16) as *const IfAddrMsg);
             assert_eq!((ifa_out.family, ifa_out.prefixlen), (AF_INET6 as u8, 64));
 
