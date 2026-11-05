@@ -1033,7 +1033,7 @@ static void pt_destroy_user_recursive(mm_struct_t *mm, pte_t *table, int level,
         if (!(pte & PTE_V)) continue;
 
         int is_leaf = arch_pte_is_leaf(pte);
-        vaddr_t va = base | ((vaddr_t)i << (ARCH_PT_BITS * level));
+        vaddr_t va = base | ((vaddr_t)i * pt_level_size(level));
 
         if (is_leaf) {
             pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));

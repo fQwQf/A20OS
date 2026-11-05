@@ -123,6 +123,7 @@ static void kerr(const char *format, ...) { (void)format; }
 static pte_t *arch_pte_to_ptr(pte_t pte);
 static int pfn_valid(pfn_t pfn);
 static int arch_pt_level_entries(int level) { (void)level; return 4; }
+static size_t pt_level_size(int level) { return (size_t)PAGE_SIZE << (ARCH_PT_BITS * level); }
 
 static unsigned frame_put_calls[64];
 static unsigned frame_refs[64];
@@ -149,6 +150,8 @@ static pte_t root_table[4];
 static pte_t user_table_a[4];
 static pte_t user_table_b[4];
 static pte_t *table_by_pfn[64];
+static int file_fixture;
+static mm_seg_t *expected_file_vma;
 
 static void reset_state(void) {
     memset(frame_put_calls, 0, sizeof(frame_put_calls));
@@ -165,6 +168,7 @@ static void reset_state(void) {
     deferred_pending = release_saw_null_pgdir = mm_kfree_calls = 0;
     pt_destroy_finished = tlb_finish_calls = tlb_finished = 0;
     pt_destroy_expected = queue_from_retire_drain = 0;
+    file_fixture = 0; expected_file_vma = NULL;
 }
 
 static pte_t leaf(pfn_t pfn, int user) {
@@ -201,9 +205,16 @@ static void frame_put_many(const pfn_t *pfns, size_t count) {
 static void swap_free(uint64_t entry) { (void)entry; swap_free_calls++; }
 typedef struct { int refs; } page_cache_page_t;
 typedef struct { unsigned char cls[4]; page_cache_page_t **cache_owner; } pt_meta_t;
-static pt_meta_t *mm_pt_meta(pte_t *table) { (void)table; return NULL; }
+static page_cache_page_t file_page;
+static pt_meta_t *mm_pt_meta(pte_t *table) {
+    static pt_meta_t file_meta = { .cls = {MM_ST_FILE_PRIVATE, 0, 0, 0} };
+    return file_fixture && table == user_table_b ? &file_meta : NULL;
+}
 static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *vma, vaddr_t va, pfn_t pfn) {
-    (void)vma; (void)va; (void)pfn; return NULL;
+    if (file_fixture && vma == expected_file_vma && va == 65536 && pfn == 12) {
+        file_page.refs++; return &file_page;
+    }
+    return NULL;
 }
 static void page_cache_put(page_cache_page_t *page) { page->refs--; }
 static void mm_pt_note_absent(pte_t *table, int level, int index) {
@@ -355,6 +366,20 @@ static int test_ineligible(uint64_t flags, int pointer_kind) {
     return 0;
 }
 
+static int test_file_owner_fallback_address(void) {
+    mm_struct_t mm = { .refcount = 1, .arch_asid = 1, .pgdir = root_table };
+    mm_seg_t file = { .vm_flags = VM_FILE, .start = 65536, .end = 81920,
+                     .file_vnode = &mm };
+    mm_seg_t anon = { .vm_flags = VM_ANON, .start = 0, .end = 65536, .next = &file };
+    reset_state(); setup_anon_tree(); mm.mmap = &anon;
+    file_fixture = 1; expected_file_vma = &file; file_page.refs = 1;
+    mm_destroy_impl(&mm);
+    CHECK(file_page.refs == 0, "terminal cache fallback uses byte-addressed VMA offset");
+    CHECK(frame_put_calls[12] == 0, "cache-owned leaf never releases an ordinary frame ref");
+    CHECK(invalid_frame_put_calls == 0, "cache fallback keeps terminal release ordering");
+    return 0;
+}
+
 static int test_nonfinal_reference(void) {
     mm_struct_t mm = { .refcount = 2, .arch_asid = 1, .pgdir = root_table };
     mm_seg_t vma = { .vm_flags = VM_ANON };
@@ -396,6 +421,7 @@ int main(void) {
         test_ineligible(0, 3) || test_ineligible(0, 4)) return 1;
     if (test_nonfinal_reference()) return 1;
     if (test_final_flush_without_root()) return 1;
+    if (test_file_owner_fallback_address()) return 1;
     puts("anon-final-destroy-host: PASS");
     return 0;
 }
