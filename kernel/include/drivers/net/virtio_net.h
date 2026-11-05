@@ -3,8 +3,6 @@
 
 #include "core/types.h"
 
-#define VIRTIO_NET_MAX_DEVS 2
-
 int  virtio_net_ready(int idx);
 const uint8_t *virtio_net_mac(int idx);
 int  virtio_net_send(int idx, const void *packet, size_t len, int nonblock);

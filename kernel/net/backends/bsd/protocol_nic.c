@@ -28,6 +28,7 @@
 #include <netinet6/in6_fib.h>
 #include <netinet/in.h>
 #include <netinet/in_var.h>
+#include <netinet/in_fib.h>
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
 #include <netinet6/scope6_var.h>
@@ -160,6 +161,25 @@ static struct mbuf *filter_ipv4(struct mbuf *m, int port_id, bool output)
     return m;
 }
 
+#ifdef A20_BSD_ROUTER_POLICY
+extern unsigned a20_bsd_policy_fibs4(uint32_t source, uint32_t destination,
+                                     unsigned *fibs, unsigned capacity);
+
+static unsigned policy_fib4(const struct ip *ip, const struct mbuf *m)
+{
+    unsigned fibs[16];
+    unsigned count = a20_bsd_policy_fibs4(ip->ip_src.s_addr, ip->ip_dst.s_addr, fibs, 16);
+    if (!count || (m->m_flags & (M_BCAST | M_MCAST)) || in_localip(ip->ip_dst) ||
+        IN_MULTICAST(ntohl(ip->ip_dst.s_addr)) || in_broadcast(ip->ip_dst, m->m_pkthdr.rcvif))
+        return 0;
+    for (unsigned i = 0; i < count; ++i) {
+        if (fib4_lookup(fibs[i], ip->ip_dst, 0, NHR_NONE, 0))
+            return fibs[i];
+    }
+    return 0;
+}
+#endif
+
 struct mbuf *port_ipv4_input(struct mbuf *m)
 {
     struct ifnet *ifp = m->m_pkthdr.rcvif;
@@ -191,8 +211,14 @@ struct mbuf *port_ipv4_input(struct mbuf *m)
         m->m_pkthdr.csum_flags = 0;
     }
     m = filter_ipv4(m, filter_index, false);
-    if (!m && ctx)
-        ctx->stats.rx_drops++;
+    if (!m) {
+        if (ctx)
+            ctx->stats.rx_drops++;
+        return NULL;
+    }
+#ifdef A20_BSD_ROUTER_POLICY
+    M_SETFIB(m, policy_fib4(mtod(m, const struct ip *), m));
+#endif
     return m;
 }
 
@@ -819,6 +845,67 @@ static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,
     info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
     return rib_action(RT_DEFAULT_FIB, add ? RTM_ADD : RTM_DELETE,
                       &info, &rci);
+}
+
+int port_policy_route4(unsigned fib, unsigned index, uint32_t destination,
+                       uint8_t prefix, uint32_t gateway, int replace, int remove,
+                       int check_only)
+{
+    if (!fib || fib >= rt_numfibs || prefix > 32)
+        return -port_linux_errno(EINVAL);
+    struct sockaddr_in dst = {.sin_len = sizeof(dst), .sin_family = AF_INET};
+    struct sockaddr_in mask = {.sin_len = sizeof(mask), .sin_family = AF_INET};
+    struct sockaddr_in gw = {.sin_len = sizeof(gw), .sin_family = AF_INET};
+    dst.sin_addr.s_addr = destination;
+    mask.sin_addr.s_addr = htonl(prefix ? UINT32_MAX << (32 - prefix) : 0);
+    gw.sin_addr.s_addr = gateway;
+    struct sockaddr_dl link = {.sdl_len = sizeof(link), .sdl_family = AF_LINK};
+    struct rt_addrinfo info = {.rti_flags = RTF_STATIC | (prefix == 32 ? RTF_HOST : 0)};
+    info.rti_info[RTAX_DST] = (struct sockaddr *)&dst;
+    if (prefix != 32)
+        info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
+
+    struct epoch_tracker et;
+    struct rib_cmd_info result;
+    int error = 0;
+    NET_EPOCH_ENTER(et);
+    if (!remove) {
+        struct ifnet *ifp = ifnet_byindex(index);
+        if (!ifp) {
+            error = ENODEV;
+            goto done;
+        }
+        struct ifaddr *ifa = ifaof_ifpforaddr((struct sockaddr *)(gateway ? &gw : &dst), ifp);
+        if (!ifa || ifa->ifa_addr->sa_family != AF_INET) {
+            error = EADDRNOTAVAIL;
+            goto done;
+        }
+        link.sdl_index = ifp->if_index;
+        link.sdl_type = ifp->if_type;
+        /* The RIB selects and references the ifaddr on this interface even
+         * when its FIB has no connected route for the gateway. */
+        info.rti_info[RTAX_IFP] = (struct sockaddr *)&link;
+        info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&link;
+        if (gateway) {
+            const struct sockaddr_in *local = (const void *)ifa->ifa_addr;
+            const struct sockaddr_in *subnet = (const void *)ifa->ifa_netmask;
+            const struct sockaddr_in *peer = (const void *)ifa->ifa_dstaddr;
+            bool on_link = subnet && !((local->sin_addr.s_addr ^ gateway) & subnet->sin_addr.s_addr);
+            bool point_to_point = (ifp->if_flags & IFF_POINTOPOINT) && peer &&
+                                  peer->sin_family == AF_INET && peer->sin_addr.s_addr == gateway;
+            if (!on_link && !point_to_point) {
+                error = EHOSTUNREACH;
+                goto done;
+            }
+            info.rti_flags |= RTF_GATEWAY;
+            info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&gw;
+        }
+    }
+    if (!check_only)
+        error = rib_action(fib, remove ? RTM_DELETE : replace ? RTM_CHANGE : RTM_ADD, &info, &result);
+done:
+    NET_EPOCH_EXIT(et);
+    return -port_linux_errno(error);
 }
 
 static int route_default(uint32_t gateway, int add)

@@ -105,6 +105,13 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
             code = code.replace(old, new)
         path.write_text(code)
 
+    # Forwarded mbufs carry the selected egress FIB. An ICMP error is a new
+    # local packet and needs a return route to the original sender.
+    overlay('freebsd/netinet/ip_icmp.c', [
+        ('M_SETFIB(m, M_GETFIB(n));',
+         '#ifdef A20_BSD_ROUTER_POLICY\n\tM_SETFIB(m, RT_DEFAULT_FIB);\n'
+         '#else\n\tM_SETFIB(m, M_GETFIB(n));\n#endif'),
+    ])
     overlay('freebsd/netinet/ip_input.c', [
         ('extern void ipreass_slowtimo(void);',
          'extern void ipreass_slowtimo(void);\n'
@@ -197,6 +204,7 @@ def main():
     parser.add_argument('--cross-prefix', help='target binutils prefix (defaults to the target triple)')
     parser.add_argument('--emulated-tls', action='store_true',
                         help='require a compiler with -femulated-tls; never access user FS/TLS')
+    parser.add_argument('--router', action='store_true', help='allocate native policy FIBs')
     parser.add_argument('--net-profile', type=int, choices=[1, 2, 3], default=2)
     parser.add_argument('--nr-cpus', type=int, default=1)
     args = parser.parse_args()
@@ -249,6 +257,9 @@ def main():
     explicit_tls = args.emulated_tls and args.arch == 'loongarch64'
     staged_lib = prepare_port_sources(upstream, out, sources, explicit_tls)
     flags += ['-I' + str(staged_lib)]
+    if args.router:
+        (staged_lib/'opt_route.h').write_text('#define ROUTETABLES 9\n')
+        flags += ['-DA20_BSD_ROUTER_POLICY=1']
     if explicit_tls:
         flags += ['-DA20_BSD_EXPLICIT_TLS=1']
     elif args.emulated_tls:
@@ -329,6 +340,7 @@ def main():
                 'port_host_nic_poll': 'a20_bsd_host_nic_poll',
                 'port_host_nic_token_freed': 'a20_bsd_host_nic_token_freed',
                 'a20_bsd_capture_input': 'a20_bsd_capture_input',
+                'a20_bsd_policy_fibs4': 'a20_bsd_policy_fibs4',
                 'a20_bsd_netfilter_busy': 'a20_bsd_netfilter_busy',
                 'a20_bsd_netfilter_input': 'a20_bsd_netfilter_input',
                 'a20_bsd_netfilter_output': 'a20_bsd_netfilter_output',
@@ -380,7 +392,7 @@ def main():
             linked['isolated_sha256'] = hashlib.sha256(elf).hexdigest()
             (out/'isolated-sections.txt').write_text(subprocess.check_output(
                 [cross + 'readelf', '-SW', str(prefixed)], text=True))
-    manifest = dict(arch=args.arch, net_profile=args.net_profile, emulated_tls=args.emulated_tls,
+    manifest = dict(arch=args.arch, net_profile=args.net_profile, router=args.router, emulated_tls=args.emulated_tls,
                     tls_lowering='explicit-accessors' if explicit_tls else 'compiler',
                     revision=pin['revision'], source_manifest_sha256=hashlib.sha256((port/'port-sources.toml').read_bytes()).hexdigest(), partial_link=linked, compiler=compiler_version, status='object-compilation-only-not-linked', sources=rows)
     manifest['port_headers'] = {str(path.relative_to(port)): hashlib.sha256(path.read_bytes()).hexdigest()

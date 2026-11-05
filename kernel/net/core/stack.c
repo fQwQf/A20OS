@@ -232,6 +232,14 @@ int net_stack_if_del_addr6(unsigned index, const uint8_t *addr) {
     return -EOPNOTSUPP;
 }
 
+int net_stack_policy_update_v4(const void *route, int remove, uint32_t flags)
+{
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->policy_update_v4)
+        return b->iface->policy_update_v4(route, remove, flags);
+    return -ENOSYS;
+}
+
 int net_stack_route_update_v6(const uint8_t dst[16], uint8_t prefix,
                                unsigned index, int remove)
 {

@@ -18,13 +18,15 @@ ip route del 198.51.100.0/24 via 10.0.2.2 dev en2 table 100
 
 规则按 priority 从小到大查询；匹配但对应表没有路由时继续；最后查询 main(254)。每个表按最长前缀、较低 metric 选路。相同表、目标前缀、metric 的新增返回 EEXIST，显式 replace 更新。设备撤销会清理其路由。默认预算为 64 路由、16 规则；`NET_PROFILE=1` 为 8 路由、4 规则。满表返回 ENOSPC，不覆盖既有项。
 
-lwIP 路由 hook 查询这一 FIB；ARP 网关 hook 对同一源/目标查询并取网关值副本。网关仅支持直接连接的下一跳，尚未提供递归下一跳解析。策略源地址需要由应用明确绑定或已存在于转发包中；未绑定本地 socket 的源地址自动选择不是这次改造的验收项。
+lwIP 路由 hook 查询这一 FIB。ARP 网关 hook 对同一源和目的地址查表并取得网关值副本。应用明确绑定的源地址可以参与策略匹配。
+
+F-Stack 路由器为 IPv4 转发提供主表和最多 8 个附加 FIB，附加表可使用任意未保留的 Linux 表号。入口完成分片重组、过滤与 DNAT 后，按源和目的地址选择首个有匹配路由的原生 FIB。附加表通过显式出口连接下一跳，较低 metric 的路由进入原生 FIB，删除后由同前缀的下一条接管。本机地址的投递及转发产生的 ICMP 差错回包走主表。F-Stack 本机 socket 与 IPv6 的策略选择待接入。
 
 ## 已支持与边界
 
-支持 IPv4 unicast 路由、32 位表号、网关、出口和 metric，以及源/目标前缀的 lookup 规则。修正了原先把 Linux `RTA_GATEWAY=5` 当成 3 的错误。查询输出真实已安装值，并保留尚未迁入 FIB 的接口默认网关作为兼容回退。
+IPv4 rtnetlink 支持 unicast 路由、32 位表号、网关、出口和 metric，以及源和目的前缀的 lookup 规则。查询输出公共路由表中的值，并保留接口默认网关作为兼容回退。F-Stack 原生生成的直连路由由主表维护。
 
-尚不支持 IPv6 FIB、非初始网络域独立 FIB、策略 mark/iif/oif、ECMP、黑洞/不可达动作或递归网关。这些请求返回错误，不能依赖写成功但数据面不执行的旧行为。目前 bounded FIB 以线性查表和有界规则遍历为主，不代表大路由规模的最终实现。本功能不等于开启了跨网卡转发，也不等于 NAT、分片或 PMTU 已完成。
+策略 mark/iif/oif、独立网络域 FIB、ECMP、黑洞/不可达动作和递归网关仍在支持范围之外。公共路由状态使用有界线性表。
 
 ## 验证
 
@@ -36,3 +38,10 @@ python3 tools/net/tests/test-net-control-kvm.py --baseline <网络基线manifest
 ```
 
 宿主测试覆盖前缀字节序、最长前缀、metric、替换/删除、设备清理、规则优先级和空表回退、容量耗尽；KVM 使用实际 Alpine `ip` 完成新增、查询及删除事务。后者发现并修复了 netlink `write(2)` 分派和删除时 action 未指定的 Linux ABI 兼容问题。
+
+F-Stack 路由器的三网口 QEMU 回归使用实际 BusyBox `ip` 配置策略，通过抓包验证同一目的地址的双 WAN 分流、反向转发、空表回退、最长前缀、metric 接管与替换、ICMP 差错和错误网关拒绝。
+
+```sh
+python3 tools/net/tests/test-bsd-policy-v4.py --kernel <x86_64-router-kernel.bin> \
+  --busybox <静态BusyBox> --out <新的证据目录>
+```

@@ -4,6 +4,7 @@
 //! No reference into the FIB survives a transaction or backend call.
 use core::cell::UnsafeCell;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(a20_net_embedded)]
 const ROUTES: usize = 8;
@@ -19,6 +20,7 @@ const ENOSPC: i32 = 28;
 const ESRCH: i32 = 3;
 const EEXIST: i32 = 17;
 const REPLACE: u32 = 0x100;
+const MATCH_METRIC: u32 = 1 << 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -85,6 +87,7 @@ fn mask(prefix: u8) -> u32 {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Fib {
     routes: [Route; ROUTES],
     rules: [Rule; RULES],
@@ -105,7 +108,7 @@ impl Fib {
             e.table == r.table
                 && e.prefix == r.prefix
                 && e.destination == r.destination
-                && (remove || e.metric == r.metric)
+                && ((remove && flags & MATCH_METRIC == 0) || e.metric == r.metric)
                 && (!remove || r.ifindex == 0 || e.ifindex == r.ifindex)
                 && (!remove || r.gateway == 0 || e.gateway == r.gateway)
         });
@@ -162,27 +165,42 @@ impl Fib {
             .min_by_key(|r| (32 - r.prefix, r.metric))
             .copied()
     }
-    fn lookup(&self, src: u32, dst: u32, mark: u32) -> Option<Route> {
-        /* Fixed-size selection avoids allocation/sorting on the packet path.
-         * A matching rule with an empty table continues to the next rule. */
+    fn matching_tables(&self, src: u32, dst: u32, mark: u32, out: &mut [u32]) -> usize {
+        /* Fixed-size selection avoids allocation/sorting on the packet path. */
         let mut visited = 0u32;
-        for _ in 0..RULES {
-            let selected = self
-                .rules
-                .iter()
-                .enumerate()
-                .filter(|(i, r)| visited & (1 << i) == 0 && r.table != 0)
+        let mut count = 0;
+        while count < out.len() {
+            let selected = self.rules.iter().enumerate()
+                .filter(|(i, r)| visited & (1 << i) == 0 && r.table != 0 && r.matches(src, dst, mark))
                 .min_by_key(|(i, r)| (r.priority, *i));
-            let Some((i, r)) = selected else { break };
+            let Some((i, rule)) = selected else { break };
             visited |= 1 << i;
-            if r.matches(src, dst, mark) {
-                if let Some(route) = self.lookup_table(dst, r.table) {
-                    return Some(route);
-                }
+            if !out[..count].contains(&rule.table) {
+                out[count] = rule.table;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn lookup(&self, src: u32, dst: u32, mark: u32) -> Option<Route> {
+        let mut tables = [0u32; RULES];
+        let count = self.matching_tables(src, dst, mark, &mut tables);
+        for table in &tables[..count] {
+            if let Some(route) = self.lookup_table(dst, *table) {
+                return Some(route);
             }
         }
         self.lookup_table(dst, MAIN)
     }
+
+    fn best_prefix(&self, route: Route) -> Route {
+        let dst = route.destination & mask(route.prefix);
+        self.routes.iter()
+            .filter(|r| r.table == route.table && r.prefix == route.prefix && r.destination == dst)
+            .min_by_key(|r| r.metric).copied().unwrap_or(Route::EMPTY)
+    }
+
     fn flush_if(&mut self, ifindex: u32) {
         for r in &mut self.routes {
             if r.ifindex == ifindex {
@@ -210,7 +228,53 @@ impl Drop for Guard {
 struct SharedFib(UnsafeCell<Fib>);
 // SAFETY: every FFI access holds Guard; no reference or pointer is returned.
 unsafe impl Sync for SharedFib {}
+static HAVE_RULES: AtomicBool = AtomicBool::new(false);
 static FIB: SharedFib = SharedFib(UnsafeCell::new(Fib::new()));
+
+#[repr(C)]
+pub struct RouteChange {
+    before: Route,
+    after: Route,
+    table_used: u32,
+}
+
+// A backend executor serializes policy route writers. Preflight leaves
+// shared state intact while the native RIB operation can still fail.
+#[no_mangle]
+pub unsafe extern "C" fn a20_net_route_plan_v4(
+    route: *const Route, remove: i32, flags: u32, out: *mut RouteChange,
+) -> i32 {
+    if route.is_null() || out.is_null() {
+        return -EINVAL;
+    }
+    let value = unsafe { ptr::read(route) };
+    let _guard = Guard::acquire();
+    let fib = unsafe { &*FIB.0.get() };
+    let mut next = *fib;
+    let result = next.route(value, remove != 0, flags);
+    if result == 0 {
+        unsafe {
+            *out = RouteChange {
+                before: fib.best_prefix(value),
+                after: next.best_prefix(value),
+                table_used: next.routes.iter().any(|r| r.table == value.table) as u32,
+            };
+        }
+    }
+    result
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn a20_net_route_tables_v4(
+    src: u32, dst: u32, mark: u32, out: *mut u32, cap: u32,
+) -> u32 {
+    if out.is_null() || cap == 0 || !HAVE_RULES.load(Ordering::Acquire) {
+        return 0;
+    }
+    let tables = unsafe { core::slice::from_raw_parts_mut(out, (cap as usize).min(RULES)) };
+    let _guard = Guard::acquire();
+    unsafe { (&*FIB.0.get()).matching_tables(src, dst, mark, tables) as u32 }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn a20_net_route_update_v4(r: *const Route, remove: i32, flags: u32) -> i32 {
@@ -228,7 +292,12 @@ pub unsafe extern "C" fn a20_net_rule_update_v4(r: *const Rule, remove: i32) -> 
     }
     let value = unsafe { ptr::read(r) };
     let _guard = Guard::acquire();
-    unsafe { (&mut *FIB.0.get()).rule(value, remove != 0) }
+    let fib = unsafe { &mut *FIB.0.get() };
+    let rc = fib.rule(value, remove != 0);
+    if rc == 0 {
+        HAVE_RULES.store(remove == 0 || fib.rules.iter().any(|r| r.table != 0), Ordering::Release);
+    }
+    rc
 }
 #[no_mangle]
 pub unsafe extern "C" fn a20_net_route_query_v4(

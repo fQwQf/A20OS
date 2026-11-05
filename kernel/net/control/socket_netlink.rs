@@ -95,6 +95,7 @@ const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
+const ENOSYS: i32 = 38;
 const ENODEV: i32 = 19;
 const EOPNOTSUPP: i32 = 95;
 const EPROTONOSUPPORT: i32 = 93;
@@ -319,6 +320,7 @@ unsafe extern "C" {
     fn a20_net_netlink_if_set_flags(ifindex: u32, value: u32, mask: u32) -> i32;
     fn a20_net_netlink_if_get_addr(ifindex: u32, ip: *mut u8, mask: *mut u8,
                                    gw: *mut u8) -> i32;
+    fn net_stack_policy_update_v4(route: *const RouteV4, remove: i32, flags: u32) -> i32;
     fn net_stack_route_update_v4(dst: *const u8, prefix: u8,
                                  gateway: *const u8, ifindex: u16,
                                  remove: i32) -> i32;
@@ -1226,6 +1228,7 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
         prefix: rt.dst_len,
         ..RouteV4::default()
     };
+    let mut update_flags = flags as u32;
     let mut it = AttrIter::new(attrs);
     while let Some((kind, data)) = it.next() {
         let value = match attr_u32(data) {
@@ -1237,7 +1240,10 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
             RTA_GATEWAY => r.gateway = value,
             RTA_OIF => r.ifindex = value,
             RTA_TABLE => r.table = value,
-            RTA_PRIORITY => r.metric = value,
+            RTA_PRIORITY => {
+                r.metric = value;
+                update_flags |= 1 << 16; // NET_ROUTE_MATCH_METRIC
+            }
             _ => return -EOPNOTSUPP,
         }
     }
@@ -1266,6 +1272,12 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
             return rc;
         }
     }
+    if r.table != RT_TABLE_MAIN {
+        let rc = net_stack_policy_update_v4(&r, (msg_type == RTM_DELROUTE) as i32, update_flags);
+        if rc != -ENOSYS {
+            return rc;
+        }
+    }
     /* Keep the protocol RIB and the common policy FIB in the same
      * transaction.  Backends without a second RIB make this a no-op. */
     let mirrored = r.table == RT_TABLE_MAIN;
@@ -1284,7 +1296,7 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
         }
     }
     let common_rc = a20_net_route_update_v4(&r, (msg_type == RTM_DELROUTE) as i32,
-                                            flags as u32);
+                                            update_flags);
     /* A boot-configured default route may exist only in the backend RIB.  A
      * successful backend delete must not be converted to ESRCH merely because
      * the policy FIB was never seeded with that implicit route. */
@@ -2673,6 +2685,11 @@ mod tests {
     unsafe extern "C" fn net_stack_route_lookup_v6(_d: *const u8, _i: u32,
                                                     _r: *mut NlrtRoute6) -> i32 {
         -EOPNOTSUPP
+    }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_policy_update_v4(_r: *const RouteV4, _remove: i32,
+                                                       _flags: u32) -> i32 {
+        -ENOSYS
     }
     #[no_mangle]
     unsafe extern "C" fn net_stack_route_update_v4(_d: *const u8, _p: u8,
