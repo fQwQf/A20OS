@@ -149,8 +149,17 @@ static int wait4_adapter_group_dead(void *context, void *child)
 
 static int wait4_adapter_is_current_any_cpu(void *context, void *child)
 {
-    (void)context;
-    return proc_task_is_current_any_cpu(child);
+    wait4_adapter_t *a = context;
+    task_t *t = child;
+    /* Serialize the notification request with switch completion's CPU-slot
+     * release. If completion won, we can reap now; otherwise it must notify
+     * after tasklist_lock lets this waiter publish its park token. */
+    uint64_t cf = spin_lock_irqsave(&t->park_lock);
+    int active = proc_task_is_current_any_cpu(t);
+    if (active && !(a->options & WNOHANG))
+        t->reap_wait_requested = 1;
+    spin_unlock_irqrestore(&t->park_lock, cf);
+    return active;
 }
 
 /* Runs under the child's park_lock: samples the exit code and takes the pin

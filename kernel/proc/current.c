@@ -94,13 +94,13 @@ static task_t *proc_switch_complete_locked(unsigned cpu)
     }
     proc_sched_assert_task_locked(old);
 
-    /* Transfer a pin to the unlocked notifier before dropping CPU ownership.
+    /* Transfer the CPU slot's pin to the unlocked notifier on zombie exit.
      * Another CPU may reap immediately after the switching slot is cleared;
      * the pin keeps the task and its thread-group anchor alive meanwhile. */
-    task_t *reap = old->state == PROC_ZOMBIE ? proc_get(old) : NULL;
+    task_t *reap = old->state == PROC_ZOMBIE ? old : NULL;
     __atomic_store_n(&g_cpu_switching_out[cpu], NULL, __ATOMIC_RELEASE);
-    /* Drop the CPU slot reference after the outgoing stack is inactive. */
-    proc_put(old);
+    if (!reap)
+        proc_put(old);
     return reap;
 }
 
@@ -129,7 +129,8 @@ void proc_switch_out_finish_pending(void)
     spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
     if (reap) {
         /* No scheduler/park lock may nest outside tasklist_lock. */
-        proc_notify_reap_ready(reap);
+        if (reap->reap_wait_requested)
+            proc_notify_reap_ready(reap);
         proc_sched_note_zombie();
         proc_put(reap);
     }
@@ -242,7 +243,8 @@ void proc_switch_complete(void)
     spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
     if (reap) {
         /* No scheduler/park lock may nest outside tasklist_lock. */
-        proc_notify_reap_ready(reap);
+        if (reap->reap_wait_requested)
+            proc_notify_reap_ready(reap);
         proc_sched_note_zombie();
         proc_put(reap);
     }
