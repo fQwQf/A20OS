@@ -44,6 +44,7 @@ typedef struct a20_bsd_nic_config {
     char netmask[16];
     char broadcast[16];
     char gateway[16];
+    int accept_ra;
 } a20_bsd_nic_config_t;
 typedef struct a20_bsd_nic_stats {
     uint64_t rx_frames, tx_frames, rx_drops, tx_drops, tx_errors, rx_starved;
@@ -311,6 +312,29 @@ int ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m, int total)
     return result;
 }
 
+static void nic_enable_ra(struct ifnet *ifp)
+{
+    struct in6_ndireq req = {0};
+    int error = nd6_ioctl(SIOCGIFINFO_IN6, (caddr_t)&req, ifp);
+    if (!error) {
+        req.ndi.flags |= ND6_IFF_ACCEPT_RTADV | ND6_IFF_AUTO_LINKLOCAL;
+        req.ndi.flags &= ~(ND6_IFF_IFDISABLED | ND6_IFF_NO_RADR);
+        error = nd6_ioctl(SIOCSIFINFO_FLAGS, (caddr_t)&req, ifp);
+    }
+    if (!error) {
+        error = nd6_ioctl(SIOCGIFINFO_IN6, (caddr_t)&req, ifp);
+        if (!error && (req.ndi.flags & ND6_IFF_IFDISABLED))
+            error = EADDRNOTAVAIL;
+    }
+    if (error) {
+        printf("[NET] BSD IPv6 RA setup failed on %s: %d\n", ifp->if_xname, error);
+        return;
+    }
+    /* Receive a default router on the selected WAN even while forwarding. */
+    V_ip6_rfc6204w3 = 1;
+    printf("[NET] BSD IPv6 RA enabled on %s\n", ifp->if_xname);
+}
+
 void *port_nic_attach(const a20_bsd_nic_config_t *config)
 {
     if (!config) return NULL;
@@ -328,7 +352,12 @@ void *port_nic_attach(const a20_bsd_nic_config_t *config)
     void *context = ff_veth_attach(&cfg);
     if (context) {
         struct ff_dpdk_if_context *ctx = context;
-        if (ctx->ifp) if_up((struct ifnet *)ctx->ifp);
+        if (ctx->ifp) {
+            struct ifnet *ifp = ctx->ifp;
+            if_up(ifp);
+            if (config->accept_ra)
+                nic_enable_ra(ifp);
+        }
     }
     return context;
 }

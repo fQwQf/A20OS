@@ -13,6 +13,7 @@ typedef struct a20_net_config {
     int        dns_count;
     int        dhcp_enable;
     char       hostname[64];
+    char       ipv6_ra_if[16];
 } a20_net_config_t;
 
 /* Global effective runtime network configuration.  Populated during early boot

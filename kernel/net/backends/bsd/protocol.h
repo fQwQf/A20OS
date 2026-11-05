@@ -64,6 +64,7 @@ typedef struct a20_bsd_nic_config {
     char netmask[16];
     char broadcast[16];
     char gateway[16];
+    int accept_ra;
 } a20_bsd_nic_config_t;
 
 typedef struct a20_bsd_nic_stats {

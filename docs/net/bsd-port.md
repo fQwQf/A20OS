@@ -103,7 +103,7 @@ TUN 地址仍由 `SIOCSIFADDR`/`SIOCSIFNETMASK` 驱动。首次 `SIOCSIFADDR` �
 
 `NET_ROLE=router` 已可用于 BSD：后端 attach 所有 class NIC（`en2`/`en3`…），执行器内打开 IPv4/IPv6 forwarding，并通过同一 `netfilter_bridge.c` 做 NAT。三节点 QEMU 验证了双栈 ping（TTL/hop 63）、16 KiB TCP 回显和 UDP NAPT 回包。 DHCPv4 服务端已可用：`SIOCSARP` 会按 `arp_add_ifa_lle()` 的方式向 FreeBSD 的 LLE 表插入静态邻居项（`lltable_calc_llheader()`/`lltable_set_entry_addr()`，保证 `arpresolve()` 复制的 `r_linkdata` 有效），dnsmasq 因此能把 OFFER/ACK 单播给尚未配置地址的客户端。发送控制信息也改为 F-Stack 期望的 Linux cmsg 布局（`ff_sendmsg()` 是 Linux 入口），修掉了带源地址（`IP_PKTINFO`）的 UDP 发送直接挂死的问题。
 
-未完成项是策略路由/多 FIB、RA/SLAAC 和内核内 DHCP 客户端。RA 已定位到`ND6_IFF_ACCEPT_RTADV` 无法在 `nd_ifinfo` 上保持，详见 [router.md](./router.md)。 socket 就绪路径把单个就绪 fd 的排空上限从 4 提到 16，突发包由每 4 个一次执行器轮转降为每 16 个一次。
+WAN 选定接口的 RA/SLAAC 与默认路由学习已通过双网口验证，配置见 [router.md](./router.md)。DHCPv6-PD、策略路由和多 FIB 仍待补全。 socket 就绪路径把单个就绪 fd 的排空上限从 4 提到 16，突发包由每 4 个一次执行器轮转降为每 16 个一次。
 
 ### 连接规模对比（BSD vs lwIP）
 

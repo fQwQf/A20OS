@@ -241,9 +241,14 @@ static void test_msg_nosignal(int fd)
 /* ------------------------------------------------------------------ */
 
 #define NETLINK_ROUTE_   0
+#define NLT_ERROR        2
 #define NLT_DONE         3
 #define NLT_GETLINK      18
+#define NLT_NEWADDR      20
 #define NLT_GETADDR      22
+#define NLT_IFA_LOCAL    2
+#define NLT_REQUEST_ACK  0x005
+#define NLT_CREATE_EXCL  0x600
 #define NLT_IFNAME       3
 
 struct nlmsghdr {
@@ -437,10 +442,65 @@ static int set_ipv4(int fd, const char *name, const char *ip, const char *mask)
     return 1;
 }
 
+static int set_ipv6(const char *name, const char *ip, const char *prefix)
+{
+    struct {
+        struct nlmsghdr header;
+        struct ifaddrmsg address;
+        struct rtattr local;
+        struct in6_addr value;
+    } request = {0};
+    char *end;
+    unsigned long bits = strtoul(prefix, &end, 10);
+    request.address.ifa_index = if_nametoindex(name);
+    if (!request.address.ifa_index || !*prefix || *end || bits > 128 ||
+        inet_pton(AF_INET6, ip, &request.value) != 1) {
+        fprintf(stderr, "NETCTL: FAIL invalid IPv6 configuration\n");
+        return 1;
+    }
+    request.header = (struct nlmsghdr){sizeof(request), NLT_NEWADDR,
+                                      NLT_REQUEST_ACK | NLT_CREATE_EXCL, 1, 0};
+    request.address.ifa_family = AF_INET6;
+    request.address.ifa_prefixlen = (uint8_t)bits;
+    request.local = (struct rtattr){sizeof(request.local) + sizeof(request.value), NLT_IFA_LOCAL};
+
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE_);
+    if (fd < 0) {
+        perror("NETCTL: FAIL IPv6 control socket");
+        return 1;
+    }
+    struct sockaddr_nl local = {.nl_family = AF_NETLINK};
+    struct {
+        struct nlmsghdr header;
+        int32_t error;
+        struct nlmsghdr request;
+    } ack;
+    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) == 0 &&
+        send(fd, &request, sizeof(request), 0) == sizeof(request)) {
+        ssize_t count = recv(fd, &ack, sizeof(ack), 0);
+        if (count >= (ssize_t)(sizeof(ack.header) + sizeof(ack.error)) &&
+            ack.header.nlmsg_seq == 1 && ack.header.nlmsg_type == NLT_ERROR) {
+            if (ack.error == 0) {
+                close(fd);
+                puts("NETCTL: IPv6 configured");
+                return 0;
+            }
+            errno = -ack.error;
+        } else if (count >= 0) {
+            errno = EPROTO;
+        }
+    }
+    perror("NETCTL: FAIL configure IPv6");
+    close(fd);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 5 && !strcmp(argv[1], "set-ipv6"))
+        return set_ipv6(argv[2], argv[3], argv[4]);
     if (argc != 1 && (argc != 5 || strcmp(argv[1], "set-ipv4"))) {
-        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK]\n");
+        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX]\n");
         return 2;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);

@@ -19,7 +19,30 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 
 DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
-BSD 当前未完成：策略路由/多 FIB（`ip rule` + `table 100` 仍只落到主 RIB）、 RA/SLAAC、内核内 DHCP 客户端；`SO_BINDTODEVICE` 目前只对主接口是真实 no-op，绑定次级网卡会明确 `EOPNOTSUPP` 而不是静默错路由。RA 侧已定位到：RA 报文能到达端口并进入 FreeBSD 输入路径，但 `ND6_IFF_ACCEPT_RTADV` 在接口的`nd_ifinfo` 上不能保持（写后随即被重置为 `nd6_ifattach()` 的默认值），因此 SLAAC 地址生成尚未生效，需要继续在 nd6 侧处理。
+BSD 当前仍缺多 FIB 与源策略、DHCPv6-PD 及 LAN 前缀发布。BSD 的
+`SO_BINDTODEVICE` 当前仅接受主接口，指定次级网卡返回 `EOPNOTSUPP`。
+
+## WAN IPv6 自动配置
+
+启动时传入 `a20.ipv6_ra=en3`，指定接收 IPv6 Router Advertisement 的
+网口。该接口使用 BSD 的邻居发现和 SLAAC。启用 `NET_ROLE=router` 时，
+它仍能从 RA 学习 WAN 默认路由，供配置过 IPv6 地址的 LAN 使用。
+默认路由随通告寿命到期撤销，也接受寿命为零的即时撤销。其他接口
+继续拒绝 RA。接收、地址生成和重复地址检测由 BSD 协议栈处理。
+[RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html) ·
+[RFC 4862](https://www.rfc-editor.org/rfc/rfc4862.html)
+
+可在测试镜像中用 `netctl set-ipv6 en2 2001:db8:10::1 64` 配置 LAN
+地址。以下测试用两个隔离以太网链路验证 WAN 地址、默认路由和 LAN
+双向转发。
+
+```sh
+python3 tools/net/tests/test-bsd-router-ipv6-ra.py \
+  --kernel <路由内核的kernel.bin> --out <新的证据目录>
+```
+
+目前通过上游发送的 RA 学习地址和路由。主动 Router Solicitation、
+IPv6 地址和路由的 Linux 查询接口、DHCPv6-PD 及 LAN RA 仍在补全。
 
 ## 最小双网卡配置
 

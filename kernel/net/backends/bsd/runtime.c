@@ -308,6 +308,7 @@ static int attach_one_nic(int slot, const a20_net_config_t *config,
     job.config.port_id = slot;
     nic_name_for_slot(slot, job.config.ifname, sizeof(job.config.ifname));
     memcpy(job.config.mac, mac, 6);
+    job.config.accept_ra = strcmp(config->ipv6_ra_if, job.config.ifname) == 0;
 
     int placeholder = 0;
     if (configured) {
