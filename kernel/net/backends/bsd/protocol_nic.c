@@ -85,6 +85,7 @@ struct ff_dpdk_if_context {
 };
 
 static struct ff_dpdk_if_context *interfaces;
+int port_tun_filter_index(const struct ifnet *ifp);
 
 static struct ff_dpdk_if_context *nic_for_ifp(const struct ifnet *ifp)
 {
@@ -146,21 +147,26 @@ static struct mbuf *filter_ipv4(struct mbuf *m, int port_id, bool output)
 
 struct mbuf *port_ipv4_input(struct mbuf *m)
 {
-    struct ff_dpdk_if_context *ctx = nic_for_ifp(m->m_pkthdr.rcvif);
-    if (!ctx)
+    struct ifnet *ifp = m->m_pkthdr.rcvif;
+    struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
+    int filter_index = ctx ? ctx->port_id : port_tun_filter_index(ifp);
+    if (filter_index < 0)
         return m;
 
     struct ip *ip = mtod(m, struct ip *);
     if (ip->ip_off & htons(IP_MF | IP_OFFMASK)) {
         /* A long-lived fragment must not pin one of the 32 NIC RX tokens.
          * m_dup copies the data to owned BSD storage and preserves metadata. */
-        struct mbuf *owned = m_dup(m, M_NOWAIT);
-        m_freem(m);
-        if (!owned) {
-            ctx->stats.rx_drops++;
-            return NULL;
+        if (ctx) {
+            struct mbuf *owned = m_dup(m, M_NOWAIT);
+            m_freem(m);
+            if (!owned) {
+                ctx->stats.rx_drops++;
+                return NULL;
+            }
+            m = owned;
         }
-        m = ip_reass(owned);
+        m = ip_reass(m);
         if (!m)
             return NULL;
         ip = mtod(m, struct ip *);
@@ -169,8 +175,8 @@ struct mbuf *port_ipv4_input(struct mbuf *m)
         ip->ip_sum = in_cksum(m, ip->ip_hl << 2);
         m->m_pkthdr.csum_flags = 0;
     }
-    m = filter_ipv4(m, ctx->port_id, false);
-    if (!m)
+    m = filter_ipv4(m, filter_index, false);
+    if (!m && ctx)
         ctx->stats.rx_drops++;
     return m;
 }
@@ -182,13 +188,15 @@ static pfil_return_t filter_ipv4_output(pfil_packet_t packet, struct ifnet *ifp,
     (void)ruleset;
     (void)inp;
     struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
-    if (!ctx)
+    int filter_index = ctx ? ctx->port_id : port_tun_filter_index(ifp);
+    if (filter_index < 0)
         return PFIL_PASS;
-    *packet.m = filter_ipv4(*packet.m, ctx->port_id, true);
+    *packet.m = filter_ipv4(*packet.m, filter_index, true);
     if (*packet.m)
         return PFIL_PASS;
     /* The NIC path reported a policy drop as successful consumption. */
-    ctx->stats.tx_drops++;
+    if (ctx)
+        ctx->stats.tx_drops++;
     return PFIL_CONSUMED;
 }
 

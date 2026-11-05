@@ -19,6 +19,9 @@
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/route.h>
+#include <net/if_dl.h>
+#include <net/route/nhop.h>
+#include <net/route/route_ctl.h>
 #include <net/netisr.h>
 #include <sys/epoch.h>
 #include <netinet/in.h>
@@ -36,6 +39,7 @@ typedef struct port_tun {
     void *emit_ctx;
     uint32_t ip, mask, gw;
     int has_ip;
+    int filter_index;
 } port_tun_t;
 
 typedef struct tun_reader_ctx {
@@ -81,13 +85,22 @@ static int port_tun_output(struct ifnet *ifp, struct mbuf *m,
     return rc < 0 ? ENOBUFS : 0;
 }
 
-void *port_tun_create(int unit, a20_bsd_tun_emit_t emit, void *ctx)
+int port_tun_filter_index(const struct ifnet *ifp)
+{
+    if (!ifp || ifp->if_output != port_tun_output)
+        return -1;
+    const port_tun_t *tun = ifp->if_softc;
+    return tun ? tun->filter_index : -1;
+}
+
+void *port_tun_create(int unit, int filter_index, a20_bsd_tun_emit_t emit, void *ctx)
 {
     if (unit < 0 || unit > 1024 || !emit)
         return NULL;
     port_tun_t *tun = ff_calloc(1, sizeof(*tun));
     if (!tun)
         return NULL;
+    tun->filter_index = filter_index;
     tun->emit = emit;
     tun->emit_ctx = ctx;
     struct ifnet *ifp = if_alloc(IFT_PPP);
@@ -245,6 +258,54 @@ int port_tun_set_addr(void *context, const uint8_t address[4],
     }
     soclose(so);
     return error;
+}
+
+static int tun_route_match(const struct rtentry *rt, const struct nhop_object *nh,
+                           void *context)
+{
+    (void)rt;
+    return nh->nh_ifp == context;
+}
+
+/* An L3 link already knows where to send its packets. The RIB needs an
+ * interface next hop and source address, with no IP gateway or ARP. */
+int port_tun_route4(void *context, const uint8_t destination[4], uint8_t prefix,
+                    int remove)
+{
+    port_tun_t *tun = context;
+    if (!tun || !tun->ifp || !destination || prefix > 32)
+        return EINVAL;
+    if (!remove && !tun->has_ip)
+        return EADDRNOTAVAIL;
+
+    struct ifnet *ifp = tun->ifp;
+    struct sockaddr_in dst = {.sin_len = sizeof(dst), .sin_family = AF_INET};
+    struct sockaddr_in mask = {.sin_len = sizeof(mask), .sin_family = AF_INET};
+    struct sockaddr_in local = {.sin_len = sizeof(local), .sin_family = AF_INET};
+    memcpy(&dst.sin_addr, destination, 4);
+    mask.sin_addr.s_addr = htonl(prefix ? (0xffffffffu << (32 - prefix)) : 0);
+    local.sin_addr.s_addr = tun->ip;
+    struct sockaddr_dl link = {
+        .sdl_len = sizeof(link), .sdl_family = AF_LINK,
+        .sdl_index = ifp->if_index, .sdl_type = ifp->if_type,
+    };
+    struct rt_addrinfo info = {0};
+    info.rti_flags = RTF_STATIC | (prefix == 32 ? RTF_HOST : 0);
+    info.rti_info[RTAX_DST] = (struct sockaddr *)&dst;
+    info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
+    info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&link;
+    info.rti_filter = tun_route_match;
+    info.rti_filterdata = ifp;
+
+    struct epoch_tracker et;
+    struct rib_cmd_info result;
+    NET_EPOCH_ENTER(et);
+    if (!remove)
+        info.rti_ifa = ifaof_ifpforaddr((struct sockaddr *)&local, ifp);
+    int rc = !remove && !info.rti_ifa ? EADDRNOTAVAIL :
+        rib_action(ifp->if_fib, remove ? RTM_DELETE : RTM_ADD, &info, &result);
+    NET_EPOCH_EXIT(et);
+    return rc;
 }
 
 int port_tun_set_addr6(void *context, const uint8_t address[16],

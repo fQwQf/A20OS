@@ -14,7 +14,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | 64 位非嵌入式实例统一后端 | 实例检查、四架构真实 BSD 内核编译及 QEMU 网络收发 | 基础迁移完成 |
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
-| PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | 待完成 |
+| PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | TUN 数据面通过，拨号与认证待完成 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | 待完成 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
@@ -109,3 +109,22 @@ UDP 空闲超时设为 2 秒。该测试用于验证容量与状态，吞吐量�
 四架构 BSD 网络回归位于 `conntrack-sockets-<arch>-final`。主机 NAT/过滤
 回归位于 `conntrack-nat-final` 和 `conntrack-filter-final`。实例 CLI 共
 214 项测试，213 项通过、1 项跳过。ARM32/RV32 lwIP 启动关机 smoke 通过。
+
+## PPPoE 数据面准备
+
+BSD TUN 支持 IPv4 接口路由。配置 TUN 的 /32 地址后，可通过
+`RTM_NEWROUTE` 指定出口设备并添加无网关默认路由。Linux 主路由表
+254 同步到 F-Stack RIB，关闭 TUN 时清除与该接口关联的路由。
+TUN IPv4 复用 BSD 重组、过滤和 NAT；普通网卡的 AF_PACKET 捕获由
+BSD 执行器交付给套接字，并使用正确的公开接口索引。
+
+`tun-route-wire-07` 用双网口 x86_64 QEMU、无 IPv4 地址的 WAN 网卡和
+固定 PPPoE 会话验证了 1492 字节 MTU、LAN 出口 NAT、回包以及关闭后
+重新安装默认路由。会话封装和 MTU 依据 [RFC 2516](https://www.rfc-editor.org/rfc/rfc2516)。
+证据目录包含两侧抓包和内核哈希。此回归使用固定会话参数，PADI/PADO、
+LCP、PAP/CHAP 和 IPCP 的 A20OS 实现及对端协商另行验收。
+
+构建方法与分片回归相同，运行
+`python3 tools/net/tests/test-bsd-router-tun.py --kernel <kernel.bin>
+--out <新证据目录>`。四架构网络回归位于 `tun-socket-<arch>-dataplane`，
+分片转发复测位于 `tun-fragment-final`。
