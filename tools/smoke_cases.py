@@ -3578,7 +3578,7 @@ CASES: dict[str, dict] = {
                    '\\[CKPT\\] restored', 'svcdemo tick'],
         'forbid': ['PANIC|KERNEL PANIC|KERNEL PAGE FAULT|Kernel panic|LOCK-STALL|Kernel BUG|TRAP-STORM',
                    'kexec: reboot:|has no shutdown callback|Cannot open /bin/init|svcctl: restore:'],
-        'post': ['python3 tools/ckpt_svc_verify.py '
+        'post': ['python3 tools/qemu/ckpt_svc_verify.py '
                  '.kernel-build/smoke/kexec-svc-checkpoint.log'],
         'require_exit_zero': True,
         'timeout_msg': False,

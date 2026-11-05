@@ -3,7 +3,7 @@
  * and its replies return.  This is the counterpart to netnat_test's inbound
  * DNAT gate; together they cover both NAT directions on a real virtio netif.
  *
- * The peer is the host alias 10.0.2.2, where tools/netnat_snat_probe.py listens.
+ * The peer is the host alias 10.0.2.2, where tools/probes/netnat_snat_probe.py listens.
  * QEMU's user-mode network performs its own address translation outside the
  * guest, so the probe cannot observe the guest's rewritten source port.  What
  * this gate does establish is that the guest output hook rewrote the tuple,

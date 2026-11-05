@@ -58,14 +58,14 @@ apk 内部会 chdir 到目标 root，相对路径的 keys-dir 会静默找不到
 2. 把签名包进一个无结束标记的 tar，gzip 成流；
 3. **前置**到 APKINDEX.tar.gz 之前（`cat sig.gz APKINDEX.tar.gz`）。
 
-`tools/apk-sign-stream.py` 实现这一流程，`mka20repo.sh --sign-key`自动调用。
+`tools/packaging/apk-sign-stream.py` 实现这一流程，`mka20repo.sh --sign-key`自动调用。
 
 ## 参考验证方法
 
 改动打包器后，用真实 apk 工具验证（这也是本体系开发时的方法）：
 
 ```bash
-APK=$(tools/ensure-apk-static.sh)
+APK=$(tools/packaging/ensure-apk-static.sh)
 $APK --arch riscv64 --root /tmp/t --initdb --usermode \
      -U --allow-untrusted --force-non-repository add ./your.apk
 $APK --keys-dir /abs/path/keys index -o APKINDEX.tar.gz your.apk

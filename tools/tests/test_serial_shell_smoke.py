@@ -7,7 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 try:
-    spec = importlib.util.spec_from_file_location("serial_shell_smoke", ROOT / "tools/check_serial_shell.py")
+    spec = importlib.util.spec_from_file_location("serial_shell_smoke", ROOT / "tools/qemu/check_serial_shell.py")
     smoke = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(smoke)
 finally:

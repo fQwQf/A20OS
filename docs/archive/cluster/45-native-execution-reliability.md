@@ -28,10 +28,10 @@ x86 单核的第二个真实文件子程序曾返回 75；诊断副本进一步�
 
 ```sh
 python3 tools/tests/test_sched_yield_accounting.py
-python3 tools/check-native-thread-admission.py
-python3 tools/check-native-sync.py --cpus 2 --timeout 180 \
+python3 tools/native/check-native-thread-admission.py
+python3 tools/native/check-native-sync.py --cpus 2 --timeout 180 \
   --output .kernel-build/cluster/native-reliability-ready-servers
-python3 tools/check-native-sync.py --arches x86_64 --cpus 1 --timeout 180 \
+python3 tools/native/check-native-sync.py --arches x86_64 --cpus 1 --timeout 180 \
   --output .kernel-build/cluster/native-reliability-ready-single
 ```
 

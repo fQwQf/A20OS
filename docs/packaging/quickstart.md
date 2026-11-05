@@ -29,7 +29,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base PKG_ALPINE=0
 | 组真机最小镜像（出厂用，1.38 MiB） | `make ARCH=riscv64 image-world PKG_WORLD=min` |
 | 组 devel 镜像（含 Alpine 上游 vim/git） | `make ARCH=riscv64 image-world PKG_WORLD=devel PKG_SIZE_MB=1024` |
 | 组镜像但不碰网络 | `make image-world PKG_ALPINE=0` |
-| 手工组装（更细控制） | `tools/mkrootfs.py --arch riscv64 --world packages/world/base.world --repo build/repo --keys-dir build/keys --no-alpine` |
+| 手工组装（更细控制） | `tools/packaging/mkrootfs.py --arch riscv64 --world packages/world/base.world --repo build/repo --keys-dir build/keys --no-alpine` |
 | 检查包内容 | `tar -tzf build/packages/riscv64/a20-base-*.apk`（或用 `apk.static` 解包） |
 
 ## 加一个用户软件（vim/git 等）

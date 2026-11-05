@@ -830,7 +830,7 @@ for (int slot = 0; slot < 4; slot++)      /* kernel/arch/x86_64/mm/kwx.c */
 
 修法：把直映射范围常量提到共享头 `arch/x86_64/include/platform.h`（原先只在`firmware.c` 里局部定义，提上来是为了避免与 `firmware.c` 漂移），循环上界改为`X86_HIGH_RAM_MAP_END >> 30`，即覆盖直映射实际映射的每一个 1 GiB 槽位。槽位 0 含内核映像、其降级路径（旁路建好新 PD 再单次写入替换 PDPT 项）原样保留。
 
-第二个故障不是内核问题。修完驱动能加载后，仍报 `no FAT32 device for /bin`，那是我自己的 QEMU 参数不对（用了默认 i440fx machine + `if=virtio`）。改用仓库自己`tools/targets-steps.mk` 里的写法（`-machine q35 -device virtio-blk-pci,drive=x0`）即正常。所以我此前「x86_64 dev 镜像坏了」的结论**是错的**：镜像没坏，坏的是驱动加载，而那半是我参数错。
+第二个故障不是内核问题。修完驱动能加载后，仍报 `no FAT32 device for /bin`，那是我自己的 QEMU 参数不对（用了默认 i440fx machine + `if=virtio`）。改用仓库自己`tools/mk/targets-steps.mk` 里的写法（`-machine q35 -device virtio-blk-pci,drive=x0`）即正常。所以我此前「x86_64 dev 镜像坏了」的结论**是错的**：镜像没坏，坏的是驱动加载，而那半是我参数错。
 
 修后 x86_64 完整启动：`[INIT] Block device -> /bin (fat32)` → execve mksh → `audit errors=0`、`MM-ASM pt_pages=9 missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 anon_virt=0`。riscv64 侧无回归（`smoke-mm-stress` / `smoke-mm-fork-exec-race` 通过，审计全 0），x86_64/riscv64/aarch64 构建通过。
 

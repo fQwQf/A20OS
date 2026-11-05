@@ -5,7 +5,7 @@ This directory contains a deterministic generator, oracle driver, TSV expectatio
 Run the full host check from the repository root:
 
 ```sh
-sh tools/test-elf-exec-host.sh
+sh tools/host-tests/test-elf-exec-host.sh
 ```
 
 Or generate inputs for inspection:

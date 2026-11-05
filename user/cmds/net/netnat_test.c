@@ -1,7 +1,7 @@
 /*
  * conntrack and NAT test.
  *
- * Run by tools/targets-smoke.mk:smoke-netfilter-nat, which launches QEMU with
+ * Run by tools/mk/targets-smoke.mk:smoke-netfilter-nat, which launches QEMU with
  *
  *     hostfwd=tcp:127.0.0.1:18081-:10.0.2.15:18081
  *
@@ -53,7 +53,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-/* Must match the hostfwd rule in tools/targets-smoke.mk:smoke-netfilter-nat. */
+/* Must match the hostfwd rule in tools/mk/targets-smoke.mk:smoke-netfilter-nat. */
 #define FWD_PORT 18081
 #define LISTEN_PORT 18082
 #define NAT_BENCH_TRANSACTIONS 16

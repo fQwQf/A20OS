@@ -2,7 +2,7 @@
 
 如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及 generic 的架构模块清单与 embedded 的显式静态源码账本。
 
-通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/arch/<arch>/boards/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块包装位于 `kernel/drvmod/examples/`。full profile 不按类目录通配收集设备驱动：`tools/driver-sources.mk` 仍通配收集 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 generic 内核服务和 embedded 设备实现采用显式源码账本；generic 的设备包则以 `tools/driver-modules.mk` 的每架构清单为准。
+通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/arch/<arch>/boards/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块包装位于 `kernel/drvmod/examples/`。full profile 不按类目录通配收集设备驱动：`tools/mk/driver-sources.mk` 仍通配收集 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 generic 内核服务和 embedded 设备实现采用显式源码账本；generic 的设备包则以 `tools/mk/driver-modules.mk` 的每架构清单为准。
 
 ## 分类导航
 

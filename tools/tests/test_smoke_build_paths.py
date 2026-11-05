@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
 
 import smoke  # noqa: E402
 from a20_derive import derive_make_vars  # noqa: E402

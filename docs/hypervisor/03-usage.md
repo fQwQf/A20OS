@@ -38,13 +38,13 @@ RV64 的完整 A20OS RAMFS guest 和管理器有独立运行路径。ARM/x86/RV3
 以下每条命令从当前源码构建新内核，再启动、检查结果并等待模拟宿主关机。默认 `KERNEL_WERROR=1`。`--cpus 2` 同时设置构建的 `NR_CPUS=2` 和模拟 CPU 数量，并开启双 guest vCPU 测试；省略时为单 CPU。
 
 ```sh
-python3 tools/check_hyp_multiarch.py --arch aarch64 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch arm32 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch riscv64 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel tcg
+python3 tools/qemu/check_hyp_multiarch.py --arch aarch64 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch arm32 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv64 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel tcg
 # 下面一项只用于可暴露嵌套 SVM 的 AMD KVM 开发机：
-python3 tools/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel kvm
+python3 tools/qemu/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel kvm
 ```
 
 Intel VMX 的实际执行命令见第 3 节。当前 QEMU runner 的 x86 正控按 SVM 检查后端名称；不能将其 KVM 选项当作 Intel VMX 的现成验收入口。
@@ -52,10 +52,10 @@ Intel VMX 的实际执行命令见第 3 节。当前 QEMU runner 的 x86 正控�
 负控对上述每个架构加 `--without-virtualization`：
 
 ```sh
-python3 tools/check_hyp_multiarch.py --arch arm32 --cpus 2 --build --without-virtualization
-python3 tools/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build --without-virtualization
+python3 tools/qemu/check_hyp_multiarch.py --arch arm32 --cpus 2 --build --without-virtualization
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build --without-virtualization
 # LoongArch 本地仅支持此项，runner 会在 UART 提示后发送显式 LVZ 实验参数：
-python3 tools/check_hyp_multiarch.py --arch loongarch64 --cpus 2 --build --without-virtualization
+python3 tools/qemu/check_hyp_multiarch.py --arch loongarch64 --cpus 2 --build --without-virtualization
 ```
 
 ARM 负控关闭 virtualization，RISC-V 设置 `h=false`，x86 关闭 SVM/VMX。 LoongArch TCG 本身没有 LVZ；该选项检查显式 opt-in 也不能绕过硬件能力检查，不表示执行了 LVZ。成功负控应打印 `HYP_ARCH_TEST: SKIP (backend unavailable)`并正常关机。
@@ -224,7 +224,7 @@ hypvm --help
 双 guest 真实场景检查：
 
 ```sh
-python3 tools/hyp_pair_probe.py --host lab --timeout 120 --report /tmp/a20-pair/report.json
+python3 tools/probes/hyp_pair_probe.py --host lab --timeout 120 --report /tmp/a20-pair/report.json
 ```
 
 它检查 shell 命令、控制台隔离、重连、暂停隔离、正常退出、记录销毁和计数基线；证据属于独立完整 guest 场景，单次通过不代表重复运行或长稳稳定。

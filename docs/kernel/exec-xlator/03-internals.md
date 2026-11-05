@@ -18,7 +18,7 @@
 | `kernel/core/bootargs.c` | `arch_bootargs_get()` 弱默认（返回 NULL）与 `bootargs_get()` |
 | `kernel/core/fdt_bootargs.c` | 各 FDT 架构共用的 `/chosen/bootargs` 提取器 |
 | `kernel/core/uart_cmdline.c` | `uart_cmdline_read()`：`UART_CMDLINE=y` 时在串口上收一次命令行，5 秒无输入即放弃。整份文件包在 `#ifdef CONFIG_UART_CMDLINE` 内，默认关 |
-| `tools/xlator_guests_audit.py` | `check-xlator-guests` 门禁的实现 |
+| `tools/xlator/xlator_guests_audit.py` | `check-xlator-guests` 门禁的实现 |
 | `user/cmds/core/xlate_shim.c` | 只打印 argv/env 的宿主替身，形状验证用 |
 | `user/cmds/core/xlate_exec.c` | Linux-ABI 启动器与断言器，`smoke-exec-xlator*` 的驱动 |
 

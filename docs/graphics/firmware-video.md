@@ -87,7 +87,7 @@ make ARCH=x86_64 BOARD=x86_64-pc ABI=linux BRINGUP=0 \
 build_dir=$(make -s ARCH=x86_64 BOARD=x86_64-pc ABI=linux BRINGUP=0 \
   RAMFS_USER=1 RAMFS_MEDIA=1 DRIVER_DEPLOYMENT=embedded \
   CONFIG_UBSAN=0 CONFIG_SWAP=0 print-build-dir)
-python3 tools/check_uefi_framebuffer.py --efi "$build_dir/BOOTX64.EFI" --audio --media-files
+python3 tools/qemu/check_uefi_framebuffer.py --efi "$build_dir/BOOTX64.EFI" --audio --media-files
 ```
 
 检查会生成一个临时 GPT ESP，通过 AHCI 读取其中的 `clip.rgb` 和 `clip.wav`；串口 shell 执行真实播放器，完成 12 帧文件播放，并检查 QMP `screendump` 的实际屏幕 RGB 像素、HDA PCM 输出的 WAV 样本和正常关机。此外，向 `/media` 创建文件必须返回只读错误，启动前后整盘 SHA256 必须相同。不加 `--media-files` 时保留十秒、300 帧的内建动态图与测试音路径。输出在 `.kernel-build/smoke/uefi-media/`。宿主需要 QEMU、OVMF 和足够资源；没有 OVMF 时本检查不可替代为模拟 descriptor 或串口字符串通过。
@@ -121,7 +121,7 @@ fb_make=(ARCH="$fb_arch" BOARD="qemu-virt-$fb_arch" ABI=linux BRINGUP=0
          RAMFS_USER=1 RAMFS_MEDIA=1 DRIVER_DEPLOYMENT=embedded CONFIG_UBSAN=0 CONFIG_SWAP=0)
 make "${fb_make[@]}" kernel-only -j2
 fb_build_dir=$(make -s "${fb_make[@]}" print-build-dir)
-python3 tools/check_dt_framebuffer.py --kernel "$fb_build_dir/kernel.bin" \
+python3 tools/qemu/check_dt_framebuffer.py --kernel "$fb_build_dir/kernel.bin" \
   --platform "kernel/arch/$fb_arch/boot/tests/ramfb.json" \
   --output ".kernel-build/smoke/dt-framebuffer-$fb_arch"
 python3 -m unittest tools.tests.test_dt_framebuffer tools.tests.test_simplefb_lifecycle \

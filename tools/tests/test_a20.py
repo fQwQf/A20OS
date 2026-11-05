@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
 
 from a20_error import A20Error, ToolError
 from a20_board import FLASH_TARGET_REACHABLE, run_flash  # noqa: E402
@@ -154,7 +155,7 @@ class TestRetiredArchitectures(unittest.TestCase):
 
     def test_retired_arch_is_not_an_ext4_smoke_cli_choice(self) -> None:
         proc = subprocess.run(
-            [sys.executable, "tools/ext4_journal_gate.py", "--arch", "ppc64le"],
+            [sys.executable, "tools/fs/ext4_journal_gate.py", "--arch", "ppc64le"],
             cwd=REPO_ROOT, text=True, capture_output=True, check=False)
         self.assertEqual(proc.returncode, 2)
         self.assertIn("invalid choice: 'ppc64le'", proc.stderr)
@@ -1032,6 +1033,7 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
         import subprocess as sp
         from a20_test import _exclusive
         code = (f"import sys; sys.path.insert(0, {str(REPO_ROOT / 'tools')!r});"
+                f"sys.path.insert(0, {str(REPO_ROOT / 'tools/cli')!r});"
                 "from a20_test import _exclusive\n"
                 "with _exclusive('unit-test-reclaim'):\n"
                 "    print('held', flush=True)\n")

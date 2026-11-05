@@ -19,6 +19,8 @@ from unittest.mock import patch
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(TOOLS / "cli"))
+sys.path.insert(0, str(TOOLS / "boot"))
 import kernel_bundle
 import media
 from a20_instance import parse_instance

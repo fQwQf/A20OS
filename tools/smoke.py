@@ -7,7 +7,7 @@ a target that printed nothing looked exactly like a target that passed.  Each
 case is now data here, and this module is the single interpreter for it.
 
 Order of operations per case mirrors what the make recipe did:
-  1. resource gate  (tools/a20_resource.py) -- wait rather than risk the OOM killer
+  1. resource gate  (tools/cli/a20_resource.py) -- wait rather than risk the OOM killer
   2. pre-build commands (some gates delete a driver so it rebuilds with a
      smoke-test define)
   3. recursive build
@@ -43,7 +43,7 @@ from smoke_cases import CASES  # noqa: E402
 from smoke_platforms import ARCHES, RISCV_ONLY, case_for_arch  # noqa: E402
 
 TIMEOUT_HELPER = "tools/run_with_timeout.py"
-GATE = "tools/a20_resource.py"
+GATE = "tools/cli/a20_resource.py"
 # CI must fail rather than hang when the host is genuinely out of room; an
 # interactive `a20 run` waits forever, so the ceiling is here instead.
 GATE_WAIT_S = os.environ.get("A20_WAIT_TIMEOUT", "900")

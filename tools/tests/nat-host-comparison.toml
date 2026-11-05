@@ -34,19 +34,19 @@ timeout_seconds = 30
 expected_contract = { checks = 44, failures = 0, check_names_fnv1a32 = 3915109928 }
 
 [cases.commands.c0]
-argv = ["python3", "tools/v1_nat_host.py", "--revision", "9526af438a73eb834169d002536f8e57e21f24a8"]
-artifact_paths = ["{run_dir}/test-nat-rewrite-c0", "{run_dir}/fixed-c0-source/netfilter_rewrite.c", "{run_dir}/manifest.json", "tools/v1_nat_host.py", "tools/test-nat-rewrite-host.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+argv = ["python3", "tools/release/v1_nat_host.py", "--revision", "9526af438a73eb834169d002536f8e57e21f24a8"]
+artifact_paths = ["{run_dir}/test-nat-rewrite-c0", "{run_dir}/fixed-c0-source/netfilter_rewrite.c", "{run_dir}/manifest.json", "tools/release/v1_nat_host.py", "tools/host-tests/test-nat-rewrite-host.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
 cwd = "."
 env = { CC = "cc" }
 
 [cases.commands.cn]
-argv = ["tools/test-nat-rewrite-host.sh", "c"]
-artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/filter/netfilter_rewrite.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+argv = ["tools/host-tests/test-nat-rewrite-host.sh", "c"]
+artifact_paths = ["tools/host-tests/test-nat-rewrite-host.sh", "tools/host-tests/test-nat-rewrite-host.c", "kernel/net/filter/netfilter_rewrite.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
 cwd = "."
 env = { CC = "cc" }
 
 [cases.commands.candidate]
-argv = ["tools/test-nat-rewrite-host.sh", "rust"]
-artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/filter/netfilter_rewrite.c", "kernel/net/filter/netfilter_rewrite.rs", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+argv = ["tools/host-tests/test-nat-rewrite-host.sh", "rust"]
+artifact_paths = ["tools/host-tests/test-nat-rewrite-host.sh", "tools/host-tests/test-nat-rewrite-host.c", "kernel/net/filter/netfilter_rewrite.c", "kernel/net/filter/netfilter_rewrite.rs", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
 cwd = "."
 env = { CC = "cc", RUSTC = "rustc" }

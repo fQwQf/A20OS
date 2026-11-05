@@ -1,4 +1,4 @@
-"""Tests for tab completion (tools/a20_complete.py + the `a20 complete`
+"""Tests for tab completion (tools/cli/a20_complete.py + the `a20 complete`
 and `a20 completion` subcommands in tools/a20).
 
 The candidates must come from the same argparse tree main() parses with --
@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
 
 import a20_complete  # noqa: E402
 from a20_make import REPO_ROOT  # noqa: E402

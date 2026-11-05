@@ -360,7 +360,7 @@ host build → guest build → bundle 的依赖是有向无环图，guest 构建
 | `kernel/abi/linux/` 与设备/VFS 层 | `/dev/kvm`、fd 操作、UAPI 转换和诊断；核心逻辑留在 `kernel/hyp/` |
 | `user/cmds/core/hyp/` | 将 ELF/FDT 等加载器移为用户态 VMM 公共库，加入独立 console |
 | `user/` 与 `packages/` | `a20-vmm`、`a20-vmd`、`hypctl`，固定 QEMU 包及运行依赖 |
-| `tools/a20_instance.py`、`a20_validate.py`、`a20_derive.py` | 宿主配置新增 virtualization/accel；guest 模板单独 typed parser |
+| `tools/cli/a20_instance.py`、`a20_validate.py`、`a20_derive.py` | 宿主配置新增 virtualization/accel；guest 模板单独 typed parser |
 | `tools/a20` 与新增 runtime/VM 客户端模块 | session 管理、attach、`vm` 子命令与管理 transport |
 | `components/` | 后端/构建能力注册；运行时能力仍以内核 probe 为准 |
 | `instances/`、拟议 `vm-profiles/` | 可运行宿主、guest 模板、产物依赖和测试组合 |
@@ -422,7 +422,7 @@ P2 是第一个可以交互试用的里程碑；P5 才是 QEMU/KVM 兼容里程�
 - [当前 VM/stage-2](../../kernel/hyp/hyp.c)、[运行循环](../../kernel/hyp/hyp_vcpu.c)、[设备模型](../../kernel/hyp/hyp_dev.c)。
 - [RISC-V 后端](../../kernel/arch/riscv64/hyp/hyp_arch.c)、[Arm 启动](../../kernel/arch/aarch64/boot/entry.S)。
 - [Native 入口](../../kernel/abi/native/sys_native_hyp.c)、[Linux bridge](../../kernel/abi/linux/sys_a20_bridge.c)、[对象回收](../../kernel/ipc/a20_object.c)。
-- [实例模型](../../tools/a20_instance.py)、[CLI](../../tools/a20)、[测试运行器](../../tools/a20_test.py)、[资源预检](../../tools/a20_resource.py)。
+- [实例模型](../../tools/cli/a20_instance.py)、[CLI](../../tools/a20)、[测试运行器](../../tools/cli/a20_test.py)、[资源预检](../../tools/cli/a20_resource.py)。
 
 外部规范与参考实现：
 

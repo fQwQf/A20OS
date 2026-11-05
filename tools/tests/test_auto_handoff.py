@@ -10,6 +10,7 @@ import unittest
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
 from a20_handoff import load_plan, run_image_handoff
 from a20_instance import parse_instance
 

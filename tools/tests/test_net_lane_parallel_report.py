@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "check_net_lane_parallel_report.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "net/check_net_lane_parallel_report.py"
 SPEC = importlib.util.spec_from_file_location("check_net_lane_parallel_report", MODULE_PATH)
 assert SPEC and SPEC.loader
 report = importlib.util.module_from_spec(SPEC)

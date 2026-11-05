@@ -29,11 +29,11 @@ make CCACHE= BUILD_DIR=.kernel-build/cluster/native-compute-final-mcu \
   STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 NR_CPUS=2 \
   ALLOW_UNVERIFIED_SMP=1 MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 \
   MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 NATIVE_FLAT_FILES=1 -j6 kernel-only
-python3 tools/check-mcu-program.py .kernel-build/cluster/native-compute-final-mcu/kernel.elf \
+python3 tools/mcu/check-mcu-program.py .kernel-build/cluster/native-compute-final-mcu/kernel.elf \
   --backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
   --seed 26 --rounds 22000000 \
   --report .kernel-build/cluster/native-compute-final-rtl.json
-python3 tools/check-native-sync.py --cpus 2 --timeout 180 \
+python3 tools/native/check-native-sync.py --cpus 2 --timeout 180 \
   --output .kernel-build/cluster/native-compute-server-final
 ```
 

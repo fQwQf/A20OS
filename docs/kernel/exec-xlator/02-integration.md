@@ -36,7 +36,7 @@ A20OS 有两种 ABI（Linux ABI 与 A20 native ABI），通道的键是 `(架构
 
 内核对翻译器程序的要求只有四条：
 
-1. **宿主原生可执行文件。** 必须是**构建宿主**那个架构的 ELF。这不是建议：宿主版的翻译器若被做成外来架构，它自己会撞上本特性然后被转发给它自己。`tools/xlator_fetch.py` 的 `--check-guest` 就是断言这一条。
+1. **宿主原生可执行文件。** 必须是**构建宿主**那个架构的 ELF。这不是建议：宿主版的翻译器若被做成外来架构，它自己会撞上本特性然后被转发给它自己。`tools/xlator/xlator_fetch.py` 的 `--check-guest` 就是断言这一条。
 2. **宿主 Linux ABI 下可运行。** 它对 A20OS 而言就是一个普通 Linux-ABI 程序，走 musl 生态那一套。
 3. **吃下镜像路径。** 路径会作为某个位置参数交给它，位置由你的模板决定。
 4. **返回 guest 的退出码。** 内核不代理任何东西，退出码就是翻译器的退出码。
@@ -123,7 +123,7 @@ XLATE_SHIM: argv[3]=/tmp/guest_aarch64
 
 - 加一个**翻译器** = 一次启动配置改动，零代码（本文第 3 节）。
 - 加一个 **guest 架构** = 两处编辑，外加过一道门禁。
-- 加一个 **guest ABI**（同一架构的第二种 ABI，例如将来的 native-ABI 翻译器）= `.def` 加一行，外加门禁的一条新断言。CC 表那条「两处编辑」对它不直接适用，理由与处理方式见 [04-extending.md](04-extending.md#第-3-步toolstargets-xlatormk-加交叉编译器)。
+- 加一个 **guest ABI**（同一架构的第二种 ABI，例如将来的 native-ABI 翻译器）= `.def` 加一行，外加门禁的一条新断言。CC 表那条「两处编辑」对它不直接适用，理由与处理方式见 [04-extending.md](04-extending.md#第-3-步toolsmktargets-xlatormk-加交叉编译器)。
 
 两处编辑：
 
@@ -142,7 +142,7 @@ XLATOR_GUEST(<name>, <e_machine>, <abi>, <argv_template>)
 
 ABI 列不是元数据，它是**查找键的一半**：同一台机器的两种 ABI 在 `e_machine` 上无法区分，而能跑它们的翻译器是互斥的。键只有 `e_machine` 时会发生什么，是实测出来的而不是推出来的，见 [03-internals.md](03-internals.md#为什么输出的是二元组)。
 
-**2. `tools/targets-xlator.mk`** —— 一行 `XLATOR_GUEST_CC_<name> := <交叉编译器>`。
+**2. `tools/mk/targets-xlator.mk`** —— 一行 `XLATOR_GUEST_CC_<name> := <交叉编译器>`。
 
 这一行**无法从 `.def` 推导**——它是构建环境事实（宿主上装了哪个 gcc）。所以只能断言一致，不能计算。`make check-xlator-guests` 负责这个断言：
 
@@ -158,13 +158,13 @@ ABI 列不是元数据，它是**查找键的一半**：同一台机器的两种
 
 这道门禁不是预防性的摆设：写下它的时候两份清单**已经漂移**了——`XLATOR_GUEST_CC_riscv64` 存在，而 `--guest riscv64` 会被 argparse 直接拒掉。删掉那行没有损失任何能力（那个 guest 从来就不能翻译），但它说明了为什么需要门禁。
 
-`tools/xlator_fetch.py` 原本自带一份 `GUEST_TARGETS` 字典，那正是「第三份名单」的来源。它现在直接解析 `.def`，`--guest` 的可选值由内核的注册表决定。
+`tools/xlator/xlator_fetch.py` 原本自带一份 `GUEST_TARGETS` 字典，那正是「第三份名单」的来源。它现在直接解析 `.def`，`--guest` 的可选值由内核的注册表决定。
 
 新增或修改 guest 时的正确顺序：**先改 `.def`，再改 `targets-xlator.mk`，然后 `make check-xlator-guests`。** 反过来做，门禁会告诉你缺哪一半。
 
 ### 要不要下载翻译器
 
-仓里只自带 qemu-user 的取件逻辑（`tools/xlator_fetch.py`，从 Alpine v3.23 的 APKINDEX 解析版本化 `.apk`、解开拼接的 gzip 载荷、取出翻译器并校验它是宿主原生 ELF）。你自己的翻译器不进 git，按普通方式放进 rootfs 即可，然后按路径配置。
+仓里只自带 qemu-user 的取件逻辑（`tools/xlator/xlator_fetch.py`，从 Alpine v3.23 的 APKINDEX 解析版本化 `.apk`、解开拼接的 gzip 载荷、取出翻译器并校验它是宿主原生 ELF）。你自己的翻译器不进 git，按普通方式放进 rootfs 即可，然后按路径配置。
 
 要跑完整的真实翻译验证（而不是 shim），构建时带上翻译器与探针：
 
@@ -204,7 +204,7 @@ Prism 不是包装器，是**提前编译器**：输入一个模块，输出一�
 
 包装器型：
 
-- [ ] 翻译器是**宿主原生** ELF（用 `tools/xlator_fetch.py --check-guest` 或 `readelf -h` 确认 `Machine` 是宿主架构）
+- [ ] 翻译器是**宿主原生** ELF（用 `tools/xlator/xlator_fetch.py --check-guest` 或 `readelf -h` 确认 `Machine` 是宿主架构）
 - [ ] 翻译器在 A20OS 的 Linux ABI 下能独立运行
 - [ ] 选了匹配的 `.argv` 模板，用 shim 验证过 `argv[i]` 逐项符合预期
 - [ ] 环境需求写进了 `.env`（如果有）
@@ -217,7 +217,7 @@ Prism 不是包装器，是**提前编译器**：输入一个模块，输出一�
 新增 guest 架构时追加：
 
 - [ ] `kernel/proc/xlator_guests.def` 加了一行（ABI 列不要漏，它进查找键）
-- [ ] `tools/targets-xlator.mk` 加了 `XLATOR_GUEST_CC_<name>`
+- [ ] `tools/mk/targets-xlator.mk` 加了 `XLATOR_GUEST_CC_<name>`
 - [ ] `make check-xlator-guests` 通过
 
 设计与取舍、代码位置、内核 API 契约：[03-internals.md](03-internals.md)。扩展这条通道本身（新增 ABI、AOT、binfmt_misc 的借鉴）：[04-extending.md](04-extending.md)。

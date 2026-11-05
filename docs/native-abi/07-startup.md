@@ -349,7 +349,7 @@ int open(const char *path, int flags, ...) {
 
 ## 4. 历史 Native-musl 移植方案
 
-本节到第 6 节记录早期方案和估算，路径、代码片段、target triple 与完成状态不代表当前构建。活跃实现是 mlibc `sysdeps/a20`；当前构建入口见 `tools/targets-mlibc.mk`。
+本节到第 6 节记录早期方案和估算，路径、代码片段、target triple 与完成状态不代表当前构建。活跃实现是 mlibc `sysdeps/a20`；当前构建入口见 `tools/mk/targets-mlibc.mk`。
 
 ### 4.1 为什么选 musl
 
@@ -1059,7 +1059,7 @@ int main(int argc, char *argv[]) {
 
 - [x] 静态 libc/sysroot、线程与 Native futex。
 - [x] pipe/poll/socketpair 与 `posix_spawn`/`waitpid` 的已接入子集。
-- [ ] 完整异步信号、exec 后非 stdio handle 继承和动态链接。 fork 的 manifest/COW continuation 与原地 execve 已在 mlibc Sysdeps 中实现，对应构建目标见 `tools/targets-mlibc.mk`；不能把这两项继续记为未编码。
+- [ ] 完整异步信号、exec 后非 stdio handle 继承和动态链接。 fork 的 manifest/COW continuation 与原地 execve 已在 mlibc Sysdeps 中实现，对应构建目标见 `tools/mk/targets-mlibc.mk`；不能把这两项继续记为未编码。
 - [ ] 将当前 RISC-V64 构建/smoke 扩展为明确的多架构矩阵。
 
 ### 关键依赖关系
@@ -1096,7 +1096,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3
 
 ### 7.2 通用约定
 
-- 完整的 175 个系统调用速查矩阵、参数形式与 C 语言调用示例参见 [系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
+- 完整的 178 个系统调用速查矩阵、参数形式与 C 语言调用示例参见 [系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
 - 所有复杂 syscall 传结构体指针（通过 `a20_abi_header_t` 声明 `size` 与 `version` 版本化）。
 - 简单 syscall（如 `handle_close(handle)`）可以直接通过标量寄存器传参。
 - 返回 `a20_status_t`（>= 0 成功，< 0 为正数错误码的负值 `-A20_ERR_*`）。

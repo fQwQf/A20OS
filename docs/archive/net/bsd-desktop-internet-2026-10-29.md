@@ -77,16 +77,16 @@ KDIR=$(make --no-print-directory ARCH=x86_64 NR_CPUS=4 \
   OPT=-O3 CONFIG_UBSAN=0 print-build-dir)
 make -j8 ARCH=x86_64 NR_CPUS=4 OPT=-O3 CONFIG_UBSAN=0 "$KDIR/fat32.img"
 
-python3 tools/test-bsd-internet-kvm.py --kernel "$KDIR/kernel.elf" \
+python3 tools/net/tests/test-bsd-internet-kvm.py --kernel "$KDIR/kernel.elf" \
   --fat "$KDIR/fat32.img" \
   --world build/evidence/apk-bench-2026-10-26-input/world.img \
   --out /tmp/a20-bsd-internet
 
-python3 tools/test-bsd-desktop-kvm.py --kernel "$KDIR/kernel.elf" \
+python3 tools/net/tests/test-bsd-desktop-kvm.py --kernel "$KDIR/kernel.elf" \
   --fat "$KDIR/fat32.img" --world build/images/xfce-x86_64.img \
   --out /tmp/a20-bsd-desktop --cpus 4,5,6,7 --smp 4
 
-python3 tools/test-bsd-desktop-kvm.py --kernel "$KDIR/kernel.elf" \
+python3 tools/net/tests/test-bsd-desktop-kvm.py --kernel "$KDIR/kernel.elf" \
   --fat "$KDIR/fat32.img" --world build/images/xfce-x86_64.img \
   --out /tmp/a20-bsd-browser --cpus 4,5,6,7 --smp 4 --browser
 ```

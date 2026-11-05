@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DRIVER = ROOT / "tools/run-task-object-qemu-series.py"
+DRIVER = ROOT / "tools/native/run-task-object-qemu-series.py"
 CONTRACT = {
     "warmup_calls": 1000,
     "calls": 100000,

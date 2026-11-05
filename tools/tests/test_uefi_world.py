@@ -11,7 +11,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 try:
-    spec = importlib.util.spec_from_file_location('check_uefi_world', ROOT / 'tools/check_uefi_world.py')
+    spec = importlib.util.spec_from_file_location('check_uefi_world', ROOT / 'tools/qemu/check_uefi_world.py')
     smoke = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(smoke)
 finally:

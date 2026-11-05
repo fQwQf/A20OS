@@ -109,8 +109,8 @@ returned=60 clean_tokens=31 corrupted=0 never_returned=240 interleaved_tokens=91
 ## 6. 门禁与边界
 
 - `make dev-build` rc=0（`/tmp/dev-build-final2.log`，0 error/warning）。
-- `make smoke-serial-fidelity`（`tools/targets-smoke.mk` 新增，内部`ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build` + `print-build-dir` 取目录 + `a20_resource.py -m 1G -c 4` 资源门 + 300 条断言）连跑 3 次全绿；断言包含：脚本退出码、`dropped=0`、`shell_not_found=0`、无 panic/page fault、**rx_fidelity 行必须存在且 `poll_bytes>0`**（探针被摘掉或任务态轮询读路径未覆盖则门禁失败，防空转）。
-- 范围：只改 `kernel/drivers/char/uart.c`、`tools/serial_fidelity.py`、`tools/targets-smoke.mk`、`tools/smoke.py`、本文件。`uart_rx_fidelity_report()` 改为 static，`kernel/include/drivers/char/uart.h` 与 HEAD 一致（未改动）。未动`kernel/fs/devfs/tty.c`、`kernel/arch/riscv64/**`、`kernel/external/lwip/**`（DIVERGENCE.md 无需更新）。
+- `make smoke-serial-fidelity`（`tools/mk/targets-smoke.mk` 新增，内部`ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build` + `print-build-dir` 取目录 + `a20_resource.py -m 1G -c 4` 资源门 + 300 条断言）连跑 3 次全绿；断言包含：脚本退出码、`dropped=0`、`shell_not_found=0`、无 panic/page fault、**rx_fidelity 行必须存在且 `poll_bytes>0`**（探针被摘掉或任务态轮询读路径未覆盖则门禁失败，防空转）。
+- 范围：只改 `kernel/drivers/char/uart.c`、`tools/serial_fidelity.py`、`tools/mk/targets-smoke.mk`、`tools/smoke.py`、本文件。`uart_rx_fidelity_report()` 改为 static，`kernel/include/drivers/char/uart.h` 与 HEAD 一致（未改动）。未动`kernel/fs/devfs/tty.c`、`kernel/arch/riscv64/**`、`kernel/external/lwip/**`（DIVERGENCE.md 无需更新）。
 - **未做**：`smoke-net-lanes-n1` 字节等价门禁未在本任务内跑——它属于 lanes/锁分片流的回归，由编排层统一做；本任务改动只涉及 UART 驱动与冒烟工具，不含 lane 代码。§2C 的停摆性质未归因（可能落在范围外的 tty.c）；真实硬件未测（仅 QEMU）。
 
 ## 7. main 集成复验（2026-10-08）

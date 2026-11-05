@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-CHECKER = Path(__file__).resolve().parents[1] / "check-release-version.py"
+CHECKER = Path(__file__).resolve().parents[1] / "release/check-release-version.py"
 
 
 class ReleaseVersionTests(unittest.TestCase):

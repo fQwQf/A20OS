@@ -8,7 +8,7 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / 'tools/a20-perf-diff.py'
+SCRIPT = ROOT / 'tools/bench/a20-perf-diff.py'
 spec = importlib.util.spec_from_file_location('perf_diff', SCRIPT)
 perf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(perf)

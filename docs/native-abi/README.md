@@ -8,7 +8,7 @@ A20OS Native ABI 是内核提供的面向对象能力、句柄与异步事件的
 
 | 文档 | 说明 |
 |---|---|
-| [syscalls.md](syscalls.md) | **系统调用速查与调用指南**：全量 175 个系统调用矩阵、全架构陷入约定与 C 代码调用示例 |
+| [syscalls.md](syscalls.md) | **系统调用速查与调用指南**：全量 178 个系统调用矩阵、全架构陷入约定与 C 代码调用示例 |
 | [00-overview.md](00-overview.md) | Native ABI 设计哲学、分层模型与系统调用约定 |
 | [01-types.md](01-types.md) | 基础数据类型、可扩充结构体（E-APPEND）与参数传递规则 |
 | [02-errors.md](02-errors.md) | 错误码体系与映射规则（`a20_status_t`） |

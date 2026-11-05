@@ -20,6 +20,7 @@ from unittest.mock import patch
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
 from a20_console import SerialTransport
 from a20_handoff import run_image_handoff
 from a20_instance import parse_instance

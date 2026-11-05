@@ -67,7 +67,7 @@ rust_target() { # rust_target <triple>
 # `-Z build-std=core` 从 rust-src 组件现场编 core。只有真的编一次才能证明
 # rust-src 可用——缺了它，riscv32 的第一个 Rust 对象就会失败。
 rust_custom_rv32() {
-    spec=$repo/tools/rust-targets/riscv32imafdc-a20.json
+    spec=$repo/tools/rust/targets/riscv32imafdc-a20.json
     [ -f "$spec" ] || fail "missing $spec"
     mkdir -p "$tmp/rv32/src"
     printf '[package]\nname="selftest"\nversion="0.0.0"\nedition="2021"\n[lib]\npath="src/lib.rs"\n' \

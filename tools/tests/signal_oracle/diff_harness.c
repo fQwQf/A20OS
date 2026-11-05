@@ -8,7 +8,7 @@
  * compiled for the host. The harness sweeps the scalar input domain and
  * requires byte-identical results, so neither side can drift silently.
  *
- * Build/run is driven by tools/test-signal-core-host.sh; this file is not part
+ * Build/run is driven by tools/host-tests/test-signal-core-host.sh; this file is not part
  * of the kernel build.
  */
 #include <stdint.h>

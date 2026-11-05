@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 : "${BUILD_DIR:?set BUILD_DIR to an isolated output directory}"
 build_dir=$(mkdir -p "$BUILD_DIR" && cd "$BUILD_DIR" && pwd)
-target="$repo/tools/rust-targets/riscv32imafdc-a20.json"
+target="$repo/tools/rust/targets/riscv32imafdc-a20.json"
 prefix=${RISCV_ELF_PREFIX:-riscv64-unknown-elf-}
 cc=${CC:-${prefix}gcc}
 ld=${LD:-${prefix}ld}

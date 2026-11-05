@@ -82,7 +82,7 @@ XLATOR_GUEST(<name>, <e_machine>, XLATOR_ABI_NATIVE, <argv_template>)
 
 | 列 | 要求 |
 |---|---|
-| `<name>` | 合法标识符片段、不能含 `.`；同时用作 `a20.xlator.<name>.<abi>` 这个键的主体、`tools/targets-xlator.mk` 里 shell 变量的后缀、以及 `/proc/a20/xlator` 的行首 |
+| `<name>` | 合法标识符片段、不能含 `.`；同时用作 `a20.xlator.<name>.<abi>` 这个键的主体、`tools/mk/targets-xlator.mk` 里 shell 变量的后缀、以及 `/proc/a20/xlator` 的行首 |
 | `<e_machine>` | 十进制数，必须与 `kernel/include/mm/elf.h` 的 `EM_*` 一致 |
 | ABI | 只能是 `XLATOR_ABI_LINUX` 或 `XLATOR_ABI_NATIVE`，且后者必须对应 `elf.h` 里真实的 `ELF_ABI_*` |
 | `<argv_template>` | 规则与 Linux ABI 那几行完全一样（见 [01-usage.md](01-usage.md#4-argv-模板语法)） |
@@ -100,7 +100,7 @@ a20.xlator.x86_64.native=/bin/prism-x86_64          # 同一架构的第二个 A
 
 > 这条约定不是推演出来的，是实测过的：临时加一行 `XLATOR_GUEST(x86_64, 62, XLATOR_ABI_NATIVE, "@P @*")` 并配上 `a20.xlator.x86_64.native=`，启动日志如期打出两行互不覆盖的``` [XLATOR] x86_64 (e_machine=62 abi=linux)  → /bin/qemu-x86_64  argv="-0 @A @P @*" [XLATOR] x86_64 (e_machine=62 abi=native) → /bin/qemu-x86_64  argv="@P @*" ```两行各自拿到自己那份模板，`/tmp/xlate_native.elf` 被转发到 native 行而不是 linux 行。零内核代码改动。
 
-### 第 3 步：`tools/targets-xlator.mk` 加交叉编译器
+### 第 3 步：`tools/mk/targets-xlator.mk` 加交叉编译器
 
 ```
 XLATOR_GUEST_CC_<name> := <交叉编译器>

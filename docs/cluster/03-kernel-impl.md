@@ -67,7 +67,7 @@ UART 轮询者拥有状态机和字节流；发送者只入有界队列。状态
 ```bash
 make check-cluster-unit
 make check-cluster-loopback
-python3 tools/check-cluster-udp.py --faults --restart
+python3 tools/cluster/check-cluster-udp.py --faults --restart
 ```
 
 这些分别验证生产编解码/MCU 配对、同内核回归和独立内核故障场景。板级构建和更广的门禁结果在 08 文档中区分记录。

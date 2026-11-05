@@ -6,7 +6,7 @@
 
 ```bash
 make check-cluster-udp
-python3 tools/check-cluster-udp.py --faults --restart
+python3 tools/cluster/check-cluster-udp.py --faults --restart
 ```
 
 脚本自动构建 `ARCH=riscv64 BRINGUP=1 RAMFS_USER=1 DRIVER_DEPLOYMENT=embedded`，从 Makefile 取得 QEMU 参数，安装 virtio-net 并配置 guest 地址 `10.0.3.2/24`和 `10.0.3.3/24`。嵌入驱动配置必不可少：只有泛用内核而没有 NIC 模块时不能把未绑定网卡造成的失败归咎于集群握手。
@@ -27,6 +27,6 @@ python3 tools/check-cluster-udp.py --faults --restart
 
 ## 3. 证据解释
 
-这是 TCG/QEMU 的独立内核功能与故障恢复证据，不是物理 MCU、真实交换机、无线串口或大规模服务器性能证据。旧 `tools/cluster-net-up.sh` 仍可用于 L2 连通排查，但它的互 ping 结果不能替代本验收。
+这是 TCG/QEMU 的独立内核功能与故障恢复证据，不是物理 MCU、真实交换机、无线串口或大规模服务器性能证据。旧 `tools/cluster/cluster-net-up.sh` 仍可用于 L2 连通排查，但它的互 ping 结果不能替代本验收。
 
 当前自动 fixture 在内核线程中运行服务，尚不替代后续 clusterd/jobd 与 Native 用户态 agent 的实际运行验收。完整剩余内容见 [../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)。

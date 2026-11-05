@@ -35,15 +35,15 @@ Java 主进程允许在逻辑 CPU 0/1 上运行，两个工作线程各执行 8 
 # 现有原始 ext4 系统镜像；仅用作只读 backing。
 IMAGE=<repo>/build/images/xfce-x86_64.img
 
-python3 tools/check-multi-qemu-kernel.py --workload jvm \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload jvm \
   --system-image "$IMAGE" \
   --out .kernel-build/cluster/multi-qemu/jvm-version-new --timeout 240
 
-python3 tools/check-multi-qemu-kernel.py --workload jvm-threads \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload jvm-threads \
   --system-image "$IMAGE" \
   --out .kernel-build/cluster/multi-qemu/jvm-threads-new --timeout 240
 
-python3 tools/check-multi-qemu-kernel.py --mode smp --workload jvm-threads \
+python3 tools/qemu/check-multi-qemu-kernel.py --mode smp --workload jvm-threads \
   --system-image "$IMAGE" \
   --out .kernel-build/cluster/multi-qemu/jvm-threads-smp-new --timeout 240
 ```

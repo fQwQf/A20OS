@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tools.v1_nat_host import HeaderClosureError, _verify_header_closure
+from tools.release.v1_nat_host import HeaderClosureError, _verify_header_closure
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,7 +39,7 @@ class FixedC0AdapterTests(unittest.TestCase):
 
     def test_revision_argument_is_required(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(ROOT / "tools/v1_nat_host.py")],
+            [sys.executable, str(ROOT / "tools/release/v1_nat_host.py")],
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertEqual(result.returncode, 2)

@@ -23,10 +23,10 @@
 
 ## 从 Windows 采集机器信息
 
-保留 Windows。将仓库的 `tools/collect_pc_windows.ps1` 复制到 CT5100，在 Windows PowerShell 5.1 或更新版本运行：
+保留 Windows。将仓库的 `tools/boards/collect_pc_windows.ps1` 复制到 CT5100，在 Windows PowerShell 5.1 或更新版本运行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\collect_pc_windows.ps1 -OutputPath .\ct5100-hardware.json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\boards\collect_pc_windows.ps1 -OutputPath .\ct5100-hardware.json
 msinfo32
 ```
 
@@ -127,10 +127,10 @@ tools/a20 package huawei-ct5100-bios -- -j2
 已有验收覆盖完整发行版挂载、XFCE 终端中的 USB 键盘命令、实际屏幕像素变化，以及经内核关机审计的 ACPI S5 退出。镜像使用快照运行，源镜像和固件变量模板的哈希在验收前后保持一致。可在具备 QEMU/OVMF 的宿主重复执行：
 
 ```sh
-python3 tools/check_uefi_world.py \
+python3 tools/qemu/check_uefi_world.py \
   --image build/huawei-ct5100/a20os-uefi.img \
   --output .kernel-build/smoke/ct5100/ahci-world
-python3 tools/check_uefi_world.py \
+python3 tools/qemu/check_uefi_world.py \
   --image build/huawei-ct5100/a20os-uefi.img --storage usb \
   --output .kernel-build/smoke/ct5100/usb-world
 ```

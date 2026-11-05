@@ -1,6 +1,6 @@
 # A20OS USB 子系统设计
 
-> 状态：已实现（HID + Mass Storage + xHCI）。当前共享实现为 `kernel/drivers/usb/`（`core/usb_core.c`、`host/xhci.c`、`class/usb_hid.c`、`class/usb_storage.c`）。generic 在 `tools/driver-modules.mk` 实际列出的 x86_64/aarch64/loongarch64 上通过 `xhci.a20drv`、`usb-hid.a20drv`、`usb-storage.a20drv` 部署；embedded 静态链接这些共享源码。
+> 状态：已实现（HID + Mass Storage + xHCI）。当前共享实现为 `kernel/drivers/usb/`（`core/usb_core.c`、`host/xhci.c`、`class/usb_hid.c`、`class/usb_storage.c`）。generic 在 `tools/mk/driver-modules.mk` 实际列出的 x86_64/aarch64/loongarch64 上通过 `xhci.a20drv`、`usb-hid.a20drv`、`usb-storage.a20drv` 部署；embedded 静态链接这些共享源码。
 
 ## 1. 背景与目标
 
@@ -157,7 +157,7 @@ typedef struct usb_hcd {
 
 ## 9. 集成点与 Makefile
 
-- 共享目录是 `kernel/drivers/usb/{core,host,class}/`。`usb_core.c` 显式列入 `GENERIC_KERNEL_SERVICE_SRCS`；xHCI/HID/storage 显式列入 `EMBEDDED_DEVICE_DRIVER_SRCS`，generic 则由 `tools/driver-modules.mk` 的架构包清单构建。不存在递归 wildcard 自动纳入。
+- 共享目录是 `kernel/drivers/usb/{core,host,class}/`。`usb_core.c` 显式列入 `GENERIC_KERNEL_SERVICE_SRCS`；xHCI/HID/storage 显式列入 `EMBEDDED_DEVICE_DRIVER_SRCS`，generic 则由 `tools/mk/driver-modules.mk` 的架构包清单构建。不存在递归 wildcard 自动纳入。
 - `bus_type "usb"` 注册在 `driver_core_init` 之后（现有总线注册序列）。
 - 类驱动 `DRIVER_REGISTER()` 自动进入 `.driver_init`。
 

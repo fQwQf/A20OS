@@ -15,9 +15,9 @@
 需要已安装且支持 virgl 的 QEMU/KVM、可用的 `/dev/dri/renderD128`，以及项目现有构建依赖。当前脚本的图形显示参数使用此 render node。
 
 ```sh
-python3 tools/check-multi-qemu-kernel.py --workload gpu-input \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload gpu-input \
   --out .kernel-build/cluster/multi-qemu/gpu-input-new --timeout 180 --jobs 4
-python3 tools/check-multi-qemu-kernel.py --mode smp --workload gpu-input \
+python3 tools/qemu/check-multi-qemu-kernel.py --mode smp --workload gpu-input \
   --out .kernel-build/cluster/multi-qemu/gpu-input-smp-new --timeout 180 --jobs 4
 ```
 

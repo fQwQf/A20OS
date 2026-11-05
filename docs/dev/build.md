@@ -138,7 +138,7 @@ Linux 原生快速路径是本页的验收重点。Windows 用户可在 Linux �
 | RISC-V32 | 与 RISC-V64 共用工具链和 QEMU | 自定义目标，另装 `rust-src` |
 | ARMv7-M | `gcc-arm-none-eabi binutils-arm-none-eabi qemu-system-arm openocd` | `thumbv7m-none-eabi`，当前仍有上述构建阻塞 |
 
-按所选架构执行 `rustup target add --toolchain 1.96.0 <表中的目标>`。 AArch64 内核使用 `aarch64-unknown-none-softfloat` 自建 core，用户态使用`aarch64-unknown-none`；RISC-V32 使用自定义 JSON 目标`tools/rust-targets/riscv32imafdc-a20.json`。这两种内核构建需要：
+按所选架构执行 `rustup target add --toolchain 1.96.0 <表中的目标>`。 AArch64 内核使用 `aarch64-unknown-none-softfloat` 自建 core，用户态使用`aarch64-unknown-none`；RISC-V32 使用自定义 JSON 目标`tools/rust/targets/riscv32imafdc-a20.json`。这两种内核构建需要：
 
 ```bash
 rustup component add --toolchain 1.96.0 rust-src

@@ -33,18 +33,18 @@
 ## 复现
 
 ```sh
-python3 tools/check-multi-qemu-kernel.py --workload linux-fs \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux-fs \
   --out .kernel-build/cluster/multi-qemu/fs-new --timeout 120
 
-python3 tools/check-multi-qemu-kernel.py --workload linux-fs \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux-fs \
   --ext4-checksums metadata32 \
   --out .kernel-build/cluster/multi-qemu/fs-csum32-new --timeout 120
 
-python3 tools/check-multi-qemu-kernel.py --workload linux-fs \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux-fs \
   --ext4-checksums metadata64 \
   --out .kernel-build/cluster/multi-qemu/fs-csum64-new --timeout 120
 
-python3 tools/check-multi-qemu-kernel.py --workload linux-fs --mode smp \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux-fs --mode smp \
   --out .kernel-build/cluster/multi-qemu/fs-smp-new --timeout 120
 
 PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test_multi_qemu_fsck.py

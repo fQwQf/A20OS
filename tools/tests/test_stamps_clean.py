@@ -359,7 +359,7 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertEqual(marker.read_text(), "untouched")
             self.assertIn("NATIVE_RUST_PEER=0", stamp.read_text())
 
-            dev_recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            dev_recipe = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-peer "$(NATIVE_RUST_PEER)"', dev_recipe)
             self.assertIn('--rust-peer-binary "$(RUST_USER_PEER_BIN)"', dev_recipe)
 
@@ -430,7 +430,7 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertFalse(service.exists())
             self.assertFalse(fixture.exists())
             self.assertIn("NATIVE_RUST_IDL_SERVICE=0", stamp.read_text())
-            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            recipe = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-idl-service "$(NATIVE_RUST_IDL_SERVICE)"', recipe)
             self.assertIn('--rust-service-binary "$(RUST_USER_SERVICE_BIN)"', recipe)
             self.assertIn('--rust-service-test-binary "$(RUST_USER_SERVICE_TEST_BIN)"', recipe)
@@ -496,7 +496,7 @@ class UserBuildLockTests(unittest.TestCase):
             ], ["0", "1", "0"])
             self.assertTrue(all(call[-1] == "native-programs" for call in calls))
             self.assertIn("NATIVE_RUST_ECHOD=0", stamp.read_text())
-            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            recipe = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-echod "$(NATIVE_RUST_ECHOD)"', recipe)
             self.assertIn('--rust-echod-binary "$(RUST_USER_SERVICE_BIN)"', recipe)
 
@@ -614,7 +614,7 @@ class UserBuildLockTests(unittest.TestCase):
             ], ["0", "1", "0"])
             self.assertTrue(all(call[-1] == "native-programs" for call in calls))
             self.assertIn("NATIVE_RUST_RTCD=0", stamp.read_text())
-            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            recipe = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-rtcd "$(NATIVE_RUST_RTCD)"', recipe)
             self.assertIn('--rust-rtcd-binary "$(RUST_USER_RTCD_BIN)"', recipe)
 
@@ -673,7 +673,7 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertEqual(target.read_text(), "keep")
 
     def test_native_uapi_header_change_rebuilds_same_build_id(self):
-        targets = (STAMPS.parent / "targets-dev.mk").read_text()
+        targets = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
         recipe = targets.split("--roots \"", 2)[2].split('"', 1)[0]
         roots = recipe.split()
         self.assertIn("kernel/include/uapi/a20", roots)
@@ -732,7 +732,7 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertEqual(loongarch.exitcode, 0)
 
     def test_arch_user_matrix_targets_use_stamp_locked_build_path(self):
-        targets = (Path(__file__).resolve().parents[1] / "targets-build.mk").read_text(
+        targets = (Path(__file__).resolve().parents[1] / "mk" / "targets-build.mk").read_text(
             encoding="utf-8")
         self.assertIn("check-user-build-stamp: $(USER_BUILD_STAMP)", targets)
         for arch in ("riscv64", "loongarch64", "aarch64", "x86_64",
@@ -976,7 +976,7 @@ class NativeRustServiceSelectorTests(unittest.TestCase):
             ], ["0", "1", "0"])
             self.assertTrue(all(call[-1] == "native-programs" for call in calls))
             self.assertIn("NATIVE_RUST_SVCMGR=0", stamp.read_text())
-            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            recipe = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-svcmgr "$(NATIVE_RUST_SVCMGR)"', recipe)
             self.assertIn('--rust-svcmgr-binary "$(RUST_USER_SVCMGR_BIN)"', recipe)
 
@@ -1114,7 +1114,7 @@ class NativeRustServiceSelectorTests(unittest.TestCase):
                                    if x.startswith("NATIVE_RUST_UFSD=")) for call in calls],
                              ["0", "1", "0"])
             self.assertIn("NATIVE_RUST_UFSD=0", stamp.read_text())
-            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            recipe = (STAMPS.parent / "mk" / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-ufsd "$(NATIVE_RUST_UFSD)"', recipe)
             self.assertIn('--rust-ufsd-binary "$(RUST_USER_UFSD_BIN)"', recipe)
 

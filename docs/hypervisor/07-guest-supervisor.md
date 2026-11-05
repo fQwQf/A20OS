@@ -48,7 +48,7 @@ manager 缓存最近 32 个请求的完整原文与响应，丢失回复的同�
 ## 运行门禁
 
 ```sh
-python3 tools/hyp_pair_probe.py --host lab --report /tmp/a20-pair/report.json
+python3 tools/probes/hyp_pair_probe.py --host lab --report /tmp/a20-pair/report.json
 ```
 
 脚本会实际创建两台 guest，等待各自 shell，用输入回显中不存在的拼接 token 检查命令执行，检测串线，检查重连和暂停隔离，再等待正常关机与输出排空、销毁记录，并检查 VM/vCPU/mapping/table 计数回到静止基线。失败日志与 JSON 证据保留。该脚本已实际运行，结果及边界见 [实现状态](../status/current/hypervisor-implementation-status.md)。

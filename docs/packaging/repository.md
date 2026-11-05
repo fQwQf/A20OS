@@ -17,10 +17,10 @@ build/repo/
 
 ```bash
 make pkg-repo ARCH=riscv64
-# 等价于：make pkgs → cp 到 build/repo/riscv64/ → tools/mka20repo.sh 建索引
+# 等价于：make pkgs → cp 到 build/repo/riscv64/ → tools/packaging/mka20repo.sh 建索引
 ```
 
-`tools/mka20repo.sh` 用 `apk index` 生成 `APKINDEX.tar.gz`；给出`--sign-key` 时会用 `tools/apk-sign-stream.py` 对索引做 RSA/SHA-256 签名（与 abuild-sign 相同的做法：对索引文件签名后把签名流前置于 tar 之前）。
+`tools/packaging/mka20repo.sh` 用 `apk index` 生成 `APKINDEX.tar.gz`；给出`--sign-key` 时会用 `tools/packaging/apk-sign-stream.py` 对索引做 RSA/SHA-256 签名（与 abuild-sign 相同的做法：对索引文件签名后把签名流前置于 tar 之前）。
 
 ## 信任链全貌
 
@@ -94,5 +94,5 @@ apk update && apk add a20-base
 仓库是纯静态文件，任何 HTTP 服务器都能托管，甚至可以直接用本地路径（CI 与 mkrootfs 正是这么用的）：
 
 ```bash
-tools/mkrootfs.py --arch riscv64 --world my.world --repo /path/to/repo
+tools/packaging/mkrootfs.py --arch riscv64 --world my.world --repo /path/to/repo
 ```

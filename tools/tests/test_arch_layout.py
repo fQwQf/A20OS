@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
+sys.path.insert(0, str(ROOT / 'tools/cli'))
 from a20_boards import board_directory
 from check_arch_layout import violations
 from a20_instance import ACTIVE_ARCHES, RETIRED_ARCHES

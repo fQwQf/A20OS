@@ -5,7 +5,7 @@
  * identical precomputed input array so the comparison is of compiled code, not
  * of different work. Rounds alternate C->Rust and Rust->C to cancel ordering
  * bias. Fixed CPU/optimisation (host, -O2) for both. Driven by
- * tools/bench-signal-core-host.sh.
+ * tools/bench/bench-signal-core-host.sh.
  */
 #include <stdint.h>
 #include <stdio.h>

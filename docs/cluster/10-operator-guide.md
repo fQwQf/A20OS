@@ -79,7 +79,7 @@ make check-cluster-unit check-cluster-fuzz
 make smoke-native-cluster smoke-native-cluster-supervisor
 make check-cluster-reliable check-cluster-mesh
 make check-cluster-hardening
-python3 tools/check-cluster-gateway.py --gossip --abandon
+python3 tools/cluster/check-cluster-gateway.py --gossip --abandon
 make demo-wordcount
 ```
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 
-TOOL = Path(__file__).resolve().parents[1] / "summarize-benchmark-pairs.py"
+TOOL = Path(__file__).resolve().parents[1] / "bench/summarize-benchmark-pairs.py"
 SPEC = importlib.util.spec_from_file_location("summary_tool", TOOL)
 summary_tool = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(summary_tool)

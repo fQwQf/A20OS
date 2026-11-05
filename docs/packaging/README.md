@@ -17,10 +17,10 @@ A20OS 使用 apk（Alpine 包格式）作为包管理与镜像组装体系：自
 
 | 工具 | 作用 |
 |------|------|
-| `tools/mka20pkg.py` | recipe → apk 包（可选 RSA256 签名） |
-| `tools/mka20repo.sh` | 目录中的 *.apk → 带索引（可选签名）的仓库 |
-| `tools/apk-sign-stream.py` | 给索引等 gzip 流前置签名段 |
-| `tools/ensure-apk-static.sh` | 获取/缓存静态 apk 二进制 |
-| `tools/mkrootfs.py` | world 清单 → ext4 rootfs 镜像 |
+| `tools/packaging/mka20pkg.py` | recipe → apk 包（可选 RSA256 签名） |
+| `tools/packaging/mka20repo.sh` | 目录中的 *.apk → 带索引（可选签名）的仓库 |
+| `tools/packaging/apk-sign-stream.py` | 给索引等 gzip 流前置签名段 |
+| `tools/packaging/ensure-apk-static.sh` | 获取/缓存静态 apk 二进制 |
+| `tools/packaging/mkrootfs.py` | world 清单 → ext4 rootfs 镜像 |
 
-Make 入口：`make pkgs` / `make pkg-repo` / `make image-world` / `make pkgs-check` / `make pkg-key`（变量见 `tools/targets-pkg.mk` 头部注释）。
+Make 入口：`make pkgs` / `make pkg-repo` / `make image-world` / `make pkgs-check` / `make pkg-key`（变量见 `tools/mk/targets-pkg.mk` 头部注释）。

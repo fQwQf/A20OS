@@ -22,15 +22,15 @@ ISA 适配器负责 ELF/寄存器/栈入口，公共代码负责参数、对象�
 
 `user/tests/native-spawn-child.c` 是各 ISA 共用的实际子程序：从标准 CRT 进入 main，核验初始参数、自身任务句柄和运行实例，读取文件，并创建两个工作线程共同领取 32 项任务。子程序核验计算总和 4359168、没有重复/遗漏以及多 CPU 参与后才返回 37。没有宿主写入任务状态、伪造退出码或代替子程序计算。 MCU 检查保留原用户线程、共享堆/futex 和退出后全部资源回收，预期实际退出从 5 次增加到 11 次；原无文件配置仍要求原来的 5 次。
 
-`tools/check-native-spawn-admission.py` 另在三种宿主 ISA 上编译生产 flat 启动处理函数，通过明确的依赖适配器注入参数复制、分配、文件读取、装载、子/父句柄安装和结果复制失败。十二条路径和五类参数边界（空向量、精确上限、字符串超限、个数超限和缺少终止项）核验引用/分配全部释放，失败的子任务不发布。这个单元检查使用模拟依赖，不能代替前面的实际 ELF/内核运行。
+`tools/native/check-native-spawn-admission.py` 另在三种宿主 ISA 上编译生产 flat 启动处理函数，通过明确的依赖适配器注入参数复制、分配、文件读取、装载、子/父句柄安装和结果复制失败。十二条路径和五类参数边界（空向量、精确上限、字符串超限、个数超限和缺少终止项）核验引用/分配全部释放，失败的子任务不发布。这个单元检查使用模拟依赖，不能代替前面的实际 ELF/内核运行。
 
 ```sh
-python3 tools/check-native-sync.py --cpus 2 --timeout 180 \
+python3 tools/native/check-native-sync.py --cpus 2 --timeout 180 \
   --output .kernel-build/cluster/native-spawn-server
 make CCACHE= check-native-spawn-admission
 # 与 41 相同的 file profile；构建会把真实子程序写入 FAT fixture。
 # 使用 Unicorn/pyelftools Python 与 RTL backend 执行新生成的 kernel.elf：
-python3 tools/check-mcu-program.py <kernel.elf> --backend <Va20_shared_top> \
+python3 tools/mcu/check-mcu-program.py <kernel.elf> --backend <Va20_shared_top> \
   --seed 22 --rounds 20000000 --report .kernel-build/cluster/native-spawn-mcu-final.json
 ```
 

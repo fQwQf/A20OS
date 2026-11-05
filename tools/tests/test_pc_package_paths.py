@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
 from a20_board import run_package
 from a20_instance import parse_instance
 from a20_derive import derive_make_vars

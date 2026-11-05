@@ -12,7 +12,7 @@
  *      verdict strings byte-identical to clframe.py, exit 0 accept /
  *      1 reject-with-verdict / 2 usage error.
  *
- * Build (tools/targets-gates.mk): gcc -std=gnu99 -O2 -Wall -Wextra
+ * Build (tools/mk/targets-gates.mk): gcc -std=gnu99 -O2 -Wall -Wextra
  * -Ikernel/include -Ikernel.  The codec is header-shared with the kernel,
  * so this test exercises the very code that ships (03-kernel-impl.md §5
  * step 1: 离线金样向量自测).

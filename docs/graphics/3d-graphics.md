@@ -286,7 +286,7 @@ boot 日志应出现：
 | `user/cmds/core/egl_test.c` | 已删除（曾被 `user/Makefile` 从 `LOCAL_CMD_SRCS` filter 掉） |
 | `tools/check-drm-abi.sh` | DRM UAPI 门禁：ioctl 号 + 结构体布局对 Linux UAPI 双向可证伪（§8.1） |
 | `tools/build-virglrenderer.sh` | 宿主侧 virglrenderer 构建（已运行，装出 1.3.0；Mesa 仍因宿主 EGL 未 attach） |
-| `tools/a20_resource.py` | 启动前宿主资源门禁（RAM/负载/磁盘；a20_preflight.py 已合并进去） |
+| `tools/cli/a20_resource.py` | 启动前宿主资源门禁（RAM/负载/磁盘；a20_preflight.py 已合并进去） |
 | `docs/graphics/gpu-3d-roadmap.md` | 路线图与排序论证 |
 | `docs/graphics/real-hardware-gpu.md` | 真机 GPU 的现实边界（scanout vs 3D 加速） |
 | `docs/graphics/host-tools.md` | 上面三个宿主工具的用法 |
@@ -317,7 +317,7 @@ boot 日志应出现：
 
 本仓库没有 vendored 的 Mesa/libdrm/EGL/GBM/wlroots/labwc/Xwayland/XFCE 源码。上面说的"用户态"是 stock Alpine apk world（`packages/world/xfce.world`），跑在 Linux syscall ABI（`kernel/abi/linux/syscall_table.def`）之上，经 Linux ioctl syscall 访问 `/dev/dri`。两个常见的"用户态 DRM 定义"引用都不成立：
 
-- `user/external/mlibc/sysdeps/managarm/generic/drm.cpp` **不在构建路径里**。 A20OS 用 `tools/targets-mlibc.mk` 配置 mlibc 的 `sysdeps/a20`，其中没有任何 DRM 代码。
+- `user/external/mlibc/sysdeps/managarm/generic/drm.cpp` **不在构建路径里**。 A20OS 用 `tools/mk/targets-mlibc.mk` 配置 mlibc 的 `sysdeps/a20`，其中没有任何 DRM 代码。
 - `user/cmds/core/egl_test.c`（已删除）曾被 `user/Makefile` 从 `LOCAL_CMD_SRCS` 里 filter 掉，**不参与构建，是死代码**。不要把它读成"A20OS 有 EGL 自测能力"。
 
 唯一真正的用户态 DRM 定义来源是 Alpine 那份 libdrm 及其安装的`<drm/*.h>` UAPI 头，这正是 §8.1 的门禁所比对的基准。

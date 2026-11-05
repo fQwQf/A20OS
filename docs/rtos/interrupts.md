@@ -51,7 +51,13 @@ kernel/arch/riscv32/mcu/vendor_hi.c
 3. 调度器选择 dispatcher 线程（它是 RT 线程，但仍受 tick 和当前任务影响）；
 4. dispatcher 线程运行 handler。
 
-因此延迟不是“几个微秒的 ISR”，而是“IRQ + 一次用户态调度”。具体上界取决于 tick、当前 RT 占用和是否在 `osKernelLock` 内；目前没有实测基线（见 [实时时延分析与基准测量体系](latency.md)）。
+因此延迟不是“几个微秒的 ISR”，而是“IRQ + 一次用户态调度”。具体上界取决于 tick、当前 RT 占用和是否在 `osKernelLock` 内；4.8 已给出 tick jitter 与 syscall latency 的周期计数基线，但 preempt/IRQ-to-handler 仍需独立测量（见 [实时时延分析与基准测量体系](latency.md)）。
+
+## Tickless 与栈 guard
+
+MCU 定时器支持 one-shot 重装：`timer_set_interval()` 记录下一截止期，IRQ 返回前按 `proc_next_timer_interval()` 重新装载；`osKernelSuspend()` 在单核上以调度器锁 + WFI 使用同一条路径。IRQ 处理期间仍递增软件 tick（跨度超过 1 tick 时逐 tick 计入调度器）。
+
+flat task 的栈底安装 8 字节无权限 PMP 区域；U-mode 越界访问进入 trap 后按 SIGSEGV 退出该任务，而不是 panic 内核。它只保护第一次越界写入，不隔离堆、代码和全局。
 
 ## 执行模型边界与限制
 
@@ -83,6 +89,6 @@ tools/a20 test qemu-riscv32-mcu
 
 - [执行模型](execution-model.md)
 - [同步与优先级继承](synchronization.md)
-- [实验 4.1–4.5](experiments.md)
+- [实验 4.1–4.8](experiments.md)
 - [实时时延分析与基准测量体系](latency.md)
 - [Hi3861 平台页](../platforms/hi3861.md)

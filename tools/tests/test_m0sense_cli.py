@@ -6,6 +6,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
+
 from test_hardware_deployment import a20_module
 from a20_instance import parse_instance
 from a20_console import SessionResult

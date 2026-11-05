@@ -8,7 +8,7 @@
  * user-mode network, so the address rewrite and the reply-direction match had
  * unit-level evidence and nothing else.  Everything here is a pure function of
  * its arguments and the frame bytes -- no table, no lock, no clock -- which is
- * what makes tools/test-nat-rewrite-host.sh able to compile this header's
+ * what makes tools/host-tests/test-nat-rewrite-host.sh able to compile this header's
  * implementation against the host libc and assert on it directly.
  *
  * Nothing here allocates, and nothing here is reachable from outside the

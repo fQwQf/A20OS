@@ -14,6 +14,7 @@ if __package__:
 else:
     from test_firmware_model import ROOT, STUBS
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "boards"))
 from raspberrypi4_fixture import Tree
 
 HARNESS = r'''

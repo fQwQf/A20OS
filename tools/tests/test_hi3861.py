@@ -8,6 +8,8 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "boards"))
 from a20_instance import applicable_actions, parse_instance
 from a20_registry import load_trim_registry, plan_trim
 from a20_validate import validate_instance

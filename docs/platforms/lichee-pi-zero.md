@@ -49,7 +49,7 @@ echo hello > /tmp/hello
 ```sh
 make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 RAMFS_FPU_TESTS=1 \
   DRIVER_DEPLOYMENT=embedded kernel-only -j2
-python3 tools/check_serial_shell.py --arch arm32 --kernel 构建输出目录/kernel.elf \
+python3 tools/qemu/check_serial_shell.py --arch arm32 --kernel 构建输出目录/kernel.elf \
   --memory-mb 64 --fpu --timers --stress-forks 40
 ```
 

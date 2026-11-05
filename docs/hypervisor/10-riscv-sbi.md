@@ -44,8 +44,8 @@ QEMU TCG 10.0.13，GCC 14.2.0，ABI=both，NR_CPUS=2，当前源码构建：
 ```sh
 python3 -m unittest tools.tests.test_hyp_sbi tools.tests.test_hyp_s2 \
   tools.tests.test_hyp_backend_contract tools.tests.test_riscv_hyp_nommu -v
-python3 tools/check_hyp_multiarch.py --arch riscv64 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv64 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build
 # 对刚构建的对应内核，可追加 --without-virtualization 复现无 H 负控。
 ```
 

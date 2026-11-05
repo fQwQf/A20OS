@@ -61,7 +61,7 @@ unset DISPLAY
 # JNA's riscv64 libjnidispatch.so imports glibc's fortified __*_chk entry
 # points, which musl does not export; without these stand-ins in the global
 # namespace the first fortified call jumps into the PLT lazy-binding stub and
-# dies (SIGSEGV at a bare .plt address).  See tools/a20-fortify.c.
+# dies (SIGSEGV at a bare .plt address).  See tools/packaging/a20-fortify.c.
 FORTIFY_SHIM=/usr/lib/a20/liba20-fortify.so
 [ -f "$FORTIFY_SHIM" ] && export LD_PRELOAD="$FORTIFY_SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
 exec java \

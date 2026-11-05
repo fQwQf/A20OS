@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
 
 from a20_error import A20Error  # noqa: E402
 from a20_instance import parse_instance  # noqa: E402

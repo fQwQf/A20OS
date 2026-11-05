@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.check_net_lane_report import read_report
+from tools.net.check_net_lane_report import read_report
 
 
 class NetLaneReportTests(unittest.TestCase):

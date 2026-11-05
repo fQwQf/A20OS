@@ -19,7 +19,7 @@
  *
  * NAT is not tested here.  A DNAT port forward needs an inbound connection
  * from outside the guest, which this single-shot serial script cannot produce;
- * tools/targets-smoke.mk:smoke-netfilter-nat does that with a QEMU hostfwd
+ * tools/mk/targets-smoke.mk:smoke-netfilter-nat does that with a QEMU hostfwd
  * rule, and user/cmds/net/netnat_test.c is its payload.
  */
 
@@ -35,7 +35,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-/* Exit-code contract with tools/targets-smoke.mk:smoke-netfilter.
+/* Exit-code contract with tools/mk/targets-smoke.mk:smoke-netfilter.
  *   0   passed
  *   1   failed (control surface or counters misbehaved)
  *   77  SKIP   -- the environment could not exercise the data plane

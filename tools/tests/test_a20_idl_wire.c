@@ -26,7 +26,7 @@
  *     The order matters: a malformed request that also carries the crash type
  *     is ignored, not fatal.
  *
- * Host-only: built by `make host-tests` (tools/targets-gates.mk) with the
+ * Host-only: built by `make host-tests` (tools/mk/targets-gates.mk) with the
  * host compiler against the generated header.  Nothing here is freestanding:
  * it is a host test binary that exits non-zero on failure, like its peers in
  * tools/tests.

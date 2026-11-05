@@ -78,7 +78,7 @@ PCI 开发者直接跳到下一节。固定设备开发者还要完成 [总线�
 
 ## 5. 建立驱动源文件
 
-以网络设备 `acme-net` 为例，新建共享实现 `kernel/drivers/net/acme_net.c`。该文件不会仅因位于类目录中就自动编译：embedded 需要把它加入 `EMBEDDED_DEVICE_DRIVER_SRCS`；默认 generic 还需要在 `kernel/drvmod/examples/` 增加带 `.a20drv` 描述符的包装，在 `tools/driver-modules.mk` 增加构建规则，并只加入实际支持架构的 `DRVMOD_MODULES`。现有包装通过改写 `DRIVER_REGISTER` 后包含共享 `.c`，可作为模板。只被本实现使用的寄存器、descriptor 和私有状态都留在 `.c`；只有其他模块需要调用的接口才放到 `kernel/include/drivers/net/`。
+以网络设备 `acme-net` 为例，新建共享实现 `kernel/drivers/net/acme_net.c`。该文件不会仅因位于类目录中就自动编译：embedded 需要把它加入 `EMBEDDED_DEVICE_DRIVER_SRCS`；默认 generic 还需要在 `kernel/drvmod/examples/` 增加带 `.a20drv` 描述符的包装，在 `tools/mk/driver-modules.mk` 增加构建规则，并只加入实际支持架构的 `DRVMOD_MODULES`。现有包装通过改写 `DRIVER_REGISTER` 后包含共享 `.c`，可作为模板。只被本实现使用的寄存器、descriptor 和私有状态都留在 `.c`；只有其他模块需要调用的接口才放到 `kernel/include/drivers/net/`。
 
 最小包含集合：
 

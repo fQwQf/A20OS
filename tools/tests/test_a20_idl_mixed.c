@@ -10,7 +10,7 @@
  * the build generates a header from tools/tests/idl_mixed.idl, compiles it with
  * the project's host flags, and runs it.
  *
- * The header is generated into $(TMPDIR) by tools/targets-gates.mk and included
+ * The header is generated into $(TMPDIR) by tools/mk/targets-gates.mk and included
  * below; nothing here reads a checked-in artifact.
  *
  * What it pins:

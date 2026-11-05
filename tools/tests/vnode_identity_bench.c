@@ -4,7 +4,7 @@
  * their own fixed-size state, so a timing difference is algorithmic/ABI
  * overhead, not workload skew.
  *
- * Protocol (see tools/test-uxfs-vnode-identity-bench.sh):
+ * Protocol (see tools/host-tests/test-uxfs-vnode-identity-bench.sh):
  *   - a fixed number of rounds; each round runs both models and the round
  *     order alternates C->Rust / Rust->C so cache/thermal drift does not
  *     favour either model;

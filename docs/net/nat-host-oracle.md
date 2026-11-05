@@ -7,7 +7,7 @@
 在 C/Rust selector 适配器可用之后运行：
 
 ```sh
-python3 tools/v1_compare.py tools/tests/nat-host-comparison.toml \
+python3 tools/release/v1_compare.py tools/tests/nat-host-comparison.toml \
   --out build/evidence/nat-host-$(date +%Y%m%d-%H%M%S)
 ```
 

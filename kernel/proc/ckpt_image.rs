@@ -17,7 +17,7 @@
 //! C keeps the ptrace freeze, the fd-table walk, all VFS I/O, frame
 //! allocation and page-table population.  This module owns the image-format
 //! checks and the register mapping; the pure parts run as host unit tests
-//! (tools/test-ckpt-image-host.sh).
+//! (tools/host-tests/test-ckpt-image-host.sh).
 
 #![no_std]
 #![allow(non_snake_case)]

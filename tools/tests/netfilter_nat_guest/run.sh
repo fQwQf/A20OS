@@ -78,7 +78,7 @@ printf '\n' >> "$out/qemu.argv"
   for c in "${cmds[@]}"; do printf '%s\n' "$c"; sleep 3; done
 } | timeout "${NET_GUEST_TIMEOUT:-300}" "${qemu[@]}" > "$out/guest.log" 2>&1 &
 qemu_pid=$!
-python3 tools/netnat_host_probe.py 18081 16 > "$out/probe.log" 2>&1
+python3 tools/probes/netnat_host_probe.py 18081 16 > "$out/probe.log" 2>&1
 probe=$?
 record_exit host-probe "$probe"
 wait $qemu_pid

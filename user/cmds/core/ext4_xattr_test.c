@@ -1,6 +1,6 @@
 /* ext4 xattr persistence fixture: write on one boot, verify on the next.
  *
- * The gate (tools/ext4_xattr_gate.py) boots twice over the same unjournaled
+ * The gate (tools/fs/ext4_xattr_gate.py) boots twice over the same unjournaled
  * ext4 image, so this binary proves the attributes reached the disk and not
  * just the VFS's volatile table:
  *

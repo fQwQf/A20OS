@@ -140,7 +140,7 @@ CUBIC 的范围与未做的部分逐条登记在 `kernel/external/lwip/DIVERGENC
 - **§4.2 的 TCP-friendly 区域已落地**（`8115a0c1a`）。`tcp_cubic_w_est()` 按`W_max*beta_cubic + alpha_aimd*(t/RTT)` 算 Eq. 4，两条曲线取**较大者**作为目标（4.2 原文是 "cwnd SHOULD be set to W_est(t)"，所以友好线是地板不是天花板）。`alpha_aimd` 由 `BETA` 导出（`3(1-b)/(1+b) = 542/1024`）而不是抄写，因此不会与上面的 beta 走散。此前那个"Reno 速率近似"（W_cubic 不给增长就每确认 cwnd 加 1 MSS）已删除：那是一个**速率**而不是**目标**，它既不看 `t/RTT` 也不看流量自己的 `W_max`，在平台上以 1/cwnd 段每 RTT 的速度无限爬，比 Eq. 4 所派生的 AIMD(alpha_aimd, beta_cubic) 慢，也就是说"至少不差于 Standard TCP"这条性质此前只是**声称**、没有交付。
 - **没有做的部分**：HyStart / TCP-AQ / DCTCP / Prague、ECN、`W_max` 跨 pcb 持久化。平台分支保留 1 MSS 的地板，理由也改了：它不再是 4.2 的近似，而是 4.2 在`W_cubic(t)` 与 `W_est(t)` **双双不高于 cwnd** 时唯一给出的进展（此时 `(W_cubic(t+RTT)-cwnd)/cwnd` 为负，RFC 没说话）。
 - **必须一起读的边界**（登记在 `tcp_cubic_priv.h` 与 DIVERGENCE §2.7）：lwIP 2.2.x 的`struct tcp_pcb` **没有 `rtt` 字段**，本栈唯一能测的 RTT 是 `pcb->sa`，以整个`TCP_SLOW_INTERVAL`（500 ms）为单位采样，所以 Eq. 4 的分母在 0.5 s 以下没有分辨率。`sa == 0`（回环、大多数局域网）被兜底成一个 tick，于是 `alpha/0.5s = 1.07` 段/秒。这反过来界定了这一区域能在哪里起约束作用：Eq. 4 只在 `alpha*K/RTT > 0.3*W_max`时压过 Eq. 1，也就是 `W_max` 低于约 3.25 段。**所以 4.2 是真的，但只在窗口量级的低端决定窗口**——在 CUBIC 真正要对付的大窗口传输上它不会成为约束项。毫秒级 RTT 需要在 `tcp_in.c` 里更新一个新 pcb 字段，未做。
-- 主机侧门禁 `tools/test-tcp-cubic-host.sh`，`test_tcp_friendly()` 跨 (t, RTT) 钉住 Eq. 4，`test_friendly_region_binding()` 在 `sa=1` 与 `sa=40` 下把区域选择推过真实的 ACK 路径。
+- 主机侧门禁 `tools/host-tests/test-tcp-cubic-host.sh`，`test_tcp_friendly()` 跨 (t, RTT) 钉住 Eq. 4，`test_friendly_region_binding()` 在 `sa=1` 与 `sa=40` 下把区域选择推过真实的 ACK 路径。
 
 ### 运行时控制面：`/proc/a20/netfilter` 的 conntrack 与 NAT 动词
 

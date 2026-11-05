@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from tools.mkdocs_repo_links import on_page_markdown, published_url
+from tools.docs.mkdocs_repo_links import on_page_markdown, published_url
 
 
 class PublishedLinksTests(unittest.TestCase):

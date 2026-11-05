@@ -13,6 +13,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "boards"))
 import quartz64_zero as quartz
 from raspberrypi4_fixture import Tree
 

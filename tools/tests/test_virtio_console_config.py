@@ -8,6 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
+sys.path.insert(0, str(ROOT / 'tools/cli'))
 from a20_instance import InstanceError, parse_instance
 from a20_derive import derive_make_vars
 from a20_validate import validate_instance

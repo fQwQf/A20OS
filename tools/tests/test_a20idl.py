@@ -65,7 +65,7 @@ def synth(body: str) -> str:
 
 
 def compile_flags():
-    """The project's host-test flags, from tools/targets-gates.mk defaults."""
+    """The project's host-test flags, from tools/mk/targets-gates.mk defaults."""
     return ["-std=gnu99", "-O2", "-Wall", "-Wextra"]
 
 

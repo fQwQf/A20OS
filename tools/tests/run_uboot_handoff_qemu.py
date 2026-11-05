@@ -16,6 +16,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tools/cli"))
+sys.path.insert(0, str(ROOT / "tools/boards"))
 from a20_console import SerialTransport, write_console_log
 from a20_handoff import run_image_handoff
 from a20_instance import parse_instance

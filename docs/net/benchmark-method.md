@@ -1,6 +1,6 @@
 # 网络后端对照方法
 
-`tools/bench-net-kvm.py` 使用同一个静态 Linux ELF 校验 TCP/UDP 请求与回显，记录吞吐、延迟分位数、QEMU 参数、镜像/ELF 哈希和完整失败样本。`--a20-setup <脚本>` 在测试前配置 A20OS，脚本副本与哈希随证据保存。`--pcap` 保存 QEMU Ethernet 抓包。有任一用例退出失败、缺少结果或未通过 payload 验证时，脚本最终非零退出。
+`tools/bench/bench-net-kvm.py` 使用同一个静态 Linux ELF 校验 TCP/UDP 请求与回显，记录吞吐、延迟分位数、QEMU 参数、镜像/ELF 哈希和完整失败样本。`--a20-setup <脚本>` 在测试前配置 A20OS，脚本副本与哈希随证据保存。`--pcap` 保存 QEMU Ethernet 抓包。有任一用例退出失败、缺少结果或未通过 payload 验证时，脚本最终非零退出。
 
 CPU 成本以验证成功的请求加回显 payload 字节数为分母。宿主客户端使用进程及等待子进程的 user+system CPU；KVM 使用整个 QEMU 进程的 CPU，包括所有 vCPU/I/O 线程与 VMM，因此不是单独的 guest CPU。Linux `/proc/<pid>/stat` 的时钟粒度也记录在结果中。外部 echo 服务的父进程 CPU 单独保存，TCP fork worker 未计入，不应解释为完整 peer 成本。目前指标为 ns/字节，不是硬件 cycles/字节，且没有静默扣除 idle 成本。
 
@@ -25,7 +25,7 @@ TCP路径仍有明显CPU/吞吐和尾延迟差距。这些结果不足以将成�
 
 ## 连接规模与内存观测
 
-`tools/net-connection-probe.c` 编译成同一 Linux ELF，由`tools/bench-net-scale-kvm.py` 在 Linux/A20OS KVM 上运行。每个规模重新启动2 vCPU/2GiB guest，相同 affinity、virtio 特性、SLIRP 与宿主事件循环 echo peer；没有每连接 fork。所有连接保持打开，每条在最终连接数下再次校验唯一 token。分别保存 baseline、held、 closed、closed_2s 的 guest 内存和网络状态。`--a20-setup` 支持有副本/哈希的配置消融。未能保持指定规模时记录已建立数与 errno，整体非零退出，不把部分成功算成通过。
+`tools/bench/net-microbench.c`（及 `tools/probes/net-connection-probe.c`）编译成同一 Linux ELF，由`tools/bench/bench-net-scale-kvm.py` 在 Linux/A20OS KVM 上运行。每个规模重新启动2 vCPU/2GiB guest，相同 affinity、virtio 特性、SLIRP 与宿主事件循环 echo peer；没有每连接 fork。所有连接保持打开，每条在最终连接数下再次校验唯一 token。分别保存 baseline、held、 closed、closed_2s 的 guest内存和网络状态。`--a20-setup` 支持有副本/哈希的配置消融。未能保持指定规模时记录已建立数与 errno，整体非零退出，不把部分成功算成通过。
 
 第一轮证据 `build/evidence/net-refactor-20261028/connection-scale2-kvm/`：
 

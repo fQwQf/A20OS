@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tools.v1_compare import SpecError, _parse_marker, _safe_token, run
+from tools.release.v1_compare import SpecError, _parse_marker, _safe_token, run
 
 
 RUNNER_SCRIPT = r'''import json, os, subprocess, sys, time

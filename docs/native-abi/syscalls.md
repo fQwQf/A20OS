@@ -2,7 +2,7 @@
 
 A20OS Native ABI 是面向对象能力、统一句柄与异步事件驱动的新一代原生系统调用接口。与 Linux 兼容层（`abi/linux`）不同，Native ABI 基于面向对象权能模型（Capability-based Handle）、结构体版本协商（`a20_abi_header_t`）与显式异步事件分发机制构建。
 
-本文档是 Native ABI 的**总览参考手册与系统调用速查矩阵**，涵盖全架构调用约定、硬件陷入指令、参数传递规范、C 语言调用代码示例以及全量 175 个系统调用的详细说明。
+本文档是 Native ABI 的**总览参考手册与系统调用速查矩阵**，涵盖全架构调用约定、硬件陷入指令、参数传递规范、C 语言调用代码示例以及全量 178 个系统调用的详细说明。
 
 ---
 
@@ -22,7 +22,7 @@ A20OS Native ABI 是面向对象能力、统一句柄与异步事件驱动的新
   - [4.5 模式四：权能屏蔽与不可逃逸沙箱（Rights Attenuation）](#45-模式四权能屏蔽与不可逃逸沙箱rights-attenuation)
 - [5. 头文件与 SDK 组织](#5-头文件与-sdk-组织)
 - [6. 系统调用分区概览](#6-系统调用分区概览)
-- [7. 全量 175 个系统调用速查矩阵](#7-全量-175-个系统调用速查矩阵)
+- [7. 全量 178 个系统调用速查矩阵](#7-全量-178-个系统调用速查矩阵)
 
 ---
 
@@ -422,7 +422,7 @@ A20OS 在内核与用户态提供了分层的头文件支持：
 
 | 头文件路径 | 层次与说明 |
 |---|---|
-| [kernel/include/abi/native/syscall_nr.h](../../kernel/include/abi/native/syscall_nr.h) | 内核系统调用号宏定义（`A20_SYS_*`，共 175 个） |
+| [kernel/include/abi/native/syscall_nr.h](../../kernel/include/abi/native/syscall_nr.h) | 内核系统调用号宏定义（`A20_SYS_*`，共 178 个） |
 | [kernel/abi/native/syscall_table.def](../../kernel/abi/native/syscall_table.def) | 内核系统调用 X-Macro 派发表 |
 | [user/liba20rt/a20_syscall.h](../../user/liba20rt/a20_syscall.h) | 用户态全架构陷入指令与底层 `a20_syscall6` 辅助宏 |
 | [user/liba20rt/a20_types.h](../../user/liba20rt/a20_types.h) | 用户态原生数据结构、参数结构体、错误码与状态宏定义 |
@@ -453,11 +453,11 @@ A20 Native ABI 采用十六进制高位分区（Class），稳定系统调用严
 | `0x0D00 - 0x0DFF` | **Pager / Monitor** | 用户态分页异常代理与内核度量监控 | 5 |
 | `0x0E00 - 0x0EFF` | **Kernel Extension** | 内核 eBPF 风格原生扩展程序加载与拦截点挂载 | 5 |
 | `0x0F00 - 0x0FFF` | **Hypervisor / vCPU** | 原生轻量硬件虚拟机（RISC-V H / 虚拟化扩展）生命周期与 vCPU 控制 | 15 |
-| **总计** | | **共 17 个子系统分类** | **175** |
+| **总计** | | **共 17 个子系统分类** | **178** |
 
 ---
 
-## 7. 全量 175 个系统调用速查矩阵
+## 7. 全量 178 个系统调用速查矩阵
 
 ### Core (0x0000)
 
@@ -522,6 +522,9 @@ A20 Native ABI 采用十六进制高位分区（Class），稳定系统调用严
 | 0x0214 | `A20_SYS_execve` | `int64_t execve(const char *path, char **argv, char **envp)` | 结构体/指针 | 原地替换当前 task 的映像，成功不返回 |
 | 0x0219 | `A20_SYS_sched_lock` | `int64_t sched_lock(int32_t mode, int32_t depth)` | 纯标量 | per-task 调度器锁（osKernelLock）：0 获取/1 释放/2 恢复深度；返回操作前深度；需要 `CAP_SYS_NICE` |
 | 0x021A | `A20_SYS_task_self` | `int64_t task_self(void)` | 无参数 | 在当前 task 的句柄表中安装并返回自己的 THREAD handle；用于初始线程的 PI/优先级查询 |
+| 0x021B | `A20_SYS_task_suspend` | `int64_t task_suspend(a20_handle_t task)` | 纯标量 | 跨线程挂起；目标在 syscall/IRQ 返回安全点进入 STOPPED，`A20_HANDLE_NULL` 表示调用者 |
+| 0x021C | `A20_SYS_task_resume` | `int64_t task_resume(a20_handle_t task)` | 纯标量 | 恢复 CMSIS 挂起任务并重新入 RT 队列 |
+| 0x0706 | `A20_SYS_kernel_idle` | `int64_t kernel_idle(void)` | 无参数 | 单核 MCU tickless idle：调度器锁 + one-shot timer + WFI，返回实际经过 tick；SMP 返回 NOT_SUPPORTED |
 | 0x0216 | `A20_SYS_task_adopt` | `int64_t task_adopt(const a20_handle_t handles[6])` | 纯标量 | 接管当前 task 的 stdio/root/cwd/self 句柄，顺序固定 |
 | 0x0217 | `A20_SYS_task_checkpoint` | `int64_t task_checkpoint(int pid, const char *path, uint32_t path_len, uint32_t flags)` | 标量+指针 | 冻结单线程 task 并序列化寄存器/地址空间/fd 表为 A20CKPT1 镜像（见 docs/kernel/kexec-hot-update.md） |
 | 0x0218 | `A20_SYS_task_restore` | `int64_t task_restore(const char *path, uint32_t path_len)` | 标量+指针 | restore-as-exec：以检查点镜像替换当前 task，成功不返回 |
@@ -629,7 +632,7 @@ A20 Native ABI 采用十六进制高位分区（Class），稳定系统调用严
 
 | 编号 | 宏定义 | 签名 | 传参形式 | 说明 |
 |---|---|---|---|---|
-| 0x0700 | `A20_SYS_clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 标量+指针 | 获取时钟 |
+| 0x0700 | `A20_SYS_clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 标量+指针 | 获取时钟；MCU 扩展 id 7 返回 raw cycle counter，id 8 返回其 Hz（4.8 时延实验使用） |
 | 0x0701 | `A20_SYS_timer_create` | `int64_t timer_create(a20_timer_create_args_t *args)` | 结构体/指针 | 创建定时器 |
 | 0x0702 | `A20_SYS_timer_set` | `int64_t timer_set(a20_handle_t timer, uint64_t deadline_ns, uint64_t interval_ns)` | 纯标量 | 设置定时器 |
 | 0x0703 | `A20_SYS_timer_cancel` | `int64_t timer_cancel(a20_handle_t timer)` | 纯标量 | 取消定时器 |

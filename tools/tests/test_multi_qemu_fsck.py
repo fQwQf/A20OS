@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-script = Path(__file__).resolve().parents[1] / 'check-multi-qemu-kernel.py'
+script = Path(__file__).resolve().parents[1] / 'qemu/check-multi-qemu-kernel.py'
 spec = importlib.util.spec_from_file_location('multi_qemu', script)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

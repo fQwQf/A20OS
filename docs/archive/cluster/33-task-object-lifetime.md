@@ -34,7 +34,7 @@ proc_destroy_task 先将任务标记 UNUSED 并从调度/任务列表移除，�
 
 ```sh
 make check-native-task-object check-native-thread-admission
-CCACHE= QEMU_ACCEL=tcg,thread=multi python3 tools/check-native-sync.py \
+CCACHE= QEMU_ACCEL=tcg,thread=multi python3 tools/native/check-native-sync.py \
   --output .kernel-build/cluster/native-task-identity
 make PYTHON=/path/to/venv/bin/python check-mcu-program-rtl
 ```

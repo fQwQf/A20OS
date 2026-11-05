@@ -32,7 +32,7 @@ make -C kernel/external/f-stack/lib -n all
 
 ## 独立编译与部分链接进展
 
-新增 `tools/probe-bsd-core.py --out <新目录>`，不调用依赖 DPDK 的上游完整构建，直接编译选定的真实网络对象。所有生成头和机器目录软链接均位于输出目录；`device_if.h`/`bus_if.h` 由上游 awk 生成器生成，不手写空壳、不修改 submodule。使用 x86_64 freestanding、无 red zone、仅通用寄存器、large code model 和 BSD 内核头，禁用宿主 Linux 头/宏，不链接 libc/DPDK，也不以宿主 socket 替代协议执行。
+新增 `tools/probes/probe-bsd-core.py --out <新目录>`，不调用依赖 DPDK 的上游完整构建，直接编译选定的真实网络对象。所有生成头和机器目录软链接均位于输出目录；`device_if.h`/`bus_if.h` 由上游 awk 生成器生成，不手写空壳、不修改 submodule。使用 x86_64 freestanding、无 red zone、仅通用寄存器、large code model 和 BSD 内核头，禁用宿主 Linux 头/宏，不链接 libc/DPDK，也不以宿主 socket 替代协议执行。
 
 `bsd-core9` 已编译46个对象并以 `ld -r` 部分链接：amd64 checksum、IPv4/IPv6 输入输出、 TCP 输入输出/连接生命周期、UDP、mbuf、socket/sockbuf/domain、接口、FIB/下一跳、锁、callout 与 epoch。源码选择由 `kernel/net/backends/bsd/port-sources.toml` 拥有，工具从 `upstream.toml` 读取版本，不在脚本中重复固定版本。checksum 按上游 VPATH 选择 amd64 实现，不能同时链接 portable 和 amd64 两份。早期缺生成头和重复定义的失败保留在`bsd-core2`/`bsd-core4`；扩展 source list 时的路径错误保留在 `bsd-core7`。精确参数、源码 SHA、编译器、告警和未解析符号写入 manifest；工具及两个 TOML 文件也复制到证据目录，便于按原始 source list 重放。
 
@@ -90,9 +90,9 @@ Clang 的 `-femulated-tls` 使真实 `__thread` 访问经过 `__emutls_get_addre
 编译探测可重跑：
 
 ```sh
-python3 tools/probe-bsd-core.py --cc /path/to/clang --emulated-tls --net-profile 2 --out <新目录>
-python3 tools/test-bsd-runtime-host.py --clang /path/to/clang --out <新目录>
-python3 tools/test-bsd-runtime-host.py --clang /path/to/clang --sanitize --out <另一新目录>
+python3 tools/probes/probe-bsd-core.py --cc /path/to/clang --emulated-tls --net-profile 2 --out <新目录>
+python3 tools/host-tests/test-bsd-runtime-host.py --clang /path/to/clang --out <新目录>
+python3 tools/host-tests/test-bsd-runtime-host.py --clang /path/to/clang --sanitize --out <另一新目录>
 ```
 
 本机使用 Debian Clang19.1.7，工具包解压在 `build/toolchains/bsd-clang19/`，未修改系统工具链。证据为 `bsd-release125-runtime-host` 和最终的 `bsd-release125-runtime-final`（ASan/UBSan）：内存对齐/清零/预算耗尽、后端分配失败、realloc 回滚、16,000次四线程分配释放通过；真实 Clang TLS 访问器的初始化、64字节对齐、四任务隔离、宿主 TLS canary、跨任务拒绝、8槽耗尽回滚、解绑回收通过，ASan/UBSan 无错误。预期的未绑定访问由子进程验证为失败，不提供假成功。测试没有运行 BSD TCP/IP 状态机。

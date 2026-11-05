@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "check-native-sync.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "native/check-native-sync.py"
 SPEC = importlib.util.spec_from_file_location("check_native_sync", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

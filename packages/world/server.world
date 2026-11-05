@@ -11,7 +11,7 @@
 # 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk
 # 缓存。注意默认 USTC 镜像源在本环境返回 403，需要改用官方源：
 #   ALPINE_MIRROR_ROOT=https://dl-cdn.alpinelinux.org/alpine
-# 该变量在 tools/targets-rootfs.mk 中是 `?=` 赋值，可以从命令行覆盖。
+# 该变量在 tools/mk/targets-rootfs.mk 中是 `?=` 赋值，可以从命令行覆盖。
 #
 # **验证状态**（2026-10）：
 #

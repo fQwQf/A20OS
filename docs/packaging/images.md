@@ -48,7 +48,7 @@ XFCE 已使用 `packages/world/xfce.world` 与 `packages/overlay/xfce/`；软件
 ## 组装：`mkrootfs.py`
 
 ```bash
-tools/mkrootfs.py --arch riscv64 \
+tools/packaging/mkrootfs.py --arch riscv64 \
     --world packages/world/devel.world \
     --repo build/repo \              # 本地 A20OS 仓库（默认即此）
     --output build/images/devel-riscv64.img \
@@ -119,4 +119,4 @@ debugfs -R "cat /etc/os-release" build/images/base-riscv64.img
 make run-world ARCH=riscv64 PKG_WORLD=base
 ```
 
-它复用根 Makefile 的 QEMU 配置（不要手抄 QEMU 参数，各平台的`-bios default`、virtio 总线槽位等易错细节都在 `Makefile`/`tools/run-targets.mk`里维护），把 world 镜像作为第二块盘启动。镜像是不含分区表的 raw ext4，也可以手工挂到任何现有 `run-*`/`distro-run` 命令的第二盘位。
+它复用根 Makefile 的 QEMU 配置（不要手抄 QEMU 参数，各平台的`-bios default`、virtio 总线槽位等易错细节都在 `Makefile`/`tools/mk/run-targets.mk`里维护），把 world 镜像作为第二块盘启动。镜像是不含分区表的 raw ext4，也可以手工挂到任何现有 `run-*`/`distro-run` 命令的第二盘位。

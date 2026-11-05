@@ -9,7 +9,7 @@
 | **互斥量 (Mutex)** | 人格层维护 `owner`、递归计数与等待链；内核执行 PI 调度重排 | 默认启用递归与优先级继承（`osMutexRecursive \| osMutexPrioInherit`）；支持超时与删除保护 |
 | **信号量 (Semaphore)** | 人格层维护计数器与上限；通过 futex park 挂起等待者 | 计数型与二值信号量；支持定时获取与动态 release |
 | **事件标志 (Event Flags)** | 人格层维护 32 位掩码字与匹配条件；底层复用 futex 字 | 支持 `osFlagsWaitAny`、`osFlagsWaitAll` 与 `osFlagsNoClear` |
-| **消息队列 (Message Queue)** | 人格层维护定长环形缓冲区与读写指针；futex 实现满/空等待 | 严格 FIFO 顺序；接口接收 `msg_prio` 但当前实现不维护优先级插队 |
+| **消息队列 (Message Queue)** | 人格层维护定长消息数组与每消息优先级；futex 实现满/空等待 | `msg_prio` 数值大者先出，同优先级保持 FIFO；插入/取出为 O(n) 滑动，适合小型队列 |
 | **内存池 (Memory Pool)** | 人格层维护单链表 free-list 与块越界标志 | 固定块阻塞分配；包含双重释放（double-free）检测 |
 | **线程标志 (Thread Flags)** | 绑定至线程控制块的 32 位独立标志字 | 支持线程间单向事件通知与带超时等待 |
 
@@ -88,4 +88,5 @@ osb_bq_wake_all() 唤醒所有等待该对象的线程
 1. **主线程初始化自句柄**：初始 flat program 线程没有显式的父创建者。在 `osKernelInitialize()` 执行期间，系统通过 `task_self` 系统调用为其在句柄表中建立引用，确保主线程可作为其他线程 PI 捐赠的目标。
 2. **捐赠执行期间禁止修改基准优先级**：当任务正处于 PI 提升状态时，调用 `osThreadSetPriority` 将被内核拒绝（返回 `osError`），防止覆盖已保存的恢复快照。
 3. **超时后的状态一致性**：若等待者因超时提前退出，其 `wait_owner` 关系立即解除；所有者继承的优先级将持续保持，直到其释放持有的最后一个互斥量（保守保留，避免引入复杂动态降级回退导致的优先级反转）。
-4. **多核 SMP 约束**：当前的依赖链追踪与单任务调度锁深度基于单核单 runqueue 模型；跨核 CPU 间的优先级迁移与队列锁嵌套目前未进行多核一致性验证。
+4. **多核 SMP 约束**：依赖链追踪与 CMSIS 调度器锁深度基于单核单 runqueue 模型；AArch64 SMP2 已验证 RT runqueue 迁移/IPI/`SCHED_DEADLINE`，但跨核 RT PI 与全局调度器锁语义仍未验证。
+5. **挂起与同步对象**：`osThreadSuspend()` 对正在等待的目标只设置 pending；其等待完成时唤醒路径发布 STOPPED，`osThreadResume()` 再入 RT 队列。挂起不会取消底层的 futex/对象等待语义。

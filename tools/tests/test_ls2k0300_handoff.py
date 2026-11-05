@@ -11,6 +11,7 @@ from unittest.mock import patch
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "boards"))
 import ls2k0300_handoff as handoff
 from mk_ls2k0300_bundle import inspect_elf
 

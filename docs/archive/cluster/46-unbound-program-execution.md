@@ -32,9 +32,9 @@ POSIX shell 用 SIGCHLD 配合 WNOHANG 回收进程。主线程先退出而其�
 python3 tools/tests/test_sched_idle_surplus.py
 python3 tools/tests/test_mlibc_futex_wake.py
 python3 tools/tests/test_group_exit_notification.py
-python3 tools/check-mlibc-threads.py --cpus 2 --cycles 30 \
+python3 tools/mlibc/check-mlibc-threads.py --cpus 2 --cycles 30 \
   --output .kernel-build/cluster/verify-unbound-dual
-python3 tools/check-mlibc-threads.py --cpus 1 --cycles 30 \
+python3 tools/mlibc/check-mlibc-threads.py --cpus 1 --cycles 30 \
   --output .kernel-build/cluster/verify-unbound-single
 ```
 

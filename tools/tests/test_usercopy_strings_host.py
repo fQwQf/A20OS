@@ -351,7 +351,7 @@ int main(void) {
 
 class UsercopyStringsHostTests(unittest.TestCase):
     def test_rust_module_is_a_rebuild_prerequisite(self):
-        makefile = (ROOT / "tools/rust-kernel.mk").read_text()
+        makefile = (ROOT / "tools/mk/rust-kernel.mk").read_text()
         self.assertIn("RUST_USERCOPY_SUBMODULES := kernel/mm/usercopy_strings.rs", makefile)
         self.assertIn(
             "$(RUST_USERCOPY_OBJECT): $(RUST_USERCOPY_SRC) $(RUST_USERCOPY_SUBMODULES)",

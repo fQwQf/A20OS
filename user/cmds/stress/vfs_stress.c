@@ -1550,7 +1550,7 @@ static int symlink_relative_target(void)
  * layout actually holds: a root directory spanning several 2048-byte blocks,
  * a name at the driver's ISOFS_MAX_NAME limit, a zero-length file, a file of
  * exactly one block, a multi-block file, and reads at and past EOF.  The
- * fixture is tools/mkisofs_test.c; the two must agree on the names and
+ * fixture is tools/fs/mkisofs_test.c; the two must agree on the names and
  * contents below. */
 #define ISO_LONG_NAME_LEN 200
 #define ISO_BIG_SIZE      9000u

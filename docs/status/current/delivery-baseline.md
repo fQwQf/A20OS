@@ -13,14 +13,14 @@
 | 未提交改动 | 领域 | 判定 |
 | --- | --- | --- |
 | `kernel/arch/aarch64/boot/entry.S`、`kernel/arch/aarch64/trap/trap.S`、`instances/xfce-aarch64.toml`（`smp = 4` → `1`） | DESKTOP | 保留原状：AArch64 桌面/JVM 的 EL0 访问控制与 SMP4 规避，属于 DESKTOP 台账 |
-| `packages/overlay/xfce/**`、`tools/fetch-minecraft.sh`、`tools/pkg.py`、`tools/a20-fortify.c`、`tools/a20-fortify.map`、`instances/minecraft-*.toml`、`instances/xfce-loongarch64.toml` | DESKTOP | 保留原状：Minecraft 多架构 natives 与 glibc-fortify 兼容层（新增文件不属于基线版本） |
+| `packages/overlay/xfce/**`、`tools/fetch-minecraft.sh`、`tools/pkg.py`、`tools/packaging/a20-fortify.c`、`tools/packaging/a20-fortify.map`、`instances/minecraft-*.toml`、`instances/xfce-loongarch64.toml` | DESKTOP | 保留原状：Minecraft 多架构 natives 与 glibc-fortify 兼容层（新增文件不属于基线版本） |
 | `kernel/arch/loongarch64/include/{cpu.h,trap_frame.h}`、`kernel/arch/loongarch64/trap/trap_bridge.c`、`kernel/core/trap.c`、`kernel/include/core/arch.h` | CORE / HYP 边界 | 保留原状：LoongArch 假中断的丢弃路径 |
 | `kernel/core/smp.c`、`kernel/include/mm/frame.h` | CORE / MM | 保留原状：等待窗口注释与 IRQ 状态归还 |
 | `user/cmds/core/{fsync_durability_test.c,jbd2_retry_test.c,ufs_mount_state_test.c}`、`user/cmds/stress/mm_stress_phase_diag.c` | FS / MM | 保留原状：新增/改写的持久化与 MM 诊断用例（新增文件不属于基线版本） |
-| `tools/rust-user.mk`、`tools/tests/test_stamps_clean.py` | 构建 / 测试 | 保留原状：RV32/x86_64 Rust peer 的在途工作（同一构建中的目录与锁定位缺陷已独立修复，见 §5） |
+| `tools/mk/rust-user.mk`、`tools/tests/test_stamps_clean.py` | 构建 / 测试 | 保留原状：RV32/x86_64 Rust peer 的在途工作（同一构建中的目录与锁定位缺陷已独立修复，见 §5） |
 | `tools/a20` | 交付工具 | 保留原状：CLI 参数解析与 QEMU 前置门禁的在途工作；本包未改 `tools/a20` 的行为 |
-| `tools/rust_idl_peer_wire_check.c` | ABI | 保留原状（该文件不属于基线树） |
-| `tools/snapshot_build_inputs.py` | 交付工具 | 保留原状，且**不纳入 1.0**：它按定义生成带哈希的构建输入清单，与"运行产物、哈希清单不入库"的当前约定冲突（该文件不属于基线树） |
+| `tools/xlator/rust_idl_peer_wire_check.c` | ABI | 保留原状（该文件不属于基线树） |
+| `tools/release/snapshot_build_inputs.py` | 交付工具 | 保留原状，且**不纳入 1.0**：它按定义生成带哈希的构建输入清单，与"运行产物、哈希清单不入库"的当前约定冲突（该文件不属于基线树） |
 
 该基线**不冻结**任何外部 ABI 或持久化格式。
 
@@ -53,7 +53,7 @@
 | loongarch64 | 通过 | 未验证 | 构建通过；本机无实板 |
 | riscv32 | 通过 | 通过 | `check-riscv32-bringup` 通过；`smoke-riscv32` 启动到 `part ok` 并自然关机 |
 | arm32 | 通过（固定 CI 容器） | 通过（内核镜像） | 容器内 `check-arm32-bringup` 通过；`smoke-arm32` 启动到 `part ok` 并自关机。`ABI=both` 用户态镜像能起 shell 并跑内建命令，但 fork 出的命令返回后 mksh 崩溃，见 [ABI-11](../gaps/abi-ipc.md) |
-| armv7m (STM32F103) | 失败 | N/A | `make stm32f103-bringup` 在 `tools/rust-kernel.mk` 的解析期断言处停下；`check-stm32f103` 另报硬编码 MMIO 地址。见 [DRIVER-09/10](../gaps/drivers.md) |
+| armv7m (STM32F103) | 失败 | N/A | `make stm32f103-bringup` 在 `tools/mk/rust-kernel.mk` 的解析期断言处停下；`check-stm32f103` 另报硬编码 MMIO 地址。见 [DRIVER-09/10](../gaps/drivers.md) |
 
 跨架构构建矩阵已补齐 riscv32/loongarch64/arm32 的 Rust 目标定义（`RUST_DONTUNMAP_TARGET`），确保各目标架构均可顺利解析并编译（见 §5）。
 
@@ -76,7 +76,7 @@
 - `check-a20-tests` 缺 `user/svc/a20_services_idl.h` 前置：该头是生成且被 gitignore 的，门禁只在"恰好被别的目标先生成过"的树上通过，在干净 checkout 上必红——CI 的`toolchain-gates` job 正好只跑它，所以这是 CI 红的一个直接原因。
 - `check-smoke-cases` 报 `smoke-elf-exec-aarch64` 无 make 目标：用例一直在表里，目标缺失，于是 AArch64 exec 路径根本没有门禁。
 - 构建目录被哈希后，`test_smoke_build_paths`、`test_a20` 的 3 个用例仍在断言描述性目录名；改为断言真正的不变量（每个 override 都到达 make 且选出不同目录）。
-- `tools/rust-kernel.mk` 缺 riscv32/loongarch64/arm32 的 Rust DONTUNMAP 目标：任何带`mm/mremap.c` 的 profile 在这三个架构上 make 解析期即失败，也是 riscv32 opt-in peer 用例不可能通过的原因。三者对象已实测可编译。
+- `tools/mk/rust-kernel.mk` 缺 riscv32/loongarch64/arm32 的 Rust DONTUNMAP 目标：任何带`mm/mremap.c` 的 profile 在这三个架构上 make 解析期即失败，也是 riscv32 opt-in peer 用例不可能通过的原因。三者对象已实测可编译。
 - `tools/tests/test_rust_user_make.py` 用 `ROOT/.git/...` 定位共享构建锁：linked worktree 里 `.git` 是文件，整个模块在 worktree 里以 `NotADirectoryError` 报错——而这正是本仓库规定的每包工作方式。改为经 `git rev-parse --git-common-dir` 定位。
 - `tools/tests/test_stamps_clean.py` 构造的 Namespace 缺 `syscall_smoke_task_construction_test`，`tools/stamps.py` 已经要读它，5 个用例直接 `AttributeError`。
 

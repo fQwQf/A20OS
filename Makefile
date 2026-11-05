@@ -99,7 +99,7 @@ NET_INSTANCE_FILE := $(if $(filter /%,$(NET_INSTANCE)),$(NET_INSTANCE),$(CURDIR)
 ifeq ($(wildcard $(NET_INSTANCE_FILE)),)
 $(error NET_INSTANCE=$(NET_INSTANCE): no manifest at $(NET_INSTANCE_FILE))
 endif
-NET_INSTANCE_VARS := $(shell $(PYTHON) tools/a20_net_vars.py $(NET_INSTANCE_FILE))
+NET_INSTANCE_VARS := $(shell $(PYTHON) tools/cli/a20_net_vars.py $(NET_INSTANCE_FILE))
 ifeq ($(strip $(NET_INSTANCE_VARS)),)
 $(error NET_INSTANCE=$(NET_INSTANCE): failed to derive build variables)
 endif
@@ -202,7 +202,7 @@ SMP_VERIFIED_QEMU_ARCHES := $(TRIM_CAP_SMP_VERIFIED_QEMU_ARCHES)
 PROFILE ?= full
 # Swap is on by default; the NOMMU override below forces it back off where
 # there is no MMU to demand-page from.  A toggle is rebuild-safe without a
-# BUILD_VARIANT component because BUILD_FLAGS_STAMP in tools/targets-images.mk
+# BUILD_VARIANT component because BUILD_FLAGS_STAMP in tools/mk/targets-images.mk
 # keys on $(CFLAGS), which gains -DCONFIG_SWAP when this flips.
 CONFIG_SWAP ?= y
 
@@ -213,7 +213,7 @@ CONFIG_SWAP ?= y
 # low-resource story: kernel/proc/xlator.c is not compiled, task_t loses the
 # xlator_host field, exec.c loses the re-exec branch and mm/wx.c loses the W^X
 # exemption.  Same rebuild-safety argument as CONFIG_SWAP above: the stamp in
-# tools/targets-images.mk keys on $(CFLAGS), which gains -DCONFIG_XLATOR when
+# tools/mk/targets-images.mk keys on $(CFLAGS), which gains -DCONFIG_XLATOR when
 # this flips, so a stale object can never be linked against the wrong knob.
 #
 # CONFIG_XLATOR additionally gets a BUILD_VARIANT component when off, because
@@ -267,7 +267,7 @@ CONFIG_SLAB_DEBUG ?= 0
 
 # Single knob for the CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST macros in
 # the loadable driver packages.  Those macros are consumed *only* by
-# kernel/drvmod/examples/{hda,nvme}.c, which tools/driver-modules.mk compiles
+# kernel/drvmod/examples/{hda,nvme}.c, which tools/mk/driver-modules.mk compiles
 # with its own DRVMOD_CFLAGS; the built-in HDA/NVMe drivers they were migrated
 # from are gone, so the kernel CFLAGS never carried them.  The per-driver
 # CONFIG_* names above now only pick the BUILD_VARIANT component that keeps the
@@ -443,7 +443,7 @@ endif
 endif
 
 # Driver deployment depends on the selected architecture and board.
-include tools/driver-deployment.mk
+include tools/mk/driver-deployment.mk
 
 # One protocol, profile-selected resource budgets. MCU firmware keeps the
 # single-transaction budget; hosted kernels may select any bounded tier.
@@ -625,7 +625,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # image and a Rust image can never reuse one another's kernel artifacts.
 # Which architectures a selector can default to `rust` on.
 #
-# tools/rust-kernel.mk is included far below and maps each architecture to a
+# tools/mk/rust-kernel.mk is included far below and maps each architecture to a
 # Rust target, so the lists are spelled here too; a selector that is `rust` on an
 # architecture with no target is a hard error in rust-kernel.mk, which is what
 # keeps the two from drifting apart silently.  The MCU trim profile
@@ -1310,7 +1310,7 @@ EXT4_IMAGE_MB ?= 128
 # User software now comes from Alpine apk packages assembled by a world
 # manifest (see packages/world/), not from source trees under user/external/.
 # The extra *partition* survives only where a board needs a writable /extra,
-# and an apk world image fills it -- see VF2_WORLD in tools/targets-build.mk.
+# and an apk world image fills it -- see VF2_WORLD in tools/mk/targets-build.mk.
 # RISCV_GNU_CC stays: the vDSO is built with it, not with an extra package.
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)$(if $(filter 1,$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)),:SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST=1,)$(if $(filter 1,$(TRAP_STORM_TEST)),:TRAP_STORM_TEST=1,)$(if $(filter 1,$(FUTEX_COW_WINDOW_TEST)),:FUTEX_COW_WINDOW_TEST=1,)
@@ -1441,7 +1441,7 @@ NET_MAC ?=
 # these variables), assembled into the kernel's a20.* boot arguments below.
 # Empty = unchanged behaviour: DHCP against the SLIRP backend, or an
 # unconfigured link.  The key names are the kernel contract in
-# kernel/net/control/net_config.c; the net smokes in tools/targets-smoke.mk pass the
+# kernel/net/control/net_config.c; the net smokes in tools/mk/targets-smoke.mk pass the
 # same keys by hand.
 NET_GUEST_IP ?=
 NET_GUEST_NETMASK ?=
@@ -2114,7 +2114,7 @@ CFLAGS += -DCONFIG_QEMU_SHARED_SMP -DCONFIG_SHARED_DEVICE_CALL -DCONFIG_SHARED_M
 endif
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
-# tools/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。
+# tools/mk/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。
 CONFIG_STACK_PROTECTOR ?= 1
 ifeq ($(filter 1,$(CONFIG_STACK_PROTECTOR)),1)
 CFLAGS += -fstack-protector-strong -DCONFIG_STACK_PROTECTOR=1
@@ -2395,7 +2395,7 @@ endif
 # CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST deliberately add nothing to
 # the kernel CFLAGS: the built-in HDA/NVMe drivers were migrated into the
 # loadable packages, so these macros are reached only through DRVMOD_SMOKE in
-# tools/driver-modules.mk.  The names survive here solely for the BUILD_VARIANT
+# tools/mk/driver-modules.mk.  The names survive here solely for the BUILD_VARIANT
 # components that isolate the smoke artifacts.
 
 ifeq ($(CONFIG_SWAP),y)
@@ -2452,7 +2452,7 @@ endif
 
 # Driver ownership is kept outside this top-level file so deployment policy is
 # explicit and generic built-in exceptions remain reviewable.
-include tools/driver-sources.mk
+include tools/mk/driver-sources.mk
 
 # Shared ISA code is selected here, never by architecture tests in core C.
 ifneq ($(filter riscv32 riscv64,$(ARCH)),)
@@ -2591,7 +2591,7 @@ ifneq ($(filter $(KERNEL_DIR)/net/control/route.c,$(KERNEL_SRC)),)
 KERNEL_ROUTE_OBJECT = $(RUST_NET_ROUTE_OBJECT)
 endif
 
-include tools/driver-modules.mk
+include tools/mk/driver-modules.mk
 ifeq ($(NET_STACK),bsd)
 # Cluster SSI's opt-in selftests currently inspect lwIP memory statistics.
 # Keep the desktop/BSD build independent instead of inventing a second stats ABI.
@@ -2608,7 +2608,7 @@ ifeq ($(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_SE
 $(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
 endif
 endif
-include tools/rust-kernel.mk
+include tools/mk/rust-kernel.mk
 ifeq ($(CLUSTER_SSI),1)
 CFLAGS += -DCONFIG_CLUSTER_SSI
 SSI_STATE_OBJECT := $(BUILD_DIR)/rust/ssi_state.o
@@ -2624,9 +2624,9 @@ $(SSI_STATE_OBJECT): kernel/cluster/ssi_state.rs $(BUILD_DIR)/rust/.ssi-state-fl
 endif
 .PHONY: check-cluster-ssi check-cluster-ssi-network
 check-cluster-ssi:
-	$(PYTHON) tools/check-cluster-ssi.py
+	$(PYTHON) tools/cluster/check-cluster-ssi.py
 check-cluster-ssi-network:
-	$(PYTHON) tools/check-cluster-ssi-network.py
+	$(PYTHON) tools/cluster/check-cluster-ssi-network.py
 KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(LWIP_SOURCE_ROOT)/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
@@ -2637,7 +2637,7 @@ BSD_CORE_OBJECT = $(BSD_CORE_DIR)/bsd-core-isolated.o
 FORCE_BSD_CORE:
 $(BSD_CORE_OBJECT): FORCE_BSD_CORE
 	@rm -rf $(BSD_CORE_DIR)
-	$(PYTHON) tools/probe-bsd-core.py --cc '$(BSD_CLANG)' --emulated-tls --net-profile $(NET_PROFILE) --out $(BSD_CORE_DIR)
+	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(BSD_CLANG)' --emulated-tls --net-profile $(NET_PROFILE) --out $(BSD_CORE_DIR)
 KERNEL_OBJ += $(BSD_CORE_OBJECT)
 CFLAGS += -DCONFIG_NET_STACK_BSD=1
 LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld
@@ -3482,35 +3482,35 @@ VBOX_X86_64_IMG = $(BUILD_DIR)/a20os-vbox-x86_64-uefi.img
 # Targets (split into tools/targets-*.mk)
 # ================================================================
 
-include tools/targets-base.mk
-include tools/targets-build.mk
-include tools/targets-gates.mk
-include tools/targets-smoke.mk
-include tools/targets-steps.mk
-include tools/targets-dev.mk
-include tools/stm32.mk
-include tools/m0sense.mk
-include tools/hi3861.mk
-include tools/pine-a64.mk
-include tools/licheerv-nano.mk
-include tools/quartz64-zero.mk
-include tools/lichee-pi-zero.mk
-include tools/ox64.mk
-include tools/raspberrypi4.mk
-include tools/execution.mk
-include tools/target-console.mk
-include tools/run-targets.mk
-include tools/targets-images.mk
-include tools/targets-rootfs.mk
-include tools/targets-pkg.mk
-include tools/targets-distro.mk
-include tools/targets-extra.mk
-include tools/targets-native.mk
-include tools/targets-native-smoke.mk
-include tools/rust-user.mk
-include tools/targets-mlibc.mk
-include tools/targets-xlator.mk
-include tools/targets-bench.mk
+include tools/mk/targets-base.mk
+include tools/mk/targets-build.mk
+include tools/mk/targets-gates.mk
+include tools/mk/targets-smoke.mk
+include tools/mk/targets-steps.mk
+include tools/mk/targets-dev.mk
+include tools/mk/stm32.mk
+include tools/mk/m0sense.mk
+include tools/mk/hi3861.mk
+include tools/mk/pine-a64.mk
+include tools/mk/licheerv-nano.mk
+include tools/mk/quartz64-zero.mk
+include tools/mk/lichee-pi-zero.mk
+include tools/mk/ox64.mk
+include tools/mk/raspberrypi4.mk
+include tools/mk/execution.mk
+include tools/mk/target-console.mk
+include tools/mk/run-targets.mk
+include tools/mk/targets-images.mk
+include tools/mk/targets-rootfs.mk
+include tools/mk/targets-pkg.mk
+include tools/mk/targets-distro.mk
+include tools/mk/targets-extra.mk
+include tools/mk/targets-native.mk
+include tools/mk/targets-native-smoke.mk
+include tools/mk/rust-user.mk
+include tools/mk/targets-mlibc.mk
+include tools/mk/targets-xlator.mk
+include tools/mk/targets-bench.mk
 
 # ================================================================
 # Documentation
@@ -3520,12 +3520,12 @@ include tools/targets-bench.mk
 # installation commands when a dependency is missing.
 .PHONY: docs check-docs
 docs:
-	@bash tools/gen_docs_pdf.sh
+	@bash tools/docs/gen_docs_pdf.sh
 
 check-docs:
-	@python3 tools/format_markdown.py --check docs README.md
-	@python3 tools/check_doc_citations.py
-	@python3 tools/check_doc_nav.py
+	@python3 tools/docs/format_markdown.py --check docs README.md
+	@python3 tools/docs/check_doc_citations.py
+	@python3 tools/docs/check_doc_nav.py
 
 # The binaries the native stamp rule requires.  make owns this list so the gate
 # and the build cannot disagree about what "built" means.  This is exactly
@@ -3536,5 +3536,5 @@ check-docs:
 NATIVE_BINS := $(NATIVE_OUTPUTS)
 
 # LS2K0300 RAM bring-up (vendor firmware is preserved).
-include tools/ls2k0300.mk
-include tools/esp32c3.mk
+include tools/mk/ls2k0300.mk
+include tools/mk/esp32c3.mk

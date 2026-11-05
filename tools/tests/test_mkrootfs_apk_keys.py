@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location(
-    "mkrootfs", Path(__file__).resolve().parents[1] / "mkrootfs.py")
+    "mkrootfs", Path(__file__).resolve().parents[1] / "packaging/mkrootfs.py")
 mkrootfs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mkrootfs)
 

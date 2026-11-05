@@ -2,7 +2,7 @@
 # Run every script-driven host harness in tools/.
 #
 # Each of these harnesses needs something the generic single-file pattern rule
-# in tools/targets-gates.mk cannot supply (a module's Rust object, a per-arch
+# in tools/mk/targets-gates.mk cannot supply (a module's Rust object, a per-arch
 # include path, or a generated header), so the harness itself lives in its own
 # tools/test-*-host.sh script.  Keeping them out of HOST_TESTS_SRC without
 # running them anywhere would have quietly dropped that coverage, which is what
@@ -28,7 +28,7 @@ attempts=6
 failed=0
 count=0
 
-for script in "$repo"/tools/test-*-host.sh \
+for script in "$repo"/tools/host-tests/test-*-host.sh \
               "$repo"/tools/tests/test-rv32-sync-abi.sh \
               "$repo"/tools/tests/test_eevdf_math_host.sh; do
     case "$(basename "$script")" in
