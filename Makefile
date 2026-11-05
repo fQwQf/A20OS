@@ -3404,7 +3404,7 @@ ifneq ($(RAMFS_USER),1)
 $(error RAMFS_NET_TESTS=1 requires RAMFS_USER=1)
 endif
 RAMFS_USER_PROGRAMS += tcp_loopback_test udp_loopback_test ipv6_loopback_test \
-                      net_lane_hostfwd_test udp_hostfwd_test bsd_scale_test bsd_tun_router_test netctl pppoe
+                      net_lane_hostfwd_test udp_hostfwd_test bsd_scale_test bsd_tun_router_test netctl pppoe pd-lan
 CFLAGS += -DCONFIG_RAMFS_NET_TESTS
 endif
 ifeq ($(RAMFS_FPU_TESTS),1)

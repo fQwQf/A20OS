@@ -61,9 +61,8 @@ class Guest:
         elif marker == '# ':
             pattern = rb'(?:^|\r?\n)# $'
         expression = re.compile(pattern)
-        sources = [self.process.stdout]
-        if drain_peer:
-            sources.append(drain_peer.process.stdout)
+        peers = drain_peer if isinstance(drain_peer, tuple) else (drain_peer,) if drain_peer else ()
+        sources = [self.process.stdout, *(peer.process.stdout for peer in peers)]
         while not (match := expression.search(self.pending)):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -71,8 +70,9 @@ class Guest:
             ready, _, _ = select.select(sources, [], [], min(1, remaining))
             # A verbose peer can stall on a full serial pipe while we wait
             # for the guest to receive its next packet.
-            if drain_peer and drain_peer.process.stdout in ready and not drain_peer.read_output():
-                raise RuntimeError(f'peer exited before guest emitted {marker!r}')
+            for peer in peers:
+                if peer.process.stdout in ready and not peer.read_output():
+                    raise RuntimeError(f'peer exited before guest emitted {marker!r}')
             if self.process.stdout not in ready:
                 continue
             if not self.read_output():

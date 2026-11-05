@@ -27,6 +27,12 @@ typedef struct {
     uint32_t valid, preferred;
 } nl_addr6_out_t;
 
+typedef struct {
+    uint32_t index;
+    uint8_t destination[16], gateway[16];
+    uint8_t prefix, has_gateway, type, scope;
+} nl_route6_out_t;
+
 void net_netlink_link_notify_one(unsigned index, int up);
 
 #endif

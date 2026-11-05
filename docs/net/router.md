@@ -19,9 +19,8 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 
 DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
-BSD 当前仍缺多 FIB 与源策略，以及 DHCPv6 委派前缀的自动发布。
-IPv6 UDP 的 `SO_BINDTODEVICE` 支持选择有 IPv6 的接口，并限制收发。
-其他套接字类型仍仅接受主接口的兼容模式。
+BSD 的多 FIB 与源策略仍在补全。IPv6 UDP 和原始套接字的
+`SO_BINDTODEVICE` 支持选择 IPv6 接口并限制收发。
 
 ## WAN IPv6 自动配置
 
@@ -30,8 +29,9 @@ IPv6 UDP 的 `SO_BINDTODEVICE` 支持选择有 IPv6 的接口，并限制收发�
 发送三次，间隔四秒。收到带有效路由器寿命的通告后停止探测。该接口
 使用 BSD 的邻居发现和 SLAAC。启用 `NET_ROLE=router` 时，
 它仍能从 RA 学习 WAN 默认路由，供配置过 IPv6 地址的 LAN 使用。
-默认路由随通告寿命到期撤销，也接受寿命为零的即时撤销。其他接口
-继续拒绝 RA。接收、地址生成和重复地址检测由 BSD 协议栈处理。
+默认路由随通告寿命到期撤销，也接受寿命为零的即时撤销。路由器模式
+为其他以太网接口生成链路本地地址，这些接口继续拒绝收到的 RA。
+接收、地址生成和重复地址检测由 BSD 协议栈处理。
 [RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html) ·
 [RFC 4862](https://www.rfc-editor.org/rfc/rfc4862.html)
 
@@ -48,8 +48,9 @@ BSD 的 `RTM_GETADDR` 返回链路本地地址和 SLAAC 地址，包括作用域
 DAD 状态和剩余寿命。Linux 的 `ip -6 addr` 和 `getifaddrs()` 已用真实
 地址验证。`RTM_NEWADDR` 可通过 `IFA_CACHEINFO` 设置首选寿命和
 有效寿命。更新地址时，手动配置的直连前缀按同一前缀下最长的剩余
-有效寿命更新。内核到期后清理地址和直连路由。IPv6 路由的 Linux
-查询接口仍在补全。
+有效寿命更新。内核到期后清理地址和直连路由。`RTM_GETROUTE`
+可查询主 IPv6 转发表的匹配项、下一跳和出口接口。IPv6 路由表的
+转储和策略查询仍在补全。
 
 ### DHCPv6 前缀委派互操作
 
@@ -67,8 +68,8 @@ Solicit、Advertise、Request 与 Reply。测试在 A20OS 手动配置委派前�
 用 `--odhcp6c <静态odhcp6c路径>` 可验证仅前缀续租。原版 odhcp6c
 通过 `-N none -P 56 -F` 向 Kea 请求并续租 /56，四报文交换和续租均
 只含 IA_PD。客户端脚本收到 `bound` 和 `updated` 事件，携带前缀、
-首选寿命和有效寿命。WAN RA/SLAAC 由内核处理。测试仍手动配置 LAN
-地址和上游返程路由，LAN 自动通告待实现。
+首选寿命和有效寿命。WAN RA/SLAAC 由内核处理。该互操作测试手动配置
+LAN 地址和上游返程路由。
 [OpenWrt odhcp6c](https://github.com/openwrt/odhcp6c)
 
 ```sh
@@ -83,6 +84,36 @@ python3 tools/net/tests/test-bsd-dhcp6-pd.py \
   --kernel <A20OS的kernel.bin> --linux <匹配的Linux内核> \
   --peer-initrd <对端目录>/peer-initramfs.cpio.gz --busybox <静态BusyBox路径> \
   --out <新的证据目录>
+```
+
+### 自动发布委派前缀
+
+在启用 `NET_ROLE=router` 的镜像中，以有网络管理权限的用户运行
+`pd-lan`，传入原版静态 odhcp6c 的路径、WAN 接口、申请的前缀长度
+以及 LAN 接口与子网编号。
+
+```sh
+/bin/pd-lan /usr/sbin/odhcp6c en3 56 en2:0x2a
+```
+
+该命令在前台运行。从委派的 /56 为 `en2` 分配子网编号 `0x2a`
+对应的 /64，将子网的 `::1` 配给路由器，并向 LAN 发布 SLAAC 前缀。
+可以提供多个不同的 `LAN:子网编号` 参数。带 PD 排除选项的租约会跳过
+重叠子网。通告寿命受上游剩余租约约束。WAN 默认路由失效时，通告中的
+路由器寿命变为零，仍有效的前缀继续发布。租约失效或命令正常退出时，
+程序撤销通告并清理它管理的地址。重启后的租约和过期通告状态持久化
+仍在补全。[RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html) ·
+[RFC 9096](https://www.rfc-editor.org/rfc/rfc9096.html)
+
+以下测试复用上述 Kea 对端镜像，分别启动 Linux WAN 和 LAN 虚拟机。
+Linux LAN 通过 SLAAC 配置自己的地址及默认路由，测试只在模拟 ISP
+配置委派前缀的返程路由。
+
+```sh
+python3 tools/net/tests/test-bsd-pd-lan.py \
+  --kernel <A20OS的kernel.bin> --linux <匹配的Linux内核> \
+  --peer-initrd <对端目录>/peer-initramfs.cpio.gz --busybox <静态BusyBox路径> \
+  --odhcp6c <静态odhcp6c路径> --out <新的证据目录>
 ```
 
 ## 最小双网卡配置

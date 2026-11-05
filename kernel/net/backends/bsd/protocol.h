@@ -69,6 +69,7 @@ typedef struct a20_bsd_nic_config {
     char broadcast[16];
     char gateway[16];
     int accept_ra;
+    int ipv6_linklocal;
 } a20_bsd_nic_config_t;
 
 typedef struct a20_bsd_nic_stats {
@@ -90,6 +91,7 @@ int a20_bsd_port_nic_set_ipv4(void *context,
                               const uint8_t old_address[4],
                               const uint8_t old_mask[4],
                               const uint8_t old_gateway[4]);
+int a20_bsd_port_route_lookup_v6(const uint8_t dst[16], unsigned zone, nl_route6_out_t *out);
 int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
                             uint8_t prefix, const uint8_t gateway[4],
                             int remove);

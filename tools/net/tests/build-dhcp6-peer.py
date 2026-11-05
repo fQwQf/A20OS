@@ -77,7 +77,7 @@ def build(args, root):
             'pd-pools': [{'prefix': '2001:db8:400::', 'prefix-len': 48, 'delegated-len': 56}],
         }],
         'loggers': [{'name': 'kea-dhcp6', 'output_options': [{'output': 'stdout'}],
-                     'severity': 'DEBUG', 'debuglevel': 40}],
+                     'severity': 'INFO'}],
     }}, indent=2) + '\n')
     (root/'etc/radvd.conf').write_text('''interface eth0 {
     AdvSendAdvert on;
@@ -95,6 +95,14 @@ mount -t proc proc /proc
 mount -t devtmpfs devtmpfs /dev
 mount -t sysfs sysfs /sys
 """ + '\n'.join(loads) + """
+read -r cmdline < /proc/cmdline
+case " $cmdline " in
+    *" a20_lan_peer=1 "*)
+        ip link set eth0 up
+        echo A20_LINUX_LAN_READY
+        exec /bin/sh
+        ;;
+esac
 echo 0 > /proc/sys/net/ipv6/conf/eth0/accept_dad
 ip link set eth0 up
 ip -6 addr add 2001:db8:20::1/64 dev eth0
