@@ -298,7 +298,6 @@ pub unsafe extern "C" fn a20_wait4_run(
         // SAFETY: every callback below satisfies the header contract.
         let flags = unsafe { (ops.scan_begin)(ctx) };
         let mut found = false;
-        let mut reap_pending = false;
         let whole_group = i32::from(options & __WNOTHREAD == 0);
         let mut member = unsafe { (ops.group_start)(ctx, whole_group) };
         while !member.is_null() {
@@ -324,9 +323,9 @@ pub unsafe extern "C" fn a20_wait4_run(
                     }
                     if view.state == WAIT_STATE_ZOMBIE {
                         if unsafe { (ops.is_current_any_cpu)(ctx, child) } != 0 {
-                            /* Still switching out on some CPU: let it finish
-                             * and rescan instead of reaping under it. */
-                            reap_pending = true;
+                            /* The switch-out completion will notify us under
+                             * the scan lock. Park below (or return WNOHANG)
+                             * rather than polling a stack still in use. */
                             child = next;
                             continue;
                         }
@@ -369,11 +368,6 @@ pub unsafe extern "C" fn a20_wait4_run(
             member = unsafe { (ops.member_next)(ctx, member) };
         }
 
-        if reap_pending {
-            unsafe { (ops.scan_unlock)(ctx, flags) };
-            unsafe { (ops.yield_now)(ctx) };
-            continue;
-        }
         if !found {
             unsafe { (ops.scan_unlock)(ctx, flags) };
             return -ECHILD;
@@ -851,17 +845,17 @@ mod tests {
     }
 
     #[test]
-    fn zombie_on_cpu_yields_and_rescans_before_reaping() {
+    fn zombie_on_cpu_parks_and_rescans_before_reaping() {
         let mut world = base_world();
         let c0 = world.add_child(zombie(11));
         world.children[c0].current_any_cpu = 1;
         world.members[0].first_child = Some(c0);
         let result = run(&mut world, -1, 0, usize::MAX);
         assert_eq!(result.rc, 11);
-        assert_eq!(world.yields, 1);
-        let first_yield = world.events.iter().position(|e| *e == "yield").unwrap();
+        assert_eq!(world.yields, 0);
+        let commit = world.events.iter().position(|e| *e == "park_commit").unwrap();
         let pin = world.events.iter().position(|e| *e == "pin").unwrap();
-        assert!(first_yield < pin);
+        assert!(commit < pin);
     }
 
     #[test]

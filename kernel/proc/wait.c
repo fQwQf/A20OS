@@ -54,13 +54,16 @@ static int wait_task_tgid(task_t *t)
  *  - the report decision: runs under the child's park_lock with the sampled
  *    stop/continue fields; the adapter applies the returned clear bits.
  *
- * No decision lives in these callbacks; each one is a single mechanical step.
+ * A pinned PID/pidfd target narrows the scan to one candidate; parent and
+ * thread-group eligibility remain Rust decisions. Unqualified waits walk the
+ * existing children chains. No match decision lives in these callbacks.
  */
 /* WAIT4_ADAPTER_BEGIN */
 typedef struct wait4_adapter {
     task_t *self;    /* waiting task; proc_current() for the whole call */
     int *status;     /* the waiter's status slot, may be NULL */
     int options;
+    task_t *single_target; /* pinned for the whole controller call */
     proc_wait_token_t token;
 } wait4_adapter_t;
 
@@ -84,28 +87,31 @@ static void wait4_adapter_yield(void *context)
 
 static void *wait4_adapter_group_start(void *context, int whole_group)
 {
-    task_t *t = ((wait4_adapter_t *)context)->self;
-    if (whole_group && t->tg_leader)
+    wait4_adapter_t *a = context;
+    task_t *t = a->self;
+    if (whole_group && !a->single_target && t->tg_leader)
         return t->tg_leader;
     return t;
 }
 
 static void *wait4_adapter_member_next(void *context, void *node)
 {
-    (void)context;
+    wait4_adapter_t *a = context;
+    if (a->single_target || (a->options & __WNOTHREAD))
+        return NULL;
     return ((task_t *)node)->tg_next;
 }
 
 static void *wait4_adapter_child_first(void *context, void *node)
 {
-    (void)context;
-    return ((task_t *)node)->children;
+    wait4_adapter_t *a = context;
+    return a->single_target ? a->single_target : ((task_t *)node)->children;
 }
 
 static void *wait4_adapter_child_next(void *context, void *node)
 {
-    (void)context;
-    return ((task_t *)node)->sibling_next;
+    wait4_adapter_t *a = context;
+    return a->single_target ? NULL : ((task_t *)node)->sibling_next;
 }
 
 /* Samples the fields the Rust matching and classification rules consume.
@@ -249,10 +255,17 @@ static void wait4_adapter_park_clear(void *context)
 static int proc_wait4_internal(int pid, task_t *target_task, int *status,
                                int options)
 {
+    /* PID lookup pins identity across sleep and concurrent reap. pidfd callers
+     * already supply a pin. The controller still checks the parent/thread
+     * relationship and state under tasklist_lock, including after every wake. */
+    task_t *lookup = !target_task && pid > 0 ? proc_find_get(pid) : NULL;
+    if (!target_task && pid > 0 && !lookup)
+        return -ECHILD;
     wait4_adapter_t adapter = {
         .self = proc_current(),
         .status = status,
         .options = options,
+        .single_target = target_task ? target_task : lookup,
         .token = { .task = NULL, .seq = 0, .prepare_error = 0 },
     };
     const wait4_ops_t ops = {
@@ -276,7 +289,9 @@ static int proc_wait4_internal(int pid, task_t *target_task, int *status,
         .park_finish = wait4_adapter_park_finish,
         .park_clear = wait4_adapter_park_clear,
     };
-    return a20_wait4_run(&ops, pid, status, options, target_task);
+    int result = a20_wait4_run(&ops, pid, status, options, adapter.single_target);
+    proc_put(lookup);
+    return result;
 }
 /* WAIT4_ADAPTER_END */
 

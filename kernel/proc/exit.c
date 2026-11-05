@@ -209,6 +209,32 @@ void proc_wake_child_waiters(task_t *parent)
     spin_unlock_irqrestore(&tasklist_lock, lf);
 }
 
+/* The outgoing kernel stack is inactive before this notification. A waiter
+ * that observed the old CPU slot publishes its park token under tasklist_lock
+ * before this notifier can acquire that lock, so the ready event cannot fall
+ * between its scan and registration. The caller's pin also retains tg_leader.
+ * Reap can win first: UNUSED tasks no longer own a parent/children link, and
+ * their stale parent pointer must not be dereferenced. */
+void proc_notify_reap_ready(task_t *task)
+{
+    task_t *parent = NULL, *group_parent = NULL;
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+    if (proc_task_state_get(task) == PROC_ZOMBIE &&
+        task->parent != proc_idle_task())
+        parent = proc_get(task->parent);
+    task_t *leader = task->tg_leader;
+    if (leader && leader != task &&
+        proc_task_state_get(leader) == PROC_ZOMBIE &&
+        proc_tg_group_dead_locked(leader) && leader->parent != proc_idle_task())
+        group_parent = proc_get(leader->parent);
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+    proc_wake_child_waiters(parent);
+    if (group_parent != parent)
+        proc_wake_child_waiters(group_parent);
+    proc_put(group_parent);
+    proc_put(parent);
+}
+
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
 /* Caller holds tasklist_lock. Signal-based parents (e.g. a POSIX shell) may
  * consume SIGCHLD with WNOHANG before the last sibling exits. Publish exactly
@@ -530,12 +556,12 @@ static void exit_parent_bookkeeping(void *opaque)
         t->ppid = 0;
         proc_children_unlink_locked(t);
         spin_unlock_irqrestore(&tasklist_lock, lf);
-    } else {
+        /* No wait status remains for an auto-reaped child. Wake a parent
+         * waiting for the last such child so it can observe ECHILD. */
         proc_wake_child_waiters(ctx->parent);
     }
-    if (ctx->completed_parent &&
-        (ctx->auto_reap || ctx->completed_parent != ctx->parent))
-        proc_wake_child_waiters(ctx->completed_parent);
+    /* Ordinary child waits are notified by proc_notify_reap_ready() after
+     * the CPU has released the outgoing stack, instead of waking to yield. */
 #ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
     proc_put(ctx->completed_parent);
     ctx->completed_parent = NULL;
