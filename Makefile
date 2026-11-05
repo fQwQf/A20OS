@@ -2658,7 +2658,7 @@ BSD_CORE_OBJECT = $(BSD_CORE_DIR)/bsd-core-isolated.o
 FORCE_BSD_CORE:
 $(BSD_CORE_OBJECT): FORCE_BSD_CORE
 	@rm -rf $(BSD_CORE_DIR)
-	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(BSD_CLANG)' --arch $(ARCH) --cross-prefix '$(CROSS_PREFIX_$(ARCH))' --nr-cpus $(NR_CPUS) --emulated-tls --net-profile $(NET_PROFILE) --out $(BSD_CORE_DIR)
+	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(BSD_CLANG)' --arch $(ARCH) --cross-prefix '$(CROSS_PREFIX_$(ARCH))' --nr-cpus $(NR_CPUS) --emulated-tls --net-profile $(NET_PROFILE) $(if $(filter router,$(NET_ROLE)),--router) --out $(BSD_CORE_DIR)
 KERNEL_OBJ += $(BSD_CORE_OBJECT)
 CFLAGS += -DCONFIG_NET_STACK_BSD=1
 LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld

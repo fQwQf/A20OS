@@ -5,6 +5,7 @@
  * callback is the A20OS TUN driver's queue writer and runs on that task.
  */
 #include "executor.h"
+#include "nic.h"
 #include "protocol.h"
 #include "tun.h"
 #include "net/tun.h"
@@ -106,12 +107,13 @@ int a20_bsd_tun_create(net_tun_emit_t emit, void *ctx)
 
 typedef struct tun_ctx_job {
     void *context;
-    unsigned filter_slot;
+    unsigned filter_slot, index;
 } tun_ctx_job_t;
 
 static int tun_destroy_job_run(void *argument)
 {
     tun_ctx_job_t *job = argument;
+    a20_bsd_policy_flush_if_v4(job->index);
     netfilter_conntrack_forget_masq(job->filter_slot);
     a20_bsd_port_tun_destroy(job->context);
     return 0;
@@ -131,10 +133,11 @@ void a20_bsd_tun_destroy(unsigned index)
     __atomic_store_n(&slot->used, 2, __ATOMIC_RELEASE);
     slot->context = NULL;
     spin_unlock_irqrestore(&g_tun_lock, flags);
-    a20_net_route_flush_if((uint16_t)index);
     if (context && a20_bsd_executor_ready()) {
-        tun_ctx_job_t job = {context, NET_PROFILE_NETIF_MAX_DEVS + index - BSD_TUN_BASE};
+        tun_ctx_job_t job = {context, NET_PROFILE_NETIF_MAX_DEVS + index - BSD_TUN_BASE, index};
         (void)a20_bsd_executor_call(tun_destroy_job_run, &job);
+    } else {
+        a20_net_route_flush_if((uint16_t)index);
     }
     flags = spin_lock_irqsave(&g_tun_lock);
     __atomic_store_n(&slot->used, 0, __ATOMIC_RELEASE);

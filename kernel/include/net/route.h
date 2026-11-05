@@ -4,6 +4,8 @@
 #define A20_NET_ROUTE_H
 #include "core/types.h"
 
+#define NET_ROUTE_MATCH_METRIC (1u << 16)
+
 typedef struct net_route_v4 {
     uint32_t destination;
     uint32_t gateway;
@@ -26,6 +28,15 @@ typedef struct net_rule_v4 {
     uint8_t pad[2];
 } net_rule_v4_t;
 
+typedef struct net_route_change_v4 {
+    net_route_v4_t before, after;
+    uint32_t table_used;
+} net_route_change_v4_t;
+
+int a20_net_route_plan_v4(const net_route_v4_t *route, int remove,
+                          uint32_t flags, net_route_change_v4_t *change);
+unsigned a20_net_route_tables_v4(uint32_t src, uint32_t dst, uint32_t mark,
+                                 uint32_t *out, unsigned capacity);
 int a20_net_route_update_v4(const net_route_v4_t *route, int remove,
                             uint32_t flags);
 int a20_net_rule_update_v4(const net_rule_v4_t *rule, int remove);

@@ -200,6 +200,7 @@ typedef struct net_backend_if_ops {
     int (*set_addr6)(unsigned index, const uint8_t *addr, uint8_t prefix,
                      uint32_t valid, uint32_t preferred, int exclusive);
     int (*del_addr6)(unsigned index, const uint8_t *addr);
+    int (*policy_update_v4)(const void *route, int remove, uint32_t flags);
     int (*route_update_v6)(const uint8_t dst[16], uint8_t prefix,
                            unsigned index, int remove);
     int (*route_lookup_v6)(const uint8_t dst[16], unsigned index, nl_route6_out_t *out);

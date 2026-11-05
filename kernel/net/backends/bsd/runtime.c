@@ -14,6 +14,7 @@
 #include "nic.h"
 #include "net/interface.h"
 #include "net/netfilter.h"
+#include "net/route.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "core/errno.h"
@@ -714,6 +715,117 @@ static int route_update_v4(const uint8_t *destination, uint8_t prefix,
     return a20_bsd_executor_call(route4_job_run, &job);
 }
 
+/* Slot zero is the native main FIB. Only the BSD executor touches this
+ * table-ID map and the corresponding alternate native FIBs. */
+#define BSD_POLICY_TABLES 8
+#define ROUTE_MAIN 254u
+static uint32_t policy_tables[BSD_POLICY_TABLES];
+
+static unsigned policy_fib(uint32_t table)
+{
+    for (unsigned i = 0; i < BSD_POLICY_TABLES; ++i)
+        if (policy_tables[i] == table)
+            return i + 1;
+    return 0;
+}
+
+unsigned a20_bsd_policy_fibs4(uint32_t source, uint32_t destination,
+                              unsigned *fibs, unsigned capacity)
+{
+    uint32_t tables[16];
+    unsigned count = a20_net_route_tables_v4(source, destination, 0, tables, 16);
+    unsigned used = 0;
+    for (unsigned i = 0; i < count && used < capacity; ++i) {
+        unsigned fib = policy_fib(tables[i]);
+        if (fib || tables[i] == ROUTE_MAIN)
+            fibs[used++] = fib;
+    }
+    return used;
+}
+
+typedef struct {
+    net_route_v4_t route;
+    int remove;
+    uint32_t flags;
+} policy_route4_job_t;
+
+static int policy_apply_v4(unsigned fib, const net_route_v4_t *before,
+                           const net_route_v4_t *after)
+{
+    const net_route_v4_t *route = after->table ? after : before;
+    int index = after->table ? a20_bsd_ifindex_to_bsd(route->ifindex) : 0;
+    if (index < 0)
+        return index;
+    return a20_bsd_port_policy_route4(fib, index, route->destination, route->prefix,
+                                     route->gateway, before->table != 0, after->table == 0, 0);
+}
+
+static int policy_update_v4_run(void *argument)
+{
+    policy_route4_job_t *job = argument;
+    uint32_t table = job->route.table;
+    net_route_change_v4_t change;
+    int rc = a20_net_route_plan_v4(&job->route, job->remove, job->flags, &change);
+    if (rc < 0)
+        return rc;
+    unsigned fib = policy_fib(table);
+    if (!fib) {
+        for (unsigned i = 0; i < BSD_POLICY_TABLES; ++i) {
+            if (!policy_tables[i]) {
+                fib = i + 1;
+                break;
+            }
+        }
+        if (!fib)
+            return -ENOSPC;
+    }
+    int changed = memcmp(&change.before, &change.after, sizeof(change.before)) != 0;
+    if (changed) {
+        rc = policy_apply_v4(fib, &change.before, &change.after);
+    } else if (!job->remove) {
+        int native = a20_bsd_ifindex_to_bsd(job->route.ifindex);
+        if (native < 0)
+            return native;
+        rc = a20_bsd_port_policy_route4(fib, native, job->route.destination,
+                                        job->route.prefix, job->route.gateway, 0, 0, 1);
+    }
+    if (rc < 0)
+        return rc;
+    /* The executor serializes alternate-table writes and interface removal.
+     * A main-table insert can still consume the last common route slot. */
+    rc = a20_net_route_update_v4(&job->route, job->remove, job->flags);
+    if (rc == 0)
+        policy_tables[fib - 1] = change.table_used ? table : 0;
+    else if (changed && policy_apply_v4(fib, &change.after, &change.before) < 0)
+        printf("[NET] BSD could not restore policy route in table %u\n", table);
+    return rc;
+}
+
+static int policy_update_v4(const void *route, int remove, uint32_t flags)
+{
+    const net_route_v4_t *entry = route;
+    if (!CONFIG_NET_ROUTER || !entry || entry->table == ROUTE_MAIN || entry->table == 255)
+        return -EOPNOTSUPP;
+    policy_route4_job_t job = {*entry, remove, flags};
+    return a20_bsd_executor_call(policy_update_v4_run, &job);
+}
+
+void a20_bsd_policy_flush_if_v4(unsigned index)
+{
+    net_route_v4_t routes[64];
+    unsigned count = a20_net_route_snapshot_v4(routes, 64);
+    for (unsigned i = 0; i < count; ++i) {
+        if (routes[i].ifindex == index && routes[i].table != ROUTE_MAIN) {
+            policy_route4_job_t job = {routes[i], 1, NET_ROUTE_MATCH_METRIC};
+            int rc = policy_update_v4_run(&job);
+            if (rc < 0)
+                printf("[NET] BSD could not update policy route while detaching %u: %d\n",
+                       index, rc);
+        }
+    }
+    a20_net_route_flush_if((uint16_t)index);
+}
+
 static int if_set_addr(unsigned index, const uint8_t *address,
                        const uint8_t *mask, const uint8_t *gateway)
 {
@@ -1070,6 +1182,7 @@ static const net_backend_if_ops_t bsd_iface_ops = {
     .set_addr = if_set_addr,
     .set_addr6 = if_set_addr6,
     .del_addr6 = if_del_addr6,
+    .policy_update_v4 = policy_update_v4,
     .route_update_v6 = a20_bsd_tun_route6,
     .route_lookup_v6 = route_lookup_v6,
     .route_update_v4 = route_update_v4,

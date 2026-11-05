@@ -7,6 +7,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "net/stack.h"
+#include "net/profile.h"
 #include "mm/mm.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -15,6 +16,12 @@
 #include "core/lock.h"
 #include "core/timer.h"
 #include "proc/proc.h"
+
+#if CONFIG_NET_ROUTER
+#define VIRTIO_NET_MAX_DEVS        NET_PROFILE_NETIF_MAX_DEVS
+#else
+#define VIRTIO_NET_MAX_DEVS        2
+#endif
 
 #define VIRTIO_NET_QUEUE_RX        0
 #define VIRTIO_NET_QUEUE_TX        1
