@@ -172,13 +172,16 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 $(RAMFS_USER_BLOB_DIR)/native_futex: $(NATIVE_FUTEX_BIN)
 	@mkdir -p $(dir $@)
 	cp $< $@
+$(RAMFS_USER_BLOB_DIR)/native_latency: $(NATIVE_LATENCY_BIN)
+	@mkdir -p $(dir $@)
+	cp $< $@
 $(RAMFS_USER_BLOB_DIR)/native_spawn: $(NATIVE_SPAWN_BIN)
 	@mkdir -p $(dir $@)
 	cp $< $@
 $(RAMFS_USER_BLOB_DIR)/native_input:
 	@mkdir -p $(dir $@)
 	$(PYTHON) -c 'from pathlib import Path; Path("$@").write_bytes(bytes((i*37+11)&255 for i in range(2048)))'
-$(addprefix $(RAMFS_USER_BLOB_DIR)/,native_futex.o native_spawn.o native_input.o): $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BLOB_DIR)/%
+$(addprefix $(RAMFS_USER_BLOB_DIR)/,native_futex.o native_spawn.o native_input.o native_latency.o): $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BLOB_DIR)/%
 	cd $(RAMFS_USER_BLOB_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
 		$* $(abspath $@)

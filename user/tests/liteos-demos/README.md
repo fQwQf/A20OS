@@ -51,7 +51,7 @@ Expected tail:
 [4.3] PASS once=1 periodic=12
 [4.4] PASS irq=5
 [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1 init=1
-[DEMO] experiments 4.1-4.5: PASS
+[DEMO] experiments 4.1-4.9: PASS
 ```
 
 The QEMU board enables `CONFIG_MCU_USER_DEMO` in

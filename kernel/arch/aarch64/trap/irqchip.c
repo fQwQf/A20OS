@@ -237,6 +237,15 @@ static void gic_init(void) {
 }
 
 static void handle_timer_irq(int from_user) {
+#ifndef CONFIG_COOPERATIVE_BOOT
+    /* Sample before timer_set_interval() rewrites the compare register: the
+     * CVAL that fired is the deadline this IRQ was late against. */
+    uint64_t deadline;
+    uint64_t now;
+    __asm__ __volatile__("mrs %0, cntp_cval_el0" : "=r"(deadline));
+    __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(now));
+    timer_irq_latency_sample(deadline, now);
+#endif
     timer_irq_tick();
     kernel_progress_timer_tick();
     timer_set_interval(proc_next_timer_interval(timer_get_ticks()));

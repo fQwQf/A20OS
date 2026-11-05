@@ -21,6 +21,7 @@
 #define SCHED_RR       2
 #define SCHED_BATCH    3
 #define SCHED_IDLE     5
+#define SCHED_DEADLINE 6
 #define SCHED_RESET_ON_FORK 0x40000000
 
 #define CLONE_VM             0x00000100
@@ -75,6 +76,8 @@ typedef struct proc_current_sched_snapshot {
     uint32_t policy;
     int32_t priority;
     uint64_t eevdf_deadline;
+    uint64_t dl_deadline;
+    uint32_t dl_throttled;
 } proc_current_sched_snapshot_t;
 int proc_current_sched_snapshot(unsigned cpu, const task_t *candidate,
                                 proc_current_sched_snapshot_t *out);

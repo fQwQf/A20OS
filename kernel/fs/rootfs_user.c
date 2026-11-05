@@ -34,7 +34,12 @@ extern const unsigned char _binary_storage_read_test_end[];
 extern const unsigned char _binary_native_futex_start[], _binary_native_futex_end[];
 extern const unsigned char _binary_native_spawn_start[], _binary_native_spawn_end[];
 extern const unsigned char _binary_native_input_start[], _binary_native_input_end[];
+extern const unsigned char _binary_native_latency_start[], _binary_native_latency_end[];
 extern const unsigned char _binary_cluster_threads_start[], _binary_cluster_threads_end[];
+#endif
+
+#ifdef CONFIG_RAMFS_RT_TESTS
+extern const unsigned char _binary_sched_stress_start[], _binary_sched_stress_end[];
 #endif
 
 #ifdef CONFIG_RAMFS_MEDIA
@@ -54,9 +59,13 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/init", init),
 #ifdef CONFIG_RAMFS_NATIVE_TESTS
     USER_ENTRY("/bin/native-futex", native_futex),
+    USER_ENTRY("/bin/native-latency", native_latency),
     USER_ENTRY("/bin/cluster_threads", cluster_threads),
     USER_ENTRY("/bin/SPAWN.ELF", native_spawn),
     USER_ENTRY("/bin/INPUT.DAT", native_input),
+#endif
+#ifdef CONFIG_RAMFS_RT_TESTS
+    USER_ENTRY("/bin/sched_stress", sched_stress),
 #endif
     USER_ENTRY("/bin/mksh", mksh),
     USER_ENTRY("/bin/help", help),

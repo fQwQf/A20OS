@@ -27,4 +27,17 @@ void timer_irq_tick(void);
 void timer_enable(void);
 void timer_disable(void);
 
+#ifdef CONFIG_AARCH64
+/*
+ * Timer IRQ entry latency: the elapsed counter cycles between the compare
+ * value that fired and the first instruction of the timer handler.  Samples
+ * cover timer interrupts only, not device IRQs.  Per-CPU writers are the
+ * local IRQ path; readers aggregate, so a concurrent update may produce a
+ * mixed snapshot (diagnostic only).
+ */
+void timer_irq_latency_sample(uint64_t deadline, uint64_t now);
+int timer_irq_latency_read(uint64_t *out_min, uint64_t *out_avg,
+                           uint64_t *out_max, uint64_t *out_count);
+#endif
+
 #endif /* _TIMER_H */

@@ -32,8 +32,10 @@ static int native_memory_contract(void) {
     a20_free((void *)0);
     a20_free(grown);
     a20_free(q);
+    /* The allocator's free list is LIFO, and q was freed after grown, so a
+     * reuse check must accept either freed chunk; it must not grow a region. */
     unsigned char *reused = a20_malloc(8);
-    if (reused != grown)
+    if (reused != grown && reused != q)
         return 9;
     a20_free(reused);
     void *fresh = a20_realloc((void *)0, 23);

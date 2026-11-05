@@ -99,6 +99,19 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
                 ? owner_cpu : task->cpu_id;
         task->wake_time = 0;
         task->state = PROC_READY;
+        if (task->suspend_pending) {
+            /* The wait completed while a CMSIS suspend request was pending:
+             * publish STOPPED and leave the task out of the runqueue.  Resume
+             * will make it READY again, and the syscall return path rechecks
+             * its original condition. */
+            task->suspend_pending = 0;
+            task->cmsis_suspend = 1;
+            task->stop_report_pending = 0;
+            task->continue_report_pending = 0;
+            task->state = PROC_STOPPED;
+            proc_sched_assert_task_locked(task);
+            return 1;
+        }
         /*
          * An on_cpu task is still executing the commit/sched boundary; a
          * dispatching task has already been selected. The runqueue helper

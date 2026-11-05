@@ -15,6 +15,7 @@
 #ifdef CONFIG_MCU_NATIVE_PROGRAM
 #include "core/arch.h"
 #include "program.h"
+#include "mcu.h"
 #include "core/errno.h"
 #include "core/panic.h"
 #include "core/string.h"
@@ -235,6 +236,9 @@ void arch_flat_program_enter(void)
     uintptr_t ksp =
         (uintptr_t)task->kstack_base + CONFIG_MCU_KERNEL_STACK_SIZE;
     __asm__ volatile("csrw mscratch, %0" ::"r"(ksp));
+    /* entry.S starts with a full-access PMP; replace it with this program's
+     * allow-list before the first user instruction. */
+    riscv_mcu_pmp_update();
     /* MPIE=1, MPP=0 (U-mode): mret enables interrupts and drops privilege. */
     mcu_enter_user(p->entry, p->arg, p->sp, 0x80);
 }
@@ -324,6 +328,76 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     proc_publish_deferred_task(task);
     proc_put(task);
     return pid;
+}
+
+uintptr_t arch_flat_current_stack_base(void)
+{
+    task_t *t = proc_current();
+    if (!t || !t->arch_program)
+        return 0;
+    riscv_mcu_program_t *p = t->arch_program;
+    return (uintptr_t)p->stack;
+}
+
+/* Permission for one registered range: the loaded image needs R/W/X (it holds
+ * code and writable data), the program stack and every dynamic region are
+ * data-only.  Treating a data region as executable would widen the boundary
+ * for no benefit. */
+static uint32_t flat_region_perms(const riscv_mcu_program_image_t *owner,
+                                  uintptr_t base, size_t size)
+{
+    if (size == owner->image_size && base == owner->image)
+        return ARCH_FLAT_PERM_R | ARCH_FLAT_PERM_W | ARCH_FLAT_PERM_X;
+    if (size == (size_t)0 && base == 0)
+        return 0;
+    return ARCH_FLAT_PERM_R | ARCH_FLAT_PERM_W;
+}
+
+int arch_flat_region_snapshot(arch_flat_region_t *out, int max)
+{
+    task_t *t = proc_current();
+    riscv_mcu_program_t *p = t ? t->arch_program : NULL;
+    if (!p || !p->owner || !out || max <= 0)
+        return 0;
+
+    riscv_mcu_program_image_t *owner = p->owner;
+    int count = 0;
+    uint64_t flags = spin_lock_irqsave(&owner->memory.lock);
+    for (a20_flat_region_t *r = owner->memory.regions; r; r = r->next) {
+        if (count == max) {
+            count = -ENOSPC;
+            break;
+        }
+        out[count].base = r->base;
+        out[count].size = r->size;
+        out[count].perms = flat_region_perms(owner, r->base, r->size);
+        count++;
+    }
+    spin_unlock_irqrestore(&owner->memory.lock, flags);
+    return count;
+}
+
+size_t arch_flat_current_span(uintptr_t *base)
+{
+    task_t *t = proc_current();
+    riscv_mcu_program_t *p = t ? t->arch_program : NULL;
+    if (!p || !p->owner || !base)
+        return 0;
+
+    riscv_mcu_program_image_t *owner = p->owner;
+    uintptr_t low = UINTPTR_MAX, high = 0;
+    uint64_t flags = spin_lock_irqsave(&owner->memory.lock);
+    for (a20_flat_region_t *r = owner->memory.regions; r; r = r->next) {
+        if (r->base < low)
+            low = r->base;
+        if (r->base + r->size > high)
+            high = r->base + r->size;
+    }
+    spin_unlock_irqrestore(&owner->memory.lock, flags);
+    if (low >= high)
+        return 0;
+    *base = low;
+    return (size_t)(high - low);
 }
 
 int arch_flat_thread_attach(task_t *parent, task_t *child, uintptr_t entry,

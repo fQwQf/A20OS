@@ -643,6 +643,28 @@ typedef struct task_t {
     /* Per-task scheduler lock (osKernelLock).  While non-zero, the IRQ and
      * syscall preemption points defer a pending reschedule. */
     uint32_t           sched_lock_depth;
+    /* SCHED_DEADLINE (EDF) state, in kernel ticks.  The ready list is sorted
+     * by absolute deadline; a task whose runtime is exhausted moves to the
+     * per-CPU throttle list until its next period begins.  Serialized by the
+     * owning runqueue lock and by park_lock for attribute changes. */
+    uint64_t           dl_runtime;
+    uint64_t           dl_deadline;
+    uint64_t           dl_period;
+    uint64_t           dl_remaining;
+    uint64_t           dl_period_start;
+    uint64_t           dl_next_release;
+    uint32_t           dl_throttled;
+    uint32_t           dl_admitted;
+    uint32_t           dl_overrun;   /* missed an absolute deadline */
+    uint32_t           dl_pad;
+    struct task_t     *dl_ready_next;
+    struct task_t     *dl_throttle_next;
+    /* Cross-thread suspend/resume.  suspend_pending is set by another task
+     * and consumed at the target's next syscall/IRQ-return safe point;
+     * cmsis_suspend distinguishes this from job-control STOPPED so SIGCONT
+     * and parent wait status cannot resume a CMSIS-suspended thread. */
+    uint32_t           suspend_pending;
+    uint32_t           cmsis_suspend;
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&
@@ -677,6 +699,7 @@ _Static_assert(ARCH_TASK_TRAP_CTX_OFFSET == 0 ||
 #define PROC_SCHED_PRIORITY (1U << 1)
 #define PROC_SCHED_AFFINITY (1U << 2)
 #define PROC_SCHED_NICE     (1U << 3)
+#define PROC_SCHED_DL       (1U << 4)
 
 typedef struct proc_sched_config {
     uint32_t fields;
@@ -685,6 +708,12 @@ typedef struct proc_sched_config {
     int nice;
     uint32_t affinity;
     int reset_on_fork;
+    /* SCHED_DEADLINE parameters in nanoseconds, matching Linux sched_attr.
+     * A zero period means "equal to deadline" as on Linux. */
+    uint64_t dl_runtime_ns;
+    uint64_t dl_deadline_ns;
+    uint64_t dl_period_ns;
+    uint32_t dl_overrun;
 } proc_sched_config_t;
 
 static inline int proc_has_cap(const task_t *t, int cap)
@@ -786,6 +815,8 @@ int      proc_sched_set(task_t *t, const proc_sched_config_t *config);
  */
 int      proc_sched_rt_donate(task_t *t, int priority);
 int      proc_sched_rt_restore(task_t *t);
+/* Drop SCHED_DEADLINE admission/throttle state at task destruction. */
+void     proc_sched_dl_release(task_t *t);
 /*
  * Per-task scheduler lock used by osKernelLock().  mode is one of
  * PROC_SCHED_LOCK_ACQUIRE / RELEASE / RESTORE; returns the previous depth.
@@ -797,6 +828,9 @@ int      proc_sched_rt_restore(task_t *t);
 #define PROC_SCHED_LOCK_RELEASE 1
 #define PROC_SCHED_LOCK_RESTORE 2
 int      proc_sched_lock_set(int mode, int depth);
+/* Cross-thread suspend/resume (CMSIS osThreadSuspend/osThreadResume). */
+int      proc_sched_suspend_task(task_t *t);
+int      proc_sched_resume_task(task_t *t);
 int      proc_sched_priority_range(int policy, int *min, int *max);
 uint32_t proc_sched_effective_affinity(task_t *t);
 void     sched(void);

@@ -161,7 +161,10 @@ riscv_mcu_trap:
 mcu_enter_user:
 	li	t0, -1
 	csrw	pmpaddr0, t0
-	li	t0, 0x1f
+	csrw	pmpaddr1, t0
+	/* entry 0/1 both NAPOT R/W/X until the first trap installs the stack
+	 * guard via riscv_mcu_pmp_update(). */
+	li	t0, 0x1f1f
 	csrw	pmpcfg0, t0
 
 	csrw	mepc, a0

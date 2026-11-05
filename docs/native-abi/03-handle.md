@@ -572,7 +572,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
-| 0x0700 | `clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 获取时钟 |
+| 0x0700 | `clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 获取时钟；id 7/8 为 raw cycle 与频率，AArch64 id 9–12 为 timer IRQ 入口时延统计 |
 | 0x0701 | `timer_create` | `int64_t timer_create(a20_timer_create_args_t *args)` | 创建定时器 |
 | 0x0702 | `timer_set` | `int64_t timer_set(a20_handle_t timer, uint64_t deadline_ns, uint64_t interval_ns)` | 设置定时器 |
 | 0x0703 | `timer_cancel` | `int64_t timer_cancel(a20_handle_t timer)` | 取消定时器 |

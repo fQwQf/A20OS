@@ -13,6 +13,7 @@
  * Only the standard API from cmsis_os2.h is used.
  */
 #include "cmsis_os2.h"
+#include "a20_mem.h"
 
 void demo_log(const char *fmt, ...);
 int demo_check(int condition, const char *what);
@@ -420,6 +421,161 @@ static int test_initial_inheritance(void)
     ok &= demo_check(g_init_done == 1, "initial waiter completed");
     demo_log("[4.5] initial done ok=%d", ok);
     osMutexDelete(m);
+    return ok;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 4.6 cross-thread suspend/resume                                        */
+/* ---------------------------------------------------------------------- */
+
+static volatile uint32_t g_susp_count;
+static volatile int      g_susp_stop;
+static uint64_t          g_susp_stack[256] __attribute__((aligned(16)));
+
+static void susp_worker(void *arg)
+{
+    (void)arg;
+    while (!g_susp_stop) {
+        g_susp_count++;
+        osDelay(1);
+    }
+}
+
+int experiment_46(void)
+{
+    demo_log("[4.6] cross-thread suspend/resume");
+    g_susp_count = 0;
+    g_susp_stop = 0;
+    osThreadAttr_t attr = {
+        .name = "susp",
+        .stack_mem = g_susp_stack,
+        .stack_size = sizeof(g_susp_stack),
+        .priority = osPriorityLow,
+    };
+    osThreadId_t t = osThreadNew(susp_worker, NULL, &attr);
+    int ok = demo_check(t != NULL, "suspend worker created");
+    if (!t)
+        return 0;
+
+    for (unsigned i = 0; i < 100 && g_susp_count == 0; i++)
+        osDelay(1);
+    ok &= demo_check(g_susp_count > 0, "worker made progress");
+    ok &= demo_check(osThreadSuspend(t) == osOK, "osThreadSuspend");
+    osDelay(5);
+    uint32_t frozen = g_susp_count;
+    osDelay(50);
+    int stayed = g_susp_count == frozen;
+    ok &= demo_check(stayed, "worker stopped while suspended");
+    ok &= demo_check(osThreadResume(t) == osOK, "osThreadResume");
+    osDelay(20);
+    int resumed = g_susp_count > frozen;
+    ok &= demo_check(resumed, "worker resumed");
+    g_susp_stop = 1;
+    ok &= demo_check(osThreadJoin(t) == osOK, "suspended worker joined");
+    demo_log("[4.6] %s suspend=%d resume=%d",
+             ok ? "PASS" : "FAIL", stayed, resumed);
+    return ok;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 4.7 osKernelSuspend / osKernelResume tickless idle                     */
+/* ---------------------------------------------------------------------- */
+
+int experiment_47(void)
+{
+    demo_log("[4.7] osKernelSuspend tickless idle");
+    uint32_t before = osKernelGetTickCount();
+    uint32_t slept = osKernelSuspend();
+    uint32_t after = osKernelGetTickCount();
+    osKernelResume(slept);
+    int ok = demo_check(slept > 0, "kernel suspend returned sleep ticks");
+    ok &= demo_check(after - before >= slept, "tick advanced while suspended");
+    ok &= demo_check(osKernelGetState() == osKernelRunning,
+                     "kernel resumed");
+    demo_log("[4.7] %s slept=%u elapsed=%u", ok ? "PASS" : "FAIL",
+             (unsigned)slept, (unsigned)(after - before));
+    return ok;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 4.9 PMP allow-list: an unmapped page is no longer reachable from U-mode */
+/* ---------------------------------------------------------------------- */
+
+static volatile uint32_t g_pmp_good_write;
+static volatile uint32_t g_pmp_probe_entered;
+static volatile uint32_t g_pmp_probe_survived;
+static uint64_t          g_pmp_stack[256] __attribute__((aligned(16)));
+static volatile uint32_t *g_pmp_good;
+static volatile uint32_t *g_pmp_bad;
+
+static void pmp_probe(void *arg)
+{
+    (void)arg;
+    /* First prove the allowed dynamic region works... */
+    *g_pmp_good = 0x5a5a5a5aU;
+    g_pmp_good_write = 1;
+    /* ...then touch the page that vm_unmap removed from the allow-list.  The
+     * trap path must terminate this thread with SIGSEGV, not the kernel. */
+    g_pmp_probe_entered = 1;
+    *g_pmp_bad = 0xdeadbeefU;
+    g_pmp_probe_survived = 1;
+}
+
+int experiment_49(void)
+{
+    demo_log("[4.9] PMP allow-list isolation");
+
+    uint64_t good_addr = 0, bad_addr = 0;
+    int ok = demo_check(a20_vm_alloc_pages(1, 3, &good_addr) == A20_OK,
+                        "alloc allowed page");
+    ok &= demo_check(a20_vm_alloc_pages(1, 3, &bad_addr) == A20_OK,
+                     "alloc victim page");
+    if (!ok) {
+        demo_log("[4.9] FAIL allocate");
+        return 0;
+    }
+
+    g_pmp_good = (volatile uint32_t *)(uintptr_t)good_addr;
+    g_pmp_bad = (volatile uint32_t *)(uintptr_t)bad_addr;
+    g_pmp_good_write = 0;
+    g_pmp_probe_entered = 0;
+    g_pmp_probe_survived = 0;
+
+    /* Remove the victim from the flat space while it is still mapped in the
+     * kernel heap: only the hardware allow-list can reject the later write. */
+    ok &= demo_check(a20_vm_unmap(bad_addr, 4096) == A20_OK,
+                     "unmap victim page");
+
+    osThreadAttr_t attr = {
+        .name = "pmp-probe",
+        .stack_mem = g_pmp_stack,
+        .stack_size = sizeof(g_pmp_stack),
+        .priority = osPriorityLow,
+    };
+    osThreadId_t t = osThreadNew(pmp_probe, NULL, &attr);
+    ok &= demo_check(t != NULL, "probe thread created");
+    if (!t) {
+        demo_log("[4.9] FAIL create");
+        return 0;
+    }
+
+    for (unsigned i = 0; i < 200 && !g_pmp_probe_entered; i++)
+        osDelay(1);
+    /* Give the faulting store a chance to run even if it is not the next
+     * instruction after the flag becomes visible. */
+    osDelay(20);
+
+    ok &= demo_check(g_pmp_good_write == 1, "allowed page remains writable");
+    ok &= demo_check(g_pmp_probe_entered == 1, "probe reached the bad store");
+    ok &= demo_check(g_pmp_probe_survived == 0,
+                     "bad store killed the thread, not the kernel");
+    /* The thread died with SIGSEGV; detach reaps it without waiting. */
+    (void)osThreadDetach(t);
+    (void)a20_vm_unmap(good_addr, 4096);
+    demo_log("[4.9] %s good=%u entered=%u survived=%u",
+             ok ? "PASS" : "FAIL", (unsigned)g_pmp_good_write,
+             (unsigned)g_pmp_probe_entered,
+             (unsigned)g_pmp_probe_survived);
     return ok;
 }
 

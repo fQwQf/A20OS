@@ -117,6 +117,38 @@ void *osb_alloc(size_t size)
 
 void osb_free(void *ptr) { osn_vm_free(ptr); }
 
+/*
+ * Large thread stacks get a dedicated page-aligned region so join/detach can
+ * return the whole thing with vm_unmap.  Small stacks stay in the shared
+ * a20_malloc pool: on the MCU that pool is only a few tens of KiB, and giving
+ * every 2-16 KiB worker its own region would starve it.  The threshold is
+ * applied identically on release, so no extra metadata is needed.
+ */
+#define OSB_STACK_VM_MIN (32U * 1024U)
+
+void *osb_alloc_stack(size_t size)
+{
+    if (size < OSB_STACK_VM_MIN)
+        return osb_alloc(size);
+    size_t total = (size + 4095U) & ~(size_t)4095U;
+    void *base = NULL;
+    if (osn_vm_alloc_page_aligned(total, &base) != 0 || !base)
+        return NULL;
+    return base;
+}
+
+void osb_free_stack(void *ptr, size_t size)
+{
+    if (!ptr)
+        return;
+    if (size < OSB_STACK_VM_MIN) {
+        osb_free(ptr);
+        return;
+    }
+    size_t total = (size + 4095U) & ~(size_t)4095U;
+    (void)osn_vm_unmap(ptr, total);
+}
+
 uint64_t osb_time_ns(void)
 {
     uint64_t ns = 0;
@@ -139,7 +171,7 @@ int osb_thread_start(osThreadId_t t)
 {
     size_t size = osn_stack_grow(t->stack_size);
     if (!t->stack_mem) {
-        t->stack_mem = osb_alloc(size);
+        t->stack_mem = osb_alloc_stack(size);
         if (!t->stack_mem)
             return -OS_ENOMEM;
         t->owned_stack = t->stack_mem;
@@ -148,6 +180,10 @@ int osb_thread_start(osThreadId_t t)
         /* The caller supplied a stack the platform cannot use. */
         return -OS_EINVAL;
     }
+    /* Fill before the first instruction runs.  Caller-provided stacks and
+     * Native-owned stacks both land here, so osThreadGetStackSpace() has a
+     * complete high-water baseline on the MCU target as well as on the host. */
+    os_stack_fill(t);
     /* Register before the thread can run: the first thing it does is look
      * itself up by stack address. */
     self_register(t);
@@ -209,14 +245,20 @@ int osb_thread_sleep_ns(uint64_t ns)
 
 int osb_thread_suspend(osThreadId_t t)
 {
-    (void)t;
-    return -OS_ENOSYS;
+    if (!t)
+        return -OS_EINVAL;
+    if (!t->bhandle && osb_thread_self() != t)
+        return -OS_EINVAL;
+    return osn_task_suspend(t->bhandle) == 0 ? 0 : -OS_EIO;
 }
 
 int osb_thread_resume(osThreadId_t t)
 {
-    (void)t;
-    return -OS_ENOSYS;
+    if (!t)
+        return -OS_EINVAL;
+    if (!t->bhandle && osb_thread_self() != t)
+        return -OS_EINVAL;
+    return osn_task_resume(t->bhandle) == 0 ? 0 : -OS_EIO;
 }
 
 int osb_thread_terminate(osThreadId_t t)
@@ -273,7 +315,7 @@ osPriority_t osb_thread_get_priority(osThreadId_t t)
     if (!t || (!t->bhandle && osb_thread_self() != t))
         return osPriorityNone;
     int32_t policy = 0, priority = 0;
-    if (osn_task_get_sched(t->bhandle, &policy, &priority) != 0)
+    if (osn_task_get_sched(t->bhandle, &policy, &priority, NULL) != 0)
         return osPriorityNone;
     /* The ABI returns 0 for a non-RT task.  A CMSIS-created thread in that
      * state did not get its kernel priority and must not look correctly
@@ -318,20 +360,24 @@ int osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set)
 
 uint32_t osb_thread_get_affinity(osThreadId_t t)
 {
-    (void)t;
-    return 0;
-}
-
-uint32_t osb_thread_stack_space(osThreadId_t t)
-{
-    (void)t;
-    return 0;
+    if (!t || (!t->bhandle && osb_thread_self() != t))
+        return 0;
+    int32_t policy = 0, priority = 0;
+    uint32_t affinity = 0;
+    if (osn_task_get_sched(t->bhandle, &policy, &priority, &affinity) != 0)
+        return 0;
+    return affinity;
 }
 
 /* ------------------------------------------------------------------------- */
 /* ------------------------------------------------------------------------- */
 /* Scheduler lock: kernel-owned per-task depth                              */
 /* ------------------------------------------------------------------------- */
+
+uint32_t osb_kernel_suspend(void)
+{
+    return osn_kernel_suspend();
+}
 
 int osb_kernel_lock(void)
 {

@@ -69,6 +69,7 @@
 
 static uint32_t timer_lo;
 static uint32_t timer_hi;
+static uint64_t timer_interval_ticks = 1;
 
 static void uart_pins(void) {
     REG(IOMUX_FUNC(3)) = GPIO3_UART0_TXD;
@@ -132,7 +133,8 @@ void riscv_mcu_timer_init(void) {
     timer_clock_enable();
     (void)REG(TIMER_BASE + TIMER_EOI); /* clear a stale comparator event */
     REG(TIMER_BASE + TIMER_CONTROL) = 0;
-    REG(TIMER_BASE + TIMER_LOAD) = TIMER_HZ / ARCH_TIMER_FREQ;
+    REG(TIMER_BASE + TIMER_LOAD) =
+        (TIMER_HZ / ARCH_TIMER_FREQ) * timer_interval_ticks;
     REG(TIMER_BASE + TIMER_CONTROL) =
         TIMER_CTRL_EN | TIMER_CTRL_RELOAD | TIMER_CTRL_UNMASK;
     local_irq_priority();
@@ -149,7 +151,8 @@ uint64_t riscv_mcu_timer_read(void) {
 
 void riscv_mcu_timer_enable(int enabled) {
     if (enabled) {
-        REG(TIMER_BASE + TIMER_LOAD) = TIMER_HZ / ARCH_TIMER_FREQ;
+        REG(TIMER_BASE + TIMER_LOAD) =
+            (TIMER_HZ / ARCH_TIMER_FREQ) * timer_interval_ticks;
         REG(TIMER_BASE + TIMER_CONTROL) =
             TIMER_CTRL_EN | TIMER_CTRL_RELOAD | TIMER_CTRL_UNMASK;
         local_irq_priority();
@@ -160,16 +163,30 @@ void riscv_mcu_timer_enable(int enabled) {
     }
 }
 
-void riscv_mcu_timer_rearm(void) {} /* hardware periodic comparator */
+void riscv_mcu_timer_set_interval(uint64_t ticks)
+{
+    timer_interval_ticks = ticks ? ticks : 1;
+}
+
+uint64_t riscv_mcu_timer_interval(void) { return timer_interval_ticks; }
+
+void riscv_mcu_timer_rearm(void)
+{
+    /* Reload mode repeats this period, so each IRQ advances the software
+     * tick count by the requested number of kernel ticks. */
+    REG(TIMER_BASE + TIMER_LOAD) =
+        (TIMER_HZ / ARCH_TIMER_FREQ) * timer_interval_ticks;
+}
 
 int riscv_mcu_irq_dispatch(uint32_t cause) {
     if (cause != TIMER_IRQ)
         return -1;
 
     (void)REG(TIMER_BASE + TIMER_EOI); /* read clears the IRQ */
-    timer_lo++;
-    if (timer_lo == 0)
-        timer_hi++;
+    uint64_t ticks = ((uint64_t)timer_hi << 32) | timer_lo;
+    ticks += timer_interval_ticks;
+    timer_lo = (uint32_t)ticks;
+    timer_hi = (uint32_t)(ticks >> 32);
 
     int c;
     while ((c = arch_uart_poll_getc()) >= 0)

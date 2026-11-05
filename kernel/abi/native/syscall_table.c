@@ -47,6 +47,7 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_write(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_stat(const a20_syscall_args_t *args);
 int64_t sys_a20_clock_get(const a20_syscall_args_t *args);
+int64_t sys_a20_kernel_idle(const a20_syscall_args_t *args);
 
 /* Forward declarations for Phase 2 syscalls (sys_phase2.c) */
 int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args);
@@ -68,6 +69,8 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args);
 int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args);
 int64_t sys_a20_sched_lock(const a20_syscall_args_t *args);
 int64_t sys_a20_task_self(const a20_syscall_args_t *args);
+int64_t sys_a20_task_suspend(const a20_syscall_args_t *args);
+int64_t sys_a20_task_resume(const a20_syscall_args_t *args);
 int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args);
 int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args);
 int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args);

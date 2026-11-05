@@ -39,14 +39,16 @@ backend needs, and the trim below makes that set explicit and checkable.
 * kernel: initialize/start/state/info/version, tick and system-timer clocks,
   lock/unlock/restore, suspend/resume, `osDelay`, `osDelayUntil`
 * threads: create/exit/join/detach/terminate/suspend/resume, priorities,
-  names, state, count/enumerate, affinity, stack size/space
+  names, state, count/enumerate, affinity get/set, stack size and high-water
+  space
 * thread flags: set/get/clear/wait (any/all/no-clear, timeouts)
 * timers: one-shot and periodic, start/stop/is-running/delete, callbacks in a
   dedicated service thread (the CMSIS execution context contract)
 * mutexes: owner, recursion, timed acquire, delete
 * semaphores: counting, max bound, timed acquire, get-count
 * event flags: set/clear/get/wait with any/all/no-clear
-* message queues: FIFO, blocking put/get, capacity/space/reset
+* message queues: priority-ordered put/get (`msg_prio`, higher first; equal
+  priorities FIFO), blocking put/get, capacity/space/reset
 * memory pools: fixed blocks, blocking alloc, double-free detection
 
 Objects support `cb_mem`/`cb_size` (static control blocks) and
@@ -55,11 +57,25 @@ Objects support `cb_mem`/`cb_size` (static control blocks) and
 Documented limits:
 
 * `osThreadSuspend/Resume` is cooperative on the POSIX backend (signal based)
-  and not supported by the Native backend; it returns `osError` there.
+  and kernel-level on the Native backend: the target stops at its next
+  syscall/IRQ-return safe point (or is published STOPPED directly if it was
+  blocked), and resume re-enqueues it.
+* `osKernelSuspend()` is a real scheduler-locked WFI on the single-core MCU
+  Native backend and returns the elapsed ticks; SMP and hosted backends return
+  0 because they cannot suspend the whole machine from one task.
 * The POSIX backend keeps the host's pthread scheduling policy; CMSIS
   priorities and priority inheritance are guaranteed by the Native/MCU
   backend, not by a hosted process.
-* Message queues are FIFO; `msg_prio` is accepted and ignored.
+* `osThreadGetAffinity()` returns the kernel's effective affinity mask on
+  Native and the host pthread mask on POSIX.  `osThreadSetAffinity()` is
+  forwarded to `task_set_sched`; the Native MCU profile is single-core, so
+  the useful mask has one bit.
+* `osThreadGetStackSpace()` uses a high-water pattern.  The Native backend
+  fills every stack it owns; the POSIX backend can only measure a
+  caller-provided stack that meets `PTHREAD_STACK_MIN`.  A pthread-owned
+  default stack and the initial thread (no stack metadata) report 0.  The
+  value is stable for a blocked/terminated thread and best-effort while the
+  target is still running.
 * The POSIX backend implements `osKernelLock` as a recursive mutex; a
   blocking call inside the lock is still an application error.
 * The initial thread installs its own handle at `osKernelInitialize()`
@@ -145,7 +161,7 @@ Profiles:
 | Profile | Object families | Syscalls |
 |---|---|---|
 | `full` | all | all (mirrors the master table) |
-| `mcu` | thread, mutex, semaphore, timer, event flags, message queue | 15 |
+| `mcu` | thread, mutex, semaphore, timer, event flags, message queue, suspend/resume, idle, vm_unmap | 19 |
 | `mcu-min` | thread, semaphore, timer (no join/terminate/priority control) | 9 |
 
 Measured library text for the Native backend, riscv32imc/ilp32, `-Os`
@@ -193,7 +209,11 @@ tools/a20 test qemu-riscv32-mcu
 # [4.3] PASS once=1 periodic=12
 # [4.4] PASS irq=5
 # [4.5] PASS create=1 setprio=1 lock=1 inherit=1 chain=1 init=1
-# [DEMO] experiments 4.1-4.5: PASS
+# [4.6] PASS suspend=1 resume=1
+# [4.7] PASS slept=1 elapsed=1
+# [4.8] PASS delay=<cycles> syscall=<cycles>
+# [4.9] PASS good=1 entered=1 survived=0
+# [DEMO] experiments 4.1-4.9: PASS
 ```
 
 Experiments 4.1-4.3 include only `cmsis_os2.h`.  Experiment 4.4 adds the

@@ -348,7 +348,7 @@ strength of a boilerplate note.
 | `setns` | namespaces | `partial` | `smoke-mntns`, `smoke-pidns` | joins mount and pid namespaces via /proc/<pid>/ns/mnt, /ns/pid and /ns/pid_for_children fds (CAP_SYS_ADMIN/root/same-uid); other ns targets refuse with -EINVAL |
 | `pivot_root` | namespaces | `full` | `smoke-pivot-root` | real pivot over the mount tree; no shared-subtree propagation (no MS_SHARED mounts) |
 | `get_mempolicy` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; validates policy/flags/nice/priority and routes through proc_sched_set; no util-clamp or deadline fields |
+| `sched_setattr` | scheduler | `partial` | `sched_stress`, AArch64 SMP2 | full struct sched_attr wire layout; supports SCHED_DEADLINE runtime/deadline/period with per-CPU 95% admission and tick-based EDF/throttle; deadline misses set SCHED_FLAG_DL_OVERRUN in sched_getattr; util-clamp and reclaim remain unsupported |
 | `sched_getattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; reports policy/flags/nice/priority; no util-clamp or deadline fields |
 | `clone3` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `openat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |

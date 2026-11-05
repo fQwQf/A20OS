@@ -46,11 +46,14 @@ osMessageQueueId_t osMessageQueueNew(uint32_t msg_count, uint32_t msg_size,
     q->obj.static_cb = (uint16_t)static_cb;
     q->obj.q = osb_bq_create();
     q->buf = (uint8_t *)osb_alloc((size_t)msg_count * msg_size);
-    if (!q->obj.q || !q->buf) {
+    q->prio = (uint8_t *)osb_alloc(msg_count);
+    if (!q->obj.q || !q->buf || !q->prio) {
         if (q->obj.q)
             osb_bq_destroy(q->obj.q);
         if (q->buf)
             osb_free(q->buf);
+        if (q->prio)
+            osb_free(q->prio);
         if (!static_cb)
             osb_free(q);
         return NULL;
@@ -70,7 +73,6 @@ const char *osMessageQueueGetName(osMessageQueueId_t mq_id)
 osStatus_t osMessageQueuePut(osMessageQueueId_t mq_id, const void *msg_ptr,
                              uint8_t msg_prio, uint32_t timeout)
 {
-    (void)msg_prio;   /* FIFO queue: priorities are accepted and ignored */
     if (!mq_valid(mq_id) || !msg_ptr)
         return osErrorParameter;
 #if !OS_CFG_MESSAGE_QUEUE
@@ -82,9 +84,23 @@ osStatus_t osMessageQueuePut(osMessageQueueId_t mq_id, const void *msg_ptr,
     osb_bq_lock(mq_id->obj.q);
     for (;;) {
         if (mq_id->count < mq_id->capacity) {
-            os_memcopy(mq_id->buf + (size_t)mq_id->head * mq_id->msg_size,
-                   msg_ptr, mq_id->msg_size);
-            mq_id->head = (mq_id->head + 1) % mq_id->capacity;
+            /* Higher msg_prio is dequeued first.  Equal priorities keep FIFO
+             * order, so insertion goes after every existing equal-priority
+             * message.  Queues in the supported profiles are small; the
+             * O(n) slot shift is cheaper than a second heap and keeps one
+             * contiguous buffer for the trim-friendly MCU build. */
+            uint32_t pos = 0;
+            while (pos < mq_id->count && mq_id->prio[pos] >= msg_prio)
+                pos++;
+            for (uint32_t i = mq_id->count; i > pos; i--) {
+                os_memcopy(mq_id->buf + (size_t)i * mq_id->msg_size,
+                           mq_id->buf + (size_t)(i - 1) * mq_id->msg_size,
+                           mq_id->msg_size);
+                mq_id->prio[i] = mq_id->prio[i - 1];
+            }
+            os_memcopy(mq_id->buf + (size_t)pos * mq_id->msg_size,
+                       msg_ptr, mq_id->msg_size);
+            mq_id->prio[pos] = msg_prio;
             mq_id->count++;
             osb_bq_wake_all(mq_id->obj.q);
             osb_bq_unlock(mq_id->obj.q);
@@ -119,13 +135,16 @@ osStatus_t osMessageQueueGet(osMessageQueueId_t mq_id, void *msg_ptr,
     osb_bq_lock(mq_id->obj.q);
     for (;;) {
         if (mq_id->count > 0) {
-            os_memcopy(msg_ptr,
-                   mq_id->buf + (size_t)mq_id->tail * mq_id->msg_size,
-                   mq_id->msg_size);
-            mq_id->tail = (mq_id->tail + 1) % mq_id->capacity;
-            mq_id->count--;
+            os_memcopy(msg_ptr, mq_id->buf, mq_id->msg_size);
             if (msg_prio)
-                *msg_prio = 0;
+                *msg_prio = mq_id->prio[0];
+            for (uint32_t i = 0; i + 1 < mq_id->count; i++) {
+                os_memcopy(mq_id->buf + (size_t)i * mq_id->msg_size,
+                           mq_id->buf + (size_t)(i + 1) * mq_id->msg_size,
+                           mq_id->msg_size);
+                mq_id->prio[i] = mq_id->prio[i + 1];
+            }
+            mq_id->count--;
             osb_bq_wake_all(mq_id->obj.q);
             osb_bq_unlock(mq_id->obj.q);
             return osOK;
@@ -181,7 +200,6 @@ osStatus_t osMessageQueueReset(osMessageQueueId_t mq_id)
         return osErrorParameter;
     osb_bq_lock(mq_id->obj.q);
     mq_id->count = 0;
-    mq_id->head = mq_id->tail = 0;
     osb_bq_wake_all(mq_id->obj.q);
     osb_bq_unlock(mq_id->obj.q);
     return osOK;
@@ -193,6 +211,7 @@ osStatus_t osMessageQueueDelete(osMessageQueueId_t mq_id)
         return osErrorParameter;
     osb_bq_destroy(mq_id->obj.q);
     osb_free(mq_id->buf);
+    osb_free(mq_id->prio);
     mq_id->obj.magic = 0;
     if (!mq_id->obj.static_cb)
         osb_free(mq_id);

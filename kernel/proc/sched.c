@@ -22,6 +22,26 @@
 #include "proc/rt_sched_account.h"
 #include "cluster/ssi.h"
 
+#define DL_BW_MAX 950U   /* 95% of one CPU, in 1/1024 units */
+
+static void sched_suspend_current(void);
+
+static uint64_t sched_ticks_to_ns(uint64_t ticks)
+{
+    return (ticks / TICKS_PER_SEC) * 1000000000ULL +
+           ((ticks % TICKS_PER_SEC) * 1000000000ULL) / TICKS_PER_SEC;
+}
+
+static uint64_t sched_ns_to_ticks(uint64_t ns)
+{
+    if (!ns)
+        return 0;
+    uint64_t ticks = (ns / 1000000000ULL) * TICKS_PER_SEC;
+    uint64_t rem = (ns % 1000000000ULL) * TICKS_PER_SEC;
+    ticks += (rem + 999999999ULL) / 1000000000ULL;
+    return ticks ? ticks : 1;
+}
+
 /*
  * RT_PRI_LEVELS: exact per-priority FIFO buckets for SCHED_FIFO/SCHED_RR
  * priorities 1..99.  MCU bring-up builds collapse the range into coarse
@@ -60,6 +80,12 @@ typedef struct __attribute__((aligned(64))) proc_runq {
     /* Per-CPU RT bandwidth: reserve 5% of every second for normal work.
      * All fields are protected by this runqueue's lock. */
     proc_rt_bandwidth_t rt_bandwidth;
+    /* Level 0a: SCHED_DEADLINE ready list, sorted by absolute deadline.
+     * The throttle list holds runtime-exhausted tasks sorted by the next
+     * period start.  Both are protected by this runqueue's lock. */
+    task_t *dl_ready;
+    task_t *dl_throttled;
+    uint32_t dl_bw;            /* admitted bandwidth, runtime/period * 1024 */
     /* Level 1: EEVDF — randomized BST ordered by earliest virtual deadline,
      * augmented with subtree-min vruntime for eligible-gated O(log n) pick. */
     eevdf_node_t *eevdf_root;
@@ -232,6 +258,74 @@ static int sched_task_rt(task_t *t)
     return t && a20_rt_policy_is_rt((uint32_t)t->sched_policy);
 }
 
+#ifdef CONFIG_MCU
+/* The MCU profile has no Linux ABI and no deadline personality.  Keeping the
+ * EDF class out of the 320 KiB image leaves heap for the CMSIS experiments;
+ * the fields remain in task_t but no dispatch path uses them. */
+static int sched_policy_dl_value(int policy)
+{
+    (void)policy;
+    return 0;
+}
+#else
+static int sched_policy_dl_value(int policy)
+{
+    return policy == SCHED_DEADLINE;
+}
+#endif
+
+#ifndef CONFIG_MCU
+static int sched_dl_admit(unsigned cpu, uint32_t bw)
+{
+    if (cpu >= CONFIG_NR_CPUS)
+        return -EINVAL;
+    uint64_t flags = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+    if (rq->dl_bw + bw > DL_BW_MAX) {
+        RUNQ_UNLOCK_IRQ(cpu, flags);
+        return -EBUSY;
+    }
+    rq->dl_bw += bw;
+    RUNQ_UNLOCK_IRQ(cpu, flags);
+    return 0;
+}
+
+static void sched_dl_uncharge(unsigned cpu, uint32_t bw)
+{
+    if (cpu >= CONFIG_NR_CPUS || !bw)
+        return;
+    uint64_t flags = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+    rq->dl_bw = rq->dl_bw > bw ? rq->dl_bw - bw : 0;
+    RUNQ_UNLOCK_IRQ(cpu, flags);
+}
+#endif /* !CONFIG_MCU */
+
+#ifdef CONFIG_MCU
+static int sched_dl_admit(unsigned cpu, uint32_t bw)
+{
+    (void)cpu;
+    (void)bw;
+    return 0;
+}
+static void sched_dl_uncharge(unsigned cpu, uint32_t bw)
+{
+    (void)cpu;
+    (void)bw;
+}
+
+static int sched_task_dl(const task_t *t)
+{
+    (void)t;
+    return 0;
+}
+#else
+static int sched_task_dl(const task_t *t)
+{
+    return t && sched_policy_dl_value(t->sched_policy);
+}
+#endif
+
 static task_t *rt_node_task(proc_rt_node_t *node)
 {
     return (task_t *)((char *)node - offsetof(task_t, rt_node));
@@ -317,6 +411,18 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
 {
     if (!candidate || !running || candidate == running)
         return 0;
+
+    int cand_dl = sched_task_dl(candidate);
+    int run_dl = sched_task_dl(running);
+    if (cand_dl || run_dl) {
+        if (cand_dl != run_dl)
+            return cand_dl;
+        if (candidate->dl_throttled)
+            return 0;
+        if (running->dl_throttled)
+            return 1;
+        return candidate->dl_next_release < running->dl_next_release;
+    }
 
     a20_task_preemption_snapshot_t snapshot = {0};
     snapshot.candidate_policy = (uint32_t)candidate->sched_policy;
@@ -450,7 +556,7 @@ static inline int eevdf_eligible(proc_runq_t *rq, task_t *t)
 /* Charge `now - last_account` of run time to t and advance system vtime. */
 static void eevdf_charge(proc_runq_t *rq, task_t *t, uint64_t now)
 {
-    if (!t || sched_task_rt(t) || t->pid == 0)
+    if (!t || sched_task_rt(t) || sched_task_dl(t) || t->pid == 0)
         return;
     uint64_t dt = now - t->eevdf_last_account;
     t->eevdf_last_account = now;
@@ -498,6 +604,55 @@ static void rt_unlink_locked(proc_runq_t *rq, task_t *t)
                         &t->rt_node))
         panic("rt dequeue rejected pid=%d slot=%d", t->pid,
               t->rt_node.queued_slot);
+}
+
+/* ---- SCHED_DEADLINE EDF lists ---- */
+static uint32_t dl_bw_units(uint64_t runtime, uint64_t period)
+{
+    if (!period)
+        return 1024U;
+    uint64_t units = (runtime * 1024ULL + period - 1) / period;
+    return units > 1024U ? 1024U : (uint32_t)units;
+}
+
+static void dl_ready_insert_locked(proc_runq_t *rq, task_t *t)
+{
+    task_t **pp = &rq->dl_ready;
+    while (*pp && (*pp)->dl_next_release <= t->dl_next_release)
+        pp = &(*pp)->dl_ready_next;
+    t->dl_ready_next = *pp;
+    *pp = t;
+}
+
+static void dl_ready_remove_locked(proc_runq_t *rq, task_t *t)
+{
+    task_t **pp = &rq->dl_ready;
+    while (*pp && *pp != t)
+        pp = &(*pp)->dl_ready_next;
+    if (*pp == t) {
+        *pp = t->dl_ready_next;
+        t->dl_ready_next = NULL;
+    }
+}
+
+static void dl_throttle_insert_locked(proc_runq_t *rq, task_t *t)
+{
+    task_t **pp = &rq->dl_throttled;
+    while (*pp && (*pp)->dl_next_release <= t->dl_next_release)
+        pp = &(*pp)->dl_throttle_next;
+    t->dl_throttle_next = *pp;
+    *pp = t;
+}
+
+static void dl_throttle_remove_locked(proc_runq_t *rq, task_t *t)
+{
+    task_t **pp = &rq->dl_throttled;
+    while (*pp && *pp != t)
+        pp = &(*pp)->dl_throttle_next;
+    if (*pp == t) {
+        *pp = t->dl_throttle_next;
+        t->dl_throttle_next = NULL;
+    }
 }
 
 /* Highest-priority non-empty RT queue via bitmap word scan: O(words).
@@ -647,7 +802,7 @@ static int sched_policy_valid(int policy)
 {
     return policy == SCHED_NORMAL || policy == SCHED_FIFO ||
            policy == SCHED_RR || policy == SCHED_BATCH ||
-           policy == SCHED_IDLE;
+           policy == SCHED_IDLE || policy == SCHED_DEADLINE;
 }
 
 static int sched_policy_rt_value(int policy)
@@ -696,7 +851,10 @@ static int sched_runq_detach_locked(task_t *t)
         RUNQ_UNLOCK_IRQ(cpu, rf);
         return 0;
     }
-    if (sched_task_rt(t)) rt_unlink_locked(rq, t);
+    if (sched_task_dl(t))
+        dl_ready_remove_locked(rq, t);
+    else if (sched_task_rt(t))
+        rt_unlink_locked(rq, t);
     else {
         eevdf_remove_locked(rq, t);
         sched_runq_eevdf_del_weight(rq, t);
@@ -717,6 +875,11 @@ int proc_sched_priority_range(int policy, int *min, int *max)
 {
     if (!sched_policy_valid(policy) || !min || !max)
         return -1;
+    if (sched_policy_dl_value(policy)) {
+        *min = 0;
+        *max = 0;
+        return 0;
+    }
     *min = sched_policy_rt_value(policy) ? 1 : 0;
     *max = sched_policy_rt_value(policy) ? 99 : 0;
     return 0;
@@ -740,6 +903,16 @@ int proc_sched_get(task_t *t, proc_sched_config_t *out)
     out->nice = sched_nice_value(t);
     out->affinity = proc_sched_effective_affinity(t);
     out->reset_on_fork = t->sched_reset_on_fork;
+    out->dl_runtime_ns = 0;
+    out->dl_deadline_ns = 0;
+    out->dl_period_ns = 0;
+    if (sched_task_dl(t)) {
+        out->fields |= PROC_SCHED_DL;
+        out->dl_runtime_ns = sched_ticks_to_ns(t->dl_runtime);
+        out->dl_deadline_ns = sched_ticks_to_ns(t->dl_deadline);
+        out->dl_period_ns = sched_ticks_to_ns(t->dl_period);
+        out->dl_overrun = t->dl_overrun;
+    }
     spin_unlock_irqrestore(&t->park_lock, lock_flags);
     return 0;
 }
@@ -747,13 +920,19 @@ int proc_sched_get(task_t *t, proc_sched_config_t *out)
 int proc_sched_set(task_t *t, const proc_sched_config_t *config)
 {
     const uint32_t all_fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY |
-                                PROC_SCHED_AFFINITY | PROC_SCHED_NICE;
+                                PROC_SCHED_AFFINITY | PROC_SCHED_NICE |
+                                PROC_SCHED_DL;
     if (!t || !config || (config->fields & ~all_fields))
         return -EINVAL;
 
     int self_can_migrate = t == proc_current() && t != proc_idle_task() &&
         arch_irqs_enabled() && !preempt_count() && !in_hardirq();
     int migrate_self = 0;
+    /* Kept initialized before any `goto invalid`: the invalid path may be
+     * reached before the deadline admission block runs. */
+    unsigned admit_cpu = cpu_current_id();
+    int dl_refund = 0;
+    uint32_t dl_refund_bw = 0;
     /* Remove the old queue entry before changing keys: pickers use only
      * runqueue locks, so park_lock alone does not protect queued keys. */
     uint64_t lock_flags = spin_lock_irqsave(&t->park_lock);
@@ -766,8 +945,10 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
                        : (sched_policy_rt_value(policy) &&
                           sched_policy_rt_value(t->sched_policy)
                               ? t->priority : 0);
+    int dl_policy = sched_policy_dl_value(policy);
     if (!sched_policy_valid(policy) ||
-        (cluster_ssi_managed(t) && sched_policy_rt_value(policy)) ||
+        (cluster_ssi_managed(t) &&
+         (sched_policy_rt_value(policy) || dl_policy)) ||
         (sched_policy_rt_value(policy)
              ? (priority < 1 || priority > 99)
              : priority != 0))
@@ -775,6 +956,32 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if ((config->fields & PROC_SCHED_NICE) &&
         (config->nice < -20 || config->nice > 19))
         goto invalid;
+
+    uint64_t dl_runtime = 0, dl_deadline = 0, dl_period = 0;
+    uint32_t dl_bw = 0;
+    if ((config->fields & PROC_SCHED_DL) && !dl_policy)
+        goto invalid;
+    if (dl_policy) {
+        if (config->fields & PROC_SCHED_DL) {
+            dl_runtime = sched_ns_to_ticks(config->dl_runtime_ns);
+            dl_deadline = sched_ns_to_ticks(config->dl_deadline_ns);
+            dl_period = config->dl_period_ns
+                            ? sched_ns_to_ticks(config->dl_period_ns)
+                            : dl_deadline;
+        } else if (sched_task_dl(t)) {
+            dl_runtime = t->dl_runtime;
+            dl_deadline = t->dl_deadline;
+            dl_period = t->dl_period;
+        } else {
+            goto invalid;
+        }
+        if (!dl_runtime || !dl_deadline || !dl_period ||
+            dl_runtime > dl_deadline || dl_deadline > dl_period)
+            goto invalid;
+        dl_bw = dl_bw_units(dl_runtime, dl_period);
+        if (!dl_bw || dl_bw > DL_BW_MAX)
+            goto invalid;
+    }
     if ((config->fields & PROC_SCHED_POLICY) && t->sched_reset_on_fork &&
         !config->reset_on_fork && !proc_has_cap(proc_current(), CAP_SYS_NICE)) {
         spin_unlock_irqrestore(&t->park_lock, lock_flags);
@@ -817,7 +1024,31 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         }
     }
 
+    int old_dl = sched_task_dl(t);
+    uint32_t old_bw = (old_dl && t->dl_admitted)
+                          ? dl_bw_units(t->dl_runtime, t->dl_period)
+                          : 0;
+    admit_cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
+    if (dl_policy) {
+        int need = (int)dl_bw - (int)old_bw;
+        if (need > 0) {
+            int ar = sched_dl_admit(admit_cpu, (uint32_t)need);
+            if (ar < 0) {
+                spin_unlock_irqrestore(&t->park_lock, lock_flags);
+                return ar;
+            }
+            dl_refund = 1;
+            dl_refund_bw = (uint32_t)need;
+        }
+    }
+
     int ready = sched_runq_detach_locked(t);
+    if (old_dl && t->dl_throttled && t->cpu_id < CONFIG_NR_CPUS) {
+        uint64_t tf = RUNQ_LOCK_IRQ(t->cpu_id);
+        dl_throttle_remove_locked(&sched_runq[t->cpu_id], t);
+        t->dl_throttled = 0;
+        RUNQ_UNLOCK_IRQ(t->cpu_id, tf);
+    }
     /* A picker may have won since the earlier affinity validation. Its
      * owner is stable while we hold park_lock; reject exclusion before
      * changing any attributes. */
@@ -849,14 +1080,41 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         }
         t->sched_policy = policy;
         t->sched_reset_on_fork = config->reset_on_fork;
-        if (sched_policy_rt_value(policy))
+        if (sched_policy_rt_value(policy)) {
             t->sched_level = 0;
-        else if (old_rt)
+        } else if (old_rt) {
             t->priority = old_nice;
+        }
         if (policy == SCHED_IDLE)
             t->cfs_weight = EEVDF_NICE0_LOAD / 4;
         else if (policy == SCHED_BATCH)
             t->cfs_weight = sched_weight_for_nice(t->priority + 5);
+    }
+    if (dl_policy) {
+        t->dl_runtime = dl_runtime;
+        t->dl_deadline = dl_deadline;
+        t->dl_period = dl_period;
+        t->dl_period_start = timer_get_ticks();
+        t->dl_remaining = dl_runtime;
+        t->dl_next_release = t->dl_period_start + dl_deadline;
+        t->dl_throttled = 0;
+        t->dl_admitted = 1;
+        t->dl_overrun = 0;
+        t->priority = 0;
+        t->sched_level = 0;
+        int need = (int)dl_bw - (int)old_bw;
+        if (need < 0)
+            sched_dl_uncharge(admit_cpu, (uint32_t)(-need));
+    } else if (old_dl) {
+        t->dl_admitted = 0;
+        t->dl_throttled = 0;
+        t->dl_runtime = 0;
+        t->dl_deadline = 0;
+        t->dl_period = 0;
+        t->dl_remaining = 0;
+        t->dl_period_start = 0;
+        t->dl_next_release = 0;
+        sched_dl_uncharge(admit_cpu, old_bw);
     }
     if (sched_policy_rt_value(policy))
         t->priority = priority;
@@ -883,6 +1141,26 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         if (target_cpu >= 32 || !(eligible & (1U << target_cpu)))
             target_cpu = proc_sched_select_cpu_locked(t);
     }
+    if (dl_policy) {
+        uint32_t eligible = sched_task_cpu_mask(t);
+        if (admit_cpu < 32 && (eligible & (1U << admit_cpu))) {
+            target_cpu = admit_cpu;
+        } else if (target_cpu != admit_cpu && !old_dl) {
+            /* Admission ran against the old CPU; admit the destination before
+             * releasing the source so a failed move cannot lose the budget. */
+            int ar = sched_dl_admit(target_cpu, dl_bw);
+            if (ar < 0) {
+                if (!old_dl) {
+                    dl_refund = 1;
+                    dl_refund_bw = dl_bw;
+                }
+                goto invalid;
+            }
+            sched_dl_uncharge(admit_cpu, dl_bw);
+            admit_cpu = target_cpu;
+            dl_refund = 0;
+        }
+    }
 
     if (ready) {
         t->cpu_id = target_cpu;
@@ -908,9 +1186,12 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
      * Linux callers return on a CPU allowed by the effective new mask. */
     if (migrate_self)
         proc_yield();
+    dl_refund = 0;
     return 0;
 
 invalid:
+    if (dl_refund)
+        sched_dl_uncharge(admit_cpu, dl_refund_bw);
     spin_unlock_irqrestore(&t->park_lock, lock_flags);
     return -EINVAL;
 }
@@ -1056,6 +1337,19 @@ int proc_sched_should_preempt_locked(task_t *t, unsigned cpu)
     proc_current_sched_snapshot_t current = {0};
     proc_current_sched_snapshot(cpu, t, &current);
 
+    int cand_dl = sched_task_dl(t);
+    int run_dl = current.valid && !current.idle &&
+                 current.policy == SCHED_DEADLINE;
+    if (cand_dl || run_dl) {
+        if (cand_dl != run_dl)
+            return cand_dl;
+        if (t->dl_throttled)
+            return 0;
+        if (current.dl_throttled)
+            return 1;
+        return t->dl_next_release < current.dl_deadline;
+    }
+
     a20_task_preemption_snapshot_t snapshot = {0};
     snapshot.candidate_policy = (uint32_t)t->sched_policy;
     snapshot.candidate_priority = t->priority;
@@ -1137,12 +1431,84 @@ void proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,
     *idle = __atomic_load_n(&g_cpu_ticks[cpu].idle, __ATOMIC_RELAXED);
 }
 
+/*
+ * Replenish SCHED_DEADLINE tasks whose next period has started.  The
+ * throttle list is sorted by dl_period_start, so an exhausted task is only
+ * looked at when its period boundary is due.  A task that is still current
+ * keeps the CPU with a fresh budget; a READY task is put back on the EDF
+ * ready list.  Called from the timer tick, before ordinary accounting.
+ */
+static void sched_dl_replenish(uint64_t now)
+{
+#ifdef CONFIG_MCU
+    (void)now;   /* deadline class is not built into the MCU profile */
+#else
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        int kick = 0;
+        uint64_t flags = RUNQ_LOCK_IRQ(cpu);
+        proc_runq_t *rq = &sched_runq[cpu];
+        while (rq->dl_throttled &&
+               rq->dl_throttled->dl_period_start <= now) {
+            task_t *t = rq->dl_throttled;
+            dl_throttle_remove_locked(rq, t);
+            do {
+                t->dl_period_start += t->dl_period;
+                t->dl_next_release += t->dl_period;
+            } while (t->dl_period_start <= now);
+            t->dl_remaining = t->dl_runtime;
+            t->dl_throttled = 0;
+            if (t->state == PROC_READY) {
+                dl_ready_insert_locked(rq, t);
+                t->on_rq = 1;
+                __atomic_fetch_add(&rq->nr_running, 1, __ATOMIC_RELAXED);
+                kick = 1;
+            }
+        }
+        uint64_t next = rq->dl_throttled
+                            ? rq->dl_throttled->dl_period_start
+                            : 0;
+        RUNQ_UNLOCK_IRQ(cpu, flags);
+        if (next)
+            sched_note_timer_deadline(next);
+        if (kick)
+            proc_sched_request_cpu(cpu, 1);
+    }
+#endif
+}
+
 void proc_sched_tick(int from_user)
 {
     task_t *cur = proc_current();
     if (!cur)
         return;
     uint64_t now = timer_get_ticks();
+    sched_dl_replenish(now);
+
+    if (sched_task_dl(cur) && cur->state == PROC_RUNNING) {
+        unsigned cpu = cpu_current_id();
+        int exhausted = 0;
+        uint64_t flags = spin_lock_irqsave(&cur->park_lock);
+        if (!cur->dl_throttled && cur->dl_remaining) {
+            if (now > cur->dl_next_release)
+                cur->dl_overrun = 1;
+            cur->dl_remaining--;
+            exhausted = cur->dl_remaining == 0;
+            if (exhausted) {
+                cur->dl_throttled = 1;
+                cur->dl_period_start += cur->dl_period;
+                cur->dl_next_release += cur->dl_period;
+            }
+        }
+        spin_unlock_irqrestore(&cur->park_lock, flags);
+        if (exhausted && cpu < CONFIG_NR_CPUS) {
+            uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+            dl_throttle_insert_locked(&sched_runq[cpu], cur);
+            uint64_t next = cur->dl_period_start;
+            RUNQ_UNLOCK_IRQ(cpu, rf);
+            sched_note_timer_deadline(next);
+            proc_sched_request_cpu(cpu, 1);
+        }
+    }
     proc_sched_expire_wait_timers(now);
     /* Load average must be sampled at the fixed tick rate: its EMAs decay
      * per window, so an opportunistic sample (as sched_scan_timers is)
@@ -1189,6 +1555,8 @@ void proc_sched_tick(int from_user)
             proc_sched_request_cpu(cpu_current_id(), 0);
         return;
     }
+    if (sched_task_dl(cur))
+        return;
 
     eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
 
@@ -1211,12 +1579,19 @@ uint64_t proc_runq_load_sum(void)
 int proc_sched_safe_point(void)
 {
     unsigned cpu = cpu_current_id();
-    if (cpu >= CONFIG_NR_CPUS ||
-        !__atomic_load_n(&sched_cpu[cpu].need_resched, __ATOMIC_ACQUIRE))
+    if (cpu >= CONFIG_NR_CPUS)
+        return 0;
+    task_t *cur = proc_current();
+    /* A cross-thread suspend is consumed even when no reschedule request is
+     * pending: osThreadSuspend() must not wait for the next unrelated IPI. */
+    if (cur && cur->suspend_pending && !cur->sched_lock_depth) {
+        sched_suspend_current();
+        return 1;
+    }
+    if (!__atomic_load_n(&sched_cpu[cpu].need_resched, __ATOMIC_ACQUIRE))
         return 0;
     /* osKernelLock(): a pending reschedule is deferred until the task drops
      * its last lock level.  The request survives in need_resched. */
-    task_t *cur = proc_current();
     if (cur && cur->sched_lock_depth)
         return 0;
     proc_yield();
@@ -1229,7 +1604,10 @@ int proc_sched_lock_set(int mode, int depth)
     if (!cur)
         return -EINVAL;
 
-    uint64_t flags = arch_irq_save();
+    /* park_lock serializes this field with the wake/preemption paths and is
+     * available on every architecture; the old arch_irq_save() pair only
+     * exists on some 32-bit ports. */
+    uint64_t flags = spin_lock_irqsave(&cur->park_lock);
     int previous = (int)cur->sched_lock_depth;
     int next;
     switch (mode) {
@@ -1243,11 +1621,11 @@ int proc_sched_lock_set(int mode, int depth)
         next = depth > 0 ? depth : 0;
         break;
     default:
-        arch_irq_restore(flags);
+        spin_unlock_irqrestore(&cur->park_lock, flags);
         return -EINVAL;
     }
     cur->sched_lock_depth = (uint32_t)next;
-    arch_irq_restore(flags);
+    spin_unlock_irqrestore(&cur->park_lock, flags);
 
     /* Dropping the last level is the release point: run the safe point here
      * so the deferred higher-priority task starts before the unlock syscall
@@ -1255,6 +1633,98 @@ int proc_sched_lock_set(int mode, int depth)
     if (previous != 0 && next == 0)
         (void)proc_sched_safe_point();
     return previous;
+}
+
+/* Stop the current task at a safe point.  Unlike job-control stop this must
+ * not produce SIGCHLD or a continued report; resume is solely the paired
+ * proc_sched_resume_task(). */
+static void sched_suspend_current(void)
+{
+    task_t *t = proc_current();
+    if (!t || t == proc_idle_task())
+        return;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    t->suspend_pending = 0;
+    t->cmsis_suspend = 1;
+    t->stop_report_pending = 0;
+    t->continue_report_pending = 0;
+    t->state = PROC_STOPPED;
+    proc_sched_assert_task_locked(t);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    sched();
+}
+
+int proc_sched_suspend_task(task_t *t)
+{
+    if (!t || t == proc_idle_task())
+        return -EINVAL;
+    if (t == proc_current()) {
+        uint64_t flags = spin_lock_irqsave(&t->park_lock);
+        t->suspend_pending = 1;
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        (void)proc_sched_safe_point();
+        return 0;
+    }
+
+    unsigned kick_cpu = CONFIG_NR_CPUS;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE) {
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        return -ESRCH;
+    }
+    if (t->cmsis_suspend || t->state == PROC_STOPPED) {
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        return 0;
+    }
+    if (t->state == PROC_RUNNING || t->on_cpu || t->dispatching) {
+        t->suspend_pending = 1;
+        kick_cpu = t->on_cpu || t->dispatching ? t->owner_cpu : t->cpu_id;
+    } else if (t->state == PROC_READY && t->on_rq) {
+        proc_runq_remove_locked(t);
+        t->suspend_pending = 0;
+        t->cmsis_suspend = 1;
+        t->stop_report_pending = 0;
+        t->continue_report_pending = 0;
+        t->state = PROC_STOPPED;
+    } else {
+        /* Blocked/preparing: it is already not running.  The pending flag
+         * makes the eventual wake publish STOPPED instead of READY. */
+        t->suspend_pending = 1;
+    }
+    proc_sched_assert_task_locked(t);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    if (kick_cpu < CONFIG_NR_CPUS)
+        proc_sched_request_cpu(kick_cpu, 0);
+    return 0;
+}
+
+int proc_sched_resume_task(task_t *t)
+{
+    if (!t || t == proc_idle_task())
+        return -EINVAL;
+    unsigned target_cpu = cpu_current_id();
+    int queued = 0, preempt = 0;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    t->suspend_pending = 0;
+    if (t->state == PROC_STOPPED && t->cmsis_suspend) {
+        t->cmsis_suspend = 0;
+        t->state = PROC_READY;
+        if (t->on_cpu) {
+            t->cpu_id = t->owner_cpu;
+        } else if (!t->dispatching && !t->on_rq) {
+            uint32_t eligible = sched_task_cpu_mask(t);
+            if (t->cpu_id >= 32 || !(eligible & (1U << t->cpu_id)))
+                t->cpu_id = proc_sched_select_cpu_locked(t);
+        }
+        target_cpu = t->cpu_id;
+        queued = proc_runq_enqueue_locked(t);
+        preempt = queued && proc_sched_should_preempt_locked(t, target_cpu);
+    }
+    proc_sched_assert_task_locked(t);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    if (queued && (target_cpu != cpu_current_id() || preempt))
+        proc_sched_request_cpu(target_cpu, preempt);
+    return 0;
 }
 
 /*
@@ -1309,6 +1779,11 @@ void kernel_preempt_at_irq_return(void)
      */
     if (cur->first_kernel_entry)
         return;
+    if (cur->suspend_pending) {
+        arch_local_irq_enable();
+        sched_suspend_current();
+        return;
+    }
     /*
      * Nothing else is runnable, so the yield can only keep `cur`.  Skipping
      * it keeps the IRQ handler shorter than the tick period on slow MCUs.
@@ -1403,6 +1878,12 @@ void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
  */
 static int sched_runq_contains_locked(proc_runq_t *rq, task_t *t)
 {
+    if (sched_task_dl(t)) {
+        for (task_t *it = rq->dl_ready; it; it = it->dl_ready_next)
+            if (it == t)
+                return 1;
+        return 0;
+    }
     if (sched_task_rt(t)) {
         for (proc_rt_node_t *it = rq->rt_q[rt_prio_slot(t->priority)].head;
              it; it = it->next) {
@@ -1610,6 +2091,13 @@ void proc_make_ready(task_t *t)
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
+    /* A runtime-exhausted deadline task is already on the throttle list; it
+     * becomes runnable again only when sched_dl_replenish() moves it back. */
+    if (sched_task_dl(t) && t->dl_throttled) {
+        proc_sched_assert_task_locked(t);
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        return;
+    }
     int queued = proc_runq_enqueue_locked(t);
     int priority_preempt =
         queued && proc_sched_should_preempt_locked(t, target_cpu);
@@ -1744,6 +2232,12 @@ int proc_sched_resume_stopped(task_t *t, int report_continued)
     task_t *notify_parent = NULL;
     task_t *wake_for = NULL;
     uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    /* SIGCONT must not override an explicit CMSIS suspend.  Fatal signals
+     * still pass report_continued == 0 and may remove the task normally. */
+    if (t->state == PROC_STOPPED && t->cmsis_suspend && report_continued) {
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        return 0;
+    }
     if (t->state == PROC_STOPPED) {
         t->state = PROC_READY;
         t->stop_report_pending = 0;
@@ -1812,6 +2306,8 @@ int proc_runq_enqueue_locked(task_t *t) {
         return 0;
     if (t == proc_idle_task() || t->state != PROC_READY)
         return __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
+    if (sched_task_dl(t) && t->dl_throttled)
+        return 0;
 
     unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
 
@@ -1829,7 +2325,7 @@ int proc_runq_enqueue_locked(task_t *t) {
               t->pid, t->owner_cpu);
 #endif
 
-    int q = sched_task_rt(t) ? 0 : EEVDF_LEVEL;
+    int q = sched_task_dl(t) ? 2 : (sched_task_rt(t) ? 0 : EEVDF_LEVEL);
     if (!proc_get(t)) {
         RUNQ_UNLOCK_IRQ(cpu, rf);
         return 0;
@@ -1837,7 +2333,9 @@ int proc_runq_enqueue_locked(task_t *t) {
     t->sched_level = q;
     t->cpu_id = cpu;
     t->ready_since = timer_get_ticks();
-    if (q == 0)
+    if (q == 2)
+        dl_ready_insert_locked(rq, t);
+    else if (q == 0)
         rt_enqueue_locked(rq, t);
     else
         eevdf_insert_locked(rq, t);
@@ -1850,6 +2348,26 @@ int proc_runq_enqueue_locked(task_t *t) {
 /* Remove a queued task.  Caller must hold the task's park_lock. */
 void proc_runq_remove_locked(task_t *t) {
     if (sched_runq_detach_locked(t)) proc_put(t);
+}
+
+/* Drop a deadline task's admission and throttle-list membership.  Called
+ * from task destruction while park_lock is held (park_lock -> runq_lock). */
+void proc_sched_dl_release(task_t *t)
+{
+    if (!t || !t->dl_admitted)
+        return;
+    unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
+    uint64_t flags = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+    if (t->dl_throttled)
+        dl_throttle_remove_locked(rq, t);
+    if (rq->dl_bw)
+        rq->dl_bw = rq->dl_bw > dl_bw_units(t->dl_runtime, t->dl_period)
+                        ? rq->dl_bw - dl_bw_units(t->dl_runtime, t->dl_period)
+                        : 0;
+    t->dl_throttled = 0;
+    t->dl_admitted = 0;
+    RUNQ_UNLOCK_IRQ(cpu, flags);
 }
 
 /*
@@ -1953,9 +2471,18 @@ static task_t *sched_runq_pick_local(int *rt_throttled_out)
         task_t *t = NULL;
         int q = -1;
 
-        task_t *rt = sched_rt_controller_pick_locked(rq, rt_now,
-                                                     &rt_throttled);
-        if (rt) {
+        task_t *dl = rq->dl_ready;
+        task_t *rt = NULL;
+        if (dl) {
+            t = dl;
+            q = 2;
+        } else {
+            rt = sched_rt_controller_pick_locked(rq, rt_now,
+                                                 &rt_throttled);
+        }
+        if (t) {
+            /* EDF head already selected. */
+        } else if (rt) {
             t = rt;
             q = 0;
         } else if (rq->eevdf_root) {
@@ -1987,7 +2514,9 @@ static task_t *sched_runq_pick_local(int *rt_throttled_out)
         if (!t)
             break;
 
-        if (q != 0) {
+        if (q == 2) {
+            dl_ready_remove_locked(rq, t);
+        } else if (q != 0) {
             eevdf_remove_locked(rq, t);
             sched_runq_eevdf_del_weight(rq, t);
         }
@@ -2048,7 +2577,9 @@ static void sched_runq_unpick_locked(task_t *t)
     unsigned cpu = t->owner_cpu;
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
-    int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
+    int q = sched_task_dl(t) ? 2
+                             : (sched_task_rt(t) ? 0
+                                                 : sched_level_clamp(t->sched_level));
     t->dispatching = 0;
     t->owner_cpu = PROC_CPU_NONE;
     if (t->state != PROC_READY || !t->kstack) {
@@ -2061,7 +2592,9 @@ static void sched_runq_unpick_locked(task_t *t)
     t->cpu_id = cpu;
     t->sched_level = q;
     t->ready_since = timer_get_ticks();
-    if (q == 0)
+    if (q == 2)
+        dl_ready_insert_locked(rq, t);
+    else if (q == 0)
         rt_enqueue_locked(rq, t);
     else
         eevdf_insert_locked(rq, t);
@@ -2451,13 +2984,16 @@ void sched(void) {
      * this decision run on one CPU with IRQs masked, so no intervening local
      * RT-accounting update can invalidate the snapshot. */
     int current_rt_throttled = rt_throttled && sched_task_rt(current);
+    int current_dl_throttled =
+        current && sched_task_dl(current) && current->dl_throttled;
+    int current_throttled = current_rt_throttled || current_dl_throttled;
     task_t *picked = next;
     uint64_t nf = 0, cf = 0;
     /* The pair helper treats a NULL first task as an empty lock set.  Keep
      * current first so an empty pick still acquires its park_lock; the helper
      * itself orders two non-NULL tasks by address. */
     proc_lock_two_tasks(current, picked, &cf, &nf);
-    if (current_rt_throttled && current && current->state == PROC_RUNNING)
+    if (current_throttled && current && current->state == PROC_RUNNING)
         current->state = PROC_READY;
     if (next) {
         /* The picked task must still be publishable: a wake, exit or stop
@@ -2471,7 +3007,7 @@ void sched(void) {
         }
     }
     if (next && current && current != proc_idle_task() &&
-        !current_rt_throttled &&
+        !current_throttled &&
         current->state == PROC_READY && current->on_cpu &&
         !current->affinity_migrate_pending &&
         __atomic_load_n(&current->owner_cpu, __ATOMIC_RELAXED) ==
@@ -2498,7 +3034,7 @@ void sched(void) {
     /* The empty-pick keep decision can reuse current's park_lock from the
      * two-task critical section.  The W1/W2 checks below remain necessary
      * when this locked check declines to keep and a wake races after unlock. */
-    if (sched_try_keep_current_locked(current, current_rt_throttled)) {
+    if (sched_try_keep_current_locked(current, current_throttled)) {
         proc_unlock_two_tasks(current, picked, cf, nf);
         goto out;
     }
@@ -2517,7 +3053,7 @@ void sched(void) {
      * cur->park_lock and re-checks before committing to the idle switch.
      */
     task_t *cur = proc_current();
-    if (sched_try_keep_current(cur, current_rt_throttled))
+    if (sched_try_keep_current(cur, current_throttled))
         goto out;
 
     task_t *idle = proc_idle_task();
@@ -2525,7 +3061,7 @@ void sched(void) {
         /* W2: re-close the window opened by the release above.  A wake that
          * landed between the two critical sections re-published READY +
          * on_rq; consume it and keep this task instead of idling. */
-        if (sched_try_keep_current(cur, current_rt_throttled))
+        if (sched_try_keep_current(cur, current_throttled))
             goto out;
         if (cur && cur->pid >= 4)
             ktrace_sched("[SCHED] fall-to-idle: cur=%d state=%d\n", cur->pid, cur->state);

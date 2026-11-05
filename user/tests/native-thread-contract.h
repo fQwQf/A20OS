@@ -139,10 +139,13 @@ static __attribute__((noreturn)) void native_thread_worker(uintptr_t arg) {
     uint64_t stack;
     if (a20_vm_alloc_pages(4, 3, &stack))
         a20_thread_exit(96);
-    a20_thread_create_args_t args = {.entry = (uintptr_t)native_thread_nested,
-                                     .arg = 0xa20,
-                                     .stack_base = stack + 16384,
-                                     .stack_size = 16384};
+    a20_thread_create_args_t args = {
+        .entry = (uintptr_t)native_thread_nested,
+        .arg = 0xa20,
+        .stack_base = stack + 16384,
+        .stack_size = 16384,
+        .flags = A20_THREAD_CREATE_JOINABLE,
+    };
     a20_status_t handle = a20_thread_create(&args);
     if (handle < 0 || (uint32_t)handle != args.out_thread)
         a20_thread_exit(97);
@@ -175,12 +178,16 @@ static int native_thread_contract(void) {
             1);
     uint64_t stack = 0;
     T_CHECK(a20_vm_alloc_pages(4, 3, &stack) == A20_OK, 2);
-    a20_thread_create_args_t args = {.entry = (uintptr_t)native_thread_worker,
-                                     .arg = 0xc0ffee,
-                                     .stack_base = stack + 16384,
-                                     .stack_size = 16384};
+    a20_thread_create_args_t args = {
+        .entry = (uintptr_t)native_thread_worker,
+        .arg = 0xc0ffee,
+        .stack_base = stack + 16384,
+        .stack_size = 16384,
+        .flags = A20_THREAD_CREATE_JOINABLE,
+    };
     a20_thread_create_args_t bad = args;
-    bad.flags = 1;
+    /* JOINABLE is supported; an unknown flag bit must still be rejected. */
+    bad.flags = 0x80000000u;
     T_CHECK(a20_thread_create(&bad) == -A20_ERR_INVALID_ARGUMENT, 3);
     bad = args;
     bad.entry = 0;

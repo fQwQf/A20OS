@@ -70,7 +70,7 @@ A20OS 内核机制（调度、futex、VM、定时器）
 
 `osThreadSuspend/Resume` 在 Native/MCU 后端是内核级跨线程操作：目标在下一次 syscall/IRQ 返回安全点停止，阻塞中的目标由唤醒路径直接发布 STOPPED；不是用户态 futex gate。`osKernelSuspend` 在单核 MCU 上通过调度器锁 + one-shot 定时器 + WFI 进入低功耗，返回实际睡眠 tick；SMP 和 hosted 后端返回 0，不进入低功耗。
 
-控制块支持 `cb_mem`/`cb_size` 静态放置；线程支持 `stack_mem`/`stack_size`。
+控制块支持 `cb_mem`/`cb_size` 静态放置；线程支持 `stack_mem`/`stack_size`。库自有的小栈（<32 KiB）来自共享 `a20_malloc` 池，大栈使用独立页对齐区域并在 join/detach 时通过 `vm_unmap` 归还，避免把 MCU 的小堆切碎。
 
 执行、抢占、tick、PI、`osKernelLock` 的完整语义在独立页面：
 
@@ -116,7 +116,7 @@ python3 tools/cmsis_trim.py list --profile mcu
 | Profile | 对象族 | syscall 数 |
 |---|---|---|
 | `full` | 全部 | 主表全部 |
-| `mcu` | thread、mutex、semaphore、timer、event flags、message queue、suspend/resume、idle | 18 |
+| `mcu` | thread、mutex、semaphore、timer、event flags、message queue、suspend/resume、idle、vm_unmap | 19 |
 | `mcu-min` | thread、semaphore、timer（不含 join/terminate/priority 的最小集合） | 9 |
 
 被裁掉的对象族仍保留入口（返回 `osErrorResource`），因此"链接兼容、镜像裁剪"：
@@ -158,7 +158,7 @@ QEMU 板 `qemu-virt-riscv32-mcu` 与 Hi3861 使用同一条路径：
 4. 每个线程首次运行 `arch_flat_program_enter()`，把自己的内核栈顶写入`mscratch`，从 U 态陷入时硬件栈切换回该内核栈；
 5. 实验输出写入栈上的 run record，由内核 launcher 排空并打印，用户程序不需要非 CMSIS 的控制台 API。
 
-实验镜像、4.1–4.8 的预期输出、Hi3861 烧录和负向对照见 [实验 4.1–4.8](experiments.md)。4.4 的厂商 dispatcher 模型见 [中断与 ISR 模型](interrupts.md)；厂商接口位于独立目录，不进入标准 CMSIS 库：
+实验镜像、4.1–4.9 的预期输出、Hi3861 烧录和负向对照见 [实验 4.1–4.9](experiments.md)。4.4 的厂商 dispatcher 模型见 [中断与 ISR 模型](interrupts.md)；厂商接口位于独立目录，不进入标准 CMSIS 库：
 
 ```text
 user/cmsis_rtos2/          标准 CMSIS-RTOS2（不出现 hi_*/IoT*）
@@ -173,13 +173,13 @@ kernel/arch/riscv32/mcu/vendor_hi.c
 # 宿主对象语义（POSIX + Native 后端）
 make -C user/cmsis_rtos2 test
 
-# RV32 M 态 4.1–4.8
+# RV32 M 态 4.1–4.9
 tools/a20 test qemu-riscv32-mcu
 
 # 裁剪闭环
 python3 tools/cmsis_trim.py check --profile mcu --elf <kernel.elf>
 ```
 
-调度语义的预期输出与失败语义见 [实验 4.1–4.8](experiments.md)。
+调度语义的预期输出与失败语义见 [实验 4.1–4.9](experiments.md)。
 
 Hi3861 构建已编入同一套 flat-program 基础设施与 syscall 子集；实验镜像默认不在实板启动，确认 U-mode 后用`tools/a20 package hi3861 -- HI3861_LITEOS_DEMO=1` 构建、用同样的 make 参数烧录即可。烧录只写 kernel A，不带参数重新构建会回到纯 shell 镜像。

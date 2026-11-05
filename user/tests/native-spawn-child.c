@@ -6,7 +6,8 @@
 #include "native-thread-contract.h"
 int main(int argc, char **argv, char **envp) {
     a20_start_info_t *info = a20_get_start_info();
-    if (!info || info->size != sizeof(*info) || info->version != 1 ||
+    if (!info || info->size != sizeof(*info) ||
+        info->version != A20_START_INFO_VERSION ||
         info->argc != 4 || info->envc != 2 || info->page_size != 4096 ||
         info->self_task == A20_HANDLE_NULL || argc != 4 || !argv || !envp ||
         !argv[0] || !argv[1] || !argv[2] || !argv[3] || argv[4] || !envp[0] ||

@@ -273,6 +273,12 @@ int proc_current_sched_snapshot(unsigned cpu, const task_t *candidate,
         out->policy = (uint32_t)current->sched_policy;
         out->priority = current->priority;
         out->eevdf_deadline = proc_sched_deadline_snapshot(current);
+        out->dl_deadline = current->sched_policy == SCHED_DEADLINE
+                               ? current->dl_next_release
+                               : 0;
+        out->dl_throttled = current->sched_policy == SCHED_DEADLINE
+                                ? current->dl_throttled
+                                : 0;
     }
     spin_unlock_irqrestore(&g_cpu_current_lock[cpu], flags);
     return 1;

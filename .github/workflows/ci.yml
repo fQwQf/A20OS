@@ -53,6 +53,12 @@ jobs:
       - name: Host-side unit tests for kernel format/helper logic
         run: make host-tests
 
+      - name: CMSIS-RTOS2 personality and trim checks
+        run: |
+          make -C user/cmsis_rtos2 test
+          make -C user/cmsis_rtos2 trim PROFILE=mcu
+          python3 -m unittest tools.tests.test_cmsis_trim
+
       - name: Shared cluster protocol, MCU runtime and bounded job tests
         run: make check-cluster-unit
 
