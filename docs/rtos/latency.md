@@ -1,6 +1,11 @@
 # 实时时延分析与基准测量体系
 
-本文档定义 A20OS 在 Native/MCU 环境下的实时时延评估指标、调度时延的理论边界，以及实验 4.8 已落地的自由运行计数器测量方法。实验 4.8（`user/tests/liteos-demos/latency.c`）通过 `clock_get` 的 raw clock id 7/8 读取 `rdcycle` 与频率，输出 tick jitter 和 syscall latency 的 min/avg/max；它只提供测量基线，不构成 WCET 形式化证明，也不覆盖 preempt/IRQ-to-handler 的完整端到端测量。
+本文档定义 A20OS 在 Native/MCU 环境下的实时时延评估指标、调度时延的理论边界，以及已经落地的两类测量方法：
+
+- **实验 4.8**（`user/tests/liteos-demos/latency.c`）在 MCU demo 镜像内通过 `clock_get` 的 raw clock id 7/8 读取 `rdcycle` 与频率，输出 tick jitter 和 syscall latency 的 min/avg/max。
+- **独立时延探针**（`user/tests/test_native_latency.c` → `/bin/native-latency`）在 AArch64 上单独测量 RT `wake-to-run`，并读取内核累计的 timer IRQ 入口时延。它与 4.8 分开，避免额外线程/代码越过 MCU 共享堆的区域边界。
+
+两类数据都只是运行机器上的观测分布，不构成 WCET 形式化证明；`irq_to_handler` 中“内核 timer handler 入口”与“U 态 Dispatcher 首行”仍是两个不同的端点。
 
 ## 1. 核心实时评估指标
 
@@ -9,6 +14,8 @@
 | `tick_jitter` | 周期任务由 `osDelay(N)` 唤醒的实际物理时刻与期望时钟时刻的差值 | 定时器中断偏差与唤醒调度时延 |
 | `wake_latency` | 释放互斥量/信号量发起 `osb_bq_wake_all()` 到最高优先级等待者首条指令执行的间隔 | 广播唤醒分发与 RT 分桶选择开销 |
 | `preempt_latency` | 异步事件将更高优先级任务置为就绪到当前低优先级任务被切出的间隔 | 系统调用返回安全点与中断返回安全点的抢占时延 |
+| `wake_to_run` | 协调者调用 `futex_wake` 到同 CPU 更高优先级 RT 线程执行第一条用户指令的周期数 | 内核唤醒、IPI/抢占请求、上下文切换与返回 U 态的综合耗时 |
+| `timer_irq_entry` | 定时器 compare 到期值到内核 timer handler 第一条指令的周期数 | 硬件中断响应与 trap 入口；不含设备 IRQ，也不含 U 态分发 |
 | `irq_to_handler` | 外部物理中断触发到用户态 Dispatcher 线程进入处理函数第一行的时间 | 硬件 trap 入口、内核边沿记录、futex wake 与用户态线程调度综合耗时 |
 | `syscall_latency` | 用户态发起 `ecall` 到系统调用完成返回 U 态的执行耗时 | M 态上下文切换与内核系统调用分发表分发开销 |
 
@@ -34,8 +41,8 @@ MCU 构建的内核时钟仅由系统时钟中断步进，`a20_clock_get` 系统
 
 ### 已落地：用户态自由运行硬件计数器（软件测量路径）
 
-1. **CSR 直接读取**：在 RISC-V 架构下，配置硬件使 U 态可直接通过 `csrr a0, cycle` 或 `rdtime` 读取 64 位机器周期计数器。
-2. **轻量内核原语**：若芯片限制 U 态直接访问 CSR，则通过只读共享页（vDSO）或专有快速系统调用 `a20_clock_get_raw()` 暴露 24 MHz 硬件 Timer2 自由计数寄存器的当前原始数值。
+1. **内核只读计数器原语**：U 态不直接执行 `csrr cycle`；现有 `clock_get` 扩展 clock id 7/8，由内核在 M-mode 读取 `rdcycle` 与频率后返回。这样不新增 syscall，也不依赖 U 态 CSR 权限。
+2. **测量时钟**：QEMU MCU 的 `rdcycle` 按 1 GHz 标注；Hi3861 为 160 MHz。两者都远高于 tick 频率，足以观察 tick 对齐误差。
 3. **实验 4.8 已实现的两项测量**：
 
    ```text
@@ -47,7 +54,36 @@ MCU 构建的内核时钟仅由系统时钟中断步进，`a20_clock_get` 系统
      latency = t1 - t0
    ```
 
-   当前 demo 采样 32 次以适配 352 KiB SRAM；正式基线应扩展到 10,000 次并记录空载/忙等/IPC 三种背景。preempt 与 IRQ-to-handler 仍待补上独立的高优先级线程/GPIO 测量。
+   当前 demo 默认采样 32 次以适配 MCU 共享堆；正式基线可用 `-DLAT_SAMPLES=10000` 扩大样本，并记录空载/忙等/IPC 三种背景。把 `preempt_latency` 塞进同一镜像会越过 MCU 堆的区域边界，导致 4.6/4.9 失败，因此该测量保留在独立镜像。
+
+### 已落地：AArch64 独立时延探针
+
+`/bin/native-latency`（源码 `user/tests/test_native_latency.c`，随 `RAMFS_NATIVE_TESTS=1` 构建）使用同一组 `clock_get` 扩展：
+
+```text
+wake-to-run:
+  coordinator: before = raw_cycle(); futex_wake(go)
+  RT thread:   after = raw_cycle()   /* 第一条用户指令处 */
+  latency = after - before
+timer IRQ entry:
+  kernel: deadline = CNTP_CVAL; now = CNTPCT; delay = now - deadline
+          （在 timer_set_interval() 改写 compare 之前采样）
+```
+
+```sh
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 RAMFS_USER=1 \
+     RAMFS_NATIVE_TESTS=1 NR_CPUS=2 kernel-only -j4
+# guest: /bin/native-latency
+# NATIVE_LATENCY: wake min=... avg=... max=... count=200 cycles
+# NATIVE_LATENCY: timer_irq min=... avg=... max=... count=... cycles
+# NATIVE_LATENCY: PASS hz=62500000 wake_avg_ns=... timer_irq_samples=...
+```
+
+说明与边界：
+
+- `wake-to-run` 的协调者与探测线程固定在同一 CPU，探测线程优先级更高，因此区间包含真实的优先级抢占，而不只是 FIFO 队尾轮转。
+- `timer_irq_entry` 在 AArch64 的 `handle_timer_irq()` 最前端采样，比较的是触发本次中断的 `CNTP_CVAL_EL0` 与 `CNTPCT_EL0`；统计是自启动以来的累计值，且只覆盖 timer IRQ。
+- QEMU 上读到的是模拟 CPU 的计数，不代表任何具体硅片的缓存/总线行为；Hi3861 的 timer IRQ 入口与 U 态 Dispatcher 端到端仍需实板 GPIO/示波器路径。
 
 ### 路径 B：GPIO 物理引脚翻转（硬件示波器测量路径）
 

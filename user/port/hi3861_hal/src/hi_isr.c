@@ -38,7 +38,7 @@ static void irq_dispatcher(void *arg)
                 g_handler(HI_IRQ_GPIO, g_handler_arg);
         }
         /* The kernel increments and wakes this word on an edge. */
-        (void)a20_futex_wait((hi_u32 *)&g_irq_word, now, ~0ULL);
+        (void)a20_futex_wait((uint32_t *)(uintptr_t)&g_irq_word, now, ~0ULL);
     }
 }
 

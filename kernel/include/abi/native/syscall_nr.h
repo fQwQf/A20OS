@@ -43,6 +43,9 @@
 #define A20_SYS_task_get_sched 0x020A
 #define A20_SYS_sched_lock 0x0219
 #define A20_SYS_task_self 0x021A
+#define A20_SYS_task_suspend 0x021B
+#define A20_SYS_task_resume 0x021C
+#define A20_SYS_kernel_idle 0x0706
 #define A20_SYS_task_get_limits 0x020B
 #define A20_SYS_task_set_limits 0x020C
 #define A20_SYS_task_get_usage 0x020D

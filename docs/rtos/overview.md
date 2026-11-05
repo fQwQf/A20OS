@@ -14,15 +14,17 @@ A20OS 在 Native ABI 的 NOMMU / MCU 配置下支持以微内核原语承载实�
 4. **任务级调度器锁**：`osKernelLock` 映射为内核每任务独立的 `sched_lock_depth` 计数，锁定期间保留硬件中断响应并推迟抢占，锁释放归零时立即执行安全点切换。
 5. **跨线程挂起/恢复**：`osThreadSuspend/Resume` 通过 `suspend_pending` 和 syscall/IRQ 返回安全点把目标发布为 `PROC_STOPPED`；阻塞中的目标在唤醒路径直接发布 STOPPED，恢复后再入 RT 队列。
 6. **单核 tickless 低功耗**：`osKernelSuspend` 在 MCU 单核上以调度器锁 + one-shot 定时器 + `WFI` 实现，返回实际睡眠 tick；SMP 和 hosted 后端返回 0，不假装暂停其他 CPU/宿主。
-7. **PMP 栈保护**：当前 flat task 的栈底安装 8 字节无权限 PMP 区域，U-mode 越界访问转为 SIGSEGV 任务退出；这不是完整任务隔离，代码/全局仍共享。
+7. **PMP allow-list 隔离**：当前 flat program 的镜像、程序栈和每个 `vm_alloc` 动态区各占一个 PMP TOR 允许项，区间空隙显式拒绝。U-mode 访问未注册地址触发 fault 并按 SIGSEGV 结束当前线程；M-mode 内核不受影响。**同一 program 的线程仍共享镜像与堆**，这是线程语义而非进程隔离。
 
 系统的工程边界如下：
 
 - **时间分辨率受内核 tick 约束**：时间基准由架构定时器中断驱动（Hi3861 默认为 100 Hz / 10 ms，QEMU MCU 目标为 1 kHz / 1 ms）。`osDelay`、超时判定与软件定时器均按 tick 粒度对齐，不提供 sub-tick 硬截止期。
-- **无形式化 WCET 上界证明**：系统通过机制消除死锁和无界阻塞，但不提供芯片级指令最坏执行时间（WCET）的形式化证明。
-- **单核验证基准**：优先级继承、依赖链遍历、调度器锁与 tickless 的运行证据建立在单核 MCU（Hi3861）与单核 QEMU 模拟器之上；AArch64 SMP2 已跑通 RT runqueue 迁移、IPI 和 `SCHED_DEADLINE` 的 `sched_stress`，但跨核 RT PI 与 CMSIS `osKernelLock` 的全局语义仍未验证。
-- **PMP 保护范围有限**：8 字节栈 guard 只捕获第一次越界写入，不提供 MPU 多区域隔离；堆、代码和全局仍共享。
-- **无 WCET 证明**：4.8 只提供 tick jitter/syscall latency 实测，不提供芯片级最坏执行时间证明。
+- **无形式化 WCET 上界证明**：系统通过机制消除死锁和无界阻塞，但不提供芯片级指令最坏执行时间（WCET）的形式化证明；4.8 只提供 tick jitter/syscall latency 的回归基线。
+- **SMP 语义边界**：优先级继承、依赖链遍历、tickless 的运行证据主要来自单核 MCU 与单核 QEMU。AArch64 SMP2 已跑通 RT runqueue 迁移、IPI、`SCHED_DEADLINE`，以及加强后的 `NATIVE_SMP_PI`：多捐赠者并发合并、链式传播、boosted owner 跨核迁移、提升后真实抢占，以及 per-task `sched_lock` 不阻塞其他 CPU；`/bin/native-futex` 的 compute-cancel、task-control、spawn、allocator 与 futex 全套在 SMP2 和单核上都通过。CMSIS `osKernelLock` 明确是 **per-task** 抢占延迟点，不是全局 RTOS 锁，测试只验证它不会阻塞其他 CPU。
+- **PMP 保护边界**：允许列表按 flat program 建立，同一 program 的线程共享镜像、栈区和动态堆；它隔离的是不同 program 与内核内存，不是同一程序内的线程。
+- **PMP 项数上限**：每个区间占 1 个 TOR 项，不连续区间还需要 1 个拒绝项；最多 8 个区间，超出后退化为一个包围整段的粗粒度允许项。
+- **SCHED_DEADLINE 边界**：支持 runtime/deadline/period、95% 准入、tick 级 EDF/throttle 和 `SCHED_FLAG_DL_OVERRUN` 回报；不支持 reclaim、util-clamp、cgroup 带宽和 sub-tick deadline。
+- **ISR-safe API 边界**：硬件 IRQ 仍走「M-mode trap → futex 唤醒 → U-mode dispatcher 线程」模型；CMSIS 对象 API 不能直接在裸 ISR 上下文调用。真正的 ISR-safe 需要用户 ISR 入口或内核态回调执行模型，本阶段未实现。
 - **POSIX 宿主后端不具备实时保证**：`user/cmsis_rtos2/` 在 hosted 环境下提供的 POSIX 后端将线程映射为宿主 pthread，调度策略完全取决于宿主操作系统。
 
 ## 2. 机制在内核，语义在人格层
@@ -90,7 +92,7 @@ CMSIS-RTOS2 属于独立的第三方 source-level ABI，不构成 Native ABI 的
 1. **静态内存供给**：CMSIS 控制块（`cb_mem`/`cb_size`）与线程栈（`stack_mem`/`stack_size`）均支持调用方静态分配，避免动态堆（`a20_malloc`）碎片化导致内存耗尽。
 2. **栈尺寸精简**：默认 16 KiB 栈在 MCU 上会迅速耗尽内存，移植应用需按任务类型显式分配（典型传感器与采样任务建议 1–2 KiB）。
 3. **基于 Manifest 的静态裁剪**：以 `user/cmsis_rtos2/cmsis_rtos2.toml` 为唯一事实源，`tools/cmsis_trim.py` 为不同场景生成精简定义：
-   - `mcu` profile：保留线程、互斥量、信号量、定时器、事件标志、消息队列、suspend/resume 与低功耗 idle，仅包含 18 个 Native syscall；
+   - `mcu` profile：保留线程、互斥量、信号量、定时器、事件标志、消息队列、suspend/resume 与低功耗 idle，仅包含 19 个 Native syscall；
    - `mcu-min` profile：仅保留线程、信号量与定时器，压缩至 9 个 Native syscall。未启用的对象族在人格层保留符号并返回 `osErrorResource`，确保链接兼容；内核构建时通过 `-DA20_NATIVE_SYSCALL_TABLE` 覆盖分发表，未声明的系统调用直接被分发器拒绝，不把死代码编入内核 ELF。
 
 ## 5. 验证体系与模块导航
@@ -98,8 +100,9 @@ CMSIS-RTOS2 属于独立的第三方 source-level ABI，不构成 Native ABI 的
 实时子系统的正确性由两层互补的验证套件保证：
 
 - **对象语义验证（宿主回归）**：`make -C user/cmsis_rtos2 test` 在 POSIX 与 Native 宿主模拟平台上验证所有 CMSIS 对象的创建、销毁、递归、队列吞吐与内存池双重释放防护；同时覆盖 `msg_prio` 排序、`osThreadGetAffinity` 和栈高水位查询。
-- **调度语义验证（QEMU 与硬件靶板）**：RV32 M 态镜像运行 4.1–4.8。4.5 对创建优先级、`SetPriority`、`osKernelLock`、单级 PI、链式 PI 与主线程 handle 捐赠做断言和负向对照；4.6 验证跨线程挂起/恢复；4.7 验证 tickless WFI；4.8 用周期计数器记录 tick jitter 与 syscall 时延。
-- **SMP 验证**：AArch64 SMP2 的 `sched_stress` 覆盖 RT runqueue 迁移、跨核 IPI、RT 带宽与 `SCHED_DEADLINE` 的 API/准入。
+- **调度语义验证（QEMU 与硬件靶板）**：RV32 M 态镜像运行 4.1–4.9。4.5 对创建优先级、`SetPriority`、`osKernelLock`、单级 PI、链式 PI 与主线程 handle 捐赠做断言和负向对照；4.6 验证跨线程挂起/恢复；4.7 验证 tickless WFI；4.8 用周期计数器记录 tick jitter 与 syscall 时延。
+- **时延探针（AArch64 独立镜像）**：`/bin/native-latency` 测量同 CPU 高优先级 RT 线程的 `futex_wake → 首条用户指令` 周期数，并读取内核累计的 timer IRQ 入口时延（`CNTP_CVAL` 到期值到 `handle_timer_irq()` 首条指令）。它不进入 MCU demo 镜像，也不构成 WCET 证明；timer IRQ 之外的设备中断与 U 态 Dispatcher 端到端仍未覆盖。
+- **SMP 验证**：AArch64 SMP2 的 `sched_stress` 覆盖 RT runqueue 迁移、跨核 IPI、RT 带宽与 `SCHED_DEADLINE` 的 API/准入；`/bin/native-futex` 的 `NATIVE_SMP_PI` 现在覆盖多捐赠者并发合并到最大优先级、链式 `priority=0` 传播、boosted owner 跨核迁移、提升后真实抢占饿死它的 spinner，以及 per-task `sched_lock` 不阻塞其他 CPU。
 
 各领域详细设计请参阅对应专题：
 
@@ -108,5 +111,5 @@ CMSIS-RTOS2 属于独立的第三方 source-level ABI，不构成 Native ABI 的
 - **[中断与 ISR 模型](interrupts.md)**：NOMMU 硬件特权级限制、厂商 futex 分发器与延迟投递。
 - **[CMSIS-RTOS2 人格层与裁剪](cmsis-rtos2.md)**：完整 API 支持矩阵、TOML 规范与静态链接校验。
 - **[移植与配置指南](porting-guide.md)**：构建接入步骤、tick 同步原则、栈内存量化与 LiteOS API 对照表。
-- **[实验 4.1–4.8](experiments.md)**：实验矩阵、QEMU/Hi3861 运行命令、时延基线与负向对照分析。
+- **[实验 4.1–4.9](experiments.md)**：实验矩阵、QEMU/Hi3861 运行命令、时延基线与负向对照分析。
 - **[时延测量体系](latency.md)**：时延理论上界、自由运行计数器 4.8 基线与 WCET 边界。

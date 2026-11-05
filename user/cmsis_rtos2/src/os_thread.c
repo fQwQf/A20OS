@@ -19,7 +19,7 @@ void os_thread_release(osThreadId_t t)
         return;
     os_thread_registry_remove(t);
     if (t->owned_stack) {
-        osb_free(t->owned_stack);
+        osb_free_stack(t->owned_stack, t->stack_size);
         t->owned_stack = NULL;
     }
     if (t->obj.q) {
@@ -29,6 +29,33 @@ void os_thread_release(osThreadId_t t)
     t->obj.magic = 0;
     if (!t->obj.static_cb)
         osb_free(t);
+}
+
+/*
+ * Stack high-water.  The thread's stack is filled before the backend starts
+ * it, so the lowest byte that no longer holds the pattern is the deepest
+ * point the thread has reached.  The query is diagnostic; a concurrent
+ * thread may still be writing its stack, which is why CMSIS reports this as
+ * "space" rather than a precise live SP.
+ */
+void os_stack_fill(osThreadId_t t)
+{
+    if (!t || !t->stack_mem || !t->stack_size)
+        return;
+    os_memset(t->stack_mem, OS_STACK_PATTERN, t->stack_size);
+    t->stack_filled = 1;
+}
+
+uint32_t os_stack_space(osThreadId_t t)
+{
+    if (!t || !t->stack_mem || !t->stack_size || !t->stack_filled)
+        return 0;
+    const unsigned char *p = (const unsigned char *)t->stack_mem;
+    size_t untouched = 0;
+    while (untouched < t->stack_size && p[untouched] == OS_STACK_PATTERN)
+        untouched++;
+    /* The stack grows down, so the pattern prefix is the remaining space. */
+    return (uint32_t)untouched;
 }
 
 osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
@@ -238,7 +265,7 @@ uint32_t osThreadGetStackSpace(osThreadId_t thread_id)
 {
     if (!thread_valid(thread_id))
         return 0;
-    return osb_thread_stack_space(thread_id);
+    return os_stack_space(thread_id);
 }
 
 uint32_t osThreadGetCount(void)

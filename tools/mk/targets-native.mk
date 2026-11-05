@@ -170,6 +170,31 @@ include tools/mk/cluster-memory.mk
 
 native-programs: $(NATIVE_OUTPUTS)
 
+define NATIVE_LATENCY_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_latency.c \
+    $(NATIVE_LIBS) \
+    -o $(4)
+endef
+
+$(NATIVE_LATENCY_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+		user/tests/test_native_latency.c user/liba20rt/a20-generic.ld \
+		user/liba20rt/crt0_a20.h $(NATIVE_SDK_HDRS)
+	$(call NATIVE_LATENCY_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-latency-arch: $(NATIVE_LATENCY_BIN)
+
+native-latency-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-latency-arch
+
 define NATIVE_FUTEX_RECIPE
 @mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \

@@ -28,5 +28,6 @@
  * shell/sleep workload this port supports.
  */
 #define ARCH_TIMER_FREQ 100UL
+#define A20_CPU_HZ      160000000UL
 
 #endif

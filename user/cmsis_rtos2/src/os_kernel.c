@@ -200,7 +200,10 @@ uint32_t osKernelSuspend(void)
     if (g_state != osKernelRunning)
         return 0;
     g_state = osKernelSuspended;
-    return 0;   /* no tickless support: the timer service keeps running */
+    /* Native/MCU: scheduler-locked WFI until the next kernel deadline.
+     * POSIX and other hosted backends return 0 instead of pretending to
+     * implement an RTOS tickless state. */
+    return osb_kernel_suspend();
 }
 
 void osKernelResume(uint32_t sleep_ticks)

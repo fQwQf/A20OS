@@ -59,7 +59,7 @@ int app_main(void)
 
 | Profile | 保留对象族 | Native 系统调用数 |
 |---|---|---|
-| `mcu` | `thread`, `mutex`, `semaphore`, `timer`, `event_flags`, `message_queue`, suspend/resume, idle | 18 |
+| `mcu` | `thread`, `mutex`, `semaphore`, `timer`, `event_flags`, `message_queue`, suspend/resume, idle, vm_unmap | 19 |
 | `mcu-min` | `thread`, `semaphore`, `timer` | 9 |
 | `full` | 全量对象族（包含 `memory_pool`、线程挂起等） | 主表全量 |
 
@@ -152,7 +152,7 @@ CFLAGS += -I$(CMSIS_TRIM_DIR) \
 3. **调度锁内阻塞**：`osKernelLock` 只在调度安全点推迟抢占，并不禁止任务主动挂起。在锁内调用 `osDelay` 或阻塞等待信号量仍会导致 CPU 让出，属于逻辑错误。
 4. **捐赠期间修改基准优先级**：当任务正持有互斥量且已被其他等待者提升优先级时，调用 `osThreadSetPriority` 将返回 `osError`，以防止破坏内核保存的基准调度快照。
 5. **硬件中断上下文调用**：不要在任何底层硬件中断回调中直接调用 CMSIS API。应使用内核边沿记录与 U 态分发器线程模型。
-6. **tickless 与栈 guard**：`osKernelSuspend()` 在单核 MCU 上进入调度器锁 + WFI；flat task 栈底有 8 字节 PMP guard，越界会以 SIGSEGV 退出任务。MCU 内核栈预算当前为 3 KiB，flat program 主栈 8 KiB。
+6. **tickless 与 PMP allow-list**：`osKernelSuspend()` 在单核 MCU 上进入调度器锁 + WFI；flat program 的镜像、栈与动态区构成 PMP 允许列表，访问区间外的地址会以 SIGSEGV 结束当前线程。MCU 内核栈预算当前为 3 KiB，flat program 主栈 8 KiB。
 
 ## 8. 验证门禁与验收流水线
 
@@ -162,7 +162,7 @@ CFLAGS += -I$(CMSIS_TRIM_DIR) \
 # 1. 宿主对象语义单测
 make -C user/cmsis_rtos2 test
 
-# 2. QEMU MCU 模拟器执行 4.1–4.8 实时/时延全流程
+# 2. QEMU MCU 模拟器执行 4.1–4.9 实时/时延全流程
 tools/a20 test qemu-riscv32-mcu
 
 # 3. 校验内核 ELF 镜像的系统调用符号白名单

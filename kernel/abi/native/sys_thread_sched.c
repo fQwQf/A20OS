@@ -117,6 +117,38 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args) {
     return A20_OK;
 }
 
+static int64_t task_suspend_resume(a20_handle_t task_h, int suspend)
+{
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
+    task_t *target = cur;
+    if (task_h != A20_HANDLE_NULL) {
+        int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                        A20_RIGHT_CONTROL, &target);
+        if (r < 0)
+            return r;
+    }
+    int rc = suspend ? proc_sched_suspend_task(target)
+                     : proc_sched_resume_task(target);
+    if (target != cur)
+        proc_put(target);
+    return rc == 0 ? A20_OK
+                   : (rc == -ESRCH ? -A20_ERR_BAD_HANDLE
+                                   : -A20_ERR_INVALID_ARGUMENT);
+}
+
+int64_t sys_a20_task_suspend(const a20_syscall_args_t *args)
+{
+    return task_suspend_resume((a20_handle_t)A20_ARG(0), 1);
+}
+
+int64_t sys_a20_task_resume(const a20_syscall_args_t *args)
+{
+    return task_suspend_resume((a20_handle_t)A20_ARG(0), 0);
+}
+
 int64_t sys_a20_sched_lock(const a20_syscall_args_t *args) {
     if (!proc_has_cap(proc_current(), CAP_SYS_NICE))
         return -A20_ERR_ACCESS;

@@ -4,8 +4,10 @@
 #include "cg/cgroup_impl.h"
 
 /* LINUX_ABI_SCHED_BOUNDARY: policy/priority/affinity APIs map onto the
- * per-CPU EEVDF scheduler fields (policy, nice weight, affinity mask);
- * full Linux RT/deadline/cgroup semantics are not claimed. */
+ * per-CPU EEVDF/RT/EDF scheduler fields (policy, nice weight, affinity mask).
+ * SCHED_DEADLINE supports runtime/deadline/period admission and tick-based
+ * EDF throttling; util-clamp, reclaim/overrun flags and cgroup bandwidth are
+ * not claimed. */
 
 static task_t *sched_task_for_pid(int pid)
 {
@@ -60,6 +62,8 @@ static int sched_param_for_task(task_t *t)
 
 /* sched_attr(2) sched_flags bits (Linux, uapi linux/sched/types.h). */
 #define SCHED_FLAG_RESET_ON_FORK 0x01
+#define SCHED_FLAG_DL_OVERRUN    0x02
+#define SCHED_FLAG_RECLAIM       0x04
 #define SCHED_FLAG_KEEP_POLICY   0x08
 #define SCHED_FLAG_KEEP_PARAMS   0x10
 #define SCHED_FLAG_KEEP_ALL      (SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS)
@@ -315,19 +319,29 @@ int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags)
     uint64_t sched_flags = *(uint64_t *)(buf + 8);
     int32_t sched_nice = *(int32_t *)(buf + 16);
     uint32_t sched_priority = *(uint32_t *)(buf + 20);
+    uint64_t sched_runtime = *(uint64_t *)(buf + 24);
+    uint64_t sched_deadline = *(uint64_t *)(buf + 32);
+    uint64_t sched_period = *(uint64_t *)(buf + 40);
 
     if (policy & ~(SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE |
-                   SCHED_FIFO | SCHED_RR))
+                   SCHED_FIFO | SCHED_RR | SCHED_DEADLINE))
         return -EINVAL;
     /* Only RESET_ON_FORK and the KEEP_* acceptance flags are supported;
      * util clamp is not applied. */
     if (sched_flags & ~(SCHED_FLAG_SUPPORTED | SCHED_FLAG_UTIL_CLAMP))
         return -EINVAL;
+    if (sched_flags & SCHED_FLAG_DL_OVERRUN)
+        return -EINVAL;   /* kernel output flag, not accepted from user space */
     if (sched_flags & SCHED_FLAG_UTIL_CLAMP)
         return -EINVAL; /* no util clamp support */
 
     if (sched_policy_rt(policy)) {
         if (sched_priority < 1 || sched_priority > 99)
+            return -EINVAL;
+    } else if (policy == SCHED_DEADLINE) {
+        if (sched_runtime == 0 || sched_deadline == 0 ||
+            sched_runtime > sched_deadline ||
+            (sched_period && sched_period < sched_deadline))
             return -EINVAL;
     } else if (sched_nice < -20 || sched_nice > 19) {
         return -EINVAL;
@@ -345,6 +359,12 @@ int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags)
         .nice = sched_policy_rt(policy) ? 0 : sched_nice,
         .reset_on_fork = reset_on_fork,
     };
+    if (policy == SCHED_DEADLINE) {
+        config.fields |= PROC_SCHED_DL;
+        config.dl_runtime_ns = sched_runtime;
+        config.dl_deadline_ns = sched_deadline;
+        config.dl_period_ns = sched_period;
+    }
     int64_t result = sched_apply_config(t, &config);
     proc_put(t);
     return result;
@@ -364,6 +384,8 @@ int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags)
 
     uint64_t sched_flags =
         t->sched_reset_on_fork ? SCHED_FLAG_RESET_ON_FORK : 0;
+    if (t->sched_policy == SCHED_DEADLINE && t->dl_overrun)
+        sched_flags |= SCHED_FLAG_DL_OVERRUN;
     int nice = sched_policy_rt(t->sched_policy)
                    ? 0
                    : sched_nice_for_task(t);
@@ -376,6 +398,14 @@ int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags)
     *(uint64_t *)(buf + 8) = sched_flags;
     *(int32_t *)(buf + 16) = nice;
     *(uint32_t *)(buf + 20) = prio;
+    if (t->sched_policy == SCHED_DEADLINE) {
+        proc_sched_config_t cfg;
+        if (proc_sched_get(t, &cfg) == 0) {
+            *(uint64_t *)(buf + 24) = cfg.dl_runtime_ns;
+            *(uint64_t *)(buf + 32) = cfg.dl_deadline_ns;
+            *(uint64_t *)(buf + 40) = cfg.dl_period_ns;
+        }
+    }
     int64_t result =
         copy_to_user(attr, buf, size < sizeof(buf) ? size : sizeof(buf)) < 0
             ? -EFAULT : 0;

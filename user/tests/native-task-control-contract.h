@@ -18,8 +18,14 @@ static __attribute__((noreturn)) void native_control_fail(unsigned code) {
 }
 static __attribute__((noreturn)) void native_control_worker(uintptr_t arg) {
     uint64_t old;
-    if (arg != 0xa201 || a20_signal_mask((1ULL << 12) | (1ULL << 9), &old) ||
-        old || a20_signal_mask((1ULL << 12) | (1ULL << 9), &old) ||
+    /* task_kill on a THREAD handle queues in the isolated thread set, so the
+     * blocked/deliver checks must use the thread variants too. */
+    /* The child inherits the creator's thread mask (10|41); the first
+     * replacement returns that inherited snapshot. */
+    if (arg != 0xa201 ||
+        a20_thread_signal_mask((1ULL << 12) | (1ULL << 9), &old, 0) ||
+        old != ((1ULL << 10) | (1ULL << 41)) ||
+        a20_thread_signal_mask((1ULL << 12) | (1ULL << 9), &old, 0) ||
         old != (1ULL << 12) ||
         a20_atomic32_store(&native_control_shared.ready, 1))
         native_control_fail(81);
@@ -34,15 +40,15 @@ static __attribute__((noreturn)) void native_control_worker(uintptr_t arg) {
                 native_control_fail(83);
         }
     }
-    if (a20_signal_check() != 0)
+    if (a20_thread_signal_check(0, 0) != 0)
         native_control_fail(84);
-    if (a20_signal_mask(0, &old))
+    if (a20_thread_signal_mask(0, &old, 0))
         native_control_fail(86);
     if (old != (1ULL << 12))
         native_control_fail(87);
-    if (a20_signal_check() != (1LL << 12))
+    if (a20_thread_signal_check(0, 0) != (1LL << 12))
         native_control_fail(88);
-    if (a20_signal_check() != 0)
+    if (a20_thread_signal_check(0, 0) != 0)
         native_control_fail(89);
     a20_thread_yield();
     if (a20_thread_get_cpu(&native_control_shared.cpu) ||
@@ -57,7 +63,7 @@ static __attribute__((noreturn)) void native_control_worker(uintptr_t arg) {
     }
     const uint64_t bit = (1ULL << 12) | (1ULL << 40);
     if (a20_thread_signal_mask(bit | (1ULL << 9) | (1ULL << 19), &old, 0) ||
-        old != ((1ULL << 10) | (1ULL << 41)) ||
+        old != 0 ||   /* the worker unblocked all in the first phase */
         a20_thread_signal_check(0, 0) != 0 ||
         a20_thread_signal_check(A20_SIGNAL_SELECT | A20_SIGNAL_PEEK, bit) !=
             (int64_t)bit ||
@@ -101,10 +107,13 @@ static int native_task_control_contract(void) {
             21);
     uint64_t stack;
     C_CHECK(a20_vm_alloc_pages(4, 3, &stack) == A20_OK, 1);
-    a20_thread_create_args_t args = {.entry = (uintptr_t)native_control_worker,
-                                     .arg = 0xa201,
-                                     .stack_base = stack + 16384,
-                                     .stack_size = 16384};
+    a20_thread_create_args_t args = {
+        .entry = (uintptr_t)native_control_worker,
+        .arg = 0xa201,
+        .stack_base = stack + 16384,
+        .stack_size = 16384,
+        .flags = A20_THREAD_CREATE_JOINABLE,
+    };
     a20_signal_control_t control = {sizeof(control),
                                     1,
                                     A20_SIGNAL_CONTROL_CHECK,
@@ -136,7 +145,11 @@ static int native_task_control_contract(void) {
                 a20_syscall6(A20_SYS_signal_check, A20_SIGNAL_PEEK, 0, 0, 0, 0,
                              0) == -A20_ERR_INVALID_ARGUMENT,
             27);
-    C_CHECK(native_control_wait(&native_control_shared.ready), 3);
+    if (!native_control_wait(&native_control_shared.ready)) {
+        uint32_t early_error = 0;
+        (void)a20_atomic32_load(&native_control_shared.error, &early_error);
+        return early_error ? (int)early_error : 3;
+    }
     a20_handle_identity_t before, after;
     C_CHECK(a20_hdl_identity(args.out_thread, &before) == A20_OK &&
                 before.state == A20_OBJECT_LIVE,

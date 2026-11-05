@@ -151,6 +151,8 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_task_get_sched 0x020A
 #define A20_SYS_sched_lock 0x0219
 #define A20_SYS_task_self 0x021A
+#define A20_SYS_task_suspend 0x021B
+#define A20_SYS_task_resume 0x021C
 #define A20_SYS_task_get_limits 0x020B
 #define A20_SYS_task_set_limits 0x020C
 #define A20_SYS_task_get_usage 0x020D
@@ -239,6 +241,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_timer_cancel 0x0703
 #define A20_SYS_clock_set 0x0704
 #define A20_SYS_clock_resolution 0x0705
+#define A20_SYS_kernel_idle 0x0706
 
 /* ===== Security (0x0800) ===== */
 #define A20_SYS_ns_create 0x0800

@@ -63,6 +63,8 @@ uint64_t riscv_mcu_timer_read(void) {
     return (esp_systimer_read(SYSTIMER_BASE) - timer_origin) / (SYSTIMER_HZ / ARCH_TIMER_FREQ);
 }
 void riscv_mcu_timer_enable(int en) { esp_systimer_enable(SYSTIMER_BASE, en); }
+void riscv_mcu_timer_set_interval(uint64_t ticks) { (void)ticks; }
+uint64_t riscv_mcu_timer_interval(void) { return 1; }
 void riscv_mcu_timer_rearm(void) {} /* Hardware periodic comparator. */
 int riscv_mcu_irq_dispatch(uint32_t cause) {
     if (cause != TIMER_CPU_IRQ) return -1;

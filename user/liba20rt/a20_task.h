@@ -110,6 +110,17 @@ static inline int64_t a20_task_self(void)
     return a20_syscall6(A20_SYS_task_self, 0, 0, 0, 0, 0, 0);
 }
 
+/* Cross-thread suspend/resume; A20_HANDLE_NULL names the caller. */
+static inline a20_status_t a20_task_suspend(a20_handle_t task)
+{
+    return a20_syscall6(A20_SYS_task_suspend, task, 0, 0, 0, 0, 0);
+}
+
+static inline a20_status_t a20_task_resume(a20_handle_t task)
+{
+    return a20_syscall6(A20_SYS_task_resume, task, 0, 0, 0, 0, 0);
+}
+
 static inline a20_status_t a20_task_set_limit(a20_handle_t task,
                                                a20_resource_limits_t *limits)
 {

@@ -10,6 +10,7 @@
 #include "a20_syscall.h"
 #include "a20_types.h"
 #include "a20_task.h"
+#include "a20_mem.h"
 #include "a20_handle.h"
 #include "a20_sync.h"
 #include "a20_clock.h"
@@ -29,6 +30,9 @@ static const char *const g_call_names[OSN_CALL_COUNT] = {
     "task_kill",
     "task_set_sched",
     "task_get_sched",
+    "task_suspend",
+    "task_resume",
+    "kernel_suspend",
     "sched_lock",
     "task_self",
     "handle_close",
@@ -62,6 +66,26 @@ int osn_vm_alloc(size_t size, void **out_ptr)
 }
 
 void osn_vm_free(void *ptr) { a20_free(ptr); }
+
+int osn_vm_alloc_page_aligned(size_t size, void **out_ptr)
+{
+    g_calls[OSN_VM_ALLOC]++;
+    uint64_t pages = (size + 4095U) / 4096U;
+    if (!pages)
+        pages = 1;
+    uint64_t addr = 0;
+    if (a20_vm_alloc_pages(pages, 3, &addr) != A20_OK)
+        return -1;
+    *out_ptr = (void *)(uintptr_t)addr;
+    return 0;
+}
+
+int osn_vm_unmap(void *ptr, size_t size)
+{
+    g_calls[OSN_VM_UNMAP]++;
+    return a20_vm_unmap((uint64_t)(uintptr_t)ptr, (uint64_t)size) == A20_OK
+               ? 0 : -1;
+}
 
 int osn_thread_create(void (*entry)(void *), void *arg, void *stack,
                       size_t stack_size, int32_t policy, int32_t priority,
@@ -143,7 +167,8 @@ int osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
     return a20_sched_set(target, &args) == A20_OK ? 0 : -1;
 }
 
-int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority)
+int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority,
+                       uint32_t *affinity)
 {
     g_calls[OSN_TASK_GET_SCHED]++;
     if (!policy || !priority)
@@ -158,7 +183,34 @@ int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority)
         return -1;
     *policy = args.policy;
     *priority = args.priority;
+    if (affinity)
+        *affinity = (uint32_t)args.affinity;
     return 0;
+}
+
+int osn_task_suspend(void *handle)
+{
+    g_calls[OSN_TASK_SUSPEND]++;
+    a20_handle_t target = handle
+                              ? (a20_handle_t)((uintptr_t)handle - 1)
+                              : A20_HANDLE_NULL;
+    return a20_task_suspend(target) == A20_OK ? 0 : -1;
+}
+
+int osn_task_resume(void *handle)
+{
+    g_calls[OSN_TASK_RESUME]++;
+    a20_handle_t target = handle
+                              ? (a20_handle_t)((uintptr_t)handle - 1)
+                              : A20_HANDLE_NULL;
+    return a20_task_resume(target) == A20_OK ? 0 : -1;
+}
+
+uint32_t osn_kernel_suspend(void)
+{
+    g_calls[OSN_KERNEL_SUSPEND]++;
+    int64_t ticks = a20_kernel_idle();
+    return ticks > 0 ? (uint32_t)ticks : 0;
 }
 
 int osn_sched_lock(int32_t mode, int32_t depth)

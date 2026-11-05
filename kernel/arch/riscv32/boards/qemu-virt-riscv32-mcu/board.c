@@ -10,16 +10,20 @@ static uint64_t read_time(void) {
     do { a = MTIME[1]; lo = MTIME[0]; b = MTIME[1]; } while (a != b);
     return ((uint64_t)a << 32) | lo;
 }
+static uint64_t timer_interval_ticks = 1;
+void riscv_mcu_timer_set_interval(uint64_t ticks) {
+    timer_interval_ticks = ticks ? ticks : 1;
+}
+uint64_t riscv_mcu_timer_interval(void) { return timer_interval_ticks; }
 void riscv_mcu_timer_rearm(void) {
-    uint64_t t = read_time() + 10000;
+    uint64_t t = read_time() + timer_interval_ticks * 10000U;
     MTIMECMP[0] = ~0U; MTIMECMP[1] = (uint32_t)(t >> 32); MTIMECMP[0] = (uint32_t)t;
 }
 void riscv_mcu_timer_enable(int en) { arch_write_sie(en ? 1U << 7 : 0); }
-void riscv_mcu_timer_init(void) { riscv_mcu_timer_rearm(); riscv_mcu_timer_enable(1); }
+void riscv_mcu_timer_init(void) { timer_interval_ticks = 1; riscv_mcu_timer_rearm(); riscv_mcu_timer_enable(1); }
 uint64_t riscv_mcu_timer_read(void) { return read_time() / 10000U; }
 int riscv_mcu_irq_dispatch(uint32_t cause) {
     if (cause != 7) return -1;
-    riscv_mcu_timer_rearm();
     int c;
     while ((c = arch_uart_poll_getc()) >= 0) uart_receive_char((char)c);
     return 0;

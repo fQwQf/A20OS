@@ -47,10 +47,111 @@ static void test_threads(void)
     CHECK(t1 && t2);
     CHECK(osThreadGetState(t1) != osThreadError);
     CHECK(strcmp(osThreadGetName(t1), "counter") == 0);
+    /* The Native backend now forwards the kernel's effective affinity mask
+     * through task_get_sched instead of reporting zero. */
+    CHECK(osThreadGetAffinity(t1) != 0);
     CHECK(osThreadJoin(t1) == osOK);
     CHECK(osThreadJoin(t2) == osOK);
     CHECK(atomic_load(&g_counter) == 2000);
     CHECK(osThreadGetCount() >= 1);      /* at least the main thread */
+}
+
+/* ------------------------------------------------------------------------- */
+/* Stack high-water query                                                    */
+/* ------------------------------------------------------------------------- */
+
+static osSemaphoreId_t g_stack_ready;
+static osSemaphoreId_t g_stack_hold;
+/* Must satisfy PTHREAD_STACK_MIN on hosts where the POSIX backend uses the
+ * caller-provided stack directly.  The Native backend accepts the same size. */
+static uint64_t g_stack_mem[16384] __attribute__((aligned(4096)));
+
+static void stack_task(void *arg)
+{
+    (void)arg;
+    volatile unsigned char scratch[2048];
+    for (unsigned i = 0; i < sizeof(scratch); i += 32)
+        scratch[i] = (unsigned char)(i + 1U);
+    (void)scratch[0];
+    CHECK(osSemaphoreRelease(g_stack_ready) == osOK);
+    CHECK(osSemaphoreAcquire(g_stack_hold, osWaitForever) == osOK);
+}
+
+static void test_stack_space(void)
+{
+    g_stack_ready = osSemaphoreNew(1, 0, NULL);
+    g_stack_hold = osSemaphoreNew(1, 0, NULL);
+    CHECK(g_stack_ready && g_stack_hold);
+    if (!g_stack_ready || !g_stack_hold)
+        return;
+
+    osThreadAttr_t attr = {0};
+    attr.name = "stack";
+    attr.stack_mem = g_stack_mem;
+    attr.stack_size = sizeof(g_stack_mem);
+    attr.priority = osPriorityNormal;
+    osThreadId_t t = osThreadNew(stack_task, NULL, &attr);
+    CHECK(t != NULL);
+    if (!t)
+        return;
+
+    CHECK(osSemaphoreAcquire(g_stack_ready, 1000) == osOK);
+    /* The worker is parked, so its stack is not moving while it is scanned. */
+    uint32_t size = osThreadGetStackSize(t);
+    uint32_t space = osThreadGetStackSpace(t);
+    CHECK(size == sizeof(g_stack_mem));
+    /* The worker touches a 2 KiB scratch buffer near the top; the result is
+     * remaining space, so most of the 128 KiB stack must still be free. */
+    CHECK(space > size / 2);
+    CHECK(space < size);
+
+    CHECK(osSemaphoreRelease(g_stack_hold) == osOK);
+    CHECK(osThreadJoin(t) == osOK);
+    CHECK(osSemaphoreDelete(g_stack_ready) == osOK);
+    CHECK(osSemaphoreDelete(g_stack_hold) == osOK);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Cross-thread suspend/resume                                               */
+/* ------------------------------------------------------------------------- */
+
+static volatile int g_suspend_count;
+static volatile int g_suspend_stop;
+
+static void suspend_task(void *arg)
+{
+    (void)arg;
+    while (!g_suspend_stop) {
+        g_suspend_count++;
+        osDelay(1);
+    }
+}
+
+static void test_suspend_resume(void)
+{
+    g_suspend_count = 0;
+    g_suspend_stop = 0;
+    osThreadAttr_t attr = {0};
+    attr.name = "suspend";
+    attr.stack_size = 32768;
+    attr.priority = osPriorityNormal;
+    osThreadId_t t = osThreadNew(suspend_task, NULL, &attr);
+    CHECK(t != NULL);
+    if (!t)
+        return;
+    for (int i = 0; i < 200 && g_suspend_count == 0; i++)
+        osDelay(1);
+    CHECK(g_suspend_count > 0);
+    CHECK(osThreadSuspend(t) == osOK);
+    osDelay(5);
+    int frozen = g_suspend_count;
+    osDelay(30);
+    CHECK(g_suspend_count == frozen);
+    CHECK(osThreadResume(t) == osOK);
+    osDelay(30);
+    CHECK(g_suspend_count > frozen);
+    g_suspend_stop = 1;
+    CHECK(osThreadJoin(t) == osOK);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -229,6 +330,26 @@ static void test_queue(void)
     CHECK(osMessageQueueGetCount(q) == 0);
     CHECK(osMessageQueueDelete(q) == osOK);
 
+    /* msg_prio ordering: higher values leave first; equal priorities keep
+     * FIFO order. */
+    q = osMessageQueueNew(4, sizeof(int), NULL);
+    CHECK(q != NULL);
+    int msg_a = 10, msg_b = 20, msg_c = 30, msg_d = 40;
+    CHECK(osMessageQueuePut(q, &msg_a, 1, 0) == osOK);
+    CHECK(osMessageQueuePut(q, &msg_b, 3, 0) == osOK);
+    CHECK(osMessageQueuePut(q, &msg_c, 2, 0) == osOK);
+    CHECK(osMessageQueuePut(q, &msg_d, 3, 0) == osOK);
+    const int expect_val[4] = {20, 40, 30, 10};
+    const uint8_t expect_prio[4] = {3, 3, 2, 1};
+    for (int i = 0; i < 4; i++) {
+        int v = -1;
+        uint8_t p = 0;
+        CHECK(osMessageQueueGet(q, &v, &p, 0) == osOK);
+        CHECK(v == expect_val[i]);
+        CHECK(p == expect_prio[i]);
+    }
+    CHECK(osMessageQueueDelete(q) == osOK);
+
     osMemoryPoolId_t mp = osMemoryPoolNew(4, 32, NULL);
     CHECK(mp != NULL);
     CHECK(osMemoryPoolGetCapacity(mp) == 4);
@@ -312,6 +433,10 @@ int main(void)
 
     printf("phase: threads\n"); fflush(stdout);
     test_threads();
+    printf("phase: stack\n"); fflush(stdout);
+    test_stack_space();
+    printf("phase: suspend\n"); fflush(stdout);
+    test_suspend_resume();
     printf("phase: semaphore\n"); fflush(stdout);
     test_semaphore();
     printf("phase: mutex\n"); fflush(stdout);

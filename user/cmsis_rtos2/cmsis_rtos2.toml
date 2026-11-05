@@ -40,7 +40,9 @@ event_flags   = "OS_CFG_EVENT_FLAGS"
 # the generator refuses an unknown name.
 [syscall_reason]
 clock_get        = "monotonic clock for ticks and timeouts"
+kernel_idle      = "osKernelSuspend low-power WFI until the next deadline"
 vm_alloc         = "a20_malloc heap for control blocks, stacks and queues"
+vm_unmap         = "release a large library-owned thread stack and revoke its PMP entry"
 thread_create    = "osThreadNew"
 thread_exit      = "osThreadExit"
 thread_sleep     = "osDelay / timed waits"
@@ -49,6 +51,8 @@ task_wait        = "process-child wait (osThreadJoin uses its own exit word)"
 task_kill        = "osThreadTerminate"
 task_set_sched   = "osThreadSetPriority / osThreadSetAffinity"
 task_get_sched   = "osThreadGetPriority reports the effective RT priority"
+task_suspend     = "osThreadSuspend parks the target at the next safe point"
+task_resume      = "osThreadResume makes a CMSIS-suspended task READY"
 sched_lock       = "osKernelLock defers preemption in the kernel scheduler"
 task_self        = "initial-thread handle for PI and priority queries"
 handle_close     = "osThreadJoin / osThreadDetach reaps the thread handle"
@@ -72,10 +76,10 @@ syscalls = "all"
 features = ["thread", "mutex", "semaphore", "timer", "event_flags",
             "message_queue"]
 syscalls = [
-    "clock_get", "vm_alloc",
+    "clock_get", "kernel_idle", "vm_alloc", "vm_unmap",
     "thread_create", "thread_exit", "thread_sleep", "thread_yield",
-    "task_kill", "task_set_sched", "task_get_sched", "sched_lock",
-    "task_self", "handle_close",
+    "task_kill", "task_set_sched", "task_get_sched", "task_suspend",
+    "task_resume", "sched_lock", "task_self", "handle_close",
     "futex_wait", "futex_wake", "atomic32",
 ]
 

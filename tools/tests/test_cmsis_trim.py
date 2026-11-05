@@ -110,6 +110,7 @@ class CmsisTrim(unittest.TestCase):
             "sched_set": "task_set_sched",
             "sched_get": "task_get_sched",
             "hdl_close": "handle_close",
+            "vm_alloc_pages": "vm_alloc",   # wrapper over the same syscall
         }
         mapped = {mapping.get(name, name) for name in called}
         mapped.add("vm_alloc")                # a20_malloc grows the heap

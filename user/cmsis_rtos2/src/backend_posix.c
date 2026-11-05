@@ -79,6 +79,8 @@ int osb_init(void)
 
 void *osb_alloc(size_t size) { return malloc(size); }
 void  osb_free(void *ptr)    { free(ptr); }
+void *osb_alloc_stack(size_t size) { return malloc(size); }
+void  osb_free_stack(void *ptr, size_t size) { (void)size; free(ptr); }
 
 uint64_t osb_time_ns(void) { return now_ns(); }
 uint32_t osb_tick_freq(void) { return OS_POSIX_TICK_FREQ; }
@@ -100,10 +102,22 @@ int osb_thread_start(osThreadId_t t)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-    if (t->stack_size >= PTHREAD_STACK_MIN)
+    int static_stack_used = 0;
+    if (t->stack_mem) {
+        /* A caller-provided stack must satisfy the host's pthread minimum;
+         * otherwise leave the pthread default in place and let the high-water
+         * query report zero rather than mis-measuring another stack. */
+        if (t->stack_size >= (uint32_t)PTHREAD_STACK_MIN) {
+            (void)pthread_attr_setstack(&attr, t->stack_mem, t->stack_size);
+            static_stack_used = 1;
+        }
+    } else if (t->stack_size >= PTHREAD_STACK_MIN) {
         pthread_attr_setstacksize(&attr, t->stack_size);
-    if (t->stack_mem)
-        (void)pthread_attr_setstack(&attr, t->stack_mem, t->stack_size);
+    }
+    /* Only caller-provided stacks are visible to the high-water scanner here.
+     * A pthread-owned default stack has no portable base address. */
+    if (static_stack_used)
+        os_stack_fill(t);
 
     pthread_t tid;
     int rc = pthread_create(&tid, &attr, posix_entry, t);
@@ -253,15 +267,14 @@ uint32_t osb_thread_get_affinity(osThreadId_t t)
     return mask;
 }
 
-uint32_t osb_thread_stack_space(osThreadId_t t)
-{
-    (void)t;
-    return 0;   /* pthread does not expose a portable used-stack figure */
-}
-
 /* ------------------------------------------------------------------------- */
 /* Kernel lock                                                               */
 /* ------------------------------------------------------------------------- */
+
+uint32_t osb_kernel_suspend(void)
+{
+    return 0;   /* hosted kernel: no tickless low-power path */
+}
 
 int osb_kernel_lock(void)
 {

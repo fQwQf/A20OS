@@ -16,7 +16,7 @@ A20OS 在 NOMMU / MCU 配置下以通用微内核机制提供确定性调度保�
 | [synchronization.md](synchronization.md) | 同步原语矩阵、`wait_owner` 依赖图追溯、内核 PI 捐赠与快照恢复状态机 | 并发与驱动开发者 |
 | [interrupts.md](interrupts.md) | NOMMU 特权级约束、M 态 trap 到 U 态线程的 futex 分发器、临界区软延迟 | 板级支持与驱动开发者 |
 | [porting-guide.md](porting-guide.md) | 最小应用实现、构建配置接入、tick 同步原则、内存与栈量化、LiteOS API 对照 | 嵌入式应用移植开发者 |
-| [experiments.md](experiments.md) | 4.1–4.8 实验套件、QEMU 与 Hi3861 运行验证、4.5 六大实时性子项、4.6–4.8 挂起/tickless/时延 | 测试与质量验收工程师 |
+| [experiments.md](experiments.md) | 4.1–4.9 实验套件、QEMU 与 Hi3861 运行验证、4.5 六大实时性子项、4.6–4.9 挂起/tickless/时延/隔离 | 测试与质量验收工程师 |
 | [latency.md](latency.md) | 调度时延理论推导、tick 量化限制、基于自由运行计数器的 4.8 测量基线（tick jitter / syscall latency） | 性能评估与系统优化工程师 |
 
 ## 外部与底层参考

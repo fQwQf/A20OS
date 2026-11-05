@@ -54,11 +54,15 @@ static int native_compute_cancel_contract(void) {
     a20_handle_identity_t identities[2];
     for (unsigned i = 0; i < 2; i++) {
         P_CHECK(a20_vm_alloc_pages(4, 3, &stacks[i]) == A20_OK, 2);
-        a20_thread_create_args_t args = {.entry =
-                                             (uintptr_t)native_compute_worker,
-                                         .arg = i,
-                                         .stack_base = stacks[i] + 16384,
-                                         .stack_size = 16384};
+        /* The contract waits on these handles; a non-joinable thread is
+         * auto-reaped on exit and has no stable wait status. */
+        a20_thread_create_args_t args = {
+            .entry = (uintptr_t)native_compute_worker,
+            .arg = i,
+            .stack_base = stacks[i] + 16384,
+            .stack_size = 16384,
+            .flags = A20_THREAD_CREATE_JOINABLE,
+        };
         P_CHECK(a20_thread_create(&args) >= 0, 3);
         tasks[i] = args.out_thread;
         P_CHECK(a20_hdl_identity(tasks[i], &identities[i]) == A20_OK &&

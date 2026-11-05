@@ -116,6 +116,7 @@ ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
 RAMFS_NATIVE_TESTS ?= 0
+RAMFS_RT_TESTS ?= 0
 RAMFS_FPU_TESTS ?= 0
 ifeq ($(filter $(RAMFS_FPU_TESTS),0 1),)
 $(error RAMFS_FPU_TESTS must be 0 or 1)
@@ -1036,7 +1037,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1335,6 +1336,7 @@ NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_SPAWN_BIN       := $(NATIVE_BUILD_DIR)/native-spawn-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
+NATIVE_LATENCY_BIN     := $(NATIVE_BUILD_DIR)/native-latency-$(NATIVE_TAG)
 NATIVE_DEEPEN_BIN      := $(NATIVE_BUILD_DIR)/native-deepen-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
 NATIVE_EXT_BIN         := $(NATIVE_BUILD_DIR)/native-ext-$(NATIVE_TAG)
@@ -3399,8 +3401,15 @@ endif
 ifneq ($(ABI),both)
 $(error RAMFS_NATIVE_TESTS requires ABI=both for the Linux shell and Native tests)
 endif
-RAMFS_USER_PROGRAMS += native_futex native_spawn native_input cluster_threads
+RAMFS_USER_PROGRAMS += native_futex native_spawn native_input native_latency cluster_threads
 CFLAGS += -DCONFIG_RAMFS_NATIVE_TESTS
+endif
+ifeq ($(RAMFS_RT_TESTS),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_RT_TESTS requires RAMFS_USER=1)
+endif
+RAMFS_USER_PROGRAMS += sched_stress
+CFLAGS += -DCONFIG_RAMFS_RT_TESTS
 endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
 RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))

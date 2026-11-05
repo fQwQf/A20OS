@@ -43,6 +43,13 @@ static inline void os_memcopy(void *dst, const void *src, size_t n)
         *d++ = *s++;
 }
 
+static inline void os_memset(void *dst, unsigned char value, size_t n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    while (n--)
+        *d++ = value;
+}
+
 static inline size_t os_strlen(const char *s)
 {
     size_t n = 0;
@@ -70,6 +77,10 @@ typedef struct os_bq os_bq_t;
 int      osb_init(void);
 void    *osb_alloc(size_t size);
 void     osb_free(void *ptr);
+/* Library-owned thread stacks are one page-aligned region each, so the Native
+ * backend can return them to the kernel with vm_unmap on join/detach. */
+void    *osb_alloc_stack(size_t size);
+void     osb_free_stack(void *ptr, size_t size);
 uint64_t osb_time_ns(void);
 uint32_t osb_tick_freq(void);
 
@@ -98,8 +109,8 @@ void     osb_thread_unboost(osThreadId_t t);
 int      osb_thread_self_handle(osThreadId_t t);
 int      osb_thread_set_affinity(osThreadId_t t, uint32_t cpu_set);
 uint32_t osb_thread_get_affinity(osThreadId_t t);
-uint32_t osb_thread_stack_space(osThreadId_t t);
 
+uint32_t osb_kernel_suspend(void);
 int      osb_kernel_lock(void);
 int      osb_kernel_unlock(void);
 int      osb_kernel_restore(int depth);
@@ -149,6 +160,7 @@ struct os_thread_cb {
     void           *stack_mem;
     uint32_t        stack_size;
     int             static_stack;
+    uint8_t         stack_filled;   /* high-water pattern is valid */
     void           *owned_stack;   /* allocated by the backend, freed on release */
     osPriority_t    priority;       /* base priority requested by the app */
     uint32_t        held_mutexes;   /* mutexes owned; PI is dropped at zero */
@@ -205,11 +217,10 @@ struct os_mempool_cb {
 struct os_messagequeue_cb {
     os_object_t     obj;
     uint8_t        *buf;
+    uint8_t        *prio;
     uint32_t        capacity;
     uint32_t        msg_size;
     uint32_t        count;
-    uint32_t        head;
-    uint32_t        tail;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -229,6 +240,17 @@ void     os_thread_registry_remove(osThreadId_t t);
 uint32_t os_thread_registry_count(void);
 uint32_t os_thread_registry_enum(osThreadId_t *arr, uint32_t n);
 void     os_thread_release(osThreadId_t t);
+
+/*
+ * Stack high-water support.  CMSIS has no portable used-stack query, so the
+ * personality fills caller-provided/Native-owned stacks with a pattern before
+ * the thread starts and scans for the lowest written byte when asked.  This
+ * is best-effort while another thread is running; it is exact for a blocked
+ * or terminated thread.
+ */
+#define OS_STACK_PATTERN 0xCDu
+void     os_stack_fill(osThreadId_t t);
+uint32_t os_stack_space(osThreadId_t t);
 
 int      os_timer_core_init(void);
 void     os_timer_service_start(void);

@@ -16,7 +16,7 @@
 #include "spawn_params.h"
 #define FLAT_ARG_COUNT 32U
 #define FLAT_ARG_BYTES 4096U
-#define FLAT_STACK_BYTES 16384U
+#define FLAT_STACK_BYTES 8192U
 #define FLAT_IMAGE_BYTES (512U * 1024U)
 typedef struct flat_args {
     uint32_t offset[FLAT_ARG_COUNT * 2];

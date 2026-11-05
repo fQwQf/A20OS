@@ -263,6 +263,9 @@ typedef struct a20_abi_info {
  * Startup info (kernel/include/abi/native/startup.h)
  * ======================================================================== */
 
+/* Keep in sync with kernel/include/ipc/start_info.h. */
+#define A20_START_INFO_VERSION 2u
+
 typedef struct a20_start_info {
     uint32_t size;
     uint32_t version;

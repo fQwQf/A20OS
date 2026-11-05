@@ -632,7 +632,7 @@ A20 Native ABI 采用十六进制高位分区（Class），稳定系统调用严
 
 | 编号 | 宏定义 | 签名 | 传参形式 | 说明 |
 |---|---|---|---|---|
-| 0x0700 | `A20_SYS_clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 标量+指针 | 获取时钟；MCU 扩展 id 7 返回 raw cycle counter，id 8 返回其 Hz（4.8 时延实验使用） |
+| 0x0700 | `A20_SYS_clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 标量+指针 | 获取时钟；id 7 返回 raw cycle counter，id 8 返回其 Hz（MCU 用 `rdcycle`，AArch64 用 `CNTPCT`）；AArch64 的 id 9/10/11/12 返回 timer IRQ 入口时延的 min/avg/max/count（cycles），其它架构返回 `NOT_SUPPORTED` |
 | 0x0701 | `A20_SYS_timer_create` | `int64_t timer_create(a20_timer_create_args_t *args)` | 结构体/指针 | 创建定时器 |
 | 0x0702 | `A20_SYS_timer_set` | `int64_t timer_set(a20_handle_t timer, uint64_t deadline_ns, uint64_t interval_ns)` | 纯标量 | 设置定时器 |
 | 0x0703 | `A20_SYS_timer_cancel` | `int64_t timer_cancel(a20_handle_t timer)` | 纯标量 | 取消定时器 |

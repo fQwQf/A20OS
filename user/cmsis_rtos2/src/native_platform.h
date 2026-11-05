@@ -20,6 +20,7 @@
 enum osn_call {
     OSN_CLOCK_GET = 0,
     OSN_VM_ALLOC,
+    OSN_VM_UNMAP,
     OSN_THREAD_CREATE,
     OSN_THREAD_EXIT,
     OSN_THREAD_SLEEP,
@@ -27,6 +28,9 @@ enum osn_call {
     OSN_TASK_KILL,
     OSN_TASK_SET_SCHED,
     OSN_TASK_GET_SCHED,
+    OSN_TASK_SUSPEND,
+    OSN_TASK_RESUME,
+    OSN_KERNEL_SUSPEND,
     OSN_SCHED_LOCK,
     OSN_TASK_SELF,
     OSN_HANDLE_CLOSE,
@@ -64,6 +68,11 @@ size_t   osn_stack_grow(size_t requested);
 int      osn_clock_get_ns(uint64_t *out_ns);
 int      osn_vm_alloc(size_t size, void **out_ptr);
 void     osn_vm_free(void *ptr);
+/* Release a page-aligned region allocated with osn_vm_alloc_page_aligned().
+ * Native uses it for library-owned thread stacks; hosted backends may no-op. */
+int      osn_vm_unmap(void *ptr, size_t size);
+/* Allocate a page-aligned region of at least `size` bytes. */
+int      osn_vm_alloc_page_aligned(size_t size, void **out_ptr);
 /*
  * The scheduling arguments are applied before the new thread is published.
  * Passing 0 for policy/priority means "inherit the creator".
@@ -83,7 +92,12 @@ int      osn_task_kill(void *handle);
 /* handle == NULL names the calling thread on the Native backend. */
 int      osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
                             int32_t priority, uint32_t affinity);
-int      osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority);
+int      osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority,
+                            uint32_t *affinity);
+int      osn_task_suspend(void *handle);
+int      osn_task_resume(void *handle);
+/* Low-power idle; returns elapsed ticks (0 when the backend cannot sleep). */
+uint32_t osn_kernel_suspend(void);
 int      osn_sched_lock(int32_t mode, int32_t depth);
 /* A handle for the calling thread, installed in its shared table. */
 int      osn_thread_self_handle(void **out_handle);

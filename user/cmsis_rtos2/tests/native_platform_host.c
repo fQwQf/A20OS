@@ -25,25 +25,53 @@
 static unsigned g_calls[OSN_CALL_COUNT];
 
 static const char *const g_call_names[OSN_CALL_COUNT] = {
-    "clock_get", "vm_alloc", "thread_create", "thread_exit",
+    "clock_get", "vm_alloc", "vm_unmap", "thread_create", "thread_exit",
     "thread_sleep", "thread_yield", "task_kill",
-    "task_set_sched", "task_get_sched", "sched_lock", "task_self",
-    "handle_close", "futex_wait", "futex_wake",
-    "atomic32",
+    "task_set_sched", "task_get_sched", "task_suspend", "task_resume",
+    "kernel_suspend", "sched_lock", "task_self", "handle_close", "futex_wait",
+    "futex_wake", "atomic32",
 };
 
 struct host_thread {
     pthread_t tid;
+    int32_t   policy;
+    int32_t   priority;
+    uint32_t  affinity;
+    pthread_mutex_t suspend_m;
+    pthread_cond_t  suspend_c;
+    int       suspended;
 };
 
 struct host_start {
     void (*entry)(void *);
     void *arg;
+    struct host_thread *thread;
 };
+
+static pthread_key_t g_host_key;
+static pthread_once_t g_host_key_once = PTHREAD_ONCE_INIT;
+
+static void host_key_init(void)
+{
+    (void)pthread_key_create(&g_host_key, NULL);
+}
+
+static void host_suspend_gate(void)
+{
+    struct host_thread *h = (struct host_thread *)pthread_getspecific(g_host_key);
+    if (!h)
+        return;
+    pthread_mutex_lock(&h->suspend_m);
+    while (h->suspended)
+        pthread_cond_wait(&h->suspend_c, &h->suspend_m);
+    pthread_mutex_unlock(&h->suspend_m);
+}
 
 static void *host_trampoline(void *p)
 {
     struct host_start s = *(struct host_start *)p;
+    pthread_once(&g_host_key_once, host_key_init);
+    pthread_setspecific(g_host_key, s.thread);
     free(p);
     s.entry(s.arg);
     return NULL;
@@ -104,6 +132,25 @@ int osn_vm_alloc(size_t size, void **out_ptr)
 
 void osn_vm_free(void *ptr) { free(ptr); }
 
+int osn_vm_alloc_page_aligned(size_t size, void **out_ptr)
+{
+    g_calls[OSN_VM_ALLOC]++;
+    size_t rounded = (size + 4095U) & ~(size_t)4095U;
+    void *p = NULL;
+    if (posix_memalign(&p, 4096, rounded ? rounded : 4096) != 0 || !p)
+        return -1;
+    *out_ptr = p;
+    return 0;
+}
+
+int osn_vm_unmap(void *ptr, size_t size)
+{
+    (void)size;
+    g_calls[OSN_VM_UNMAP]++;
+    free(ptr);
+    return 0;
+}
+
 int osn_thread_create(void (*entry)(void *), void *arg, void *stack,
                       size_t stack_size, int32_t policy, int32_t priority,
                       void **out_handle)
@@ -120,6 +167,12 @@ int osn_thread_create(void (*entry)(void *), void *arg, void *stack,
     }
     s->entry = entry;
     s->arg = arg;
+    s->thread = h;
+    h->policy = policy;
+    h->priority = priority;
+    h->affinity = 1U;
+    pthread_mutex_init(&h->suspend_m, NULL);
+    pthread_cond_init(&h->suspend_c, NULL);
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -152,6 +205,7 @@ void osn_thread_reap(void *handle)
 int osn_thread_sleep_ns(uint64_t ns)
 {
     g_calls[OSN_THREAD_SLEEP]++;
+    host_suspend_gate();
     struct timespec ts = {
         .tv_sec = (time_t)(ns / 1000000000ULL),
         .tv_nsec = (long)(ns % 1000000000ULL),
@@ -180,21 +234,68 @@ int osn_task_set_sched(void *handle, uint32_t fields, int32_t policy,
                        int32_t priority, uint32_t affinity)
 {
     g_calls[OSN_TASK_SET_SCHED]++;
-    (void)handle;
-    (void)fields;
-    (void)policy;
-    (void)priority;
-    (void)affinity;
+    struct host_thread *h = (struct host_thread *)handle;
+    if (h) {
+        if (fields & OSN_SCHED_POLICY)
+            h->policy = policy;
+        if (fields & OSN_SCHED_PRIORITY)
+            h->priority = priority;
+        if ((fields & OSN_SCHED_AFFINITY) && affinity)
+            h->affinity = affinity;
+    }
     return 0;
 }
 
-int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority)
+int osn_task_get_sched(void *handle, int32_t *policy, int32_t *priority,
+                       uint32_t *affinity)
 {
     g_calls[OSN_TASK_GET_SCHED]++;
-    (void)handle;
-    (void)policy;
-    (void)priority;
-    return -1;   /* the host does not model CMSIS RT priorities */
+    struct host_thread *h = (struct host_thread *)handle;
+    /* A NULL handle names the caller; the host has no per-task kernel object
+     * for the main thread, so report the CMSIS defaults it would inherit. */
+    if (policy)
+        *policy = h ? h->policy : OSN_SCHED_FIFO;
+    if (priority)
+        *priority = h ? h->priority : 24;
+    if (affinity)
+        *affinity = h ? h->affinity : 1U;
+    return 0;
+}
+
+int osn_task_suspend(void *handle)
+{
+    g_calls[OSN_TASK_SUSPEND]++;
+    struct host_thread *h = (struct host_thread *)handle;
+    if (!h)
+        return -1;
+    pthread_mutex_lock(&h->suspend_m);
+    h->suspended = 1;
+    if (pthread_equal(pthread_self(), h->tid)) {
+        while (h->suspended)
+            pthread_cond_wait(&h->suspend_c, &h->suspend_m);
+    }
+    pthread_mutex_unlock(&h->suspend_m);
+    return 0;
+}
+
+int osn_task_resume(void *handle)
+{
+    g_calls[OSN_TASK_RESUME]++;
+    struct host_thread *h = (struct host_thread *)handle;
+    if (!h)
+        return -1;
+    pthread_mutex_lock(&h->suspend_m);
+    h->suspended = 0;
+    pthread_cond_broadcast(&h->suspend_c);
+    pthread_mutex_unlock(&h->suspend_m);
+    return 0;
+}
+
+uint32_t osn_kernel_suspend(void)
+{
+    g_calls[OSN_KERNEL_SUSPEND]++;
+    /* Hosted scheduling is not an RTOS kernel; report no sleep. */
+    return 0;
 }
 
 int osn_sched_lock(int32_t mode, int32_t depth)
@@ -227,6 +328,8 @@ int osn_handle_close(void *handle)
     if (!h)
         return 0;
     (void)pthread_detach(h->tid);
+    pthread_cond_destroy(&h->suspend_c);
+    pthread_mutex_destroy(&h->suspend_m);
     free(h);
     return 0;
 }
@@ -234,6 +337,7 @@ int osn_handle_close(void *handle)
 int osn_futex_wait(uint32_t *addr, uint32_t expected, uint64_t timeout_ns)
 {
     g_calls[OSN_FUTEX_WAIT]++;
+    host_suspend_gate();
     struct timespec ts;
     struct timespec *tsp = NULL;
     if (timeout_ns != UINT64_MAX) {

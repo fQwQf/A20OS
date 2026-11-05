@@ -37,7 +37,7 @@ static void demo_runner(void)
     record.version = A20_MCU_DEMO_VERSION;
 
     int pid = mcu_program_spawn(mcu_demo_elf, (size_t)(mcu_demo_elf_end - mcu_demo_elf),
-                                16384, &record, sizeof(record), 1);
+                                8192, &record, sizeof(record), 1);
     if (pid < 0) {
         printf("[DEMO] spawn failed: %d\n", pid);
         return;
@@ -58,7 +58,7 @@ static void demo_runner(void)
     }
     while (r->tail != r->head)
         print_line(r);
-    printf("[DEMO] experiments 4.1-4.5: %s (checks=%u, heap-free=%u)\n",
+    printf("[DEMO] experiments 4.1-4.9: %s (checks=%u, heap-free=%u)\n",
            r->status == 0 ? "PASS" : "FAIL", (unsigned)r->checks,
            (unsigned)mcu_heap_available());
     proc_put(task);

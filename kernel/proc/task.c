@@ -182,7 +182,25 @@ void proc_task_init_base(task_t *t, task_t *parent)
     t->eevdf_deadline = 0;
     t->eevdf_last_account = 0;
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
+    /* A deadline task's child starts in the fair class: inheriting the
+     * parent's admission without a fresh bandwidth check would double-book
+     * the CPU and leave the child with no period/runtime state. */
+    if (t->sched_policy == SCHED_DEADLINE)
+        t->sched_policy = SCHED_NORMAL;
     t->sched_reset_on_fork = 0;
+    t->dl_runtime = 0;
+    t->dl_deadline = 0;
+    t->dl_period = 0;
+    t->dl_remaining = 0;
+    t->dl_period_start = 0;
+    t->dl_next_release = 0;
+    t->dl_throttled = 0;
+    t->dl_admitted = 0;
+    t->dl_overrun = 0;
+    t->dl_ready_next = NULL;
+    t->dl_throttle_next = NULL;
+    t->suspend_pending = 0;
+    t->cmsis_suspend = 0;
     t->pi_boost_weight = 0;
     t->pi_boosted = 0;
     t->pi_rt_priority = 0;
@@ -867,6 +885,7 @@ void proc_destroy_task(task_t *t)
     t->state = PROC_UNUSED;
     proc_wait_timer_cancel(t, t->wait_seq);
     proc_alarm_cancel(t);
+    proc_sched_dl_release(t);
     proc_runq_remove_locked(t);
     spin_unlock_irqrestore(&t->park_lock, flags);
     proc_unlink_task_locked(t);
