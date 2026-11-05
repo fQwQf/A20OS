@@ -267,6 +267,7 @@ typedef struct {
     uint64_t bytes;
     uint16_t hash_next;     /* index of the next entry in this bucket */
     uint16_t rhash_next;    /* ... and in the reply-direction bucket */
+    uint16_t nat_src_slot;  /* MASQUERADE egress slot */
 } net_conntrack_entry_t;
 
 #define NET_CONNTRACK_NONE 0xFFFFu
@@ -374,6 +375,7 @@ void netfilter_conntrack_get_stats(net_conntrack_stats_t *out);
  * call stopped, so a full table cannot make one timer tick unbounded.
  */
 unsigned netfilter_conntrack_expire(unsigned max_scan);
+void netfilter_conntrack_forget_masq(unsigned slot);
 
 /*
  * How many times the idle sweeper has run.  The timeout counter says what a

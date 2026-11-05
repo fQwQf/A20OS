@@ -613,7 +613,7 @@ static void scenario_napt(void)
         require(netfilter_conntrack_process(f, len, 1, NETFILTER_DIR_IN, &pkt) == 0,
                 "track ingress before SNAT");
         require(frame_ip_src(f) == clients[i], "SNAT waits for egress");
-        require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == 0,
+        require(netfilter_conntrack_process(f, len, 2 + i, NETFILTER_DIR_OUT, &pkt) == 0,
                 "reserve egress binding on existing entry");
         require(frame_ip_src(f) == public_ip, "masquerade address");
         ports[i] = frame_sport(f);
@@ -655,6 +655,16 @@ static void scenario_napt(void)
     require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_IN, &pkt) == 0,
             "full table still serves existing mappings");
     require(frame_ip_dst(f) == clients[0], "full table retains reply ownership");
+
+    netfilter_conntrack_forget_masq(2);
+    require(netfilter_conntrack_count() == NET_PROFILE_CONNTRACK_ENTRIES - 1,
+            "link loss frees only bindings from that uplink");
+    build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, remote, public_ip, 53, ports[1]);
+    require(netfilter_conntrack_process(f, len, 3, NETFILTER_DIR_IN, &pkt) == 0 &&
+            frame_ip_dst(f) == clients[1], "the other uplink retains its binding");
+    build_frame(f, &len, &pkt, NETFILTER_PROTO_UDP, clients[0], remote, 53000, 53);
+    require(netfilter_conntrack_process(f, len, 2, NETFILTER_DIR_OUT, &pkt) == 0 &&
+            frame_sport(f) == ports[0], "redial can reclaim the released tuple");
 
     netfilter_conntrack_flush();
     netfilter_nat_reset();

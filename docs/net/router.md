@@ -6,7 +6,7 @@
 make ARCH=x86_64 NR_CPUS=2 NET_STACK=bsd NET_LANES=1 NET_ROLE=router kernel-only
 ```
 
-这项选择和 `NET_STACK`、`NET_PROFILE` 独立。无 TCP/IP 的 MCU 不能选择 router。**router 表示已编入能力，不表示成熟软路由已经验收。** BSD 的 IPv4 分片 NAT 已有双网口报文回归。故障恢复、规模和性能按 [补全记录](./router-completion.md) 验收。 LAN DHCPv4/DNS A 转发的配置与已验证范围见 [lan-services.md](./lan-services.md)。
+这项选择和 `NET_STACK`、`NET_PROFILE` 独立。无 TCP/IP 的 MCU 不能选择 router。**router 表示已编入能力，不表示成熟软路由已经验收。** BSD 的 IPv4 分片 NAT 已有双网口报文回归。故障恢复、规模和性能按 [补全记录](./router-completion.md) 验收。 LAN DHCPv4/DNS A 转发的配置与已验证范围见 [lan-services.md](./lan-services.md)。IPv4 PPPoE 的配置和 Linux 对端测试见 [PPPoE](./pppoe.md)。
 
 BSD/F-Stack 后端现在也接受 `NET_ROLE=router`：启动时按 class NIC 顺序 attach 全部网卡（公共名为 `en2`、`en3`…，索引 1、3…；`lo` 固定为 2），并在执行器内置 `V_ipforwarding=1`、`V_ip6_forwarding=1`。F-Stack 处理 IPv4/IPv6 转发及 TTL/hop-limit 递减。IPv4 过滤和 TCP/UDP NAPT 经 `netfilter_bridge.c` 使用公共规则与 conntrack。
 

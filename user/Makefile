@@ -742,6 +742,8 @@ $(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o
 	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$^ $(CRT_END) $(LIBC)
 endef
 $(foreach src,$(LOCAL_CMD_SRCS),$(eval $(call LOCAL_CMD_RULE,$(src))))
+$(BUILD_DIR)/pppoe: $(OBJ_DIR)/sbase/libutil/md5.o
+$(OBJ_DIR)/cmds/net/pppoe.o: $(SBASE_DIR)/md5.h
 
 define ARCH_CMD_RULE
 $(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst %.c,$(OBJ_DIR)/%.o,$(1)) | build_dir musl_prepare

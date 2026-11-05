@@ -51,6 +51,7 @@ NET_PROGRAM(net_lane_hostfwd_test);
 NET_PROGRAM(udp_hostfwd_test);
 NET_PROGRAM(bsd_scale_test);
 NET_PROGRAM(bsd_tun_router_test);
+NET_PROGRAM(pppoe);
 NET_PROGRAM(netctl);
 #undef NET_PROGRAM
 #endif
@@ -78,6 +79,7 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/udp_hostfwd_test", udp_hostfwd_test),
     USER_ENTRY("/bin/bsd_scale_test", bsd_scale_test),
     USER_ENTRY("/bin/bsd_tun_router_test", bsd_tun_router_test),
+    USER_ENTRY("/bin/pppoe", pppoe),
     USER_ENTRY("/bin/netctl", netctl),
 #endif
 #ifdef CONFIG_RAMFS_NATIVE_TESTS

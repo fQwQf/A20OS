@@ -14,7 +14,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | 64 位非嵌入式实例统一后端 | 实例检查、四架构真实 BSD 内核编译及 QEMU 网络收发 | 基础迁移完成 |
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
-| PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | TUN 数据面通过，拨号与认证待完成 |
+| IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | 待完成 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
@@ -122,9 +122,28 @@ BSD 执行器交付给套接字，并使用正确的公开接口索引。
 固定 PPPoE 会话验证了 1492 字节 MTU、LAN 出口 NAT、回包以及关闭后
 重新安装默认路由。会话封装和 MTU 依据 [RFC 2516](https://www.rfc-editor.org/rfc/rfc2516)。
 证据目录包含两侧抓包和内核哈希。此回归使用固定会话参数，PADI/PADO、
-LCP、PAP/CHAP 和 IPCP 的 A20OS 实现及对端协商另行验收。
+LCP、PAP/CHAP 和 IPCP 的对端协商见下一节。
 
 构建方法与分片回归相同，运行
 `python3 tools/net/tests/test-bsd-router-tun.py --kernel <kernel.bin>
 --out <新证据目录>`。四架构网络回归位于 `tun-socket-<arch>-dataplane`，
 分片转发复测位于 `tun-fragment-final`。
+
+## PPPoE 拨号与认证
+
+`pppoe` 已接入 BSD TUN。真实 Linux `pppoe-server` 与 `pppd` 对端的
+PAP 和 CHAP-MD5 两套回归记录为 `pppoe-pap-racefix`、`pppoe-chap-racefix`。
+两套测试均完成 IPCP、超过 MTU 的 LAN UDP 往返、对端断线换地址、
+复用原五元组以及错误密码拒绝。CHAP 测试还暂停了对端进程，验证 LCP
+Echo 超时会触发重新拨号。
+
+断线后从 `198.18.0.10` 改拨到 `198.18.0.11`。TUN 关闭清除相应出口的
+MASQUERADE 绑定，保留其他接口的状态。生产状态机的选择性清理验证
+位于 `pppoe-nat-host-final`。使用和复现方法见 [PPPoE 配置](./pppoe.md)。
+
+固定会话复测曾在第二次打开 TUN 时触发内核异常，回溯位于
+`pppoe-tun-regression`。`complete()` 现于发布完成并释放锁之前收集唤醒，
+避免请求者返回后仍访问栈上的完成对象。修复后 20 轮连续打开、关闭和
+重开均通过，记录为 `pppoe-tun-fixed-01` 至 `pppoe-tun-fixed-20`。
+四架构 BSD 网络回归为 `pppoe-sockets-<arch>-racefix`。ARM32/RV32
+的 lwIP 启动关机 smoke 通过。IPv6CP 和 PPP DNS 选项尚未接入。
