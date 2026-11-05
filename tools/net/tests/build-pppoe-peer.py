@@ -97,7 +97,13 @@ case "$(busybox cat /proc/cmdline)" in
     *pppauth=chap*) auth=require-chap ;;
     *) auth=require-pap ;;
 esac
-printf '%s\\n' "$auth" 'name a20-peer' 'debug' 'hide-password' 'logfd 2' 'noipv6' > /etc/ppp/peer-options
+printf '%s\\n' "$auth" 'name a20-peer' 'debug' 'hide-password' 'logfd 2' > /etc/ppp/peer-options
+case "$(busybox cat /proc/cmdline)" in
+    *pppdual=1*)
+        printf '%s\\n' '+ipv6' 'ipv6 ::1,::2' 'ms-dns 192.0.2.53' 'ms-dns 192.0.2.54' >> /etc/ppp/peer-options
+        ;;
+    *) echo noipv6 >> /etc/ppp/peer-options ;;
+esac
 net-microbench server udp 42000 &
 pppoe-peer-start &
 echo A20_LINUX_PPPOE_PEER_READY

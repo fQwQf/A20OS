@@ -28,6 +28,7 @@
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
+#include <netinet6/scope6_var.h>
 #include "ff_host_interface.h"
 #include "ff_veth.h"
 #include <net/if_types.h>
@@ -308,6 +309,47 @@ int port_tun_route4(void *context, const uint8_t destination[4], uint8_t prefix,
     return rc;
 }
 
+int port_tun_route6(void *context, const uint8_t destination[16],
+                    uint8_t prefix, int remove)
+{
+    port_tun_t *tun = context;
+    if (!tun || !tun->ifp || !destination || prefix > 128)
+        return port_linux_errno(EINVAL);
+    struct ifnet *ifp = tun->ifp;
+    struct sockaddr_in6 dst = {.sin6_len = sizeof(dst), .sin6_family = AF_INET6};
+    struct sockaddr_in6 mask = {.sin6_len = sizeof(mask), .sin6_family = AF_INET6};
+    memcpy(&dst.sin6_addr, destination, 16);
+    for (unsigned bit = 0; bit < prefix; ++bit)
+        mask.sin6_addr.s6_addr[bit / 8] |= 0x80 >> (bit % 8);
+    int rc = in6_setscope(&dst.sin6_addr, ifp, NULL);
+    if (rc)
+        return port_linux_errno(rc);
+    struct sockaddr_dl link = {
+        .sdl_len = sizeof(link), .sdl_family = AF_LINK,
+        .sdl_index = ifp->if_index, .sdl_type = ifp->if_type,
+    };
+    struct in6_ifaddr *local = remove ? NULL :
+        in6ifa_ifpforlinklocal(ifp, IN6_IFF_NOTREADY | IN6_IFF_ANYCAST);
+    if (!remove && !local)
+        return port_linux_errno(EADDRNOTAVAIL);
+    struct rt_addrinfo info = {
+        .rti_flags = RTF_STATIC | (prefix == 128 ? RTF_HOST : 0),
+        .rti_filter = tun_route_match, .rti_filterdata = ifp,
+        .rti_ifa = local ? &local->ia_ifa : NULL,
+    };
+    info.rti_info[RTAX_DST] = (struct sockaddr *)&dst;
+    info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
+    info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&link;
+    struct epoch_tracker et;
+    struct rib_cmd_info result;
+    NET_EPOCH_ENTER(et);
+    rc = rib_action(ifp->if_fib, remove ? RTM_DELETE : RTM_ADD, &info, &result);
+    NET_EPOCH_EXIT(et);
+    if (local)
+        ifa_free(&local->ia_ifa);
+    return port_linux_errno(rc);
+}
+
 int port_tun_set_addr6(void *context, const uint8_t address[16],
                        uint8_t prefix, int add, uint32_t valid,
                        uint32_t preferred, int exclusive)
@@ -315,6 +357,25 @@ int port_tun_set_addr6(void *context, const uint8_t address[16],
     port_tun_t *tun = context;
     if (!tun)
         return EINVAL;
+    if (add) {
+        struct in6_ndireq info = {0};
+        int error = nd6_ioctl(SIOCGIFINFO_IN6, (caddr_t)&info, tun->ifp);
+        if (error)
+            return port_linux_errno(error);
+        if (info.ndi.flags & ND6_IFF_IFDISABLED) {
+            /* Disable auto-generation before bringing IPv6 up. PPP installs
+             * the mutually agreed link-local address explicitly. */
+            info.ndi.flags &= ~ND6_IFF_AUTO_LINKLOCAL;
+            info.ndi.flags |= ND6_IFF_NO_DAD;
+            error = nd6_ioctl(SIOCSIFINFO_FLAGS, (caddr_t)&info, tun->ifp);
+            if (error)
+                return port_linux_errno(error);
+            info.ndi.flags &= ~ND6_IFF_IFDISABLED;
+            error = nd6_ioctl(SIOCSIFINFO_FLAGS, (caddr_t)&info, tun->ifp);
+            if (error)
+                return port_linux_errno(error);
+        }
+    }
     return port_if_set_ipv6(tun->ifp, address, prefix, add, valid, preferred, exclusive);
 }
 
