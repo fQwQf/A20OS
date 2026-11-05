@@ -58,6 +58,7 @@ int  a20_netfilter_ct_enabled(const net_ct_view_t *v);
 void a20_netfilter_ct_set_timeouts(const net_ct_view_t *v, uint32_t a,
                                    uint32_t b, uint32_t c);
 uint32_t a20_netfilter_ct_expire(const net_ct_view_t *v, uint32_t max_scan);
+uint32_t a20_netfilter_ct_forget_masq(const net_ct_view_t *v, uint16_t slot);
 int a20_netfilter_ct_process(const net_ct_view_t *v, uint8_t *frame,
                               size_t len, int net_idx, uint8_t dir,
                               const netfilter_frame_t *pkt);

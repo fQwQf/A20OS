@@ -98,6 +98,7 @@ pub struct ConntrackEntry {
     pub bytes: u64,
     pub hash_next: u16,
     pub rhash_next: u16,
+    pub nat_src_slot: u16,
 }
 
 /// Mirror of `net_conntrack_stats_t`.
@@ -583,6 +584,7 @@ fn zero_entry() -> ConntrackEntry {
         bytes: 0,
         hash_next: 0,
         rhash_next: 0,
+        nat_src_slot: NONE,
     }
 }
 
@@ -753,6 +755,34 @@ pub unsafe extern "C" fn a20_netfilter_ct_set_timeouts(v: *const CtView, a: u32,
     }
 }
 
+unsafe fn ct_remove_slot(v: &View, index: usize) {
+    ct_unlink(v, index);
+    let mut free = zero_entry();
+    free.hash_next = *v.0.free_head;
+    v.put_entry(index, free);
+    *v.0.free_head = index as u16;
+    *v.0.used -= 1;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn a20_netfilter_ct_forget_masq(v: *const CtView, slot: u16) -> u32 {
+    let _guard = CtGuard::acquire();
+    if v.is_null() {
+        return 0;
+    }
+    let v = view(v);
+    let mut removed = 0;
+    for index in 0..v.0.max as usize {
+        let entry = v.entry(index);
+        if used_slot(&entry) && entry.nat == NAT_MASQUERADE && entry.nat_src_slot == slot {
+            ct_remove_slot(&v, index);
+            removed += 1;
+        }
+    }
+    (*v.0.lifetime).tracked = *v.0.used as u64;
+    removed
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn a20_netfilter_ct_expire(v: *const CtView, max_scan: u32) -> u32 {
     let _guard = CtGuard::acquire();
@@ -788,14 +818,7 @@ pub unsafe extern "C" fn a20_netfilter_ct_expire(v: *const CtView, max_scan: u32
                 step += 1;
                 continue;
             }
-            unsafe {
-                ct_unlink(&v, i);
-                let mut free = zero_entry();
-                free.hash_next = *v.0.free_head;
-                v.put_entry(i, free);
-                *v.0.free_head = i as u16;
-                *v.0.used -= 1;
-            }
+            unsafe { ct_remove_slot(&v, i) };
             freed += 1;
             let lifetime = unsafe { &mut *v.0.lifetime };
             lifetime.timeout = lifetime.timeout.wrapping_add(1);
@@ -836,6 +859,10 @@ unsafe fn select_nat(
         return if binding_free(v, e, skip) { 0 } else { -ENOSPC };
     }
     e.nat_src_addr = if rule.nat == NAT_MASQUERADE {
+        if net_idx < 0 || net_idx >= NONE as i32 {
+            return -EINVAL;
+        }
+        e.nat_src_slot = net_idx as u16;
         a20_netfilter_masq_addr(net_idx)
     } else {
         rule.nat_addr

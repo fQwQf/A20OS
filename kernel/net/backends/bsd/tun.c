@@ -11,6 +11,7 @@
 #include "net/interface.h"
 #include "net/profile.h"
 #include "net/route.h"
+#include "net/netfilter.h"
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/string.h"
@@ -91,7 +92,6 @@ int a20_bsd_tun_create(net_tun_emit_t emit, void *ctx)
     const char *name = a20_bsd_port_tun_name(job.result);
     flags = spin_lock_irqsave(&g_tun_lock);
     memset(slot, 0, sizeof(*slot));
-    slot->used = 1;
     slot->unit = unit;
     slot->index = (unsigned)(BSD_TUN_BASE + unit);
     slot->context = job.result;
@@ -99,15 +99,20 @@ int a20_bsd_tun_create(net_tun_emit_t emit, void *ctx)
         strncpy(slot->name, name, sizeof(slot->name) - 1);
     else
         snprintf(slot->name, sizeof(slot->name), "tun%d", unit);
+    __atomic_store_n(&slot->used, 1, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_tun_lock, flags);
     return (int)slot->index;
 }
 
-typedef struct tun_ctx_job { void *context; } tun_ctx_job_t;
+typedef struct tun_ctx_job {
+    void *context;
+    unsigned filter_slot;
+} tun_ctx_job_t;
 
 static int tun_destroy_job_run(void *argument)
 {
     tun_ctx_job_t *job = argument;
+    netfilter_conntrack_forget_masq(job->filter_slot);
     a20_bsd_port_tun_destroy(job->context);
     return 0;
 }
@@ -117,15 +122,23 @@ void a20_bsd_tun_destroy(unsigned index)
     bsd_tun_slot_t *slot = slot_of(index);
     if (!slot) return;
     uint64_t flags = spin_lock_irqsave(&g_tun_lock);
+    if (slot->used != 1) {
+        spin_unlock_irqrestore(&g_tun_lock, flags);
+        return;
+    }
     void *context = slot->context;
-    slot->used = 0;
+    /* Reserve the filter slot until its old interface and mappings are gone. */
+    __atomic_store_n(&slot->used, 2, __ATOMIC_RELEASE);
     slot->context = NULL;
     spin_unlock_irqrestore(&g_tun_lock, flags);
     a20_net_route_flush_if((uint16_t)index);
     if (context && a20_bsd_executor_ready()) {
-        tun_ctx_job_t job = {context};
+        tun_ctx_job_t job = {context, NET_PROFILE_NETIF_MAX_DEVS + index - BSD_TUN_BASE};
         (void)a20_bsd_executor_call(tun_destroy_job_run, &job);
     }
+    flags = spin_lock_irqsave(&g_tun_lock);
+    __atomic_store_n(&slot->used, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_tun_lock, flags);
 }
 
 typedef struct tun_inject_job {

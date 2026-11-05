@@ -50,6 +50,7 @@ _Static_assert(__builtin_offsetof(net_conntrack_entry_t, dst_addr) == 4 &&
                __builtin_offsetof(net_conntrack_entry_t, bytes) == 40 &&
                __builtin_offsetof(net_conntrack_entry_t, hash_next) == 48 &&
                __builtin_offsetof(net_conntrack_entry_t, rhash_next) == 50 &&
+               __builtin_offsetof(net_conntrack_entry_t, nat_src_slot) == 52 &&
                sizeof(net_conntrack_entry_t) == 56,
                "net_conntrack_entry_t layout changed: update CtView in netfilter_nat.rs");
 _Static_assert(__builtin_offsetof(netfilter_frame_t, dst_addr) == 4 &&
@@ -416,6 +417,13 @@ unsigned netfilter_conntrack_expire(unsigned max_scan)
     if (removed)
         netfilter_busy_refresh();
     return removed;
+}
+
+void netfilter_conntrack_forget_masq(unsigned slot)
+{
+    if (slot < NET_CONNTRACK_NONE &&
+        a20_netfilter_ct_forget_masq(net_ct_view(), (uint16_t)slot))
+        netfilter_busy_refresh();
 }
 
 int netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
