@@ -31,6 +31,7 @@ extern const net_socket_opt_ops_t a20_bsd_socket_opt_ops;
 extern const net_endpoint_ops_t a20_bsd_endpoint_ops;
 extern int a20_bsd_socket_runtime_init(void);
 extern void a20_bsd_socket_progress(void);
+extern void net_packet_bottom_half_process(void);
 extern int a20_bsd_socket_format_status(char *, size_t);
 extern void a20_bsd_port_memory_snapshot(struct bsd_memory_stats *);
 
@@ -67,11 +68,6 @@ static int nic_slot_for_index(unsigned index)
     if (index == 1) return 0;
     if (index >= 3 && index < A20_BSD_TUN_BASE) return (int)index - 2;
     return -1;
-}
-
-static unsigned nic_index_for_slot(int slot)
-{
-    return slot == 0 ? 1u : (unsigned)(slot + 2);
 }
 
 static void nic_name_for_slot(int slot, char *out, size_t size)
@@ -246,6 +242,7 @@ static void stack_progress(void *argument)
         a20_bsd_port_nic_progress(nics[i].context, budget);
     }
     a20_bsd_port_protocol_progress();
+    net_packet_bottom_half_process();
     a20_bsd_socket_progress();
 }
 
@@ -653,10 +650,13 @@ static int route_update_v4(const uint8_t *destination, uint8_t prefix,
                            const uint8_t *gateway, uint16_t ifindex,
                            int remove)
 {
-    if (!destination) return -EINVAL;
+    if (!destination || prefix > 32) return -EINVAL;
+    if (a20_bsd_tun_is_index(ifindex)) {
+        if (gateway) return -EOPNOTSUPP;
+        return a20_bsd_tun_route4(ifindex, destination, prefix, remove);
+    }
     int slot = ifindex ? nic_slot_for_index(ifindex) : 0;
     if (slot < 0 || !nics[slot].attached) return -ENODEV;
-    if (prefix > 32) return -EINVAL;
     route4_job_t job;
     memset(&job, 0, sizeof(job));
     job.context = nics[slot].context;

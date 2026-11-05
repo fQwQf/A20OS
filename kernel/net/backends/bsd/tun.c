@@ -10,6 +10,7 @@
 #include "net/tun.h"
 #include "net/interface.h"
 #include "net/profile.h"
+#include "net/route.h"
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/string.h"
@@ -57,7 +58,8 @@ typedef struct tun_create_job {
 static int tun_create_job_run(void *argument)
 {
     tun_create_job_t *job = argument;
-    job->result = a20_bsd_port_tun_create(job->unit, job->emit, job->ctx);
+    job->result = a20_bsd_port_tun_create(
+        job->unit, NET_PROFILE_NETIF_MAX_DEVS + job->unit, job->emit, job->ctx);
     return job->result ? 0 : -ENOMEM;
 }
 
@@ -119,6 +121,7 @@ void a20_bsd_tun_destroy(unsigned index)
     slot->used = 0;
     slot->context = NULL;
     spin_unlock_irqrestore(&g_tun_lock, flags);
+    a20_net_route_flush_if((uint16_t)index);
     if (context && a20_bsd_executor_ready()) {
         tun_ctx_job_t job = {context};
         (void)a20_bsd_executor_call(tun_destroy_job_run, &job);
@@ -254,6 +257,33 @@ int a20_bsd_tun_set_addr(unsigned index, const uint8_t address[4],
     return a20_bsd_executor_call(tun_addr_job_run, &job);
 }
 
+typedef struct tun_route4_job {
+    unsigned index;
+    uint8_t destination[4];
+    uint8_t prefix;
+    int remove;
+} tun_route4_job_t;
+
+static int tun_route4_job_run(void *argument)
+{
+    tun_route4_job_t *job = argument;
+    uint64_t flags = spin_lock_irqsave(&g_tun_lock);
+    bsd_tun_slot_t *slot = slot_of(job->index);
+    void *context = slot ? slot->context : NULL;
+    spin_unlock_irqrestore(&g_tun_lock, flags);
+    if (!context)
+        return -ENODEV;
+    return -a20_bsd_port_tun_route4(context, job->destination, job->prefix, job->remove);
+}
+
+int a20_bsd_tun_route4(unsigned index, const uint8_t destination[4],
+                       uint8_t prefix, int remove)
+{
+    tun_route4_job_t job = {.index = index, .prefix = prefix, .remove = remove};
+    memcpy(job.destination, destination, sizeof(job.destination));
+    return a20_bsd_executor_call(tun_route4_job_run, &job);
+}
+
 typedef struct tun_addr6_job {
     void *context;
     uint8_t address[16];
@@ -298,8 +328,9 @@ int a20_bsd_tun_snapshot(nl_link_out_t *out, int max)
         if (tun_info(slot->index, &info) < 0) continue;
         nl_link_out_t *row = &out[count++];
         memset(row, 0, sizeof(*row));
-        strncpy(row->name, info.name[0] ? info.name : slot->name,
-                sizeof(row->name) - 1);
+        if (!net_tun_interface_name(slot->index, row->name, sizeof(row->name)))
+            strncpy(row->name, info.name[0] ? info.name : slot->name,
+                    sizeof(row->name) - 1);
         row->index = slot->index;
         row->mtu = info.mtu;
         row->flags = (info.flags & 1u) ? (NLRT_IF_FLAGS_UP |

@@ -43,6 +43,13 @@ def udp(src, dst, sport, dport, payload):
     return data[:6] + struct.pack('!H', csum) + payload
 
 
+def ipv4(src, dst, ident, data, offset=0, more=False):
+    frag = offset // 8 | (0x2000 if more else 0)
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(data), ident,
+                     frag, 64, 17, 0, src, dst)
+    return ip[:10] + struct.pack('!H', checksum(ip)) + ip[12:] + data
+
+
 class Link:
     def __init__(self, index, peer_ip, router_ip):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -91,11 +98,7 @@ class Link:
                 return
 
     def fragment(self, dst, ident, data, offset=0, more=False, *, src=None):
-        frag = offset // 8 | (0x2000 if more else 0)
-        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(data), ident,
-                         frag, 64, 17, 0, src or self.peer_ip, dst)
-        ip = ip[:10] + struct.pack('!H', checksum(ip)) + ip[12:]
-        self.send(IPV4, ip + data)
+        self.send(IPV4, ipv4(src or self.peer_ip, dst, ident, data, offset, more))
 
     def send_datagram(self, dst, ident, data, stride=1200):
         offsets = range(0, len(data), stride)
@@ -103,19 +106,21 @@ class Link:
             self.fragment(dst, ident, data[offset:offset + stride], offset,
                           offset + stride < len(data))
 
-    def receive_datagram(self, ident, src, payload, timeout=5):
+    def receive_datagram(self, ident, src, payload, timeout=5, *, mtu=1500, decode=None):
         deadline = time.monotonic() + timeout
         received = {}
         last = None
         while True:
             frame = self.receive(deadline)
+            if decode is not None:
+                frame = decode(frame)
             if frame[12:14] != IPV4 or frame[18:20] != struct.pack('!H', ident):
                 continue
             assert frame[:12] == self.mac + self.router_mac, 'wrong Ethernet endpoints'
             ip = frame[14:]
             _, _, length, _, flags, ttl, proto, _, source, dst = struct.unpack(
                 '!BBHHHBBH4s4s', ip[:20])
-            assert ip[0] == 0x45 and checksum(ip[:20]) == 0 and 20 < length <= 1500
+            assert ip[0] == 0x45 and checksum(ip[:20]) == 0 and 20 < length <= mtu
             assert (ttl, proto, source, dst) == (63, 17, src, self.peer_ip)
             offset = (flags & 0x1fff) * 8
             assert offset not in received, 'duplicate egress fragment'
@@ -134,7 +139,8 @@ class Link:
         sport, dport, length, csum = struct.unpack('!HHHH', data[:8])
         assert length == len(data) and data[8:] == payload, 'incorrect UDP contents'
         assert csum and checksum(pseudo(src, self.peer_ip, length) + data) == 0
-        assert len(received) == (length + 1479) // 1480, 'wrong egress fragment count'
+        fragment_payload = (mtu - 20) // 8 * 8
+        assert len(received) == (length + fragment_payload - 1) // fragment_payload, 'wrong egress fragment count'
         return sport, dport
 
     def expect_no_datagram(self, ident):
@@ -231,7 +237,7 @@ def exercise(lan, wan, passed):
     passed.append('forwarding_after_fragment_drops')
 
 
-def run_router(args, rules, test):
+def run_router(args, rules, test, *, wan_ipv4=True):
     """Boot the shared dual-link wire fixture and persist evidence."""
     kernel = args.kernel.resolve(strict=True)
     out = args.out.resolve()
@@ -255,15 +261,17 @@ def run_router(args, rules, test):
             guest.send('cat /proc/net/status')
             guest.until('backend: bsd')
             guest.until('# ')
-            guest.send(f'netctl set-ipv4 en3 10.20.0.1 {MASK}')
-            guest.until('NETCTL: IPv4 configured')
-            guest.until('# ')
+            if wan_ipv4:
+                guest.send(f'netctl set-ipv4 en3 10.20.0.1 {MASK}')
+                guest.until('NETCTL: IPv4 configured')
+                guest.until('# ')
             setup = ' && '.join(f"echo '{rule}' > /proc/a20/netfilter" for rule in rules)
             guest.send(setup + ' && echo A20_ROUTER_POLICY_READY')
             guest.until('A20_ROUTER_POLICY_READY', whole_line=True)
             guest.until('# ')
             lan.resolve()
-            wan.resolve()
+            if wan_ipv4:
+                wan.resolve()
             test(guest, lan, wan, result)
             guest.send('poweroff')
             guest.until('System is going down for power-off NOW')

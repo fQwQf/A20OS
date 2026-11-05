@@ -69,7 +69,7 @@ Rust CT 事务已处理 IPv4 Destination Unreachable、Time Exceeded 和 Paramet
 
 原版/衍生适配通过输入 hook 在协议转发前处理 TTL=1 和 DF 超出口 MTU，生成带正确 next-hop MTU 的差错；引用尽可能保留至576字节 IPv4 响应上限，具备全局有界速率额度，不回应 ICMP 差错、组播/广播及不合法来源。上游源码保持未修改。IPv6 转发差错仍由后端本身生成。路由器正确返回/转发 MTU 差错，不等于 A20OS 本机已支持 Linux 的全部`IP_RECVERR`、每 socket PMTU 策略和缓存。
 
-默认/embedded/2GHz 生产 C+Rust 测试覆盖 SNAT/DNAT、TCP/UDP、最短/较长引用、三类差错、校验和、MTU保留以及每个截断前缀。三节点 KVM 的 Linux LAN 使用同一 ELF 和真实 MSG_ERRQUEUE，检查 socket 元组、原始数据、错误类型/代码和1280字节下一跳 MTU。 TUN 普通 IPv4/IPv6 输入/输出也经过过滤/NAT，不是策略旁路。
+默认/embedded/2GHz 生产 C+Rust 测试覆盖 SNAT/DNAT、TCP/UDP、最短/较长引用、三类差错、校验和、MTU保留以及每个截断前缀。三节点 KVM 的 Linux LAN 使用同一 ELF 和真实 MSG_ERRQUEUE，检查 socket 元组、原始数据、错误类型/代码和1280字节下一跳 MTU。 BSD 的网卡与 TUN IPv4 输入和输出经过公共过滤/NAT。
 
 ## IPv4 分片
 

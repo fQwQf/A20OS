@@ -52,6 +52,7 @@ const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
+const RT_TABLE_MAIN: u32 = 254;
 const RTM_DELROUTE: u16 = 25;
 const RTM_NEWRULE: u16 = 32;
 const RTM_DELRULE: u16 = 33;
@@ -1161,6 +1162,11 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
     if it.bad || r.ifindex > 0xffff {
         return -EINVAL;
     }
+    // Treat the omitted table as main. Keep the Linux table number in
+    // the shared FIB, which reserves zero to mark unused entries.
+    if r.table == 0 {
+        r.table = RT_TABLE_MAIN;
+    }
     if msg_type == RTM_NEWROUTE {
         if r.ifindex == 0 {
             return -EINVAL;
@@ -1180,11 +1186,11 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
     }
     /* Keep the protocol RIB and the common policy FIB in the same
      * transaction.  Backends without a second RIB make this a no-op. */
-    let mut backend_rc = 0;
-    if r.table == 0 {
+    let mirrored = r.table == RT_TABLE_MAIN;
+    if mirrored {
         let dst = r.destination.to_ne_bytes();
         let gateway = r.gateway.to_ne_bytes();
-        backend_rc = net_stack_route_update_v4(
+        let backend_rc = net_stack_route_update_v4(
             dst.as_ptr(),
             r.prefix,
             if r.gateway == 0 { core::ptr::null() } else { gateway.as_ptr() },
@@ -1200,10 +1206,10 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
     /* A boot-configured default route may exist only in the backend RIB.  A
      * successful backend delete must not be converted to ESRCH merely because
      * the policy FIB was never seeded with that implicit route. */
-    if common_rc == -ESRCH && msg_type == RTM_DELROUTE && backend_rc == 0 {
+    if common_rc == -ESRCH && msg_type == RTM_DELROUTE && mirrored {
         return 0;
     }
-    if common_rc < 0 && backend_rc == 0 {
+    if common_rc < 0 && mirrored {
         let dst = r.destination.to_ne_bytes();
         let gateway = r.gateway.to_ne_bytes();
         let rollback_remove = (msg_type == RTM_NEWROUTE) as i32;

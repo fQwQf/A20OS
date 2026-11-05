@@ -101,7 +101,7 @@ int a20_bsd_port_nic_ifindex(void *context);
 void a20_bsd_port_nic_set_forwarding(int ipv4, int ipv6);
 
 /* TUN (L3) interface.  The returned pointer is opaque to the common layer. */
-void *a20_bsd_port_tun_create(int unit, a20_bsd_tun_emit_t emit, void *ctx);
+void *a20_bsd_port_tun_create(int unit, int filter_index, a20_bsd_tun_emit_t emit, void *ctx);
 void a20_bsd_port_tun_destroy(void *context);
 int a20_bsd_port_tun_inject(void *context, const void *packet, size_t length);
 int a20_bsd_port_tun_set_mtu(void *context, uint16_t mtu);
@@ -110,6 +110,8 @@ int a20_bsd_port_tun_get_addr(void *context, uint8_t address[4],
                               uint8_t mask[4], uint8_t gateway[4]);
 int a20_bsd_port_tun_set_addr(void *context, const uint8_t address[4],
                               const uint8_t mask[4], int add);
+int a20_bsd_port_tun_route4(void *context, const uint8_t destination[4],
+                            uint8_t prefix, int remove);
 int a20_bsd_port_tun_set_addr6(void *context, const uint8_t address[16],
                                uint8_t prefix, int add);
 int a20_bsd_port_tun_snapshot(void *context, a20_bsd_tun_info_t *out);
