@@ -17,3 +17,6 @@ expect = [
     "unmapped iova=0x20000000 -> fault=1",
     "System is going down for power-off",
 ]
+
+[net]
+stack = "bsd"

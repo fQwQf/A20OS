@@ -3,7 +3,7 @@
 `NET_ROLE=host` 是默认值，不转发经过本机的 IPv4/IPv6 报文。`NET_ROLE=router` 显式编入跨接口转发能力，产物目录与 host 隔离：
 
 ```sh
-make ARCH=x86_64 NR_CPUS=2 NET_LANES=4 NET_ROLE=router kernel-only
+make ARCH=x86_64 NR_CPUS=2 NET_STACK=bsd NET_LANES=1 NET_ROLE=router kernel-only
 ```
 
 这项选择和 `NET_STACK`、`NET_PROFILE` 独立。无 TCP/IP 的 MCU 不能选择 router。**router 表示已编入能力，不表示成熟软路由已经验收。** 分片 NAT、ICMP 差错翻译、 PMTU、故障恢复和规模成本仍需逐项完成，不能把打开 forwarding 宏当作结论。 LAN DHCPv4/DNS A 转发的配置与已验证范围见 [lan-services.md](./lan-services.md)。

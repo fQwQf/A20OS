@@ -386,8 +386,11 @@ void init_kthread(void) {
      * available. Embedded deployments link all drivers into the kernel. */
 #ifdef CONFIG_DRIVER_DEPLOYMENT_GENERIC
     driver_manager_init();
-    net_stack_attach_interfaces();
 #endif
+    /* BSD starts a process-context executor here even when the NIC driver is
+     * statically linked. Driver packaging must not decide whether it starts. */
+    if (!current_board || !current_board->defer_network_init)
+        net_stack_attach_interfaces();
 
 #ifdef CONFIG_BSD_BOOTSTRAP_TEST
     extern void a20_bsd_bootstrap_test(void);

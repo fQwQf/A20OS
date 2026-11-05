@@ -6,3 +6,6 @@ arch = "riscv64"
 
 [machine]
 smp = 4
+
+[net]
+stack = "bsd"

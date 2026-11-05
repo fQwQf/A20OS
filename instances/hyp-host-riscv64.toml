@@ -9,3 +9,6 @@ smp = 1
 memory = "1G"
 accel = "tcg"
 extra_qemu = ["-cpu", "rv64,h=true,sstc=true"]
+
+[net]
+stack = "bsd"

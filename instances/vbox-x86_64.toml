@@ -60,3 +60,6 @@ expect = ["A20OS", "poweroff"]
 # is exactly what it cannot reach.
 boot_media = ["build/x86_64-pc/a20os-uefi-disk.img"]
 media_device = "/dev/sdX"
+
+[net]
+stack = "bsd"

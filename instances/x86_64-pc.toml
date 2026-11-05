@@ -51,3 +51,6 @@ console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready (
 # swap state and capacity; it cannot infer the intended disk from its name.
 boot_media = ["build/x86_64-pc/a20os-rescue.iso"]
 media_device = "/dev/sdX"
+
+[net]
+stack = "bsd"

@@ -17,3 +17,6 @@ world_size_mb = 2048
 # mkrootfs 装进镜像 /lib/drivers，内核才能在 distro 启动时从
 # /extra/lib/drivers 加载它并拉起 eth0（DHCP 默认开启）。
 drivers = ["virtio-net"]
+
+[net]
+stack = "bsd"

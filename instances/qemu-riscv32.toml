@@ -3,3 +3,6 @@
 name = "qemu-riscv32"
 description = "RISC-V 32 text-mode development boot in QEMU (virt)"
 arch = "riscv32"
+
+[net]
+stack = "lwip"

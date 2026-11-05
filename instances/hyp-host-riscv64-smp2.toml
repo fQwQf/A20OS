@@ -8,3 +8,6 @@ smp = 2
 memory = "2G"
 accel = "tcg"
 extra_qemu = ["-cpu", "rv64,h=true,sstc=true"]
+
+[net]
+stack = "bsd"

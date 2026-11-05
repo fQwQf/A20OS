@@ -6,3 +6,6 @@ arch = "riscv64"
 
 [kernel]
 bringup = true
+
+[net]
+stack = "bsd"

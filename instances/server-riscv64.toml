@@ -14,7 +14,7 @@ memory = "1G"
 smp = 2
 
 [net]
-stack = "lwip"
+stack = "bsd"
 hostfwd = ["tcp::2222-:22"]
 
 [rootfs]

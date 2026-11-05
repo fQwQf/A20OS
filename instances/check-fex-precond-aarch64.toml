@@ -33,3 +33,6 @@ expect = [
 	"PROT_HINT: DONE",
 ]
 timeout = "1200s"
+
+[net]
+stack = "bsd"

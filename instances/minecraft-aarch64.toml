@@ -18,3 +18,6 @@ display = "gtk,gl=on"
 [rootfs]
 world = "xfce"
 world_size_mb = 4096
+
+[net]
+stack = "bsd"

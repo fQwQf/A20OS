@@ -65,7 +65,7 @@ A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以�
 
 ## 网络栈的当前边界
 - `NET_STACK=lwip` 默认使用未修改的上游 lwIP 2.2.1 submodule，核心串行执行，`NET_LANES=1`；SMP 仍可用于应用与 I/O。`NET_STACK=native` 是从旧分叉提取并由 A20OS 维护的 lwIP 衍生实现，保留 lane/CUBIC 等扩展与原始版权。
-- BSD 候选使用独立 F-Stack 项目的固定版本 submodule，尚未完成内核运行时与设备适配；`NET_STACK=bsd` 明确报错。没有独立 legacy 后端，也不会静默回退。
+- 64 位非嵌入式实例统一选择 `NET_STACK=bsd`，运行固定版本 F-Stack 的真实协议栈；32 位、MCU、NOMMU 和嵌入式板卡保留轻量配置。不同架构的运行验证及软路由剩余工作见 [补全记录](docs/net/router-completion.md)。没有独立 legacy 后端，也不会静默回退。
 - TCP 默认走真实协议 LISTEN/连接路径。`a20.tcpmode=fast` 是历史测试用的本地 socket 配对捷径，不用于协议性能或外部服务验收。
 - `NET_ROLE=router` 开启 IPv4/IPv6 转发。真实 KVM 三节点已覆盖双网卡、动态 NAPT 源端口冲突、网关/源策略路由及 Linux dnsmasq DHCP/DNS。原版 DHCP 使用`--dhcp-broadcast`；其动态 SIOCSARP 尚不支持。
 - 已接入 ICMP RELATED 翻译与转发 MTU 差错；完整分片 NAT、本机 PMTU/差错队列仍未完成，当前不能宣称生产软路由成熟。默认 conntrack=256 是已实测的连接容量限制，服务器档原版在保持跟踪开启时通过 320连接；固定 INET 暂存区仍有约30 KiB/连接的成本。

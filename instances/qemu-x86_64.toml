@@ -3,3 +3,6 @@
 name = "qemu-x86_64"
 description = "x86_64 text-mode development boot in QEMU (q35)"
 arch = "x86_64"
+
+[net]
+stack = "bsd"

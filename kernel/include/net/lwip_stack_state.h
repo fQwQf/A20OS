@@ -78,7 +78,7 @@ int  a20_lwip_if_set_addr6(unsigned ifindex, const uint8_t addr[16],
                            uint8_t prefixlen);
 int  a20_lwip_if_del_addr6(unsigned ifindex, const uint8_t addr[16]);
 int  a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu);
-int  a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask);
+int  a20_lwip_if_set_flags(unsigned ifindex, uint32_t flags, uint32_t mask);
 int  a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len);
 
 #endif /* _NET_LWIP_STACK_STATE_H */

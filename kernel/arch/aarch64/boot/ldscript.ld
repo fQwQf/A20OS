@@ -35,6 +35,8 @@ SECTIONS
     .data : AT(ADDR(.data) - LOAD_DELTA) {
         *(.data .data.*)
         *(.sdata .sdata.*)
+        /* Clang emulated TLS uses a statically relocated GOT for descriptors. */
+        *(.got .got.*)
     } :data
 
     . = ALIGN(8);

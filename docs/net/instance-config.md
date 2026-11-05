@@ -87,13 +87,15 @@ make NET_INSTANCE=xfce-x86_64 NET_STACK=lwip kernel-only
 
 ## 5. 迁移旧实例
 
-旧实例不需要写 `[net]` 也能构建，此时沿用 Makefile 的架构默认值：
+未声明 `[net].stack` 时，Makefile 按用途选择默认值：
 
-- x86_64 → `bsd`
-- 其它 hosted 架构 → `lwip`
+- 64 位普通带 MMU 的虚拟机、PC 桌面/服务器 → `bsd`
+- 32 位、NOMMU、明确的嵌入式板卡 → `lwip`
 - MCU → `none`
 
-要固定行为、避免默认值将来变化影响产物，应显式写入 `stack`。仓库中的`xfce-x86_64`、`benchmark-x86_64`、`release-riscv64`、`release-loongarch64`、`server-riscv64` 与 `qemu-riscv32-mcu` 已经显式声明。
+仓库中的全部 64 位非嵌入式实例已显式声明 `stack = "bsd"`。ARM32/RV32 普通虚拟机保留 `stack = "lwip"`。
+`driver_deployment = "embedded"` 仅表示驱动静态打包，不改变用途分类。
+`NET_INSTANCE` 同时传递 `NOMMU`，避免 NOMMU 实例错误继承普通虚拟机的默认后端。
 
 ## 6. 与资源档位的关系
 

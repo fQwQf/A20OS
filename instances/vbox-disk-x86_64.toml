@@ -25,3 +25,6 @@ expect = ["A20OS", "poweroff"]
 # the artifact is attached to a VM as a disk, not dd'd onto a block device.
 boot_media = ["build/x86_64-pc/a20os-rescue-disk.img"]
 media_device = "/dev/sdX"
+
+[net]
+stack = "bsd"

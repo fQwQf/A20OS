@@ -22,6 +22,7 @@ description = "Cluster UDP demo node A: socket-UDP tunnel to node B, 10.0.3.2/24
 arch = "riscv64"
 
 [net]
+stack = "bsd"
 mac = "52:54:00:12:34:01"
 backend = "socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121"
 guest_ip = "10.0.3.2"

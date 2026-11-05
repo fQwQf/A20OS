@@ -8,3 +8,6 @@ abi = "linux"
 [test]
 commands = ["syscall_smoke", "poweroff"]
 expect = ["SYSCALL_SMOKE: PASS"]
+
+[net]
+stack = "bsd"

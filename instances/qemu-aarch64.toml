@@ -3,3 +3,6 @@
 name = "qemu-aarch64"
 description = "AArch64 text-mode development boot in QEMU (virt)"
 arch = "aarch64"
+
+[net]
+stack = "bsd"

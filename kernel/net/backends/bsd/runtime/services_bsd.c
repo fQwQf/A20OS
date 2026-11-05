@@ -22,8 +22,20 @@ struct ff_config ff_global_cfg;
 const Elf64_Dyn _DYNAMIC[] = {{DT_NULL, {0}}};
 
 struct environment_entry { char name[64], value[256]; };
+#define ENVIRONMENT_ENTRIES 16
+#ifdef A20_BSD_EXPLICIT_TLS
+#include <a20_bsd_explicit_tls.h>
+static struct port_emutls_control environment_control = {
+    sizeof(struct environment_entry) * ENVIRONMENT_ENTRIES,
+    __alignof__(struct environment_entry), 0, NULL
+};
+static struct port_emutls_control error_control = {sizeof(int), __alignof__(int), 0, NULL};
+#define environment ((struct environment_entry *)__emutls_get_address(&environment_control))
+#define last_error (*(int *)__emutls_get_address(&error_control))
+#else
 static __thread struct environment_entry environment[16];
 static __thread int last_error;
+#endif
 static size_t bounded_length(const char *s, size_t maximum)
 {
     size_t n = 0;
@@ -33,7 +45,7 @@ static size_t bounded_length(const char *s, size_t maximum)
 char *ff_getenv(const char *name)
 {
     if (!name) return NULL;
-    for (unsigned i = 0; i < nitems(environment); ++i)
+    for (unsigned i = 0; i < ENVIRONMENT_ENTRIES; ++i)
         if (environment[i].name[0] && !strcmp(environment[i].name, name))
             return environment[i].value;
     return NULL;
@@ -45,7 +57,7 @@ int ff_setenv(const char *name, const char *value)
     size_t length = bounded_length(value, sizeof(environment[0].value));
     if (key == sizeof(environment[0].name) || length == sizeof(environment[0].value)) return EINVAL;
     struct environment_entry *empty = NULL;
-    for (unsigned i = 0; i < nitems(environment); ++i) {
+    for (unsigned i = 0; i < ENVIRONMENT_ENTRIES; ++i) {
         if (!environment[i].name[0] && !empty) empty = &environment[i];
         if (environment[i].name[0] && !strcmp(environment[i].name, name)) {
             memcpy(environment[i].value, value, length + 1);
