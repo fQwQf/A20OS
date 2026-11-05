@@ -243,6 +243,7 @@ static void test_msg_nosignal(int fd)
 #define NETLINK_ROUTE_   0
 #define NLT_ERROR        2
 #define NLT_DONE         3
+#define NLT_NEWLINK      16
 #define NLT_GETLINK      18
 #define NLT_NEWADDR      20
 #define NLT_GETADDR      22
@@ -442,6 +443,37 @@ static int set_ipv4(int fd, const char *name, const char *ip, const char *mask)
     return 1;
 }
 
+static int rtnetlink_ack(const void *request, size_t length)
+{
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE_);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_nl local = {.nl_family = AF_NETLINK};
+    struct {
+        struct nlmsghdr header;
+        int32_t error;
+        struct nlmsghdr request;
+    } ack;
+    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) == 0 &&
+        send(fd, request, length, 0) == (ssize_t)length) {
+        ssize_t count = recv(fd, &ack, sizeof(ack), 0);
+        if (count >= (ssize_t)(sizeof(ack.header) + sizeof(ack.error)) &&
+            ack.header.nlmsg_seq == 1 && ack.header.nlmsg_type == NLT_ERROR) {
+            if (ack.error == 0) {
+                close(fd);
+                return 0;
+            }
+            errno = -ack.error;
+        } else if (count >= 0) {
+            errno = EPROTO;
+        }
+    }
+    int error = errno;
+    close(fd);
+    errno = error;
+    return -1;
+}
+
 static int set_ipv6(const char *name, const char *ip, const char *prefix)
 {
     struct {
@@ -464,43 +496,46 @@ static int set_ipv6(const char *name, const char *ip, const char *prefix)
     request.address.ifa_prefixlen = (uint8_t)bits;
     request.local = (struct rtattr){sizeof(request.local) + sizeof(request.value), NLT_IFA_LOCAL};
 
-    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE_);
-    if (fd < 0) {
-        perror("NETCTL: FAIL IPv6 control socket");
+    if (rtnetlink_ack(&request, sizeof(request)) < 0) {
+        perror("NETCTL: FAIL configure IPv6");
         return 1;
     }
-    struct sockaddr_nl local = {.nl_family = AF_NETLINK};
+    puts("NETCTL: IPv6 configured");
+    return 0;
+}
+
+static int set_link(const char *name, const char *state)
+{
+    unsigned index = if_nametoindex(name);
+    int up = !strcmp(state, "up");
+    if (!index || (!up && strcmp(state, "down"))) {
+        fprintf(stderr, "NETCTL: FAIL invalid link configuration\n");
+        return 1;
+    }
     struct {
         struct nlmsghdr header;
-        int32_t error;
-        struct nlmsghdr request;
-    } ack;
-    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) == 0 &&
-        send(fd, &request, sizeof(request), 0) == sizeof(request)) {
-        ssize_t count = recv(fd, &ack, sizeof(ack), 0);
-        if (count >= (ssize_t)(sizeof(ack.header) + sizeof(ack.error)) &&
-            ack.header.nlmsg_seq == 1 && ack.header.nlmsg_type == NLT_ERROR) {
-            if (ack.error == 0) {
-                close(fd);
-                puts("NETCTL: IPv6 configured");
-                return 0;
-            }
-            errno = -ack.error;
-        } else if (count >= 0) {
-            errno = EPROTO;
-        }
+        struct ifinfomsg link;
+    } request = {
+        .header = {sizeof(request), NLT_NEWLINK, NLT_REQUEST_ACK, 1, 0},
+        .link = {.ifi_index = (int32_t)index, .ifi_change = IFF_UP,
+                 .ifi_flags = up ? IFF_UP : 0},
+    };
+    if (rtnetlink_ack(&request, sizeof(request)) < 0) {
+        perror("NETCTL: FAIL configure link");
+        return 1;
     }
-    perror("NETCTL: FAIL configure IPv6");
-    close(fd);
-    return 1;
+    puts("NETCTL: link configured");
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
+    if (argc == 4 && !strcmp(argv[1], "set-link"))
+        return set_link(argv[2], argv[3]);
     if (argc == 5 && !strcmp(argv[1], "set-ipv6"))
         return set_ipv6(argv[2], argv[3], argv[4]);
     if (argc != 1 && (argc != 5 || strcmp(argv[1], "set-ipv4"))) {
-        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX]\n");
+        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX | set-link IF up|down]\n");
         return 2;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);

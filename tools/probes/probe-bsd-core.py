@@ -101,7 +101,7 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
         code = (upstream/source).read_text()
         for old, new in replacements:
             if code.count(old) != 1:
-                raise SystemExit(f'F-Stack IPv4 port anchor changed: {source}: {old!r}')
+                raise SystemExit(f'F-Stack network port anchor changed: {source}: {old!r}')
             code = code.replace(old, new)
         path.write_text(code)
 
@@ -124,6 +124,21 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
          '\n\t/*\n\t * Try to forward the packet, but if we fail continue.'),
         ('dchg = (odst.s_addr != ip->ip_dst.s_addr);\n\tifp =',
          'dchg |= (odst.s_addr != ip->ip_dst.s_addr);\n\tifp ='),
+    ])
+
+    # Stop soliciting only after the native RA validation has accepted a router.
+    overlay('freebsd/netinet6/nd6_rtr.c', [
+        ('static struct nd_defrouter *defrtrlist_update(struct nd_defrouter *);',
+         'void port_ipv6_router_seen(struct ifnet *);\n'
+         'static struct nd_defrouter *defrtrlist_update(struct nd_defrouter *);'),
+        ('int mcast;\n', 'int mcast;\n\tbool have_router;\n'),
+        ('dr = defrtrlist_update(&dr0);',
+         'dr = defrtrlist_update(&dr0);\n'
+         '\thave_router = dr0.rtlifetime != 0;'),
+        ('lladdrlen, ND_ROUTER_ADVERT, 0);',
+         'lladdrlen, ND_ROUTER_ADVERT, 0);\n'
+         '\tif (have_router)\n'
+         '\t\tport_ipv6_router_seen(ifp);'),
     ])
 
     # Retain FreeBSD's mbuf ownership, timer and global quota. Include ingress

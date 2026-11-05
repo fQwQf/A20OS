@@ -25,7 +25,9 @@ BSD 当前仍缺多 FIB 与源策略、DHCPv6-PD 及 LAN 前缀发布。BSD 的
 ## WAN IPv6 自动配置
 
 启动时传入 `a20.ipv6_ra=en3`，指定接收 IPv6 Router Advertisement 的
-网口。该接口使用 BSD 的邻居发现和 SLAAC。启用 `NET_ROLE=router` 时，
+网口。该接口在启动或由管理员重新启用时发送 Router Solicitation，最多
+发送三次，间隔四秒。收到带有效路由器寿命的通告后停止探测。该接口
+使用 BSD 的邻居发现和 SLAAC。启用 `NET_ROLE=router` 时，
 它仍能从 RA 学习 WAN 默认路由，供配置过 IPv6 地址的 LAN 使用。
 默认路由随通告寿命到期撤销，也接受寿命为零的即时撤销。其他接口
 继续拒绝 RA。接收、地址生成和重复地址检测由 BSD 协议栈处理。
@@ -41,7 +43,6 @@ python3 tools/net/tests/test-bsd-router-ipv6-ra.py \
   --kernel <路由内核的kernel.bin> --out <新的证据目录>
 ```
 
-目前通过上游发送的 RA 学习地址和路由。主动 Router Solicitation、
 IPv6 地址和路由的 Linux 查询接口、DHCPv6-PD 及 LAN RA 仍在补全。
 
 ## 最小双网卡配置
