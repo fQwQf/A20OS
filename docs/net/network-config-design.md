@@ -36,6 +36,7 @@ QEMU AArch64 当前不导入 FDT `/chosen/bootargs`，所以给 QEMU 增加 `-ap
 | `a20.gateway` | IPv4 默认网关 | `a20.gateway=10.0.2.2` |
 | `a20.dns` | IPv4 DNS 服务器，可出现多次 | `a20.dns=10.0.2.3` |
 | `a20.dhcp` | `1` 启用 DHCP，`0` 禁用 | `a20.dhcp=1` |
+| `a20.ipv6_ra` | 指定 BSD 后端接收 RA 的 WAN 接口 | `a20.ipv6_ra=en3` |
 | `a20.hostname` | hostname 字符串，最长 63 字节 | `a20.hostname=a20os` |
 | `a20.tcpmode` | `fast` 或 `lwip`，见下 | `a20.tcpmode=lwip` |
 

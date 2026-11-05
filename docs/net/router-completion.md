@@ -15,7 +15,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
 | IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
-| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | 待完成 |
+| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC 双网口通过，DHCPv6-PD 与 LAN 发布待完成 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
@@ -147,3 +147,12 @@ MASQUERADE 绑定，保留其他接口的状态。生产状态机的选择性清
 重开均通过，记录为 `pppoe-tun-fixed-01` 至 `pppoe-tun-fixed-20`。
 四架构 BSD 网络回归为 `pppoe-sockets-<arch>-racefix`。ARM32/RV32
 的 lwIP 启动关机 smoke 通过。IPv6CP 和 PPP DNS 选项尚未接入。
+
+## WAN IPv6 RA 与 SLAAC
+
+`ra-before` 在原内核收到有效 WAN RA 后未观察到 SLAAC DAD。`ra-wire-final`
+验证了通过 `a20.ipv6_ra=en3` 启用后，LAN RA 和错误 Hop Limit 的
+RA 被拒绝。有效 RA 生成了可达的 WAN 地址和可用的默认路由。PCAP
+记录了双向 LAN 转发、零寿命撤销、无续期自然过期和收到新通告后恢复。
+同一 x86_64 内核通过了 TUN 与 Linux CHAP PPPoE 回归。四个 64 位
+架构通过 BSD socket 回归，ARM32 和 RV32 通过 lwIP 启动关机 smoke。

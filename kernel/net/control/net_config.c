@@ -117,6 +117,13 @@ void a20_net_config_init(void)
             }
         }
 
+        if (extract_key_value(p, tok_end, "a20.ipv6_ra", val, sizeof(val))) {
+            if (strlen(val) < sizeof(g_a20_net_config.ipv6_ra_if))
+                strcpy(g_a20_net_config.ipv6_ra_if, val);
+            else
+                g_a20_net_config.ipv6_ra_if[0] = '\0';
+        }
+
         if (extract_key_value(p, tok_end, "a20.hostname", val, sizeof(val))) {
             strncpy(g_a20_net_config.hostname, val,
                     sizeof(g_a20_net_config.hostname) - 1);

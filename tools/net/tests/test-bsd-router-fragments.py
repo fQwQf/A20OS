@@ -237,7 +237,7 @@ def exercise(lan, wan, passed):
     passed.append('forwarding_after_fragment_drops')
 
 
-def run_router(args, rules, test, *, wan_ipv4=True):
+def run_router(args, rules, test, *, wan_ipv4=True, bootargs=()):
     """Boot the shared dual-link wire fixture and persist evidence."""
     kernel = args.kernel.resolve(strict=True)
     out = args.out.resolve()
@@ -247,7 +247,7 @@ def run_router(args, rules, test, *, wan_ipv4=True):
     argv = ['qemu-system-x86_64', '-machine', 'q35', '-accel', 'kvm',
             '-m', '1024', '-smp', '2', '-nographic', '-monitor', 'none',
             '-no-reboot', '-kernel', str(kernel), '-append',
-            f'a20.ip=192.168.10.1 a20.netmask={MASK} a20.dhcp=0',
+            ' '.join((f'a20.ip=192.168.10.1 a20.netmask={MASK} a20.dhcp=0', *bootargs)),
             *lan.argv(0, out), *wan.argv(1, out)]
     result = dict(argv=argv, kernel_sha256=hashlib.sha256(kernel.read_bytes()).hexdigest(),
                   passed=[], status='failed')
@@ -265,10 +265,11 @@ def run_router(args, rules, test, *, wan_ipv4=True):
                 guest.send(f'netctl set-ipv4 en3 10.20.0.1 {MASK}')
                 guest.until('NETCTL: IPv4 configured')
                 guest.until('# ')
-            setup = ' && '.join(f"echo '{rule}' > /proc/a20/netfilter" for rule in rules)
-            guest.send(setup + ' && echo A20_ROUTER_POLICY_READY')
-            guest.until('A20_ROUTER_POLICY_READY', whole_line=True)
-            guest.until('# ')
+            if rules:
+                setup = ' && '.join(f"echo '{rule}' > /proc/a20/netfilter" for rule in rules)
+                guest.send(setup + ' && echo A20_ROUTER_POLICY_READY')
+                guest.until('A20_ROUTER_POLICY_READY', whole_line=True)
+                guest.until('# ')
             lan.resolve()
             if wan_ipv4:
                 wan.resolve()
