@@ -38,6 +38,38 @@ unsafe fn occupied(mask: *const u64, fd: usize) -> bool {
     unsafe { mask.add(fd >> 6).read() & (1u64 << (fd & 63)) != 0 }
 }
 
+/// Cursor over set bits. No references into the bitmap survive next(), so
+/// the caller can clear the returned slot while retaining the table lock.
+struct OpenSlots {
+    mask: *const u64,
+    limit: usize,
+    next: usize,
+}
+
+impl OpenSlots {
+    /// The bitmap must remain alive and serialized for the cursor's lifetime.
+    unsafe fn new(mask: *const u64, limit: usize) -> Self {
+        Self { mask, limit, next: 0 }
+    }
+}
+
+impl Iterator for OpenSlots {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        while self.next < self.limit {
+            let word = self.next >> 6;
+            let bits = unsafe { self.mask.add(word).read() } & (u64::MAX << (self.next & 63));
+            if bits != 0 {
+                let fd = (word << 6) + bits.trailing_zeros() as usize;
+                self.next = fd + 1;
+                return (fd < self.limit).then_some(fd);
+            }
+            self.next = (word + 1) << 6;
+        }
+        None
+    }
+}
+
 unsafe fn set_occupied(mask: *mut u64, fd: usize, value: bool) {
     let word = unsafe { mask.add(fd >> 6) };
     let bits = unsafe { word.read() };
@@ -494,14 +526,11 @@ pub unsafe extern "C" fn a20_fdtable_clone_checked_rust(
         }
     }
 
-    for fd in 0..max_files {
-        if !unsafe { occupied(src_mask, fd) } {
-            continue;
-        }
+    for fd in unsafe { OpenSlots::new(src_mask, max_files) } {
         let vf = unsafe { src_slots.add(fd).read() };
         let result = unsafe { try_get_ref(vf) };
         if result < 0 {
-            for rollback_fd in 0..fd {
+            for rollback_fd in unsafe { OpenSlots::new(dst_mask, fd) } {
                 let rollback_vf = unsafe { dst_slots.add(rollback_fd).read() };
                 if !rollback_vf.is_null() {
                     unsafe { put_ref(rollback_vf) };
@@ -698,9 +727,8 @@ pub unsafe extern "C" fn a20_fdtable_detach_bulk_rust(
         return valid;
     }
     let mut count = 0usize;
-    for fd in 0..max_files {
-        if unsafe { occupied(mask, fd) }
-            && (!cloexec_only || unsafe { cloexec.add(fd).read() != 0 })
+    for fd in unsafe { OpenSlots::new(mask, max_files) } {
+        if !cloexec_only || unsafe { cloexec.add(fd).read() != 0 }
         {
             count += 1;
         }
@@ -709,9 +737,8 @@ pub unsafe extern "C" fn a20_fdtable_detach_bulk_rust(
         return EINVAL;
     }
     let mut out = 0usize;
-    for fd in 0..max_files {
-        if !unsafe { occupied(mask, fd) }
-            || (cloexec_only && unsafe { cloexec.add(fd).read() == 0 })
+    for fd in unsafe { OpenSlots::new(mask, max_files) } {
+        if cloexec_only && unsafe { cloexec.add(fd).read() == 0 }
         {
             continue;
         }

@@ -165,7 +165,7 @@ static int ckpt_snapshot_fds(task_t *t, a20_ckpt_fd_t **out, uint32_t *nr_out,
     /* Take references under the spinlock only; path/offset reads and any
      * sleeping happen after the unlock. */
     uint64_t irqf = spin_lock_irqsave(&files->lock);
-    for (int fd = 0; fd < MAX_FILES && n < CKPT_MAX_FD; fd++) {
+    for (int fd = 0; (size_t)fd < files->capacity && n < CKPT_MAX_FD; fd++) {
         vfile_t *vf = files->fd[fd];
         if (!vf)
             continue;

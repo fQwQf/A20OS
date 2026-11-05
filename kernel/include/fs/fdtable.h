@@ -9,6 +9,8 @@
 
 typedef struct vfile vfile_t;
 
+#define FDTABLE_INLINE_FILES ((MAX_FILES < 64) ? MAX_FILES : 64)
+
 /*
  * files_struct lifetime invariants:
  * - task_t.files points to one files_struct. fork-like sharing increments
@@ -40,9 +42,15 @@ typedef struct files_struct {
     refcount_t refcount;
     int     owners;
     int     release_owner_pid;
-    struct vfile *fd[MAX_FILES];
-    uint8_t cloexec[MAX_FILES];
-    uint64_t open_mask[(MAX_FILES + 63) / 64];
+    /* All array pointers and capacity are protected by lock. Arrays grow as
+     * one allocation; readers must not retain pointers after unlocking. */
+    size_t capacity;
+    struct vfile **fd;
+    uint8_t *cloexec;
+    uint64_t *open_mask;
+    struct vfile *inline_fd[FDTABLE_INLINE_FILES];
+    uint8_t inline_cloexec[FDTABLE_INLINE_FILES];
+    uint64_t inline_mask[(FDTABLE_INLINE_FILES + 63) / 64];
     int     next_fd;
 } files_struct_t;
 
