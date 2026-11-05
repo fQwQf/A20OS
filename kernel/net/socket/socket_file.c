@@ -373,7 +373,7 @@ void *a20_net_install_prepare(void *sp, int flags)
     vfile_t *vf = vfile_alloc();
     if (!vf)
         return NULL;
-    vf->flags = flags;
+    vf->flags = flags & ~O_CLOEXEC;
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_net_ops;
     vf->priv = s;
