@@ -94,6 +94,8 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"NET_STACK={n.stack}")
     if n.lanes is not None:
         v.append(f"NET_LANES={n.lanes}")
+    if n.conntrack_entries is not None:
+        v.append(f"NET_CONNTRACK_ENTRIES={n.conntrack_entries}")
     if n.resource_profile is not None:
         v.append(f"NET_PROFILE={n.resource_profile}")
     if n.role is not None:

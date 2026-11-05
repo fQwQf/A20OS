@@ -133,6 +133,7 @@ class NetCfg:
     # select a stack.
     lanes: int | None = None
     resource_profile: int | None = None
+    conntrack_entries: int | None = None
     # "host" or "router"; router requires a TCP/IP backend.
     role: str | None = None
     # Guest-side static IPv4, handed to the kernel as a20.* boot arguments
@@ -356,7 +357,7 @@ _SECTION_SPECS: Final = {
             for f in GuiCfg.__dataclass_fields__},
     "net": {f: ("str" if f in ("mac", "backend", "guest_ip", "guest_netmask",
                                "guest_gateway", "stack", "role")
-                else "int" if f in ("lanes", "resource_profile")
+                else "int" if f in ("lanes", "resource_profile", "conntrack_entries")
                 else "str_list")
             for f in NetCfg.__dataclass_fields__},
     "rootfs": {f: ("str_list" if f == "drivers"

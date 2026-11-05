@@ -19,6 +19,9 @@ resource_profile = 2
 # 可选：host | router，对应 NET_ROLE
 role = "host"
 
+# 可选：BSD 的连接跟踪条目数，对应 NET_CONNTRACK_ENTRIES
+conntrack_entries = 8192
+
 # 以下字段是 QEMU 设备/客户机网络，不是协议栈选择：
 mac = "52:54:00:12:34:56"
 backend = "socket,id=net,..."   # -netdev 规格
@@ -104,5 +107,7 @@ make NET_INSTANCE=xfce-x86_64 NET_STACK=lwip kernel-only
 - 同一个 lwIP 可以跑 1/2/3 档；
 - BSD 当前只验证了 2 档，因此实例若写 1/3 会在校验阶段失败；
 - `lanes` 是执行并发度，不是 QEMU 拓扑，也不改变预算。
+
+BSD 路由实例默认预留 4096 条连接。可以设置 `conntrack_entries`，允许 256 至 16384 的 2 的幂。该值独立于 socket 和 mbuf 的资源档位。
 
 “避免重复 profile”的含义是：一份实例声明同时决定栈、并发和预算，后端不再各自维护一套私有的 `NET_PROFILE` 映射；后端只读取 `kernel/include/net/profile.h`中的统一常量。

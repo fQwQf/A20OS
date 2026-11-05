@@ -27,6 +27,7 @@ typedef struct net_ct_view {
     uint32_t buckets;
     uint16_t *head;
     uint16_t *rhead;
+    uint16_t *free_head;
     uint32_t *used;
     uint32_t *sweep;
     int32_t  *enabled;

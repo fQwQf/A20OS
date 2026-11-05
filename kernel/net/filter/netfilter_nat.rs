@@ -155,6 +155,7 @@ pub struct CtView {
     pub buckets: u32,
     pub head: *mut u16,
     pub rhead: *mut u16,
+    pub free_head: *mut u16,
     pub used: *mut u32,
     pub sweep: *mut u32,
     pub enabled: *mut i32,
@@ -223,9 +224,13 @@ impl View<'_> {
             self.put_head(b, false, NONE);
             self.put_head(b, true, NONE);
         }
+        // Free slots have proto=0 and reuse their forward-chain link.
         for i in 0..self.0.max as usize {
-            self.put_entry(i, zero_entry());
+            let mut entry = zero_entry();
+            entry.hash_next = if i + 1 < self.0.max as usize { (i + 1) as u16 } else { NONE };
+            self.put_entry(i, entry);
         }
+        *self.0.free_head = if self.0.max == 0 { NONE } else { 0 };
     }
 }
 unsafe fn view<'a>(v: *const CtView) -> View<'a> {
@@ -527,12 +532,12 @@ unsafe fn ct_insert(v: &View, entry: &mut ConntrackEntry) -> i32 {
     /* Conntrack is state, not a cache. Evicting a live tuple permits a new NAT
      * mapping to steal replies from a connection that is still in use. The
      * periodic sweeper is the only automatic reclamation path. */
-    if *v.0.used >= v.0.max || !binding_free(v, entry, None) {
+    let slot = *v.0.free_head;
+    if slot == NONE || !binding_free(v, entry, None) {
         return -ENOSPC;
     }
-    let Some(slot) = (0..v.0.max as usize).find(|&i| !used_slot(&v.entry(i))) else {
-        return -ENOSPC;
-    };
+    let slot = slot as usize;
+    *v.0.free_head = v.entry(slot).hash_next;
     entry.last_ms = ct_now(v);
     ct_link(v, slot, *entry);
     *v.0.used += 1;
@@ -783,12 +788,13 @@ pub unsafe extern "C" fn a20_netfilter_ct_expire(v: *const CtView, max_scan: u32
                 step += 1;
                 continue;
             }
-            unsafe { ct_unlink(&v, i) };
-            v.put_entry(i, zero_entry());
             unsafe {
-                if *v.0.used != 0 {
-                    *v.0.used -= 1;
-                }
+                ct_unlink(&v, i);
+                let mut free = zero_entry();
+                free.hash_next = *v.0.free_head;
+                v.put_entry(i, free);
+                *v.0.free_head = i as u16;
+                *v.0.used -= 1;
             }
             freed += 1;
             let lifetime = unsafe { &mut *v.0.lifetime };

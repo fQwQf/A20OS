@@ -78,8 +78,13 @@ _Static_assert(__builtin_offsetof(net_nat_rule_t, src_port) == 4 &&
 _Static_assert(sizeof(net_conntrack_stats_t) == 48,
                "net_conntrack_stats_t layout changed: update ConntrackStats");
 
+#ifdef CONFIG_NET_CONNTRACK_ENTRIES
+#define NET_CONNTRACK_MAX CONFIG_NET_CONNTRACK_ENTRIES
+#define NET_CONNTRACK_BUCKETS (NET_CONNTRACK_MAX / 8)
+#else
 #define NET_CONNTRACK_MAX NET_PROFILE_CONNTRACK_ENTRIES
 #define NET_CONNTRACK_BUCKETS NET_PROFILE_CONNTRACK_BUCKETS
+#endif
 
 /*
  * The profile comment in net_profile.h budgets "~64 bytes" per entry.  Pin it,
@@ -98,6 +103,7 @@ static uint16_t
     g_ct_head[NET_CONNTRACK_BUCKETS]; /* NET_CONNTRACK_NONE = empty */
 static uint16_t g_ct_rhead[NET_CONNTRACK_BUCKETS]; /* reply-direction chain */
 static uint32_t g_ct_used;
+static uint16_t g_ct_free_head = NET_CONNTRACK_NONE;
 static uint32_t g_ct_sweep; /* sweeper resume point */
 static int32_t g_ct_enabled = 1;
 
@@ -176,16 +182,6 @@ static const char *netfilter_nat_name(uint8_t nat) {
     }
 }
 
-/* snprintf reports what it *would* have written; letting the cursor grow past
- * bufsz would make every later bufsz - off underflow, so it is clamped here and
- * the caller's "off >= bufsz" test means "stop". */
-static size_t netfilter_append(char *buf, size_t bufsz, size_t off,
-                               const char *s) {
-    while (*s && off < bufsz)
-        buf[off++] = *s++;
-    return off;
-}
-
 #define NETFILTER_EMIT(...)                                                    \
     do {                                                                       \
         char _l[256];                                                          \
@@ -194,7 +190,7 @@ static size_t netfilter_append(char *buf, size_t bufsz, size_t off,
     } while (0)
 
 void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
-    if (!buf)
+    if (!buf || off >= bufsz)
         return;
     net_conntrack_stats_t cs;
     netfilter_conntrack_get_stats(&cs);
@@ -207,6 +203,7 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
     a20_netfilter_ct_unlock(ct_flags);
     NETFILTER_EMIT("conntrack: %s\n", enabled ? "on" : "off");
     NETFILTER_EMIT("ct_capacity: %u\n", (unsigned)NET_CONNTRACK_MAX);
+    NETFILTER_EMIT("ct_storage_bytes: %zu\n", sizeof(g_ct) + sizeof(g_ct_head) + sizeof(g_ct_rhead));
     NETFILTER_EMIT("ct_tracked: %llu\n", (unsigned long long)cs.tracked);
     NETFILTER_EMIT("ct_created: %llu\n", (unsigned long long)cs.created);
     NETFILTER_EMIT("ct_evicted: %llu\n", (unsigned long long)cs.evicted);
@@ -216,7 +213,7 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
     NETFILTER_EMIT("ct_packets: %llu\n", (unsigned long long)cs.packets);
     NETFILTER_EMIT("nat_rules: %u\n", rule_count);
 
-    for (unsigned i = 0; i < rule_count && off < bufsz; i++) {
+    for (unsigned i = 0; i < rule_count && off + 1 < bufsz; i++) {
         const net_nat_rule_t *r = &rules[i];
         char na[16] = "-";
         if (r->nat != NET_NAT_MASQUERADE)
@@ -238,7 +235,7 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
     enum { NET_CT_FORMAT_ROWS = 8 };
     net_conntrack_entry_t rows[NET_CT_FORMAT_ROWS];
     int n = netfilter_conntrack_snapshot(rows, NET_CT_FORMAT_ROWS);
-    for (int i = 0; i < n && off < bufsz; i++) {
+    for (int i = 0; i < n && off + 1 < bufsz; i++) {
         const net_conntrack_entry_t *e = &rows[i];
         if (e->proto == NETFILTER_PROTO_ICMP) {
             /*
@@ -294,6 +291,7 @@ static net_ct_view_t g_ct_view = {
     .buckets = NET_CONNTRACK_BUCKETS,
     .head = g_ct_head,
     .rhead = g_ct_rhead,
+    .free_head = &g_ct_free_head,
     .used = (uint32_t *)&g_ct_used,
     .sweep = (uint32_t *)&g_ct_sweep,
     .enabled = (int32_t *)&g_ct_enabled,

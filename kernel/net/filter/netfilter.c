@@ -219,17 +219,8 @@ static const char *proto_name(uint8_t proto)
  * The 4096-byte buffer procfs hands the renderer is not enough for the filter
  * table, the NAT table and the conntrack table at once, so the filter section
  * is written first and netfilter_nat_format() appends the rest under the
- * remaining budget.  Every cursor here is clamped: snprintf reports the length
- * it *would* have written, and an unclamped cursor would make every later
- * bufsz - off underflow into a huge size.
+ * remaining budget. The append helper leaves room for the final NUL.
  */
-static size_t netfilter_append(char *buf, size_t bufsz, size_t off,
-                               const char *s)
-{
-    while (*s && off < bufsz)
-        buf[off++] = *s++;
-    return off;
-}
 
 void netfilter_format(char *buf, size_t bufsz)
 {
@@ -254,9 +245,9 @@ void netfilter_format(char *buf, size_t bufsz)
         (unsigned long long)s.in_accepted, (unsigned long long)s.out_accepted,
         (unsigned)g_rule_count);
     off = netfilter_append(buf, bufsz, off, line);
-    if (off < bufsz && g_rule_count) {
+    if (off + 1 < bufsz && g_rule_count) {
         off = netfilter_append(buf, bufsz, off, "(filter rules)\n");
-        for (unsigned i = 0; i < g_rule_count && off < bufsz; i++) {
+        for (unsigned i = 0; i < g_rule_count && off + 1 < bufsz; i++) {
             const netfilter_rule_t *r = &g_rules[i];
             char src[16] = "any", dst[16] = "any";
             if (r->src_addr != NETFILTER_NO_ADDR)
