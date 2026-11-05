@@ -111,6 +111,53 @@ def solicit(link, timeout):
     return receive(link, timeout, validate)
 
 
+def verify_lan_address_lifetime(guest, lan, wan, result):
+    local = ip('2001:db8:11::1')
+    host = ip('2001:db8:11::2')
+    lan_source = ip('fe80::2')
+    echo = b'\x73\x13\x00\x01finite-lan'
+    first_added = time.monotonic()
+    guest.send('netctl set-ipv6 en2 2001:db8:11::1 64 4 9')
+    guest.until('NETCTL: IPv6 configured', whole_line=True)
+    guest.until('# ')
+    guest.send('netctl set-ipv6 en2 2001:db8:11::1 64 1 1')
+    guest.until('NETCTL: IPv6 address already exists', whole_line=True)
+    guest.until('# ')
+    result['passed'].append('ipv6_lifetime_add_does_not_replace_existing_address')
+
+    guest.send('netctl set-ipv6 en2 2001:db8:11::3 64 4 7')
+    guest.until('NETCTL: IPv6 configured', whole_line=True)
+    guest.until('# ')
+    time.sleep(2)
+    renewed = time.monotonic()
+    guest.send('netctl replace-ipv6 en2 2001:db8:11::1 64 5 13')
+    guest.until('NETCTL: IPv6 configured', whole_line=True)
+    guest.until('# ')
+    time.sleep(max(0, first_added + 10.5 - time.monotonic()))
+
+    def forwarded(f, p, h, s, d, b):
+        return (p == ICMP6 and h == 63 and s == OFF_LINK and d == host
+                and b[:1] == b'\x80' and b[4:] == echo)
+
+    def local_reply(f, p, h, s, d, b):
+        return p == ICMP6 and s == local and d == lan_source and b[:1] == b'\x81' and b[4:] == echo
+
+    icmp(wan, OFF_LINK, host, 128, echo, hops=64)
+    receive(lan, 2, forwarded, neighbor=host)
+    icmp(lan, lan_source, local, 128, echo, hops=64)
+    receive(lan, 2, local_reply, neighbor=lan_source)
+    result['passed'].append('ipv6_lifetime_renewal_extends_address_and_connected_route')
+
+    time.sleep(max(0, renewed + 16 - time.monotonic()))
+    icmp(wan, OFF_LINK, host, 128, echo, hops=64)
+    icmp(lan, lan_source, local, 128, echo, hops=64)
+    def stale_route(f, p, h, s, d, b):
+        return p == ICMP6 and b[:1] == b'\x87' and b[8:24] == host
+
+    absent(lan, 2, lambda *packet: forwarded(*packet) or local_reply(*packet) or stale_route(*packet))
+    result['passed'].append('ipv6_lifetime_expires_address_and_connected_route')
+
+
 def exercise(guest, lan, wan, result):
     guest.send('netctl set-ipv6 en2 2001:db8:10::1 64')
     guest.until('NETCTL: IPv6 configured', whole_line=True)
@@ -214,6 +261,7 @@ def exercise(guest, lan, wan, result):
     result['passed'].append('admin_link_restart_rearms_and_bounds_solicitations')
     guest.until('NETCTL: link watch passed', whole_line=True)
     result['passed'].append('netlink_dgram_link_subscription_and_drop')
+    verify_lan_address_lifetime(guest, lan, wan, result)
 
 
 def main():

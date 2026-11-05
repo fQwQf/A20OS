@@ -20,6 +20,15 @@ extern const net_endpoint_ops_t a20_lwip_endpoint_ops;
 extern err_t a20_etharp_update_dynamic(struct netif *, const ip4_addr_t *,
                                       struct eth_addr *);
 
+static int set_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
+                     uint32_t valid, uint32_t preferred, int exclusive)
+{
+    (void)exclusive;
+    if (valid != UINT32_MAX || preferred != UINT32_MAX)
+        return -EOPNOTSUPP;
+    return a20_lwip_if_set_addr6(index, address, prefix);
+}
+
 static int neighbor_update_v4(uint32_t ifindex, uint32_t address,
                                const uint8_t mac[6]) {
 #ifdef CONFIG_LWIP_UPSTREAM
@@ -111,7 +120,7 @@ static const net_backend_if_ops_t lwip_iface_ops = {
     .set_flags = a20_lwip_if_set_flags,
     .get_addr = a20_lwip_if_get_addr,
     .set_addr = a20_lwip_if_set_addr,
-    .set_addr6 = a20_lwip_if_set_addr6,
+    .set_addr6 = set_addr6,
     .del_addr6 = a20_lwip_if_del_addr6,
     .neighbor_update_v4 = neighbor_update_v4,
     .interface_ipv4 = a20_lwip_interface_ipv4,

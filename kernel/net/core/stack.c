@@ -217,10 +217,11 @@ int net_stack_if_set_addr(unsigned index, const uint8_t *addr,
 }
 
 int net_stack_if_set_addr6(unsigned index, const uint8_t *addr,
-                           uint8_t prefix) {
+                           uint8_t prefix, uint32_t valid, uint32_t preferred,
+                           int exclusive) {
     const net_backend_t *b = selected();
     if (b && b->iface && b->iface->set_addr6)
-        return b->iface->set_addr6(index, addr, prefix);
+        return b->iface->set_addr6(index, addr, prefix, valid, preferred, exclusive);
     return -EOPNOTSUPP;
 }
 

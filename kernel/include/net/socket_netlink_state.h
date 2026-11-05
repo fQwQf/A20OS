@@ -68,7 +68,8 @@ int  a20_net_netlink_if_get_addr(uint32_t ifindex, uint8_t *ip, uint8_t *mask,
 int  a20_net_netlink_if_set_addr(uint32_t ifindex, const uint8_t *ip,
                                  const uint8_t *mask, const uint8_t *gw);
 int  a20_net_netlink_if_set_addr6(uint32_t ifindex, const uint8_t *addr,
-                                  uint8_t prefixlen);
+                                  uint8_t prefixlen, uint32_t valid, uint32_t preferred,
+                                  int exclusive);
 int  a20_net_netlink_if_del_addr6(uint32_t ifindex, const uint8_t *addr);
 uint32_t a20_net_netlink_loopback_mtu(void *ns, uint32_t value, int set);
 uint32_t a20_net_netlink_loopback_up(void *ns, uint32_t value, int set);

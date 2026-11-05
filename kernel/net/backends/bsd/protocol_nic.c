@@ -40,6 +40,7 @@
 #include "ff_config.h"
 #include "ff_dpdk_if.h"
 #include "ff_host_interface.h"
+#include "protocol_abi.h"
 
 /* Mirror protocol.h without importing A20OS headers into the BSD namespace. */
 typedef struct a20_bsd_nic_config {
@@ -568,8 +569,16 @@ int port_ifindex_to_slot(unsigned ifindex, int *slot)
 typedef struct {
     uint32_t index;
     uint8_t address[16];
-    uint8_t prefix, flags, scope, reserved;
+    uint8_t prefix, flags, scope, has_lifetime;
+    uint32_t valid, preferred;
 } port_addr6_out_t;
+
+static uint32_t addr6_remaining(uint32_t lifetime, uint64_t age)
+{
+    if (lifetime == ND6_INFINITE_LIFETIME)
+        return lifetime;
+    return age < lifetime ? lifetime - (uint32_t)age : 0;
+}
 
 int port_addr6_snapshot(port_addr6_out_t *out, int maximum)
 {
@@ -603,22 +612,60 @@ int port_addr6_snapshot(port_addr6_out_t *out, int maximum)
             if (ia->ia6_flags & IN6_IFF_DEPRECATED) entry->flags |= 0x20;
             if (ia->ia6_flags & IN6_IFF_DUPLICATED) entry->flags |= 0x08;
             entry->scope = loopback ? 254 : IN6_IS_ADDR_LINKLOCAL(&address) ? 253 : 0;
-            entry->reserved = 0;
+            uint64_t age = time_uptime - ia->ia6_updatetime;
+            entry->has_lifetime = 1;
+            entry->valid = addr6_remaining(ia->ia6_lifetime.ia6t_vltime, age);
+            entry->preferred = addr6_remaining(ia->ia6_lifetime.ia6t_pltime, age);
         }
     }
     NET_EPOCH_EXIT(et);
     return count;
 }
 
-int port_nic_set_ipv6(void *context, const uint8_t address[16],
-                              uint8_t prefix, int add)
+/* The manual prefix lives as long as its longest-lived address.
+ * Router advertisements independently manage RA-learned prefixes. */
+static void refresh_manual_prefix(struct ifnet *ifp, struct nd_prefix *prefix)
 {
-    struct ff_dpdk_if_context *ctx = context;
-    if (!ctx || !ctx->ifp || !address || prefix > 128)
+    if (!prefix)
+        return;
+    struct epoch_tracker et;
+    NET_EPOCH_ENTER(et);
+    ND6_WLOCK();
+    if (prefix->ndpr_addrcnt && !prefix->ndpr_raf_auto &&
+        LIST_EMPTY(&prefix->ndpr_advrtrs)) {
+        uint32_t valid = 0, preferred = 0;
+        time_t now = time_uptime;
+        struct ifaddr *ifa;
+        CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
+            if (ifa->ifa_addr->sa_family != AF_INET6)
+                continue;
+            struct in6_ifaddr *ia = (struct in6_ifaddr *)ifa;
+            if (ia->ia6_ndpr != prefix)
+                continue;
+            uint64_t age = now - ia->ia6_updatetime;
+            uint32_t v = addr6_remaining(ia->ia6_lifetime.ia6t_vltime, age);
+            uint32_t p = addr6_remaining(ia->ia6_lifetime.ia6t_pltime, age);
+            if (v > valid) valid = v;
+            if (p > preferred) preferred = p;
+        }
+        prefix->ndpr_vltime = valid;
+        prefix->ndpr_pltime = preferred;
+        prefix->ndpr_lastupdate = now;
+        prefix->ndpr_expire = valid == ND6_INFINITE_LIFETIME ? 0 : now + valid;
+    }
+    ND6_WUNLOCK();
+    NET_EPOCH_EXIT(et);
+}
+
+int port_if_set_ipv6(struct ifnet *ifp, const uint8_t address[16],
+                     uint8_t prefix, int add, uint32_t valid,
+                     uint32_t preferred, int exclusive)
+{
+    if (!ifp || !address || prefix > 128)
         return EINVAL;
     struct in6_aliasreq ifra;
     memset(&ifra, 0, sizeof(ifra));
-    strlcpy(ifra.ifra_name, ((struct ifnet *)ctx->ifp)->if_xname,
+    strlcpy(ifra.ifra_name, ifp->if_xname,
             sizeof(ifra.ifra_name));
     ifra.ifra_addr.sin6_family = AF_INET6;
     ifra.ifra_addr.sin6_len = sizeof(ifra.ifra_addr);
@@ -633,14 +680,50 @@ int port_nic_set_ipv6(void *context, const uint8_t address[16],
             ifra.ifra_prefixmask.sin6_addr.s6_addr[i] =
                 (uint8_t)(0xff << (8 - bits));
     }
-    /* Infinite preferred/valid lifetime: the address is installed by an
-     * administrator, not learned from RA. */
-    ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
-    ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
-    int error = in6_control(NULL,
-                            add ? SIOCAIFADDR_IN6 : SIOCDIFADDR_IN6,
-                            (caddr_t)&ifra, (struct ifnet *)ctx->ifp, NULL);
-    return error ? error : 0;
+    struct nd_prefix *removed_prefix = NULL;
+    if (!add || exclusive) {
+        struct in6_addr scoped = ifra.ifra_addr.sin6_addr;
+        int error = in6_setscope(&scoped, ifp, NULL);
+        if (error)
+            return error;
+        struct in6_ifaddr *ia = in6ifa_ifpwithaddr(ifp, &scoped);
+        if (ia) {
+            if (!add && ia->ia6_ndpr) {
+                removed_prefix = ia->ia6_ndpr;
+                nd6_prefix_ref(removed_prefix);
+            }
+            ifa_free(&ia->ia_ifa);
+            if (add)
+                return EEXIST;
+        }
+    }
+
+    ifra.ifra_lifetime.ia6t_vltime = valid;
+    ifra.ifra_lifetime.ia6t_pltime = preferred;
+    int error = in6_control(NULL, add ? SIOCAIFADDR_IN6 : SIOCDIFADDR_IN6,
+                            (caddr_t)&ifra, ifp, NULL);
+    if (removed_prefix) {
+        if (!error)
+            refresh_manual_prefix(ifp, removed_prefix);
+        nd6_prefix_rele(removed_prefix);
+    } else if (add && !error) {
+        struct in6_ifaddr *ia = in6ifa_ifpwithaddr(ifp, &ifra.ifra_addr.sin6_addr);
+        if (ia) {
+            refresh_manual_prefix(ifp, ia->ia6_ndpr);
+            ifa_free(&ia->ia_ifa);
+        }
+    }
+    return error;
+}
+
+int port_nic_set_ipv6(void *context, const uint8_t address[16],
+                      uint8_t prefix, int add, uint32_t valid,
+                      uint32_t preferred, int exclusive)
+{
+    struct ff_dpdk_if_context *ctx = context;
+    if (!ctx)
+        return EINVAL;
+    return port_if_set_ipv6(ctx->ifp, address, prefix, add, valid, preferred, exclusive);
 }
 
 static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,

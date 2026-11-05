@@ -23,7 +23,8 @@ typedef struct {
 typedef struct {
     uint32_t index;
     uint8_t address[16];
-    uint8_t prefix, flags, scope, reserved;
+    uint8_t prefix, flags, scope, has_lifetime;
+    uint32_t valid, preferred;
 } nl_addr6_out_t;
 
 void net_netlink_link_notify_one(unsigned index, int up);

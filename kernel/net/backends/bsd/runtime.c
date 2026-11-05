@@ -784,14 +784,16 @@ typedef struct addr6_job {
     void *context;
     uint8_t address[16];
     uint8_t prefix;
-    int add;
+    int add, exclusive;
+    uint32_t valid, preferred;
 } addr6_job_t;
 
 static int addr6_job_run(void *argument)
 {
     addr6_job_t *job = argument;
     int rc = a20_bsd_port_nic_set_ipv6(job->context, job->address,
-                                       job->prefix, job->add);
+                                       job->prefix, job->add, job->valid,
+                                       job->preferred, job->exclusive);
     return rc < 0 ? rc : -rc;
 }
 
@@ -810,28 +812,33 @@ static int neighbor_job_run(void *argument)
 }
 
 static int if_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
-                    int add)
+                    int add, uint32_t valid, uint32_t preferred, int exclusive)
 {
     if (a20_bsd_tun_is_index(index))
-        return a20_bsd_tun_set_addr6(index, address, prefix, add);
+        return a20_bsd_tun_set_addr6(index, address, prefix, add, valid, preferred, exclusive);
     int slot = nic_slot_for_index(index);
-    if (slot < 0 || !nics[slot].context || !address) return -ENODEV;
+    if (slot < 0 || slot >= BSD_MAX_NICS || !nics[slot].context || !address)
+        return -ENODEV;
     addr6_job_t job;
     memset(&job, 0, sizeof(job));
     job.context = nics[slot].context;
     memcpy(job.address, address, 16);
     job.prefix = prefix;
     job.add = add;
+    job.exclusive = exclusive;
+    job.valid = valid;
+    job.preferred = preferred;
     return a20_bsd_executor_call(addr6_job_run, &job);
 }
 
-static int if_set_addr6(unsigned index, const uint8_t *address, uint8_t prefix)
+static int if_set_addr6(unsigned index, const uint8_t *address, uint8_t prefix,
+                        uint32_t valid, uint32_t preferred, int exclusive)
 {
-    return if_addr6(index, address, prefix, 1);
+    return if_addr6(index, address, prefix, 1, valid, preferred, exclusive);
 }
 static int if_del_addr6(unsigned index, const uint8_t *address)
 {
-    return if_addr6(index, address, 128, 0);
+    return if_addr6(index, address, 128, 0, 0, 0, 0);
 }
 static int neighbor_update_v4(uint32_t index, uint32_t address, const uint8_t mac[6])
 {

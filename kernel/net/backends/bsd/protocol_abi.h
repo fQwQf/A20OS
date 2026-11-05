@@ -14,6 +14,12 @@ typedef struct a20_bsd_pktinfo {
     uint8_t  address[16]; /* IPv4 dst / IPv6 pktinfo address */
 } a20_bsd_pktinfo_t;
 
+/* Private to the BSD port. Both Ethernet and TUN own a FreeBSD ifnet. */
+struct ifnet;
+int port_if_set_ipv6(struct ifnet *ifp, const uint8_t address[16],
+                     uint8_t prefix, int add, uint32_t valid,
+                     uint32_t preferred, int exclusive);
+
 #endif
 
 /* TUN callback shapes.  They mirror net/tun.h without including A20 headers
