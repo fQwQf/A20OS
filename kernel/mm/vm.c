@@ -637,11 +637,20 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
 
 /* The final unpublished MM may leave ordinary anonymous and private-file
  * leaves for the terminal page-table walk. Shared-file dirty harvesting, VMO,
- * PFNMAP and SysV retain their VMA-specific teardown. */
+ * PFNMAP and SysV retain their VMA-specific teardown. Shared anonymous
+ * mappings use ordinary frame references and can use the terminal walk. */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 static int mm_destroy_can_defer_leaf_release(const mm_seg_t *vma)
 {
-    const uint64_t excluded = VM_SHARED | VM_PFNMAP | VM_VMO | VM_SYSV_SHM;
+    const uint64_t excluded = VM_PFNMAP | VM_VMO | VM_SYSV_SHM;
+
+    /* Ordinary shared-anonymous leaves own one frame reference per mapping,
+     * just like private anonymous leaves. Keep those references until the
+     * final TLB synchronization, then release them in the terminal PT walk.
+     * Shared files still need free_vma_pages() to harvest dirty state. */
+    if (vma && (vma->vm_flags & (VM_SHARED | VM_FILE)) ==
+                   (VM_SHARED | VM_FILE))
+        return 0;
 
     if (!vma || !(vma->vm_flags & (VM_ANON | VM_FILE)) ||
         (vma->vm_flags & excluded) || vma->vmo || vma->vmar_owner)
