@@ -117,6 +117,7 @@ BRINGUP ?= 0
 RAMFS_USER ?= 0
 RAMFS_NATIVE_TESTS ?= 0
 RAMFS_RT_TESTS ?= 0
+RAMFS_NET_TESTS ?= 0
 RAMFS_FPU_TESTS ?= 0
 ifeq ($(filter $(RAMFS_FPU_TESTS),0 1),)
 $(error RAMFS_FPU_TESTS must be 0 or 1)
@@ -397,11 +398,11 @@ endif
 endif
 
 # Stack selection is separate from resource budgets and QEMU NET_BACKEND.
-# x86_64 desktop/server hosts use the FreeBSD backend once the real XFCE
-# browser, inbound/outbound TCP/UDP and control-plane transaction gates pass.
-# Other architectures stay on their validated lwIP default until their BSD
-# ports have the same evidence.
-NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,$(if $(filter x86_64,$(ARCH)),bsd,lwip))
+# Hosted 64-bit usage includes ordinary MMU VMs and PC desktops/servers. Static
+# driver deployment is independent of this distinction. Physical embedded
+# boards, 32-bit targets and NOMMU keep lwIP; MCU firmware has no stack.
+NET_HOSTED_BOARDS := $(addprefix qemu-virt-,riscv64 loongarch64 aarch64 x86_64) x86_64-pc virtualbox-aarch64
+NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,$(if $(filter 1,$(NOMMU)),lwip,$(if $(filter $(BOARD),$(NET_HOSTED_BOARDS)),bsd,lwip)))
 # Instances set NET_STACK through [net].stack (tools/a20 or NET_INSTANCE=).
 # The default above is only for a bare `make` with no manifest.
 .PHONY: check-net-backend-host
@@ -414,8 +415,8 @@ $(error NET_ROLE=router requires a TCP/IP backend)
 endif
 endif
 ifeq ($(NET_STACK),bsd)
-ifneq ($(ARCH),x86_64)
-$(error NET_STACK=bsd currently requires ARCH=x86_64)
+ifeq ($(filter $(ARCH),x86_64 aarch64 riscv64 loongarch64),)
+$(error NET_STACK=bsd requires ARCH=x86_64, aarch64, riscv64 or loongarch64; 32-bit targets use lwip)
 endif
 ifneq ($(NET_LANES),1)
 $(error BSD uses one serialized protocol executor; set NET_LANES=1)
@@ -1253,6 +1254,7 @@ BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)-$(NET_STACK)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(RAMFS_NET_TESTS)),-net-tests,)
 ifneq ($(strip $(BSD_BOOTSTRAP_OBJECT)),)
 ifneq ($(ARCH),x86_64)
 $(error BSD_BOOTSTRAP_OBJECT currently requires ARCH=x86_64)
@@ -2639,7 +2641,7 @@ BSD_CORE_OBJECT = $(BSD_CORE_DIR)/bsd-core-isolated.o
 FORCE_BSD_CORE:
 $(BSD_CORE_OBJECT): FORCE_BSD_CORE
 	@rm -rf $(BSD_CORE_DIR)
-	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(BSD_CLANG)' --emulated-tls --net-profile $(NET_PROFILE) --out $(BSD_CORE_DIR)
+	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(BSD_CLANG)' --arch $(ARCH) --cross-prefix '$(CROSS_PREFIX_$(ARCH))' --nr-cpus $(NR_CPUS) --emulated-tls --net-profile $(NET_PROFILE) --out $(BSD_CORE_DIR)
 KERNEL_OBJ += $(BSD_CORE_OBJECT)
 CFLAGS += -DCONFIG_NET_STACK_BSD=1
 LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld
@@ -3380,6 +3382,14 @@ endif
 # not grow and existing submission artifacts remain unchanged.
 RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
                       echo uname mkdir rm cp sync poweroff reboot
+ifeq ($(RAMFS_NET_TESTS),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_NET_TESTS=1 requires RAMFS_USER=1)
+endif
+RAMFS_USER_PROGRAMS += tcp_loopback_test udp_loopback_test ipv6_loopback_test \
+                      net_lane_hostfwd_test udp_hostfwd_test bsd_scale_test netctl
+CFLAGS += -DCONFIG_RAMFS_NET_TESTS
+endif
 ifeq ($(RAMFS_FPU_TESTS),1)
 RAMFS_USER_PROGRAMS += fork_fpu_probe
 CFLAGS += -DCONFIG_RAMFS_FPU_TESTS

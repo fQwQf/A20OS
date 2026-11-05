@@ -6,3 +6,6 @@ arch = "loongarch64"
 
 [kernel]
 bringup = true
+
+[net]
+stack = "bsd"

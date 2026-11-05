@@ -28,3 +28,6 @@ console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready",
 boot_media = ["build/huawei-ct5100/a20os-bios.iso"]
 media_device = "/dev/sdX"
 log = ".kernel-build/console/huawei-ct5100-bios.log"
+
+[net]
+stack = "bsd"

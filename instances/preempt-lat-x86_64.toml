@@ -18,3 +18,6 @@ commands = ["preempt_lat 256", "poweroff"]
 expect = ["PREEMPT_LAT: rt ", "PREEMPT_LAT: DONE"]
 input_delay = 60
 timeout = "1200s"
+
+[net]
+stack = "bsd"

@@ -7,3 +7,6 @@ abi = "both"
 
 [package]
 kind = "grub-iso"
+
+[net]
+stack = "bsd"

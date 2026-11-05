@@ -10,3 +10,6 @@ require_clean_exit = true
 commands = ["printf 'A20_SHELL_%s\\n' READY", "/bin/echo A20_EXTERNAL_$(printf OK)", "poweroff"]
 expect = ["A20_SHELL_READY", "A20_EXTERNAL_OK", "System is going down for power-off NOW"]
 timeout = "90s"
+
+[net]
+stack = "bsd"

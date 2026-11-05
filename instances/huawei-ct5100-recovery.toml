@@ -27,3 +27,6 @@ console_check = ["[RAM] usable", "System ready", "[init] fork=0, calling execve 
 boot_media = ["build/huawei-ct5100/a20os-recovery.img"]
 media_device = "/dev/sdX"
 log = ".kernel-build/console/huawei-ct5100-recovery.log"
+
+[net]
+stack = "bsd"

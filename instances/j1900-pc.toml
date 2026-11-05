@@ -28,3 +28,6 @@ console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "[INIT] System 
 boot_media = ["build/x86_64-pc/a20os-rescue.iso"]
 media_device = "/dev/sdX"
 log = ".kernel-build/console/j1900-pc.log"
+
+[net]
+stack = "bsd"

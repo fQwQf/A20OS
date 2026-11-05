@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from a20_derive import derive_make_vars  # noqa: E402
 from a20_instance import InstanceError, parse_instance  # noqa: E402
 
-_KEYS = ("ARCH", "BOARD", "ABI", "PROFILE", "NET_STACK", "NET_LANES",
+_KEYS = ("ARCH", "BOARD", "ABI", "PROFILE", "NOMMU", "NET_STACK", "NET_LANES",
          "NET_PROFILE", "NET_ROLE")
 
 

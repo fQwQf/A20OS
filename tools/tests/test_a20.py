@@ -730,6 +730,44 @@ class TestRepositoryInstances(unittest.TestCase):
             self.assertNotIn(name, seen, f"{name} declared by both {seen.get(name)} and {path.name}")
             seen[name] = path.name
 
+    def test_hosted_instances_select_backend_by_word_size(self) -> None:
+        checked = 0
+        for path in sorted((REPO_ROOT / "instances").glob("*.toml")):
+            inst = parse_instance(path)
+            if inst.kernel.nommu or inst.arch == "armv7m":
+                continue
+            hosted = inst.board == "qemu-virt-" + inst.arch or inst.board in (
+                "x86_64-pc", "virtualbox-aarch64")
+            if hosted:
+                expected = "lwip" if inst.arch in ("arm32", "riscv32") else "bsd"
+                self.assertEqual(inst.net.stack, expected, path.name)
+                self.assertIn("NET_STACK=" + expected, derive_make_vars(inst), path.name)
+                checked += 1
+        self.assertGreaterEqual(checked, 60)
+
+    def test_make_backend_policy_preserves_embedded_and_nommu(self) -> None:
+        cases = [
+            (["ARCH=aarch64", "DRIVER_DEPLOYMENT=embedded"], "bsd"),
+            (["ARCH=riscv64", "DRIVER_DEPLOYMENT=generic"], "bsd"),
+            (["ARCH=loongarch64"], "bsd"),
+            (["ARCH=arm32"], "lwip"),
+            (["ARCH=riscv32"], "lwip"),
+            (["ARCH=riscv64", "BOARD=visionfive2"], "lwip"),
+            (["ARCH=aarch64", "BOARD=pine-a64"], "lwip"),
+            (["ARCH=loongarch64", "BOARD=ls2k0300"], "lwip"),
+            (["ARCH=riscv64", "NOMMU=1"], "lwip"),
+            (["NET_INSTANCE=qemu-aarch64-nommu"], "lwip"),
+            (["NET_INSTANCE=qemu-riscv32-mcu"], "none"),
+        ]
+        for assignments, expected in cases:
+            with self.subTest(assignments=assignments):
+                result = subprocess.run([
+                    "make", "--no-print-directory", "-s", *assignments,
+                    "--eval=print-net-policy: ; @echo $(NET_STACK)", "print-net-policy",
+                ], cwd=REPO_ROOT, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
     def test_boot_media_names_a_path_its_package_kind_produces(self) -> None:
         """`a20 deploy` writes boot_media, so the image it names has to exist.
 

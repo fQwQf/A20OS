@@ -476,6 +476,14 @@ void proc_task_first_entry(void)
 #endif
     if (!entry)
         panic("proc_task_first_entry: no entry");
+    /* A fresh kernel task has no sched() continuation to restore its saved
+     * IRQ state. Leave the switch window before enabling interrupts, or a
+     * LoongArch worker can run forever with CRMD.IE clear and block remote
+     * TLB acknowledgements. Physical cooperative bring-up keeps its existing
+     * no-interrupt contract, just as syscall dispatch does. */
+#ifndef ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE
+    arch_local_irq_enable();
+#endif
     entry();
     proc_exit(0);
 }

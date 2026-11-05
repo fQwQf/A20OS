@@ -11,3 +11,6 @@ bringup = true
 
 [test]
 expect = ["part ok", "System is going down for power-off NOW"]
+
+[net]
+stack = "bsd"

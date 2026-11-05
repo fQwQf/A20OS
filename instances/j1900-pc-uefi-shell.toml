@@ -27,3 +27,6 @@ console_check = ["[RAM] usable", "System ready", "[init] fork=0, calling execve 
 boot_media = ["build/x86_64-pc/a20os-j1900-shell-uefi.img"]
 media_device = "/dev/sdX"
 log = ".kernel-build/console/j1900-pc-uefi-shell.log"
+
+[net]
+stack = "bsd"

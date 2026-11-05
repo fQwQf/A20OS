@@ -34,3 +34,6 @@ console_check = ["[RAM] usable", "System ready", "[INIT] Distro rootfs detected"
 boot_media = ["build/huawei-ct5100/a20os-uefi.img"]
 media_device = "/dev/sdX"
 log = ".kernel-build/console/huawei-ct5100.log"
+
+[net]
+stack = "bsd"

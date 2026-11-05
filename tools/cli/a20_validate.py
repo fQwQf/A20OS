@@ -230,14 +230,12 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if n.role is not None and n.role not in ("host", "router"):
         e.append(f"net.role: '{n.role}' must be host or router")
     if n.stack == "bsd":
-        if inst.arch != "x86_64":
-            e.append("net.stack=bsd: currently requires arch = x86_64")
+        if inst.arch not in ("x86_64", "aarch64", "riscv64", "loongarch64"):
+            e.append("net.stack=bsd: requires a supported 64-bit arch; 32-bit targets use lwip")
         if n.lanes is not None and n.lanes != 1:
             e.append("net.stack=bsd: uses one serialized executor; net.lanes must be 1")
         if n.resource_profile is not None and n.resource_profile != 2:
             e.append("net.stack=bsd: only NET_PROFILE=2 has budget evidence")
-        if n.role == "router":
-            e.append("net.stack=bsd: the desktop/host vertical slice does not provide router mode")
     if n.stack == "lwip" and n.lanes is not None and n.lanes != 1:
         e.append("net.stack=lwip: pristine lwIP requires net.lanes = 1")
     if n.stack == "none":

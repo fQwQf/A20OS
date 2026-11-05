@@ -16,3 +16,6 @@ memory = "2G"
 [rootfs]
 world = "pynode"
 world_size_mb = 2048
+
+[net]
+stack = "bsd"

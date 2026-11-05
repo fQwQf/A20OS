@@ -13,3 +13,6 @@ smp = 2
 [rootfs]
 world = "cli"
 world_size_mb = 1024
+
+[net]
+stack = "bsd"

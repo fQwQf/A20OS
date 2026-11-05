@@ -48,3 +48,6 @@ expect = [
 ]
 input_delay = 60
 timeout = "300s"
+
+[net]
+stack = "bsd"

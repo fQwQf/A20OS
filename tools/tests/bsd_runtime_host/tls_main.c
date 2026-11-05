@@ -84,6 +84,6 @@ int main(void)
     struct bsd_memory_stats s;
     port_memory_snapshot(&s);
     assert(s.used == 0 && s.allocations == 0 && backing_bytes == 0 && backing_count == 0);
-    puts("BSD_TLS_HOST_PASS: compiler TLS, four owners, initialized/aligned data, user TLS intact, reclamation");
+    puts("BSD_TLS_HOST_PASS: four owners, initialized/aligned data, user TLS intact, reclamation");
     return 0;
 }

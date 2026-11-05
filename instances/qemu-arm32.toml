@@ -3,3 +3,6 @@
 name = "qemu-arm32"
 description = "ARM32 text-mode development boot in QEMU (virt)"
 arch = "arm32"
+
+[net]
+stack = "lwip"

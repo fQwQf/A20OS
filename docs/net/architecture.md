@@ -1,6 +1,6 @@
 # 多场景网络架构与迁移约束
 
-A20OS 网络子系统的核心架构目标是提供可裁剪的网络框架：统一系统调用接口由 A20OS 内核持有，TCP/IP 协议栈实现由网络域选择的具体后端承载。x86_64 桌面/服务器默认选择 BSD 后端；其它架构默认使用原版 lwIP，native 承接特定协议扩展。BSD 已完成 x86_64 单 NIC、IPv4 出站/入站、桌面 Firefox 和动态控制面；场景默认扩展到更多架构仍需同一 Linux ELF、相同驱动与链路的完整证据。原版 lwIP 的迁移决定和能力归属见 [backend-policy.md](./backend-policy.md)。
+A20OS 网络子系统的核心架构目标是提供可裁剪的网络框架：统一系统调用接口由 A20OS 内核持有，TCP/IP 协议栈实现由网络域选择的具体后端承载。64 位非嵌入式实例统一选择 BSD/F-Stack，32 位、NOMMU 与嵌入式板卡保留原版 lwIP，MCU 默认不带网络栈；native 承接特定协议扩展。BSD 已完成 x86_64 单 NIC、IPv4 出站/入站、桌面 Firefox 和动态控制面；多架构移植的逐项运行证据见 [补全记录](./router-completion.md)。原版 lwIP 的迁移决定和能力归属见 [backend-policy.md](./backend-policy.md)。
 
 ## 分层与所有权
 
@@ -32,7 +32,7 @@ A20OS 网络子系统的核心架构目标是提供可裁剪的网络框架：�
 
 资源档位与后端选择独立。`NET_PROFILE` 定义预算；后端功能定义能力。不能以增加预算或关闭 SMP 冒充不回退。后端未实现的选项返回准确错误；默认值变化属于可观察行为变化。
 
-当前 x86_64 host 默认 `NET_STACK=bsd NET_LANES=1`；其它 hosted 架构默认`NET_STACK=lwip`，并可选择 `NET_STACK=native`。MCU 为 `NET_STACK=none`。原版适配及能力差异见[lwip-upstream.md](./lwip-upstream.md)，BSD 当前边界见[bsd-port.md](./bsd-port.md)。原版 lwIP 强制 `NET_LANES=1`；native 的 `NET_LANES` 选择执行并发度，`NET_PROFILE=1/2/3` 选择资源预算；它们均不是 QEMU 的网络拓扑选项。
+当前 64 位非嵌入式实例默认 `NET_STACK=bsd NET_LANES=1`；32 位、NOMMU 与嵌入式板卡默认 `NET_STACK=lwip`，并可显式选择 `NET_STACK=native`。MCU 为 `NET_STACK=none`。原版适配及能力差异见[lwip-upstream.md](./lwip-upstream.md)，BSD 当前边界见[bsd-port.md](./bsd-port.md)。原版 lwIP 强制 `NET_LANES=1`；native 的 `NET_LANES` 选择执行并发度，`NET_PROFILE=1/2/3` 选择资源预算；它们均不是 QEMU 的网络拓扑选项。
 
 **实例配置是选择入口。** 每个 `instances/<name>.toml` 的 `[net]` 段可以写`stack`、`lanes`、`resource_profile`、`role`；`tools/a20` 与`make NET_INSTANCE=<name>` 都会把它转换成 `NET_STACK/NET_LANES/NET_PROFILE/ NET_ROLE`。构建只链接选中的后端，启动时按名字选择，未编译进来即报错，不做回退。字段、校验规则与迁移说明见 [instance-config.md](./instance-config.md)。
 

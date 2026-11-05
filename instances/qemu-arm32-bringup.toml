@@ -6,3 +6,6 @@ arch = "arm32"
 
 [kernel]
 bringup = true
+
+[net]
+stack = "lwip"

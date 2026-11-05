@@ -1,17 +1,17 @@
 # 原版 lwIP、FreeBSD 与 A20OS 原生能力
 
-A20OS 网络栈支持 `lwip`、`native`、`bsd` 三个协议后端。x86_64 桌面和服务器/基准主机默认使用 `bsd`；其它架构默认使用 `lwip`。默认 `lwip` 使用未修改的上游发布源码；历史衍生协议实现迁入 `backends/native/protocol`，由 A20OS 承担维护。性能差异不作为保留旧后端的理由。
+A20OS 网络栈支持 `lwip`、`native`、`bsd` 三个协议后端。64 位桌面、服务器、发布/基准和普通带 MMU 的虚拟机实例统一使用 `bsd`；32 位、MCU、NOMMU 与明确的嵌入式板卡保留轻量后端。默认 `lwip` 使用未修改的上游发布源码；历史衍生协议实现迁入 `backends/native/protocol`，由 A20OS 承担维护。性能差异不作为保留旧后端的理由。
 
 ## 桌面和服务器的目标后端
 
-普通桌面与服务器场景采用 BSD 网络栈作为默认配置。性能对照用于基准定位与回归验收。x86_64 桌面/服务器默认已切换到 BSD。BSD 已完成 x86_64 单 NIC、IPv4 出站/入站、公共 socket、动态地址/MTU/路由事务和 XFCE 桌面 Firefox HTTP/HTTPS DOM 垂直切片，完整验收体系与剩余验收项如下，且不允许 `NET_STACK=bsd` 静默回退到 lwIP。当前进度见 [bsd-port.md](./bsd-port.md)：
+64 位普通桌面与服务器场景采用 BSD 网络栈作为默认配置。性能对照用于基准定位与回归验收。全部 64 位非嵌入式实例已声明 BSD；各架构实际运行验收进度见 [补全记录](./router-completion.md)。BSD 已完成 x86_64 单 NIC、IPv4 出站/入站、公共 socket、动态地址/MTU/路由事务和 XFCE 桌面 Firefox HTTP/HTTPS DOM 垂直切片，完整验收体系与剩余验收项如下，且不允许 `NET_STACK=bsd` 静默回退到 lwIP。当前进度见 [bsd-port.md](./bsd-port.md)：
 
 1. BSD 自身初始化、线程/TLS、分配器、锁/等待、时钟/callout/epoch 在 A20OS 执行。
 2. 接入同一套 virtio/包 I/O 与公共 Linux socket 前端，执行真实 BSD TCP/UDP。
 3. DNS、公网 HTTP/HTTPS、在线 apk 流程，以及现有 IPv4/IPv6/ABI 回归通过；抓包与 `/proc/net/status` 明确显示实际 BSD 后端，不借用宿主 socket。
 4. 按桌面/服务器预算验证并发连接、关闭回收、吞吐、p99 和 CPU/字节，记录限制。
 
-嵌入式保留原版 lwIP，native 继续作为独立衍生后端推进；软路由后端的选用仍须满足完整转发/NAT/服务验收。`NET_PROFILE` 是预算档位，不是场景后端选择器。
+32 位与嵌入式保留原版 lwIP，native 继续作为独立衍生后端推进；软路由后端的选用仍须满足完整转发/NAT/服务验收。`NET_PROFILE` 是预算档位，不是场景后端选择器。
 
 ## 为什么收敛魔改
 
@@ -52,6 +52,6 @@ NAT/转发需要重组与 ICMP 差错翻译时，必须把执行顺序纳入后�
 2. 隔离 INET 私有状态，建立有实际调用者的 socket、包 I/O、控制和能力契约。
 3. 接入原版 lwIP，以同一 Linux ELF、相同 NIC/链路复跑 ABI、NAT、转发和服务。
 4. 接入 FreeBSD，比较正确性、吞吐、p99、CPU/字节、连接规模与内存成本。
-5. 桌面、服务器已确定以 BSD 为最终后端；完成上述真实联网验收后切换默认。嵌入式与软路由分别按资源和能力验收。
+5. 64 位桌面、服务器已切换 BSD 默认后端；完整应用验收继续推进。32 位保留 lwIP，软路由按转发与服务能力验收。
 
 公共 socket 私有状态隔离和原版 lwIP 运行适配已完成第一阶段；物理 NIC/TUN 的公共分派也已接入；完整兼容矩阵与 BSD 运行后端仍未完成。 ICMP RELATED 与转发 MTU 差错已回归；完整分片 NAT、本机 PMTU/差错队列与生产软路由整体验收仍未完成。

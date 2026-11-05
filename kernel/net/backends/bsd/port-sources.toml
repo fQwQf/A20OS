@@ -177,6 +177,7 @@ sources = [
 
 port_sources = [
     "kernel/net/backends/bsd/runtime/clock.c",
+    "kernel/net/backends/bsd/runtime/dmap.c",
     "kernel/net/backends/bsd/runtime/memory.c",
     "kernel/net/backends/bsd/runtime/tls.c",
 ]

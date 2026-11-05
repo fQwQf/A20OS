@@ -9,3 +9,6 @@ abi = "both"
 [package]
 kind = "uefi-image"
 variant = "text"
+
+[net]
+stack = "bsd"

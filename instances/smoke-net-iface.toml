@@ -15,6 +15,7 @@ arch = "riscv64"
 abi = "linux"
 
 [net]
+stack = "bsd"
 # Claim no host ports. The Makefile defaults NET_HOSTFWD to hostfwd on 5555, but
 # this gate is serial-only and needs no forwarding; without this the run dies
 # with a confusing "could not set up host forwarding rule" whenever anything

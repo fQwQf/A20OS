@@ -40,7 +40,13 @@ run('tls-compile', [str(args.clang.resolve()), '-femulated-tls', '-fno-pie', '-c
 run('tls-build', ['cc', *common, port+'memory.c', port+'tls.c', fixtures+'hooks.c',
                   fixtures+'tls_main.c', str(out/'tls-values.o'), '-pthread', '-o', str(out/'tls')])
 run('tls', [str(out/'tls')])
+run('explicit-tls-build', ['cc', *common, '-DA20_BSD_TEST_EXPLICIT_TLS=1',
+                          port+'memory.c', port+'tls.c', fixtures+'hooks.c',
+                          fixtures+'tls_main.c', fixtures+'tls_values.c',
+                          '-pthread', '-o', str(out/'explicit-tls')])
+run('explicit-tls', [str(out/'explicit-tls')])
 sources = [port+'memory.c', port+'memory.h', port+'tls.c', port+'tls.h',
+           'kernel/net/backends/bsd/include/a20_bsd_explicit_tls.h',
            fixtures+'hooks.c', fixtures+'hooks.h', fixtures+'tls_values.c', fixtures+'tls_main.c',
            'tools/tests/bsd_memory_host.c', 'tools/host-tests/test-bsd-runtime-host.py']
 (out/'inputs.json').write_text(json.dumps({p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in sources}, indent=2))
