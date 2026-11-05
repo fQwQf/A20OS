@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <netinet/icmp6.h>
@@ -571,12 +572,144 @@ static pid_t start_client(int pipe_fd[2], const char *client, const char *wan,
     _exit(127);
 }
 
-static int run(int rtnl, struct lan *lans, unsigned count, unsigned wan,
-               int event_fd, pid_t client)
+struct client {
+    const char *program, *wan, *length;
+    pid_t pid;
+    unsigned index, failures;
+    int event_fd;
+    uint64_t retry_at, kill_at;
+};
+
+static void close_events(struct client *client)
 {
-    struct pollfd fds[MAX_LANS + 1] = {{event_fd, POLLIN, 0}};
+    if (client->event_fd >= 0) {
+        close(client->event_fd);
+        client->event_fd = -1;
+    }
+}
+
+static void stop_client(struct client *client, uint64_t now)
+{
+    close_events(client);
+    if (client->pid > 0 && !client->kill_at) {
+        (void)kill(client->pid, SIGTERM);
+        client->kill_at = now + 2000;
+    }
+}
+
+static void reap_client(struct client *client, uint64_t now)
+{
+    if (client->pid <= 0)
+        return;
+    pid_t result = waitpid(client->pid, NULL, WNOHANG);
+    if (result == client->pid || (result < 0 && errno == ECHILD)) {
+        close_events(client);
+        client->pid = 0;
+        client->kill_at = 0;
+        client->retry_at = now + (1000u << bounded(client->failures, 4));
+        if (client->failures < 4)
+            ++client->failures;
+    } else if (client->kill_at && now >= client->kill_at) {
+        (void)kill(client->pid, SIGKILL);
+    }
+}
+
+static bool link_local_ready(const char *name)
+{
+    struct ifaddrs *addresses;
+    if (getifaddrs(&addresses) < 0)
+        return false;
+    bool ready = false;
+    for (struct ifaddrs *ifa = addresses; ifa; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET6 &&
+            (ifa->ifa_flags & IFF_UP) && !strcmp(name, ifa->ifa_name)) {
+            const struct sockaddr_in6 *addr = (const void *)ifa->ifa_addr;
+            if (IN6_IS_ADDR_LINKLOCAL(&addr->sin6_addr)) {
+                ready = true;
+                break;
+            }
+        }
+    }
+    freeifaddrs(addresses);
+    return ready;
+}
+
+static void launch_client(struct client *client, unsigned index, uint64_t now)
+{
+    int pipe_fd[2];
+    if (pipe2(pipe_fd, O_CLOEXEC) < 0) {
+        perror("pd-lan: open lease event pipe");
+        client->retry_at = now + 1000;
+        return;
+    }
+    pid_t pid = start_client(pipe_fd, client->program, client->wan, client->length);
+    close(pipe_fd[1]);
+    if (pid < 0) {
+        perror("pd-lan: start odhcp6c");
+        close(pipe_fd[0]);
+        client->retry_at = now + 1000;
+        return;
+    }
+    client->index = index;
+    client->pid = pid;
+    client->event_fd = pipe_fd[0];
+    fprintf(stderr, "pd-lan: started DHCPv6 on %s (ifindex %u)\n", client->wan, index);
+}
+
+static unsigned wan_index(int ioctl_fd, const char *name)
+{
+    struct ifreq request = {0};
+    strcpy(request.ifr_name, name);
+    if (ioctl(ioctl_fd, SIOCGIFFLAGS, &request) < 0 || !(request.ifr_flags & IFF_UP))
+        return 0;
+    return if_nametoindex(name);
+}
+
+static bool removed_wan(int events, unsigned index)
+{
+    enum { NL_DELLINK = 17 };
+    uint8_t buffer[1024];
+    bool removed = false;
+    /* Bound the work so bursts of unrelated link events cannot delay leases. */
+    for (unsigned i = 0; i < 16; ++i) {
+        ssize_t size = recv(events, buffer, sizeof(buffer), MSG_DONTWAIT);
+        if (size <= 0)
+            break;
+        size_t offset = 0;
+        while (offset + sizeof(struct nl_header) <= (size_t)size) {
+            struct nl_header header;
+            memcpy(&header, buffer + offset, sizeof(header));
+            if (header.length < sizeof(header) || header.length > (size_t)size - offset)
+                break;
+            /* ifinfomsg carries ifi_index four bytes into its body. */
+            if (index && header.type == NL_DELLINK && header.length >= sizeof(header) + 16) {
+                uint32_t removed_index;
+                memcpy(&removed_index, buffer + offset + sizeof(header) + 4,
+                       sizeof(removed_index));
+                removed |= index == removed_index;
+            }
+            offset += (header.length + 3) & ~3u;
+        }
+    }
+    return removed;
+}
+
+static void lose_link(struct client *client, struct update *leases, uint64_t now)
+{
+    stop_client(client, now);
+    client->index = 0;
+    client->failures = 0;
+    client->retry_at = now;
+    leases->count = 0;
+    fprintf(stderr, "pd-lan: WAN link %s removed or down\n", client->wan);
+}
+
+static int run(int rtnl, int ioctl_fd, int links, struct lan *lans,
+               unsigned count, struct client *client)
+{
+    struct pollfd fds[MAX_LANS + 2] = {{-1, POLLIN, 0}, {links, POLLIN, 0}};
     for (unsigned i = 0; i < count; ++i)
-        fds[i + 1] = (struct pollfd){lans[i].fd, POLLIN, 0};
+        fds[i + 2] = (struct pollfd){lans[i].fd, POLLIN, 0};
     struct update leases = {0};
     bool have_default = false;
     uint64_t next_check = 0;
@@ -584,7 +717,13 @@ static int run(int rtnl, struct lan *lans, unsigned count, unsigned wan,
     while (!stopping) {
         uint64_t now = now_ms();
         if (now >= next_check) {
-            bool available = wan_default_route(rtnl, wan);
+            unsigned index = wan_index(ioctl_fd, client->wan);
+            if (client->index && index != client->index)
+                lose_link(client, &leases, now);
+            reap_client(client, now);
+            if (!client->pid && index && now >= client->retry_at && link_local_ready(client->wan))
+                launch_client(client, index, now);
+            bool available = index && wan_default_route(rtnl, index);
             now = now_ms();
             for (unsigned i = 0; i < count; ++i) {
                 reconcile(rtnl, &lans[i], &leases, now);
@@ -602,31 +741,40 @@ static int run(int rtnl, struct lan *lans, unsigned count, unsigned wan,
             if (lans[i].next_ra && lans[i].next_ra < wake)
                 wake = lans[i].next_ra;
         }
-        int ready = poll(fds, count + 1, wake > now ? (int)(wake - now) : 0);
+        fds[0].fd = client->event_fd;
+        int ready = poll(fds, count + 2, wake > now ? (int)(wake - now) : 0);
         if (ready < 0) {
             if (errno == EINTR)
                 continue;
             rc = 1;
             break;
         }
-        if (fds[0].revents & POLLIN) {
-            struct update next;
-            if (read(event_fd, &next, sizeof(next)) != sizeof(next) || next.count > MAX_LEASES) {
-                rc = 1;
-                break;
-            }
-            leases = next;
+        if (fds[1].revents & POLLIN && removed_wan(links, client->index)) {
+            lose_link(client, &leases, now_ms());
             next_check = 0;
-        } else if (fds[0].revents & (POLLHUP | POLLERR)) {
-            rc = 1;
-            break;
+        }
+        if (client->event_fd >= 0 && fds[0].revents & POLLIN) {
+            struct update next;
+            if (read(client->event_fd, &next, sizeof(next)) == sizeof(next) &&
+                next.count <= MAX_LEASES) {
+                leases = next;
+                if (leases.count)
+                    client->failures = 0;
+            } else {
+                stop_client(client, now_ms());
+            }
+            next_check = 0;
+        } else if (client->event_fd >= 0 && fds[0].revents & (POLLHUP | POLLERR)) {
+            stop_client(client, now_ms());
+            next_check = 0;
         }
         for (unsigned i = 0; i < count; ++i) {
-            if (fds[i + 1].revents & POLLIN && solicitation(lans[i].fd))
+            if (fds[i + 2].revents & POLLIN && solicitation(lans[i].fd))
                 schedule_ra(&lans[i], now_ms() + rand_r(&random_seed) % 501);
         }
     }
 
+    stop_client(client, now_ms());
     const struct update empty = {0};
     for (unsigned i = 0; i < count; ++i)
         reconcile(rtnl, &lans[i], &empty, now_ms());
@@ -641,10 +789,11 @@ static int run(int rtnl, struct lan *lans, unsigned count, unsigned wan,
         }
         advertise(&lans[i], false, now_ms(), true);
     }
-    kill(client, SIGTERM);
-    close(event_fd);
-    while (waitpid(client, NULL, 0) < 0 && errno == EINTR)
-        ;
+    while (client->pid > 0) {
+        reap_client(client, now_ms());
+        if (client->pid > 0)
+            (void)poll(NULL, 0, 50);
+    }
     return rc;
 }
 
@@ -655,15 +804,19 @@ int main(int argc, char **argv)
     if (argc == 3 && event_pipe && number(event_pipe, 10, INT_MAX, &event_fd))
         return send_update(event_fd, argv[2]);
 
-    unsigned wan = argc >= 5 ? if_nametoindex(argv[2]) : 0;
-    if (!wan || argc > MAX_LANS + 4 || !number(argv[3], 10, 64, &length) || length == 0) {
+    if (argc < 5 || argc > MAX_LANS + 4 || !argv[2][0] || strlen(argv[2]) >= IF_NAMESIZE ||
+        !number(argv[3], 10, 64, &length) || length == 0) {
         fprintf(stderr, "usage: pd-lan ODHCP6C WAN PREFIX-LENGTH LAN[:SUBNET-ID] ...\n");
         return 2;
+    }
+    if (access(argv[1], X_OK) < 0) {
+        perror("pd-lan: access odhcp6c");
+        return 1;
     }
     unsigned count = argc - 4;
     struct lan lans[MAX_LANS] = {0};
     for (unsigned i = 0; i < count; ++i) {
-        if (!parse_lan(&lans[i], argv[4 + i]) || lans[i].index == wan ||
+        if (!parse_lan(&lans[i], argv[4 + i]) || !strcmp(lans[i].name, argv[2]) ||
             lans[i].subnet >= (UINT64_C(1) << (64 - length))) {
             fprintf(stderr, "pd-lan: invalid LAN %s\n", argv[4 + i]);
             return 2;
@@ -693,23 +846,22 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    close(ioctl_fd);
+    enum { NETLINK_LEVEL = 270, ADD_MEMBERSHIP = 1, LINK_GROUP = 1 };
+    int links = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int group = LINK_GROUP;
+    if (links < 0 || setsockopt(links, NETLINK_LEVEL, ADD_MEMBERSHIP, &group, sizeof(group)) < 0) {
+        perror("pd-lan: subscribe to link changes");
+        return 1;
+    }
 
-    int events[2];
     struct sigaction action = {.sa_handler = stop};
     sigemptyset(&action.sa_mask);
-    if (sigaction(SIGINT, &action, NULL) < 0 || sigaction(SIGTERM, &action, NULL) < 0 ||
-        pipe2(events, O_CLOEXEC) < 0) {
-        perror("pd-lan: set up lease events");
+    if (sigaction(SIGINT, &action, NULL) < 0 || sigaction(SIGTERM, &action, NULL) < 0) {
+        perror("pd-lan: set up signals");
         return 1;
     }
-    pid_t client = start_client(events, argv[1], argv[2], argv[3]);
-    if (client < 0) {
-        perror("pd-lan: start odhcp6c");
-        return 1;
-    }
-    close(events[1]);
+    struct client client = {.program = argv[1], .wan = argv[2], .length = argv[3], .event_fd = -1};
     fprintf(stderr, "pd-lan: running on %u LAN interface(s) for %s\n", count, argv[2]);
     random_seed = now_ms() ^ getpid();
-    return run(rtnl, lans, count, wan, events[0], client);
+    return run(rtnl, ioctl_fd, links, lans, count, &client);
 }

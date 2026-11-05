@@ -460,6 +460,13 @@ void net_netlink_link_notify_one(unsigned index, int up)
     net_netlink_link_notify(&event, 1);
 }
 
+void net_netlink_link_removed(unsigned index, const char *name)
+{
+    nl_link_out_t link = {.index = index};
+    strncpy(link.name, name, sizeof(link.name) - 1);
+    a20_net_netlink_link_removed(&link);
+}
+
 void net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
                              const uint8_t mask[4])
 {
