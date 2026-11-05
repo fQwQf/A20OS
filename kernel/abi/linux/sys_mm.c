@@ -5,6 +5,7 @@
 #include "mm/vm.h"
 #include "mm/pt.h"
 #include "mm/mm.h"
+#include "mm/vmo.h"
 #include "fs/devfs.h"
 #include "fs/memfd.h"
 #include "fs/page_cache.h"
@@ -638,7 +639,14 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
             val = 1;
         } else {
             mm_seg_t *seg = mm_seg_find(t->mm, va);
-            if (seg && (seg->vm_flags & VM_FILE) &&
+            if (seg && seg->vmo && seg->vmo->type == VMO_SHARED_ANON &&
+                (seg->vm_flags & VM_VMO)) {
+                /* Residency belongs to the shared object, including after
+                 * fork or DONTNEED removed this mapping's borrowed PTE. */
+                uint64_t index = (seg->backing_offset + va - seg->start) / PAGE_SIZE;
+                if (index < seg->vmo->page_count)
+                    val = vmo_peek_page(seg->vmo, (uint32_t)index) != PFN_NONE;
+            } else if (seg && (seg->vm_flags & VM_FILE) &&
                 !(seg->vm_flags & (VM_VMO | VM_PFNMAP)) &&
                 seg->file_vnode) {
                 /* A file page may be resident in the page cache before this

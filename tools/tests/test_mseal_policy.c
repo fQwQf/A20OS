@@ -18,6 +18,8 @@
 #define USER_VA_LIMIT 0x4000000000UL
 
 #define VM_VMO (1UL << 14)
+#define VM_SHARED (1UL << 3)
+#define VM_ANON (1UL << 4)
 #define VM_SYSV_SHM (1UL << 16)
 #define VM_PFNMAP (1UL << 17)
 #define VM_SEALED (1UL << 18)
@@ -152,6 +154,10 @@ static void refusals(void)
     check(mm_mseal_locked(&g_mm, 0x1000, 0x4000) == -1, "a VMO range is EPERM");
     check(split_calls == 0 && mark_calls == 0,
           "a special-region refusal splits and marks nothing");
+    reset();
+    add(0x1000, 0x5000, VM_VMO | VM_SHARED | VM_ANON);
+    check(mm_mseal_locked(&g_mm, 0x1000, 0x4000) == 0,
+          "shared anonymous backing remains sealable");
 }
 
 static void sealing(void)

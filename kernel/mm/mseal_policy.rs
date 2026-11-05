@@ -23,6 +23,8 @@ const ENOMEM: i32 = -12;
 const EPERM: i32 = -1;
 
 const VM_VMO: u64 = 1 << 14;
+const VM_ANON: u64 = 1 << 4;
+const VM_SHARED: u64 = 1 << 3;
 const VM_SYSV_SHM: u64 = 1 << 16;
 const VM_PFNMAP: u64 = 1 << 17;
 const VM_SEALED: u64 = 1 << 18;
@@ -115,7 +117,9 @@ pub unsafe extern "C" fn mm_mseal_locked(mm: *mut c_void, addr: usize, len: usiz
         if r.start > covered {
             return ENOMEM; // a hole: the range is not fully mapped
         }
-        if r.vm_flags & (VM_SYSV_SHM | VM_PFNMAP | VM_VMO) != 0 {
+        let shared_anon = r.vm_flags & (VM_ANON | VM_SHARED) == (VM_ANON | VM_SHARED);
+        if r.vm_flags & (VM_SYSV_SHM | VM_PFNMAP) != 0 ||
+            (r.vm_flags & VM_VMO != 0 && !shared_anon) {
             return EPERM;
         }
         if r.end <= covered {

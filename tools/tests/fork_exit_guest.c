@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <poll.h>
+#include <sys/syscall.h>
 #include <sys/resource.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +28,66 @@ static void wait_ok(pid_t child)
     if (child < 0 || waitpid(child, &status, 0) != child ||
         !WIFEXITED(status) || WEXITSTATUS(status))
         fail("child/wait");
+}
+
+static void child_signal_handler(int sig) { (void)sig; }
+
+static void signal_only_waits(void)
+{
+    struct sigaction action = {0}, previous;
+    action.sa_handler = child_signal_handler;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGCHLD, &action, &previous)) fail("SIGCHLD action");
+    sigset_t set, old;
+    sigemptyset(&set); sigaddset(&set, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &set, &old)) fail("block SIGCHLD");
+    struct timespec zero = {0}, limit = {2, 0};
+    while (sigtimedwait(&set, NULL, &zero) == SIGCHLD) {}
+    for (int i = 0; i < 512; i++) {
+        pid_t child = fork();
+        if (!child) _exit(i % 127);
+        if (child < 0) fail("signal-only fork");
+        siginfo_t info;
+        int sig = sigtimedwait(&set, &info, &limit);
+        if (sig != SIGCHLD || info.si_pid != child) {
+            fprintf(stderr, "signal round=%d sig=%d pid=%d expected=%d\n",
+                    i, sig, sig > 0 ? info.si_pid : -1, child);
+            fail("signal-only notification");
+        }
+        int status;
+        if (waitpid(child, &status, WNOHANG) != child ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != i % 127)
+            fail("SIGCHLD precedes reap readiness");
+    }
+    if (sigprocmask(SIG_SETMASK, &old, NULL)) fail("restore signals");
+    if (sigaction(SIGCHLD, &previous, NULL)) fail("restore SIGCHLD action");
+    puts("SIGNAL_WAIT_PROBE: PASS sigchld_wnohang=512");
+}
+
+static void pidfd_ready_waits(void)
+{
+    for (int i = 0; i < 128; i++) {
+        int gate[2];
+        if (pipe(gate)) fail("pidfd gate");
+        pid_t child = fork();
+        if (!child) {
+            char byte; close(gate[1]);
+            _exit(read(gate[0], &byte, 1) == 1 ? 0 : 3);
+        }
+        if (child < 0) fail("pidfd fork");
+        int fd = syscall(SYS_pidfd_open, child, 0);
+        if (fd < 0) fail("pidfd_open");
+        close(gate[0]);
+        if (write(gate[1], "x", 1) != 1) fail("pidfd release");
+        close(gate[1]);
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        if (poll(&p, 1, 2000) != 1 || !(p.revents & POLLIN)) fail("pidfd poll");
+        int status;
+        if (waitpid(child, &status, WNOHANG) != child ||
+            !WIFEXITED(status) || WEXITSTATUS(status)) fail("pidfd precedes reap readiness");
+        close(fd);
+    }
+    puts("PIDFD_WAIT_PROBE: PASS poll_then_wnohang=128");
 }
 
 static void high_fd_inheritance(void)
@@ -161,8 +224,92 @@ static void targeted_waits(void)
     puts("FORK_EXIT_PROBE: 32 concurrent children, WNOHANG, WNOWAIT, reverse PID waits PASS");
 }
 
+static void sparse_shared_semantics(void)
+{
+    const size_t len = 256u * 1024 * 1024, far = len - 4096;
+    volatile unsigned char *map = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED) fail("sparse shared reserve");
+    map[0] = 37;
+    /* Split the VMA before fork; the tail must retain its backing offset. */
+    if (mprotect((void *)map, 4096, PROT_READ)) fail("shared split");
+    int gate[2]; pid_t children[8];
+    if (pipe(gate)) fail("shared gate");
+    for (unsigned i = 0; i < 8; i++) {
+        children[i] = fork();
+        if (!children[i]) {
+            char byte; close(gate[1]);
+            if (read(gate[0], &byte, 1) != 1 || map[0] != 37) _exit(30);
+            /* All children first-touch one canonical page concurrently. */
+            map[far + i] = (unsigned char)(i + 10);
+            map[(i + 1) * 16u * 1024 * 1024] = (unsigned char)(i + 20);
+            _exit(0);
+        }
+        if (children[i] < 0) fail("shared fork");
+    }
+    close(gate[0]);
+    if (write(gate[1], "12345678", 8) != 8) fail("shared release");
+    close(gate[1]);
+    for (unsigned i = 0; i < 8; i++) wait_ok(children[i]);
+    for (unsigned i = 0; i < 8; i++)
+        if (map[far + i] != i + 10 || map[(i + 1) * 16u * 1024 * 1024] != i + 20)
+            fail("shared canonical first touch");
+
+    unsigned char *alias = mremap((void *)(map + far), 0, 4096, MREMAP_MAYMOVE);
+    if (alias == MAP_FAILED) fail("shared alias");
+    alias[123] = 91;
+    if (map[far + 123] != 91) fail("shared alias offset");
+    unsigned char resident = 0;
+    if (madvise(alias, 4096, MADV_DONTNEED) ||
+        mincore(alias, 4096, &resident) || !(resident & 1) || alias[123] != 91)
+        fail("shared DONTNEED backing");
+    if (munmap((void *)map, len) || alias[123] != 91)
+        fail("shared alias survives unmap");
+    if (munmap(alias, 4096)) fail("shared alias release");
+
+    const size_t moved_len = 2u * 1024 * 1024;
+    map = mmap(NULL, moved_len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    void *target = mmap(NULL, moved_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED || target == MAP_FAILED) fail("shared move reserve");
+    map[0] = 71; map[moved_len - 4096] = 72;
+    map = mremap((void *)map, moved_len, moved_len, MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    if (map != target || map[0] != 71 || map[moved_len - 4096] != 72)
+        fail("shared move content");
+    if (pipe(gate)) fail("orphan shared gate");
+    pid_t child = fork();
+    if (!child) {
+        char byte; close(gate[1]);
+        if (read(gate[0], &byte, 1) != 1 || map[0] != 71 || map[moved_len - 4096] != 72)
+            _exit(31);
+        if (map[4096] != 0) _exit(32);
+        map[4096] = 73;
+        _exit(0);
+    }
+    if (child < 0) fail("orphan shared fork");
+    close(gate[0]);
+    if (munmap((void *)map, moved_len)) fail("orphan shared parent unmap");
+    if (write(gate[1], "x", 1) != 1) fail("orphan shared release");
+    close(gate[1]); wait_ok(child);
+
+    map = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED) fail("shared grow reserve");
+    map[0] = 81;
+    map = mremap((void *)map, 4096, 8192, MREMAP_MAYMOVE);
+    if (map == MAP_FAILED || map[0] != 81) fail("shared grow VMA");
+    child = fork();
+    if (!child) { map[4096] = 1; _exit(33); }
+    int status;
+    if (child < 0 || waitpid(child, &status, 0) != child ||
+        !WIFSIGNALED(status) || WTERMSIG(status) != SIGBUS)
+        fail("shared grow SIGBUS");
+    if (munmap((void *)map, 8192)) fail("shared grow release");
+    puts("FORK_EXIT_PROBE: sparse shared first-touch, split, alias, move, DONTNEED, last mapper, SIGBUS PASS");
+}
+
 int main(void)
 {
+    signal_only_waits();
+    pidfd_ready_waits();
     volatile unsigned char *shared = mmap(NULL, SZ, PROT_READ | PROT_WRITE,
                                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (shared == MAP_FAILED)
@@ -172,6 +319,9 @@ int main(void)
     for (unsigned round = 0; round < 128; round++) {
         pid_t child = fork();
         if (!child) {
+            unsigned char resident = 0;
+            if (mincore((void *)shared, 4096, &resident) || !(resident & 1))
+                _exit(8);
             shared[17] = (unsigned char)round;
             if (round % 2 == 0 && mprotect((void *)shared, SZ, PROT_READ))
                 _exit(2);
@@ -217,6 +367,7 @@ int main(void)
     high_fd_inheritance();
     file_mapping_inheritance();
     targeted_waits();
+    sparse_shared_semantics();
     puts("SHARED_EXIT_PROBE: PASS rounds=128 shared_visibility=1 mprotect=1 "
          "frame_reuse=1 untouched_backing=1");
     return 0;

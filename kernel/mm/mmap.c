@@ -95,6 +95,16 @@ uintptr_t a20_mmap_mmap_base(const void *mm_ptr)
     return mm ? (uintptr_t)mm->mmap_base : 0;
 }
 
+void *a20_mmap_shared_anon_create(uintptr_t len)
+{
+#ifdef CONFIG_NOMMU
+    (void)len;
+    return NULL;
+#else
+    return vmo_create(VMO_SHARED_ANON, len, 0);
+#endif
+}
+
 int a20_mmap_def_locked(const void *mm_ptr)
 {
     const mm_struct_t *mm = mm_ptr;

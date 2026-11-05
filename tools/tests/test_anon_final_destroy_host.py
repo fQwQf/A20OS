@@ -75,6 +75,8 @@ HARNESS = r"""
 #define ARCH_PT_ROOT_LEVEL 2
 #define ARCH_PT_BITS 2
 #define MM_ST_FILE_PRIVATE 2
+#define MM_ST_VMO 6
+#define VMO_SHARED_ANON 3
 #define MM_ST_GET_CLASS(x) (x)
 #define ARCH_PT_ROOT_ORDER 2
 #define ARCH_PT_USER_END 3
@@ -95,12 +97,13 @@ typedef uint64_t pte_t;
 typedef uint64_t pfn_t;
 typedef uint64_t paddr_t;
 typedef pte_t pt_root_t;
+struct vmo { int type; };
 typedef struct mm_seg {
     uint64_t vm_flags;
     vaddr_t start, end;
     void *file;
     void *file_vnode;
-    void *vmo;
+    struct vmo *vmo;
     void *vmar_owner;
     struct mm_seg *next;
 } mm_seg_t;
@@ -151,6 +154,7 @@ static pte_t user_table_a[4];
 static pte_t user_table_b[4];
 static pte_t *table_by_pfn[64];
 static int file_fixture;
+static int vmo_fixture;
 static mm_seg_t *expected_file_vma;
 
 static void reset_state(void) {
@@ -168,7 +172,7 @@ static void reset_state(void) {
     deferred_pending = release_saw_null_pgdir = mm_kfree_calls = 0;
     pt_destroy_finished = tlb_finish_calls = tlb_finished = 0;
     pt_destroy_expected = queue_from_retire_drain = 0;
-    file_fixture = 0; expected_file_vma = NULL;
+    file_fixture = vmo_fixture = 0; expected_file_vma = NULL;
 }
 
 static pte_t leaf(pfn_t pfn, int user) {
@@ -208,6 +212,8 @@ typedef struct { unsigned char cls[4]; page_cache_page_t **cache_owner; } pt_met
 static page_cache_page_t file_page;
 static pt_meta_t *mm_pt_meta(pte_t *table) {
     static pt_meta_t file_meta = { .cls = {MM_ST_FILE_PRIVATE, 0, 0, 0} };
+    static pt_meta_t vmo_meta = { .cls = {MM_ST_VMO, MM_ST_VMO, 0, 0} };
+    if (vmo_fixture && (table == user_table_a || table == user_table_b)) return &vmo_meta;
     return file_fixture && table == user_table_b ? &file_meta : NULL;
 }
 static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *vma, vaddr_t va, pfn_t pfn) {
@@ -356,7 +362,7 @@ static int test_ineligible(uint64_t flags, int pointer_kind) {
     mm.mmap = &vma;
     if (pointer_kind == 1) vma.file = &marker;
     if (pointer_kind == 2) vma.file_vnode = &marker;
-    if (pointer_kind == 3) vma.vmo = &marker;
+    if (pointer_kind == 3) vma.vmo = (void *)&marker;
     if (pointer_kind == 4) vma.vmar_owner = &marker;
     mm_destroy_impl(&mm);
     CHECK(free_vma_pages_calls == 1,
@@ -377,6 +383,19 @@ static int test_file_owner_fallback_address(void) {
     CHECK(file_page.refs == 0, "terminal cache fallback uses byte-addressed VMA offset");
     CHECK(frame_put_calls[12] == 0, "cache-owned leaf never releases an ordinary frame ref");
     CHECK(invalid_frame_put_calls == 0, "cache fallback keeps terminal release ordering");
+    return 0;
+}
+
+static int test_sparse_vmo_borrowed_leaves(void) {
+    mm_struct_t mm = { .refcount = 1, .arch_asid = 1, .pgdir = root_table };
+    struct vmo backing = { .type = VMO_SHARED_ANON };
+    mm_seg_t vma = { .vm_flags = VM_ANON | VM_SHARED | VM_VMO, .vmo = &backing };
+    reset_state(); setup_anon_tree(); mm.mmap = &vma; vmo_fixture = 1;
+    mm_destroy_impl(&mm);
+    CHECK(free_vma_pages_calls == 0, "sparse VMO terminal path avoids per-page unmaps");
+    CHECK(frame_put_calls[10] + frame_put_calls[11] + frame_put_calls[12] == 0,
+          "VMO canonical frames are borrowed even when protected");
+    CHECK(tlb_finished && pt_destroy_finished, "borrowed leaves cross final barrier and root release");
     return 0;
 }
 
@@ -422,6 +441,7 @@ int main(void) {
     if (test_nonfinal_reference()) return 1;
     if (test_final_flush_without_root()) return 1;
     if (test_file_owner_fallback_address()) return 1;
+    if (test_sparse_vmo_borrowed_leaves()) return 1;
     puts("anon-final-destroy-host: PASS");
     return 0;
 }

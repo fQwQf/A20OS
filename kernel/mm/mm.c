@@ -1037,6 +1037,12 @@ static void pt_destroy_user_recursive(mm_struct_t *mm, pte_t *table, int level,
 
         if (is_leaf) {
             pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+            if (mm && meta && MM_ST_GET_CLASS(meta->cls[i]) == MM_ST_VMO) {
+                /* Canonical VMO frames have no PTE-owned reference. The
+                 * retained VMAs release their backing after this root walk. */
+                table[i] = 0;
+                continue;
+            }
             page_cache_page_t *owner = meta && meta->cache_owner
                                            ? meta->cache_owner[i] : NULL;
             if (owner) {

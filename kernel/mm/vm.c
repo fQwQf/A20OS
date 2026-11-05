@@ -636,13 +636,20 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
 }
 
 /* The final unpublished MM may leave ordinary anonymous and private-file
- * leaves for the terminal page-table walk. Shared-file dirty harvesting, VMO,
- * PFNMAP and SysV retain their VMA-specific teardown. Shared anonymous
- * mappings use ordinary frame references and can use the terminal walk. */
+ * leaves for the terminal page-table walk. Shared-file dirty harvesting, native
+ * VMOs, PFNMAP and SysV retain VMA-specific teardown. Shared anonymous VMOs
+ * retain their canonical pages until the walk has discarded borrowed leaves. */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 static int mm_destroy_can_defer_leaf_release(const mm_seg_t *vma)
 {
     const uint64_t excluded = VM_PFNMAP | VM_VMO | VM_SYSV_SHM;
+
+    /* The retained VMA keeps canonical sparse-VMO frames alive through the
+     * final TLB barrier and root walk, which skips borrowed MM_ST_VMO leaves. */
+    if (vma && vma->vmo && vma->vmo->type == VMO_SHARED_ANON &&
+        (vma->vm_flags & (VM_VMO | VM_ANON | VM_SHARED | VM_PFNMAP | VM_SYSV_SHM | VM_FILE)) ==
+            (VM_VMO | VM_ANON | VM_SHARED) && !vma->vmar_owner)
+        return 1;
 
     /* Ordinary shared-anonymous leaves own one frame reference per mapping,
      * just like private anonymous leaves. Keep those references until the
@@ -954,6 +961,13 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
         if (pv->vm_flags & VM_VMO) {
+            /* Shared-anonymous bulk data is recoverable through the retained
+             * canonical object. Keep small/hot and executable mappings eager;
+             * shared VMAs cannot carry a userfaultfd MISSING registration. */
+            if (pv->vmo && pv->vmo->type == VMO_SHARED_ANON &&
+                pv->end - pv->start >= 1024 * 1024 && !(pv->vm_flags & VM_EXEC) &&
+                !arch_fork_requires_private_copy())
+                continue;
             /* VMO mappings share canonical frames across fork: the child's
              * struct-copied VMA already holds a VMO reference (vma_ref_fork).
              * Clone already-present frames as shared and leave the rest to
