@@ -556,12 +556,13 @@ static void exit_parent_bookkeeping(void *opaque)
         t->ppid = 0;
         proc_children_unlink_locked(t);
         spin_unlock_irqrestore(&tasklist_lock, lf);
-        /* No wait status remains for an auto-reaped child. Wake a parent
-         * waiting for the last such child so it can observe ECHILD. */
-        proc_wake_child_waiters(ctx->parent);
     }
-    /* Ordinary child waits are notified by proc_notify_reap_ready() after
-     * the CPU has released the outgoing stack, instead of waking to yield. */
+    /* Start the parent's dispatch while this CPU finishes exit. A waiter
+     * that still sees CPU ownership requests one completion notification
+     * under the child's park_lock before parking, closing the release race. */
+    proc_wake_child_waiters(ctx->parent);
+    if (ctx->completed_parent != ctx->parent)
+        proc_wake_child_waiters(ctx->completed_parent);
 #ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
     proc_put(ctx->completed_parent);
     ctx->completed_parent = NULL;

@@ -31,6 +31,7 @@ struct task {
     void *mm;
     spinlock_t park_lock;
     int refs, freed, wakes, dead_group;
+    int reap_wait_requested;
     task_t *parent, *tg_leader;
 };
 static task_t outgoing, running, parent, group_parent, leader, idle;
@@ -85,6 +86,12 @@ static int proc_task_state_get(task_t *t) {
 }
 static task_t *proc_idle_task(void) { return &idle; }
 static int proc_tg_group_dead_locked(task_t *t) { assert(list_held); return t->dead_group; }
+typedef struct { int options; } wait4_adapter_t;
+#define WNOHANG 1
+static int proc_task_is_current_any_cpu(task_t *t) {
+    assert(park_held);
+    return g_cpu_switching_out[0] == t;
+}
 static void proc_wake_child_waiters(task_t *t) {
     assert(!switch_held && !park_held && !list_held);
     if (t) { assert(!t->freed && t->refs > 1); t->wakes++; }
@@ -100,6 +107,7 @@ static void reset(void) {
     parent.refs = group_parent.refs = leader.refs = 1;
     outgoing.refs = 2; /* CPU + task-list allocation */
     outgoing.state = PROC_ZOMBIE;
+    outgoing.reap_wait_requested = 1;
     outgoing.on_cpu = 1; outgoing.owner_cpu = 0; outgoing.park_lock.kind = 2;
     outgoing.parent = &parent; outgoing.tg_leader = &outgoing;
     g_cpu_switching_out[0] = &outgoing;
@@ -107,7 +115,31 @@ static void reset(void) {
 }
 int main(void) {
     void (*complete[])(void) = { proc_switch_complete, proc_switch_out_finish_pending };
+    wait4_adapter_t waiter = {0};
     for (size_t i = 0; i < 2; i++) {
+        /* Registration wins CPU release: completion owes a notification. */
+        reset(); outgoing.reap_wait_requested = 0;
+        uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+        assert(wait4_adapter_is_current_any_cpu(&waiter, &outgoing));
+        assert(outgoing.reap_wait_requested);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+        complete[i](); assert(parent.wakes == 1);
+
+        /* CPU release wins: the subsequent scan can reap without parking. */
+        reset(); outgoing.reap_wait_requested = 0; complete[i]();
+        lf = spin_lock_irqsave(&tasklist_lock);
+        assert(!wait4_adapter_is_current_any_cpu(&waiter, &outgoing));
+        assert(!outgoing.reap_wait_requested && parent.wakes == 0);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+
+        /* WNOHANG never registers an unnecessary completion wake. */
+        reset(); outgoing.reap_wait_requested = 0; waiter.options = WNOHANG;
+        lf = spin_lock_irqsave(&tasklist_lock);
+        assert(wait4_adapter_is_current_any_cpu(&waiter, &outgoing));
+        assert(!outgoing.reap_wait_requested);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+        complete[i](); assert(parent.wakes == 0); waiter.options = 0;
+
         reset(); complete[i]();
         assert(parent.wakes == 1 && parent.refs == 1 && outgoing.refs == 1);
         assert(!outgoing.on_cpu && outgoing.owner_cpu == PROC_CPU_NONE && zombie_notes == 1);
@@ -116,6 +148,9 @@ int main(void) {
 
         reset(); inject_reaper = 1; complete[i]();
         assert(outgoing.freed && parent.wakes == 0 && zombie_notes == 1);
+
+        reset(); outgoing.reap_wait_requested = 0; complete[i]();
+        assert(parent.wakes == 0 && outgoing.refs == 1 && zombie_notes == 1);
 
         reset(); outgoing.tg_leader = &leader;
         leader.state = PROC_ZOMBIE; leader.dead_group = 1; leader.parent = &group_parent;
@@ -146,6 +181,8 @@ def main():
         'static task_t *proc_switch_complete_locked(',
         'void proc_switch_out_finish_pending(', 'void proc_switch_complete('))
     code += '\n' + extract_function(exit_source, 'void proc_notify_reap_ready(')
+    code += '\n' + extract_function((ROOT / 'kernel/proc/wait.c').read_text(),
+                                    'static int wait4_adapter_is_current_any_cpu(')
     with tempfile.TemporaryDirectory(prefix='a20-reap-ready-') as tmp:
         src, exe = Path(tmp)/'test.c', Path(tmp)/'test'
         src.write_text(HARNESS.replace('/* PRODUCTION */', code))

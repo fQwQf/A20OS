@@ -84,6 +84,7 @@ struct task_t {
     int stop_report_pending, continue_report_pending;
     int ptrace_stop_active, ptrace_event;
     int waiting_for_child;
+    int reap_wait_requested;
     uint64_t total_time, stime_ticks, child_utime, child_stime;
     task_t *parent, *tg_leader, *tg_next, *children, *sibling_next;
     w_spinlock_t park_lock;
