@@ -89,6 +89,7 @@ int  a20_net_netlink_uevent_send(void *requester, const void *buf, size_t len,
 int  a20_net_netlink_route_request(void *requester, const void *buf, size_t len,
                                    const void *addr, size_t addrlen);
 void a20_net_netlink_link_notify(const void *events, int n);
+void a20_net_netlink_link_removed(const void *link);
 void a20_net_netlink_addr_notify(uint32_t ifindex, const uint8_t addr[4],
                                  const uint8_t mask[4]);
 void a20_net_netlink_addr6_notify(uint32_t ifindex, const uint8_t addr[16],

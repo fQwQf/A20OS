@@ -38,6 +38,51 @@ def build(args, root):
             if match:
                 put(Path(match[1]), match[1])
 
+    if args.kea:
+        put(args.kea, '/usr/sbin/kea-dhcp6')
+        for line in subprocess.check_output(['ldd', str(args.kea)], text=True).splitlines():
+            if '=> not found' in line:
+                raise ValueError(f'{args.kea}: {line.strip()}')
+            match = re.search(r'(\S+) => (/\S+) \(0x', line)
+            if match:
+                put(Path(match[2]), f'/lib/kea/{match[1]}')
+            else:
+                match = re.search(r'(/\S+) \(0x', line)
+                if match:
+                    put(Path(match[1]), match[1])
+
+        for directory in ('etc/ppp', 'run/kea', 'var/lib/kea', 'var/run/kea'):
+            (root/directory).mkdir(parents=True, exist_ok=True)
+        configuration = {'Dhcp6': {
+            'interfaces-config': {'interfaces': ['ppp0']},
+            'lease-database': {'type': 'memfile', 'persist': False},
+            'preferred-lifetime': 24, 'valid-lifetime': 36,
+            'renew-timer': 10, 'rebind-timer': 20,
+            'subnet6': [{'id': 1, 'interface': 'ppp0', 'subnet': '2001:db8:20::/64',
+                         'pd-pools': [{'prefix': '2001:db8:POOL::',
+                                       'prefix-len': 48, 'delegated-len': 56}]}],
+            'loggers': [{'name': 'kea-dhcp6', 'output_options': [{'output': 'stdout'}],
+                         'severity': 'INFO'}],
+        }}
+        path = root/'etc/ppp/kea-pd.json'
+        path.write_text(json.dumps(configuration))
+        start_pd = root/'bin/pppoe-pd-start'
+        start_pd.write_text("""#!/bin/sh
+set -eu
+case "$1" in 400|500) pool="$1" ;; *) exit 2 ;; esac
+ip -6 addr replace 2001:db8:30::1/128 dev lo
+# Kea 2.6 reads IFA_ADDRESS rather than IFA_LOCAL for the PPP address
+# pair. Keep the negotiated local address in the normal single form.
+ip -6 addr flush dev ppp0 scope link
+ip -6 addr add fe80::1/64 dev ppp0
+ip -6 addr replace 2001:db8:20::1/64 dev ppp0
+ip -6 route replace "2001:db8:$pool::/56" dev ppp0
+busybox sed "s/POOL/$pool/g" /etc/ppp/kea-pd.json > /run/kea-pd.json
+export LD_LIBRARY_PATH=/lib/kea
+exec /usr/sbin/kea-dhcp6 -c /run/kea-pd.json
+""")
+        start_pd.chmod(0o755)
+
     for name in ('sh', 'mount', 'mknod', 'insmod', 'ip', 'sleep'):
         (root/'bin'/name).symlink_to('busybox')
     for name in ('etc/ppp', 'dev', 'proc', 'sys', 'tmp', 'run', 'modules', 'var/run'):
@@ -128,6 +173,7 @@ def main():
     parser.add_argument('--kver', required=True)
     parser.add_argument('--legacy-provider', type=Path, required=True)
     parser.add_argument('--pppd', type=Path, default=Path('/usr/sbin/pppd'))
+    parser.add_argument('--kea', type=Path, help='include a DHCPv6-PD server for PPP')
     parser.add_argument('--busybox', type=Path, default=Path('/bin/busybox'))
     parser.add_argument('--modprobe', default='/usr/sbin/modprobe')
     parser.add_argument('--cc', default='cc')

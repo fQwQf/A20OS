@@ -34,5 +34,6 @@ typedef struct {
 } nl_route6_out_t;
 
 void net_netlink_link_notify_one(unsigned index, int up);
+void net_netlink_link_removed(unsigned index, const char *name);
 
 #endif

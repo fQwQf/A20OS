@@ -91,18 +91,30 @@ def advertisements(capture):
         yield stamp, default, prefixes
 
 
-def verified_renewal(capture):
-    request = set()
+def dhcp_packets(capture):
     for _, frame in frames(capture):
-        if len(frame) < 66 or frame[12:14] != pd.ra.IPV6 or frame[20] != 17:
+        if frame[12:14] == pd.ra.IPV6:
+            ip = frame[14:]
+        elif frame[12:14] == b'\x88\x64' and frame[20:22] == b'\0\x57':
+            ip = frame[22:]
+        else:
             continue
-        ports = struct.unpack_from('!2H', frame, 54)
-        kind, xid = frame[62], frame[63:66]
-        if ports == (546, 547) and kind == 5:
-            request.add(xid)
-        if ports == (547, 546) and kind == 7 and xid in request:
-            options = list(pd.dhcp_options(frame[66:54 + struct.unpack_from('!H', frame, 58)[0]]))
-            assert not any(kind == 3 for kind, _ in options)
+        if len(ip) < 52 or ip[6] != 17:
+            continue
+        source, dest, length = struct.unpack_from('!3H', ip, 40)
+        if (source, dest) not in ((546, 547), (547, 546)):
+            continue
+        payload = ip[48:40 + length]
+        yield source, payload[0], payload[1:4], list(pd.dhcp_options(payload[4:]))
+
+
+def verified_renewal(capture):
+    requests = set()
+    for source, kind, xid, options in dhcp_packets(capture):
+        if source == 546 and kind == 5:
+            requests.add(xid)
+        if source == 547 and kind == 7 and xid in requests:
+            assert not any(option == 3 for option, _ in options)
             return True
     return False
 
@@ -195,10 +207,82 @@ def exercise(a20, wan, lan, out, result):
                    for _, frame in frames(out/'wan.pcap')), 'LAN advertisement leaked to WAN'
 
 
+def verify_ppp_delegations(capture):
+    identities, prefixes = set(), set()
+    for source, kind, _, options in dhcp_packets(capture):
+        assert not any(code == 3 for code, _ in options), 'unexpected IA_NA over PPP'
+        if source == 546 and kind in (1, 3, 5):
+            duid = next(value for code, value in options if code == 1)
+            iaid = next(value[:4] for code, value in options if code == 25)
+            identities.add((duid, iaid))
+        if source == 547 and kind == 7:
+            ia_pd = next(value for code, value in options if code == 25)
+            for code, value in pd.dhcp_options(ia_pd[12:]):
+                if code == 26:
+                    preferred, valid, length = struct.unpack_from('!IIB', value)
+                    assert (preferred, valid, length) == (24, 36, 56)
+                    prefixes.add(ipaddress.IPv6Network((value[9:25], length)))
+    assert len(identities) == 1, identities
+    assert prefixes == {ipaddress.IPv6Network('2001:db8:400::/56'),
+                        ipaddress.IPv6Network('2001:db8:500::/56')}, prefixes
+
+
+def exercise_ppp(a20, wan, lan, out, result):
+    wan.until('A20_LINUX_PPPOE_PEER_READY')
+    lan.until('A20_LINUX_LAN_READY')
+    a20.until('[INIT] entering scheduler...')
+    assert command(a20, 'umask 077; echo a20-client > /tmp/credentials && '
+                   'echo a20-test-secret >> /tmp/credentials', wan)[0] == 0
+    a20.send(f'pd-lan /extra/odhcp6c ppp-wan 56 en2:{SUBNET} & manager=$!')
+    a20.until('pd-lan: running on', 6, drain_peer=wan)
+    a20.send('pppoe -6 en3 ppp-wan test chap /tmp/credentials & dialer=$!')
+    a20.until('PPPOE IPV6 local=fe80::2 peer=fe80::1', 35, drain_peer=wan)
+    wan.until('remote LL address fe80::', timeout=10)
+    wan.send('pppoe-pd-start 400 &')
+    wan.until('DHCP6_STARTED', timeout=15)
+    peers = (wan, a20)
+    wait_linux(lan, 'ip -6 addr show dev eth0',
+               lambda b: b'2001:db8:400:2a:' in b and b'scope global' in b and b'tentative' not in b,
+               peers, timeout=40)
+    assert command(lan, f'busybox ping -6 -c 2 -W 2 {UPSTREAM}', peers)[0] == 0
+    result['passed'].append('dhcp6_pd_over_pppoe_routes_the_linux_lan')
+    deadline = time.monotonic() + 25
+    while not verified_renewal(out/'wan.pcap'):
+        assert time.monotonic() < deadline, 'PPP DHCPv6 renewal missing'
+        command(lan, 'true', peers)
+        time.sleep(0.7)
+    result['passed'].append('dhcp6_pd_renews_on_the_ppp_uplink')
+
+    assert command(wan, 'kill $(busybox pidof kea-dhcp6 pppd pppoe-server)')[0] == 0
+    wait_linux(lan, 'ip -6 route show dev eth0', lambda b: b'default via' not in b, peers, timeout=9)
+    old_prefix = ipaddress.IPv6Network('2001:db8:400:2a::/64')
+    assert any(default == 0 and prefixes.get(old_prefix) == (0, 0)
+               for _, default, prefixes in advertisements(out/'lan.pcap'))
+    result['passed'].append('ppp_disconnect_withdraws_old_lan_prefix_and_default')
+    wan.send('while busybox pidof pppd pppoe-server kea-dhcp6 >/dev/null; '
+             'do sleep 0.1; done; pppoe-peer-start 198.18.0.11 &')
+    a20.until('PPPOE UP session=', 35, drain_peer=wan)
+    a20.until('ip=198.18.0.11', 8, drain_peer=wan)
+    a20.until('PPPOE IPV6 local=fe80::2 peer=fe80::1', 8, drain_peer=wan)
+    wan.until('remote LL address fe80::', timeout=10)
+    wan.send('pppoe-pd-start 500 &')
+    wan.until('DHCP6_STARTED', timeout=15)
+    wait_linux(lan, 'ip -6 addr show dev eth0',
+               lambda b: b'2001:db8:500:2a:' in b and b'scope global' in b and b'tentative' not in b,
+               peers, timeout=45)
+    assert command(lan, f'busybox ping -6 -c 2 -W 2 {UPSTREAM}', peers)[0] == 0
+    result['passed'].append('new_pd_and_lan_connectivity_after_pppoe_redial')
+    verify_ppp_delegations(out/'wan.pcap')
+    result['passed'].append('wire_delegations_share_client_duid_and_iaid')
+    assert command(a20, 'kill "$manager"; wait "$manager"; kill "$dialer"; wait "$dialer"',
+                   wan, timeout=14)[0] == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ('kernel', 'linux', 'peer-initrd', 'busybox', 'odhcp6c', 'out'):
         parser.add_argument(f'--{arg}', type=Path, required=True)
+    parser.add_argument('--pppoe-peer-initrd', type=Path, help='run the WAN peer through PPPoE')
     parser.add_argument('--trace-odhcp6c', action='store_true')
     args = parser.parse_args()
     out = args.out.resolve()
@@ -214,7 +298,9 @@ def main():
         item.replace('id=wan', 'id=lan').replace('netdev=wan', 'netdev=lan')
         for item in wan_link(local, remote, mac, cap)
     ]
-    bootargs = 'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0 a20.ipv6_ra=en3'
+    bootargs = 'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0'
+    if not args.pppoe_peer_initrd:
+        bootargs += ' a20.ipv6_ra=en3'
     if args.trace_odhcp6c:
         bootargs += ' trace=odhcp6c'
     router = [*common, '-kernel', str(args.kernel.resolve()), '-append', bootargs,
@@ -222,13 +308,18 @@ def main():
               *wan_link(rwan, wan, '52:54:00:77:00:02', out/'wan.pcap'),
               '-drive', f'file={payload},if=none,format=raw,id=payload',
               '-device', 'virtio-blk-pci,drive=payload']
-    wan_cmd = [*base, '-append', 'console=ttyS0 quiet net.ifnames=0',
+    wan_initrd = args.pppoe_peer_initrd or args.peer_initrd
+    wan_args = 'console=ttyS0 quiet net.ifnames=0'
+    if args.pppoe_peer_initrd:
+        wan_args += ' pppauth=chap pppdual=1'
+    wan_cmd = [*base[:-1], str(wan_initrd.resolve()), '-append', wan_args,
                *wan_link(wan, rwan, '52:54:00:77:00:01', out/'kea.pcap')]
     lan_cmd = [*base, '-append', 'console=ttyS0 quiet net.ifnames=0 a20_lan_peer=1',
                *lan_link(lan, rlan, '52:54:00:01:00:02', out/'client.pcap')]
     result = dict(status='failed', passed=[], argv={'router': router, 'wan': wan_cmd, 'lan': lan_cmd},
                   sha256={str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in (args.kernel, args.linux, args.peer_initrd, args.busybox, args.odhcp6c)})
+                          for p in (args.kernel, args.linux, args.peer_initrd, wan_initrd,
+                                    args.busybox, args.odhcp6c)})
     Guest = pd.pppoe.router.backend.Guest
     with (out/'serial.log').open('wb') as router_log, (out/'wan.log').open('wb') as wan_log, \
          (out/'lan.log').open('wb') as lan_log:
@@ -237,7 +328,10 @@ def main():
             guests.append(Guest(router, router_log))
             guests.append(Guest(wan_cmd, wan_log))
             guests.append(Guest(lan_cmd, lan_log))
-            exercise(*guests, out, result)
+            if args.pppoe_peer_initrd:
+                exercise_ppp(*guests, out, result)
+            else:
+                exercise(*guests, out, result)
             guests[0].send('poweroff')
             guests[0].until('System is going down for power-off NOW')
             assert guests[0].process.wait(timeout=15) == 0

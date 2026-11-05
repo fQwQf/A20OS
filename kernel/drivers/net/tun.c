@@ -880,10 +880,12 @@ static int tun_close(vfile_t *vf)
     tun_t *t = tun_from_vfile(vf);
     if (!t) { mutex_unlock(&g_tun_control); return 0; }
     if (t->ifindex && !t->persist) {
-        net_stack_tun_destroy(t->ifindex);
+        unsigned index = t->ifindex;
+        net_stack_tun_destroy(index);
         uint64_t tf = spin_lock_irqsave(&g_tun_table_lock);
         t->ifindex = 0;
         spin_unlock_irqrestore(&g_tun_table_lock, tf);
+        net_netlink_link_removed(index, t->name);
     }
     uint64_t flags = spin_lock_irqsave(&t->lock);
     for (int i = 0; i < TUN_RX_DEPTH; i++) {

@@ -102,7 +102,10 @@ python3 tools/net/tests/test-bsd-dhcp6-pd.py \
 重叠子网。通告寿命受上游剩余租约约束。WAN 默认路由失效时，通告中的
 路由器寿命变为零，仍有效的前缀继续发布。租约失效或命令正常退出时，
 程序撤销通告并清理它管理的地址。重启后的租约和过期通告状态持久化
-仍在补全。[RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html) ·
+仍在补全。WAN 接口可以是普通以太网接口或 IPv6CP 建立的
+[PPP 接口](./pppoe.md#在-ppp-上取得并发布-ipv6-前缀)。服务会等待
+WAN 链路本地地址，接口销毁或关闭时重启 DHCPv6 会话。
+[RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html) ·
 [RFC 9096](https://www.rfc-editor.org/rfc/rfc9096.html)
 
 以下测试复用上述 Kea 对端镜像，分别启动 Linux WAN 和 LAN 虚拟机。

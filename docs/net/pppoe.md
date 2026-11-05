@@ -50,6 +50,22 @@ pppoe -6 -d /run/ppp-wan.resolv en3 ppp-wan - chap /etc/pppoe.credentials
 [PAP](https://www.rfc-editor.org/rfc/rfc1334.html)、
 [CHAP](https://www.rfc-editor.org/rfc/rfc1994.html)。
 
+## 在 PPP 上取得并发布 IPv6 前缀
+
+启用双栈拨号后，`pd-lan` 可以直接在拨号创建的 `ppp-wan` 上运行
+原版 odhcp6c。它可以先启动并等待 `ppp-wan` 出现，随后把委派前缀
+分给 LAN。
+
+```sh
+pd-lan /usr/sbin/odhcp6c ppp-wan 56 en2:0x2a
+```
+
+这条路径使用 IPv6CP 建立的链路本地地址和 IPv6 默认路由。旧 PPP
+接口销毁时，`pd-lan` 撤销 LAN 的旧前缀和默认路由通告，停止绑定在
+旧接口上的客户端。新接口就绪后，即使它复用了旧索引，服务也会重新
+运行客户端并发布新租约。[DHCPv6 规范](https://www.rfc-editor.org/rfc/rfc9915.html)
+
+
 ## Linux 对端回归
 
 从本机匹配的 Linux 内核、模块、`pppd`、PPPoE 插件及
@@ -77,3 +93,9 @@ Linux 对端并验证 LCP Echo 超时。添加 `--dual` 可验证 IPv6CP
 可验证对端拒绝 DNS 选项时 IPv4 正常拨号。回归发送经过 NAT 的 LAN
 UDP 流，重拨时让对端分配新地址后复用原五元组，并检查错误密码不会
 建立 TUN。
+
+
+测试 PPP 上的前缀委派时，构建 PPP 对端镜像时再加
+`--kea <kea-dhcp6路径>`，然后按
+[LAN 自动配置测试](./router.md#自动发布委派前缀)运行，并向测试命令
+额外传入 `--pppoe-peer-initrd <含-Kea-的-PPP-对端镜像>`。

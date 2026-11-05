@@ -246,4 +246,21 @@ LAN 可通过 IPv6 默认路由和 PPP 到达 WAN；同一会话也通过 IPv4 N
 IPCP 确认了 `192.0.2.53` 和 `192.0.2.54`。解析器文件在重拨后
 重新生成并在正常停止后清理。`pppoe-ipcp-dns-reject` 验证对端拒绝
 DNS 选项时 IPv4 仍可拨号和转发。此轮 IPv6 转发使用测试配置的
-LAN 前缀。经 PPP 获取 DHCPv6-PD 及在重拨后恢复委派还需验证。
+LAN 前缀。PPP 上的自动委派与重拨恢复见下节。
+
+
+### PPP 上的前缀委派与链路恢复
+
+`pppoe-pd-verified` 使用 Linux pppoe-server、pppd、Kea 和独立
+Linux LAN 主机。`pd-lan` 在 PPP 接口出现前启动，随后在 PPP
+上从 Kea 取得并续租 `2001:db8:400::/56`，为 LAN 发布
+`2001:db8:400:2a::/64`。Linux 客户端通过 SLAAC 获取地址并与
+WAN 双向通信。
+
+关闭 Linux PPP 对端时，旧 TUN 的 `RTM_DELLINK` 通知带原接口索引，
+LAN 收到旧前缀和默认路由的撤销通告。重拨复用了接口索引，原发布
+服务启动新的 DHCPv6 客户端，取得 `2001:db8:500::/56` 并恢复
+转发。抓包校验了两次拨号的 DUID、IAID 和委派寿命。模拟 ISP
+的返程路由由测试对端配置。Kea 对端测试保留 pppd 协商出的本地
+链路地址，将其以单地址形式配置，以免 Kea 绑定到 Linux PPP
+地址对中的远端地址。

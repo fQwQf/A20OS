@@ -48,6 +48,7 @@ const TCP_LISTEN: u8 = 10;
 
 const NLMSG_ERROR: u16 = 2;
 const RTM_NEWLINK: u16 = 16;
+const RTM_DELLINK: u16 = 17;
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
@@ -2256,6 +2257,20 @@ pub unsafe extern "C" fn a20_net_netlink_link_notify(events: *const c_void, n: i
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn a20_net_netlink_link_removed(link: *const c_void) {
+    if link.is_null() {
+        return;
+    }
+    let entry = &*(link as *const NlrtLink);
+    let mut msg = MsgBuf::new();
+    let total = build_linkmsg(&mut msg.0, entry, RTM_DELLINK, 0, nlrt_next_seq());
+    if total != 0 {
+        ptr::write_unaligned(msg.0.as_mut_ptr().add(6) as *mut u16, 0);
+        let _ = nlrt_broadcast(msg.0.as_ptr(), total, RTNLGRP_LINK);
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn a20_net_netlink_addr_notify(ifindex: u32, addr: *const u8,
                                                      mask: *const u8) {
     if addr.is_null() {
@@ -3649,6 +3664,15 @@ mod tests {
             /* An interface not in the snapshot publishes nothing. */
             a20_net_netlink_addr_notify(9, zero.as_ptr(), zero.as_ptr());
             assert_eq!(T_ENQ_CALLS, 4);
+
+            /* DELLINK carries the old identity even after snapshot removal. */
+            T_NLINKS = 0;
+            a20_net_netlink_link_removed(&e as *const NlrtLink as *const c_void);
+            assert_eq!(T_ENQ_CALLS, 5);
+            let header = &*(T_ENQ_BYTES.0.as_ptr() as *const NlMsghdr);
+            let link = &*(T_ENQ_BYTES.0.as_ptr().add(16) as *const IfInfoMsg);
+            assert_eq!((header.msg_type, header.flags, link.index), (RTM_DELLINK, 0, 2));
+            assert!(find(&T_ENQ_BYTES.0[..header.len as usize], b"eth0"));
         }
     }
 
