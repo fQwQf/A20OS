@@ -35,6 +35,7 @@ const NLM_F_ACK: u16 = 0x04;
 const NLM_F_DUMP: u16 = 0x300;
 const NLM_F_MULTI: u16 = 0x2;
 const NLM_F_REPLACE: u16 = 0x100;
+const NLM_F_EXCL: u16 = 0x200;
 
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
 const TCPDIAG_GETSOCK: u16 = 18;
@@ -68,6 +69,7 @@ const IFLA_OPERSTATE: u16 = 5;
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
 const IFA_BROADCAST: u16 = 4;
+const IFA_CACHEINFO: u16 = 6;
 const IFA_LABEL: u16 = 3;
 
 const RTA_DST: u16 = 1;
@@ -252,12 +254,14 @@ struct NlrtAddr6 {
     prefix: u8,
     flags: u8,
     scope: u8,
-    reserved: u8,
+    has_lifetime: u8,
+    valid: u32,
+    preferred: u32,
 }
 
 impl NlrtAddr6 {
     const ZERO: Self = Self { index: 0, address: [0; 16], prefix: 0,
-                              flags: 0, scope: 0, reserved: 0 };
+                              flags: 0, scope: 0, has_lifetime: 0, valid: 0, preferred: 0 };
 }
 const NLRT_MAX_ADDR6: usize = 64;
 
@@ -319,8 +323,8 @@ unsafe extern "C" {
                                  remove: i32) -> i32;
     fn a20_net_netlink_if_set_addr(ifindex: u32, ip: *const u8, mask: *const u8,
                                    gw: *const u8) -> i32;
-    fn a20_net_netlink_if_set_addr6(ifindex: u32, addr: *const u8,
-                                    prefixlen: u8) -> i32;
+    fn a20_net_netlink_if_set_addr6(ifindex: u32, addr: *const u8, prefixlen: u8,
+                                   valid: u32, preferred: u32, exclusive: i32) -> i32;
     fn a20_net_netlink_if_del_addr6(ifindex: u32, addr: *const u8) -> i32;
     fn a20_net_netlink_loopback_mtu(ns: *mut c_void, value: u32, set: i32) -> u32;
     fn a20_net_netlink_loopback_up(ns: *mut c_void, value: u32, set: i32) -> u32;
@@ -1045,6 +1049,12 @@ unsafe fn build_addrmsg6(buf: &mut [u8], entry: &NlrtAddr6, name: &[u8],
     off += core::mem::size_of::<IfAddrMsg>();
     off = put_attr(buf, off, IFA_ADDRESS, &entry.address);
     off = put_attr(buf, off, IFA_LOCAL, &entry.address);
+    if entry.has_lifetime != 0 {
+        let mut info = [0u8; 16];
+        info[..4].copy_from_slice(&entry.preferred.to_ne_bytes());
+        info[4..8].copy_from_slice(&entry.valid.to_ne_bytes());
+        off = put_attr(buf, off, IFA_CACHEINFO, &info);
+    }
     if !name.is_empty() {
         let mut label = [0u8; 17];
         let n = name.len().min(16);
@@ -1560,7 +1570,7 @@ unsafe fn apply_newlink(ns: *mut c_void, ifi: &IfInfoMsg, attrs: &[u8]) -> i32 {
     rc
 }
 
-unsafe fn apply_addr6(msg_type: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
+unsafe fn apply_addr6(msg_type: u16, flags: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
     if msg_type != RTM_NEWADDR && msg_type != RTM_DELADDR {
         return -EOPNOTSUPP;
     }
@@ -1577,6 +1587,9 @@ unsafe fn apply_addr6(msg_type: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
     let mut local = [0u8; 16];
     let mut have_address = false;
     let mut have_local = false;
+    let mut preferred = u32::MAX;
+    let mut valid = u32::MAX;
+    let mut have_lifetime = false;
     let mut it = AttrIter::new(attrs);
     while let Some((type_, payload)) = it.next() {
         if type_ == IFA_ADDRESS {
@@ -1591,6 +1604,16 @@ unsafe fn apply_addr6(msg_type: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
             }
             local.copy_from_slice(payload);
             have_local = true;
+        } else if type_ == IFA_CACHEINFO && msg_type == RTM_NEWADDR {
+            if have_lifetime || payload.len() != 16 {
+                return -EINVAL;
+            }
+            preferred = ptr::read_unaligned(payload.as_ptr() as *const u32);
+            valid = ptr::read_unaligned(payload.as_ptr().add(4) as *const u32);
+            if valid == 0 || preferred > valid {
+                return -EINVAL;
+            }
+            have_lifetime = true;
         }
     }
     if it.bad {
@@ -1606,13 +1629,14 @@ unsafe fn apply_addr6(msg_type: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
     if msg_type == RTM_DELADDR {
         return a20_net_netlink_if_del_addr6(ifa.index, want.as_ptr());
     }
-    a20_net_netlink_if_set_addr6(ifa.index, want.as_ptr(), ifa.prefixlen)
+    a20_net_netlink_if_set_addr6(ifa.index, want.as_ptr(), ifa.prefixlen,
+                                 valid, preferred, (flags & NLM_F_EXCL != 0) as i32)
 }
 
 unsafe fn apply_addr(msg_type: u16, flags: u16, ifa: &IfAddrMsg,
                      attrs: &[u8]) -> i32 {
     if ifa.family as i32 == AF_INET6 {
-        return apply_addr6(msg_type, ifa, attrs);
+        return apply_addr6(msg_type, flags, ifa, attrs);
     }
     if ifa.family as i32 != AF_INET {
         return -EAFNOSUPPORT;
@@ -2228,6 +2252,7 @@ mod tests {
     static mut T_SET_MTU: i32 = 0;
     static mut T_SET_FLAGS: i32 = 0;
     static mut T_SET_ADDR: i32 = 0;
+    static mut T_ADDR6_LIFETIME: (u32, u32, i32) = (0, 0, 0);
     static mut T_SET_ADDR6: i32 = 0;
     static mut T_DEL_ADDR6: i32 = 0;
     static mut T_GET_ADDR_IP: [u8; 4] = [0; 4];
@@ -2489,8 +2514,10 @@ mod tests {
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_netlink_if_set_addr6(_i: u32, _a: *const u8,
-                                                      _p: u8) -> i32 {
+                                                      _p: u8, valid: u32, preferred: u32,
+                                                      exclusive: i32) -> i32 {
         T_SET_ADDR6 += 1;
+        T_ADDR6_LIFETIME = (valid, preferred, exclusive);
         0
     }
     #[no_mangle]
@@ -3159,6 +3186,24 @@ mod tests {
                                                      0), 0);
             assert_eq!(T_SET_ADDR6, 1);
 
+            assert_eq!(T_ADDR6_LIFETIME, (u32::MAX, u32::MAX, 0));
+
+            let mut cache = [0u8; 16];
+            cache[..4].copy_from_slice(&12u32.to_ne_bytes());
+            cache[4..8].copy_from_slice(&30u32.to_ne_bytes());
+            body[28..48].copy_from_slice(&attr(IFA_CACHEINFO, &cache)[..20]);
+            let req = route_req(RTM_NEWADDR, NLM_F_EXCL, &body[..48]);
+            assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
+                                                     req.len(), ptr::null(), 0), 0);
+            assert_eq!(T_ADDR6_LIFETIME, (30, 12, 1));
+
+            cache[4..8].copy_from_slice(&11u32.to_ne_bytes());
+            body[28..48].copy_from_slice(&attr(IFA_CACHEINFO, &cache)[..20]);
+            let req = route_req(RTM_NEWADDR, 0, &body[..48]);
+            assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req.as_ptr() as *const c_void,
+                                                     req.len(), ptr::null(), 0), -EINVAL);
+            assert_eq!(T_SET_ADDR6, 2);
+
             /* A delete reaches the same parser and the delete primitive. */
             let del = route_req(RTM_DELADDR, 0, &body[..28]);
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, del.as_ptr() as *const c_void,
@@ -3315,8 +3360,17 @@ mod tests {
             assert!(find(&msg.0[..total], b"eth0"));
 
             let mut msg = MsgBuf::new();
-            let entry = NlrtAddr6 { index: 2, prefix: 64, ..NlrtAddr6::ZERO };
-            let _total = build_addrmsg6(&mut msg.0, &entry, b"eth0", RTM_NEWADDR, 0, 0);
+            let entry = NlrtAddr6 { index: 2, prefix: 64, has_lifetime: 1,
+                                    preferred: 12, valid: 30, ..NlrtAddr6::ZERO };
+            let total = build_addrmsg6(&mut msg.0, &entry, b"eth0", RTM_NEWADDR, 0, 0);
+            let mut attrs = AttrIter::new(&msg.0[24..total]);
+            assert_eq!(attrs.next().unwrap().0, IFA_ADDRESS);
+            assert_eq!(attrs.next().unwrap().0, IFA_LOCAL);
+            let (kind, cache) = attrs.next().unwrap();
+            assert_eq!((kind, cache.len()), (IFA_CACHEINFO, 16));
+            assert_eq!(cache[..4], 12u32.to_ne_bytes());
+            assert_eq!(cache[4..8], 30u32.to_ne_bytes());
+            assert_eq!(cache[8..], [0; 8]);
             let ifa_out = &*(msg.0.as_ptr().add(16) as *const IfAddrMsg);
             assert_eq!((ifa_out.family, ifa_out.prefixlen), (AF_INET6 as u8, 64));
 

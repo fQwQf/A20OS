@@ -309,29 +309,13 @@ int port_tun_route4(void *context, const uint8_t destination[4], uint8_t prefix,
 }
 
 int port_tun_set_addr6(void *context, const uint8_t address[16],
-                               uint8_t prefix, int add)
+                       uint8_t prefix, int add, uint32_t valid,
+                       uint32_t preferred, int exclusive)
 {
     port_tun_t *tun = context;
-    if (!tun || !tun->ifp || !address || prefix > 128)
+    if (!tun)
         return EINVAL;
-    struct in6_aliasreq ifra;
-    memset(&ifra, 0, sizeof(ifra));
-    strlcpy(ifra.ifra_name, tun->ifp->if_xname, sizeof(ifra.ifra_name));
-    ifra.ifra_addr.sin6_family = AF_INET6;
-    ifra.ifra_addr.sin6_len = sizeof(ifra.ifra_addr);
-    memcpy(&ifra.ifra_addr.sin6_addr, address, 16);
-    ifra.ifra_prefixmask.sin6_family = AF_INET6;
-    ifra.ifra_prefixmask.sin6_len = sizeof(ifra.ifra_prefixmask);
-    for (unsigned i = 0; i < 16; ++i) {
-        unsigned bits = prefix > i * 8 ? prefix - i * 8 : 0;
-        if (bits >= 8) ifra.ifra_prefixmask.sin6_addr.s6_addr[i] = 0xff;
-        else if (bits) ifra.ifra_prefixmask.sin6_addr.s6_addr[i] =
-            (uint8_t)(0xff << (8 - bits));
-    }
-    ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
-    ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
-    return in6_control(NULL, add ? SIOCAIFADDR_IN6 : SIOCDIFADDR_IN6,
-                       (caddr_t)&ifra, tun->ifp, NULL);
+    return port_if_set_ipv6(tun->ifp, address, prefix, add, valid, preferred, exclusive);
 }
 
 int port_tun_snapshot(void *context, a20_bsd_tun_info_t *out)

@@ -301,19 +301,22 @@ typedef struct tun_addr6_job {
     void *context;
     uint8_t address[16];
     uint8_t prefix;
-    int add;
+    int add, exclusive;
+    uint32_t valid, preferred;
 } tun_addr6_job_t;
 
 static int tun_addr6_job_run(void *argument)
 {
     tun_addr6_job_t *job = argument;
     int rc = a20_bsd_port_tun_set_addr6(job->context, job->address,
-                                        job->prefix, job->add);
+                                        job->prefix, job->add, job->valid,
+                                        job->preferred, job->exclusive);
     return rc < 0 ? rc : -rc;
 }
 
 int a20_bsd_tun_set_addr6(unsigned index, const uint8_t address[16],
-                          uint8_t prefix, int add)
+                          uint8_t prefix, int add, uint32_t valid,
+                          uint32_t preferred, int exclusive)
 {
     bsd_tun_slot_t *slot = slot_of(index);
     if (!slot) return -ENODEV;
@@ -323,12 +326,15 @@ int a20_bsd_tun_set_addr6(unsigned index, const uint8_t address[16],
     memcpy(job.address, address, 16);
     job.prefix = prefix;
     job.add = add;
+    job.exclusive = exclusive;
+    job.valid = valid;
+    job.preferred = preferred;
     return a20_bsd_executor_call(tun_addr6_job_run, &job);
 }
 
 int a20_bsd_tun_del_addr6(unsigned index, const uint8_t address[16])
 {
-    return a20_bsd_tun_set_addr6(index, address, 128, 0);
+    return a20_bsd_tun_set_addr6(index, address, 128, 0, 0, 0, 0);
 }
 
 int a20_bsd_tun_snapshot(nl_link_out_t *out, int max)

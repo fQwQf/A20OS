@@ -23,7 +23,8 @@ int a20_bsd_tun_set_addr(unsigned index, const uint8_t address[4],
 int a20_bsd_tun_route4(unsigned index, const uint8_t destination[4],
                        uint8_t prefix, int remove);
 int a20_bsd_tun_set_addr6(unsigned index, const uint8_t address[16],
-                          uint8_t prefix, int add);
+                          uint8_t prefix, int add, uint32_t valid,
+                              uint32_t preferred, int exclusive);
 int a20_bsd_tun_del_addr6(unsigned index, const uint8_t address[16]);
 int a20_bsd_tun_snapshot(nl_link_out_t *out, int max);
 int a20_bsd_tun_interface_ipv4(unsigned index);

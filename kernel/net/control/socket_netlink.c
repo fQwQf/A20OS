@@ -295,9 +295,10 @@ int a20_net_netlink_if_set_addr(uint32_t ifindex, const uint8_t *ip,
 }
 
 int a20_net_netlink_if_set_addr6(uint32_t ifindex, const uint8_t *addr,
-                                 uint8_t prefixlen)
+                                 uint8_t prefixlen, uint32_t valid, uint32_t preferred,
+                                  int exclusive)
 {
-    return net_stack_if_set_addr6((unsigned)ifindex, addr, prefixlen);
+    return net_stack_if_set_addr6(ifindex, addr, prefixlen, valid, preferred, exclusive);
 }
 
 int a20_net_netlink_if_del_addr6(uint32_t ifindex, const uint8_t *addr)

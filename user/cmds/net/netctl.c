@@ -252,6 +252,8 @@ static void test_msg_nosignal(int fd)
 #define NLT_IFA_LOCAL    2
 #define NLT_REQUEST_ACK  0x005
 #define NLT_CREATE_EXCL  0x600
+#define NLT_CREATE_REPLACE 0x500
+#define NLT_IFA_CACHEINFO 6
 #define NLT_IFNAME       3
 
 struct nlmsghdr {
@@ -476,13 +478,16 @@ static int rtnetlink_ack(const void *request, size_t length)
     return -1;
 }
 
-static int set_ipv6(const char *name, const char *ip, const char *prefix)
+static int set_ipv6(const char *name, const char *ip, const char *prefix,
+                    const char *preferred, const char *valid, int replace)
 {
     struct {
         struct nlmsghdr header;
         struct ifaddrmsg address;
         struct rtattr local;
         struct in6_addr value;
+        struct rtattr cache;
+        uint32_t lifetimes[4];
     } request = {0};
     char *end;
     unsigned long bits = strtoul(prefix, &end, 10);
@@ -492,13 +497,32 @@ static int set_ipv6(const char *name, const char *ip, const char *prefix)
         fprintf(stderr, "NETCTL: FAIL invalid IPv6 configuration\n");
         return 1;
     }
-    request.header = (struct nlmsghdr){sizeof(request), NLT_NEWADDR,
-                                      NLT_REQUEST_ACK | NLT_CREATE_EXCL, 1, 0};
+    size_t length = sizeof(request) - sizeof(request.cache) - sizeof(request.lifetimes);
+    if (valid) {
+        unsigned long long preferred_seconds = strtoull(preferred, &end, 10);
+        if (!*preferred || *end || preferred_seconds > UINT32_MAX)
+            return 2;
+        unsigned long long valid_seconds = strtoull(valid, &end, 10);
+        if (!*valid || *end || !valid_seconds || valid_seconds > UINT32_MAX ||
+            preferred_seconds > valid_seconds)
+            return 2;
+        request.cache = (struct rtattr){sizeof(request.cache) + sizeof(request.lifetimes),
+                                       NLT_IFA_CACHEINFO};
+        request.lifetimes[0] = preferred_seconds;
+        request.lifetimes[1] = valid_seconds;
+        length = sizeof(request);
+    }
+    uint16_t action = replace ? NLT_CREATE_REPLACE : NLT_CREATE_EXCL;
+    request.header = (struct nlmsghdr){length, NLT_NEWADDR, NLT_REQUEST_ACK | action, 1, 0};
     request.address.ifa_family = AF_INET6;
     request.address.ifa_prefixlen = (uint8_t)bits;
     request.local = (struct rtattr){sizeof(request.local) + sizeof(request.value), NLT_IFA_LOCAL};
 
-    if (rtnetlink_ack(&request, sizeof(request)) < 0) {
+    if (rtnetlink_ack(&request, length) < 0) {
+        if (errno == EEXIST) {
+            fprintf(stderr, "NETCTL: IPv6 address already exists\n");
+            return EEXIST;
+        }
         perror("NETCTL: FAIL configure IPv6");
         return 1;
     }
@@ -677,9 +701,12 @@ int main(int argc, char **argv)
     if (argc == 4 && !strcmp(argv[1], "set-link"))
         return set_link(argv[2], argv[3]);
     if (argc == 5 && !strcmp(argv[1], "set-ipv6"))
-        return set_ipv6(argv[2], argv[3], argv[4]);
+        return set_ipv6(argv[2], argv[3], argv[4], NULL, NULL, 0);
+    if (argc == 7 && (!strcmp(argv[1], "set-ipv6") || !strcmp(argv[1], "replace-ipv6")))
+        return set_ipv6(argv[2], argv[3], argv[4], argv[5], argv[6],
+                        !strcmp(argv[1], "replace-ipv6"));
     if (argc != 1 && (argc != 5 || strcmp(argv[1], "set-ipv4"))) {
-        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX | set-link IF up|down | watch-link IF | raw6-echo IF]\n");
+        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX [PREFERRED VALID] | replace-ipv6 IF ADDRESS PREFIX PREFERRED VALID | set-link IF up|down | watch-link IF | raw6-echo IF]\n");
         return 2;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);

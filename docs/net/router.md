@@ -44,9 +44,12 @@ python3 tools/net/tests/test-bsd-router-ipv6-ra.py \
   --kernel <路由内核的kernel.bin> --out <新的证据目录>
 ```
 
-BSD 的 `RTM_GETADDR` 返回链路本地地址和 SLAAC 地址，包括作用域与
-DAD 状态。Linux 的 `ip -6 addr` 和 `getifaddrs()` 已用真实地址验证。
-IPv6 路由的 Linux 查询接口仍在补全。
+BSD 的 `RTM_GETADDR` 返回链路本地地址和 SLAAC 地址，包括作用域、
+DAD 状态和剩余寿命。Linux 的 `ip -6 addr` 和 `getifaddrs()` 已用真实
+地址验证。`RTM_NEWADDR` 可通过 `IFA_CACHEINFO` 设置首选寿命和
+有效寿命。更新地址时，手动配置的直连前缀按同一前缀下最长的剩余
+有效寿命更新。内核到期后清理地址和直连路由。IPv6 路由的 Linux
+查询接口仍在补全。
 
 ### DHCPv6 前缀委派互操作
 

@@ -97,7 +97,8 @@ int a20_bsd_port_ifindex_from_slot(int slot);
 int a20_bsd_port_ifindex_to_slot(unsigned ifindex, int *slot);
 int a20_bsd_port_addr6_snapshot(nl_addr6_out_t *out, int maximum);
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
-                              uint8_t prefix, int add);
+                              uint8_t prefix, int add, uint32_t valid,
+                              uint32_t preferred, int exclusive);
 int a20_bsd_port_nic_send_raw(void *context, const void *frame, size_t length);
 /* Insert (or refresh) a static Ethernet neighbour entry.  DHCP servers use
  * SIOCSARP for this because the client has no address to answer ARP with yet;
@@ -121,7 +122,8 @@ int a20_bsd_port_tun_set_addr(void *context, const uint8_t address[4],
 int a20_bsd_port_tun_route4(void *context, const uint8_t destination[4],
                             uint8_t prefix, int remove);
 int a20_bsd_port_tun_set_addr6(void *context, const uint8_t address[16],
-                               uint8_t prefix, int add);
+                              uint8_t prefix, int add, uint32_t valid,
+                              uint32_t preferred, int exclusive);
 int a20_bsd_port_tun_snapshot(void *context, a20_bsd_tun_info_t *out);
 const char *a20_bsd_port_tun_name(void *context);
 

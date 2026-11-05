@@ -197,7 +197,8 @@ typedef struct net_backend_if_ops {
                     uint8_t *gateway);
     int (*set_addr)(unsigned index, const uint8_t *addr, const uint8_t *mask,
                     const uint8_t *gateway);
-    int (*set_addr6)(unsigned index, const uint8_t *addr, uint8_t prefix);
+    int (*set_addr6)(unsigned index, const uint8_t *addr, uint8_t prefix,
+                     uint32_t valid, uint32_t preferred, int exclusive);
     int (*del_addr6)(unsigned index, const uint8_t *addr);
     int (*route_update_v4)(const uint8_t *dst, uint8_t prefix,
                            const uint8_t *gateway, uint16_t ifindex,
