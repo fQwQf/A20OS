@@ -129,6 +129,7 @@ void proc_switch_out_finish_pending(void)
     spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
     if (reap) {
         /* No scheduler/park lock may nest outside tasklist_lock. */
+        proc_finish_exit_signal(reap);
         if (reap->reap_wait_requested)
             proc_notify_reap_ready(reap);
         proc_sched_note_zombie();
@@ -243,6 +244,7 @@ void proc_switch_complete(void)
     spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
     if (reap) {
         /* No scheduler/park lock may nest outside tasklist_lock. */
+        proc_finish_exit_signal(reap);
         if (reap->reap_wait_requested)
             proc_notify_reap_ready(reap);
         proc_sched_note_zombie();

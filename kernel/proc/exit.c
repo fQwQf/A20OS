@@ -235,6 +235,53 @@ void proc_notify_reap_ready(task_t *task)
     proc_put(parent);
 }
 
+/* CPU completion owns these transferred pins. WNOHANG consumers must receive
+ * their one exit signal after the reportable child has left every CPU. The
+ * early direct wait wake independently overlaps exit and parent dispatch. */
+void proc_finish_exit_signal(task_t *task)
+{
+#ifdef A20_TASK_OBJECTS_ENABLED
+    if (task->exit_events_pending) {
+        task->exit_events_pending = 0;
+        /* The CPU-completion pin also owns task->a20_object until final put,
+         * even if a competing reaper has detached its weak task binding. */
+        a20_task_object_notify(task, A20_EVENT_EXITED,
+                               (uint64_t)task->exit_code, 0, 1);
+    }
+#endif
+    task_t *parent = task->exit_signal_parent;
+    task_t *child = task->exit_signal_child;
+    int sig = task->exit_signal_pending;
+    task->exit_signal_parent = NULL;
+    task->exit_signal_child = NULL;
+    task->exit_signal_pending = 0;
+    if (parent && child && child != task) {
+        uint64_t pf = spin_lock_irqsave(&child->park_lock);
+        if (proc_task_is_current_any_cpu(child)) {
+            /* The last sibling can leave its CPU before the zombie leader.
+             * Group notification is claimed exactly once under tasklist_lock.
+             * Transfer both pins to the leader; its CPU release takes this
+             * same park_lock before publishing the slot as empty. */
+            child->exit_signal_parent = parent;
+            child->exit_signal_child = child;
+            child->exit_signal_pending = sig;
+            spin_unlock_irqrestore(&child->park_lock, pf);
+            return;
+        }
+        spin_unlock_irqrestore(&child->park_lock, pf);
+    }
+    if (parent && sig > 0) {
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+        if (child)
+            signal_notify_child_exit(parent, child);
+        else
+#endif
+            signal_send_task(parent, sig);
+    }
+    proc_put(child);
+    proc_put(parent);
+}
+
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
 /* Caller holds tasklist_lock. Signal-based parents (e.g. a POSIX shell) may
  * consume SIGCHLD with WNOHANG before the last sibling exits. Publish exactly
@@ -383,8 +430,8 @@ typedef struct task_exit_context {
     task_t *thread_leader;
     task_t *completed_parent;
     int completed_signal;
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     task_t *notify_leader;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     struct hyp_bridge_drop hyp_drop;
 #endif
 } task_exit_context_t;
@@ -525,10 +572,8 @@ static void exit_parent_bookkeeping(void *opaque)
     ctx->completed_parent = proc_group_exit_parent_get_locked(
         group_leader, &completed_signal);
     ctx->completed_signal = completed_signal;
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (ctx->completed_parent && completed_signal > 0)
         ctx->notify_leader = proc_get(group_leader);
-#endif
     spin_unlock_irqrestore(&tasklist_lock, lf);
 #else
     if (ctx->thread_leader) {
@@ -583,7 +628,9 @@ static void exit_task_services(void *opaque)
     a20_registry_task_exit(t->pid);
 #endif
 #ifdef A20_TASK_OBJECTS_ENABLED
-    a20_task_object_notify(t, A20_EVENT_EXITED, (uint64_t)ctx->exit_code, 0, 1);
+    /* Native event consumers can use TASK_WAIT_NONBLOCK, just like pidfd /
+     * SIGCHLD consumers use WNOHANG. Publish EXITED only after CPU release. */
+    t->exit_events_pending = 1;
 #else
     a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
                      A20_EVENT_EXITED, (uint64_t)ctx->exit_code, 0);
@@ -607,19 +654,23 @@ static void exit_tracer_detach(void *opaque)
 static void exit_notify_parent(void *opaque)
 {
     task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (ctx->notify_leader)
-        signal_notify_child_exit(ctx->completed_parent, ctx->notify_leader);
+    if (ctx->completed_parent && ctx->completed_signal > 0) {
+        t->exit_signal_parent = ctx->completed_parent;
+        t->exit_signal_pending = ctx->completed_signal;
+        ctx->completed_parent = NULL;
+        t->exit_signal_child = ctx->notify_leader;
+        ctx->notify_leader = NULL;
+    }
     proc_put(ctx->notify_leader);
-#else
-    if (ctx->completed_parent && ctx->completed_signal > 0)
-        signal_send_task(ctx->completed_parent, ctx->completed_signal);
-#endif
     proc_put(ctx->completed_parent);
 #else
-    if (!ctx->auto_reap && ctx->parent && ctx->task->exit_signal > 0)
-        signal_send_task(ctx->parent, ctx->task->exit_signal);
+    if (!ctx->auto_reap && ctx->parent && t->exit_signal > 0) {
+        t->exit_signal_parent = ctx->parent;
+        t->exit_signal_pending = t->exit_signal;
+        ctx->parent = NULL;
+    }
 #endif
     proc_put(ctx->parent);
     ctx->parent = NULL;

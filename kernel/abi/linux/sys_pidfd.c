@@ -45,10 +45,13 @@ static int pidfd_poll(vfile_t *vf, short events)
         return POLLNVAL;
 
     uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    int state = proc_task_state_get(target);
+    uint64_t pf_flags = spin_lock_irqsave(&target->park_lock);
+    int state = target->state;
+    int off_cpu = !proc_task_is_current_any_cpu(target);
+    spin_unlock_irqrestore(&target->park_lock, pf_flags);
     int exited = a20_pidfd_group_exited_rust(
         true, state == PROC_UNUSED, state == PROC_ZOMBIE,
-        state == PROC_ZOMBIE && proc_tg_group_dead_locked(target));
+        state == PROC_ZOMBIE && off_cpu && proc_tg_group_dead_locked(target));
     spin_unlock_irqrestore(&tasklist_lock, flags);
     return a20_pidfd_poll_events_rust(exited != 0, events);
 }
