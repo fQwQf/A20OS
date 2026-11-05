@@ -16,7 +16,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
 | PPPoE 宽带接入 | discovery/session、认证、MTU、IPv6CP、IPCP DNS 与断线重连 | Linux PAP、CHAP 双栈和 IPv4 回归通过 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 委派与续租、Linux LAN 自动地址与转发、租约撤销和重编号通过 |
-| 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | IPv4 和 IPv6 转发双 WAN 通过，本机 socket 待完成 |
+| 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | IPv4 和 IPv6 转发、本机 TCP/UDP 双 WAN 均通过 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
 | 真机验证 | 具体硬件 PCI ID、双网口收发、中断/链路恢复和长时负载 | 待硬件验收 |
@@ -85,6 +85,11 @@ LoongArch64 追加 `UART_CMDLINE=y`。测试命令为
 `policy-v6/manifest.json` 和同目录的抓包记录 IPv6 三网口回归。两个 WAN 使用相同的
 链路本地网关。测试覆盖源与目的规则、空表回退、反向转发、Hop Limit 超时回包、
 网关拒绝、最长前缀、metric 接管与替换，以及双栈共用表号时的删除隔离。
+
+`policy-local-final/manifest.json` 记录本机套接字的 7 项三网口回归。
+绑定源地址的 IPv4 和 IPv6 TCP/UDP 连接在增删规则后切换出口，原连接继续收发。
+目的策略也可为未绑定套接字选择只在附加表中存在的路由。测试同时覆盖 IPv6
+显式绑定网口及 TCP 使用策略出口 MTU 通告 MSS。
 
 ## IPv4 分片验证
 

@@ -44,6 +44,7 @@
 #include "ff_dpdk_if.h"
 #include "ff_host_interface.h"
 #include "protocol_abi.h"
+#include <a20_bsd_policy.h>
 
 /* Mirror protocol.h without importing A20OS headers into the BSD namespace. */
 typedef struct a20_bsd_nic_config {
@@ -164,47 +165,56 @@ static struct mbuf *filter_ipv4(struct mbuf *m, int port_id, bool output)
 #ifdef A20_BSD_ROUTER_POLICY
 extern unsigned a20_bsd_policy_fibs4(uint32_t source, uint32_t destination,
                                      unsigned *fibs, unsigned capacity);
-
-static unsigned policy_fib4(const struct ip *ip, const struct mbuf *m)
-{
-    unsigned fibs[16];
-    unsigned count = a20_bsd_policy_fibs4(ip->ip_src.s_addr, ip->ip_dst.s_addr, fibs, 16);
-    if (!count || (m->m_flags & (M_BCAST | M_MCAST)) || in_localip(ip->ip_dst) ||
-        IN_MULTICAST(ntohl(ip->ip_dst.s_addr)) || in_broadcast(ip->ip_dst, m->m_pkthdr.rcvif))
-        return 0;
-    for (unsigned i = 0; i < count; ++i) {
-        if (fib4_lookup(fibs[i], ip->ip_dst, 0, NHR_NONE, 0))
-            return fibs[i];
-    }
-    return 0;
-}
-#endif
-
-#ifdef A20_BSD_ROUTER_POLICY
 extern unsigned a20_bsd_policy_fibs6(const uint8_t source[16],
                                      const uint8_t destination[16],
                                      unsigned *fibs, unsigned capacity);
 
+unsigned port_policy_fib4(const struct in_addr *source, const struct in_addr *destination,
+                           unsigned base_fib, uint32_t flowid)
+{
+    unsigned fibs[16];
+    unsigned count = a20_bsd_policy_fibs4(source->s_addr, destination->s_addr, fibs, nitems(fibs));
+    uint32_t target = ntohl(destination->s_addr);
+    if (!count || target == INADDR_ANY || target == INADDR_BROADCAST ||
+        IN_MULTICAST(target) || IN_LINKLOCAL(target) || in_localip(*destination))
+        return base_fib;
+    for (unsigned i = 0; i < count; ++i) {
+        if (fib4_lookup(fibs[i], *destination, 0, NHR_NONE, flowid))
+            return fibs[i];
+    }
+    return base_fib;
+}
+
+unsigned port_policy_fib6(const struct in6_addr *source, const struct in6_addr *destination,
+                           unsigned base_fib, uint32_t flowid)
+{
+    unsigned fibs[16];
+    unsigned count = a20_bsd_policy_fibs6(source->s6_addr, destination->s6_addr, fibs, nitems(fibs));
+    if (!count || IN6_IS_SCOPE_LINKLOCAL(source) || IN6_IS_SCOPE_LINKLOCAL(destination) ||
+        IN6_IS_ADDR_MULTICAST(destination) || IN6_IS_ADDR_UNSPECIFIED(destination))
+        return base_fib;
+    struct in6_addr target = *destination;
+    if (in6_localip(&target))
+        return base_fib;
+    for (unsigned i = 0; i < count; ++i) {
+        if (fib6_lookup(fibs[i], &target, 0, NHR_NONE, flowid))
+            return fibs[i];
+    }
+    return base_fib;
+}
+
+bool port_policy_explicit_if6(const struct ip6_pktopts *opts)
+{
+    return opts && (opts->ip6po_nexthop || opts->ip6po_rthdr ||
+                    (opts->ip6po_pktinfo && opts->ip6po_pktinfo->ipi6_ifindex));
+}
+
 void port_ipv6_policy_input(struct mbuf *m)
 {
     struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
-    if ((m->m_flags & (M_BCAST | M_MCAST)) ||
-        IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_src) ||
-        IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_dst) ||
-        IN6_IS_ADDR_MULTICAST(&ip6->ip6_dst) ||
-        IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src))
+    if ((m->m_flags & (M_BCAST | M_MCAST)) || IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src))
         return;
-    unsigned fibs[16];
-    unsigned count = a20_bsd_policy_fibs6(ip6->ip6_src.s6_addr, ip6->ip6_dst.s6_addr,
-                                         fibs, nitems(fibs));
-    if (!count || in6_localip(&ip6->ip6_dst))
-        return;
-    for (unsigned i = 0; i < count; ++i) {
-        if (fib6_lookup(fibs[i], &ip6->ip6_dst, 0, NHR_NONE, 0)) {
-            M_SETFIB(m, fibs[i]);
-            return;
-        }
-    }
+    M_SETFIB(m, port_policy_fib6(&ip6->ip6_src, &ip6->ip6_dst, M_GETFIB(m), m->m_pkthdr.flowid));
 }
 #endif
 
@@ -245,7 +255,12 @@ struct mbuf *port_ipv4_input(struct mbuf *m)
         return NULL;
     }
 #ifdef A20_BSD_ROUTER_POLICY
-    M_SETFIB(m, policy_fib4(mtod(m, const struct ip *), m));
+    ip = mtod(m, struct ip *);
+    if (!(m->m_flags & (M_BCAST | M_MCAST))) {
+        unsigned fib = port_policy_fib4(&ip->ip_src, &ip->ip_dst, M_GETFIB(m), m->m_pkthdr.flowid);
+        if (fib != M_GETFIB(m) && !in_broadcast(ip->ip_dst, ifp))
+            M_SETFIB(m, fib);
+    }
 #endif
     return m;
 }

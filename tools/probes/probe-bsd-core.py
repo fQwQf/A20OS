@@ -126,6 +126,80 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
          '\n#ifdef A20_BSD_ROUTER_POLICY\n\tM_SETFIB(m, RT_DEFAULT_FIB);\n#endif\n'
          '\ticmp6_reflect(m, sizeof(struct ip6_hdr)); /* header order: IPv6 - ICMPv6 */'),
     ])
+    # Source selection, output and TCP MTU must use the same policy. The
+    # native cache cookie tracks generation, which can be equal in two FIBs.
+    policy_include = ('#include <net/route.h>',
+                      '#include <net/route.h>\n#include <a20_bsd_policy.h>')
+    overlay('freebsd/net/route/nhop_ctl.c', [
+        policy_include,
+        ('int\nnhop_get_rtflags',
+         '#ifdef A20_BSD_ROUTER_POLICY\n'
+         'bool\nport_policy_cache_in_fib(const struct nhop_object *nh, unsigned fib)\n'
+         '{\n\tconst struct rib_head *rib = nh->nh_priv->nh_control->ctl_rh;\n'
+         '\treturn (rib != NULL && rib->rib_fibnum == fib);\n}\n#endif\n\n'
+         'int\nnhop_get_rtflags'),
+    ])
+    output_fib = '\tfibnum = (inp != NULL) ? inp->inp_inc.inc_fibnum : M_GETFIB(m);'
+    overlay('freebsd/netinet/ip_output.c', [
+        policy_include,
+        (output_fib, output_fib + '\n#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\tif (inp != NULL && (flags & (IP_FORWARDING | IP_ROUTETOIF | IP_SENDONES)) == 0) {\n'
+         '\t\tfibnum = port_policy_fib4(&ip->ip_src, &ip->ip_dst, fibnum, m->m_pkthdr.flowid);\n'
+         '\t\tM_SETFIB(m, fibnum);\n'
+         '\t}\n'
+         '\tif (ro != NULL && ro->ro_nh != NULL && !port_policy_cache_in_fib(ro->ro_nh, fibnum))\n'
+         '\t\tRO_INVALIDATE_CACHE(ro);\n#endif'),
+    ])
+    overlay('freebsd/netinet6/ip6_output.c', [
+        policy_include,
+        (output_fib, output_fib + '\n#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\tif (inp != NULL && (flags & IPV6_FORWARDING) == 0 &&\n'
+         '\t    !port_policy_explicit_if6(opt) &&\n'
+         '\t    (inp->inp_socket == NULL || (inp->inp_socket->so_options & SO_DONTROUTE) == 0)) {\n'
+         '\t\tfibnum = port_policy_fib6(&ip6->ip6_src, &ip6->ip6_dst, fibnum, m->m_pkthdr.flowid);\n'
+         '\t\tM_SETFIB(m, fibnum);\n'
+         '\t}\n'
+         '\tif (ro != NULL && ro->ro_nh != NULL && !port_policy_cache_in_fib(ro->ro_nh, fibnum))\n'
+         '\t\tRO_INVALIDATE_CACHE(ro);\n#endif'),
+    ])
+    overlay('freebsd/netinet/in_pcb.c', [
+        policy_include,
+        ('\tif ((inp->inp_socket->so_options & SO_DONTROUTE) == 0)\n'
+         '\t\tnh = fib4_lookup(inp->inp_inc.inc_fibnum, *faddr,\n\t\t    0, NHR_NONE, 0);',
+         '\tif ((inp->inp_socket->so_options & SO_DONTROUTE) == 0) {\n'
+         '\t\tuint32_t fib = inp->inp_inc.inc_fibnum;\n'
+         '#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\t\tfib = port_policy_fib4(laddr, faddr, fib, 0);\n'
+         '#endif\n'
+         '\t\tnh = fib4_lookup(fib, *faddr, 0, NHR_NONE, 0);\n\t}'),
+    ])
+    overlay('freebsd/netinet6/in6_src.c', [
+        policy_include,
+        ('(inp != NULL) ? inp->inp_inc.inc_fibnum : fibnum)) != 0)',
+         'fibnum)) != 0)'),
+        ('\tfibnum = inp->inp_inc.inc_fibnum;\n\tretifp = NULL;',
+         '\tfibnum = inp->inp_inc.inc_fibnum;\n'
+         '#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\tif (!port_policy_explicit_if6(opts) &&\n'
+         '\t    (inp->inp_socket == NULL || (inp->inp_socket->so_options & SO_DONTROUTE) == 0)) {\n'
+         '\t\tconst struct in6_addr *src = &inp->in6p_laddr;\n'
+         '\t\tif (opts && opts->ip6po_pktinfo && !IN6_IS_ADDR_UNSPECIFIED(&opts->ip6po_pktinfo->ipi6_addr))\n'
+         '\t\t\tsrc = &opts->ip6po_pktinfo->ipi6_addr;\n'
+         '\t\tfibnum = port_policy_fib6(src, &dstsock->sin6_addr, fibnum, 0);\n'
+         '\t}\n#endif\n'
+         '\tretifp = NULL;'),
+    ])
+    overlay('freebsd/netinet/tcp_subr.c', [
+        policy_include,
+        ('\t\tnh = fib4_lookup(inc->inc_fibnum, inc->inc_faddr, 0, NHR_NONE, 0);',
+         '\t\tuint32_t fib = inc->inc_fibnum;\n#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\t\tfib = port_policy_fib4(&inc->inc_laddr, &inc->inc_faddr, fib, 0);\n#endif\n'
+         '\t\tnh = fib4_lookup(fib, inc->inc_faddr, 0, NHR_NONE, 0);'),
+        ('\t\tnh = fib6_lookup(inc->inc_fibnum, &dst6, scopeid, NHR_NONE, 0);',
+         '\t\tuint32_t fib = inc->inc_fibnum;\n#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\t\tfib = port_policy_fib6(&inc->inc6_laddr, &inc->inc6_faddr, fib, 0);\n#endif\n'
+         '\t\tnh = fib6_lookup(fib, &dst6, scopeid, NHR_NONE, 0);'),
+    ])
     overlay('freebsd/netinet/ip_input.c', [
         ('extern void ipreass_slowtimo(void);',
          'extern void ipreass_slowtimo(void);\n'
