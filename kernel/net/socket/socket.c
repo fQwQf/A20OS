@@ -593,7 +593,8 @@ int net_socket_create(int domain, int type, int protocol) {
      * leak into the file status flags (SOCK_RAW==3 would read back as an
      * invalid access mode and SOCK_STREAM as write-only). */
     return net_socket_install_file(s, O_RDWR |
-                                   ((type & SOCK_NONBLOCK) ? O_NONBLOCK : 0));
+                                   ((type & SOCK_NONBLOCK) ? O_NONBLOCK : 0) |
+                                   ((type & SOCK_CLOEXEC) ? O_CLOEXEC : 0));
 }
 
 int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {

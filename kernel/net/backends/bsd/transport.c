@@ -574,6 +574,13 @@ static void options_apply(net_socket_t *s, unsigned mask)
     if (mask & (1u << 3)) {
         job.level = SOL_SOCKET; job.option = SO_REUSEADDR; job.value = s->reuseaddr;
         (void)a20_bsd_executor_call(option_job_run, &job);
+        if (state->kind == BSD_KIND_UDP) {
+            /* The common layer checks that both Linux sockets set
+             * SO_REUSEADDR. FreeBSD needs SO_REUSEPORT for a duplicate
+             * unicast UDP bind. */
+            job.option = SO_REUSEPORT;
+            (void)a20_bsd_executor_call(option_job_run, &job);
+        }
     }
     if (mask & (1u << 7)) {
         job.level = SOL_SOCKET; job.option = SO_SNDBUF; job.value = (int)s->snd_buf;

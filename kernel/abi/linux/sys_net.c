@@ -41,8 +41,6 @@ int64_t sys_socket(int domain, int type, int protocol) {
             return mr;
         }
     }
-    /* net_socket_create() already installed the fd; @type only carried
-     * SOCK_NONBLOCK handling done inside net_socket_create. */
     return gfd;
 }
 

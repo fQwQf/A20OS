@@ -12,6 +12,7 @@
  * "NETCTL: FAIL <what>" and returns 1.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -692,8 +693,37 @@ fail:
     return 1;
 }
 
+static int udp6_reuse(void)
+{
+    int first = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+    int second = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    int exclusive = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    int one = 1, rc = 1;
+    struct sockaddr_in6 address = {.sin6_family = AF_INET6, .sin6_port = htons(6546)};
+    if (first < 0 || second < 0 || exclusive < 0 ||
+        fcntl(first, F_GETFD) != FD_CLOEXEC || fcntl(first, F_GETFL) != O_RDWR ||
+        fcntl(second, F_GETFD) != 0 ||
+        setsockopt(first, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
+        setsockopt(second, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
+        bind(first, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        bind(second, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        bind(exclusive, (struct sockaddr *)&address, sizeof(address)) == 0 ||
+        errno != EADDRINUSE) {
+        perror("NETCTL: FAIL IPv6 UDP port reuse or descriptor flags");
+    } else {
+        puts("NETCTL: IPv6 UDP port reuse passed");
+        rc = 0;
+    }
+    if (first >= 0) close(first);
+    if (second >= 0) close(second);
+    if (exclusive >= 0) close(exclusive);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "reuse-ipv6-udp"))
+        return udp6_reuse();
     if (argc == 3 && !strcmp(argv[1], "raw6-echo"))
         return raw6_echo(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "watch-link"))
@@ -706,7 +736,7 @@ int main(int argc, char **argv)
         return set_ipv6(argv[2], argv[3], argv[4], argv[5], argv[6],
                         !strcmp(argv[1], "replace-ipv6"));
     if (argc != 1 && (argc != 5 || strcmp(argv[1], "set-ipv4"))) {
-        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX [PREFERRED VALID] | replace-ipv6 IF ADDRESS PREFIX PREFERRED VALID | set-link IF up|down | watch-link IF | raw6-echo IF]\n");
+        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX [PREFERRED VALID] | replace-ipv6 IF ADDRESS PREFIX PREFERRED VALID | set-link IF up|down | watch-link IF | raw6-echo IF | reuse-ipv6-udp]\n");
         return 2;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
