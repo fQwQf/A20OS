@@ -879,7 +879,7 @@ RUST_NET_ROUTE_SRC := kernel/net/control/route.rs
 RUST_NET_ROUTE_TARGET := $(RUST_NET_LWIP_STACK_TARGET)
 RUST_NET_ROUTE_OBJECT := $(BUILD_DIR)/rust/net_route.o
 RUST_NET_ROUTE_CODE_MODEL := $(RUST_NET_LWIP_STACK_CODE_MODEL)
-RUST_NET_ROUTE_EXTRA := $(RUST_NET_LWIP_STACK_EXTRA) $(if $(filter 1,$(NET_PROFILE)),--cfg a20_net_embedded,)
+RUST_NET_ROUTE_EXTRA := $(RUST_NET_LWIP_STACK_EXTRA) $(if $(filter 1,$(NET_PROFILE)),--cfg a20_net_embedded,) $(if $(and $(filter bsd,$(NET_STACK)),$(filter router,$(NET_ROLE))),--cfg a20_net_policy_v6,)
 RUST_NET_ROUTE_FEATURES := $(RUST_NET_LWIP_STACK_FEATURES)
 $(eval $(call RUST_FD_ABI_STATE_RULE,RUST_NET_ROUTE))
 

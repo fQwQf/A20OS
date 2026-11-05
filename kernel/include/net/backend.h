@@ -33,6 +33,7 @@
 
 #include "core/types.h"
 #include "net/datagram.h"
+#include "net/route.h"
 #include "net/interface.h"
 #include "net/net_config.h"
 #include "net/tun.h"
@@ -201,9 +202,12 @@ typedef struct net_backend_if_ops {
                      uint32_t valid, uint32_t preferred, int exclusive);
     int (*del_addr6)(unsigned index, const uint8_t *addr);
     int (*policy_update_v4)(const void *route, int remove, uint32_t flags);
-    int (*route_update_v6)(const uint8_t dst[16], uint8_t prefix,
-                           unsigned index, int remove);
-    int (*route_lookup_v6)(const uint8_t dst[16], unsigned index, nl_route6_out_t *out);
+    int (*route_update_v6)(const net_route_v6_t *route, int remove, uint32_t flags);
+    int (*rule_update_v6)(const net_rule_v6_t *rule, int remove);
+    unsigned (*route_snapshot_v6)(net_route_v6_t *out, unsigned capacity);
+    unsigned (*rule_snapshot_v6)(net_rule_v6_t *out, unsigned capacity);
+    int (*route_lookup_v6)(const uint8_t src[16], const uint8_t dst[16],
+                           unsigned index, unsigned table, nl_route6_out_t *out);
     int (*route_update_v4)(const uint8_t *dst, uint8_t prefix,
                            const uint8_t *gateway, uint16_t ifindex,
                            int remove);

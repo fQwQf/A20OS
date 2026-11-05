@@ -240,20 +240,44 @@ int net_stack_policy_update_v4(const void *route, int remove, uint32_t flags)
     return -ENOSYS;
 }
 
-int net_stack_route_update_v6(const uint8_t dst[16], uint8_t prefix,
-                               unsigned index, int remove)
+int net_stack_route_update_v6(const net_route_v6_t *route, int remove, uint32_t flags)
 {
     const net_backend_t *b = selected();
     if (b && b->iface && b->iface->route_update_v6)
-        return b->iface->route_update_v6(dst, prefix, index, remove);
+        return b->iface->route_update_v6(route, remove, flags);
     return -EOPNOTSUPP;
 }
 
-int net_stack_route_lookup_v6(const uint8_t dst[16], unsigned index, nl_route6_out_t *out)
+int net_stack_rule_update_v6(const net_rule_v6_t *rule, int remove)
+{
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->rule_update_v6)
+        return b->iface->rule_update_v6(rule, remove);
+    return -EAFNOSUPPORT;
+}
+
+unsigned net_stack_route_snapshot_v6(net_route_v6_t *out, unsigned capacity)
+{
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->route_snapshot_v6)
+        return b->iface->route_snapshot_v6(out, capacity);
+    return 0;
+}
+
+unsigned net_stack_rule_snapshot_v6(net_rule_v6_t *out, unsigned capacity)
+{
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->rule_snapshot_v6)
+        return b->iface->rule_snapshot_v6(out, capacity);
+    return 0;
+}
+
+int net_stack_route_lookup_v6(const uint8_t src[16], const uint8_t dst[16],
+                              unsigned index, unsigned table, nl_route6_out_t *out)
 {
     const net_backend_t *b = selected();
     if (b && b->iface && b->iface->route_lookup_v6)
-        return b->iface->route_lookup_v6(dst, index, out);
+        return b->iface->route_lookup_v6(src, dst, index, table, out);
     return -EOPNOTSUPP;
 }
 

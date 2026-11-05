@@ -33,6 +33,32 @@ typedef struct net_route_change_v4 {
     uint32_t table_used;
 } net_route_change_v4_t;
 
+typedef struct net_route_v6 {
+    uint8_t destination[16], gateway[16];
+    uint32_t ifindex, table, metric;
+    uint8_t prefix, pad[3];
+} net_route_v6_t;
+
+typedef struct net_rule_v6 {
+    uint8_t source[16], destination[16];
+    uint32_t priority, table, mark, mark_mask;
+    uint8_t source_prefix, destination_prefix, pad[2];
+} net_rule_v6_t;
+
+typedef struct net_route_change_v6 {
+    net_route_v6_t before, after;
+    uint32_t table_used;
+} net_route_change_v6_t;
+
+int a20_net_route_plan_v6(const net_route_v6_t *, int, uint32_t, net_route_change_v6_t *);
+int a20_net_route_update_v6(const net_route_v6_t *, int, uint32_t);
+int a20_net_rule_update_v6(const net_rule_v6_t *, int);
+unsigned a20_net_route_tables_v6(const uint8_t src[16], const uint8_t dst[16],
+                                 uint32_t *out, unsigned capacity);
+unsigned a20_net_route_snapshot_v6(net_route_v6_t *, unsigned capacity);
+unsigned a20_net_rule_snapshot_v6(net_rule_v6_t *, unsigned capacity);
+int a20_net_route_query_table_v6(const uint8_t dst[16], unsigned table, net_route_v6_t *);
+
 int a20_net_route_plan_v4(const net_route_v4_t *route, int remove,
                           uint32_t flags, net_route_change_v4_t *change);
 unsigned a20_net_route_tables_v4(uint32_t src, uint32_t dst, uint32_t mark,
