@@ -14,7 +14,7 @@ static inline unsigned nic_index_for_slot(int slot)
 int a20_bsd_nic_public_ifindex(unsigned bsd_ifindex, uint8_t local[4],
                                uint32_t *public_index);
 /* Interface zone translations run on the BSD executor. */
-void a20_bsd_policy_flush_if_v4(unsigned index);
+void a20_bsd_policy_flush_if(unsigned index, unsigned filter_slot);
 int a20_bsd_ifindex_to_bsd(unsigned index);
 int a20_bsd_ifindex_to_public(unsigned index);
 #endif

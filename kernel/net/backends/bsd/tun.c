@@ -113,7 +113,7 @@ typedef struct tun_ctx_job {
 static int tun_destroy_job_run(void *argument)
 {
     tun_ctx_job_t *job = argument;
-    a20_bsd_policy_flush_if_v4(job->index);
+    a20_bsd_policy_flush_if(job->index, job->filter_slot);
     netfilter_conntrack_forget_masq(job->filter_slot);
     a20_bsd_port_tun_destroy(job->context);
     return 0;

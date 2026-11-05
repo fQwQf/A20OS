@@ -112,6 +112,20 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
          '#ifdef A20_BSD_ROUTER_POLICY\n\tM_SETFIB(m, RT_DEFAULT_FIB);\n'
          '#else\n\tM_SETFIB(m, M_GETFIB(n));\n#endif'),
     ])
+    overlay('freebsd/netinet6/ip6_input.c', [
+        ('#include <netinet6/ip6_var.h>',
+         '#include <netinet6/ip6_var.h>\n'
+         '#ifdef A20_BSD_ROUTER_POLICY\nvoid port_ipv6_policy_input(struct mbuf *);\n#endif'),
+        ('\n\t/*\n\t * Try to forward the packet, but if we fail continue.',
+         '\n#ifdef A20_BSD_ROUTER_POLICY\n'
+         '\tif (V_ip6_forwarding != 0)\n\t\tport_ipv6_policy_input(m);\n#endif\n'
+         '\n\t/*\n\t * Try to forward the packet, but if we fail continue.'),
+    ])
+    overlay('freebsd/netinet6/icmp6.c', [
+        ('icmp6_reflect(m, sizeof(struct ip6_hdr)); /* header order: IPv6 - ICMPv6 */',
+         '\n#ifdef A20_BSD_ROUTER_POLICY\n\tM_SETFIB(m, RT_DEFAULT_FIB);\n#endif\n'
+         '\ticmp6_reflect(m, sizeof(struct ip6_hdr)); /* header order: IPv6 - ICMPv6 */'),
+    ])
     overlay('freebsd/netinet/ip_input.c', [
         ('extern void ipreass_slowtimo(void);',
          'extern void ipreass_slowtimo(void);\n'
@@ -341,6 +355,7 @@ def main():
                 'port_host_nic_token_freed': 'a20_bsd_host_nic_token_freed',
                 'a20_bsd_capture_input': 'a20_bsd_capture_input',
                 'a20_bsd_policy_fibs4': 'a20_bsd_policy_fibs4',
+                'a20_bsd_policy_fibs6': 'a20_bsd_policy_fibs6',
                 'a20_bsd_netfilter_busy': 'a20_bsd_netfilter_busy',
                 'a20_bsd_netfilter_input': 'a20_bsd_netfilter_input',
                 'a20_bsd_netfilter_output': 'a20_bsd_netfilter_output',

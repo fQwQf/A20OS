@@ -91,7 +91,11 @@ int a20_bsd_port_nic_set_ipv4(void *context,
                               const uint8_t old_address[4],
                               const uint8_t old_mask[4],
                               const uint8_t old_gateway[4]);
-int a20_bsd_port_route_lookup_v6(const uint8_t dst[16], unsigned zone, nl_route6_out_t *out);
+int a20_bsd_port_route_lookup_v6(unsigned fib, const uint8_t dst[16], unsigned zone,
+                                  nl_route6_out_t *out);
+int a20_bsd_port_policy_route6(unsigned fib, unsigned index, const uint8_t destination[16],
+                               uint8_t prefix, const uint8_t gateway[16], int replace,
+                               int remove, int check_only);
 int a20_bsd_port_policy_route4(unsigned fib, unsigned index,
                                uint32_t destination, uint8_t prefix, uint32_t gateway,
                                int replace, int remove, int check_only);

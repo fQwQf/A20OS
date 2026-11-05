@@ -31,6 +31,7 @@ typedef struct {
     uint32_t index;
     uint8_t destination[16], gateway[16];
     uint8_t prefix, has_gateway, type, scope;
+    uint32_t table, metric;
 } nl_route6_out_t;
 
 void net_netlink_link_notify_one(unsigned index, int up);

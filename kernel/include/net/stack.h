@@ -59,9 +59,12 @@ int  net_stack_if_set_addr6(unsigned index, const uint8_t *addr,
                             int exclusive);
 int  net_stack_if_del_addr6(unsigned index, const uint8_t *addr);
 int  net_stack_policy_update_v4(const void *route, int remove, uint32_t flags);
-int  net_stack_route_update_v6(const uint8_t dst[16], uint8_t prefix,
-                               unsigned index, int remove);
-int  net_stack_route_lookup_v6(const uint8_t dst[16], unsigned index, nl_route6_out_t *out);
+int  net_stack_route_update_v6(const net_route_v6_t *route, int remove, uint32_t flags);
+int  net_stack_rule_update_v6(const net_rule_v6_t *rule, int remove);
+unsigned net_stack_route_snapshot_v6(net_route_v6_t *out, unsigned capacity);
+unsigned net_stack_rule_snapshot_v6(net_rule_v6_t *out, unsigned capacity);
+int  net_stack_route_lookup_v6(const uint8_t src[16], const uint8_t dst[16],
+                                unsigned index, unsigned table, nl_route6_out_t *out);
 int  net_stack_route_update_v4(const uint8_t *dst, uint8_t prefix,
                                const uint8_t *gateway, uint16_t index,
                                int remove);

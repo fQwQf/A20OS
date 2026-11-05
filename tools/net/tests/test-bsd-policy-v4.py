@@ -130,11 +130,14 @@ def exercise(guest, lan, wan_a, wan_b, result):
     result['passed'].append('removing_rule_restores_native_main_default')
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def arguments(description):
+    parser = argparse.ArgumentParser(description=description)
     for argument in ('kernel', 'busybox', 'out'):
         parser.add_argument('--' + argument, required=True, type=Path)
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def run_router(args, test):
     out = args.out.resolve()
     out.mkdir(parents=True)
     image = pd.make_payload(out, args.busybox, False, None)
@@ -156,7 +159,7 @@ def main():
         try:
             guest.until('[INIT] entering scheduler...')
             configure(guest, 'true')
-            exercise(guest, *links, result)
+            test(guest, *links, result)
             guest.send('poweroff')
             guest.until('System is going down for power-off NOW')
             assert guest.process.wait(timeout=15) == 0
@@ -169,6 +172,10 @@ def main():
             for link in links:
                 link.sock.close()
             (out/'manifest.json').write_text(json.dumps(result, indent=2) + '\n')
+
+
+def main():
+    run_router(arguments(__doc__), exercise)
     print('BSD_POLICY_V4: PASS')
 
 

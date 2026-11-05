@@ -55,6 +55,7 @@ const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
 const RT_TABLE_MAIN: u32 = 254;
+const NET_ROUTE_MATCH_METRIC: u32 = 1 << 16;
 const RTM_DELROUTE: u16 = 25;
 const RTM_NEWRULE: u16 = 32;
 const RTM_DELRULE: u16 = 33;
@@ -1157,8 +1158,37 @@ fn attr_u32(bytes: &[u8]) -> Result<u32, i32> {
     }
     Ok(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
-extern "C" {
-    fn net_stack_route_update_v6(dst: *const u8, prefix: u8, index: u32, remove: i32) -> i32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RouteV6 {
+    destination: [u8; 16],
+    gateway: [u8; 16],
+    ifindex: u32,
+    table: u32,
+    metric: u32,
+    prefix: u8,
+    pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RuleV6 {
+    source: [u8; 16],
+    destination: [u8; 16],
+    priority: u32,
+    table: u32,
+    mark: u32,
+    mark_mask: u32,
+    source_prefix: u8,
+    destination_prefix: u8,
+    pad: [u8; 2],
+}
+
+unsafe extern "C" {
+    fn net_stack_route_update_v6(route: *const RouteV6, remove: i32, flags: u32) -> i32;
+    fn net_stack_rule_update_v6(rule: *const RuleV6, remove: i32) -> i32;
+    fn net_stack_route_snapshot_v6(out: *mut RouteV6, capacity: u32) -> u32;
+    fn net_stack_rule_snapshot_v6(out: *mut RuleV6, capacity: u32) -> u32;
 }
 
 unsafe fn apply_route6(msg_type: u16, flags: u16, rt: &RtMsg, attrs: &[u8]) -> i32 {
@@ -1167,42 +1197,100 @@ unsafe fn apply_route6(msg_type: u16, flags: u16, rt: &RtMsg, attrs: &[u8]) -> i
     }
     let remove = msg_type == RTM_DELROUTE;
     if rt.src_len != 0 || rt.tos != 0 || rt.flags != 0 ||
-        (!remove && flags & NLM_F_REPLACE != 0) ||
         (rt.type_ != 1 && !(remove && rt.type_ == 0)) {
         return -EOPNOTSUPP;
     }
-    let mut table = rt.table as u32;
-    let mut destination = [0u8; 16];
+    let mut route = RouteV6 {
+        table: rt.table as u32, prefix: rt.dst_len, ..RouteV6::default()
+    };
     let mut have_dst = false;
-    let mut index = 0;
+    let mut have_gateway = false;
+    let mut update_flags = flags as u32;
     let mut it = AttrIter::new(attrs);
     while let Some((kind, value)) = it.next() {
         match kind {
             RTA_DST if value.len() == 16 && !have_dst => {
-                destination.copy_from_slice(value);
+                route.destination.copy_from_slice(value);
                 have_dst = true;
             }
-            RTA_OIF | RTA_TABLE => match attr_u32(value) {
-                Ok(v) if kind == RTA_OIF => index = v,
-                Ok(v) => table = v,
-                Err(e) => return e,
-            },
-            RTA_DST => return -EINVAL,
+            RTA_GATEWAY if value.len() == 16 && !have_gateway => {
+                route.gateway.copy_from_slice(value);
+                have_gateway = true;
+            }
+            RTA_OIF | RTA_TABLE | RTA_PRIORITY => {
+                let value = match attr_u32(value) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                match kind {
+                    RTA_OIF => route.ifindex = value,
+                    RTA_TABLE => route.table = value,
+                    _ => {
+                        route.metric = value;
+                        update_flags |= NET_ROUTE_MATCH_METRIC;
+                    }
+                }
+            }
+            RTA_DST | RTA_GATEWAY => return -EINVAL,
             _ => return -EOPNOTSUPP,
         }
     }
-    if it.bad || index == 0 || (rt.dst_len != 0 && !have_dst) {
+    if it.bad || (!remove && route.ifindex == 0) || (route.prefix != 0 && !have_dst) ||
+        (have_gateway && route.gateway == [0; 16]) {
         return -EINVAL;
     }
-    if table != 0 && table != RT_TABLE_MAIN {
-        return -EOPNOTSUPP;
+    if route.table == 0 {
+        route.table = RT_TABLE_MAIN;
     }
-    for bit in rt.dst_len as usize..128 {
-        if destination[bit / 8] & (0x80 >> (bit % 8)) != 0 {
+    for bit in route.prefix as usize..128 {
+        if route.destination[bit / 8] & (0x80 >> (bit % 8)) != 0 {
             return -EINVAL;
         }
     }
-    net_stack_route_update_v6(destination.as_ptr(), rt.dst_len, index, remove as i32)
+    net_stack_route_update_v6(&route, remove as i32, update_flags)
+}
+
+unsafe fn apply_rule6(msg_type: u16, h: &RtMsg, attrs: &[u8]) -> i32 {
+    if h.dst_len > 128 || h.src_len > 128 {
+        return -EINVAL;
+    }
+    let remove = msg_type == RTM_DELRULE;
+    if h.tos != 0 || h.flags != 0 || (h.type_ != 1 && !(remove && h.type_ == 0)) {
+        return -EOPNOTSUPP;
+    }
+    let mut rule = RuleV6 {
+        table: h.table as u32,
+        priority: 32765,
+        source_prefix: h.src_len,
+        destination_prefix: h.dst_len,
+        ..RuleV6::default()
+    };
+    let mut have_source = false;
+    let mut have_destination = false;
+    let mut it = AttrIter::new(attrs);
+    while let Some((kind, data)) = it.next() {
+        match kind {
+            1 if data.len() == 16 && !have_destination => {
+                rule.destination.copy_from_slice(data);
+                have_destination = true;
+            }
+            2 if data.len() == 16 && !have_source => {
+                rule.source.copy_from_slice(data);
+                have_source = true;
+            }
+            1 | 2 => return -EINVAL,
+            6 | 15 => match attr_u32(data) {
+                Ok(v) if kind == 6 => rule.priority = v,
+                Ok(v) => rule.table = v,
+                Err(e) => return e,
+            },
+            _ => return -EOPNOTSUPP,
+        }
+    }
+    if it.bad || (h.src_len != 0 && !have_source) || (h.dst_len != 0 && !have_destination) {
+        return -EINVAL;
+    }
+    net_stack_rule_update_v6(&rule, remove as i32)
 }
 
 unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) -> i32 {
@@ -1242,7 +1330,7 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
             RTA_TABLE => r.table = value,
             RTA_PRIORITY => {
                 r.metric = value;
-                update_flags |= 1 << 16; // NET_ROUTE_MATCH_METRIC
+                update_flags |= NET_ROUTE_MATCH_METRIC;
             }
             _ => return -EOPNOTSUPP,
         }
@@ -1323,6 +1411,9 @@ unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) 
  * that the FIB cannot enforce instead of acknowledging configuration no-ops. */
 unsafe fn apply_rule(msg_type: u16, body: *const u8, attrs: &[u8]) -> i32 {
     let h = ptr::read_unaligned(body as *const RtMsg);
+    if h.family as i32 == AF_INET6 {
+        return apply_rule6(msg_type, &h, attrs);
+    }
     if h.family as i32 != AF_INET {
         return -EAFNOSUPPORT;
     }
@@ -1415,10 +1506,44 @@ struct NlrtRoute6 {
     has_gateway: u8,
     type_: u8,
     scope: u8,
+    table: u32,
+    metric: u32,
 }
 
 extern "C" {
-    fn net_stack_route_lookup_v6(dst: *const u8, index: u32, out: *mut NlrtRoute6) -> i32;
+    fn net_stack_route_lookup_v6(src: *const u8, dst: *const u8, index: u32,
+                                 table: u32, out: *mut NlrtRoute6) -> i32;
+}
+
+unsafe fn build_route6(msg: &mut [u8], route: &NlrtRoute6, pid: u32, seq: u32, flags: u16) -> usize {
+    let result = RtMsg {
+        family: AF_INET6 as u8,
+        dst_len: route.prefix,
+        src_len: 0,
+        tos: 0,
+        table: if route.table <= 255 { route.table as u8 } else { 0 },
+        protocol: NLRT_RTPROT_BOOT,
+        scope: route.scope,
+        type_: route.type_,
+        flags: 0,
+    };
+    ptr::write_unaligned(msg.as_mut_ptr().add(16) as *mut RtMsg, result);
+    let mut off = 28;
+    if route.prefix != 0 {
+        off = put_attr(msg, off, RTA_DST, &route.destination);
+    }
+    if route.has_gateway != 0 {
+        off = put_attr(msg, off, RTA_GATEWAY, &route.gateway);
+    }
+    off = put_attr(msg, off, RTA_OIF, &route.index.to_ne_bytes());
+    if route.table > 255 {
+        off = put_attr(msg, off, RTA_TABLE, &route.table.to_ne_bytes());
+    }
+    if route.metric != 0 {
+        off = put_attr(msg, off, RTA_PRIORITY, &route.metric.to_ne_bytes());
+    }
+    fill_hdr_flags(msg, RTM_NEWROUTE, off as u32, seq, pid, flags);
+    off
 }
 
 unsafe fn route_lookup6(requester: *mut c_void, req: &NlMsghdr,
@@ -1427,12 +1552,15 @@ unsafe fn route_lookup6(requester: *mut c_void, req: &NlMsghdr,
         return -EINVAL;
     }
     let rt = ptr::read_unaligned(body as *const RtMsg);
-    if rt.src_len != 0 || rt.tos != 0 || (rt.table != 0 && rt.table != 254) {
+    if rt.tos != 0 {
         return -EOPNOTSUPP;
     }
     let mut destination = [0u8; 16];
+    let mut source = [0u8; 16];
     let mut have_destination = false;
+    let mut have_source = false;
     let mut index = 0;
+    let mut table = rt.table as u32;
     let mut it = AttrIter::new(core::slice::from_raw_parts(body.add(12), len - 12));
     while let Some((kind, data)) = it.next() {
         match kind {
@@ -1440,44 +1568,29 @@ unsafe fn route_lookup6(requester: *mut c_void, req: &NlMsghdr,
                 destination.copy_from_slice(data);
                 have_destination = true;
             }
-            RTA_OIF => match attr_u32(data) {
-                Ok(value) => index = value,
+            2 if data.len() == 16 && !have_source => {
+                source.copy_from_slice(data);
+                have_source = true;
+            }
+            RTA_OIF | RTA_TABLE => match attr_u32(data) {
+                Ok(value) if kind == RTA_OIF => index = value,
+                Ok(value) => table = value,
                 Err(e) => return e,
             },
-            RTA_DST => return -EINVAL,
+            RTA_DST | 2 => return -EINVAL,
             _ => return -EOPNOTSUPP,
         }
     }
-    if it.bad || (rt.dst_len != 0 && (rt.dst_len != 128 || !have_destination)) {
+    if it.bad || (rt.dst_len != 0 && (rt.dst_len != 128 || !have_destination)) ||
+        (rt.src_len != 0 && (rt.src_len != 128 || !have_source)) {
         return -EINVAL;
     }
     let mut route = NlrtRoute6::default();
-    let rc = net_stack_route_lookup_v6(destination.as_ptr(), index, &mut route);
+    let rc = net_stack_route_lookup_v6(source.as_ptr(), destination.as_ptr(), index, table, &mut route);
     if rc < 0 {
         return rc;
     }
-
     let mut msg = MsgBuf::new();
-    let result = RtMsg {
-        family: AF_INET6 as u8,
-        dst_len: route.prefix,
-        src_len: 0,
-        tos: 0,
-        table: 254,
-        protocol: NLRT_RTPROT_BOOT,
-        scope: route.scope,
-        type_: route.type_,
-        flags: 0,
-    };
-    ptr::write_unaligned(msg.0.as_mut_ptr().add(16) as *mut RtMsg, result);
-    let mut off = 28;
-    if route.prefix != 0 {
-        off = put_attr(&mut msg.0, off, RTA_DST, &route.destination);
-    }
-    if route.has_gateway != 0 {
-        off = put_attr(&mut msg.0, off, RTA_GATEWAY, &route.gateway);
-    }
-    off = put_attr(&mut msg.0, off, RTA_OIF, &route.index.to_ne_bytes());
     let mut from = [0u8; NET_SOCKADDR_NL_SIZE];
     ptr::write_unaligned(from.as_mut_ptr() as *mut u16, AF_NETLINK);
 
@@ -1488,7 +1601,7 @@ unsafe fn route_lookup6(requester: *mut c_void, req: &NlMsghdr,
         return -ENOTSOCK;
     }
     let pid = a20_net_netlink_local_pid(requester);
-    fill_hdr_flags(&mut msg.0, RTM_NEWROUTE, off as u32, req.seq, pid, 0);
+    let off = build_route6(&mut msg.0, &route, pid, req.seq, 0);
     let rc = a20_net_netlink_enqueue(requester, msg.0.as_ptr(), off,
                                      from.as_ptr() as *const c_void, NET_SOCKADDR_NL_SIZE);
     if rc >= 0 && req.flags & NLM_F_ACK != 0 {
@@ -1561,7 +1674,57 @@ impl Drop for NetlinkGuard {
     }
 }
 
-unsafe fn rule_dump(requester: *mut c_void, req: &NlMsghdr, len: usize) -> i32 {
+unsafe fn route_dump6(requester: *mut c_void, req: &NlMsghdr, body: *const u8, len: usize) -> i32 {
+    let mut table = 0;
+    if len >= 12 {
+        table = ptr::read_unaligned(body as *const RtMsg).table as u32;
+        let mut it = AttrIter::new(core::slice::from_raw_parts(body.add(12), len - 12));
+        while let Some((kind, value)) = it.next() {
+            if kind != RTA_TABLE {
+                return -EOPNOTSUPP;
+            }
+            table = match attr_u32(value) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+        }
+        if it.bad {
+            return -EINVAL;
+        }
+    }
+    let mut routes = [RouteV6::default(); 64];
+    let count = net_stack_route_snapshot_v6(routes.as_mut_ptr(), routes.len() as u32);
+    let mut irq = 0;
+    a20_net_netlink_lock(requester, &mut irq);
+    let _guard = NetlinkGuard { socket: requester, flags: irq };
+    if a20_net_netlink_is_live(requester) == 0 {
+        return -ENOTSOCK;
+    }
+    let pid = a20_net_netlink_local_pid(requester);
+    let mut from = [0u8; NET_SOCKADDR_NL_SIZE];
+    ptr::write_unaligned(from.as_mut_ptr() as *mut u16, AF_NETLINK);
+    let mut msg = MsgBuf::new();
+    for r in routes.iter().take(count as usize).filter(|r| table == 0 || r.table == table) {
+        let has_gateway = (r.gateway != [0; 16]) as u8;
+        let route = NlrtRoute6 {
+            index: r.ifindex, destination: r.destination, gateway: r.gateway,
+            prefix: r.prefix, has_gateway, type_: 1, scope: if has_gateway != 0 { 0 } else { 253 },
+            table: r.table, metric: r.metric,
+        };
+        let off = build_route6(&mut msg.0, &route, pid, req.seq, NLM_F_MULTI);
+        let rc = a20_net_netlink_enqueue(requester, msg.0.as_ptr(), off,
+                                         from.as_ptr() as *const c_void, NET_SOCKADDR_NL_SIZE);
+        if rc < 0 {
+            return rc;
+        }
+    }
+    fill_hdr(&mut msg.0, NLMSG_DONE, 16, req.seq, pid);
+    let rc = a20_net_netlink_enqueue(requester, msg.0.as_ptr(), 16,
+                                     from.as_ptr() as *const c_void, NET_SOCKADDR_NL_SIZE);
+    if rc < 0 { rc } else { req.len as i32 }
+}
+
+unsafe fn rule_dump(requester: *mut c_void, req: &NlMsghdr, len: usize, family: i32) -> i32 {
     if req.flags & NLM_F_DUMP == 0 {
         return -EOPNOTSUPP;
     }
@@ -1570,7 +1733,13 @@ unsafe fn rule_dump(requester: *mut c_void, req: &NlMsghdr, len: usize) -> i32 {
         return -EOPNOTSUPP;
     }
     let mut rules = [RuleV4::default(); 16];
-    let n = a20_net_rule_snapshot_v4(rules.as_mut_ptr(), rules.len() as u32);
+    let mut rules6 = [RuleV6::default(); 16];
+    let n4 = if family == AF_INET6 { 0 } else {
+        a20_net_rule_snapshot_v4(rules.as_mut_ptr(), rules.len() as u32) as usize
+    };
+    let n6 = if family == AF_INET { 0 } else {
+        net_stack_rule_snapshot_v6(rules6.as_mut_ptr(), rules6.len() as u32) as usize
+    };
     let mut flags = 0;
     a20_net_netlink_lock(requester, &mut flags);
     let _guard = NetlinkGuard {
@@ -1588,9 +1757,21 @@ unsafe fn rule_dump(requester: *mut c_void, req: &NlMsghdr, len: usize) -> i32 {
     let mut from = [0u8; NET_SOCKADDR_NL_SIZE];
     ptr::write_unaligned(from.as_mut_ptr() as *mut u16, AF_NETLINK);
     let mut msg = MsgBuf::new();
-    for r in rules.iter().take(n as usize) {
+    for i in 0..n4 + n6 {
+        let (r, family, address_len) = if i < n4 {
+            let v4 = rules[i];
+            let mut r = RuleV6 {
+                priority: v4.priority, table: v4.table, source_prefix: v4.source_prefix,
+                destination_prefix: v4.destination_prefix, ..RuleV6::default()
+            };
+            r.source[..4].copy_from_slice(&v4.source.to_ne_bytes());
+            r.destination[..4].copy_from_slice(&v4.destination.to_ne_bytes());
+            (r, AF_INET, 4)
+        } else {
+            (rules6[i - n4], AF_INET6, 16)
+        };
         let h = RtMsg {
-            family: AF_INET as u8,
+            family: family as u8,
             dst_len: r.destination_prefix,
             src_len: r.source_prefix,
             tos: 0,
@@ -1603,10 +1784,10 @@ unsafe fn rule_dump(requester: *mut c_void, req: &NlMsghdr, len: usize) -> i32 {
         ptr::write_unaligned(msg.0.as_mut_ptr().add(16) as *mut RtMsg, h);
         let mut off = 28;
         if r.source_prefix != 0 {
-            off = put_attr(&mut msg.0, off, 2, &r.source.to_ne_bytes());
+            off = put_attr(&mut msg.0, off, 2, &r.source[..address_len]);
         }
         if r.destination_prefix != 0 {
-            off = put_attr(&mut msg.0, off, 1, &r.destination.to_ne_bytes());
+            off = put_attr(&mut msg.0, off, 1, &r.destination[..address_len]);
         }
         off = put_attr(&mut msg.0, off, 6, &r.priority.to_ne_bytes());
         off = put_attr(&mut msg.0, off, 15, &r.table.to_ne_bytes());
@@ -1973,15 +2154,19 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
         return rc;
     }
 
-    if type_==RTM_GETRULE {
-        if family==AF_INET6 {return -EAFNOSUPPORT;}
-        return rule_dump(requester,&req,len);
+    if type_ == RTM_GETRULE {
+        return rule_dump(requester, &req, len, family);
     }
-    if type_ == RTM_GETROUTE && family == AF_INET6 && req.flags & NLM_F_DUMP == 0 {
+    if type_ == RTM_GETROUTE && family == AF_INET6 {
         if a20_net_netlink_ns_initial(*rv.net_ns) == 0 {
             return -EOPNOTSUPP;
         }
-        return route_lookup6(requester, &req, (buf as *const u8).add(hdr_size), payload);
+        let body = (buf as *const u8).add(hdr_size);
+        return if req.flags & NLM_F_DUMP != 0 {
+            route_dump6(requester, &req, body, payload)
+        } else {
+            route_lookup6(requester, &req, body, payload)
+        };
     }
     let mut links = [NlrtLink::zero(); NLRT_MAX_LINKS];
     let nlinks = a20_net_netlink_snapshot(*rv.net_ns, links.as_mut_ptr(),
@@ -2677,13 +2862,21 @@ mod tests {
         T_GET_ADDR_RC
     }
     #[no_mangle]
-    unsafe extern "C" fn net_stack_route_update_v6(_d: *const u8, _p: u8,
-                                                    _i: u32, _remove: i32) -> i32 {
+    unsafe extern "C" fn net_stack_route_update_v6(_r: *const RouteV6, _remove: i32,
+                                                      _flags: u32) -> i32 {
         -EOPNOTSUPP
     }
     #[no_mangle]
-    unsafe extern "C" fn net_stack_route_lookup_v6(_d: *const u8, _i: u32,
-                                                    _r: *mut NlrtRoute6) -> i32 {
+    unsafe extern "C" fn net_stack_rule_update_v6(_r: *const RuleV6, _remove: i32) -> i32 {
+        -EAFNOSUPPORT
+    }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_route_snapshot_v6(_out: *mut RouteV6, _cap: u32) -> u32 { 0 }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_rule_snapshot_v6(_out: *mut RuleV6, _cap: u32) -> u32 { 0 }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_route_lookup_v6(_s: *const u8, _d: *const u8, _i: u32,
+                                                    _t: u32, _r: *mut NlrtRoute6) -> i32 {
         -EOPNOTSUPP
     }
     #[no_mangle]

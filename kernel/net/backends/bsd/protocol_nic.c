@@ -180,6 +180,34 @@ static unsigned policy_fib4(const struct ip *ip, const struct mbuf *m)
 }
 #endif
 
+#ifdef A20_BSD_ROUTER_POLICY
+extern unsigned a20_bsd_policy_fibs6(const uint8_t source[16],
+                                     const uint8_t destination[16],
+                                     unsigned *fibs, unsigned capacity);
+
+void port_ipv6_policy_input(struct mbuf *m)
+{
+    struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
+    if ((m->m_flags & (M_BCAST | M_MCAST)) ||
+        IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_src) ||
+        IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_dst) ||
+        IN6_IS_ADDR_MULTICAST(&ip6->ip6_dst) ||
+        IN6_IS_ADDR_UNSPECIFIED(&ip6->ip6_src))
+        return;
+    unsigned fibs[16];
+    unsigned count = a20_bsd_policy_fibs6(ip6->ip6_src.s6_addr, ip6->ip6_dst.s6_addr,
+                                         fibs, nitems(fibs));
+    if (!count || in6_localip(&ip6->ip6_dst))
+        return;
+    for (unsigned i = 0; i < count; ++i) {
+        if (fib6_lookup(fibs[i], &ip6->ip6_dst, 0, NHR_NONE, 0)) {
+            M_SETFIB(m, fibs[i]);
+            return;
+        }
+    }
+}
+#endif
+
 struct mbuf *port_ipv4_input(struct mbuf *m)
 {
     struct ifnet *ifp = m->m_pkthdr.rcvif;
@@ -766,9 +794,11 @@ typedef struct {
     uint32_t index;
     uint8_t destination[16], gateway[16];
     uint8_t prefix, has_gateway, type, scope;
+    uint32_t table, metric;
 } port_route6_out_t;
 
-int port_route_lookup_v6(const uint8_t dst[16], unsigned zone, port_route6_out_t *out)
+int port_route_lookup_v6(unsigned fib, const uint8_t dst[16], unsigned zone,
+                          port_route6_out_t *out)
 {
     struct in6_addr target, prefix;
     struct route_nhop_data matched;
@@ -779,12 +809,12 @@ int port_route_lookup_v6(const uint8_t dst[16], unsigned zone, port_route6_out_t
     int slot, length, error = ENETUNREACH;
     uint32_t prefix_zone;
     NET_EPOCH_ENTER(epoch);
-    struct rtentry *route = fib6_lookup_rt(0, &target, zone, 0, &matched);
+    struct rtentry *route = fib6_lookup_rt(fib, &target, zone, 0, &matched);
     if (!route)
         goto done;
     struct nhop_object *next = matched.rnd_nhop;
     if (NH_IS_NHGRP(next))
-        next = fib6_lookup(0, &target, zone, 0, 0);
+        next = fib6_lookup(fib, &target, zone, 0, 0);
     if (!next || !NH_IS_VALID(next) || !(next->nh_ifp->if_flags & IFF_UP) ||
         (zone && zone != next->nh_aifp->if_index))
         goto done;
@@ -907,6 +937,70 @@ done:
     NET_EPOCH_EXIT(et);
     return -port_linux_errno(error);
 }
+
+#ifdef A20_BSD_ROUTER_POLICY
+int port_policy_route6(unsigned fib, unsigned index, const uint8_t destination[16],
+                       uint8_t prefix, const uint8_t gateway[16], int replace,
+                       int remove, int check_only)
+{
+    if (fib >= rt_numfibs || prefix > 128)
+        return -port_linux_errno(EINVAL);
+    struct sockaddr_in6 dst = {.sin6_len = sizeof(dst), .sin6_family = AF_INET6};
+    struct sockaddr_in6 mask = {.sin6_len = sizeof(mask), .sin6_family = AF_INET6};
+    struct sockaddr_in6 gw = {.sin6_len = sizeof(gw), .sin6_family = AF_INET6};
+    memcpy(&dst.sin6_addr, destination, 16);
+    memcpy(&gw.sin6_addr, gateway, 16);
+    for (unsigned bit = 0; bit < prefix; ++bit)
+        mask.sin6_addr.s6_addr[bit / 8] |= 0x80 >> (bit % 8);
+
+    struct sockaddr_dl link = {.sdl_len = sizeof(link), .sdl_family = AF_LINK};
+    struct rt_addrinfo info = {.rti_flags = RTF_STATIC | (prefix == 128 ? RTF_HOST : 0)};
+    info.rti_info[RTAX_DST] = (struct sockaddr *)&dst;
+    if (prefix != 128)
+        info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
+
+    struct epoch_tracker et;
+    struct rib_cmd_info result;
+    int error = 0;
+    NET_EPOCH_ENTER(et);
+    struct ifnet *ifp = ifnet_byindex(index);
+    if (!ifp) {
+        error = ENODEV;
+        goto done;
+    }
+    error = in6_setscope(&dst.sin6_addr, ifp, NULL);
+    if (error)
+        goto done;
+    if (!remove) {
+        link.sdl_index = ifp->if_index;
+        link.sdl_type = ifp->if_type;
+        info.rti_info[RTAX_IFP] = (struct sockaddr *)&link;
+        info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&link;
+        bool have_gateway = !IN6_IS_ADDR_UNSPECIFIED(&gw.sin6_addr);
+        if (have_gateway) {
+            error = in6_setscope(&gw.sin6_addr, ifp, NULL);
+            if (error)
+                goto done;
+            if (IN6_IS_ADDR_MULTICAST(&gw.sin6_addr) || !nd6_is_addr_neighbor(&gw, ifp)) {
+                error = EHOSTUNREACH;
+                goto done;
+            }
+            info.rti_flags |= RTF_GATEWAY;
+            info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&gw;
+        }
+        struct ifaddr *ifa = ifaof_ifpforaddr((struct sockaddr *)(have_gateway ? &gw : &dst), ifp);
+        if (!ifa || ifa->ifa_addr->sa_family != AF_INET6) {
+            error = EADDRNOTAVAIL;
+            goto done;
+        }
+    }
+    if (!check_only)
+        error = rib_action(fib, remove ? RTM_DELETE : replace ? RTM_CHANGE : RTM_ADD, &info, &result);
+done:
+    NET_EPOCH_EXIT(et);
+    return -port_linux_errno(error);
+}
+#endif
 
 static int route_default(uint32_t gateway, int add)
 {
