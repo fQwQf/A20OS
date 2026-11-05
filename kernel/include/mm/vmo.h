@@ -39,8 +39,12 @@
 #define VMO_ANONYMOUS 0
 #define VMO_PHYSICAL  1
 #define VMO_PAGED     2
+/* Internal Linux MAP_SHARED|MAP_ANONYMOUS backing, with sparse canonical
+ * slots and an immutable extent (mremap growth faults beyond it with SIGBUS). */
+#define VMO_SHARED_ANON 3
 
 struct a20_pager;
+struct vmo_charge;
 
 struct vmo {
     refcount_t  refcount;
@@ -50,6 +54,8 @@ struct vmo {
     uint32_t    options;
     spinlock_t  lock;
     pfn_t      *pages;         /* canonical frames, owned by this VMO */
+    void       *sparse_root;   /* SHARED_ANON: Rust-owned sparse page index */
+    struct vmo_charge *shared_charges; /* SHARED_ANON: pinned per-cgroup ledger */
     uint32_t    page_count;
     struct cg_node *charge_cg; /* cgroup charged for materialized pages */
     uint64_t    charged_pages;
@@ -94,8 +100,8 @@ pfn_t       a20_vmo_page_slot_locked(struct vmo *vmo, uint32_t index);
 int         a20_vmo_page_is_paged_locked(struct vmo *vmo);
 int         a20_vmo_page_paged_fault(struct vmo *vmo, uint32_t index,
                                      int write_access);
-int         a20_vmo_page_charge(struct cg_node *cg);
-void        a20_vmo_page_uncharge(struct cg_node *cg);
+int         a20_vmo_page_charge(struct vmo *vmo, struct cg_node *cg);
+void        a20_vmo_page_uncharge(struct vmo *vmo, struct cg_node *cg);
 pfn_t       a20_vmo_page_alloc(void);
 void        a20_vmo_page_free(pfn_t pfn);
 void        a20_vmo_page_zero(pfn_t pfn);

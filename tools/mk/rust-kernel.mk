@@ -1241,7 +1241,7 @@ $(RUST_VMO_PAGE_FLAGS_STAMP): FORCE_RUST_VMO_PAGE_FLAGS
 	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VMO_PAGE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_VMO_PAGE_CODE_MODEL) $(RUST_VMO_PAGE_EXTRA) -C target-feature=$(RUST_VMO_PAGE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
-$(RUST_VMO_PAGE_OBJECT): $(RUST_VMO_PAGE_SRC) tools/mk/rust-kernel.mk $(RUST_VMO_PAGE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+$(RUST_VMO_PAGE_OBJECT): $(RUST_VMO_PAGE_SRC) kernel/mm/vmo_sparse.rs tools/mk/rust-kernel.mk $(RUST_VMO_PAGE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
 	@mkdir -p $(dir $@)
 	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
 		--target $(RUST_VMO_PAGE_TARGET) \

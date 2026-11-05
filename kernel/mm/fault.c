@@ -993,7 +993,9 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             }
             uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
             pfn_t vpfn;
-            int r = vmo_get_page_charged(vma->vmo, pg_idx, t->cgroup, &vpfn);
+            struct cg_node *charge = cg_task_group_pin(t);
+            int r = vmo_get_page_charged(vma->vmo, pg_idx, charge, &vpfn);
+            cg_group_unpin(charge);
             if (r == -ENOMEM)
                 return -ENOMEM;
             if (r != 0 || vpfn == PFN_NONE)
