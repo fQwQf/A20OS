@@ -270,6 +270,13 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     }
     guard.pinned = true;
 
+    let mapped = guard.pages.iter().take(count).filter(|page| page.class != 0).count();
+    if mapped == 0 {
+        // Holes and recoverable file leaves own no child references. Avoid
+        // allocating destination page tables for an entirely omitted window.
+        return 1;
+    }
+
     let result = unsafe {
         a20_cow_map_child_anon_batch(
             child,
@@ -284,7 +291,6 @@ pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
     }
     /* The C mapper validates the complete destination and has no failure
      * point after its first PTE write, so ownership and RSS move as one batch. */
-    let mapped = guard.pages.iter().take(count).filter(|page| page.class != 0).count();
     guard.transferred = count;
     unsafe { a20_cow_rss_add(child, mapped) };
     1
@@ -362,7 +368,7 @@ unsafe fn clone_leaf(
         },
     };
     if snapshot_ok == 0 {
-        return 0; // the leaf vanished or is no longer a leaf
+        return 0; // absent leaf, or a cache-owned file page left for demand fault
     }
     let flags = if shared != 0 { snap.raw_flags } else { snap.cow_flags };
     if shared == 0 && snap.w_or_cow != 0 {
