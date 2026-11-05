@@ -19,8 +19,9 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 
 DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
-BSD 当前仍缺多 FIB 与源策略、DHCPv6-PD 续租及 LAN 前缀发布。BSD 的
-`SO_BINDTODEVICE` 当前仅接受主接口，指定次级网卡返回 `EOPNOTSUPP`。
+BSD 当前仍缺多 FIB 与源策略，以及 DHCPv6 委派前缀的自动发布。
+IPv6 UDP 的 `SO_BINDTODEVICE` 支持选择有 IPv6 的接口，并限制收发。
+其他套接字类型仍仅接受主接口的兼容模式。
 
 ## WAN IPv6 自动配置
 
@@ -53,7 +54,10 @@ IPv6 路由的 Linux 查询接口仍在补全。
 Kea 2.6.3 请求前缀。测试收到 /56 和 36 秒的租期，抓包校验了
 Solicit、Advertise、Request 与 Reply。测试在 A20OS 手动配置委派前缀的
 第一个 /64，并在 Linux 上配置返程路由，验证了委派地址的双向转发。
-续租和向 LAN 自动通告前缀仍在补全。
+加上 `--renew --bind-probe` 会同时申请 IA_NA 和 IA_PD，验证首个单播
+续租 Reply、绑定网口的双向收发和解除绑定。BusyBox 1.37.0 使用
+`-r no` 时的续租路径解引用空地址指针。仅前缀续租和 LAN 自动通告
+仍在补全。[BusyBox 1.37.0 源码](https://busybox.net/downloads/busybox-1.37.0.tar.bz2)
 [RFC 9915](https://www.rfc-editor.org/rfc/rfc9915.html) ·
 [Kea 前缀委派](https://kea.readthedocs.io/en/kea-2.6.4/arm/dhcp6-srv.html)
 

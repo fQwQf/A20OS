@@ -524,6 +524,45 @@ int port_nic_send_raw(void *context, const void *frame, size_t length)
     return 0;
 }
 
+/* Slot -1 names loopback. Ethernet and TUN share the filter slot layout. */
+static int port_if_slot(const struct ifnet *ifp, int *slot)
+{
+    if (ifp->if_flags & IFF_LOOPBACK) {
+        *slot = -1;
+        return 0;
+    }
+    struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
+    *slot = ctx ? ctx->port_id : port_tun_filter_index(ifp);
+    return *slot < 0 ? -ENODEV : 0;
+}
+
+int port_ifindex_from_slot(int slot)
+{
+    struct epoch_tracker et;
+    struct ifnet *ifp;
+    int index = -ENODEV;
+    NET_EPOCH_ENTER(et);
+    CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link) {
+        int current;
+        if (port_if_slot(ifp, &current) == 0 && current == slot) {
+            index = ifp->if_index;
+            break;
+        }
+    }
+    NET_EPOCH_EXIT(et);
+    return index;
+}
+
+int port_ifindex_to_slot(unsigned ifindex, int *slot)
+{
+    struct epoch_tracker et;
+    NET_EPOCH_ENTER(et);
+    struct ifnet *ifp = ifnet_byindex(ifindex);
+    int result = ifp ? port_if_slot(ifp, slot) : -ENODEV;
+    NET_EPOCH_EXIT(et);
+    return result;
+}
+
 /* The isolated port returns slot-plus-one (zero for loopback). The
  * runtime translates it to the Linux-facing interface index. */
 typedef struct {
@@ -539,11 +578,10 @@ int port_addr6_snapshot(port_addr6_out_t *out, int maximum)
     int count = 0;
     NET_EPOCH_ENTER(et);
     CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link) {
-        int loopback = (ifp->if_flags & IFF_LOOPBACK) != 0;
-        struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
-        int slot = ctx ? ctx->port_id : port_tun_filter_index(ifp);
-        if (!loopback && slot < 0)
+        int slot;
+        if (port_if_slot(ifp, &slot) < 0)
             continue;
+        int loopback = slot == -1;
         struct ifaddr *ifa;
         CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
             if (ifa->ifa_addr->sa_family != AF_INET6)

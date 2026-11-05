@@ -15,7 +15,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
 | IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
-| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 初次委派和手动 LAN 路由通过，续租与发布待完成 |
+| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 初次委派、IA_NA + IA_PD 续租和手动 LAN 路由通过 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
@@ -174,6 +174,16 @@ RA 被拒绝。有效 RA 生成了可达的 WAN 地址和可用的默认路由�
 LAN 地址和上游返程路由由测试程序配置。
 
 `pd-renew-baseline` 进一步复现了续租失败。BusyBox 在切换到 IPv6 UDP
-续租套接字时请求绑定 `en3`，当前 BSD 的 `SO_BINDTODEVICE` 对次级
+续租套接字时请求绑定 `en3`，当时 BSD 的 `SO_BINDTODEVICE` 对次级
 网卡返回 `EOPNOTSUPP`。四个 64 位架构通过 BSD socket 回归，x86_64
 通过 RA 回归，ARM32 和 RV32 通过 lwIP 启动关机测试。
+
+### 续租与 IPv6 UDP 绑定
+
+`pd-renew-bind-wire` 验证了 BusyBox 同时申请 IA_NA 和 IA_PD 时，可
+通过绑定 `en3` 的套接字接收第一个单播续租 Reply。双网口对照还验证了
+绑定状态拒收 LAN 报文、拒绝从 LAN 作用域发送，以及解除绑定后使用
+Linux 公共接口索引进行 LAN 收发。四个 64 位架构通过 BSD socket 回归。
+
+`pd-renew-01` 记录了 BusyBox 1.37.0 使用 `-r no` 时在其 UDP 发送
+函数中解引用空地址指针的用户态崩溃。首次仅前缀委派继续通过。

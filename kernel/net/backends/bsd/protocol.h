@@ -46,6 +46,7 @@ int a20_bsd_port_socket_getpeername(int fd, void *address, size_t *length);
 int a20_bsd_port_socket_getsockname(int fd, void *address, size_t *length);
 int a20_bsd_port_socket_set_int(int fd, int level, int option, int value);
 int a20_bsd_port_socket_enable_pktinfo(int fd, int domain);
+int a20_bsd_port_socket_bind_if6(int fd, unsigned ifindex);
 int a20_bsd_port_socket_multicast(int fd, uint32_t group, uint32_t ifaddr,
                                   int join);
 int a20_bsd_port_socket_get_int_freebsd(int fd, int level, int option,
@@ -90,6 +91,8 @@ int a20_bsd_port_nic_set_ipv4(void *context,
 int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
                             uint8_t prefix, const uint8_t gateway[4],
                             int remove);
+int a20_bsd_port_ifindex_from_slot(int slot);
+int a20_bsd_port_ifindex_to_slot(unsigned ifindex, int *slot);
 int a20_bsd_port_addr6_snapshot(nl_addr6_out_t *out, int maximum);
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add);
