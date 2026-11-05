@@ -1341,6 +1341,99 @@ unsafe fn build_route_v4(msg: &mut [u8], r: &RouteV4, pid: u32, seq: u32) -> usi
     off
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct NlrtRoute6 {
+    index: u32,
+    destination: [u8; 16],
+    gateway: [u8; 16],
+    prefix: u8,
+    has_gateway: u8,
+    type_: u8,
+    scope: u8,
+}
+
+extern "C" {
+    fn net_stack_route_lookup_v6(dst: *const u8, index: u32, out: *mut NlrtRoute6) -> i32;
+}
+
+unsafe fn route_lookup6(requester: *mut c_void, req: &NlMsghdr,
+                        body: *const u8, len: usize) -> i32 {
+    if len < 12 {
+        return -EINVAL;
+    }
+    let rt = ptr::read_unaligned(body as *const RtMsg);
+    if rt.src_len != 0 || rt.tos != 0 || (rt.table != 0 && rt.table != 254) {
+        return -EOPNOTSUPP;
+    }
+    let mut destination = [0u8; 16];
+    let mut have_destination = false;
+    let mut index = 0;
+    let mut it = AttrIter::new(core::slice::from_raw_parts(body.add(12), len - 12));
+    while let Some((kind, data)) = it.next() {
+        match kind {
+            RTA_DST if data.len() == 16 && !have_destination => {
+                destination.copy_from_slice(data);
+                have_destination = true;
+            }
+            RTA_OIF => match attr_u32(data) {
+                Ok(value) => index = value,
+                Err(e) => return e,
+            },
+            RTA_DST => return -EINVAL,
+            _ => return -EOPNOTSUPP,
+        }
+    }
+    if it.bad || (rt.dst_len != 0 && (rt.dst_len != 128 || !have_destination)) {
+        return -EINVAL;
+    }
+    let mut route = NlrtRoute6::default();
+    let rc = net_stack_route_lookup_v6(destination.as_ptr(), index, &mut route);
+    if rc < 0 {
+        return rc;
+    }
+
+    let mut msg = MsgBuf::new();
+    let result = RtMsg {
+        family: AF_INET6 as u8,
+        dst_len: route.prefix,
+        src_len: 0,
+        tos: 0,
+        table: 254,
+        protocol: NLRT_RTPROT_BOOT,
+        scope: route.scope,
+        type_: route.type_,
+        flags: 0,
+    };
+    ptr::write_unaligned(msg.0.as_mut_ptr().add(16) as *mut RtMsg, result);
+    let mut off = 28;
+    if route.prefix != 0 {
+        off = put_attr(&mut msg.0, off, RTA_DST, &route.destination);
+    }
+    if route.has_gateway != 0 {
+        off = put_attr(&mut msg.0, off, RTA_GATEWAY, &route.gateway);
+    }
+    off = put_attr(&mut msg.0, off, RTA_OIF, &route.index.to_ne_bytes());
+    let mut from = [0u8; NET_SOCKADDR_NL_SIZE];
+    ptr::write_unaligned(from.as_mut_ptr() as *mut u16, AF_NETLINK);
+
+    let mut irq = 0;
+    a20_net_netlink_lock(requester, &mut irq);
+    if a20_net_netlink_is_live(requester) == 0 {
+        a20_net_netlink_unlock(requester, irq);
+        return -ENOTSOCK;
+    }
+    let pid = a20_net_netlink_local_pid(requester);
+    fill_hdr_flags(&mut msg.0, RTM_NEWROUTE, off as u32, req.seq, pid, 0);
+    let rc = a20_net_netlink_enqueue(requester, msg.0.as_ptr(), off,
+                                     from.as_ptr() as *const c_void, NET_SOCKADDR_NL_SIZE);
+    if rc >= 0 && req.flags & NLM_F_ACK != 0 {
+        enqueue_ack(requester, req, pid);
+    }
+    a20_net_netlink_unlock(requester, irq);
+    if rc < 0 { rc } else { req.len as i32 }
+}
+
 struct RouteQuery {
     routes: [RouteV4; 64],
     count: usize,
@@ -1819,6 +1912,12 @@ pub unsafe extern "C" fn a20_net_netlink_route_request(requester: *mut c_void,
     if type_==RTM_GETRULE {
         if family==AF_INET6 {return -EAFNOSUPPORT;}
         return rule_dump(requester,&req,len);
+    }
+    if type_ == RTM_GETROUTE && family == AF_INET6 && req.flags & NLM_F_DUMP == 0 {
+        if a20_net_netlink_ns_initial(*rv.net_ns) == 0 {
+            return -EOPNOTSUPP;
+        }
+        return route_lookup6(requester, &req, (buf as *const u8).add(hdr_size), payload);
     }
     let mut links = [NlrtLink::zero(); NLRT_MAX_LINKS];
     let nlinks = a20_net_netlink_snapshot(*rv.net_ns, links.as_mut_ptr(),
@@ -2498,6 +2597,11 @@ mod tests {
                                                      _m: *mut u8, _g: *mut u8) -> i32 {
         ptr::copy_nonoverlapping(T_GET_ADDR_IP.as_ptr(), ip, 4);
         T_GET_ADDR_RC
+    }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_route_lookup_v6(_d: *const u8, _i: u32,
+                                                    _r: *mut NlrtRoute6) -> i32 {
+        -EOPNOTSUPP
     }
     #[no_mangle]
     unsafe extern "C" fn net_stack_route_update_v4(_d: *const u8, _p: u8,

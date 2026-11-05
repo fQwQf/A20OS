@@ -336,6 +336,7 @@ static int attach_one_nic(int slot, const a20_net_config_t *config,
     nic_name_for_slot(slot, job.config.ifname, sizeof(job.config.ifname));
     memcpy(job.config.mac, mac, 6);
     job.config.accept_ra = strcmp(config->ipv6_ra_if, job.config.ifname) == 0;
+    job.config.ipv6_linklocal = CONFIG_NET_ROUTER;
 
     int placeholder = 0;
     if (configured) {
@@ -1028,6 +1029,32 @@ static int addr6_snapshot(nl_addr6_out_t *out, int maximum)
     return a20_bsd_executor_call(addr6_snapshot_run, &job);
 }
 
+typedef struct {
+    const uint8_t *destination;
+    unsigned index;
+    nl_route6_out_t *out;
+} route_lookup6_job_t;
+
+static int route_lookup6_run(void *argument)
+{
+    route_lookup6_job_t *job = argument;
+    int zone = job->index ? a20_bsd_ifindex_to_bsd(job->index) : 0;
+    if (zone < 0)
+        return zone;
+    int rc = a20_bsd_port_route_lookup_v6(job->destination, zone, job->out);
+    if (rc == 0)
+        job->out->index = public_index_for_slot((int)job->out->index - 1);
+    return rc;
+}
+
+static int route_lookup_v6(const uint8_t destination[16], unsigned index, nl_route6_out_t *out)
+{
+    if (!a20_bsd_executor_ready())
+        return -ENETUNREACH;
+    route_lookup6_job_t job = {destination, index, out};
+    return a20_bsd_executor_call(route_lookup6_run, &job);
+}
+
 static const net_backend_if_ops_t bsd_iface_ops = {
     .up = if_up,
     .default_index = if_default_index,
@@ -1043,6 +1070,7 @@ static const net_backend_if_ops_t bsd_iface_ops = {
     .set_addr = if_set_addr,
     .set_addr6 = if_set_addr6,
     .del_addr6 = if_del_addr6,
+    .route_lookup_v6 = route_lookup_v6,
     .route_update_v4 = route_update_v4,
     .neighbor_update_v4 = neighbor_update_v4,
     .interface_ipv4 = interface_ipv4,

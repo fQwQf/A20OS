@@ -24,6 +24,8 @@
 #include <net/pfil.h>
 #include <net/route.h>
 #include <net/route/route_ctl.h>
+#include <net/route/nhop.h>
+#include <netinet6/in6_fib.h>
 #include <netinet/in.h>
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
@@ -52,6 +54,7 @@ typedef struct a20_bsd_nic_config {
     char broadcast[16];
     char gateway[16];
     int accept_ra;
+    int ipv6_linklocal;
 } a20_bsd_nic_config_t;
 typedef struct a20_bsd_nic_stats {
     uint64_t rx_frames, tx_frames, rx_drops, tx_drops, tx_errors, rx_starved;
@@ -406,14 +409,18 @@ static void nic_poll_rs(struct ff_dpdk_if_context *ctx)
     NET_EPOCH_EXIT(et);
 }
 
-static void nic_enable_ra(struct ff_dpdk_if_context *ctx)
+static void nic_enable_ipv6(struct ff_dpdk_if_context *ctx, int accept_ra)
 {
     struct ifnet *ifp = ctx->ifp;
     struct in6_ndireq req = {0};
     int error = nd6_ioctl(SIOCGIFINFO_IN6, (caddr_t)&req, ifp);
     if (!error) {
-        req.ndi.flags |= ND6_IFF_ACCEPT_RTADV | ND6_IFF_AUTO_LINKLOCAL;
-        req.ndi.flags &= ~(ND6_IFF_IFDISABLED | ND6_IFF_NO_RADR);
+        req.ndi.flags |= ND6_IFF_AUTO_LINKLOCAL;
+        req.ndi.flags &= ~(ND6_IFF_IFDISABLED | ND6_IFF_ACCEPT_RTADV);
+        if (accept_ra) {
+            req.ndi.flags |= ND6_IFF_ACCEPT_RTADV;
+            req.ndi.flags &= ~ND6_IFF_NO_RADR;
+        }
         error = nd6_ioctl(SIOCSIFINFO_FLAGS, (caddr_t)&req, ifp);
     }
     if (!error) {
@@ -422,9 +429,11 @@ static void nic_enable_ra(struct ff_dpdk_if_context *ctx)
             error = EADDRNOTAVAIL;
     }
     if (error) {
-        printf("[NET] BSD IPv6 RA setup failed on %s: %d\n", ifp->if_xname, error);
+        printf("[NET] BSD IPv6 setup failed on %s: %d\n", ifp->if_xname, error);
         return;
     }
+    if (!accept_ra)
+        return;
     /* Receive a default router on the selected WAN even while forwarding. */
     V_ip6_rfc6204w3 = 1;
     ctx->rs_enabled = true;
@@ -452,8 +461,8 @@ void *port_nic_attach(const a20_bsd_nic_config_t *config)
         if (ctx->ifp) {
             struct ifnet *ifp = ctx->ifp;
             if_up(ifp);
-            if (config->accept_ra)
-                nic_enable_ra(ctx);
+            if (config->accept_ra || config->ipv6_linklocal)
+                nic_enable_ipv6(ctx, config->accept_ra);
         }
     }
     return context;
@@ -685,7 +694,7 @@ int port_if_set_ipv6(struct ifnet *ifp, const uint8_t address[16],
         struct in6_addr scoped = ifra.ifra_addr.sin6_addr;
         int error = in6_setscope(&scoped, ifp, NULL);
         if (error)
-            return error;
+            return port_linux_errno(error);
         struct in6_ifaddr *ia = in6ifa_ifpwithaddr(ifp, &scoped);
         if (ia) {
             if (!add && ia->ia6_ndpr) {
@@ -713,7 +722,7 @@ int port_if_set_ipv6(struct ifnet *ifp, const uint8_t address[16],
             ifa_free(&ia->ia_ifa);
         }
     }
-    return error;
+    return port_linux_errno(error);
 }
 
 int port_nic_set_ipv6(void *context, const uint8_t address[16],
@@ -724,6 +733,61 @@ int port_nic_set_ipv6(void *context, const uint8_t address[16],
     if (!ctx)
         return EINVAL;
     return port_if_set_ipv6(ctx->ifp, address, prefix, add, valid, preferred, exclusive);
+}
+
+/* Returned interface is a slot plus one, with zero denoting loopback. */
+typedef struct {
+    uint32_t index;
+    uint8_t destination[16], gateway[16];
+    uint8_t prefix, has_gateway, type, scope;
+} port_route6_out_t;
+
+int port_route_lookup_v6(const uint8_t dst[16], unsigned zone, port_route6_out_t *out)
+{
+    struct in6_addr target, prefix;
+    struct route_nhop_data matched;
+    struct epoch_tracker epoch;
+    memcpy(&target, dst, sizeof(target));
+    if (IN6_IS_SCOPE_LINKLOCAL(&target) && !zone)
+        return -EINVAL;
+    int slot, length, error = ENETUNREACH;
+    uint32_t prefix_zone;
+    NET_EPOCH_ENTER(epoch);
+    struct rtentry *route = fib6_lookup_rt(0, &target, zone, 0, &matched);
+    if (!route)
+        goto done;
+    struct nhop_object *next = matched.rnd_nhop;
+    if (NH_IS_NHGRP(next))
+        next = fib6_lookup(0, &target, zone, 0, 0);
+    if (!next || !NH_IS_VALID(next) || !(next->nh_ifp->if_flags & IFF_UP) ||
+        (zone && zone != next->nh_aifp->if_index))
+        goto done;
+    if (port_if_slot(next->nh_ifp, &slot) < 0) {
+        error = ENODEV;
+        goto done;
+    }
+
+    rt_get_inet6_prefix_plen(route, &prefix, &length, &prefix_zone);
+    in6_clearscope(&prefix);
+    memset(out, 0, sizeof(*out));
+    out->index = slot + 1;
+    out->prefix = length;
+    memcpy(out->destination, &prefix, sizeof(prefix));
+    if (next->nh_flags & NHF_GATEWAY && next->gw_sa.sa_family == AF_INET6) {
+        struct in6_addr gateway = next->gw6_sa.sin6_addr;
+        in6_clearscope(&gateway);
+        memcpy(out->gateway, &gateway, sizeof(gateway));
+        out->has_gateway = 1;
+    }
+    /* Linux rtnetlink route type and scope values. */
+    out->type = next->nh_flags & NHF_BLACKHOLE ? 6 :
+                next->nh_flags & NHF_REJECT ? 7 :
+                (nhop_get_rtflags(next) & RTF_LOCAL) ? 2 : 1;
+    out->scope = out->type == 2 ? 254 : out->has_gateway ? 0 : 253;
+    error = 0;
+done:
+    NET_EPOCH_EXIT(epoch);
+    return -port_linux_errno(error);
 }
 
 static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,

@@ -15,7 +15,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
 | IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
-| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 初次委派、含或不含 IA_NA 的续租和手动 LAN 路由通过 |
+| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 委派与续租、Linux LAN 自动地址与转发、租约撤销和重编号通过 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
@@ -215,3 +215,20 @@ ICMPv6 报文并校验了校验和、跳数与接口作用域，同时验证了 
 到期后，LAN 上不再出现目标主机的邻居请求、转发报文或路由器地址的
 回包。主机端测试覆盖 `IFA_CACHEINFO` 的寿命校验和响应布局。该测试
 直接设置地址寿命，仍需将 DHCPv6-PD 租约事件接到 LAN 配置和 RA。
+
+
+### LAN 自动配置、撤销与重编号
+
+`pd-lan-verified` 使用 A20OS 路由器、运行 Kea 与 radvd 的 Linux WAN、
+运行 SLAAC 的独立 Linux LAN 三个节点。原版 odhcp6c 续租只带 IA_PD，
+Linux LAN 从子网编号 `0x2a` 对应的 /64 自动生成地址，并使用通告
+的默认路由与 WAN 通信。抓包校验了通告的跳数、链路本地源地址、校验
+和、前缀寿命与网口隔离。测试撤销并恢复 WAN 默认路由时，LAN 的
+默认路由随之变化，委派前缀继续有效。
+
+停止 Kea 后，通告撤销过期前缀，Linux 地址和 A20OS 的 LAN 地址到期。
+Kea 改用另一个 /56 恢复后，原有发布进程重新获得委派，Linux 使用新
+地址恢复通信。正常退出时，发布进程撤销新通告并移除它管理的地址。
+这轮同时验证了 UDP 546 复拨需要的 Linux `SO_REUSEADDR` 和
+`SOCK_CLOEXEC` 行为。多 LAN 部署、进程或整机重启后的旧前缀处理、
+IPv6CP 和 PPP DNS 仍需运行验证或实现。

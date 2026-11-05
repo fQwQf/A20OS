@@ -32,7 +32,7 @@ struct port_linux_msghdr {
 
 /* F-Stack's public wrapper accepts Linux socket constants but reports BSD
  * errno. Keep the conversion here, before values reach A20OS's Linux ABI. */
-static int linux_errno(int error)
+int port_linux_errno(int error)
 {
     switch (error) {
     case 0: return 0;
@@ -111,7 +111,7 @@ static int linux_errno(int error)
 
 static int result(int value)
 {
-    return value < 0 ? -linux_errno(port_last_error()) : value;
+    return value < 0 ? -port_linux_errno(port_last_error()) : value;
 }
 
 int port_socket_create(int domain, int type, int protocol)
@@ -144,10 +144,10 @@ int port_socket_accept(int fd, void *address, size_t *length)
     int fd_new = ff_accept(fd, (struct linux_sockaddr *)address,
                            length ? &local : NULL);
     if (length) *length = local;
-    if (fd_new < 0) return -linux_errno(port_last_error());
+    if (fd_new < 0) return -port_linux_errno(port_last_error());
     int nonblocking = 1;
     if (ff_ioctl(fd_new, 0x5421, &nonblocking) < 0) {
-        int error = linux_errno(port_last_error());
+        int error = port_linux_errno(port_last_error());
         ff_close(fd_new);
         return -error;
     }
@@ -171,7 +171,7 @@ int port_socket_send(int fd, const void *buffer, size_t length, int flags,
     ssize_t sent = ff_sendto(fd, buffer, length, flags,
                              (const struct linux_sockaddr *)address,
                              (socklen_t)address_length);
-    return sent < 0 ? -linux_errno(port_last_error()) : (int)sent;
+    return sent < 0 ? -port_linux_errno(port_last_error()) : (int)sent;
 }
 
 int port_socket_recv(int fd, void *buffer, size_t length, int flags,
@@ -182,7 +182,7 @@ int port_socket_recv(int fd, void *buffer, size_t length, int flags,
                                    (struct linux_sockaddr *)address,
                                    address_length ? &local : NULL);
     if (address_length) *address_length = local;
-    return received < 0 ? -linux_errno(port_last_error()) : (int)received;
+    return received < 0 ? -port_linux_errno(port_last_error()) : (int)received;
 }
 
 int port_socket_enable_pktinfo(int fd, int domain)
@@ -291,7 +291,7 @@ int port_socket_recv_meta(int fd, void *buffer, size_t length, int flags,
     msg.msg_controllen = sizeof(control);
     ssize_t received = ff_recvmsg(fd, (struct msghdr *)(void *)&msg, flags);
     if (address_length) *address_length = msg.msg_namelen;
-    if (received < 0) return -linux_errno(port_last_error());
+    if (received < 0) return -port_linux_errno(port_last_error());
 
     if (info) {
         /* ff_recvmsg() rewrites the control buffer from FreeBSD into the
@@ -406,7 +406,7 @@ int port_socket_send_control(int fd, const void *buffer, size_t length,
     }
 
     ssize_t sent = ff_sendmsg(fd, &msg, flags);
-    return sent < 0 ? -linux_errno(port_last_error()) : (int)sent;
+    return sent < 0 ? -port_linux_errno(port_last_error()) : (int)sent;
 }
 
 int port_socket_error(int fd)
@@ -416,15 +416,15 @@ int port_socket_error(int fd)
     /* The Linux-facing wrapper's level conversion is ambiguous for
      * SOL_SOCKET; use the FreeBSD-native entry with BSD constants here. */
     if (ff_getsockopt_freebsd(fd, SOL_SOCKET, SO_ERROR, &error, &length) < 0)
-        return -linux_errno(port_last_error());
-    return linux_errno(error);
+        return -port_linux_errno(port_last_error());
+    return port_linux_errno(error);
 }
 
 int port_socket_poll(int fd, int events)
 {
     struct pollfd pfd = {.fd = fd, .events = (short)events, .revents = 0};
     int ready = ff_poll(&pfd, 1, 0);
-    if (ready < 0) return -linux_errno(port_last_error());
+    if (ready < 0) return -port_linux_errno(port_last_error());
     return ready ? pfd.revents : 0;
 }
 
@@ -489,7 +489,7 @@ int port_readiness_init(void)
         return 0;
     int kq = ff_kqueue();
     if (kq < 0)
-        return -linux_errno(port_last_error());
+        return -port_linux_errno(port_last_error());
     readiness_kq = kq;
     return 0;
 }
@@ -504,7 +504,7 @@ int port_readiness_add(int fd, void *tag)
     struct kevent change;
     EV_SET(&change, fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, tag);
     if (ff_kevent(readiness_kq, &change, 1, NULL, 0, NULL) < 0)
-        return -linux_errno(port_last_error());
+        return -port_linux_errno(port_last_error());
     return 0;
 }
 
@@ -530,7 +530,7 @@ int port_readiness_wait(a20_bsd_ready_t *events, int maximum)
         /* A spurious wakeup is not a socket error. */
         if (error == EINTR || error == EWOULDBLOCK || error == EAGAIN)
             return 0;
-        return -linux_errno(error);
+        return -port_linux_errno(error);
     }
     for (int i = 0; i < count; ++i) {
         events[i].fd = (int)readiness_events[i].ident;

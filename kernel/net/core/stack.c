@@ -232,6 +232,14 @@ int net_stack_if_del_addr6(unsigned index, const uint8_t *addr) {
     return -EOPNOTSUPP;
 }
 
+int net_stack_route_lookup_v6(const uint8_t dst[16], unsigned index, nl_route6_out_t *out)
+{
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->route_lookup_v6)
+        return b->iface->route_lookup_v6(dst, index, out);
+    return -EOPNOTSUPP;
+}
+
 int net_stack_route_update_v4(const uint8_t *dst, uint8_t prefix,
                               const uint8_t *gateway, uint16_t index,
                               int remove) {
