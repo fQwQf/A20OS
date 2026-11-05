@@ -56,3 +56,31 @@ python3 tools/tests/test_aio_user_mapping_races.py
 The 4-CPU preemptible x86_64 full VM smoke and RISC-V VM/AIO probes pass (`build/browser-followup/usercopy-aio-guest.log`, `usercopy-rv-guest.log`). The added guest `copy-protection` case also passed on the preceding kernel; it is permission regression coverage, not evidence of reproducing the copy race. Firefox ESR still crashes after this change, so this fix does not establish the cause of its heap corruption.
 
 ARM32 cross-compilation additionally caught a direct conversion from the 64-bit user-address arithmetic to a native pointer. Converting through `uintptr_t` keeps that generic helper valid for 32-bit kernels. The ARM32 Linux kernel build passes with this conversion; the AArch64 dual-ABI kernel also builds. These are compile checks, not desktop or boot validation for either architecture.
+
+## 可恢复页与共享匿名后备
+
+普通 MMU 上的 Linux `MAP_SHARED | MAP_ANONYMOUS` 使用内部 `VMO_SHARED_ANON` 后备。创建映射只预留地址范围；Rust 稀疏页索引在首次触页时预留元数据，随后完成 cgroup 计费、帧分配、清零与唯一发布。VMA 持有后备引用，PTE 只借用后备帧。分裂、别名与重映射必须保留 `backing_offset`；`mremap` 扩展可增加虚拟范围，超出原后备范围的访问仍产生 SIGBUS。NOMMU、原生 capability 映射及显式 huge-page 映射保留各自路径。
+
+每个首次分配页面的 cgroup 在后备中保有引用及页数记录，最后一个后备引用销毁时才退还预算。进程退出按 RSS 进行的旧计费回退不得扣除这部分对象所有的预算。最终 MM 拆除先完成 TLB 同步，再遍历页表释放普通帧；`MM_ST_VMO` 叶不减帧引用，后备的最终释放统一回收 canonical 页面。`mincore` 查询后备驻留状态，因此缺少本映射的 PTE 不等于页面未驻留。
+
+fork 可以省略可从后备恢复的子 PTE。目前仅对至少 1 MiB、非可执行且架构允许重新缺页的映射使用该策略。共享匿名 VMO 可以直接跳过现有叶；私有文件叶还必须只读、属于文件私有类、没有特殊状态，且 PFN 与对应 page-cache owner 相同。已经私有修改、随后改回只读的文件页仍须继承。小映射和可执行映射保留现有叶，避免放大常用代码及栈的缺页成本。
+
+这项策略将页表复制成本移到子进程后续访问。fork 后退出或 exec 的负载通常受益；子进程立即读取全部映射会产生更多缺页，可能更慢。评估时必须同时测量两种访问模式，不能仅凭 fork 返回时间判断整体收益。
+
+宿主检查覆盖真实 C/Rust 适配器的分配失败、并发首次触页、计费与生命周期；guest 检查覆盖内容、权限、别名、驻留、COW、帧复用和回收事件。可执行：
+
+```sh
+python3 tools/tests/test_shared_anon_host.py
+python3 tools/tests/test_vmo_page_host.py
+python3 tools/tests/test_anon_final_destroy_host.py
+python3 tools/tests/test_cow_snapshot_token.py
+python3 tools/tests/test_reap_ready_host.py
+bash tools/host-tests/test-mmap-policy-host.sh
+bash tools/host-tests/test-mseal-policy-host.sh
+# 已构建本仓库 x86_64 musl 后，生成两侧 guest 共用的静态程序：
+bash tools/host-tests/build-fork-exit-probes.sh
+```
+
+`fork-exit-bench` 接受 `file|shared-sparse|shared-dense`、轮数、MiB、子进程是否读取每页四个参数。父进程在计时前触页（`shared-sparse` 除外）；结果包含整个 fork/wait 周期和父进程侧累计 fork、wait 时间。两侧应使用同一二进制、相同 vCPU/内存/CPU affinity 和透明大页设置，并把诊断计数与正式计时分开。
+
+回收完成还有独立于页表的 CPU 生命周期边界：`ZOMBIE` 不意味着退出任务已经离开 CPU。阻塞 wait 在子任务的 `park_lock` 内注册完成通知，CPU slot 的任务引用移交给完成回调，保护并发回收。SIGCHLD 与 pidfd 可读状态必须等到对应进程可以非阻塞回收后才可见；线程组信号若先由最后一个 sibling 产生，还须等待仍在 CPU 上的 leader。原生任务对象的逐任务 EXITED 事件也移到该任务释放 CPU 之后，保持原有的任务与线程组事件范围。
