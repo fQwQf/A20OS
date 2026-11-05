@@ -15,7 +15,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
 | IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
-| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC 双网口通过，DHCPv6-PD 与 LAN 发布待完成 |
+| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 初次委派和手动 LAN 路由通过，续租与发布待完成 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
@@ -162,3 +162,18 @@ RA 被拒绝。有效 RA 生成了可达的 WAN 地址和可用的默认路由�
 重试，错误 Hop Limit、错误链路层选项和零寿命通告均不会终止探测。
 对端在收到第二次请求后才发送有效通告。随后观察到 SLAAC、双向转发
 和停止探测。管理命令关闭并重开 WAN 时，重新发送了三次请求。
+
+
+## DHCPv6-PD 首次租约
+
+`pd-stock-02` 复现了原版 BusyBox 因 `RTM_GETADDR` 缺少 WAN IPv6
+地址而无法开始。BSD 地址现在从实际接口地址表读取，返回给 Linux
+兼容层，并保留链路本地作用域、前缀长度和 DAD 状态。`pd-route-final`
+验证了 BusyBox 读到链路本地和 SLAAC 地址，与 Kea 完成四报文交换，
+并用收到的 /56 在 LAN 配置一个 /64 后与 Linux 双向通信。测试中的
+LAN 地址和上游返程路由由测试程序配置。
+
+`pd-renew-baseline` 进一步复现了续租失败。BusyBox 在切换到 IPv6 UDP
+续租套接字时请求绑定 `en3`，当前 BSD 的 `SO_BINDTODEVICE` 对次级
+网卡返回 `EOPNOTSUPP`。四个 64 位架构通过 BSD socket 回归，x86_64
+通过 RA 回归，ARM32 和 RV32 通过 lwIP 启动关机测试。

@@ -20,5 +20,10 @@ typedef struct {
     uint8_t  gw[4];
 } nl_link_out_t;
 
+typedef struct {
+    uint32_t index;
+    uint8_t address[16];
+    uint8_t prefix, flags, scope, reserved;
+} nl_addr6_out_t;
 
 #endif

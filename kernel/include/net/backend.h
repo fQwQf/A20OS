@@ -188,6 +188,7 @@ typedef struct net_backend_if_ops {
     int (*mtu)(unsigned index);
     int (*hwaddr)(unsigned index, uint8_t mac[6]);
     int (*snapshot)(void *out, int maximum);
+    int (*snapshot_addr6)(nl_addr6_out_t *out, int maximum);
     void (*config_snapshot)(a20_net_config_t *out);
     int (*set_mtu)(unsigned index, uint16_t mtu);
     int (*set_flags)(unsigned index, uint32_t value, uint32_t mask);

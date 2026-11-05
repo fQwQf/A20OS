@@ -5,6 +5,7 @@
 #define A20_NET_BSD_PROTOCOL_H
 
 #include "core/types.h"
+#include "net/interface.h"
 
 int a20_bsd_port_socket_create(int domain, int type, int protocol);
 int a20_bsd_port_socket_bind(int fd, const void *address, size_t length);
@@ -89,6 +90,7 @@ int a20_bsd_port_nic_set_ipv4(void *context,
 int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
                             uint8_t prefix, const uint8_t gateway[4],
                             int remove);
+int a20_bsd_port_addr6_snapshot(nl_addr6_out_t *out, int maximum);
 int a20_bsd_port_nic_set_ipv6(void *context, const uint8_t address[16],
                               uint8_t prefix, int add);
 int a20_bsd_port_nic_send_raw(void *context, const void *frame, size_t length);
