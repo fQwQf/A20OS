@@ -80,15 +80,15 @@ natadd out proto=tcp dport=80    action=masquerade
 | 门禁 | 断言 |
 |---|---|
 | `smoke-netfilter` | 既有 drop/accept 语义不回归，且 conntrack 计数随 `udp_send_once` 增长、`/proc` 里能看到该五元组（`user/cmds/net/netfilter_test.c` 测试 8）；**外加 ICMP echo 跟踪**：手工构造的 echo 请求发往网关，`ct_packets` 增长、`ct_tracked` 增加、`/proc` 里出现 `icmp=echo id=...` 且条目是 `state=established`——回程能匹配上该状态是验证的关键依据，只有 insert 的话条目会保持 `new`（测试 9） |
-| `smoke-netfilter-nat` | 端到端 DNAT 端口转发：QEMU `hostfwd` 把 `127.0.0.1:18081` 转到 guest 18081，guest 侧规则转到 18082，host 侧 `tools/netnat_host_probe.py` 连上、发出、收到回显 |
-| `smoke-netfilter-snat` | 端到端出站 SNAT：guest 主动连 `10.0.2.2:18083`，规则改写到 `10.0.2.15:18084`；`tools/netnat_snat_probe.py` 在宿主机回显，guest 断言 `/proc/a20/netfilter` 出现 `action=snat` 和 established 状态，并做删规则 + `ctflush` 的阴性对照 |
+| `smoke-netfilter-nat` | 端到端 DNAT 端口转发：QEMU `hostfwd` 把 `127.0.0.1:18081` 转到 guest 18081，guest 侧规则转到 18082，host 侧 `tools/probes/netnat_host_probe.py` 连上、发出、收到回显 |
+| `smoke-netfilter-snat` | 端到端出站 SNAT：guest 主动连 `10.0.2.2:18083`，规则改写到 `10.0.2.15:18084`；`tools/probes/netnat_snat_probe.py` 在宿主机回显，guest 断言 `/proc/a20/netfilter` 出现 `action=snat` 和 established 状态，并做删规则 + `ctflush` 的阴性对照 |
 | `smoke-ct-capacity` | 表填到 `ct_capacity` 恰好停住；多一条流恰好淘汰一条，且**淘汰的是最久未用的那一条**（淘汰前后的 `ct_lru_victim` 各断言一次）；短超时（`cttimeout 100 100 100`）下条目在截止时间内被回收、`ct_timeout` +1 且 `ct_sweeps` 前进 |
-| `test-nat-rewrite`（在 `make check` 内） | 主机侧编译**真实的** `kernel/net/filter/netfilter_rewrite.c`：SNAT/MASQUERADE/DNAT 地址改写后 IP 与 L4 校验和都用独立的一次性重算校验；端口改写与 `toport=0` 语义；masquerade 取的是"正在离开的那块接口"的地址；回程元组的推导，并与对端实际会发出的那个帧逐字段比对（`tools/test-nat-rewrite-host.c`） |
+| `test-nat-rewrite`（在 `make check` 内） | 主机侧编译**真实的** `kernel/net/filter/netfilter_rewrite.c`：SNAT/MASQUERADE/DNAT 地址改写后 IP 与 L4 校验和都用独立的一次性重算校验；端口改写与 `toport=0` 语义；masquerade 取的是"正在离开的那块接口"的地址；回程元组的推导，并与对端实际会发出的那个帧逐字段比对（`tools/host-tests/test-nat-rewrite-host.c`） |
 
 SNAT 的端到端拓扑是 guest 主动发起、宿主机回显（QEMU user-net 把 `10.0.2.2` 映射到宿主 loopback），回程包真实存在，因此 `smoke-netfilter-snat` 能证明 output hook 的改写、 conntrack 回程链和返回路径。它的**观测边界**是：QEMU user-net 在 guest 之外还会做一次自己的地址/端口转换，所以宿主机探针无法看到 guest 改写的源端口。源端口改写本身由`test-nat-rewrite` 的主机侧一次性重算逐字段验证；不要把这个限制读成"SNAT 端口没生效"。
 
 两个测试钩子是为了让上面的容量/超时断言不必靠 256 条真实流和 30 秒等待达成：`ctinject`（经由数据面同一个 `netfilter_ct_insert` 插入合成流）和 `cttimeout`（运行期覆盖三个毫秒常量，0 恢复默认）。**只有三个**——ICMP 复用 UDP 那个（`kernel/net/filter/netfilter_nat.rs` 的 `ct_time_init`），所以覆盖超时测试同时改了 echo 条目的寿命，这一点是巧合而不是设计，测试脚本改三个值时要知道。**`ctinject` 只接受 TCP / UDP**（`kernel/net/filter/netfilter_nat.rs` 的 `a20_netfilter_ct_inject` 拒掉其他 proto 与其他状态），理由写在源码注释里：注入器只应当造出数据面真能造出的表形状。因此 `smoke-ct-capacity` 覆盖的是 TCP/UDP 的淘汰与超时，**ICMP 条目的淘汰与超时没有门禁**，它们只由代码路径本身保证。两者都只是 `/proc` 动词，不新增内核状态。
 
-DNAT 门禁有两个 QEMU 10 的坑，都写在 `tools/targets-smoke.mk` 的目标注释里：规则必须带 `hostfwd=` 前缀（裸短格式被当成已废弃的布尔量），guest 地址前**不能**有冒号（否则 guest 段被解析成 `[addr]:port`，端口取到 10）。另外门禁必须用 `a20.tcpmode=lwip` 启动：默认的 `fast` 模式不建 lwIP LISTEN pcb，入站 SYN 只会得到 RST （`kernel/net/socket/socket_control.c:211-231` 的注释与 `:253` 的 `/proc` 打印）。
+DNAT 门禁有两个 QEMU 10 的坑，都写在 `tools/mk/targets-smoke.mk` 的目标注释里：规则必须带 `hostfwd=` 前缀（裸短格式被当成已废弃的布尔量），guest 地址前**不能**有冒号（否则 guest 段被解析成 `[addr]:port`，端口取到 10）。另外门禁必须用 `a20.tcpmode=lwip` 启动：默认的 `fast` 模式不建 lwIP LISTEN pcb，入站 SYN 只会得到 RST （`kernel/net/socket/socket_control.c:211-231` 的注释与 `:253` 的 `/proc` 打印）。
 
 `user/cmds/net/netnat_test.c` 里的阶段划分是有意的：先在没有 NAT 的情况下验证 conntrack 本身工作正常，再验证规则解析的拒绝路径，再装规则，最后用一次**注定失败**的直连做阴性对照，确认转发是规则造成的而不是环境本来就能通。

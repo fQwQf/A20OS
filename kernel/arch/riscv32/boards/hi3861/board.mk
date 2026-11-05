@@ -1,4 +1,4 @@
-include tools/riscv-mcu.mk
+include tools/mk/riscv-mcu.mk
 # The kernel is executed in place from SPI flash; the RV32 entry code copies
 # .data down to the SRAM window before clearing .bss.
 ARCH_CFLAGS += -DCONFIG_MCU_COPY_DATA -DCONFIG_MCU_DRIVER_MODEL

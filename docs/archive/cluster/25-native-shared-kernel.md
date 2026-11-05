@@ -108,7 +108,7 @@ make -j8 ARCH=armv7m ABI=native STM32_FLASH_KB=512 STM32_RAM_KB=64 \
   MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 kernel-only
 python3 -m venv /tmp/a20-shared-test
 /tmp/a20-shared-test/bin/pip install unicorn==2.1.4 pyelftools==0.33
-/tmp/a20-shared-test/bin/python tools/check-mcu-shared-kernel.py \
+/tmp/a20-shared-test/bin/python tools/mcu/check-mcu-shared-kernel.py \
   .kernel-build/armv7m-stm32f103-native-bringup-nommu-smp2-preempt-noxlator-stm32f103-f512k-r64k-shared1024k-selftest/kernel.elf \
   --report .kernel-build/cluster/shared-kernel/report.json
 ```

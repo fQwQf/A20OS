@@ -690,4 +690,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F0D | `hyp_stats` | `int64_t hyp_stats(struct hyp_stats *out)` | 读取 hypervisor 统计快照 |
 | 0x0F0E | `hyp_vm_smp` | `int64_t hyp_vm_smp(a20_handle_t vm, uint64_t count)` | 配置有上限的 guest vCPU 数量 |
 
-总计：175 个 syscall（`syscall_table.def` 当前登记数）。
+总计：178 个 syscall（`syscall_table.def` 当前登记数）。

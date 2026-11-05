@@ -231,7 +231,7 @@ SACK（RFC 2018）与 TCP 时间戳（RFC 7323）在上游 `opt.h` 里默认是 
 
 **§4.2 的 TCP-friendly 区域规范实现**（`8115a0c1a`）：`tcp_cubic_w_est()` 按 RFC Eq. 4 计算 `W_est(t) = W_max*beta_cubic + alpha_aimd*(t/RTT)`，与 `W_cubic(t)` 取**较大者**——RFC 4.2 明确 "cwnd SHOULD be set to W_est(t)"，标准友好线作为下界保障。此前采用的 Reno 速率近似未参考 `t/RTT` 与流本身 `W_max`，无法保证不低于标准 TCP 的收敛速率。
 
-**实现带来的边界**（必须一起读，否则会以为 4.2 在大窗口上也在起作用）：lwIP 2.2.x 的 `struct tcp_pcb` 没有 `rtt` 字段，本栈唯一能测的 RTT 是 `pcb->sa`，以整个`TCP_SLOW_INTERVAL`（500 ms）为单位采样，所以 Eq. 4 的分母在 0.5 s 以下没有分辨率；`sa == 0`（回环、大多数局域网）兜底成一个 tick。于是该区域只在 `W_max` 低于约 3.25 段时可能成为约束项——**在 CUBIC 真正要对付的大窗口传输上它不会成为约束项**。毫秒级 RTT 需要在 `tcp_in.c` 里更新一个新 pcb 字段，未做。门禁`tools/test-tcp-cubic-host.sh`（`test_tcp_friendly` 跨 (t, RTT) 钉住 Eq. 4，`test_friendly_region_binding` 在 `sa=1` / `sa=40` 下把区域选择推过真实 ACK 路径）。
+**实现带来的边界**（必须一起读，否则会以为 4.2 在大窗口上也在起作用）：lwIP 2.2.x 的 `struct tcp_pcb` 没有 `rtt` 字段，本栈唯一能测的 RTT 是 `pcb->sa`，以整个`TCP_SLOW_INTERVAL`（500 ms）为单位采样，所以 Eq. 4 的分母在 0.5 s 以下没有分辨率；`sa == 0`（回环、大多数局域网）兜底成一个 tick。于是该区域只在 `W_max` 低于约 3.25 段时可能成为约束项——**在 CUBIC 真正要对付的大窗口传输上它不会成为约束项**。毫秒级 RTT 需要在 `tcp_in.c` 里更新一个新 pcb 字段，未做。门禁`tools/host-tests/test-tcp-cubic-host.sh`（`test_tcp_friendly` 跨 (t, RTT) 钉住 Eq. 4，`test_friendly_region_binding` 在 `sa=1` / `sa=40` 下把区域选择推过真实 ACK 路径）。
 
 ### `SO_SNDBUF` / `SO_RCVBUF` 不再是被接受然后忽略（`aacce4dcc`）
 
@@ -425,7 +425,7 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 三件事叠加，使得"默认配置"这个事实从来没有被任何门禁兑现过：
 
 1. **唯一的 ABI 冒烟门禁构建的是 `ABI=linux`。** `instances/smoke-abi-linux.toml`里明写 `abi = "linux"`，它跑的是 Linux syscall 冒烟。Native ABI 那 21 条（`tools/smoke_cases.py` 中名字带 `native` 的用例，本次逐条导出确认是 21 条）**全部**是 `ARCH=riscv64` + `ABI=both`，与上面那条不重叠。
-2. **两个覆盖生成器只读 Linux syscall 表。** `tools/gen_linux_syscall_coverage.py`的 `TABLE` 指向 `kernel/abi/linux/syscall_table.def`，`tools/gen_envelope_coverage.py`在 `:144` 用 `^LINUX_SYSCALL\(` 解析同一张表。两者对`A20_NATIVE_SYSCALL` / `A20_SYS_` 一次都没有提及（grep 命中 0）。Native 侧此前的`check-abi-boundary` 是 19 条单文件关键词存在性检查，没有一条跨表比对——所以"加一个 native 入口不需要写任何文档行"这件事，没有任何一道门会红。
+2. **两个覆盖生成器只读 Linux syscall 表。** `tools/xlator/gen_linux_syscall_coverage.py`的 `TABLE` 指向 `kernel/abi/linux/syscall_table.def`，`tools/gen_envelope_coverage.py`在 `:144` 用 `^LINUX_SYSCALL\(` 解析同一张表。两者对`A20_NATIVE_SYSCALL` / `A20_SYS_` 一次都没有提及（grep 命中 0）。Native 侧此前的`check-abi-boundary` 是 19 条单文件关键词存在性检查，没有一条跨表比对——所以"加一个 native 入口不需要写任何文档行"这件事，没有任何一道门会红。
 3. **CI 从来没跑过任何一条 native 运行时门禁。** `git show HEAD:.github/workflows/ci.yml | grep -c native` → **0**。21 条 native 运行时门禁在主干上一次都没有执行过，本地绿与主干红之间不存在任何 native 差异。
 
 这三条合起来解释了一个此前没人注意到的形状：**CI 是绿的，默认配置却是不工作的** ——不是"跑得少所以少见"，是那条唯一会执行的 ABI 门禁跑的是另一个 ABI。
@@ -564,7 +564,7 @@ SDK 三个 wrapper 改为传平铺参数，并补上 `a20_hdl_xattr_remove()`。
 | `make check-format` 真正执行 | 装上 `clang-format` 23.1.2（pipx），新文件 `netfilter_nat.c` / `netfilter_internal.h` / `netnat_test.c` 过格式；**门禁本身仍红**，见下 | 新增，见文末 |
 | conntrack LRU / 空闲超时门禁 | `make smoke-ct-capacity`（`faa8ca1b3`） | conntrack + NAT 行的 "LRU 与超时只有计数" 一句已失效，改写 |
 | SNAT/MASQUERADE 可测性 | `test-nat-rewrite` 编译出货源码做改写/校验和对照；`smoke-netfilter-snat` 提供出站 SNAT 的端到端回程门禁 |
-| `tools/a20_derive.py` 的 hostfwd 拼写 | `tcp::5555-:5555` 补出 guest 地址与 `=on`（`32764f659`）。**原判据不成立**：QEMU 10.0.13 上 `-netdev user` 并不报 "Missing guest address"，裸短格式被拒的报错是 "Invalid parameter"；补齐前后两种拼写都真的绑上 5555。改动仍然保留，因为带地址的拼写是 QEMU 唯一在 `-netdev user` 与 `-nic user` 两种写法下都稳定的形状 | 无（本来不在表里） |
+| `tools/cli/a20_derive.py` 的 hostfwd 拼写 | `tcp::5555-:5555` 补出 guest 地址与 `=on`（`32764f659`）。**原判据不成立**：QEMU 10.0.13 上 `-netdev user` 并不报 "Missing guest address"，裸短格式被拒的报错是 "Invalid parameter"；补齐前后两种拼写都真的绑上 5555。改动仍然保留，因为带地址的拼写是 QEMU 唯一在 `-netdev user` 与 `-nic user` 两种写法下都稳定的形状 | 无（本来不在表里） |
 | 文档对齐 | 本节表重排 + `net/conntrack-nat.md` 补 ICMP / LRU / 超时边界与门禁表 + README 网络段 | — |
 
 **`check-format` 为什么还是红的**：`.clang-format` 写的是 `BreakBeforeBraces: Attach`，树里写的是 Linux 风格，995 个在册源文件有 843 个被基线豁免（`tools/clang-format-baseline.txt`写着 "Only ever shrink"），剩下 57 个漂移文件属于别的流。改 `.clang-format` 只会更糟——实测改成 `Linux` 后漂移从 60 涨到 138。这一条要么全树重排（跨流），要么明确决定重新划基线，不是网络这条流能单方面定的，所以留在这里而不是被顺手抹平。
@@ -583,7 +583,7 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
 
 两处环境相关的坑，都不是仓库逻辑问题：
 
-- 默认 USTC 镜像源在本环境返回 **403**，需换官方源；`ALPINE_MIRROR_ROOT` 在`tools/targets-rootfs.mk` 中是 `?=` 赋值，可从命令行覆盖。
+- 默认 USTC 镜像源在本环境返回 **403**，需换官方源；`ALPINE_MIRROR_ROOT` 在`tools/mk/targets-rootfs.mk` 中是 `?=` 赋值，可从命令行覆盖。
 - `mkfs.ext4 -d` 曾报 `do_write_internal: 权限不够 while opening "bbsuid"`。这是`busybox-suid` 的 `bbsuid` 需要 `mknod`、而 fakeroot 只伪造属主不提供 `CAP_MKNOD`所致（单独 `fakeroot chown 101:101` 正常，可确认不是 fakeroot 本身坏了）。已从 world 清单去掉 `busybox-suid` 绕开，见 `6a1ab8f8`；宿主上有 root 时该包可以放回。
 
 #### 让这张镜像真的能被登进去，需要两件事

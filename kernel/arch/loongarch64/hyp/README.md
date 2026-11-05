@@ -53,7 +53,7 @@ retain translations. No hardware positive, including SMP, is claimed here.
 
 ```sh
 make ARCH=loongarch64 BRINGUP=1 UART_CMDLINE=y kernel-only -j12
-python3 tools/check_hyp_multiarch.py --arch loongarch64 --build \
+python3 tools/qemu/check_hyp_multiarch.py --arch loongarch64 --build \
   --without-virtualization
 ```
 

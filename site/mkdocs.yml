@@ -21,7 +21,7 @@ validation:
     anchors: warn
 
 hooks:
-  - ../tools/mkdocs_repo_links.py
+  - ../tools/docs/mkdocs_repo_links.py
 
 # 文档源：仓库根目录的 docs/（相对本配置文件解析）
 docs_dir: ../docs
@@ -391,6 +391,7 @@ nav:
           - 桌面应用与 apk 集成: status/history/desktop-apps-apk-2026-10-23.md
           - 桌面回归排查: status/history/desktop-regressions-2026-10-22.md
           - mlibc Native 加固: status/history/mlibc-native-hardening-2026-10-23.md
+          - 内存优化工作记录: status/history/perf-worklog-2026-10-22.md
           - 串口保真度: status/history/serial-fidelity.md
           - XFCE x86_64 验证: status/history/xfce-x86_64-validation.md
   - 版本发布:

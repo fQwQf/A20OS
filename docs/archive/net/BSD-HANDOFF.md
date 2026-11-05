@@ -36,9 +36,9 @@ F-Stack submodule：`kernel/external/f-stack`，release `v1.25`，提交`7616399
 | `runtime/services_bsd.c` | 私有环境、BSD格式化、日志、随机数导入、单队列默认 RSS 路径、启动配置 |
 | `sets.ld` | 保留真实 SYSINIT/sysctl/module/per-CPU sets；A20OS 和 BSD 符号隔离 |
 | `bootstrap_test.c` | A20OS 内核诊断入口；只在显式诊断构建启用 |
-| `tools/probe-bsd-core.py` | 固定版本/洁净检查、生成头、编译/部分链接、namespace/TLS检查、完整依赖清单 |
-| `tools/test-bsd-bootstrap-host.py` | 执行真实 BSD 初始化及协议回环；生成不含宿主 shim 的 `kernel-bootstrap.o` |
-| `tools/test-bsd-bootstrap-kvm.py` | 启动实际 A20OS KVM，要求初始化与 UDP/TCP 三个 marker |
+| `tools/probes/probe-bsd-core.py` | 固定版本/洁净检查、生成头、编译/部分链接、namespace/TLS检查、完整依赖清单 |
+| `tools/host-tests/test-bsd-bootstrap-host.py` | 执行真实 BSD 初始化及协议回环；生成不含宿主 shim 的 `kernel-bootstrap.o` |
+| `tools/net/tests/test-bsd-bootstrap-kvm.py` | 启动实际 A20OS KVM，要求初始化与 UDP/TCP 三个 marker |
 | `kernel/include/net/stack.h`、`transport.h` | 下一步需要实现的公共后端操作表 |
 | `kernel/net/core/stack.c` | 当前每内核固定一个后端的分派，不支持运行中迁移连接 |
 
@@ -74,14 +74,14 @@ KVM 冻结内核 SHA256：`b2cda775fd1e0f1134f62bef60cbf6759fe4de2be316505badcc0
 git submodule update --init kernel/external/f-stack kernel/external/lwip-upstream
 CLANG="$PWD/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang"
 R="$PWD/build/evidence/bsd-repro-$(date +%Y%m%d-%H%M%S)"
-python3 tools/probe-bsd-core.py --cc "$CLANG" --emulated-tls --net-profile 2 --out "$R/core"
-python3 tools/test-bsd-bootstrap-host.py --core "$R/core" --out "$R/host"
+python3 tools/probes/probe-bsd-core.py --cc "$CLANG" --emulated-tls --net-profile 2 --out "$R/core"
+python3 tools/host-tests/test-bsd-bootstrap-host.py --core "$R/core" --out "$R/host"
 make -j8 ARCH=x86_64 NR_CPUS=2 NET_STACK=lwip NET_LANES=1 OPT=-O3 CONFIG_UBSAN=0 \
   BSD_BOOTSTRAP_OBJECT="$R/host/kernel-bootstrap.o" kernel-only
 KDIR=$(make --no-print-directory ARCH=x86_64 NR_CPUS=2 NET_STACK=lwip NET_LANES=1 \
   OPT=-O3 CONFIG_UBSAN=0 BSD_BOOTSTRAP_OBJECT="$R/host/kernel-bootstrap.o" print-build-dir)
-python3 tools/test-bsd-bootstrap-kvm.py --kernel "$KDIR/kernel.elf" --out "$R/kvm"
-python3 tools/test-bsd-runtime-host.py --clang "$CLANG" --sanitize --out "$R/runtime-asan"
+python3 tools/net/tests/test-bsd-bootstrap-kvm.py --kernel "$KDIR/kernel.elf" --out "$R/kvm"
+python3 tools/host-tests/test-bsd-runtime-host.py --clang "$CLANG" --sanitize --out "$R/runtime-asan"
 python3 tools/check-network-backend-boundary.py --check-upstream
 ```
 

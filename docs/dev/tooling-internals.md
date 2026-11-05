@@ -10,7 +10,7 @@ QEMU 参数通过 `_qemu_argv` 查询，生成与执行的分工见 [参数接�
 
 ## 目标运行库 {#target-runtime}
 
-`rust-src` 不是可选项：riscv32 是自定义 JSON 目标（`tools/rust-targets/riscv32imafdc-a20.json`），构建入口用`-Z build-std=core` 现场编 core，而 core 来自这个组件。构建入口自己会设`RUSTC_BOOTSTRAP=1`，所以 stable 工具链够用。
+`rust-src` 不是可选项：riscv32 是自定义 JSON 目标（`tools/rust/targets/riscv32imafdc-a20.json`），构建入口用`-Z build-std=core` 现场编 core，而 core 来自这个组件。构建入口自己会设`RUSTC_BOOTSTRAP=1`，所以 stable 工具链够用。
 
 ## ARM32 时间 ABI {#arm32-time-abi}
 
@@ -26,7 +26,7 @@ ARM32 musl 的 `time_t` 是 64 位，直接 syscall 回归 `timer_edge` 因此�
 
 串口传输使用标准库的 `termios`、`fcntl` 与 `select`；`tools/a20` 的 PEP 723 头声明`dependencies = []`，因此传输实现不引入 pyserial。波特率编码由宿主 `termios` 提供，不维护另一份编码表：例如 Linux 的 `B115200` 为 `0o10002`，BSD 的编号不同。
 
-具体实现位于 `tools/a20_console.py` 的 `SerialTransport` 和 `_baud_code`；波特率不受支持时报告宿主 `termios` 提供的可用值。
+具体实现位于 `tools/cli/a20_console.py` 的 `SerialTransport` 和 `_baud_code`；波特率不受支持时报告宿主 `termios` 提供的可用值。
 
 ## 同实例互斥 {#instance-exclusion}
 

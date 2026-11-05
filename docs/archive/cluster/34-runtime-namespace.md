@@ -60,7 +60,7 @@ epoch 72623859790382856
 
 ```sh
 make check-native-runtime check-native-task-object check-cluster-unit
-python3 tools/check-native-sync.py --jobs 12 --output .kernel-build/cluster/native-runtime
+python3 tools/native/check-native-sync.py --jobs 12 --output .kernel-build/cluster/native-runtime
 make check-mcu-program-rtl
 make smoke-native-cluster-supervisor
 ```

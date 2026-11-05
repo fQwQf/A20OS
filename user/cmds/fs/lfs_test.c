@@ -1,7 +1,7 @@
 /*
  * lfs_test — guest-side gate for the littlefs VFS adapter.
  *
- * The image (created by tools/mkfs_lfs.c) carries /hello.txt and
+ * The image (created by tools/fs/mkfs_lfs.c) carries /hello.txt and
  * /data/seed.bin with deterministic contents.  The test:
  *   1. mounts the second virtio-blk device as littlefs
  *   2. verifies the payload byte-for-byte

@@ -129,8 +129,8 @@ v0 ERROR 保留固定 errno/orig_txid 布局。v1 接纳后的错误通过带会
 ## 9. 可复现协议证据
 
 ```bash
-python3 tools/check-cluster-unit.py
-python3 tools/check-cluster-udp.py --faults --restart
+python3 tools/cluster/check-cluster-unit.py
+python3 tools/cluster/check-cluster-udp.py --faults --restart
 ```
 
 前者运行生产编解码、UART/MCU 配对、序号回绕测试及原 v0 金样；后者在两套独立内核之间丢请求/回复/ACK/完成收据、重复/延迟帧、全丢包直到重试耗尽，重启一端再注入旧 HELLO_ACK 与旧 CALL。测试与限制在 08 文档中记录。

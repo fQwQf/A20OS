@@ -42,7 +42,7 @@ tools/a20 build esp32-c3 -- -j4
 tools/a20 package esp32-c3 -- -j4
 ```
 
-Rust 使用 `tools/rust-targets/riscv32imc-a20.json` 构建匹配的 core。它的 ILP32、无 A/F/D 目标与现有 QEMU RV32 的 ILP32D 目标分离，不能复用后者的目标库。
+Rust 使用 `tools/rust/targets/riscv32imc-a20.json` 构建匹配的 core。它的 ILP32、无 A/F/D 目标与现有 QEMU RV32 的 ILP32D 目标分离，不能复用后者的目标库。
 
 ## 内存与镜像
 
@@ -89,7 +89,7 @@ tools/a20 deploy esp32-c3 --serial /dev/ttyUSB0
 ```sh
 tools/a20 deploy esp32-c3 --serial /dev/ttyUSB0 --dry-run
 tools/a20 deploy esp32-c3 --serial /dev/ttyUSB0 --no-console
-python3 tools/esp32c3.py verify
+python3 tools/boards/esp32c3.py verify
 ```
 
 esptool 在写入前检查芯片身份、检测 Flash 容量，并校验烧录结果；工具不主动全片擦除。固件 UART 波特率沿用 ROM SPI 启动的 115200 8N1，不依赖主机下载时选择的波特率。

@@ -17,7 +17,7 @@
 
 - 普通单播 IPv4/IPv6 TCP/UDP 热路径只取所属 lane 锁；`g_lwip_lock` 仅作为设备 ingress/staging 门和 control barrier 的外层门，出现在冷路径、中断入口和配置事务。
 - TCP 的 `tcp_active_pcbs` / `tcp_bound_pcbs` / `tcp_listen_pcbs` / `tcp_tw_pcbs` 按 lane 分桶；`CONFIG_NET_PCB_SANE=1` 时 `tcp_pcbs_sane()` 检查 bucket、`lane` 与 addr/port 一致性。UDP 没有独立 sane 函数，等价断言在 `udp_input()` 的每个 pcb 上就地执行。
-- 运行时 panic 边界：lane→control 升级、lane 递归、非 owner 释放、lane 队列误用、 shared guard 误释放。静态门禁 `tools/check_lwip_concurrency_wiring.py`（`make check-honesty-policy` 的 `lwip-concurrency-wiring`）检查 filter 顺序、IRQ staging、owner-lane drain 和 accept 发布顺序（C 包装 → Rust `a20_net_accept_publish`）。
+- 运行时 panic 边界：lane→control 升级、lane 递归、非 owner 释放、lane 队列误用、 shared guard 误释放。静态门禁 `tools/net/check_lwip_concurrency_wiring.py`（`make check-honesty-policy` 的 `lwip-concurrency-wiring`）检查 filter 顺序、IRQ staging、owner-lane drain 和 accept 发布顺序（C 包装 → Rust `a20_net_accept_publish`）。
 - 有意保留的全局面：ARP/ND6 cache、conntrack 表、UDP autobind、TCP ISS 共用一个`NULL`-key shared shard；loopback 在 control barrier 下交付；e1000/rtl8139 的 IRQ 仍取完整 barrier（驱动 owned，已报告给 drivers），virtio 走 ingress lock。
 
 ## 套接字缓冲

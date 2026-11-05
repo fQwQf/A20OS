@@ -206,7 +206,7 @@ int main(void)
     else
         strcpy(path_val, "/bin");
     /* /extra is the extra image: programs at its root, /extra/bin wrappers,
-     * package prefixes under /extra (see tools/targets-extra.mk). */
+     * package prefixes under /extra (see tools/mk/targets-extra.mk). */
     static const char *path_dirs[] = {
         "/usr/bin", "/extra", "/extra/bin",
         NULL,

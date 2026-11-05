@@ -208,7 +208,7 @@ ifneq ($(strip $(USERLAND_MISSING_INPUTS)),)
 $(error Missing userland submodules: $(USERLAND_MISSING_INPUTS). Run git submodule update --init --recursive from the repository root)
 endif
 
-MUSL_BUILD_KEY := $(shell $(PYTHON) ../tools/musl_build_identity.py \
+MUSL_BUILD_KEY := $(shell $(PYTHON) ../tools/packaging/musl_build_identity.py \
 	--source "$(MUSL_BASE)" --target "$(MUSL_TARGET)" --compiler "$(CROSS_COMPILE)gcc" \
 	--cflags="$(MUSL_CONFIG_CFLAGS)" --ldflags="$(MUSL_CONFIG_LDFLAGS)" 2>/dev/null)
 ifeq ($(strip $(MUSL_BUILD_KEY)),)

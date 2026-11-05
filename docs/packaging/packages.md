@@ -1,6 +1,6 @@
 # 包与 recipe 参考
 
-A20OS 的包 = **标准 apk v2 包**。打包器 `tools/mka20pkg.py` 读取一个 TOML recipe，把构建产物收集成包。recipe 是纯数据文件，不含构建逻辑：**构建仍由 Makefile 完成，recipe 只负责"把已构建的产物装进包"**。
+A20OS 的包 = **标准 apk v2 包**。打包器 `tools/packaging/mka20pkg.py` 读取一个 TOML recipe，把构建产物收集成包。recipe 是纯数据文件，不含构建逻辑：**构建仍由 Makefile 完成，recipe 只负责"把已构建的产物装进包"**。
 
 ## recipe 完整示例与字段参考
 
@@ -88,17 +88,17 @@ symlink = "/mksh"
 
 ```bash
 # 打包（产物在 build/packages/<arch>/）
-tools/mka20pkg.py packages/recipes/a20-base.toml --arch riscv64 \
+tools/packaging/mka20pkg.py packages/recipes/a20-base.toml --arch riscv64 \
     --sign-key build/keys/a20os-dev.rsa --key-name a20os-dev.rsa.pub
 
 # 只校验（src 是否都能匹配、元数据是否齐全），CI 用
-tools/mka20pkg.py packages/recipes/a20-base.toml --arch riscv64 --check
+tools/packaging/mka20pkg.py packages/recipes/a20-base.toml --arch riscv64 --check
 
 # 不带签名（消费侧需 --allow-untrusted）
-tools/mka20pkg.py packages/recipes/a20-base.toml --arch riscv64
+tools/packaging/mka20pkg.py packages/recipes/a20-base.toml --arch riscv64
 ```
 
-make 集成（`tools/targets-pkg.mk`）会自动传入正确的 `--arch/--variant/ --kernel-build-dir/--sign-key`，日常使用 `make pkgs` 即可。
+make 集成（`tools/mk/targets-pkg.mk`）会自动传入正确的 `--arch/--variant/ --kernel-build-dir/--sign-key`，日常使用 `make pkgs` 即可。
 
 ## 新增一个包的流程
 

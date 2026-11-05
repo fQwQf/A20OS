@@ -34,8 +34,8 @@ Run the opt-in QEMU test using a raw kernel image so QEMU supplies x0=DTB:
 
 ```
 make ARCH=aarch64 BRINGUP=1 NR_CPUS=2 kernel-only
-python3 tools/check_hyp_multiarch.py --arch aarch64 --cpus 2 --kernel <build>/kernel.bin
-python3 tools/check_hyp_multiarch.py --arch aarch64 --cpus 2 --kernel <build>/kernel.bin --without-virtualization
+python3 tools/qemu/check_hyp_multiarch.py --arch aarch64 --cpus 2 --kernel <build>/kernel.bin
+python3 tools/qemu/check_hyp_multiarch.py --arch aarch64 --cpus 2 --kernel <build>/kernel.bin --without-virtualization
 ```
 
 The positive test uses `virt,virtualization=on`, verifies mapping/audit/unmap,

@@ -1,4 +1,4 @@
-include tools/riscv-mcu.mk
+include tools/mk/riscv-mcu.mk
 ARCH_KERNEL_C_SRC += kernel/drivers/char/esp_uart.c kernel/drivers/timer/esp_systimer.c
 # Bin output from objcopy spans two SRAM aliases; only elf2image is flashable.
 

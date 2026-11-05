@@ -53,11 +53,11 @@
 准备好 Native full mlibc、对应 CPU 配置的内核/镜像，以及由同一 libc 链接的`user/tests/test_mlibc_signals.c` ELF 后执行：
 
 ```sh
-python tools/check-mlibc-signals.py --cpus 2 --cycles 10 \
+python tools/mlibc/check-mlibc-signals.py --cpus 2 --cycles 10 \
   --kernel /absolute/frozen/kernel.elf --image /absolute/frozen/fat32.img \
   --program /absolute/frozen/signals.elf \
   --output .kernel-build/verify-native-signals
-python tools/check-native-sync.py --cpus 2 --timeout 180 \
+python tools/native/check-native-sync.py --cpus 2 --timeout 180 \
   --output .kernel-build/verify-native-signals-servers
 ```
 

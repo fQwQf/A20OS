@@ -27,7 +27,7 @@ make docs
 
 根配置继承 `site/mkdocs.yml`。发布入口 `bash site/build.sh` 使用同一份配置与链接处理器。两者均开启 strict 模式，缺失目标、无法识别的相对链接和失效锚点都会使构建失败。存在的仓库源码、冻结归档与研究页链接在构建时转为仓库 `main` 文件链接；普通文档链接保留站内检查。没有对应文件的链接继续报错。处理器不修改源 Markdown 或代码块。
 
-`make docs` 调用 `tools/gen_docs_pdf.sh`，需要 pandoc、XeLaTeX、rsvg-convert、fontconfig、 DejaVu 与 Noto CJK 字体；缺少依赖会列出安装命令并退出。生成的参考手册 PDF 不入库。 Pandoc 的警告直接使构建失败。数字开头的中文标题在 MkDocs 与 Pandoc 间使用共同的显式锚点，以保持网页和合并 PDF 的内部跳转一致。
+`make docs` 调用 `tools/docs/gen_docs_pdf.sh`，需要 pandoc、XeLaTeX、rsvg-convert、fontconfig、 DejaVu 与 Noto CJK 字体；缺少依赖会列出安装命令并退出。生成的参考手册 PDF 不入库。 Pandoc 的警告直接使构建失败。数字开头的中文标题在 MkDocs 与 Pandoc 间使用共同的显式锚点，以保持网页和合并 PDF 的内部跳转一致。
 
 ## 验收边界
 

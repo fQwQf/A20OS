@@ -80,7 +80,7 @@ link status 包含 state、rtt_us、帧数、丢弃数、retransmits 和 HELLO �
 make check-cluster-unit
 make check-cluster-loopback
 make smoke-native-cluster
-python3 tools/check-cluster-udp.py --faults --restart
+python3 tools/cluster/check-cluster-udp.py --faults --restart
 ```
 
 验收状态、物理硬件边界和剩余功能见 [../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)。

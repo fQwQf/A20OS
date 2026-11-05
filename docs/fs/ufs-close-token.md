@@ -17,7 +17,7 @@ Rust 分派器拥有自己的生命周期表，C 实现使用对应的注册表�
 针对性的 host 契约测试：
 
 ```sh
-tools/test-ufs-close-token-host.sh
+tools/host-tests/test-ufs-close-token-host.sh
 ```
 
 可用 `NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1`（`test-drop-close-token-ack`）启用「丢失 CLOSE-ACK」故障档的 guest。guest 必须观察到响应被丢弃、用同一 token 重试、收到重放成功、确认、重启，并核对数据可读回。该档位测的是重试契约，不是生产档服务。

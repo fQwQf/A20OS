@@ -23,15 +23,15 @@ owner 是逻辑 CPU 端点，width 为 1/2/4/8 字节。地址必须自然对齐
 
 ```sh
 # 内核线程在 CPU 1 上执行真实块设备操作。
-python3 tools/check-multi-qemu-kernel.py --workload disk \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload disk \
   --out .kernel-build/cluster/multi-qemu/disk-new --timeout 110
 
 # 普通 Linux 程序：原线程测试、远端控制台、真实磁盘操作和退出码。
-python3 tools/check-multi-qemu-kernel.py --workload linux-disk \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux-disk \
   --out .kernel-build/cluster/multi-qemu/linux-disk-new --timeout 110
 
 # 普通单 QEMU 双 vCPU 对照。
-python3 tools/check-multi-qemu-kernel.py --mode smp --workload linux-disk \
+python3 tools/qemu/check-multi-qemu-kernel.py --mode smp --workload linux-disk \
   --out .kernel-build/cluster/multi-qemu/linux-disk-smp-new --timeout 110
 ```
 

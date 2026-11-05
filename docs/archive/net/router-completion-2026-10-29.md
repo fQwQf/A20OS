@@ -37,7 +37,7 @@
 
 ```sh
 E=build/evidence/net-router-completion-20261029
-python3 tools/test-net-router-kvm.py \
+python3 tools/net/tests/test-net-router-kvm.py \
   --baseline build/evidence/net-refactor-20261028/runtime-smoke/manifest.json \
   --router-kernel "$E/kernel-lwip-70f7534a.elf" \
   --binary build/evidence/net-refactor-20261028/router-binary/net-microbench \

@@ -61,7 +61,7 @@ CMSIS 定义的 `osPriority_t`（数值 1..55）直接作为内核 RT 优先级�
 
 `osDelay`、接口超时与 `osTimer` 软件定时器的分辨率均以此粒度为最小单位。`osKernelGetTickFreq()` 返回 CMSIS 人格层编译时确定的频率，必须与底层的 `ARCH_TIMER_FREQ` 严格对齐。
 
-`osKernelSuspend()` 接口在此模型下不触发 tickless 低功耗休眠，仅切换人格层内核运行状态，定时器服务线程与硬件 tick 仍持续运转。
+`osKernelSuspend()` 在单核 MCU 上映射为 `kernel_idle`：得到当前任务的调度器锁，按 `proc_next_timer_interval()` one-shot 重装 MCU 定时器并执行 `WFI`，返回实际经过的 tick；IRQ 仍响应，但 IRQ 返回安全点因锁深度非零而不切换任务。SMP 和 hosted 后端返回 0，不会假装暂停其他 CPU/宿主。
 
 ## 6. per-task 调度器锁（osKernelLock）
 
@@ -90,4 +90,5 @@ CMSIS 定义的 `osPriority_t`（数值 1..55）直接作为内核 RT 优先级�
 - 系统不提供基于静态指令周期的 WCET 形式化证明；
 - 在持锁或捐赠执行期间，禁止调用阻塞型接口或修改基准优先级；
 - POSIX 宿主后端映射为宿主 pthread，不享受上述实时确定性保证；
-- 当前多级优先级继承与调度器锁基于单核单 runqueue 模型验证，多核 SMP 场景暂未包含实板证据。
+- 多级优先级继承与 CMSIS 调度器锁基于单核单 runqueue 模型验证；AArch64 SMP2 已跑通 RT runqueue 迁移/IPI/`SCHED_DEADLINE` 压力，但跨核 RT PI 与 CMSIS `osKernelLock` 的全局语义仍未验证。
+- PMP 栈 guard 只捕获第一次越界写入，不构成完整 MPU 任务隔离。

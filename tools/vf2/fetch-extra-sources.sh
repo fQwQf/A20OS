@@ -5,7 +5,7 @@ set -euo pipefail
 # compiled from vendored source, because it is linked into the FAT32 root that
 # boots before any Alpine world is mounted; every other program the extra disk
 # used to carry (vim, git, zlib, gcc, binutils, musl-cross-make, curl, rust,
-# Lamina1) now comes from an apk world instead -- see tools/targets-extra.mk
+# Lamina1) now comes from an apk world instead -- see tools/mk/targets-extra.mk
 # for the retired targets and docs/packaging/images.md for the world list.
 #
 # GitHub uses SSH by default; set VF2_GIT_TRANSPORT=https on hosts without a

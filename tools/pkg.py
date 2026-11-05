@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package/image orchestration that used to live in tools/targets-pkg.mk.
+"""Package/image orchestration that used to live in tools/mk/targets-pkg.mk.
 
 The Makefile owned three things that are not compilation: iterating the recipe
 list, deciding which optional arguments mka20pkg/mkrootfs get, and sequencing
@@ -67,7 +67,7 @@ def _stage_fortify_shim(ov: Path, arch: str) -> None:
 
     Only riscv64's libjnidispatch.so (JNA 5.17.0) imports __*_chk
     @GLIBC_2.27, which musl does not export; the first fortified call then
-    jumps into the PLT lazy-binding stub and dies.  See tools/a20-fortify.c.
+    jumps into the PLT lazy-binding stub and dies.  See tools/packaging/a20-fortify.c.
     The overlay copy is per-arch ELF, so it is compiled here rather than
     committed under packages/overlay/ (mkrootfs refuses a mismatched
     e_machine).
@@ -79,8 +79,8 @@ def _stage_fortify_shim(ov: Path, arch: str) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     out = dst / "liba20-fortify.so"
     run([cc, "-shared", "-fPIC", "-O2",
-         "-Wl,--version-script=tools/a20-fortify.map",
-         "-o", str(out), "tools/a20-fortify.c"])
+         "-Wl,--version-script=tools/packaging/a20-fortify.map",
+         "-o", str(out), "tools/packaging/a20-fortify.c"])
 
 
 def run(cmd: list[str], **kw) -> None:
@@ -119,14 +119,14 @@ def cmd_pkg_key(a) -> int:
 def cmd_pkgs_check(a) -> int:
     """Validate recipes and artifact paths without writing packages."""
     for r in recipes(a):
-        run([sys.executable, "tools/mka20pkg.py", r, "--arch", a.arch,
+        run([sys.executable, "tools/packaging/mka20pkg.py", r, "--arch", a.arch,
              "--variant", a.variant, "--kernel-build-dir", a.build_dir, "--check"])
     return 0
 
 
 def cmd_pkgs(a) -> int:
     for r in recipes(a):
-        cmd = [sys.executable, "tools/mka20pkg.py", r, "--arch", a.arch,
+        cmd = [sys.executable, "tools/packaging/mka20pkg.py", r, "--arch", a.arch,
                "--variant", a.variant, "--kernel-build-dir", a.build_dir]
         if a.sign_key:
             cmd += ["--sign-key", str((REPO / a.sign_key).resolve()),
@@ -141,7 +141,7 @@ def cmd_pkg_repo(a) -> int:
     dest.mkdir(parents=True, exist_ok=True)
     for apk in sorted(Path(a.out_dir).glob("*.apk")):
         shutil.copy2(apk, dest)
-    cmd = ["tools/mka20repo.sh"]
+    cmd = ["tools/packaging/mka20repo.sh"]
     if a.sign_key:
         cmd += ["--sign-key", a.sign_key, "--key-name", a.key_name]
     run(cmd + [str(dest)])
@@ -195,7 +195,7 @@ def cmd_media_overlay(a) -> int:
 
 
 def cmd_image_world(a) -> int:
-    cmd = [sys.executable, "tools/mkrootfs.py", "--arch", a.arch,
+    cmd = [sys.executable, "tools/packaging/mkrootfs.py", "--arch", a.arch,
            "--world", f"packages/world/{a.world}.world",
            "--repo", str((REPO / a.repo_dir).resolve())]
     ov = REPO / "packages" / "overlay" / a.world

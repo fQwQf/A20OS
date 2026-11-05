@@ -144,7 +144,7 @@ U-Boot 只增加 `CONFIG_CRC32_VERIFY=y` 与 `CONFIG_BOOTMETH_SCRIPT=y` 命令�
 | 镜像旁 `.img.json` | 固件来源/布局与各文件、整镜像 SHA256 |
 | `build/licheerv-nano/handoff/` | 同一 ELF 产生的 Image、匹配 DTB、manifest 和手动救援文本 |
 
-两个默认实例共用板级产物目录。`handoff/kernel.bin` 是内核 Image，不能直接当整盘镜像写卡。`handoff/uboot.cmd` 是命令文本；FAT 中 `boot.scr` 才是 mkimage 包装的二进制脚本。`tools/licheerv_nano.py prepare/sdcard` 是等价私有入口，支持自定义缓存、输出、交叉工具前缀与并行数。
+两个默认实例共用板级产物目录。`handoff/kernel.bin` 是内核 Image，不能直接当整盘镜像写卡。`handoff/uboot.cmd` 是命令文本；FAT 中 `boot.scr` 才是 mkimage 包装的二进制脚本。`tools/boards/licheerv_nano.py prepare/sdcard` 是等价私有入口，支持自定义缓存、输出、交叉工具前缀与并行数。
 
 ## 写空卡与自动启动
 
@@ -211,7 +211,7 @@ tools/a20 package licheerv-nano-e-tftp
 终端 1 启动只读服务：
 
 ```sh
-sudo python3 tools/a20_tftp.py --bundle "$PWD/build/licheerv-nano/handoff" \
+sudo python3 tools/cli/a20_tftp.py --bundle "$PWD/build/licheerv-nano/handoff" \
   --bind 192.168.50.10 --port 69
 ```
 

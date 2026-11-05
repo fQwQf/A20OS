@@ -222,7 +222,7 @@ static int prepare_glibc_lib_links(void)
 {
     static int done;
     /* /extra is the extra image mount point; /glibc matches its staging-root
-     * layout (tools/targets-extra.mk stages glibc under glibc/lib). */
+     * layout (tools/mk/targets-extra.mk stages glibc under glibc/lib). */
     static const char *const glibc_candidates[] = {
         "/extra/glibc/lib",
         "/glibc/lib",
@@ -266,7 +266,7 @@ static int prepare_musl_lib_links(void)
 {
     static int done;
     /* The FAT32 utilities image stages musl's libc.so under /musl/lib,
-     * which lands at /bin/musl/lib once mounted (tools/targets-images.mk). */
+     * which lands at /bin/musl/lib once mounted (tools/mk/targets-images.mk). */
     static const char *const musl_candidates[] = {
         "/bin/musl/lib",
         NULL,

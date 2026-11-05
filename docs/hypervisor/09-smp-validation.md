@@ -37,14 +37,14 @@ RV32 另有连续三次完整 SMP 重建启动流程的通过记录。当前验�
 `--build` 从当前 worktree 源码构建，默认 Werror；`--cpus 2` 同时启用宿主 SMP 构建与 guest 并行测试。ARM32 需要 `arm-linux-gnueabihf-gcc`；本机使用解包在`/tmp/a20-arm-toolchain/root` 的 Debian GCC 12，PATH 和 LD_LIBRARY_PATH 指向其 `usr/bin` 与 `usr/lib/x86_64-linux-gnu`，没有安装全局系统包。
 
 ```sh
-python3 tools/check_hyp_multiarch.py --arch arm32 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch aarch64 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch riscv64 --cpus 2 --build
-python3 tools/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel tcg
-python3 tools/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel kvm
+python3 tools/qemu/check_hyp_multiarch.py --arch arm32 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv32 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch aarch64 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch riscv64 --cpus 2 --build
+python3 tools/qemu/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel tcg
+python3 tools/qemu/check_hyp_multiarch.py --arch x86_64 --cpus 2 --build --accel kvm
 # 对上述每项加 --without-virtualization 运行负控。
-python3 tools/check_hyp_multiarch.py --arch loongarch64 --cpus 2 --build --without-virtualization
+python3 tools/qemu/check_hyp_multiarch.py --arch loongarch64 --cpus 2 --build --without-virtualization
 python3 -m unittest tools.tests.test_hyp_s2 tools.tests.test_hyp_backend_contract -v
 ```
 

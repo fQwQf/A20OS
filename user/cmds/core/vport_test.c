@@ -1,7 +1,7 @@
 /*
  * vport_test -- the guest half of the smoke-virtio-console gate.
  *
- * The host probe (tools/vport_host_probe.py) connects to the QEMU chardev
+ * The host probe (tools/probes/vport_host_probe.py) connects to the QEMU chardev
  * socket and writes 64 bytes only after this program prints its READY marker,
  * so the two halves cannot race the guest boot.  This program then
  *

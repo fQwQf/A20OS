@@ -9,16 +9,16 @@
 要求本机 x86_64、可读写的 `/dev/kvm`、系统 `qemu-system-x86_64`、Python 3、项目 x86_64 工具链以及 GNU `as`/`ld`。RAM 临时目录至少留出 600 MiB；构建输出位于独立 `.kernel-build` 变体目录。若需要把 RAM 放在其他**可写**分区，使用`TMPDIR=/path/to/temp`；脚本不修改挂载方式。
 
 ```sh
-python3 tools/check-multi-qemu-kernel.py \
+python3 tools/qemu/check-multi-qemu-kernel.py \
   --out .kernel-build/cluster/multi-qemu/shared-run
 
 # 同一个真实 Native 用户程序跨实例创建线程和分配计算任务。
-python3 tools/check-multi-qemu-kernel.py --workload native \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload native \
   --out .kernel-build/cluster/multi-qemu/native-run
 
 # 用户程序对照也可组合 --workload native --mode smp。
 # 对照：普通单 QEMU、双 vCPU，关闭新增配置。
-python3 tools/check-multi-qemu-kernel.py --mode smp \
+python3 tools/qemu/check-multi-qemu-kernel.py --mode smp \
   --out .kernel-build/cluster/multi-qemu/ordinary-smp-run
 ```
 

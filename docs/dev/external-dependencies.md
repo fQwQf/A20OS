@@ -9,7 +9,7 @@
 
 ## 已退役的源码自建用户态路径
 
-`user/external/{apps/{git,vim},libs/zlib,toolchain/{binutils,musl-cross-make},gcc,rust,toolchain/Lamina1}` 与 `user/extra.mk` 已删除：这些程序现由 `packages/world/*.world` 清单经 `apk` 从 Alpine 上游仓库解析。`tools/targets-extra.mk` 保留了 `extra-img`、`run-<arch>-extra`、`vf2-extra` 等入口作为**会报错的弃置桩**，每个都给出替代命令；这是刻意的——让旧命令失败时直接告诉正确做法，而不是让它报 "no rule to make target"。
+`user/external/{apps/{git,vim},libs/zlib,toolchain/{binutils,musl-cross-make},gcc,rust,toolchain/Lamina1}` 与 `user/extra.mk` 已删除：这些程序现由 `packages/world/*.world` 清单经 `apk` 从 Alpine 上游仓库解析。`tools/mk/targets-extra.mk` 保留了 `extra-img`、`run-<arch>-extra`、`vf2-extra` 等入口作为**会报错的弃置桩**，每个都给出替代命令；这是刻意的——让旧命令失败时直接告诉正确做法，而不是让它报 "no rule to make target"。
 
 `tools/img.py extra`、`tools/stamps.py extra-inputs` 与 `tools/pkg.py prepare-riscv64-sysroot` 已随之删除。真板仍需要一块可写 ext4（挂 `/extra`），该分区现在由 world 镜像填充：`mkrootfs.py` 输出的无分区表 raw ext4 可直接替换原 `extra.img`，`make vf2-sdcard` 即走此路径（`VF2_WORLD` 选 world，默认 `devel`）。
 

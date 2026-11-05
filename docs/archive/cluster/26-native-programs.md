@@ -49,7 +49,7 @@ make PYTHON=/path/to/venv/bin/python check-mcu-program-rtl
 
 测试实际编译 SDK 应用 ELF 并嵌入固件；应用检查重定位、BSS、坏输出指针、未知 syscall、让出、休眠、CPU1→CPU0 恢复及栈/全局数据保留。控制线程只通过真实亲和性接口改变已阻塞任务的目标 CPU。退出后检查唯一 PID、退出码、程序资源全部回收、五个任务退出、主 CPU 回到 idle，以及隔离复位被拒绝。固件另拒绝 8 种坏 ELF，并检查失败加载前后可用堆完全恢复。
 
-`tools/check-mcu-program.py` 执行真实应用、SVC 入口、内核处理函数和调度器指令。它补充 Unicorn 不支持的 Cortex-M 异常硬件压栈/退栈；从实际 PSP/MSP 读取修改后的帧，不通过 context_restore 抹掉 SVC 的修改，也不改任务状态。仅模拟 SVC/SysTick，不是完整 NVIC。测试的 tick 注入最多每 1000 轮一次，不是 MCU 周期计时或性能测量。逐条步进规避现有 Unicorn RAM hook 问题。
+`tools/mcu/check-mcu-program.py` 执行真实应用、SVC 入口、内核处理函数和调度器指令。它补充 Unicorn 不支持的 Cortex-M 异常硬件压栈/退栈；从实际 PSP/MSP 读取修改后的帧，不通过 context_restore 抹掉 SVC 的修改，也不改任务状态。仅模拟 SVC/SysTick，不是完整 NVIC。测试的 tick 注入最多每 1000 轮一次，不是 MCU 周期计时或性能测量。逐条步进规避现有 Unicorn RAM hook 问题。
 
 RTL 模式下共享数据、异常硬件帧及共享代码字节检查进入实际 FSMC 桥、仲裁器、RAM RTL；指令引擎使用经过核对的镜像执行。引脚适配逐笔完成事务，并发在途证据仍由独立三端口总线测试提供。报告在`.kernel-build/cluster/shared-program/`。这不是物理板运行证据。
 

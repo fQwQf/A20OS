@@ -175,7 +175,7 @@
 即旧稿 §3 描述的三条设计（本地数组命中无锁、批量补给、批量回灌）**已经是树的现状**。因此：
 
 - slab agent **无事可做**，`lock-after.md` 里也不会出现 slab 维度差异，写一个恒零对比表列属于自欺；
-- 原 §3 的两条约束移入 §5.1 的测量前提：**slab cache 锁从未注册进`lock_counters_register`**（全树 `grep -rn lock_counters_register kernel/` 只有`proc.c:365`、`sched.c:589`、`lwip_stack.c:369`、`block_cache.c:332`、`page_cache.c:507`、`dcache.c:108` 六处，`kernel/mm/` 下零处），所以 `tools/lock_bench.py:82` 的 `TRACKED_LOCKS = ["proc","lwip","slab","runq"]`里的 `"slab"` 永远不会出现在 `/proc/a20/lock_contention` 里。若仍要观测 slab，注册 `caches[i].lock` 的调用点在 `kernel/mm/slab.c`，属于 §4 表给 baseline agent 开的具名例外，独立于本拆分工作，只作为 §5 的可测性前置条件，由 baseline agent 在 §6 第 1 步串行完成。
+- 原 §3 的两条约束移入 §5.1 的测量前提：**slab cache 锁从未注册进`lock_counters_register`**（全树 `grep -rn lock_counters_register kernel/` 只有`proc.c:365`、`sched.c:589`、`lwip_stack.c:369`、`block_cache.c:332`、`page_cache.c:507`、`dcache.c:108` 六处，`kernel/mm/` 下零处），所以 `tools/bench/lock_bench.py:82` 的 `TRACKED_LOCKS = ["proc","lwip","slab","runq"]`里的 `"slab"` 永远不会出现在 `/proc/a20/lock_contention` 里。若仍要观测 slab，注册 `caches[i].lock` 的调用点在 `kernel/mm/slab.c`，属于 §4 表给 baseline agent 开的具名例外，独立于本拆分工作，只作为 §5 的可测性前置条件，由 baseline agent 在 §6 第 1 步串行完成。
 - `CONFIG_SLAB_DEBUG`（sentinel、审计）路径行为不变；slab 相关既有 gate （`check-concurrency-foundation` 等）保持绿——这两条保留为回归要求，不再是设计。
 
 ## 4. 文件所有权（并行实施边界）
@@ -184,11 +184,11 @@
 
 | Agent | 独占 | 禁入 |
 |---|---|---|
-| proc | `kernel/proc/`、`kernel/core/sync.c`、`kernel/core/lock_counters.c`、`kernel/include/proc/`、`kernel/include/core/lock.h`、`kernel/include/core/sync.h`、`tools/gates.toml` 中 proc 相关 gate、`docs/archive/process-lock-split-audit.md`（追加）、**§4.2 表中 21 个跨边界文件**（含 `kernel/mm/`、`kernel/fs/`、`kernel/ipc/`、`kernel/abi/`、`kernel/include/mm/`、`kernel/include/cg/` 中被点名的那几个） | `kernel/net/`、`kernel/mm/slab.c`、`Makefile`、`tools/lock_bench.py` |
+| proc | `kernel/proc/`、`kernel/core/sync.c`、`kernel/core/lock_counters.c`、`kernel/include/proc/`、`kernel/include/core/lock.h`、`kernel/include/core/sync.h`、`tools/gates.toml` 中 proc 相关 gate、`docs/archive/process-lock-split-audit.md`（追加）、**§4.2 表中 21 个跨边界文件**（含 `kernel/mm/`、`kernel/fs/`、`kernel/ipc/`、`kernel/abi/`、`kernel/include/mm/`、`kernel/include/cg/` 中被点名的那几个） | `kernel/net/`、`kernel/mm/slab.c`、`Makefile`、`tools/bench/lock_bench.py` |
 | net | `kernel/net/`、`kernel/include/net/`、`kernel/drivers/net/`（如需） | `kernel/proc/`、`kernel/core/`、`kernel/mm/slab.c`、`kernel/include/core/lock.h`（走 §4.1 单向授权，不直接编辑） |
-| baseline（先于上两者串行完成） | `tools/lock_bench.py`、`Makefile`（仅追加 `include tools/targets-bench.mk`）、`tools/targets-bench.mk`、`user/cmds/`（如需负载程序）、`docs/status/measurements/`，**外加 §5.1 点名的三个 `lock_counters_register` 调用点**（`kernel/net/socket/socket.c`、`kernel/mm/slab.c`，分片/拆分开始**之前**打） | `kernel/` 其余全部 |
+| baseline（先于上两者串行完成） | `tools/bench/lock_bench.py`、`Makefile`（仅追加 `include tools/mk/targets-bench.mk`）、`tools/mk/targets-bench.mk`、`user/cmds/`（如需负载程序）、`docs/status/measurements/`，**外加 §5.1 点名的三个 `lock_counters_register` 调用点**（`kernel/net/socket/socket.c`、`kernel/mm/slab.c`，分片/拆分开始**之前**打） | `kernel/` 其余全部 |
 
-（slab agent 一行已删除：见 §3。`tools/targets-bench.mk` 与 `Makefile` 的 include 行已建好，在当前基准上是已存在的文件——`ls -la tools/lock_bench.py tools/targets-bench.mk` 两者都在，`grep -n "include tools/targets" Makefile` 见 :1335。）
+（slab agent 一行已删除：见 §3。`tools/mk/targets-bench.mk` 与 `Makefile` 的 include 行已建好，在当前基准上是已存在的文件——`ls -la tools/bench/lock_bench.py tools/mk/targets-bench.mk` 两者都在，`grep -n "include tools/targets" Makefile` 见 :1335。）
 
 ### 4.1 `kernel/include/core/lock.h` 的跨界：单向授权，不是并行
 
@@ -253,27 +253,27 @@ proc_lock -> a20_handle_table.lock
 复核指出本节缺可测性，实测确认：
 
 - `g_net_lock` **从未注册进 lock_counters**：`kernel/net/socket/socket.c:165` 只有`spin_init(&g_net_lock)`，全树 `grep -rn lock_counters_register kernel/` 只有`kernel/proc/proc.c:365`（`&proc_lock, "proc"`）、`kernel/proc/sched.c:589`（`&sched_runq[i].lock, "runq"`）、`kernel/net/backends/lwip/lwip_stack.c:369`（`&g_lwip_lock, "lwip"`）、`kernel/fs/block_cache.c:332`、`kernel/fs/page_cache.c:507`、`kernel/fs/vfs/dcache.c:108`，加`kernel/core/lock_counters.c:34` 的定义与 `kernel/mcu/mcu_stubs.c:58` 的空桩。
-- `tools/lock_bench.py:82` 的 `TRACKED_LOCKS = ["proc", "lwip", "slab", "runq"]`：`"slab"` 永远不会出现（见 §3），`"net"` 根本没列入。四项里两项没有测量通道，而拆分的核心目标之一正是 net。
+- `tools/bench/lock_bench.py:82` 的 `TRACKED_LOCKS = ["proc", "lwip", "slab", "runq"]`：`"slab"` 永远不会出现（见 §3），`"net"` 根本没列入。四项里两项没有测量通道，而拆分的核心目标之一正是 net。
 
 因此 §6 第 1 步（baseline，串行）必须先完成：
 
 1. 在 `kernel/net/socket/socket.c` 注册 `lock_counters_register(&g_net_lock, "net")`；分片后改为注册每个 `net_bucket[i]`（名字 `net_bucket0..127`，或注册一把`net_bucket_registry` 汇总锁并让每把桶锁在 acquire 失败时把计数累加过去——二选一，写进 `docs/net/network-lock-contract.md`）。
 2. 在 `kernel/mm/slab.c` 注册 7 个 `caches[i].lock`（名字 `slab0..slab6`），使 `"slab"` 这个名字真实存在。
-3. 把 `tools/lock_bench.py` 的 `TRACKED_LOCKS` 改成实际注册的名字集合，并新增`"net"`。
-4. 上面 1、2 两条**是对 `kernel/` 的修改**，与 §5.2「worktree 在任何分片/拆分修改前是干净的」冲突。处置：把 `kernel/net/socket/socket.c`、`kernel/mm/slab.c`、`tools/lock_bench.py` 从 "baseline 禁入 `kernel/` 全部"里**开一个具名例外**（§4 表已按此改写），并把基线采集拆成两段：
+3. 把 `tools/bench/lock_bench.py` 的 `TRACKED_LOCKS` 改成实际注册的名字集合，并新增`"net"`。
+4. 上面 1、2 两条**是对 `kernel/` 的修改**，与 §5.2「worktree 在任何分片/拆分修改前是干净的」冲突。处置：把 `kernel/net/socket/socket.c`、`kernel/mm/slab.c`、`tools/bench/lock_bench.py` 从 "baseline 禁入 `kernel/` 全部"里**开一个具名例外**（§4 表已按此改写），并把基线采集拆成两段：
    - **B0（真基线）**：未打补丁的树，`lock_contention` 里没有 `net`/`slab` 行——这一段的 net 证据只能来自 `docs/net/network-lock-contract.md` 的静态普查，明确记为"无计数通道"；
    - **B1（可测性补丁后的基线）**：注册调用点合入、**分片/拆分尚未开始**，采集含 `net`/`slab` 的完整基线。
    - `lock-after.md` 与 **B1** 对比（协议、镜像、QEMU 命令行一致），B0 仅作交叉参考。这样"分片/拆分前采基线"仍然成立，又不会出现 before/after 用两套通道。
 
 ### 5.2 采集形态
 
-- **基线先行**：基准采集依次执行 B0、B1（§5.1）。`tools/lock_bench.py`、`tools/targets-bench.mk`、`Makefile` 的 `include tools/targets-bench.mk`（:1335）与 `make bench-locks` 目标（`tools/targets-bench.mk:30`）**在当前基准中已存在**，由基线测试脚本直接维护。
+- **基线先行**：基准采集依次执行 B0、B1（§5.1）。`tools/bench/lock_bench.py`、`tools/mk/targets-bench.mk`、`Makefile` 的 `include tools/mk/targets-bench.mk`（:1335）与 `make bench-locks` 目标（`tools/mk/targets-bench.mk:30`）**在当前基准中已存在**，由基线测试脚本直接维护。
 - **负载形态**（**注意命令名**）：
   - `mm_stress` — 用户态命令 `mm_stress`
-  - `net_stress_test` — **用户态命令是 `net_stress_test`**，不是 `net_stress`。`net_stress` 只是 `tools/lock_bench.py:62` 的 scenario key；`grep -n "net_stress" tools/smoke_cases.py` 无输出，`tools/smoke_cases.py` 里没有这个名字；`smoke-smp-lock-contention`（`tools/targets-smoke.mk:464-470`）直接往控制台敲的就是 `net_stress_test`。
+  - `net_stress_test` — **用户态命令是 `net_stress_test`**，不是 `net_stress`。`net_stress` 只是 `tools/bench/lock_bench.py:62` 的 scenario key；`grep -n "net_stress" tools/smoke_cases.py` 无输出，`tools/smoke_cases.py` 里没有这个名字；`smoke-smp-lock-contention`（`tools/mk/targets-smoke.mk:464-470`）直接往控制台敲的就是 `net_stress_test`。
   - `sched_stress`、`futex_stress`
-  - 镜像与 init 形态复用 `tools/targets-smoke.mk` 已有案例； QEMU 参照 `docs/roadmap/perf-overhaul.md` §5 手工形态`-smp 8 -accel tcg,thread=multi`（宿主不支持则 4 核并在结果中注明）。
-- 每负载 **5 次取中位数**，记录 min/max；采集`/proc/a20/lock_contention`（per-lock + callsite 采样）与 `/proc/a20/perf`。`lock_contention` 的 callsite 采样有已知限制（`tools/targets-smoke.mk:455-461`： call-site 归因哈希进固定 32 槽表，冲突时该 caller 的自旋数丢失而锁总数仍计），所以低采集次数下"什么都没归因"是合法结果，不得据此断言。
+  - 镜像与 init 形态复用 `tools/mk/targets-smoke.mk` 已有案例； QEMU 参照 `docs/roadmap/perf-overhaul.md` §5 手工形态`-smp 8 -accel tcg,thread=multi`（宿主不支持则 4 核并在结果中注明）。
+- 每负载 **5 次取中位数**，记录 min/max；采集`/proc/a20/lock_contention`（per-lock + callsite 采样）与 `/proc/a20/perf`。`lock_contention` 的 callsite 采样有已知限制（`tools/mk/targets-smoke.mk:455-461`： call-site 归因哈希进固定 32 槽表，冲突时该 caller 的自旋数丢失而锁总数仍计），所以低采集次数下"什么都没归因"是合法结果，不得据此断言。
 - **噪声纪律（重写）**：`server-readiness.md:27-28` 与 `docs/net/net-lanes.md:953` 记录的 0–920024 噪声带，来自不清窗口的**累计自旋数**观测（自 boot 起累加）。而 `lock_bench.py:9-15` 每个 workload 会先 `echo reset > /proc/a20/lock_contention` 再读取，量纲为“workload 窗口内的自旋数”，两者不可直接混用。规范处理方式如下：
   1. 采集当场的同二进制对照：每个 workload 在同一场次里跑 5 次，用这 5 次的 max−min 作为**该指标本场的观测带宽**；
   2. 另在 B1 阶段用**同一二进制、同一镜像、同一场次**把 4 个 workload 各多跑 3 次，得到"同一份代码在同一场次的复测带宽"，写进 `lock-baseline.md` 作为新方法学的带宽来源；
@@ -333,6 +333,6 @@ make smoke-smp-lock-contention
 
 ### 复核结论中被部分推翻的部分
 
-- 结论 10 的一半（「先建 `tools/lock_bench.py` + `make bench-locks` 已过期，`tools/lock_bench.py` 已在树中，`make bench-locks` 与 `tools/targets-bench.mk`都不存在」）：**与仓库实际状态不符**。实测`ls -la tools/lock_bench.py tools/targets-bench.mk` 两者都存在（37688 / 1836 字节，未跟踪），`grep -rn "bench-locks" Makefile tools/*.mk` 在`tools/targets-bench.mk:30` 命中，`Makefile:1335` 已`include tools/targets-bench.mk`。这两个文件正是 §4 表里 baseline agent 的产出，复核把它们当成"树里没有"来判断。本节改为"已存在，baseline agent 维护"，并保留复核指出的**真实**部分：负载命令名是 `net_stress_test`。
+- 结论 10 的一半（「先建 `tools/lock_bench.py` + `make bench-locks` 已过期，`tools/lock_bench.py` 已在树中，`make bench-locks` 与 `tools/mk/targets-bench.mk`都不存在」）：**与仓库实际状态不符**。实测`ls -la tools/bench/lock_bench.py tools/mk/targets-bench.mk` 两者都存在（37688 / 1836 字节，未跟踪），`grep -rn "bench-locks" Makefile tools/*.mk` 在`tools/mk/targets-bench.mk:30` 命中，`Makefile:1335` 已`include tools/mk/targets-bench.mk`。这两个文件正是 §4 表里 baseline agent 的产出，复核把它们当成"树里没有"来判断。本节改为"已存在，baseline agent 维护"，并保留复核指出的**真实**部分：负载命令名是 `net_stress_test`。
 - 结论 6(b) 的清单与实测的差异：复核列了 `kernel/core/sync.c`（1 处）与`kernel/include/proc/signal.h`（2 处），这两处属于 proc agent 独占范围，实测未计入 62 这个数；其余逐文件计数与实测一致。**一处需要加强**：复核给的是"约 60 处引用"，实测 62 处引用里只有**21 处是真取锁点**（`spin_lock_irqsave(&proc_lock)` 逐文件计数），分布在 12 个文件；另 41 处是注释/锁序声明。§4.2 按两列分别列出，因为改法不同（取锁点要换锁，声明只要同步文本）。
 - 结论 7（slab 已实现）：复核结论成立，且覆盖面比复核说的更宽。`CONFIG_SLAB_DEBUG` 的 sentinel/审计分支仍在（`slab.c:19-20` 默认、`:139` popcount 校验、`:305`/`:386`/`:397`），启动早期的 CPU 号越界由`slab_cpu_array()` 的 `if (cpu >= CONFIG_NR_CPUS) cpu = 0;`（`slab.c:97-98`）兜住——注意这**不是**旧稿设想的"退化到直连 cache 锁"，而是一开始就落在 CPU 0 的数组上。旧稿 §3 是纯粹的重复设计工作，且两条约束的写法与已合入实现不同，照抄反而会把退化路径改坏。

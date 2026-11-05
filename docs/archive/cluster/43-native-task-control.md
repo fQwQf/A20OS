@@ -25,7 +25,7 @@ MCU 和服务器父程序都运行 `user/tests/native-task-control-contract.h`�
 ## 验证方式和边界
 
 ```sh
-python3 tools/check-native-sync.py --cpus 2 --timeout 180 \
+python3 tools/native/check-native-sync.py --cpus 2 --timeout 180 \
   --output .kernel-build/cluster/native-control-server-final2
 # 独立构建目录保留了此前失败映像；不改变文件程序 profile。
 make CCACHE= BUILD_DIR=.kernel-build/cluster/native-control-fixed-mcu \
@@ -34,7 +34,7 @@ make CCACHE= BUILD_DIR=.kernel-build/cluster/native-control-fixed-mcu \
   ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 MCU_SHARED_KERNEL=1 \
   MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 \
   NATIVE_FLAT_FILES=1 -j6 kernel-only
-python3 tools/check-mcu-program.py .kernel-build/cluster/native-control-fixed-mcu/kernel.elf \
+python3 tools/mcu/check-mcu-program.py .kernel-build/cluster/native-control-fixed-mcu/kernel.elf \
   --backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
   --seed 23 --rounds 20000000 \
   --report .kernel-build/cluster/native-control-fixed-rtl.json

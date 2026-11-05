@@ -306,8 +306,8 @@ Eq. 4 里 `t/RTT` 的分母在 0.5 s 之下没有任何表达方式：`sa == 0`�
 **没有实现、因此不得假定的**（同样逐条列在头注释里）：HyStart / TCP-AQ / DCTCP /
 Prague / ECN 与 RTT 方差耦合均无；`W_max` 不跨 pcb 生命周期持久化。
 
-算法正确性由主机侧单元测试 `tools/test-tcp-cubic-host.sh`
-（`tools/test-tcp-cubic-host.c`）覆盖，参考值全部按 RFC 原文的双精度公式独立算出，
+算法正确性由主机侧单元测试 `tools/host-tests/test-tcp-cubic-host.sh`
+（`tools/host-tests/test-tcp-cubic-host.c`）覆盖，参考值全部按 RFC 原文的双精度公式独立算出，
 不从实现反推。往返传输的 smoke 门禁**不能**覆盖这些：一条从不丢包的连接根本不
 会离开慢启动，因此对本文件里那几类算错（立方根截断、定标错位、时间轴单位错、
 快收敛方向反了）全部不敏感。

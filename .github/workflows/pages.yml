@@ -7,7 +7,7 @@ on:
       - 'site/**'
       - 'docs/**'
       - 'mkdocs.yml'
-      - 'tools/mkdocs_repo_links.py'
+      - 'tools/docs/mkdocs_repo_links.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 

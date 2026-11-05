@@ -44,7 +44,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 由源码编译的独立第三方可执行文件只余 fastfetch 一项，且它被并入 FAT32 根而非独立镜像槽。以往 `user/extra.mk` 产出的 git、Vim、GCC、binutils、Rust 与 lamina 已全部删除：GCC/binutils 曾用于自举 riscv64-musl 交叉工具链，Git 曾静态链接源码构建的 zlib 与 curl+mbedtls，lamina 依赖宿主 glibc C++ 工具链动态加载 `laminaCore`。这些能力改由 world 清单从 Alpine 上游解析。
 
-**world 镜像的分发边界**：`build/images/<world>-<arch>.img` 由 `tools/mkrootfs.py` 用 `apk` 从两类来源组装 —— 本仓库的 `a20-*` 包，以及 Alpine 上游仓库的包。因此：
+**world 镜像的分发边界**：`build/images/<world>-<arch>.img` 由 `tools/packaging/mkrootfs.py` 用 `apk` 从两类来源组装 —— 本仓库的 `a20-*` 包，以及 Alpine 上游仓库的包。因此：
 
 | 组件类别 | 许可证 | 位置 |
 |------|--------|------|

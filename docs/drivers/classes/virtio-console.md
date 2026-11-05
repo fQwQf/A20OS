@@ -71,4 +71,4 @@ make ARCH=x86_64 BOARD=qemu-virt-x86_64 NR_CPUS=2 \
 
 `test_virtio_console_config.py` 校验预设、覆盖、实例到 Make 的映射、增量生成及生产队列结构的 DMA 预算。`test_vport_tx.py` 在 throughput、compact 和最小合法配置下验证并发、索引回绕、超时、信号和设备持有 DMA 时的所有权。
 
-compact 已在 x86_64 KVM 下通过 2 MiB 逐字节输出核验、接收端暂停 250 ms、 Ctrl-C，以及管道、poll/epoll、160 条并发 TTY 记录和 `tcdrain` 回归。本地记录为 `build/vport-config/compact-runtime/results.json`，不纳入源码。最小合法配置（RX/TX 各 1 槽、64 B 缓冲区、128 B 接收环）也通过 512 KiB 逐字节输出和同组回归，记录为 `build/vport-config/minimum-runtime/results.json`。性能复测方式参见自动化基准脚本 `tools/targets-bench.mk`；小内存预设不承诺与默认预设相同的吞吐量。
+compact 已在 x86_64 KVM 下通过 2 MiB 逐字节输出核验、接收端暂停 250 ms、 Ctrl-C，以及管道、poll/epoll、160 条并发 TTY 记录和 `tcdrain` 回归。本地记录为 `build/vport-config/compact-runtime/results.json`，不纳入源码。最小合法配置（RX/TX 各 1 槽、64 B 缓冲区、128 B 接收环）也通过 512 KiB 逐字节输出和同组回归，记录为 `build/vport-config/minimum-runtime/results.json`。性能复测方式参见自动化基准脚本 `tools/mk/targets-bench.mk`；小内存预设不承诺与默认预设相同的吞吐量。

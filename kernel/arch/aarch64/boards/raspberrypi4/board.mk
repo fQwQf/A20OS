@@ -21,7 +21,7 @@ endif
 QEMU_KERNEL = $(KERNEL_BIN)
 QEMU_BOOT_FLAGS = -dtb $(BUILD_DIR)/qemu-fixture.dtb
 
-$(BUILD_DIR)/qemu-fixture.dtb: tools/raspberrypi4_fixture.py
+$(BUILD_DIR)/qemu-fixture.dtb: tools/boards/raspberrypi4_fixture.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) $< --output $@ $(if $(filter-out 1,$(NR_CPUS)),--selftest,)
 

@@ -26,5 +26,5 @@
 
 - 当前实现：C/Rust 内存接口统一采用原生地址和计数宽度，避免 ILP32 参数错位释放仍被映射的页框。异常处理进入任务自己的内核栈后允许调度；trap、切换和信号帧保存对应 VFP 状态。
 - 验证范围：QEMU virt、64 MiB、`ABI=both`、RAMFS，连续 10 轮，每轮 40 次顺序 fork/exec，并验证父子 VFP 隔离、抢占、空闲唤醒、文件读写和正常关机，共 400 次 fork/exec 通过，无 SIGSEGV、内核异常或内存耗尽。
-- 回归入口：以 `ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 RAMFS_FPU_TESTS=1 DRIVER_DEPLOYMENT=embedded` 构建，执行 `python3 tools/check_serial_shell.py --arch arm32 --kernel <kernel.elf> --memory-mb 64 --fpu --timers --stress-forks 40`。
+- 回归入口：以 `ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 RAMFS_FPU_TESTS=1 DRIVER_DEPLOYMENT=embedded` 构建，执行 `python3 tools/qemu/check_serial_shell.py --arch arm32 --kernel <kernel.elf> --memory-mb 64 --fpu --timers --stress-forks 40`。
 - 边界：此结论只覆盖上述配置；V3s 板级 UART、DDR、SD 和真实中断时序尚待实机验收，异步信号与长期负载仍需独立覆盖。

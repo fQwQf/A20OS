@@ -55,7 +55,7 @@ if (a20_object_publish(task, 30000, 4000, &pub) == 0) {
 make check-cluster-unit
 make check-object-directory-portability
 make check-cluster-objects
-CCACHE= QEMU_ACCEL=tcg,thread=multi python3 tools/check-native-sync.py --jobs 12
+CCACHE= QEMU_ACCEL=tcg,thread=multi python3 tools/native/check-native-sync.py --jobs 12
 make CCACHE= PYTHON=<带 Unicorn/pyelftools 的 Python> check-mcu-program-rtl
 ```
 

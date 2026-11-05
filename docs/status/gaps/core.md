@@ -6,7 +6,7 @@
 
 - 现状：ARM32 trap 帧保存 `d0-d15`/FPSCR，调度帧保存 AAPCS callee-saved `d8-d15`/FPSCR，信号附加帧保存/恢复 VFP。`RAMFS_FPU_TESTS=1` 下的 `/bin/fork_fpu_probe` 已在 QEMU 64 MiB 验证父子进程全部 16 个 VFP 寄存器隔离。
 - 运行时范围：64 MiB QEMU virt 已连续 10 轮通过每轮 40 次顺序 fork/exec、FPU 隔离、抢占和空闲唤醒；[ABI-11](abi-ipc.md) 的原关闭条件已满足。这不等于 V3s 实机或 ARM32 媒体驱动验收。
-- 验收入口：`tools/check_serial_shell.py --arch arm32 --kernel <kernel.elf> --memory-mb 64 --fpu --timers`。FP 信号状态的实现仍需要真实用户态信号压力覆盖。
+- 验收入口：`tools/qemu/check_serial_shell.py --arch arm32 --kernel <kernel.elf> --memory-mb 64 --fpu --timers`。FP 信号状态的实现仍需要真实用户态信号压力覆盖。
 - 历史诊断：[notes/core-arm32-fp.md](notes/core-arm32-fp.md)，其中“未保存 VFP”属于修复前现场。
 
 

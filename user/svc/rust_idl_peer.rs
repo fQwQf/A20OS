@@ -28,7 +28,7 @@
 //! Syscall-argument structures are mirrored field-for-field from
 //! user/liba20rt/a20_types.h and pinned with size/offset assertions, so any
 //! drift between these Rust bindings and the C ABI is a compile error rather
-//! than a silent wire difference.  tools/rust_idl_peer_wire_check.c
+//! than a silent wire difference.  tools/xlator/rust_idl_peer_wire_check.c
 //! independently re-derives the same bytes from the generated IDL header.
 
 #![no_std]
@@ -419,7 +419,7 @@ const fn align_of_ptr() -> bool {
 // Wire vectors
 //
 // The hex literals below are the only source of truth for the bytes this peer
-// puts on the channel.  tools/rust_idl_peer_wire_check.c parses the
+// puts on the channel.  tools/xlator/rust_idl_peer_wire_check.c parses the
 // `wire:<name>:<hex>` markers *out of this file* and re-derives the same bytes
 // from user/svc/a20_services_idl.h, so the two cannot drift silently.
 //

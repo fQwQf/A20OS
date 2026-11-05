@@ -3,7 +3,7 @@
  * before adding an entry.
  *
  * This file is not a translation unit.  It is #included by kernel/proc/xlator.c
- * with XLATOR_GUEST defined, and parsed by tools/xlator_fetch.py (guest name ->
+ * with XLATOR_GUEST defined, and parsed by tools/xlator/xlator_fetch.py (guest name ->
  * expected e_machine) and by the check-xlator-guests gate.  Like the syscall
  * tables under kernel/abi/<arch>/, it deliberately contains no #include, no typedef
  * and no declaration of its own.
@@ -14,7 +14,7 @@
  *   The cmdline key suffix, so `a20.xlator.<name>=<path>` configures this
  *   guest, and the file name of the cross-built probe (xlate_probe-<name>).
  *   Must be a valid identifier fragment: it reaches both a shell variable
- *   suffix (XLATOR_GUEST_CC_<name> in tools/targets-xlator.mk) and a C string.
+ *   suffix (XLATOR_GUEST_CC_<name> in tools/mk/targets-xlator.mk) and a C string.
  *   It must not contain a dot either -- `.argv` and `.env` are reserved as
  *   the per-guest sub-keys of the configuration surface, so a dot inside a
  *   guest name would make the two ambiguous.
@@ -79,7 +79,7 @@
  *   lists the shapes this covers and, honestly, the one it does not.
  *
  * Adding a guest architecture therefore costs exactly two edits -- one line
- * here, one XLATOR_GUEST_CC_<name> line in tools/targets-xlator.mk -- plus
+ * here, one XLATOR_GUEST_CC_<name> line in tools/mk/targets-xlator.mk -- plus
  * passing `make check-xlator-guests`, which fails if those two disagree in
  * either direction.  Adding a *translator* costs no edit anywhere: it is a
  * path, plus a .argv and/or .env key if its convention differs.

@@ -106,7 +106,7 @@ Sipeed 明确说明部分出厂固件没有 U 盘功能。软件 BOOT 按钮连�
 ```sh
 tools/a20 prepare m0sense-bl702-probe --dry-run
 tools/a20 prepare m0sense-bl702-probe
-# 独立脚本：python3 tools/m0sense_recovery_assets.py
+# 独立脚本：python3 tools/boards/m0sense_recovery_assets.py
 # 等价：make m0sense-recovery-assets
 ```
 

@@ -2,7 +2,7 @@
 
 本目录收纳 A20OS 的实时执行机制、第三方 RTOS ABI 人格层（CMSIS-RTOS2）以及嵌入式 MCU 支持的相关技术规范与使用指南。
 
-A20OS 在 NOMMU / MCU 配置下以通用微内核机制提供确定性调度保障：CMSIS 线程映射为内核 `SCHED_FIFO` 实时任务，提供固定优先级即时抢占、互斥量优先级继承（PI）和每任务调度器锁（`osKernelLock`）。时钟精度以内核 tick 为基准（Hi3861 100 Hz / 10 ms，QEMU MCU 1 kHz / 1 ms）。
+A20OS 在 NOMMU / MCU 配置下以通用微内核机制提供确定性调度保障：CMSIS 线程映射为内核 `SCHED_FIFO` 实时任务，提供固定优先级即时抢占、互斥量优先级继承（PI）和每任务调度器锁（`osKernelLock`）。对象层还提供消息队列 `msg_prio` 排序、`osThreadGetAffinity`（复用内核有效亲和性）、`osThreadGetStackSpace` 栈高水位查询、内核级跨线程 `osThreadSuspend/Resume`，以及单核 MCU 的 `osKernelSuspend` tickless WFI。4.8 使用 raw cycle counter 记录 tick jitter 与 syscall latency。时钟精度以内核 tick 为基准（Hi3861 100 Hz / 10 ms，QEMU MCU 1 kHz / 1 ms）。
 
 完整设计哲学与系统分层参见 [A20OS 实时执行模型与系统架构](overview.md)。
 
@@ -16,8 +16,8 @@ A20OS 在 NOMMU / MCU 配置下以通用微内核机制提供确定性调度保�
 | [synchronization.md](synchronization.md) | 同步原语矩阵、`wait_owner` 依赖图追溯、内核 PI 捐赠与快照恢复状态机 | 并发与驱动开发者 |
 | [interrupts.md](interrupts.md) | NOMMU 特权级约束、M 态 trap 到 U 态线程的 futex 分发器、临界区软延迟 | 板级支持与驱动开发者 |
 | [porting-guide.md](porting-guide.md) | 最小应用实现、构建配置接入、tick 同步原则、内存与栈量化、LiteOS API 对照 | 嵌入式应用移植开发者 |
-| [experiments.md](experiments.md) | 4.1–4.5 实验套件、QEMU 与 Hi3861 运行验证、4.5 六大实时性子项与负向对照 | 测试与质量验收工程师 |
-| [latency.md](latency.md) | 调度时延理论推导、tick 量化限制、基于自由运行计数器的 4.6 测量体系规划 | 性能评估与系统优化工程师 |
+| [experiments.md](experiments.md) | 4.1–4.8 实验套件、QEMU 与 Hi3861 运行验证、4.5 六大实时性子项、4.6–4.8 挂起/tickless/时延 | 测试与质量验收工程师 |
+| [latency.md](latency.md) | 调度时延理论推导、tick 量化限制、基于自由运行计数器的 4.8 测量基线（tick jitter / syscall latency） | 性能评估与系统优化工程师 |
 
 ## 外部与底层参考
 

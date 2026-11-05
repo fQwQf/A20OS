@@ -6,18 +6,23 @@
 
 A20OS 在 Native ABI 的 NOMMU / MCU 配置下支持以微内核原语承载实时任务负载。上层通过用户态人格库接入 Arm CMSIS-RTOS2 标准，现有实时应用无需修改源码即可直接链接运行。
 
-内核为实时执行提供四项确定性机制保障：
+内核为实时执行提供以下机制与保障：
 
 1. **固定优先级单级抢占**：CMSIS 线程直接映射为内核 `SCHED_FIFO` 调度类，优先级 1..55 一对一映射至独立就绪队列分桶。
 2. **双安全点即时抢占**：高优先级任务就绪后，在系统调用返回（U 态陷入退出）与硬件中断处理完成（IRQ 返回）两个安全点立即触发调度，无需等待下一个时钟 tick。
 3. **互斥量优先级继承（PI）**：支持单级与多级依赖链捐赠；内核保存基准调度快照并在释放最后一个关联互斥量时恢复，消除无界优先级反转。
 4. **任务级调度器锁**：`osKernelLock` 映射为内核每任务独立的 `sched_lock_depth` 计数，锁定期间保留硬件中断响应并推迟抢占，锁释放归零时立即执行安全点切换。
+5. **跨线程挂起/恢复**：`osThreadSuspend/Resume` 通过 `suspend_pending` 和 syscall/IRQ 返回安全点把目标发布为 `PROC_STOPPED`；阻塞中的目标在唤醒路径直接发布 STOPPED，恢复后再入 RT 队列。
+6. **单核 tickless 低功耗**：`osKernelSuspend` 在 MCU 单核上以调度器锁 + one-shot 定时器 + `WFI` 实现，返回实际睡眠 tick；SMP 和 hosted 后端返回 0，不假装暂停其他 CPU/宿主。
+7. **PMP 栈保护**：当前 flat task 的栈底安装 8 字节无权限 PMP 区域，U-mode 越界访问转为 SIGSEGV 任务退出；这不是完整任务隔离，代码/全局仍共享。
 
 系统的工程边界如下：
 
 - **时间分辨率受内核 tick 约束**：时间基准由架构定时器中断驱动（Hi3861 默认为 100 Hz / 10 ms，QEMU MCU 目标为 1 kHz / 1 ms）。`osDelay`、超时判定与软件定时器均按 tick 粒度对齐，不提供 sub-tick 硬截止期。
 - **无形式化 WCET 上界证明**：系统通过机制消除死锁和无界阻塞，但不提供芯片级指令最坏执行时间（WCET）的形式化证明。
-- **单核验证基准**：当前优先级继承、依赖链遍历与调度器锁的运行证据建立在单核 MCU（Hi3861）与单核 QEMU 模拟器之上；多核 SMP 场景下的跨核优先级迁移与调度锁语义尚未进行实板验证。
+- **单核验证基准**：优先级继承、依赖链遍历、调度器锁与 tickless 的运行证据建立在单核 MCU（Hi3861）与单核 QEMU 模拟器之上；AArch64 SMP2 已跑通 RT runqueue 迁移、IPI 和 `SCHED_DEADLINE` 的 `sched_stress`，但跨核 RT PI 与 CMSIS `osKernelLock` 的全局语义仍未验证。
+- **PMP 保护范围有限**：8 字节栈 guard 只捕获第一次越界写入，不提供 MPU 多区域隔离；堆、代码和全局仍共享。
+- **无 WCET 证明**：4.8 只提供 tick jitter/syscall latency 实测，不提供芯片级最坏执行时间证明。
 - **POSIX 宿主后端不具备实时保证**：`user/cmsis_rtos2/` 在 hosted 环境下提供的 POSIX 后端将线程映射为宿主 pthread，调度策略完全取决于宿主操作系统。
 
 ## 2. 机制在内核，语义在人格层
@@ -85,15 +90,16 @@ CMSIS-RTOS2 属于独立的第三方 source-level ABI，不构成 Native ABI 的
 1. **静态内存供给**：CMSIS 控制块（`cb_mem`/`cb_size`）与线程栈（`stack_mem`/`stack_size`）均支持调用方静态分配，避免动态堆（`a20_malloc`）碎片化导致内存耗尽。
 2. **栈尺寸精简**：默认 16 KiB 栈在 MCU 上会迅速耗尽内存，移植应用需按任务类型显式分配（典型传感器与采样任务建议 1–2 KiB）。
 3. **基于 Manifest 的静态裁剪**：以 `user/cmsis_rtos2/cmsis_rtos2.toml` 为唯一事实源，`tools/cmsis_trim.py` 为不同场景生成精简定义：
-   - `mcu` profile：保留线程、互斥量、信号量、定时器、事件标志与消息队列，仅包含 15 个 Native syscall；
+   - `mcu` profile：保留线程、互斥量、信号量、定时器、事件标志、消息队列、suspend/resume 与低功耗 idle，仅包含 18 个 Native syscall；
    - `mcu-min` profile：仅保留线程、信号量与定时器，压缩至 9 个 Native syscall。未启用的对象族在人格层保留符号并返回 `osErrorResource`，确保链接兼容；内核构建时通过 `-DA20_NATIVE_SYSCALL_TABLE` 覆盖分发表，未声明的系统调用直接被分发器拒绝，不把死代码编入内核 ELF。
 
 ## 5. 验证体系与模块导航
 
 实时子系统的正确性由两层互补的验证套件保证：
 
-- **对象语义验证（宿主回归）**：`make -C user/cmsis_rtos2 test` 在 POSIX 与 Native 宿主模拟平台上验证所有 CMSIS 对象的创建、销毁、递归、队列吞吐与内存池双重释放防护。
-- **调度语义验证（QEMU 与硬件靶板）**：RV32 M 态镜像运行 LiteOS 实验 4.1–4.5，其中实验 4.5（`rt.c`）直接对创建优先级、`SetPriority` 动态调整、`osKernelLock` 延迟、单级 PI、链式 A→B→C PI 与主线程 handle 捐赠六大场景执行断言与负向对照。
+- **对象语义验证（宿主回归）**：`make -C user/cmsis_rtos2 test` 在 POSIX 与 Native 宿主模拟平台上验证所有 CMSIS 对象的创建、销毁、递归、队列吞吐与内存池双重释放防护；同时覆盖 `msg_prio` 排序、`osThreadGetAffinity` 和栈高水位查询。
+- **调度语义验证（QEMU 与硬件靶板）**：RV32 M 态镜像运行 4.1–4.8。4.5 对创建优先级、`SetPriority`、`osKernelLock`、单级 PI、链式 PI 与主线程 handle 捐赠做断言和负向对照；4.6 验证跨线程挂起/恢复；4.7 验证 tickless WFI；4.8 用周期计数器记录 tick jitter 与 syscall 时延。
+- **SMP 验证**：AArch64 SMP2 的 `sched_stress` 覆盖 RT runqueue 迁移、跨核 IPI、RT 带宽与 `SCHED_DEADLINE` 的 API/准入。
 
 各领域详细设计请参阅对应专题：
 
@@ -102,5 +108,5 @@ CMSIS-RTOS2 属于独立的第三方 source-level ABI，不构成 Native ABI 的
 - **[中断与 ISR 模型](interrupts.md)**：NOMMU 硬件特权级限制、厂商 futex 分发器与延迟投递。
 - **[CMSIS-RTOS2 人格层与裁剪](cmsis-rtos2.md)**：完整 API 支持矩阵、TOML 规范与静态链接校验。
 - **[移植与配置指南](porting-guide.md)**：构建接入步骤、tick 同步原则、栈内存量化与 LiteOS API 对照表。
-- **[实验 4.1–4.5](experiments.md)**：实验矩阵、QEMU/Hi3861 运行命令与负向对照分析。
-- **[时延测量体系](latency.md)**：时延理论上界与自由运行计数器测量规划。
+- **[实验 4.1–4.8](experiments.md)**：实验矩阵、QEMU/Hi3861 运行命令、时延基线与负向对照分析。
+- **[时延测量体系](latency.md)**：时延理论上界、自由运行计数器 4.8 基线与 WCET 边界。

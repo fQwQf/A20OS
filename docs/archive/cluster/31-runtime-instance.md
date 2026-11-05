@@ -44,8 +44,8 @@ SDK 使用 `a20_execution_domain_info(&info)`；旧内核返回不支持即可�
 
 ```sh
 make check-execution
-python3 tools/check-native-sync.py --output .kernel-build/cluster/native-domain-sync
-python3 tools/check-native-sync.py --arches riscv64 --cpus 1 --output .kernel-build/cluster/native-domain-single
+python3 tools/native/check-native-sync.py --output .kernel-build/cluster/native-domain-sync
+python3 tools/native/check-native-sync.py --arches riscv64 --cpus 1 --output .kernel-build/cluster/native-domain-single
 make check-mcu-program-rtl
 ```
 

@@ -84,8 +84,8 @@ Lua 5.5.1 / SQLite 3.54.1 使用官方源码：[Lua FTP](https://www.lua.org/ftp
 python3 tools/build-mlibc-native.py --arch riscv64 --library both --jobs 6 --output /tmp/a20-recheck-rv64
 python3 tools/build-mlibc-native.py --arch aarch64 --library both --jobs 6 --output /tmp/a20-recheck-aa64
 make check-native-abi-coverage check-abi-boundary
-python3 tools/check-native-exec-features.py
-python3 tools/check-native-runtime-layout.py
+python3 tools/native/check-native-exec-features.py
+python3 tools/native/check-native-runtime-layout.py
 ```
 
 需要对应的交叉编译器/C++ 头和 Meson/Ninja；本机 AArch64 C++ wrapper 的命令、编译器版本/哈希及参数见 `final-aarch64-build.json`，布局检查可用 `--aarch64-cxx` 指定。应用/软件构建命令分别保存在 apps build 日志、`final-aarch64-apps/commands.json` 和`final-software-{rv64,aarch64}/build.json`。原版软件源码下载来源与校验值在`final-software-sources.json`。构建成功本身不写作运行通过。
@@ -93,7 +93,7 @@ python3 tools/check-native-runtime-layout.py
 可重放冻结应用的一例（选择新的空输出目录，不覆盖验收证据）：
 
 ```sh
-python3 tools/check-mlibc-runtime.py --arch aarch64 \
+python3 tools/mlibc/check-mlibc-runtime.py --arch aarch64 \
   --kernel .kernel-build/mlibc-hardening-aarch64/kernel.elf \
   --image .kernel-build/mlibc-hardening-aarch64/fat32.img \
   --apps build/validation/mlibc-hardening-20261023/final-aarch64-all-apps \

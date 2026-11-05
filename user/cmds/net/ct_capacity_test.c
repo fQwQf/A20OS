@@ -1,7 +1,7 @@
 /*
  * conntrack capacity and idle-timeout gate.
  *
- * Run by tools/targets-smoke.mk:smoke-ct-capacity, which boots the same
+ * Run by tools/mk/targets-smoke.mk:smoke-ct-capacity, which boots the same
  * riscv64 dev image as smoke-netfilter-nat and runs this instead of it.
  *
  * What it proves, and why it exists rather than more packet traffic:

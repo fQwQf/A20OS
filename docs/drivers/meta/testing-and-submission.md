@@ -6,7 +6,7 @@
 
 ## 把驱动接到构建里
 
-full profile 不会通配包含类目录中的设备驱动。`tools/driver-sources.mk` 的 `DRIVER_CORE_SRCS` 仍通配 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 `GENERIC_KERNEL_SERVICE_SRCS` 和 `EMBEDDED_DEVICE_DRIVER_SRCS` 是显式列表；`tools/driver-modules.mk` 也按架构显式列出 generic 的 `.a20drv` 包。新增设备驱动必须更新适用的源码账本、模块包装/规则和架构包清单，不能仅把文件放进 `kernel/drivers/<class>/`。公共声明放 `kernel/include/drivers/<class>/`；只在一个驱动内部共享的寄存器和私有结构放驱动私有头，不要进入公共 include 树。
+full profile 不会通配包含类目录中的设备驱动。`tools/mk/driver-sources.mk` 的 `DRIVER_CORE_SRCS` 仍通配 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 `GENERIC_KERNEL_SERVICE_SRCS` 和 `EMBEDDED_DEVICE_DRIVER_SRCS` 是显式列表；`tools/mk/driver-modules.mk` 也按架构显式列出 generic 的 `.a20drv` 包。新增设备驱动必须更新适用的源码账本、模块包装/规则和架构包清单，不能仅把文件放进 `kernel/drivers/<class>/`。公共声明放 `kernel/include/drivers/<class>/`；只在一个驱动内部共享的寄存器和私有结构放驱动私有头，不要进入公共 include 树。
 
 MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检查 Makefile 的 profile 分支。新平台还需要平台链接脚本和 `BOARD_INCLUDE_DIR`。
 

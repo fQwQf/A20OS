@@ -17,6 +17,10 @@
 #include <unistd.h>
 #include <time.h>
 
+#ifndef SCHED_DEADLINE
+#define SCHED_DEADLINE 6
+#endif
+
 #ifndef SYS_sched_setattr
 #define SYS_sched_setattr 274
 #endif
@@ -925,6 +929,72 @@ static int rt_bandwidth_progress(void)
     return 0;
 }
 
+static void deadline_restore(void)
+{
+    struct sched_param param = {.sched_priority = 0};
+    (void)syscall(SYS_sched_setscheduler, 0, 0 /* SCHED_OTHER */, &param);
+}
+
+static int deadline_policy(void)
+{
+    struct sched_attr_compat attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.size = sizeof(attr);
+    attr.sched_policy = SCHED_DEADLINE;
+    attr.sched_runtime = 1000000;
+    attr.sched_deadline = 5000000;
+    attr.sched_period = 10000000;
+    if (syscall(SYS_sched_setattr, 0, &attr, 0) < 0) {
+        deadline_restore();
+        return fail("deadline-setattr");
+    }
+
+    memset(&attr, 0, sizeof(attr));
+    attr.size = sizeof(attr);
+    if (syscall(SYS_sched_getattr, 0, &attr, sizeof(attr), 0) < 0) {
+        deadline_restore();
+        return fail("deadline-getattr");
+    }
+    if (attr.sched_policy != SCHED_DEADLINE ||
+        attr.sched_runtime != 1000000 ||
+        attr.sched_deadline != 5000000 ||
+        attr.sched_period != 10000000) {
+        deadline_restore();
+        return fail("deadline-roundtrip");
+    }
+
+    /* runtime > deadline is rejected before admission. */
+    struct sched_attr_compat bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.size = sizeof(bad);
+    bad.sched_policy = SCHED_DEADLINE;
+    bad.sched_runtime = 6000000;
+    bad.sched_deadline = 5000000;
+    bad.sched_period = 10000000;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &bad, 0) != -1 || errno != EINVAL) {
+        deadline_restore();
+        return fail("deadline-invalid-runtime");
+    }
+
+    /* A full-CPU deadline task must fail admission (95% budget). */
+    memset(&bad, 0, sizeof(bad));
+    bad.size = sizeof(bad);
+    bad.sched_policy = SCHED_DEADLINE;
+    bad.sched_runtime = 10000000;
+    bad.sched_deadline = 10000000;
+    bad.sched_period = 10000000;
+    errno = 0;
+    if (syscall(SYS_sched_setattr, 0, &bad, 0) != -1) {
+        deadline_restore();
+        return fail("deadline-admission");
+    }
+
+    deadline_restore();
+    printf("SCHED_STRESS: deadline PASS\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("SCHED_STRESS: start\n");
@@ -945,6 +1015,8 @@ int main(void)
     if (runqueue_lock_split() != 0)
         return 1;
     if (nice_and_attr() != 0)
+        return 1;
+    if (deadline_policy() != 0)
         return 1;
     if (cgroup_cpuset_affinity() != 0)
         return 1;

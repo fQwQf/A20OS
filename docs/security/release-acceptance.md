@@ -51,9 +51,9 @@ make check-honesty-policy check-smoke-cases
 "$runner" build-2 make smoke-security-release
 "$runner" build-2 python3 tools/smoke.py smoke-security-release --nr-cpus 2
 "$runner" build-2 make smoke-wx-aslr
-"$runner" build-2 python3 tools/security_release.py boot
-"$runner" build-2 python3 tools/security_release.py perf-off
-"$runner" build-2 python3 tools/security_release.py perf-on
+"$runner" build-2 python3 tools/release/security_release.py boot
+"$runner" build-2 python3 tools/release/security_release.py perf-off
+"$runner" build-2 python3 tools/release/security_release.py perf-on
 ```
 
 退出 75 表示共享槽忙、本次没有开始，不是 PASS/FAIL；槽释放后重新运行。脚本复用现有 `tools/smoke.py` 的 QEMU lease、超时与断言。所有产物留在被忽略的构建目录。新增 make target 只接线本包唯一 case，未修改 GLOBAL 默认、通用构建规则或 CLI。

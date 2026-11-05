@@ -43,19 +43,19 @@ handler 必须是**有界、无锁、不阻塞的底层操作**。不能分配�
 
 ```sh
 # 四端点并发，直接执行相同生产 C 文件。
-python3 tools/check-shared-device-call.py --arch x86_64 \
+python3 tools/archive/check-shared-device-call.py --arch x86_64 \
   --out .kernel-build/cluster/multi-qemu/device-x86-run
-python3 tools/check-shared-device-call.py --arch aarch64 \
+python3 tools/archive/check-shared-device-call.py --arch aarch64 \
   --out .kernel-build/cluster/multi-qemu/device-arm-run
-python3 tools/check-shared-device-call.py --arch riscv64 \
+python3 tools/archive/check-shared-device-call.py --arch riscv64 \
   --out .kernel-build/cluster/multi-qemu/device-rv-run
 
 # 两个系统 QEMU；次实例使用 -serial none，主实例使用 -serial stdio。
-python3 tools/check-multi-qemu-kernel.py --workload linux \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux \
   --out .kernel-build/cluster/multi-qemu/console-run
 
 # 普通 SMP 对照，关闭共享设备后端。
-python3 tools/check-multi-qemu-kernel.py --workload linux --mode smp \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux --mode smp \
   --out .kernel-build/cluster/multi-qemu/console-smp-run
 ```
 

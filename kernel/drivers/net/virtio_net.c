@@ -225,7 +225,7 @@ static uint32_t virtio_net_page_align(uint32_t off)
  * Why the rings are kmalloc()ed instead of declared as static arrays.
  *
  * Under the default DRIVER_DEPLOYMENT=generic profile this driver is not
- * linked into the kernel image: tools/driver-modules.mk packages it as
+ * linked into the kernel image: tools/mk/driver-modules.mk packages it as
  * virtio-net.a20drv and drvmod_load() rejects any package whose .text + .data
  * + .bss exceeds DRV_MOD_MAX_SIZE (kernel/include/drvmod/drvmod.h:31,
  * 512 KiB, enforced in kernel/drvmod/loader.c on "bad total_size").  256 slots

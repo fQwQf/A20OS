@@ -31,9 +31,9 @@ MASQUERADE 使用实际出口的地址；出口没有地址时拒绝创建映射
 ```sh
 bash tools/tests/netfilter_nat_host/run.sh "$PWD/build/evidence/<新目录>"
 bash tools/tests/netfilter_filter_host/run.sh "$PWD/build/evidence/<另一新目录>"
-sh tools/test-nat-rewrite-host.sh c
-sh tools/test-nat-rewrite-host.sh rust
-python3 tools/check-net-pcap.py <完整、已完成软件校验的Ethernet抓包>
+sh tools/host-tests/test-nat-rewrite-host.sh c
+sh tools/host-tests/test-nat-rewrite-host.sh rust
+python3 tools/net/check-net-pcap.py <完整、已完成软件校验的Ethernet抓包>
 ```
 
 生产状态机测试覆盖两客户端同端口冲突、回包归属、重传、转发两阶段、固定端口冲突、满表不变换、不驱逐、关闭 tracking、4 线程竞争，以及 1 kHz/2 GHz 时钟与毫秒回绕。重写测试独立重算校验和：TCP 的零值仍是合法计算结果，必须更新；IPv4 UDP 的原始零值表示未启用校验，但变换计算出的零必须编码成 0xffff。

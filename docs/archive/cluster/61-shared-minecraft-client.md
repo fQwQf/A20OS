@@ -43,7 +43,7 @@ Quit Game 后正常回收应用服务并结束 compositor。系统服务仍可�
 ```sh
 IMAGE=<repo>/build/images/xfce-x86_64.img
 RUN=.kernel-build/cluster/multi-qemu/minecraft-new
-python3 tools/check-multi-qemu-kernel.py --workload minecraft \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload minecraft \
   --system-image "$IMAGE" --out "$RUN" --timeout 900 --jobs 4
 ```
 
@@ -73,7 +73,7 @@ python3 tools/cluster-qmp.py "$RUN" key esc
 检查器的 report PASS 仅自动确认运行和退出契约；画面必须另行检查。`minecraft-shared-evidence.json` 汇总三次原始 report、冻结 ELF/ROM、payload、写层、日志、截图和 QMP 交互哈希，不改写早期报告。后两次分别已查看 welcome.png、main-menu-ready.png、options.png、quit-selected.png。
 
 ```sh
-python3 tools/audit-shared-minecraft.py "$RUN" --screenshots-reviewed \
+python3 tools/archive/audit-shared-minecraft.py "$RUN" --screenshots-reviewed \
   --out .kernel-build/cluster/multi-qemu/minecraft-audit-new.json
 ```
 

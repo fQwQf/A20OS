@@ -10,7 +10,7 @@
 
 新体系的打包器**只读构建产物目录**，不影响构建过程本身。
 
-**唯一的例外是源码构建的 extra 路径，它已退役**。`user/extra.mk` 已删除，`user/external/` 下的 vim、git、zlib、curl+mbedtls、binutils+GCC、Rust、 Lamina1 源码树也不再入库：这些软件现在由 world 清单从 Alpine 上游仓库解析。`extra-img`、`run-*-extra`、`vf2-extra` 这些入口刻意保留为**会报错的弃置桩**（`tools/targets-extra.mk`），每个都打印替代命令后 `exit 2`，而不是让 make 报一句什么也不教的 "no rule to make target"。
+**唯一的例外是源码构建的 extra 路径，它已退役**。`user/extra.mk` 已删除，`user/external/` 下的 vim、git、zlib、curl+mbedtls、binutils+GCC、Rust、 Lamina1 源码树也不再入库：这些软件现在由 world 清单从 Alpine 上游仓库解析。`extra-img`、`run-*-extra`、`vf2-extra` 这些入口刻意保留为**会报错的弃置桩**（`tools/mk/targets-extra.mk`），每个都打印替代命令后 `exit 2`，而不是让 make 报一句什么也不教的 "no rule to make target"。
 
 `/extra` 这个**分区本身没有取消**：真板仍需要一块可写 ext4，`make vf2-sdcard`现在用 apk world 镜像填它（`VF2_WORLD` 选 world，默认 `devel`）。
 

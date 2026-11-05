@@ -24,13 +24,13 @@ A20OS 拥有完整的 Linux ABI 兼容层，能直接运行 musl/Alpine 生态�
 │ 4. CI 层    .github/workflows/ci.yml（PR 门禁）               │
 │             tools/ci/Dockerfile（固化工具链，CI=本地）          │
 ├─────────────────────────────────────────────────────────────┤
-│ 3. 组装层   packages/world/*.world  +  tools/mkrootfs.py      │
+│ 3. 组装层   packages/world/*.world  +  tools/packaging/mkrootfs.py      │
 │             声明式包清单 → apk 解析 → ext4 镜像                │
 ├─────────────────────────────────────────────────────────────┤
-│ 2. 仓库层   tools/mka20repo.sh + tools/apk-sign-stream.py     │
+│ 2. 仓库层   tools/packaging/mka20repo.sh + tools/packaging/apk-sign-stream.py     │
 │             *.apk → APKINDEX.tar.gz（可签名）→ build/repo/     │
 ├─────────────────────────────────────────────────────────────┤
-│ 1. 打包层   packages/recipes/*.toml  +  tools/mka20pkg.py     │
+│ 1. 打包层   packages/recipes/*.toml  +  tools/packaging/mka20pkg.py     │
 │             构建产物 → 合法 apk v2 包（可 RSA256 签名）          │
 └─────────────────────────────────────────────────────────────┘
                 ↑ 数据全部来自现有构建系统（make 不变）

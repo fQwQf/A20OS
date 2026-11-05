@@ -99,7 +99,7 @@ tools/a20 deploy quartz64-zero --dry-run
 | 同名 `.img.json` | 镜像及 FAT 文件 SHA256、固件版本和布局 |
 | `build/quartz64-zero/handoff/` | ELF、ARM64 Image、匹配 DTB、manifest、U-Boot 命令文本 |
 
-只需普通内核构建时运行 `tools/a20 build quartz64-zero`；`kernel.bin` 是内核 Image，不能把它当作整盘镜像写卡。独立入口为 `python3 tools/quartz64_zero.py prepare` 和`python3 tools/quartz64_zero.py sdcard`，各自 `--help` 可查看缓存、交叉编译器和镜像位置参数。
+只需普通内核构建时运行 `tools/a20 build quartz64-zero`；`kernel.bin` 是内核 Image，不能把它当作整盘镜像写卡。独立入口为 `python3 tools/boards/quartz64_zero.py prepare` 和`python3 tools/boards/quartz64_zero.py sdcard`，各自 `--help` 可查看缓存、交叉编译器和镜像位置参数。
 
 ## 固件选择与板级设备树
 

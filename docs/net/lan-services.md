@@ -31,10 +31,10 @@ dnsmasq --no-daemon --user=root --no-resolv --no-hosts \
 
 ## 验证
 
-把 `tools/net-socket-abi-probe.c` 用与 microbench 相同的 musl 静态工具链编译，保存源码、命令和 ELF 哈希。再运行：
+把 `tools/probes/net-socket-abi-probe.c` 用与 microbench 相同的 musl 静态工具链编译，保存源码、命令和 ELF 哈希。再运行：
 
 ```sh
-python3 tools/test-net-router-kvm.py \
+python3 tools/net/tests/test-net-router-kvm.py \
   --baseline <基线manifest.json> --router-kernel <冻结router kernel.elf> \
   --binary <静态Linux net-microbench ELF> \
   --socket-probe <静态Linux net-socket-abi-probe ELF> \

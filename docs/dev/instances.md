@@ -237,14 +237,14 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `prepare` | 根据板型构建固定版本的启动固件或取得恢复资产。只准备宿主文件，不连接或烧写板卡 |
 | `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`grub-disk`（x86_64 可直接启动的 GRUB 磁盘）、`uefi-disk`（x86_64 可直接启动的 BOOTX64.EFI 磁盘）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（内核交接目录或 MCU 探针）、`board-sdcard`（板级完整 SD 镜像，具体固件依赖见平台页） |
 
-VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](../platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
+VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/mk/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](../platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
 ### 校验规则（选摘）
 
 - `smp > 1` 只允许在已验证的 QEMU virt 平台（riscv64/aarch64/loongarch64/x86_64），否则必须显式 `allow_unverified_smp = true`。
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
 - `nommu`、`swap`、`ramfs_user` 有架构白名单（出处是 `components/trim.toml` 的 capability 矩阵；此前 Makefile 只会在构建期把这些请求静默 force-off，现在 `a20 check` 直接拒绝）；`kernel.profile` 必须与架构一致——`mcu` 只用于 MCU 级架构，而 MCU 级架构上的其他 profile 会被 Makefile 强制成 `mcu`，写错都会在编译前被拒绝。`driver_deployment` 是取值枚举（`generic` | `embedded`）。
-- `run`/`debug`/`test` 仅支持活跃且有对应运行路径的架构；armv7m 走 `tools/stm32.mk`。LoongArch32/PPC64LE 在当前注册表中会被明确拒绝；归档实例只用于历史追溯。
+- `run`/`debug`/`test` 仅支持活跃且有对应运行路径的架构；armv7m 走 `tools/mk/stm32.mk`。LoongArch32/PPC64LE 在当前注册表中会被明确拒绝；归档实例只用于历史追溯。
 
 ### 互斥组合
 
@@ -565,7 +565,7 @@ early_arches = ["riscv64"]   # 可选：嵌入内核 root ramfs 的架构（启�
 description = "virtio network device"
 ```
 
-实例用 `[rootfs].drivers` 按名字选择进入 `/lib/drivers` 的运行时驱动子集；a20 在编译前校验：名字必须存在、必须支持实例架构、不能是该架构的 early 驱动（early 驱动始终嵌入内核镜像，无需也不能再选）。选定后通过 `DRIVER_SELECTION` 传给 make；不写该字段则按 `tools/driver-modules.mk` 的默认全集打包。
+实例用 `[rootfs].drivers` 按名字选择进入 `/lib/drivers` 的运行时驱动子集；a20 在编译前校验：名字必须存在、必须支持实例架构、不能是该架构的 early 驱动（early 驱动始终嵌入内核镜像，无需也不能再选）。选定后通过 `DRIVER_SELECTION` 传给 make；不写该字段则按 `tools/mk/driver-modules.mk` 的默认全集打包。
 
 `make check-component-registry`（= `tools/a20 check-registry`）校验两件事：注册表自身（重名、未知架构、early ⊆ arches、early 必须配 generic 部署、源文件存在），以及生成物 `components/drivers.mk` 是否与 `components/drivers.toml` 一致。改完 TOML 要跑 `tools/a20 regen-drivers`（`make regen-driver-fragment`）重新生成，否则这一门禁会报 stale。
 
@@ -636,7 +636,7 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 | `tools/check-drm-abi.sh` | 每个 DRM ioctl 号与结构体布局对 Linux UAPI 逐条比对，漂移时 exit 1 | 否 |
 | `tools/build-virglrenderer.sh check` | 报告宿主 QEMU、两版 virglrenderer、`/dev/dri/renderD128` 是否真的可访问 | 否 |
 | `tools/build-virglrenderer.sh build` | 构建宿主 virglrenderer ≥ 0.11 到 `tools/virgl/install`（Makefile 自动拾取） | **是** |
-| `tools/a20_resource.py` | 不直接调用：`tools/a20 run/debug/test` 在启动前采样宿主 RAM/负载/磁盘，放不下就**等待**（`A20_PREFLIGHT=0` 跳过）。`tools/a20 check` 会校验它与 Makefile 默认值的副本未漂移。原 `a20_preflight.py` 已合并进本文件 | 否 |
+| `tools/cli/a20_resource.py` | 不直接调用：`tools/a20 run/debug/test` 在启动前采样宿主 RAM/负载/磁盘，放不下就**等待**（`A20_PREFLIGHT=0` 跳过）。`tools/a20 check` 会校验它与 Makefile 默认值的副本未漂移。原 `a20_preflight.py` 已合并进本文件 | 否 |
 
 `build/package/flash` 不启动 guest，因此不受 preflight 约束。
 

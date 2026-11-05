@@ -1,0 +1,707 @@
+#!/usr/bin/env python3
+"""mkrootfs — compose an A20OS root filesystem image from a world file.
+
+A world file (packages/world/*.world) lists apk package names, one per line
+(`#` comments allowed; `name=version` pins work).  mkrootfs resolves them
+against the A20OS package repository (build/repo/<arch>, built by
+`make pkg-repo`) plus the Alpine Linux repositories, installs everything
+into a staging root with the real apk resolver, applies optional overlays,
+and packs the result as an ext4 image (or a plain directory).
+
+Examples:
+    tools/mkrootfs.py --arch riscv64 --world packages/world/base.world
+    tools/mkrootfs.py --arch riscv64 --world packages/world/devel.world \
+        --output build/images/devel-riscv64.img --size-mb 1024
+    tools/mkrootfs.py --arch riscv64 --world my.world --format dir \
+        --usermode --allow-untrusted --output build/images/rootfs
+
+Privileges: like user/rootfs/alpine/build.sh, composing with correct file
+ownership needs root; the script re-execs the apk/mkfs steps through sudo
+when not root.  --usermode skips that for development (files stay owned by
+the caller; ext4 output is forced to root ownership via -E root_owner).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+ELF_MACHINES = {
+    "riscv64": 243, "riscv32": 243,
+    "aarch64": 183,
+    "x86_64": 62,
+    "loongarch64": 258,
+    "arm32": 40, "armv7m": 40,
+    "ppc64le": 21,
+}
+
+DEFAULT_ALPINE_MIRROR = "https://mirrors.ustc.edu.cn/alpine"
+DEFAULT_ALPINE_VERSION = "v3.23"
+ALPINE_KEYS_REPO = "edge/main/x86_64"
+
+# ext4 feature set matching tools/mk/targets-images.mk (the kernel's ext4
+# implementation is verified against exactly these features).
+EXT4_MKFS_ARGS = [
+    "mkfs.ext4", "-q", "-F",
+    "-O", "^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index",
+]
+MKFS_EXT4_FALLBACK_DIRS = (Path("/usr/sbin"), Path("/sbin"))
+
+
+def die(msg: str) -> "SystemExit":
+    print(f"mkrootfs: error: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def resolve_mkfs_ext4() -> str:
+    """Resolve mkfs.ext4 before staging, including standard sbin directories.
+
+    PATH wins when it contains an executable; minimal host environments often
+    omit /usr/sbin and /sbin even though e2fsprogs is installed there. Return an
+    absolute path so fakeroot's shell does not need to rediscover the command.
+    """
+    candidate = shutil.which(EXT4_MKFS_ARGS[0])
+    if candidate:
+        path_candidate = Path(candidate)
+        if path_candidate.is_file() and os.access(path_candidate, os.X_OK):
+            return str(path_candidate.resolve())
+
+    for directory in MKFS_EXT4_FALLBACK_DIRS:
+        path_candidate = directory / EXT4_MKFS_ARGS[0]
+        if path_candidate.is_file() and os.access(path_candidate, os.X_OK):
+            return str(path_candidate.resolve())
+
+    searched = ":".join([os.environ.get("PATH", ""),
+                          *(str(p) for p in MKFS_EXT4_FALLBACK_DIRS)])
+    die(f"required host tool {EXT4_MKFS_ARGS[0]} not found or not executable "
+        f"(searched PATH and {', '.join(str(p) for p in MKFS_EXT4_FALLBACK_DIRS)}); "
+        f"install e2fsprogs or add it to PATH (PATH={searched})")
+
+
+def run(cmd: list[str], sudo: list[str], **kw) -> None:
+    proc = subprocess.run(sudo + cmd, **kw)
+    if proc.returncode != 0:
+        die(f"command failed ({proc.returncode}): {' '.join(sudo + cmd)}")
+
+
+def apply_overlay(overlay: Path, staging: Path, sudo: list[str],
+                  keep_account_files: bool = False) -> None:
+    overlay = overlay.resolve()
+    if not overlay.is_dir():
+        die(f"overlay {overlay} is not a directory")
+    if keep_account_files:
+        # Package maintainer scripts append system users/groups to the
+        # overlay-provided /etc/passwd and /etc/group; the second apply must
+        # not clobber them.
+        run(["sh", "-c",
+             f"tar -C {overlay} --exclude=./etc/passwd --exclude=./etc/group -cf - . "
+             f"| tar -C {staging} -xf -"], sudo)
+    else:
+        run(["cp", "-a", "--remove-destination", f"{overlay}/.", f"{staging}/"], sudo)
+    normalize_overlay_modes(overlay, staging, sudo)
+
+
+def install_ssh_pubkeys(staging: Path, pubkeys: list[Path],
+                        sudo: list[str]) -> None:
+    """Install root's authorized_keys from public key files given on the CLI.
+
+    Password authentication is not a thing a baked image can carry safely:
+    the credential would live in the image forever.  A public key is the
+    only credential that can be baked in without handing the image a way in,
+    so this is how a world image becomes reachable over dropbear.
+
+    This runs after the overlays on purpose -- an operator-supplied key must
+    win over anything an overlay happens to ship.
+    """
+    home = staging / "root"
+    ssh_dir = home / ".ssh"
+    auth = ssh_dir / "authorized_keys"
+    run(["mkdir", "-p", str(ssh_dir)], sudo)
+    run(["sh", "-c", f"cat > {auth}"], sudo, input=b"".join(
+        pk.read_bytes().rstrip(b"\n") + b"\n" for pk in pubkeys))
+    # sshd/dropbear refuse the file outright when it is group-writable, and
+    # the strict-mode check on the directory is what stops a non-root local
+    # user from planting a key.
+    run(["chmod", "0700", str(home)], sudo)
+    run(["chmod", "0700", str(ssh_dir)], sudo)
+    run(["chmod", "0600", str(auth)], sudo)
+    if sudo:
+        run(["chown", "-R", "0:0", str(home)], sudo)
+    print(f"mkrootfs: installed {len(pubkeys)} ssh key(s) into /root/.ssh")
+
+
+def normalize_overlay_modes(overlay: Path, staging: Path,
+                            sudo: list[str]) -> None:
+    """Force overlay entries to 0644/0755.
+
+    `cp -a` and `tar -x` preserve the source mode, so a developer umask of 002
+    leaks group-writable configuration files (and 0775 scripts) into the
+    image.  Normalise to what git would check out: 0755 for directories and
+    executables, 0644 otherwise.
+    """
+    for src in sorted(overlay.rglob("*")):
+        if src.is_symlink():
+            continue
+        dst = staging / src.relative_to(overlay)
+        if not dst.exists():
+            continue
+        if src.is_dir():
+            mode = 0o755
+        elif src.lstat().st_mode & 0o111:
+            mode = 0o755
+        else:
+            mode = 0o644
+        run(["chmod", f"{mode:04o}", str(dst)], sudo)
+
+
+def elf_machine(path: Path) -> int | None:
+    """e_machine of a little-endian ELF file, or None when it is not one.
+
+    Unreadable files and big-endian objects read as None, matching the inline
+    check this was extracted from: none of the supported targets is
+    big-endian, and guessing a machine for one would reject good files.
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] == 2:
+        return None
+    return struct.unpack_from("<H", head, 18)[0]
+
+
+def check_overlay_elf_arch(overlay: Path, arch: str) -> None:
+    """Reject an overlay ELF built for a different target architecture."""
+    want = ELF_MACHINES.get(arch)
+    if want is None:
+        return
+    for src in overlay.rglob("*"):
+        if src.is_symlink() or not src.is_file():
+            continue
+        machine = elf_machine(src)
+        if machine is not None and machine != want:
+            die(f"overlay {overlay} ships an ELF for another architecture: "
+                f"{src.relative_to(overlay)} (e_machine={machine}, --arch "
+                f"{arch} expects {want})")
+
+
+def read_name_id_map(path: Path) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ids
+    for line in text.splitlines():
+        fields = line.split(":")
+        if len(fields) < 3:
+            continue
+        try:
+            ids.setdefault(fields[0], int(fields[2]))
+        except ValueError:
+            continue
+    return ids
+
+
+def installed_archives(staging: Path, cache_dir: Path) -> list[Path]:
+    """Map the installed apk database to archives present in the package cache."""
+    db = staging / "lib" / "apk" / "db" / "installed"
+    try:
+        lines = db.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    names: list[str] = []
+    current: dict[str, str] = {}
+    for line in lines:
+        if line[:2] in ("P:", "V:") and len(line) > 2:
+            current[line[0]] = line[2:]
+        elif not line.strip():
+            if "P" in current and "V" in current:
+                names.append(f"{current['P']}-{current['V']}")
+            current = {}
+    if "P" in current and "V" in current:
+        names.append(f"{current['P']}-{current['V']}")
+    archives: list[Path] = []
+    for name in names:
+        archives.extend(sorted(cache_dir.glob(f"{name}.*.apk")))
+    return archives
+
+
+def collect_nonroot_ownership(staging: Path,
+                              cache_dir: Path) -> list[tuple[Path, int, int]]:
+    """Ownership the installed packages declare for non-root service accounts.
+
+    `apk --usermode` cannot chown, so files a package owns as a service
+    account (e.g. polkit's 0700 rules, owned by polkitd) end up owned by the
+    caller and are then recorded as root in the image -- the daemon can no
+    longer read them.  Re-derive the intended owner from the package archives,
+    resolving account names against the staging /etc/passwd and /etc/group.
+    """
+    users = read_name_id_map(staging / "etc" / "passwd")
+    groups = read_name_id_map(staging / "etc" / "group")
+    fixups: list[tuple[Path, int, int]] = []
+    for archive in installed_archives(staging, cache_dir):
+        try:
+            with tarfile.open(archive, "r:gz") as tar:
+                members = tar.getmembers()
+        except (tarfile.TarError, OSError):
+            continue
+        for member in members:
+            if not member.uname or member.uname == "root":
+                continue
+            dst = staging / member.name
+            if not dst.exists():
+                continue
+            uid = member.uid or users.get(member.uname)
+            gid = member.gid or groups.get(member.gname)
+            if uid is None or gid is None:
+                continue
+            fixups.append((dst, uid, gid))
+    return fixups
+
+
+def check_fits_size_mb(staging: Path, size_mb: int) -> None:
+    """Refuse to build an image that cannot hold what was just staged.
+
+    ext4 reports an over-full image as `Could not allocate block in ext2
+    filesystem` partway through `mkfs.ext4 -d`, naming whichever file it
+    happened to be writing at the time.  That reads like a full disk and
+    points at the wrong thing: the real cause is that --size-mb is smaller
+    than the world plus its overlays.  server-riscv64 hit exactly this --
+    world_size_mb = 512 against a 535 MiB media overlay -- and the message
+    named icu4j-77.1.jar, a Minecraft library that has no business being in
+    a server image at all.
+
+    So check before mkfs, name the offenders, and say which knob to turn.
+    """
+    budget = size_mb * 1024 * 1024
+    totals: dict[str, int] = {}
+    total = 0
+    for root, _dirs, files in os.walk(staging):
+        for name in files:
+            path = Path(root) / name
+            try:
+                # st_size, not st_blocks: this is about how big the image
+                # has to be, and it must not depend on the host's fs.
+                nbytes = path.lstat().st_size
+            except OSError:
+                continue
+            total += nbytes
+            top = path.relative_to(staging).parts[0]
+            totals[top] = totals.get(top, 0) + nbytes
+
+    if total <= budget:
+        return
+    biggest = sorted(totals.items(), key=lambda kv: -kv[1])[:5]
+    detail = ", ".join(f"{name}/ {nbytes / (1024 * 1024):.0f} MiB"
+                       for name, nbytes in biggest)
+    die(f"staged rootfs is {total / (1024 * 1024):.0f} MiB but the image is "
+        f"only {size_mb} MiB ({detail}); raise world_size_mb / --size-mb, or "
+        f"stop injecting an overlay the world does not need")
+
+
+def staging_root(repo_root: Path) -> Path:
+    """Where mkrootfs unpacks the world: build/tmp, never the host /tmp.
+
+    tempfile's default is TMPDIR or /tmp, and /tmp is a tmpfs on many hosts:
+    the xfce worlds stage well over a GiB there, apk dies partway through
+    with dozens of `No space left on device` errors, and the repository disk
+    sits mostly empty next to it. Staging under build/ keeps the world on the
+    same filesystem as the output image (so --format dir is a rename, not a
+    cross-device copy) and inside the tree `make clean` removes. TMPDIR is
+    deliberately ignored: build artifacts belong to the build tree.
+    """
+    root = repo_root / "build" / "tmp"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        die(f"cannot create staging root {root}: {exc}")
+    return root
+
+
+def check_staging_space(root: Path, need_mb: int) -> None:
+    """Refuse to start a stage whose filesystem cannot hold it.
+
+    apk reports a full staging filesystem as a wall of `No space left on
+    device` errors and `failed to write database` halfway through the
+    install, naming packages instead of the real cause. Check the budget
+    before creating anything, and say where the space should come from --
+    same idea as check_fits_size_mb below.
+    """
+    try:
+        free_mb = shutil.disk_usage(root).free // (1024 * 1024)
+    except OSError as exc:
+        die(f"cannot measure free space at {root}: {exc}")
+    if free_mb < need_mb:
+        die(f"{root} has only {free_mb} MiB free but this build needs about "
+            f"{need_mb} MiB; free space on that filesystem (staging is fixed "
+            f"under build/ on purpose, so `make clean` can reach it)")
+
+
+def read_world(paths: list[Path], arch: str | None = None) -> list[str]:
+    pkgs: list[str] = []
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            die(f"cannot read world file {path}: {exc}")
+        for ln, line in enumerate(lines, 1):
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("["):
+                selector = re.fullmatch(r"\[([A-Za-z0-9_,+-]+)\]\s*(\S+)", line)
+                if not selector:
+                    die(f"{path}:{ln}: invalid architecture selector {line!r}")
+                architectures = selector[1].split(",")
+                if any(a not in ELF_MACHINES for a in architectures):
+                    die(f"{path}:{ln}: unknown architecture in {selector[1]!r}")
+                if arch is None:
+                    die(f"{path}:{ln}: architecture selector requires --arch")
+                if arch not in architectures:
+                    continue
+                line = selector[2]
+            if any(c.isspace() for c in line):
+                die(f"{path}:{ln}: whitespace inside package spec {line!r}")
+            pkgs.append(line)
+    if not pkgs:
+        die("world file(s) produced an empty package set")
+    return pkgs
+
+
+def ensure_alpine_keys(mirror: str, dest: Path) -> None:
+    """Fetch Alpine's official repository signing keys (once, cached).
+
+    The alpine-keys package ships /etc/apk/keys/*.rsa.pub; the same keys sign
+    every architecture, so the host-arch package is fine.  Downloaded without
+    trust (bootstrap problem); the fetched keys then authenticate everything
+    else."""
+    if any(dest.glob("*.rsa.pub")):
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    import re
+    import urllib.request
+    mirrors = [mirror.rstrip("/"), "https://dl-cdn.alpinelinux.org/alpine"]
+    name = None
+    for m in mirrors:
+        url = f"{m}/{ALPINE_KEYS_REPO}/"
+        try:
+            listing = urllib.request.urlopen(url, timeout=30).read().decode()
+        except OSError:
+            continue
+        names = sorted(set(re.findall(r'alpine-keys-[^"<>]*?\.apk', listing)))
+        if names:
+            name = names[-1]
+            break
+    if not name:
+        die("cannot resolve alpine-keys package from any mirror")
+    data = None
+    for m in mirrors:
+        try:
+            data = urllib.request.urlopen(f"{m}/{ALPINE_KEYS_REPO}/{name}",
+                                          timeout=60).read()
+            break
+        except OSError:
+            continue
+    if data is None:
+        die(f"cannot download alpine-keys package {name}")
+    print(f"mkrootfs: fetched Alpine keys ({name})")
+    import tarfile
+    import io
+    found = 0
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name.endswith(".rsa.pub") and member.isfile():
+                target = dest / Path(member.name).name
+                target.write_bytes(tar.extractfile(member).read())
+                found += 1
+    if not found:
+        die(f"{names[-1]} contained no *.rsa.pub keys")
+
+
+def install_drivers(staging: Path, drivers: list[Path], sudo: list[str]) -> None:
+    """Copy runtime .a20drv packages into <staging>/lib/drivers.
+
+    The kernel DriverStore scans /bin/lib/drivers when the classic FAT32
+    userland disk is mounted, and /extra/lib/drivers when a distro root is
+    mounted there instead.  Filling this directory is what makes a distro
+    image self-sufficient: without it the network driver (a Runtime
+    DriverStore member, not embedded) never loads and the guest has no eth0.
+    """
+    dest = staging / "lib" / "drivers"
+    for d in drivers:
+        src = d.resolve()
+        if not src.is_file():
+            die(f"--driver {src} is not a file; run `make dev-build` first")
+        run(["mkdir", "-p", str(dest)], sudo)
+        run(["install", "-m", "0644", str(src), str(dest / src.name)], sudo)
+
+
+def install_apk_keys(staging: Path, keys_dir: Path | None,
+                     sudo: list[str]) -> None:
+    """Keep the image's apk client able to verify the repositories we used."""
+    if keys_dir is None:
+        return
+    keys = sorted(keys_dir.glob("*.rsa.pub"))
+    if not keys:
+        return
+    dest = staging / "etc" / "apk" / "keys"
+    run(["install", "-d", "-m", "0755", str(dest)], sudo)
+    run(["install", "-m", "0644", *(str(p) for p in keys), str(dest)], sudo)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Compose an A20OS rootfs image from a world file.")
+    ap.add_argument("--arch", required=True,
+                    help="apk architecture (riscv64, aarch64, x86_64, loongarch64)")
+    ap.add_argument("--world", type=Path, action="append", required=True,
+                    help="world file(s); repeatable")
+    ap.add_argument("--repo", action="append", default=[],
+                    help="A20OS package repository: a local directory "
+                         "(its <arch>/ subdir is used) or a repository URL; "
+                         "repeatable. Default: build/repo")
+    ap.add_argument("--alpine-mirror", default=DEFAULT_ALPINE_MIRROR,
+                    help="Alpine mirror tree base ('' disables Alpine repos)")
+    ap.add_argument("--alpine-version", default=DEFAULT_ALPINE_VERSION)
+    ap.add_argument("--no-alpine", action="store_true",
+                    help="do not add Alpine repositories")
+    ap.add_argument("--overlay", type=Path, action="append", default=[],
+                    help="directory copied over the staged rootfs; repeatable")
+    ap.add_argument("--driver", type=Path, action="append", default=[],
+                    help="runtime .a20drv package installed into /lib/drivers; "
+                         "repeatable (the kernel scans it from the distro root)")
+    ap.add_argument("--output", type=Path, default=None,
+                    help="output image (default: build/images/<world>-<arch>.img "
+                         "or directory with --format dir)")
+    ap.add_argument("--size-mb", type=int, default=512)
+    ap.add_argument("--format", choices=["ext4", "dir"], default="ext4")
+    ap.add_argument("--label", default="a20os-rootfs", help="ext4 volume label")
+    ap.add_argument("--usermode", action="store_true",
+                    help="no sudo; files stay owned by the caller")
+    ap.add_argument("--keys-dir", type=Path, default=None,
+                    help="apk trust directory (public keys)")
+    ap.add_argument("--allow-untrusted", action="store_true",
+                    help="accept unsigned packages/indexes")
+    ap.add_argument("--cache-dir", type=Path, default=None,
+                    help="apk package cache (default: build/cache/apk/<arch>)")
+    ap.add_argument("--ssh-pubkey", type=Path, action="append", default=[],
+                    help="public key file to install as root's "
+                         "/root/.ssh/authorized_keys; repeatable")
+    ap.add_argument("--keep-staging", action="store_true")
+    args = ap.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent.parent
+
+    if args.size_mb < 16:
+        die("--size-mb must be at least 16")
+
+    # Resolve this before fetching keys or creating the expensive apk staging
+    # tree, and use the absolute path through any fakeroot wrapper below.
+    mkfs_ext4 = resolve_mkfs_ext4() if args.format == "ext4" else None
+
+    # --- locate apk.static ---
+    apk = os.environ.get("APK_STATIC")
+    if not apk:
+        proc = subprocess.run([str(script_dir / "ensure-apk-static.sh")],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            die(f"ensure-apk-static failed:\n{proc.stderr}")
+        apk = proc.stdout.strip().splitlines()[-1]
+    if not Path(apk).exists():
+        die(f"apk binary not found: {apk}")
+
+    pkgs = read_world(args.world, args.arch)
+
+    # --- repository list ---
+    repos: list[str] = []          # passed to apk -X
+    remote_repos: list[str] = []   # written to /etc/apk/repositories
+    for repo in args.repo or [str(repo_root / "build" / "repo")]:
+        if "://" in repo:
+            repos.append(repo)
+            remote_repos.append(repo)
+        else:
+            # apk appends /<arch>/ to every repository path itself; we only
+            # verify the per-arch index exists before handing it over.
+            local = Path(repo) / args.arch
+            if not (local / "APKINDEX.tar.gz").exists():
+                if args.repo:
+                    die(f"local repository {local} has no APKINDEX.tar.gz; "
+                        f"build it with `make pkg-repo ARCH={args.arch}` first")
+                print(f"mkrootfs: note: default local repo {local} missing; "
+                      f"using remote repositories only", file=sys.stderr)
+                continue
+            repos.append(str(Path(repo).resolve()))
+    if not args.no_alpine and args.alpine_mirror:
+        base = f"{args.alpine_mirror.rstrip('/')}/{args.alpine_version}"
+        for section in ("main", "community"):
+            repos.append(f"{base}/{section}")
+            remote_repos.append(f"{base}/{section}")
+
+    sudo: list[str] = []
+    if os.geteuid() != 0 and not args.usermode:
+        sudo = [os.environ.get("SUDO", "sudo")]
+
+    keys_dir = args.keys_dir.resolve() if args.keys_dir else None
+    if not args.allow_untrusted and not args.no_alpine and args.alpine_mirror:
+        alpine_keys = repo_root / "build" / "cache" / "alpine-keys"
+        ensure_alpine_keys(args.alpine_mirror, alpine_keys)
+        combined = repo_root / "build" / "cache" / "apk-keys-combined"
+        shutil.rmtree(combined, ignore_errors=True)
+        combined.mkdir(parents=True)
+        for src_dir in (alpine_keys, keys_dir):
+            if src_dir is None or not Path(src_dir).is_dir():
+                continue
+            for pub in Path(src_dir).glob("*.rsa.pub"):
+                shutil.copy2(pub, combined / pub.name)
+        keys_dir = combined
+
+    output = args.output
+    if output is None:
+        stem = "-".join(p.stem for p in args.world)
+        suffix = "" if args.format == "dir" else ".img"
+        output = repo_root / "build" / "images" / f"{stem}-{args.arch}{suffix}"
+
+    root = staging_root(repo_root)
+    # The unpacked world stays within size_mb (check_fits_size_mb enforces
+    # that on content, but only after apk has already filled the disk), and
+    # the ext4 image spends about the same again when it lands on the same
+    # filesystem -- which is the default layout, build/tmp and build/images.
+    need_mb = args.size_mb
+    if args.format != "dir":
+        probe = output.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        try:
+            same_fs = os.stat(probe).st_dev == os.stat(root).st_dev
+        except OSError:
+            same_fs = True
+        if same_fs:
+            need_mb += args.size_mb + 128
+    check_staging_space(root, need_mb)
+
+    staging = Path(tempfile.mkdtemp(prefix="a20os-rootfs-", dir=root))
+    print(f"mkrootfs: staging at {staging}")
+    try:
+        cache_dir = args.cache_dir or repo_root / "build" / "cache" / "apk" / args.arch
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            apk, "--arch", args.arch,
+            "--root", str(staging),
+            "--initdb",
+            "--cache-dir", str(cache_dir), "--cache-packages",
+        ]
+        if args.usermode:
+            cmd.append("--usermode")
+        if args.allow_untrusted:
+            cmd += ["-U", "--allow-untrusted"]
+        if keys_dir:
+            cmd += ["--keys-dir", str(keys_dir)]
+        for repo in repos:
+            cmd += ["-X", repo]
+        cmd += ["add"] + pkgs
+        # apk --usermode applies the caller's umask to extracted files;
+        # pin it so dev images get sane 0755/0644 permissions.
+        preexec = (lambda: os.umask(0o022)) if args.usermode else None
+
+        for overlay in args.overlay:
+            check_overlay_elf_arch(overlay.resolve(), args.arch)
+
+        # Overlays must be visible to apk's maintainer scripts and must also
+        # win over packaged files, so they apply both before and after add.
+        for overlay in args.overlay:
+            apply_overlay(overlay, staging, sudo)
+        run(cmd, sudo, preexec_fn=preexec)
+
+        for overlay in args.overlay:
+            apply_overlay(overlay, staging, sudo, keep_account_files=True)
+
+        install_apk_keys(staging, keys_dir, sudo)
+
+        if args.driver:
+            install_drivers(staging, args.driver, sudo)
+
+        if args.ssh_pubkey:
+            keys = [pk.resolve() for pk in args.ssh_pubkey]
+            for pk in keys:
+                if not pk.is_file():
+                    die(f"--ssh-pubkey {pk} is not a readable file")
+            install_ssh_pubkeys(staging, keys, sudo)
+
+        if remote_repos:
+            apk_etc = staging / "etc" / "apk"
+            run(["mkdir", "-p", str(apk_etc)], sudo)
+            content = "".join(f"{r}\n" for r in remote_repos)
+            run(["sh", "-c",
+                 f"cat > {apk_etc / 'repositories'}"],
+                sudo, input=content.encode())
+
+        if args.format == "dir":
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists():
+                shutil.rmtree(output)
+            if sudo:
+                run(["chown", "-R", f"{os.getuid()}:{os.getgid()}",
+                     str(staging)], [])
+            shutil.move(str(staging), output)
+            print(f"mkrootfs: rootfs directory at {output}")
+            return
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp_img = output.with_suffix(output.suffix + ".tmp")
+        tmp_img.unlink(missing_ok=True)
+        check_fits_size_mb(staging, args.size_mb)
+        run(["truncate", "-s", f"{args.size_mb}M", str(tmp_img)], [])
+        mkfs = [mkfs_ext4, *EXT4_MKFS_ARGS[1:], "-L", args.label]
+        mkfs_sudo = sudo
+        if args.usermode:
+            # Staging files are owned by the caller; record them as root in
+            # the image.  root_owner fixes the inodes mkfs creates itself.
+            mkfs += ["-E", "root_owner=0:0"]
+        mkfs += ["-d", str(staging), str(tmp_img)]
+
+        if args.usermode:
+            if not shutil.which("fakeroot"):
+                mkfs_sudo = []
+                print("mkrootfs: warning: fakeroot not found; image files "
+                      "will be owned by the caller", file=sys.stderr)
+            else:
+                chowns = [
+                    f"chown -h {uid}:{gid} {shlex.quote(str(p))}"
+                    for p, uid, gid in
+                    collect_nonroot_ownership(staging, cache_dir)
+                ]
+                if chowns:
+                    # The chown must share mkfs' fakeroot session for the
+                    # faked ids to reach the image.
+                    mkfs = ["fakeroot", "sh", "-c", " && ".join(chowns + [
+                        "exec " + " ".join(shlex.quote(a) for a in mkfs)])]
+                else:
+                    mkfs = ["fakeroot"] + mkfs
+        run(mkfs, mkfs_sudo)
+        os.replace(tmp_img, output)
+        print(f"mkrootfs: wrote {output} ({args.size_mb} MiB, "
+              f"{len(pkgs)} packages)")
+    finally:
+        if staging.exists():
+            if args.keep_staging:
+                print(f"mkrootfs: staging kept at {staging}")
+            elif sudo:
+                subprocess.run(sudo + ["rm", "-rf", str(staging)])
+            else:
+                shutil.rmtree(staging, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

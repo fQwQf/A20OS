@@ -19,7 +19,7 @@ flat 配置目前支持只读 FAT32 和 fat32lite 的短文件名路径，文件
 ## 构建和复现
 
 ```sh
-python3 tools/check-native-sync.py --cpus 2 --timeout 180 \
+python3 tools/native/check-native-sync.py --cpus 2 --timeout 180 \
   --output .kernel-build/cluster/native-files-server-complete
 python3 tools/check-cluster-apps.py --timeout 600 \
   --log-dir .kernel-build/cluster/apps-native-files-complete
@@ -30,7 +30,7 @@ make CCACHE= ARCH=armv7m BOARD=stm32f103 ABI=native \
   CONFIG_KERNEL_PREEMPT=1 MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 \
   MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 NATIVE_FLAT_FILES=1 kernel-only
 # 使用已安装 Unicorn/pyelftools 的 Python；RTL backend 路径见 25/26。
-python3 tools/check-mcu-program.py <上一步 kernel.elf> \
+python3 tools/mcu/check-mcu-program.py <上一步 kernel.elf> \
   --backend <Va20_shared_top> --seed 22 --rounds 12000000 \
   --report .kernel-build/cluster/native-files-mcu-complete.json
 ```

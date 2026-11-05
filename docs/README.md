@@ -69,7 +69,7 @@
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
 - [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu 3D 图形加速栈的原理、内核接口与当前状态清单
 - [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂上、把像素送上屏的路线图（VIRTGPU UAPI、ABI 门禁、排序论证、非目标）
-- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套：`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_resource.py`（启动前资源门禁）
+- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套：`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/cli/a20_resource.py`（启动前资源门禁）
 - [graphics/real-hardware-gpu.md](graphics/real-hardware-gpu.md)：真机 GPU 的现实边界：scanout（2–4 周）与 3D 加速（不可行）是两件事，附实测驱动规模与逐 SoC 结论
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
@@ -146,7 +146,7 @@ CMSIS-RTOS2 是独立的第三方 source-level ABI，不属于 Native ABI；完�
 - [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)、[hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：RV64 命名实例、磁盘与控制台隔离、双 guest 管理及控制协议。
 - [hypervisor/00-design.md](hypervisor/00-design.md)、[hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)、[hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)、[hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：基础设计、历史阶段与后续平台目标，以当前使用指南和运行记录为状态依据。
 
-多架构运行入口为 `python3 tools/check_hyp_multiarch.py --arch ARCH --cpus 2 --build`，VMX 另用 Bochs runner。旧 `smoke-hyp-*` 门禁保留 RV64 完整 guest 场景覆盖；不能将多架构小载荷通过等同于这些完整 guest 场景全部通过。 Native 与 Linux 扩展 ABI 共享内核核心，但编号、handle 和权限包装各自独立；当前没有 A20 `/dev/kvm` 兼容层。
+多架构运行入口为 `python3 tools/qemu/check_hyp_multiarch.py --arch ARCH --cpus 2 --build`，VMX 另用 Bochs runner。旧 `smoke-hyp-*` 门禁保留 RV64 完整 guest 场景覆盖；不能将多架构小载荷通过等同于这些完整 guest 场景全部通过。 Native 与 Linux 扩展 ABI 共享内核核心，但编号、handle 和权限包装各自独立；当前没有 A20 `/dev/kvm` 兼容层。
 
 ## 当前契约与边界记录
 

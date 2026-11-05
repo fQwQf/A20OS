@@ -447,7 +447,7 @@ PATH=<arm-none-eabi toolchain>:$PATH \
 
 实际验证结果：`check-cluster-apps` 在 RV64/AArch64/x86_64 上通过，新增`service-death`、`partition`、`member-fail`、`recovered` 标记；真实`APP-WORK` 计数为 32/9/18，主动丢弃 6 个 START 回复（其中 2 个属于 owner 死亡场景；重试次数随宿主调度变化，检查器只要求至少一次）。`check-cluster-objects` 在同一三内核上通过`partition`、`service-death`、`recovered`。`check-cluster-unit` 通过。`check-object-directory-portability.py --kind apps` 的 x86_64、 AArch64、RISC-V64 实际执行与 x86_64 ASan/UBSan 通过，ARMv7-M/RV32 freestanding 编译通过（使用隔离解包在 `/tmp` 的 ARM 工具链，未改系统安装）。
 
-`make check-mcu-program-rtl` 的固件构建当前被[DELIVERY-06](../gaps/delivery.md) 阻塞：`tools/rust-kernel.mk` 在`ARCH=armv7m` 且 `CONFIG_FLAT_USER_MEMORY=1` 时没有 flat-policy Rust target。该门禁不是 cluster 断言失败，当前未将其记为通过；MCU 侧仍是指令/RTL 模型证据，不替代物理板。
+`make check-mcu-program-rtl` 的固件构建当前被[DELIVERY-06](../gaps/delivery.md) 阻塞：`tools/mk/rust-kernel.mk` 在`ARCH=armv7m` 且 `CONFIG_FLAT_USER_MEMORY=1` 时没有 flat-policy Rust target。该门禁不是 cluster 断言失败，当前未将其记为通过；MCU 侧仍是指令/RTL 模型证据，不替代物理板。
 
 ### 四节点负载契约
 

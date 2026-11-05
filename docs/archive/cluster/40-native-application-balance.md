@@ -38,9 +38,9 @@ for (;;) {
 旧有的显式亲和性迁移检查保留，发生在工作领取之前，不充当本项分摊证据。测试另外检查空范围、无效范围、UINT32_MAX 边界和耗尽后输出保持。完整流程继续覆盖嵌套线程、join、句柄身份、共享堆、futex 和退出后资源回收。
 
 ```sh
-python3 tools/check-native-sync.py --cpus 2 --timeout 120 \
+python3 tools/native/check-native-sync.py --cpus 2 --timeout 120 \
   --output .kernel-build/cluster/native-work-range-dual
-python3 tools/check-native-sync.py --cpus 1 --timeout 120 \
+python3 tools/native/check-native-sync.py --cpus 1 --timeout 120 \
   --output .kernel-build/cluster/native-work-range-single
 make CCACHE= PYTHON=<Unicorn/pyelftools Python> check-mcu-program-rtl
 python3 tools/check-cluster-apps.py --timeout 600 \

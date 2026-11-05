@@ -21,7 +21,7 @@ TUN 是由 `open("/dev/net/tun")` 和 `TUNSETIFF` 创建的内核服务，没有
 
 ## 回归
 
-`tools/net-tun-abi-probe.c` 编译成同一个静态 Linux ELF，在 Linux KVM 和 A20OS 运行： IPv4/IPv6 双向 UDP、64次 FIFO 回绕、IPv6 connected/lazy/unbound-connect 的实际线缆地址/端口、MTU/UP、持久化重连、全部协议槽持久化后重连、24次创建/关闭，以及只读 ifreq 的 EFAULT 清理。Linux 可能先输出 DAD/RS，探针按实际 UDP 报文匹配，不把第一帧必为测试数据作为假设；IPv6 bind 等待真实 DAD 就绪，避免偶发使用 link-local 来源探测跨网段服务。宿主不加载模块；测试为固定 Linux guest 显式安装匹配内核版本的 tun.ko，并在 manifest 记录其哈希。
+`tools/probes/net-tun-abi-probe.c` 编译成同一个静态 Linux ELF，在 Linux KVM 和 A20OS 运行： IPv4/IPv6 双向 UDP、64次 FIFO 回绕、IPv6 connected/lazy/unbound-connect 的实际线缆地址/端口、MTU/UP、持久化重连、全部协议槽持久化后重连、24次创建/关闭，以及只读 ifreq 的 EFAULT 清理。Linux 可能先输出 DAD/RS，探针按实际 UDP 报文匹配，不把第一帧必为测试数据作为假设；IPv6 bind 等待真实 DAD 就绪，避免偶发使用 link-local 来源探测跨网段服务。宿主不加载模块；测试为固定 Linux guest 显式安装匹配内核版本的 tun.ko，并在 manifest 记录其哈希。
 
 原始验证记录位于 `build/evidence/net-router-completion-20261029/`。TUN IPv6 探针还发现并修复旧 UDP 发送路径对物理域 IPv6 的直接拒绝；延迟绑定现在先在后端绑定，再发布前端地址/端口。该测试证明具体 ABI 路径，不代表已完成所有 IPv6 socket 选项。
 

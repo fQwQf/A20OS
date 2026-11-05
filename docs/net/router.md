@@ -41,7 +41,7 @@ ip -6 addr add fd42:20::1/64 dev en3
 ## 可复现验证
 
 ```sh
-python3 tools/test-net-router-kvm.py \
+python3 tools/net/tests/test-net-router-kvm.py \
   --baseline <网络基线manifest.json> --router-kernel <冻结router kernel.elf> \
   --binary <静态Linux net-microbench ELF> --out <新证据目录>
 ```
@@ -55,7 +55,7 @@ LAN 节点用两个地址模拟两个客户端，显式绑定同一 UDP 源端�
 - 源策略规则把192.168.10.3导向表100，经10.20.0.2网关到WAN的198.51.100.5/32；匹配源TCP回显成功，不匹配源192.168.10.2无法建立连接。
 - 四份pcap独立重算IPv4/TCP/UDP校验和；WAN捕获证明不存在匹配UDP/TCP的LAN源地址泄漏。
 
-`tools/net-microbench.c` 的 client 模式支持末尾可选的 `SOURCE_IP SOURCE_PORT`，默认调用方式保持不变。构建成同一个静态Linux ELF后用于各端点；源码和ELF哈希随证据保存。
+`tools/bench/net-microbench.c` 的 client 模式支持末尾可选的 `SOURCE_IP SOURCE_PORT`，默认调用方式保持不变。构建成同一个静态Linux ELF后用于各端点；源码和ELF哈希随证据保存。
 
 ## 当前 lwIP 分叉中的必要修正
 

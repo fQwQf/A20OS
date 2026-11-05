@@ -35,6 +35,9 @@ import difflib
 import re
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent / "cli"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "boards"))
+from pathlib import Path
 from typing import assert_never
 
 from a20_board import firmware_make_args, run_flash, run_package
@@ -186,7 +189,7 @@ def _check_runnable(inst: Instance, action: str) -> None:
     if inst.arch not in QEMU_RUNNABLE_ARCHES:
         raise A20Error(
             f"'{action}' has no generic QEMU path for {inst.arch}",
-            hint="armv7m runs through tools/stm32.mk ([stm32] qemu = true); "
+            hint="armv7m runs through tools/mk/stm32.mk ([stm32] qemu = true); "
                  "LoongArch32 and PPC64LE are retired; use a clean v0.18 checkout for historical reproduction")
 
 
@@ -213,7 +216,7 @@ def _gate_resources(inst, args, *, guest: bool = True) -> None:
               echo=_echo, guest=guest)
 def _gate_qemu(inst: Instance, action: str, *, check_image: bool = True,
                dry_run: bool = False) -> None:
-    """Block until the host can host this instance; see tools/a20_resource.gate_qemu.
+    """Block until the host can host this instance; see tools/cli/a20_resource.gate_qemu.
 
     `check_image=False` is for the callers whose make target runs `image-world`
     before QEMU: the bytes on disk now are not the bytes that get booted, so
@@ -360,7 +363,7 @@ def cmd_console(args: argparse.Namespace) -> int:
         inst = replace(inst, target=replace(inst.target, serial=args.serial))
     if inst.board == "esp32-c3" and not args.no_reset and not inst.target.reset:
         inst = replace(inst, target=replace(inst.target, reset=
-            "python3 tools/esp32c3.py reset --port " + shlex.quote(inst.target.serial or "auto")))
+            "python3 tools/boards/esp32c3.py reset --port " + shlex.quote(inst.target.serial or "auto")))
     if args.no_reset:
         inst = replace(inst, target=replace(inst.target, reset=None))
     auto_handoff = getattr(args, "auto_handoff", False)
@@ -845,7 +848,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             failed += 1
     drift = self_check(
         (REPO_ROOT / "Makefile").read_text(encoding="utf-8"),
-        (REPO_ROOT / "tools" / "targets-pkg.mk").read_text(encoding="utf-8"),
+        (REPO_ROOT / "tools" / "mk" / "targets-pkg.mk").read_text(encoding="utf-8"),
     )
     for line in drift:
         print(f"FAIL a20_resource: {line}")
@@ -1128,7 +1131,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Tab completion: `completion` prints the shell shim, `complete` answers
     # one completion query (hidden -- it is plumbing the shim calls).  Both
-    # are described in tools/a20_complete.
+    # are described in tools/cli/a20_complete.
     p_completion = sub.add_parser(
         "completion", help="print the shell completion script (bash)")
     p_completion.add_argument("shell", nargs="?", choices=("bash",), default="bash",
@@ -1281,8 +1284,9 @@ def _run() -> int:
         # `a20 list | head` closes the pipe early; that is not an error.
         try:
             sys.stdout.close()
-        finally:
-            return EXIT_OK
+        except OSError:
+            pass
+        return EXIT_OK
     except ConsoleError as e:
         return report(BoardUnreachable(str(e)))
     except MakeQueryError as e:

@@ -4,7 +4,7 @@
 # trimming: which sources a small-memory build profile curates, and which
 # architectures/boards each optional capability supports.  It exists because
 # these lists used to live in two places at once -- the Makefile for the build
-# and tools/a20_instance.py for instance validation -- and could only be kept
+# and tools/cli/a20_instance.py for instance validation -- and could only be kept
 # in agreement by hand.
 #
 # Two consumers, one file:

@@ -18,6 +18,6 @@ baud = 115200
 boot_wait = 0
 boot_timeout = "30s"
 console_check = ["A20 BL702 M-mode SRAM probe", "A20 BL702 PROBE READY"]
-# Factory UF2 USB upload is implemented by tools/m0sense_deploy_uf2.py.
+# Factory UF2 USB upload is implemented by tools/boards/m0sense_deploy_uf2.py.
 # USB-only acceptance uses the blue LED heartbeat; UART console is optional.
 # The JTAG SRAM loader remains available for boards without the UF2 bootloader.

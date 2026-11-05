@@ -209,7 +209,7 @@ generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Ea
 
 框架 API 现状：DMA 对象（coherent/aligned/sync）与地址 mask（`dma_set_mask`/`dma_addr_ok`/`dma_range_ok`）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、`random_reseed`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）与 virtio-rng（`virtio-rng.a20drv` → `/dev/hwrng`）即以模块形式实现并受 smoke 门禁覆盖。
 
-其余设备包：`tools/driver-modules.mk` 的每架构 `DRVMOD_MODULES` 是 generic 包的权威清单，不能从 `kernel/drvmod/examples/` 中存在某个包装文件推断所有架构都会部署它。PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。`tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS` 只表示 embedded 当前显式静态集合，不是 generic 模块清单或两种 profile 的能力并集。
+其余设备包：`tools/mk/driver-modules.mk` 的每架构 `DRVMOD_MODULES` 是 generic 包的权威清单，不能从 `kernel/drvmod/examples/` 中存在某个包装文件推断所有架构都会部署它。PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。`tools/mk/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS` 只表示 embedded 当前显式静态集合，不是 generic 模块清单或两种 profile 的能力并集。
 
 迁移顺序（每步都必须有等价回归证据）：
 

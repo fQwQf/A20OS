@@ -107,7 +107,7 @@ tools/a20 deploy pine-a64 --dry-run
 
 启动链为 A64 BootROM → U-Boot SPL（DDR 初始化）→ TF-A BL31 → U-Boot → A20OS。上游 `pine64_plus_defconfig` 同时包含 pine64 与 pine64-plus；SPL 依据 512 MiB RAM 自动选中非 plus 的配置。这个 defconfig 名字里的 plus 不代表要改用 plus 的 DTB。
 
-准备脚本 `tools/pine_a64.py prepare` 固定使用：
+准备脚本 `tools/boards/pine_a64.py prepare` 固定使用：
 
 | 组件 | 固定来源/参数 |
 | --- | --- |
@@ -118,7 +118,7 @@ tools/a20 deploy pine-a64 --dry-run
 
 准备过程不接受 A64+ 或 LTS 的 DTB 替代品；检查 SPL 的 `eGON.BT0` 标记和固件大小，并将编译器版本、源归档哈希及每个固件文件的 SHA256 记录在 manifest。Crust SCP 对这一阶段不是必需；挂起/恢复不在此次支持范围。源码、版本、参数与布局可重复执行；宿主工具版本和 FAT 时间戳仍可能影响最终镜像哈希，不把这个流程称作跨主机逐字节可复现的固件发行。
 
-不经 a20 的等价入口为 `python3 tools/pine_a64.py prepare`；可用`--cache`、`--work`、`--out`、`--cross-compile`、`--jobs` 自定义工作位置与工具链。
+不经 a20 的等价入口为 `python3 tools/boards/pine_a64.py prepare`；可用`--cache`、`--work`、`--out`、`--cross-compile`、`--jobs` 自定义工作位置与工具链。
 
 ## 3. 准备 microSD
 

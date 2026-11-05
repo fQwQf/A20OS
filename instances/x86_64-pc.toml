@@ -2,7 +2,7 @@
 # office boxes.  ARCH=x86_64 BOARD=x86_64-pc.
 #
 # grub-iso is the right packaging here even though GRUB is not on the board:
-# tools/mk_grub_iso.sh builds a rescue ISO whose grub.cfg uses `multiboot
+# tools/boot/mk_grub_iso.sh builds a rescue ISO whose grub.cfg uses `multiboot
 # /boot/kernel.elf`, and GRUB2's multiboot v1 module works whether it was
 # started by BIOS or by UEFI boot services.  That matters because most 2025
 # thin clients are UEFI-only with no CSM option.  Writing that ISO to a USB

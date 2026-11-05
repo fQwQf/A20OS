@@ -136,4 +136,4 @@ make smoke-kexec-svc-checkpoint   # rv64：checkpoint→kexec→restore，计数
 make test-ckpt-image              # Rust 校验与帧装配的宿主机单元测试
 ```
 
-smoke 断言：恢复前后 tick 计数器单调连续（`tools/ckpt_svc_verify.py`）、恢复方 pid 不同、两次启动均 `[SMP] 2/2`。跨架构上寄存器经语义化 `proc_debug_regs_t` 交换，镜像不可跨架构移植。
+smoke 断言：恢复前后 tick 计数器单调连续（`tools/qemu/ckpt_svc_verify.py`）、恢复方 pid 不同、两次启动均 `[SMP] 2/2`。跨架构上寄存器经语义化 `proc_debug_regs_t` 交换，镜像不可跨架构移植。

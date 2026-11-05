@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FAT32/ext4 image assembly that used to live in tools/targets-images.mk.
+"""FAT32/ext4 image assembly that used to live in tools/mk/targets-images.mk.
 
 Assembling a filesystem image is not compilation: it is dd, mkfs, and a long
 list of mcopy calls whose order and error handling were expressed in shell.  All

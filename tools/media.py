@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write boot images to a physical board's media (was tools/target-console.mk).
+"""Write boot images to a physical board's media (was tools/mk/target-console.mk).
 
 `dd` to a block node is the one irreversible command in the build system, so the
 guards are the substance of this file and the copy is an afterthought.  Each

@@ -15,10 +15,10 @@
 ## 可复现验收
 
 ```sh
-python3 tools/check-multi-qemu-kernel.py --workload linux \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux \
   --out .kernel-build/cluster/multi-qemu/linux-run
 
-python3 tools/check-multi-qemu-kernel.py --workload linux --mode smp \
+python3 tools/qemu/check-multi-qemu-kernel.py --workload linux --mode smp \
   --out .kernel-build/cluster/multi-qemu/linux-smp-run
 ```
 

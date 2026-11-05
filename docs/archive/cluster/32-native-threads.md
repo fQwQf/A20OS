@@ -35,7 +35,7 @@ Native 新建线程在发布前标记为可加入；只要同组还有等待者�
 
 ```sh
 make check-native-thread-admission
-python3 tools/check-native-sync.py --output .kernel-build/cluster/native-thread-sync
+python3 tools/native/check-native-sync.py --output .kernel-build/cluster/native-thread-sync
 make PYTHON=/path/to/venv/bin/python check-mcu-program-rtl
 ```
 

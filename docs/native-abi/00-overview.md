@@ -115,13 +115,13 @@ Native ABI syscall 编号按子系统分区：
 0x1000 - 0x1fff  experimental, not stable
 ```
 
-稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 175 个系统调用速查矩阵、跨架构寄存器陷入约定与 C 代码调用示例详见专门手册：[系统调用手册与调用指南](syscalls.md)（历史编号表亦保留在 [handle.md](03-handle.md) §6）。
+稳定 syscall 不允许随意改号。实验 syscall 只能在 `0x1000+` 范围内。完整的 178 个系统调用速查矩阵、跨架构寄存器陷入约定与 C 代码调用示例详见专门手册：[系统调用手册与调用指南](syscalls.md)（历史编号表亦保留在 [handle.md](03-handle.md) §6）。
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [syscalls.md](syscalls.md) | **系统调用速查与调用指南**：全量 175 个系统调用矩阵、跨架构陷入指令与调用代码示例 |
+| [syscalls.md](syscalls.md) | **系统调用速查与调用指南**：全量 178 个系统调用矩阵、跨架构陷入指令与调用代码示例 |
 | [types.md](01-types.md) | 基础类型定义、ABI 头约定、所有 syscall 参数结构体 |
 | [errors.md](02-errors.md) | 错误码定义、返回值约定、错误处理策略 |
 | [handle.md](03-handle.md) | Handle 生命周期状态机、handle table 规范、14 种对象类型映射 |
@@ -193,7 +193,7 @@ Native ABI 一旦稳定，需要遵守：
 
 ```text
 kernel/abi/native/syscall_table.c      syscall 分发表
-syscall_table.def                      syscall 编号宏定义（175 条）
+syscall_table.def                      syscall 编号宏定义（178 条）
 sys_core.c                             核心 syscall 实现
 sys_native_{handle,task,mm,fs,ipc,net,time,security,debug,system,sync,device,ext}.c  分区 syscall
 sys_native_debug.c                     Debug (0x0900) syscall（包装 proc_debug_*）
@@ -253,7 +253,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 当前登记 175 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
+Native ABI 当前登记 178 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
 
 `event_queue` 为 channel/timer/task 等对象提供统一等待模型，但 file/socket readiness 与 `event_watch_fs` 事件源尚未完整接入，不能视为已覆盖 epoll/signalfd/inotify 全语义。
 

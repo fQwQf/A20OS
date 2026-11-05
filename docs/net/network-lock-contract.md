@@ -34,7 +34,7 @@ TX(netif tx-frame guard) -> CT guard (released) -> driver send callback
 
 - **global shared-domain 分片 0**：ARP/ND6 cache、conntrack 表、UDP autobind 和 TCP ISS 使用 `NULL` key 的 shared guard，因此都落在同一分片。它们要么是真正的全局对象（ARP cache、conntrack 表），要么是没有对象可散列的单次编号生成器（autobind、ISS）。拆成每 lane 一份会改变语义，而不是提高并行度。热包在这些 guard 内只做有界查表/更新，不做分配、I/O 或阻塞。
 - **loopback**：回环交付仍在 control barrier 下排空（本地 fast path，不经过设备）。它不是外部数据面的一部分；把它移到每 lane 队列属于独立设计，不在 1.0 承诺内。
-- **e1000 / rtl8139 中断入口**：仍取完整 control barrier，而 virtio 已改走 ingress lock。这是驱动拥有的路径（`kernel/drivers/net/`），不在本包可改范围；已作为跨领域项报告给 drivers。virtio 是 1.0 的主要数据面，其 ingress 顺序由`tools/check_lwip_concurrency_wiring.py` 静态门禁保护。
+- **e1000 / rtl8139 中断入口**：仍取完整 control barrier，而 virtio 已改走 ingress lock。这是驱动拥有的路径（`kernel/drivers/net/`），不在本包可改范围；已作为跨领域项报告给 drivers。virtio 是 1.0 的主要数据面，其 ingress 顺序由`tools/net/check_lwip_concurrency_wiring.py` 静态门禁保护。
 
 运行时死锁/误用边界由以下 panic 强制，均由`make check-honesty-policy` 的 `lwip-concurrency-wiring` 静态门禁配套：
 

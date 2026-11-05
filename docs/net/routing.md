@@ -29,9 +29,9 @@ lwIP 路由 hook 查询这一 FIB；ARP 网关 hook 对同一源/目标查询并
 ## 验证
 
 ```sh
-sh tools/test-net-route-host.sh
-sh tools/test-socket-netlink-host.sh
-python3 tools/test-net-control-kvm.py --baseline <网络基线manifest.json> \
+sh tools/host-tests/test-net-route-host.sh
+sh tools/host-tests/test-socket-netlink-host.sh
+python3 tools/net/tests/test-net-control-kvm.py --baseline <网络基线manifest.json> \
   --kernel <冻结kernel.elf> --out <新的证据目录>
 ```
 
