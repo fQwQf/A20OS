@@ -1166,9 +1166,8 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(
     let pkt = &*pkt;
     let bytes = core::slice::from_raw_parts_mut(frame, len);
     let ip = pkt.ip_off as usize;
-    // Until the ingress datagram owner can reassemble before policy/NAT,
-    // never translate only fragment zero and leak untranslated tails. This
-    // check precedes tuple allocation, including first fragments with ports.
+    // Backends must reassemble before policy/NAT. Reject fragments that
+    // reach this transaction before allocating a tuple, including fragment zero.
     if *v.0.nat_count != 0 && ip != 0 && len >= ip + 8 && bytes[ip] >> 4 == 4 &&
         wire16(bytes, ip + 6) & 0x3fff != 0 { return -EOPNOTSUPP; }
     if pkt.proto == PROTO_ICMP && pkt.icmp_off == 0 {
@@ -1192,7 +1191,23 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(
         add_stat(ptr::addr_of_mut!((*st).packets), 1);
         add_stat(ptr::addr_of_mut!((*st).bytes), len as u64);
     }
-    if let Some((idx, reverse)) = ct_find(&v, pkt.src_addr, pkt.dst_addr, sport, dport, pkt.proto) {
+    let flow = ct_find(&v, pkt.src_addr, pkt.dst_addr, sport, dport, pkt.proto).or_else(|| {
+        if dir != DIR_OUT {
+            return None;
+        }
+        // After ingress DNAT, the forwarded tuple is the inverse of the
+        // reserved reply tuple. It still belongs to the same binding.
+        let (reply_sport, reply_dport) = if echo { (sport, dport) } else { (dport, sport) };
+        let reply = (pkt.dst_addr, pkt.src_addr, reply_sport, reply_dport);
+        let (idx, reverse) = ct_find(&v, reply.0, reply.1, reply.2, reply.3, pkt.proto)?;
+        let entry = v.entry(idx);
+        if reverse && entry.nat == NAT_DNAT && ct_reply_tuple(&entry) == reply {
+            Some((idx, false))
+        } else {
+            None
+        }
+    });
+    if let Some((idx, reverse)) = flow {
         let mut e = v.entry(idx);
         // A forwarded packet is first tracked on ingress. Apply SNAT only on
         // its later egress and reindex the newly reserved reply tuple atomically.

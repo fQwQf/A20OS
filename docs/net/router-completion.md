@@ -12,7 +12,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | 项目 | 所需证据 | 状态 |
 |---|---|---|
 | 64 位非嵌入式实例统一后端 | 实例检查、四架构真实 BSD 内核编译及 QEMU 网络收发 | 基础迁移完成 |
-| 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | 待完成 |
+| BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 待完成 |
 | PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | 待完成 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | 待完成 |
@@ -74,3 +74,19 @@ LoongArch64 追加 `UART_CMDLINE=y`。测试命令为
   `inputs.json` 的源码哈希已复核。
 - `tools/a20 test smoke-arm32` 与 `tools/a20 test smoke-riscv32`：lwIP
   构建、启动检查与正常关机通过；这两项不是 32 位完整网络性能验收。
+
+## IPv4 分片验证
+
+BSD 网卡入口先校验和重组，出口在重新分片前处理 NAT。重叠及冲突终点
+丢弃整组，队列按入口和 FIB 隔离，等待分片不占用 NIC RX token。
+出口沿用入站 DNAT 的连接绑定，避免为已改写的正向元组重复建表。
+
+- `fragment-wire-04/manifest.json` 记录双网口 x86_64 回归的 10 项通过结果。
+  正反向 UDP 报文均超过 MTU，测试验证内容、地址、端口、TTL、IPv4/UDP
+  校验和和重分片，并覆盖过滤、重叠、配额、超时、跨接口隔离和故障后转发。
+  同目录的 `link0.pcap`、`link1.pcap` 是两侧实际报文。
+- `fragment-{x86_64,aarch64,riscv64,loongarch64}-final` 记录四个架构的
+  TCP/UDP/IPv6 回环、并发外部收发和关机回归。
+- `fragment-nat-host-03` 覆盖 TCP DNAT 正向出口复用，默认、嵌入式和
+  高时钟三个生产状态机配置均通过。独立过滤回归为 `fragment-filter-host-02`。
+- 实现边界和命令见 [NAT 说明](./nat.md)。lwIP/native 保持分片保护策略。

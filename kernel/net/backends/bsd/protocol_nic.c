@@ -9,6 +9,7 @@
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <sys/eventhandler.h>
+#include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/sockio.h>
 #include <sys/socketvar.h>
@@ -17,12 +18,15 @@
 #include <net/if_var.h>
 #include <net/if_llatbl.h>
 #include <net/ethernet.h>
+#include <net/pfil.h>
 #include <net/route.h>
 #include <net/route/route_ctl.h>
 #include <netinet/in.h>
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
+#include <netinet/ip.h>
+#include <machine/in_cksum.h>
 #include <netinet/ip_var.h>
 #include <netinet6/ip6_var.h>
 #include <net/vnet.h>
@@ -55,6 +59,8 @@ extern int port_host_nic_send(void *context, const void *frame, int length);
 extern void port_host_nic_poll(void *context);
 extern void port_host_nic_token_freed(void *context);
 /* A20OS policy bridge; resolves to the non-isolated common object. */
+extern void a20_bsd_capture_input(const void *frame, size_t len, int ifindex);
+extern int a20_bsd_netfilter_busy(void);
 extern int a20_bsd_netfilter_input(void *frame, size_t len, int ifindex);
 extern int a20_bsd_netfilter_output(void *frame, size_t len, int ifindex);
 /* Mirror of netfilter_action_t: 0 accept, 1 drop. */
@@ -67,6 +73,7 @@ typedef struct nic_token {
 } nic_token_t;
 
 struct ff_dpdk_if_context {
+    struct ff_dpdk_if_context *next;
     void *softc;
     void *ifp;
     int port_id;
@@ -76,6 +83,134 @@ struct ff_dpdk_if_context {
     uint8_t tx_frame[NIC_FRAME_BYTES];
     a20_bsd_nic_stats_t stats;
 };
+
+static struct ff_dpdk_if_context *interfaces;
+
+static struct ff_dpdk_if_context *nic_for_ifp(const struct ifnet *ifp)
+{
+    for (struct ff_dpdk_if_context *ctx = interfaces; ctx; ctx = ctx->next)
+        if (ctx->ifp == ifp)
+            return ctx;
+    return NULL;
+}
+
+/* Common policy operates on writable Ethernet frames. L2 capture already
+ * happened on RX, so only the EtherType is needed here. */
+static struct mbuf *filter_ipv4(struct mbuf *m, int port_id, bool output)
+{
+    if (!a20_bsd_netfilter_busy())
+        return m;
+
+    m = m_unshare(m, M_NOWAIT);
+    if (!m)
+        return NULL;
+
+    /* NAT updates transport checksums incrementally. Materialize a delayed
+     * checksum first, while the original pseudo-header is still present. */
+    if (output && (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA)) {
+        in_delayed_cksum(m);
+        m->m_pkthdr.csum_flags &= ~CSUM_DELAY_DATA;
+    }
+
+    uint8_t small_frame[NIC_FRAME_BYTES];
+    int length = m->m_pkthdr.len;
+    if (length < sizeof(struct ip) || length > IP_MAXPACKET) {
+        m_freem(m);
+        return NULL;
+    }
+    size_t frame_len = ETHER_HDR_LEN + (size_t)length;
+    uint8_t *frame = small_frame;
+    if (frame_len > sizeof(small_frame))
+        frame = malloc(frame_len, M_TEMP, M_NOWAIT);
+    if (!frame) {
+        m_freem(m);
+        return NULL;
+    }
+
+    memset(frame, 0, ETHER_HDR_LEN);
+    frame[12] = ETHERTYPE_IP >> 8;
+    frame[13] = ETHERTYPE_IP & 0xff;
+    m_copydata(m, 0, length, (char *)frame + ETHER_HDR_LEN);
+    int verdict = output ? a20_bsd_netfilter_output(frame, frame_len, port_id)
+                         : a20_bsd_netfilter_input(frame, frame_len, port_id);
+    if (verdict != BSD_NETFILTER_DROP)
+        m_copyback(m, 0, length, (const char *)frame + ETHER_HDR_LEN);
+    if (frame != small_frame)
+        free(frame, M_TEMP);
+    if (verdict == BSD_NETFILTER_DROP) {
+        m_freem(m);
+        return NULL;
+    }
+    return m;
+}
+
+struct mbuf *port_ipv4_input(struct mbuf *m)
+{
+    struct ff_dpdk_if_context *ctx = nic_for_ifp(m->m_pkthdr.rcvif);
+    if (!ctx)
+        return m;
+
+    struct ip *ip = mtod(m, struct ip *);
+    if (ip->ip_off & htons(IP_MF | IP_OFFMASK)) {
+        /* A long-lived fragment must not pin one of the 32 NIC RX tokens.
+         * m_dup copies the data to owned BSD storage and preserves metadata. */
+        struct mbuf *owned = m_dup(m, M_NOWAIT);
+        m_freem(m);
+        if (!owned) {
+            ctx->stats.rx_drops++;
+            return NULL;
+        }
+        m = ip_reass(owned);
+        if (!m)
+            return NULL;
+        ip = mtod(m, struct ip *);
+        ip->ip_off = 0;
+        ip->ip_sum = 0;
+        ip->ip_sum = in_cksum(m, ip->ip_hl << 2);
+        m->m_pkthdr.csum_flags = 0;
+    }
+    m = filter_ipv4(m, ctx->port_id, false);
+    if (!m)
+        ctx->stats.rx_drops++;
+    return m;
+}
+
+static pfil_return_t filter_ipv4_output(pfil_packet_t packet, struct ifnet *ifp,
+                                       int flags, void *ruleset, struct inpcb *inp)
+{
+    (void)flags;
+    (void)ruleset;
+    (void)inp;
+    struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
+    if (!ctx)
+        return PFIL_PASS;
+    *packet.m = filter_ipv4(*packet.m, ctx->port_id, true);
+    if (*packet.m)
+        return PFIL_PASS;
+    /* The NIC path reported a policy drop as successful consumption. */
+    ctx->stats.tx_drops++;
+    return PFIL_CONSUMED;
+}
+
+void port_ipv4_filter_init(pfil_head_t head)
+{
+    struct pfil_hook_args hook_args = {
+        .pa_version = PFIL_VERSION,
+        .pa_flags = PFIL_OUT,
+        .pa_type = PFIL_TYPE_IP4,
+        .pa_func = filter_ipv4_output,
+        .pa_modname = "a20",
+        .pa_rulname = "ipv4",
+    };
+    struct pfil_link_args link_args = {
+        .pa_version = PFIL_VERSION,
+        .pa_flags = PFIL_OUT | PFIL_HEADPTR | PFIL_HOOKPTR,
+        .pa_head = head,
+        .pa_hook = pfil_add_hook(&hook_args),
+    };
+    if (!head || !link_args.pa_hook || pfil_link(&link_args))
+        panic("unable to install A20 IPv4 egress filter");
+}
 
 static void token_return(nic_token_t *token, int protocol_released)
 {
@@ -117,12 +252,19 @@ struct ff_dpdk_if_context *ff_dpdk_register_if(void *sc, void *ifp,
         ff_free(ctx);
         return NULL;
     }
+    ctx->next = interfaces;
+    interfaces = ctx;
     return ctx;
 }
 
 void ff_dpdk_deregister_if(struct ff_dpdk_if_context *ctx)
 {
     if (!ctx) return;
+    struct ff_dpdk_if_context **entry = &interfaces;
+    while (*entry && *entry != ctx)
+        entry = &(*entry)->next;
+    if (*entry)
+        *entry = ctx->next;
     port_host_nic_unbind(ctx);
     /* A live detach must first drain protocol-owned RX mbufs. Until such a
      * teardown exists, retain the storage rather than causing token UAF. */
@@ -149,13 +291,6 @@ int ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m, int total)
     int result = 0;
     if (unsupported || ff_mbuf_copydata(m, ctx->tx_frame, 0, total) < 0) {
         result = EOPNOTSUPP;
-    } else if (a20_bsd_netfilter_output(ctx->tx_frame, (size_t)total,
-                                        ctx->port_id) == BSD_NETFILTER_DROP) {
-        /* Policy drop is a successful consumption, not a driver error. */
-        result = 0;
-        ctx->stats.tx_drops++;
-        ff_mbuf_free(m);
-        return result;
     } else if (port_host_nic_send(ctx, ctx->tx_frame, total) < 0) {
         result = ENOBUFS;
     } else {
@@ -213,12 +348,7 @@ void port_nic_progress(void *context, unsigned budget)
             token_return(token, 0);
             continue;
         }
-        if (a20_bsd_netfilter_input(token->frame, (size_t)length,
-                                    ctx->port_id) == BSD_NETFILTER_DROP) {
-            ctx->stats.rx_drops++;
-            token_return(token, 0);
-            continue;
-        }
+        a20_bsd_capture_input(token->frame, (size_t)length, ctx->port_id);
         void *m = ff_mbuf_gethdr(token, (uint16_t)length, token->frame,
                                  (uint16_t)length, 0);
         if (!m) {

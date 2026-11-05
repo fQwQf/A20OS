@@ -8,7 +8,7 @@ git submodule update --init --depth 1 kernel/external/f-stack
 
 BSD/F-Stack 是 **64 位非嵌入式实例**的默认后端，支持 x86_64、AArch64、RV64 和 LoongArch64。32 位普通实例、NOMMU 和嵌入式板卡保留 lwIP，MCU 默认 none。静态驱动部署不改变这个用途划分。BSD 构建不链接 lwIP，也不使用宿主 socket 代替内核协议栈。
 
-运行路径使用单 BSD 执行器、外部 token/`ff_veth` 数据面和公共 Linux socket 接口。现有代码已接入多 NIC、TUN、router 角色、IPv4 配置与路由事务、TCP/UDP、raw socket、本地 IPv6、IPv6 地址事务及 A20 netfilter/NAT 桥。完整软路由验收还需要分片 NAT、连接容量、PPPoE、IPv6 前缀委派、策略路由、服务恢复和长时间负载测试。具体进度见 [补全记录](../../../../docs/net/router-completion.md)，接口见 [网络后端接口契约](../../../../docs/net/backend-interface.md)。
+运行路径使用单 BSD 执行器、外部 token/`ff_veth` 数据面和公共 Linux socket 接口。现有代码已接入多 NIC、TUN、router 角色、IPv4 配置与路由事务、TCP/UDP、raw socket、本地 IPv6、IPv6 地址事务及 A20 netfilter/NAT 桥。IPv4 网卡路径已验证分片 NAT。完整软路由验收还需要连接容量、PPPoE、IPv6 前缀委派、策略路由、服务恢复和长时间负载测试。具体进度见 [补全记录](../../../../docs/net/router-completion.md)，接口见 [网络后端接口契约](../../../../docs/net/backend-interface.md)。
 
 `port-sources.toml` 列出真实 BSD 对象。`tools/probes/probe-bsd-core.py --arch <架构> --out <新目录>` 生成私有头文件、编译并部分链接，同时保留源码哈希、命令、告警、未解析符号与 ELF 检查结果。普通 BSD 构建自动执行此探测并链接隔离对象。
 
