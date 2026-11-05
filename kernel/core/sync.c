@@ -932,14 +932,18 @@ void completion_init(completion_t *c) {
 void complete(completion_t *c) {
     if (!c)
         return;
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&c->lock);
 #ifdef CONFIG_COMPLETION_RUST
     a20_completion_state_add_rust(&c->done);
 #else
     c->done++;
 #endif
+    /* The waiter may release a stack completion as soon as it consumes done. */
+    (void)wait_queue_collect_one(&c->waiters, 0, PROC_WAKE_EVENT, &wake_q);
     spin_unlock_irqrestore(&c->lock, flags);
-    wait_queue_wake_one(&c->waiters, 0, PROC_WAKE_EVENT);
+    proc_wake_q_flush(&wake_q);
 }
 
 void complete_all(completion_t *c) {
