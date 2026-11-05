@@ -143,7 +143,8 @@ static mut RSS:usize=0;
 #[no_mangle] unsafe extern "C" fn mock_snapshot(_p:*mut c_void,_c:*mut c_void,_v:usize,_n:*mut c_void,
                                                    out:*mut AnonBatchPage,count:usize,_shared:i32)->i32 {
     unsafe { SNAPSHOTS+=1; if SNAPSHOT_RESULT!=1 { return SNAPSHOT_RESULT; }
-        PINS=if SPARSE!=0 {count-1} else {count}; for i in 0..count {
+        PINS=if SPARSE==2 {0} else if SPARSE!=0 {count-1} else {count}; for i in 0..count {
+            if SPARSE==2 { *out.add(i)=AnonBatchPage::default(); continue; }
             if SPARSE!=0 && i==0 { *out.add(i)=AnonBatchPage::default(); continue; }
             let cache=i%3==0;
             *out.add(i)=AnonBatchPage{pfn:(i+1) as u32,
@@ -187,6 +188,9 @@ fn main() { unsafe {
     reset(); SPARSE=1;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),1);
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,15,1,15));
+    reset(); SPARSE=2; MAP_RESULT=ENOMEM;
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),1);
+    assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,0,0,0,0));
     reset(); MAP_RESULT=ENOMEM;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),ENOMEM);
     assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,10,6,0,1,0));

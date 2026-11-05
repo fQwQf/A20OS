@@ -319,6 +319,30 @@ int a20_cow_map_child_anon_batch(
 #endif
 }
 
+#if defined(ARCH_HAS_PGTABLE_OPS)
+/* Called with the source node locked and parent->lock holding VMA policy
+ * stable. A canonical cache-owned private leaf can be recovered through the
+ * child's retained file mapping. A private copy made writable and later
+ * mprotected read-only has no cache owner and must still be inherited. */
+static int cow_file_leaf_refaultable(const mm_seg_t *vma, pt_meta_t *meta,
+                                     int index, int level, pte_t source)
+{
+    if (!vma || level != 0 || !meta || !vma->file || !vma->file_vnode ||
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_VMO | VM_PFNMAP)) != VM_FILE ||
+        !(source & PTE_V) || !arch_pte_is_leaf(source) || (source & PTE_W) ||
+        MM_ST_GET_CLASS(meta->cls[index]) != MM_ST_FILE_PRIVATE ||
+        (meta->safe[index >> 3] & MM_SAFE_MASK) || !meta->cache_owner ||
+        arch_fork_requires_private_copy())
+        return 0;
+#if ARCH_INSN_FAULT_UNRECOVERABLE
+    if (source & PTE_X)
+        return 0;
+#endif
+    page_cache_page_t *owner = meta->cache_owner[index];
+    return owner && page_cache_pfn(owner) == phys_to_pfn(arch_pte_addr(source));
+}
+#endif
+
 /* MM_FORK_SNAPSHOT_PIN: snapshot and pin the source leaf under the parent's
  * node lock.  The lock is RELEASED by a20_cow_share_unlock() on every success
  * path; returning 0 leaves no lock held.  Pinning and snapshotting are one step
@@ -365,6 +389,11 @@ static int a20_cow_share_snapshot_from_slot(
     uint8_t cls = mm_fork_page_class(stab, level, va, vma);
     page_cache_page_t *pcp = NULL;
 #if defined(ARCH_HAS_PGTABLE_OPS)
+    if (stab && cow_file_leaf_refaultable(vma, mm_pt_meta(stab),
+                                         arch_pt_vpn(va, level), level, source)) {
+        mm_pt_node_unlock(stab);
+        return 0;
+    }
     if (is_file && stab) {
         pcp = mm_pt_cache_peek(stab, arch_pt_vpn(va, level));
         if (pcp && page_cache_pfn(pcp) == pfn)
@@ -627,6 +656,8 @@ int a20_cow_share_anon_batch_snapshot(
             mm_pt_node_unlock(node);
             return 0;
         }
+        if (!shared && cow_file_leaf_refaultable(vma, node_meta, index, 0, source))
+            continue;
         pfns[i] = pfn;
         out[i].pfn = pfn;
         out[i].class = cls;
@@ -657,6 +688,8 @@ int a20_cow_share_anon_batch_snapshot(
     }
     frame_get_many(frame_pfns, frame_count);
     for (size_t i = 0; i < nr; i++) {
+        if (!out[i].class)
+            continue;
         pte_t source = *slots[i];
         if (!shared && (source & (PTE_W | PTE_COW))) {
             struct a20_cow_shared_snapshot snap = {0};

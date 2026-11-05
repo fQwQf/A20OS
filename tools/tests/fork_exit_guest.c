@@ -60,6 +60,105 @@ static void high_fd_inheritance(void)
     puts("FORK_EXIT_PROBE: fd boundaries and fork ownership PASS");
 }
 
+static void check_file_maps(volatile unsigned char *clean,
+                            volatile unsigned char *modified)
+{
+    for (size_t i = 0; i < 32; i++) {
+        unsigned char original = (unsigned char)(i + 1);
+        unsigned char changed = i < 16 && i % 2 == 0 ? 0xa5 : original;
+        if (clean[i * 4096] != original || clean[i * 4096 + 17] != original ||
+            modified[i * 4096] != original || modified[i * 4096 + 17] != changed)
+            _exit(20);
+    }
+    if (mprotect((void *)modified, 32 * 4096, PROT_READ | PROT_WRITE))
+        _exit(21);
+    modified[0] = 0xee;
+    if (clean[0] != 1) _exit(22);
+}
+
+static void file_mapping_inheritance(void)
+{
+    char name[] = "/tmp/fork-exit-file-XXXXXX";
+    int fd = mkstemp(name);
+    if (fd < 0) fail("file create");
+    unsigned char page[4096];
+    for (unsigned i = 0; i < 33; i++) {
+        memset(page, i, sizeof(page));
+        if (write(fd, page, sizeof(page)) != sizeof(page)) fail("file fill");
+    }
+    const size_t len = 32 * 4096;
+    volatile unsigned char *clean = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 4096);
+    volatile unsigned char *modified = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 4096);
+    if (clean == MAP_FAILED || modified == MAP_FAILED) fail("file mmap");
+    for (unsigned i = 0; i < 32; i++)
+        if (clean[i * 4096] != i + 1 || modified[i * 4096] != i + 1)
+            fail("file initial read");
+    if (mprotect((void *)modified, 16 * 4096, PROT_READ | PROT_WRITE))
+        fail("file writable protection");
+    for (unsigned i = 0; i < 16; i += 2) modified[i * 4096 + 17] = 0xa5;
+    if (mprotect((void *)modified, len, PROT_READ)) fail("file read-only protection");
+    if (close(fd) || unlink(name)) fail("file detach names");
+    for (unsigned i = 0; i < 8; i++) {
+        pid_t child = fork();
+        if (!child) { check_file_maps(clean, modified); _exit(0); }
+        wait_ok(child);
+        if (modified[0] != 1) fail("private child COW");
+    }
+    int gate[2];
+    if (pipe(gate)) fail("file gate");
+    pid_t child = fork();
+    if (!child) {
+        close(gate[1]);
+        if (read(gate[0], page, 1) != 1) _exit(23);
+        check_file_maps(clean, modified);
+        _exit(0);
+    }
+    if (child < 0) fail("file fork");
+    close(gate[0]);
+    if (munmap((void *)clean, len) || munmap((void *)modified, len))
+        fail("parent file unmap");
+    if (write(gate[1], "x", 1) != 1) fail("file gate release");
+    close(gate[1]); wait_ok(child);
+    puts("FORK_EXIT_PROBE: clean file refault, modified read-only COW, orphaned backing PASS");
+}
+
+static void targeted_waits(void)
+{
+    enum { CHILDREN = 32 };
+    pid_t children[CHILDREN];
+    int gate[2], status;
+    if (pipe(gate)) fail("wait gate");
+    for (int i = 0; i < CHILDREN; i++) {
+        children[i] = fork();
+        if (!children[i]) {
+            char byte;
+            close(gate[1]);
+            if (read(gate[0], &byte, 1) != 1) _exit(100);
+            _exit(i);
+        }
+        if (children[i] < 0) fail("wait fork");
+    }
+    close(gate[0]);
+    if (waitpid(children[0], &status, WNOHANG) != 0) fail("wait WNOHANG");
+    char release[CHILDREN]; memset(release, 1, sizeof(release));
+    if (write(gate[1], release, sizeof(release)) != sizeof(release))
+        fail("wait release");
+    close(gate[1]);
+    siginfo_t info;
+    for (int i = 0; i < 2; i++) {
+        if (waitid(P_PID, children[CHILDREN - 1], &info, WEXITED | WNOWAIT) ||
+            info.si_pid != children[CHILDREN - 1] || info.si_status != CHILDREN - 1)
+            fail("targeted WNOWAIT");
+    }
+    for (int i = CHILDREN - 1; i >= 0; i--)
+        if (waitpid(children[i], &status, 0) != children[i] ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != i)
+            fail("targeted reverse wait");
+    if (waitpid(-1, &status, WNOHANG) != -1 || errno != ECHILD)
+        fail("wait final ECHILD");
+    puts("FORK_EXIT_PROBE: 32 concurrent children, WNOHANG, WNOWAIT, reverse PID waits PASS");
+}
+
 int main(void)
 {
     volatile unsigned char *shared = mmap(NULL, SZ, PROT_READ | PROT_WRITE,
@@ -114,6 +213,8 @@ int main(void)
     if (munmap((void *)shared, sparse))
         fail("sparse munmap");
     high_fd_inheritance();
+    file_mapping_inheritance();
+    targeted_waits();
     puts("SHARED_EXIT_PROBE: PASS rounds=128 shared_visibility=1 mprotect=1 "
          "frame_reuse=1 untouched_backing=1");
     return 0;
