@@ -73,6 +73,7 @@ def build(args, root):
         'rebind-timer': 20,
         'subnet6': [{
             'id': 1, 'interface': 'eth0', 'subnet': '2001:db8:20::/64',
+            'pools': [{'pool': '2001:db8:20::10-2001:db8:20::1f'}],
             'pd-pools': [{'prefix': '2001:db8:400::', 'prefix-len': 48, 'delegated-len': 56}],
         }],
         'loggers': [{'name': 'kea-dhcp6', 'output_options': [{'output': 'stdout'}],

@@ -15,6 +15,19 @@
 extern int port_last_error(void);
 extern void ff_hardclock(void);
 
+#define A20_LINUX_AF_INET6 10
+
+/* ff_recvmsg has a BSD prototype but consumes Linux's msghdr layout. */
+struct port_linux_msghdr {
+    void *msg_name;
+    socklen_t msg_namelen;
+    struct iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+};
+
 /* F-Stack's public wrapper accepts Linux socket constants but reports BSD
  * errno. Keep the conversion here, before values reach A20OS's Linux ABI. */
 static int linux_errno(int error)
@@ -188,7 +201,7 @@ int port_socket_enable_pktinfo(int fd, int domain)
                                           &one, sizeof(one)));
         return rc;
     }
-    if (domain == AF_INET6) {
+    if (domain == A20_LINUX_AF_INET6) {
         rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO,
                                           &one, sizeof(one)));
         if (rc < 0) return rc;
@@ -199,6 +212,20 @@ int port_socket_enable_pktinfo(int fd, int domain)
                                             &one, sizeof(one)));
     }
     return -EAFNOSUPPORT;
+}
+
+int port_socket_bind_if6(int fd, unsigned ifindex)
+{
+    if (ifindex) {
+        int one = 1;
+        int rc = result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO,
+                                              &one, sizeof(one)));
+        if (rc < 0)
+            return rc;
+    }
+    struct in6_pktinfo info = {.ipi6_ifindex = ifindex};
+    return result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_PKTINFO,
+                                        &info, sizeof(info)));
 }
 
 int port_socket_multicast(int fd, uint32_t group, uint32_t ifaddr, int join)
@@ -217,8 +244,8 @@ int port_socket_recv_meta(int fd, void *buffer, size_t length, int flags,
                           a20_bsd_pktinfo_t *info)
 {
     struct iovec iov = { .iov_base = buffer, .iov_len = length };
-    struct msghdr msg;
-    uint8_t control[192];
+    struct port_linux_msghdr msg;
+    _Alignas(uint64_t) uint8_t control[192];
     memset(&msg, 0, sizeof(msg));
     memset(control, 0, sizeof(control));
     if (info) memset(info, 0, sizeof(*info));
@@ -228,7 +255,7 @@ int port_socket_recv_meta(int fd, void *buffer, size_t length, int flags,
     msg.msg_iovlen = 1;
     msg.msg_control = control;
     msg.msg_controllen = sizeof(control);
-    ssize_t received = ff_recvmsg(fd, &msg, flags);
+    ssize_t received = ff_recvmsg(fd, (struct msghdr *)(void *)&msg, flags);
     if (address_length) *address_length = msg.msg_namelen;
     if (received < 0) return -linux_errno(port_last_error());
 
@@ -276,7 +303,7 @@ int port_socket_recv_meta(int fd, void *buffer, size_t length, int flags,
                         (struct in6_pktinfo *)data;
                     memcpy(info->address, &pi->ipi6_addr, 16);
                     info->ifindex = pi->ipi6_ifindex;
-                    info->family = AF_INET6;
+                    info->family = A20_LINUX_AF_INET6;
                     info->valid = 1;
                 } else if (c->cmsg_type == IPV6_HOPLIMIT && payload >= 4) {
                     info->hoplimit = (uint8_t)*(int *)data;

@@ -70,6 +70,13 @@ static int nic_slot_for_index(unsigned index)
     return -1;
 }
 
+static unsigned public_index_for_slot(int slot)
+{
+    if (slot < 0) return 2;
+    if (slot < BSD_MAX_NICS) return nic_index_for_slot(slot);
+    return A20_BSD_TUN_BASE + (unsigned)slot - BSD_MAX_NICS;
+}
+
 static void nic_name_for_slot(int slot, char *out, size_t size)
 {
     snprintf(out, size, "en%d", slot == 0 ? 2 : slot + 2);
@@ -292,6 +299,26 @@ static int attach_cleanup_run(void *argument)
     uint8_t zero[4] = {0, 0, 0, 0};
     return a20_bsd_port_nic_set_ipv4(job->context, zero, zero, NULL,
                                      job->address, job->mask, NULL);
+}
+
+int a20_bsd_ifindex_to_bsd(unsigned index)
+{
+    if (index == 2)
+        return a20_bsd_port_ifindex_from_slot(-1);
+    if (a20_bsd_tun_is_index(index))
+        return a20_bsd_port_ifindex_from_slot(BSD_MAX_NICS + index - A20_BSD_TUN_BASE);
+    int slot = nic_slot_for_index(index);
+    if (slot < 0 || slot >= BSD_MAX_NICS || !nics[slot].bsd_ifindex)
+        return -ENODEV;
+    return (int)nics[slot].bsd_ifindex;
+}
+
+int a20_bsd_ifindex_to_public(unsigned index)
+{
+    int slot;
+    if (a20_bsd_port_ifindex_to_slot(index, &slot) < 0)
+        return -ENODEV;
+    return public_index_for_slot(slot);
 }
 
 static int attach_one_nic(int slot, const a20_net_config_t *config,
@@ -976,16 +1003,8 @@ static int addr6_snapshot_run(void *argument)
 {
     addr6_snapshot_job_t *job = argument;
     int count = a20_bsd_port_addr6_snapshot(job->out, job->maximum);
-    for (int i = 0; i < count; ++i) {
-        nl_addr6_out_t *entry = &job->out[i];
-        if (entry->index == 0) {
-            entry->index = 2;
-        } else {
-            unsigned slot = entry->index - 1;
-            entry->index = slot < BSD_MAX_NICS ? nic_index_for_slot(slot) :
-                           A20_BSD_TUN_BASE + slot - BSD_MAX_NICS;
-        }
-    }
+    for (int i = 0; i < count; ++i)
+        job->out[i].index = public_index_for_slot((int)job->out[i].index - 1);
     return count;
 }
 

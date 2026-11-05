@@ -36,6 +36,7 @@ typedef struct bsd_socket {
     int connecting;
     int connect_result;
     char bound_device[16];
+    unsigned bound_if6; /* private BSD index, owned by the executor */
     completion_t connect_done;
 } bsd_socket_t;
 
@@ -171,6 +172,44 @@ static void state_release(net_socket_t *s)
     kfree(state);
 }
 
+static int address_has_zone(const net_sockaddr_in6_t *address)
+{
+    const uint8_t *a = address->sin6_addr;
+    return address->sin6_family == AF_INET6 && address->sin6_scope_id != 0 &&
+           ((a[0] == 0xfe && (a[1] & 0xc0) == 0x80) ||
+            (a[0] == 0xff && (a[1] & 0xf) <= 2));
+}
+
+static int scope_to_bsd(const void **address, size_t *length,
+                        net_sockaddr_in6_t *copy)
+{
+    if (!*address || *length < sizeof(*copy))
+        return 0;
+    memcpy(copy, *address, sizeof(*copy));
+    if (!address_has_zone(copy))
+        return 0;
+    int index = a20_bsd_ifindex_to_bsd(copy->sin6_scope_id);
+    if (index < 0)
+        return index;
+    copy->sin6_scope_id = index;
+    *address = copy;
+    *length = sizeof(*copy);
+    return 0;
+}
+
+static void scope_to_public(void *address, size_t length)
+{
+    net_sockaddr_in6_t copy;
+    if (!address || length < sizeof(copy))
+        return;
+    memcpy(&copy, address, sizeof(copy));
+    if (!address_has_zone(&copy))
+        return;
+    int index = a20_bsd_ifindex_to_public(copy.sin6_scope_id);
+    copy.sin6_scope_id = index < 0 ? 0 : (unsigned)index;
+    memcpy(address, &copy, sizeof(copy));
+}
+
 typedef struct address_job {
     int fd;
     const void *address;
@@ -180,7 +219,11 @@ typedef struct address_job {
 static int bind_job(void *argument)
 {
     address_job_t *job = argument;
-    return a20_bsd_port_socket_bind(job->fd, job->address, job->length);
+    net_sockaddr_in6_t scoped;
+    const void *address = job->address;
+    size_t length = job->length;
+    int result = scope_to_bsd(&address, &length, &scoped);
+    return result < 0 ? result : a20_bsd_port_socket_bind(job->fd, address, length);
 }
 
 static int bind_pcb(net_socket_t *s, const void *address, size_t length)
@@ -194,7 +237,11 @@ static int bind_pcb(net_socket_t *s, const void *address, size_t length)
 static int connect_job(void *argument)
 {
     address_job_t *job = argument;
-    return a20_bsd_port_socket_connect(job->fd, job->address, job->length);
+    net_sockaddr_in6_t scoped;
+    const void *address = job->address;
+    size_t length = job->length;
+    int result = scope_to_bsd(&address, &length, &scoped);
+    return result < 0 ? result : a20_bsd_port_socket_connect(job->fd, address, length);
 }
 
 static void connect_clear(bsd_socket_t *state)
@@ -262,8 +309,13 @@ typedef struct io_job {
 static int send_job(void *argument)
 {
     io_job_t *job = argument;
-    return a20_bsd_port_socket_send(job->fd, job->buffer, job->length,
-                                    job->flags, job->address, job->address_length);
+    net_sockaddr_in6_t scoped;
+    const void *address = job->address;
+    size_t length = job->address_length;
+    int result = scope_to_bsd(&address, &length, &scoped);
+    return result < 0 ? result :
+        a20_bsd_port_socket_send(job->fd, job->buffer, job->length,
+                                 job->flags, address, length);
 }
 
 static int getsockname_job(void *argument)
@@ -271,6 +323,8 @@ static int getsockname_job(void *argument)
     address_job_t *job = argument;
     size_t length = job->length;
     int result = a20_bsd_port_socket_getsockname(job->fd, (void *)job->address, &length);
+    if (result == 0)
+        scope_to_public((void *)job->address, length);
     job->length = length;
     return result;
 }
@@ -347,6 +401,8 @@ static void accept_pending(bsd_socket_t *state)
         uint8_t peer[NET_SOCKADDR_MAX];
         size_t peer_len = sizeof(peer);
         int fd = a20_bsd_port_socket_accept(state->fd, peer, &peer_len);
+        if (fd >= 0)
+            scope_to_public(peer, peer_len);
         if (fd == -EAGAIN) return;
         if (fd < 0) {
             if (fd == -ECONNABORTED || fd == -EINTR) continue;
@@ -592,23 +648,54 @@ static void ip_options_apply(net_socket_t *s)
     (void)a20_bsd_executor_call(option_job_run, &job);
 }
 
+typedef struct {
+    bsd_socket_t *state;
+    const char *name;
+    int index;
+} bind_device_job_t;
+
+static void publish_bound_device(bsd_socket_t *state, const char *name)
+{
+    uint64_t flags = net_sock_lock(state->socket);
+    strncpy(state->bound_device, name, sizeof(state->bound_device) - 1);
+    state->bound_device[sizeof(state->bound_device) - 1] = '\0';
+    net_sock_unlock(state->socket, flags);
+}
+
+static int bind_device6_run(void *argument)
+{
+    bind_device_job_t *job = argument;
+    bsd_socket_t *state = job->state;
+    if (state->fd < 0)
+        return -ENOTSOCK;
+    int index = job->index ? a20_bsd_ifindex_to_bsd(job->index) : 0;
+    if (index < 0)
+        return index;
+    if (state->bound_if6 != (unsigned)index) {
+        int result = a20_bsd_port_socket_bind_if6(state->fd, index);
+        if (result < 0)
+            return result;
+        state->bound_if6 = index;
+    }
+    publish_bound_device(state, job->name);
+    return 0;
+}
+
 static int bind_device(net_socket_t *s, const char *name)
 {
     bsd_socket_t *state = bsd(s);
     if (!state) return -ENOTSOCK;
-    if (!name || !name[0]) {
-        memset(state->bound_device, 0, sizeof(state->bound_device));
-        return 0;
-    }
-    /* F-Stack/FreeBSD has no SO_BINDTODEVICE.  Binding the primary interface
-     * is a true no-op because every unbound flow already leaves through it;
-     * a secondary NIC would require per-socket FIB/source routing that this
-     * port does not implement, so refuse it rather than silently misroute. */
-    int index = ifreq_name_index(name);
+    if (!name) name = "";
+    int index = name[0] ? ifreq_name_index(name) : 0;
     if (index < 0) return -ENODEV;
-    if (index != net_stack_if_default_index()) return -EOPNOTSUPP;
-    strncpy(state->bound_device, name, sizeof(state->bound_device) - 1);
-    state->bound_device[sizeof(state->bound_device) - 1] = '\0';
+    if (s->domain == AF_INET6 && state->kind == BSD_KIND_UDP) {
+        bind_device_job_t job = {state, name, index};
+        return a20_bsd_executor_call(bind_device6_run, &job);
+    }
+    /* Preserve the legacy primary-device compatibility for other sockets. */
+    if (index && index != net_stack_if_default_index())
+        return -EOPNOTSUPP;
+    publish_bound_device(state, name);
     return 0;
 }
 
@@ -617,8 +704,9 @@ static int bound_device(net_socket_t *s, char name[16])
     bsd_socket_t *state = bsd(s);
     if (!state) return -ENOTSOCK;
     if (name) {
-        strncpy(name, state->bound_device, 16);
-        name[15] = '\0';
+        uint64_t flags = net_sock_lock(s);
+        memcpy(name, state->bound_device, sizeof(state->bound_device));
+        net_sock_unlock(s, flags);
     }
     return 0;
 }
@@ -656,6 +744,8 @@ static void receive_one(bsd_socket_t *state)
             wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
             return;
         }
+        if (state->bound_if6 && pinfo.ifindex != state->bound_if6)
+            continue;
         if (got == 0) {
             if (state->kind != BSD_KIND_TCP) return;
             flags = net_sock_lock(s);
@@ -674,7 +764,11 @@ static void receive_one(bsd_socket_t *state)
             int mapped = pinfo.ifindex ?
                 a20_bsd_nic_public_ifindex(pinfo.ifindex, local_ip,
                                            &public_index) : -ENODEV;
-            meta.pktinfo_ifindex = mapped == 0 ? public_index : pinfo.ifindex;
+            if (mapped != 0 && pinfo.ifindex) {
+                int index = a20_bsd_ifindex_to_public(pinfo.ifindex);
+                if (index > 0) public_index = index;
+            }
+            meta.pktinfo_ifindex = public_index;
             if (pinfo.family == AF_INET) {
                 memcpy(meta.pktinfo.ipv4.destination, pinfo.address, 4);
                 if (mapped == 0)
@@ -693,6 +787,7 @@ static void receive_one(bsd_socket_t *state)
                 meta.tclass = pinfo.tclass;
             }
         }
+        scope_to_public(address, address_length);
         flags = net_sock_lock(s);
         int queued = s->closed ? -ENOTCONN :
             net_enqueue_msg_locked_meta(s, buffer, (size_t)got, address,

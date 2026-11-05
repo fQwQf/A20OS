@@ -13,4 +13,7 @@ static inline unsigned nic_index_for_slot(int slot)
  * Returns -ENODEV when the index is not one of the attached NICs. */
 int a20_bsd_nic_public_ifindex(unsigned bsd_ifindex, uint8_t local[4],
                                uint32_t *public_index);
+/* Interface zone translations run on the BSD executor. */
+int a20_bsd_ifindex_to_bsd(unsigned index);
+int a20_bsd_ifindex_to_public(unsigned index);
 #endif
