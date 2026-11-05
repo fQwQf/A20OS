@@ -164,6 +164,7 @@ typedef struct spinlock {
 typedef struct task task_t;
 struct task {
     int pid, tgid, waiting_for_child;
+    task_t *tg_leader, *tg_next;
     unsigned long wait_seq;
     spinlock_t park_lock;
 };
@@ -198,11 +199,6 @@ static void spin_unlock_irqrestore(spinlock_t *lock, uint64_t flags) {
 }
 static int proc_task_tgid(task_t *task) {
     return task->tgid > 0 ? task->tgid : task->pid;
-}
-static task_t *proc_first_task_locked(void) { return &waiter; }
-static task_t *proc_next_task_locked(task_t *task) {
-    (void)task;
-    return NULL;
 }
 static int proc_try_wake_locked(task_t *task, unsigned long seq, int why) {
     (void)seq;
@@ -280,6 +276,9 @@ static int run_race(notifier_fn_t notifier) {
     waiter.wait_seq = 7;
     parent.pid = 20;
     parent.tgid = 10;
+    parent.tg_leader = &waiter;
+    waiter.tg_leader = &waiter;
+    waiter.tg_next = &parent;
     scan_complete = exit_attempted_tasklist = exit_returned = wake_queued = 0;
     active_notifier = notifier;
     pthread_create(&waiter_tid, NULL, waiter_thread, NULL);
