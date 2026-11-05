@@ -323,21 +323,20 @@ int a20_cow_map_child_anon_batch(
 /* Called with the source node locked and parent->lock holding VMA policy
  * stable. A canonical cache-owned private leaf can be recovered through the
  * child's retained file mapping. A private copy made writable and later
- * mprotected read-only has no cache owner and must still be inherited. */
+ * mprotected read-only has no cache owner and must still be inherited.
+ * Preserve executable and small mappings: their first child faults cost more
+ * than cloning their PTEs on A20. Elision targets bulk file data (>= 1 MiB). */
 static int cow_file_leaf_refaultable(const mm_seg_t *vma, pt_meta_t *meta,
                                      int index, int level, pte_t source)
 {
     if (!vma || level != 0 || !meta || !vma->file || !vma->file_vnode ||
+        vma->end - vma->start < 1024 * 1024 || (vma->vm_flags & VM_EXEC) ||
         (vma->vm_flags & (VM_FILE | VM_SHARED | VM_VMO | VM_PFNMAP)) != VM_FILE ||
         !(source & PTE_V) || !arch_pte_is_leaf(source) || (source & PTE_W) ||
         MM_ST_GET_CLASS(meta->cls[index]) != MM_ST_FILE_PRIVATE ||
         (meta->safe[index >> 3] & MM_SAFE_MASK) || !meta->cache_owner ||
         arch_fork_requires_private_copy())
         return 0;
-#if ARCH_INSN_FAULT_UNRECOVERABLE
-    if (source & PTE_X)
-        return 0;
-#endif
     page_cache_page_t *owner = meta->cache_owner[index];
     return owner && page_cache_pfn(owner) == phys_to_pfn(arch_pte_addr(source));
 }
