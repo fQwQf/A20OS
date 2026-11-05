@@ -44,7 +44,16 @@ class Guest:
         self.log = log
         self.pending = b''
 
-    def until(self, marker, timeout=90, *, whole_line=False):
+    def read_output(self):
+        data = os.read(self.process.stdout.fileno(), 65536)
+        if not data:
+            return False
+        self.log.write(data)
+        self.log.flush()
+        self.pending += data
+        return True
+
+    def until(self, marker, timeout=90, *, whole_line=False, drain_peer=None):
         deadline = time.monotonic() + timeout
         pattern = re.escape(marker.encode())
         if whole_line:
@@ -52,19 +61,22 @@ class Guest:
         elif marker == '# ':
             pattern = rb'(?:^|\r?\n)# $'
         expression = re.compile(pattern)
+        sources = [self.process.stdout]
+        if drain_peer:
+            sources.append(drain_peer.process.stdout)
         while not (match := expression.search(self.pending)):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f'guest did not emit {marker!r}')
-            ready, _, _ = select.select([self.process.stdout], [], [], min(1, remaining))
-            if not ready:
+            ready, _, _ = select.select(sources, [], [], min(1, remaining))
+            # A verbose peer can stall on a full serial pipe while we wait
+            # for the guest to receive its next packet.
+            if drain_peer and drain_peer.process.stdout in ready and not drain_peer.read_output():
+                raise RuntimeError(f'peer exited before guest emitted {marker!r}')
+            if self.process.stdout not in ready:
                 continue
-            data = os.read(self.process.stdout.fileno(), 65536)
-            if not data:
+            if not self.read_output():
                 raise RuntimeError(f'guest exited before {marker!r}')
-            self.log.write(data)
-            self.log.flush()
-            self.pending += data
             if b'KERNEL PANIC' in self.pending or b'Kernel panic' in self.pending or b': FAIL' in self.pending:
                 raise RuntimeError('guest reported a failure; inspect serial.log')
         pos = match.end()

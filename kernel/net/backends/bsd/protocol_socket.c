@@ -7,6 +7,8 @@
 #include <sys/poll.h>
 #include <sys/event.h>
 #include <netinet/in.h>
+#include <net/vnet.h>
+#include <netinet/icmp6.h>
 #include <net/if_dl.h>
 #include "ff_api.h"
 #include "ff_host_interface.h"
@@ -226,6 +228,38 @@ int port_socket_bind_if6(int fd, unsigned ifindex)
     struct in6_pktinfo info = {.ipi6_ifindex = ifindex};
     return result(ff_setsockopt_freebsd(fd, IPPROTO_IPV6, IPV6_PKTINFO,
                                         &info, sizeof(info)));
+}
+
+/* Map Linux option numbers explicitly at the port boundary. */
+int port_socket_ipv6_option(int fd, int level, int option,
+                            const void *value, size_t length)
+{
+    if (level == IPPROTO_ICMPV6 && option == 1) {
+        struct icmp6_filter filter;
+        if (length != sizeof(filter))
+            return -22;
+        memcpy(&filter, value, sizeof(filter));
+        /* Linux stores blocked types, FreeBSD stores permitted types. */
+        for (unsigned i = 0; i < sizeof(filter.icmp6_filt) / sizeof(filter.icmp6_filt[0]); ++i)
+            filter.icmp6_filt[i] = ~filter.icmp6_filt[i];
+        return result(ff_setsockopt_freebsd(fd, level, ICMP6_FILTER, &filter, sizeof(filter)));
+    }
+    int native;
+    if (level == IPPROTO_IPV6) {
+        switch (option) {
+        case 7:  native = IPV6_CHECKSUM; break;
+        case 17: native = IPV6_MULTICAST_IF; break;
+        case 18: native = IPV6_MULTICAST_HOPS; break;
+        case 19: native = IPV6_MULTICAST_LOOP; break;
+        case 20: native = IPV6_JOIN_GROUP; break;
+        case 21: native = IPV6_LEAVE_GROUP; break;
+        case 67: native = IPV6_TCLASS; break;
+        default: return -92;
+        }
+    } else {
+        return -92;
+    }
+    return result(ff_setsockopt_freebsd(fd, level, native, value, length));
 }
 
 int port_socket_multicast(int fd, uint32_t group, uint32_t ifaddr, int join)

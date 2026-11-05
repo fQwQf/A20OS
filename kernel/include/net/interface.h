@@ -26,4 +26,6 @@ typedef struct {
     uint8_t prefix, flags, scope, reserved;
 } nl_addr6_out_t;
 
+void net_netlink_link_notify_one(unsigned index, int up);
+
 #endif

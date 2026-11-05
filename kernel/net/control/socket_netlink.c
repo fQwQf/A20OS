@@ -336,6 +336,89 @@ void a20_net_netlink_klog_drop(uint32_t group, int dropped, int delivered)
          (unsigned)group, dropped, delivered);
 }
 
+static void netlink_autobind_locked(net_socket_t *s)
+{
+    if (s->local_len == sizeof(net_sockaddr_nl_t))
+        return;
+    uint32_t pid = a20_net_netlink_host_pid();
+    net_sockaddr_nl_t local = {.nl_family = AF_NETLINK, .nl_pid = pid ? pid : 1};
+    memcpy(s->local, &local, sizeof(local));
+    s->local_len = sizeof(local);
+    s->bound = 1;
+}
+
+int net_netlink_connect(net_socket_t *s, const void *addr, size_t length)
+{
+    if (length < sizeof(uint16_t))
+        return -EINVAL;
+    uint16_t family;
+    memcpy(&family, addr, sizeof(family));
+    net_sockaddr_nl_t peer;
+    if (family != AF_UNSPEC) {
+        if (family != AF_NETLINK)
+            return -EAFNOSUPPORT;
+        if (length < sizeof(peer))
+            return -EINVAL;
+        memcpy(&peer, addr, sizeof(peer));
+        /* Only the kernel peer is routed by this netlink implementation. */
+        if (peer.nl_pid || peer.nl_groups)
+            return -EOPNOTSUPP;
+        peer.nl_pad = 0;
+    }
+    uint64_t flags = net_sock_lock(s);
+    if (!net_socket_is_live(s)) {
+        net_sock_unlock(s, flags);
+        return -ENOTSOCK;
+    }
+    if (family == AF_UNSPEC) {
+        s->connected = 0;
+        s->peer_len = 0;
+    } else {
+        netlink_autobind_locked(s);
+        memcpy(s->peer_addr, &peer, sizeof(peer));
+        s->peer_len = sizeof(peer);
+        s->connected = 1;
+        s->ever_connected = 1;
+    }
+    net_sock_unlock(s, flags);
+    return 0;
+}
+
+int net_netlink_membership(net_socket_t *s, int option, const void *value,
+                           size_t length)
+{
+    enum { ADD_MEMBERSHIP = 1, DROP_MEMBERSHIP = 2 };
+    if (option != ADD_MEMBERSHIP && option != DROP_MEMBERSHIP)
+        return -ENOPROTOOPT;
+    uint32_t group;
+    if (!value || length < sizeof(group))
+        return -EINVAL;
+    memcpy(&group, value, sizeof(group));
+    if (!group || group > 32)
+        return -EINVAL;
+
+    uint64_t flags = net_sock_lock(s);
+    if (!net_socket_is_live(s)) {
+        net_sock_unlock(s, flags);
+        return -ENOTSOCK;
+    }
+    netlink_autobind_locked(s);
+    net_sockaddr_nl_t local;
+    memcpy(&local, s->local, sizeof(local));
+    uint32_t mask = 1U << (group - 1);
+    int coldplug = s->protocol == NETLINK_KOBJECT_UEVENT && mask == UEVENT_GROUP &&
+                   option == ADD_MEMBERSHIP && !(local.nl_groups & mask);
+    if (option == ADD_MEMBERSHIP)
+        local.nl_groups |= mask;
+    else
+        local.nl_groups &= ~mask;
+    memcpy(s->local, &local, sizeof(local));
+    net_sock_unlock(s, flags);
+    if (coldplug)
+        a20_net_netlink_class_emit_all("add");
+    return 0;
+}
+
 int net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen)
 {
     return a20_net_netlink_bind(s, addr, addrlen);
@@ -368,6 +451,12 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 void net_netlink_link_notify(const nlrt_link_event_t *events, int n)
 {
     a20_net_netlink_link_notify(events, n);
+}
+
+void net_netlink_link_notify_one(unsigned index, int up)
+{
+    nlrt_link_event_t event = {.index = index, .want_up = up != 0};
+    net_netlink_link_notify(&event, 1);
 }
 
 void net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],

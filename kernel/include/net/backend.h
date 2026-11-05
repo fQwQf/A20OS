@@ -70,6 +70,7 @@ struct device;
 #define NET_CAP_DEVICE_IRQ (1u << 19)   /* backend consumes device IRQ     */
 #define NET_CAP_MULTI_QUEUE (1u << 20)  /* more than one RX/TX queue       */
 #define NET_CAP_OFFLOAD_SG (1u << 21)   /* scatter-gather transmit         */
+#define NET_CAP_RAW_IPV6_TX (1u << 23) /* wire IPv6 raw transmit */
 #define NET_CAP_OFFLOAD_CSUM (1u << 22) /* checksum offload negotiated     */
 
 /* ------------------------------------------------------------------ *

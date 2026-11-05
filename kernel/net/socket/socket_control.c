@@ -512,6 +512,12 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
 {
     if (!s)
         return -ENOTSOCK;
+    if (s->domain == AF_NETLINK && level == SOL_NETLINK)
+        return net_netlink_membership(s, optname, optval, optlen);
+    /* Linux raw IPv6 applications can spell IPV6_CHECKSUM with SOL_RAW. */
+    if (s->domain == AF_INET6 && s->type == SOCK_RAW && level == 255 &&
+        optname == IPV6_CHECKSUM)
+        level = IPPROTO_IPV6;
     if (!net_option_cap_supported(level, optname))
         return -ENOPROTOOPT;
     int validation = net_inet_option_validate(s, level, optname, optval, optlen);

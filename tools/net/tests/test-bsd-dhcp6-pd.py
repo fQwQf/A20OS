@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Request an IPv6 prefix from a real Kea peer with stock BusyBox udhcpc6."""
+"""Request an IPv6 prefix from a real Kea peer with stock BusyBox or odhcp6c."""
 import argparse
 import hashlib
 import importlib.util
@@ -25,7 +25,7 @@ ra = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ra)
 
 
-def make_payload(out, busybox, probe):
+def make_payload(out, busybox, probe, odhcp6c):
     image = out/'payload.img'
     with tempfile.TemporaryDirectory(prefix='a20-pd-payload-') as directory:
         root = Path(directory)
@@ -34,6 +34,13 @@ def make_payload(out, busybox, probe):
             source = Path(__file__).with_name('bsd-udp6-bind-probe.c')
             subprocess.run(['cc', '-static', '-Wall', '-Wextra', '-Werror', '-O2',
                             str(source), '-o', str(root/'udp6-bind-probe')], check=True)
+        if odhcp6c:
+            shutil.copy2(odhcp6c, root/'odhcp6c')
+            event = root/'odhcp-event'
+            event.write_text('''#!/bin/mksh
+echo "A20_OD_EVENT state=$2 prefixes=$PREFIXES A20_OD_END"
+''')
+            event.chmod(0o755)
         event = root/'pd-event'
         event.write_text('''#!/bin/mksh
 if [ "$1" = bound ] && [ -n "$ipv6" ]; then
@@ -61,7 +68,16 @@ echo "A20_PD_EVENT event=$1 prefix=$ipv6prefix valid=$ipv6prefix_lease"
     return image
 
 
-def verify_exchange(capture, renew, bind_probe):
+def dhcp_options(data):
+    while data:
+        assert len(data) >= 4
+        code, length = struct.unpack_from('!2H', data)
+        assert length + 4 <= len(data)
+        yield code, data[4:4 + length]
+        data = data[4 + length:]
+
+
+def verify_exchange(capture, renew, bind_probe, pd_only=False):
     data = capture.read_bytes()
     assert data[:4] == bytes.fromhex('d4c3b2a1'), 'unexpected pcap byte order'
     offset = 24
@@ -82,13 +98,23 @@ def verify_exchange(capture, renew, bind_probe):
         pseudo = frame[22:54] + struct.pack('!I3xB', udp_length, 17)
         assert checksum and len(udp) == udp_length and len(udp) >= 12
         assert not pppoe.router.checksum(pseudo + udp)
+        if pd_only:
+            options = list(dhcp_options(udp[12:]))
+            assert all(code != 3 for code, _ in options), 'unexpected IA_NA'
+            if udp[8] == 7:
+                delegation = next(value for code, value in options if code == 25)
+                prefix = next(value for code, value in dhcp_options(delegation[12:]) if code == 26)
+                assert struct.unpack_from('!IIB', prefix) == (24, 36, 56)
         exchange.append((source, destination, udp[8], udp[9:12]))
     if bind_probe:
         assert wan_reply, 'bound reply missing from WAN'
     expected = [(546, 547, 1), (547, 546, 2), (546, 547, 3), (547, 546, 7)]
+    observed = [(s, d, kind) for s, d, kind, _ in exchange]
+    assert observed[:4] == expected, exchange
     if renew:
-        expected.extend([(546, 547, 5), (547, 546, 7)])
-    assert [(s, d, kind) for s, d, kind, _ in exchange] == expected, exchange
+        assert len(exchange) >= 6 and len(exchange) % 2 == 0, exchange
+        expected.extend([(546, 547, 5), (547, 546, 7)] * ((len(exchange) - 4) // 2))
+    assert observed == expected, exchange
     assert all(exchange[i][3] == exchange[i+1][3] for i in range(0, len(expected), 2))
 
 
@@ -146,16 +172,30 @@ def verify_bind(guest, lan, wan_port):
     guest.until('# ')
 
 
+def odhcp_lease(guest, peer, event):
+    marker = f'A20_OD_EVENT state={event} prefixes='
+    output = (guest.until(marker, timeout=35, drain_peer=peer)
+              + guest.until(' A20_OD_END', drain_peer=peer))
+    match = re.search(rb'prefixes=([^ ,]+),(\d+),(\d+)(?:,[^ ]+)? A20_OD_END', output)
+    assert match, output
+    preferred, valid = int(match[2]), int(match[3])
+    assert 0 < preferred <= 24 and 12 < valid <= 36 and valid - preferred == 12, output
+    return ipaddress.IPv6Network(match[1].decode()), preferred, valid
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ('kernel', 'linux', 'peer-initrd', 'busybox', 'out'):
         parser.add_argument(f'--{arg}', type=Path, required=True)
     parser.add_argument('--renew', action='store_true', help='keep the client running through renewal')
     parser.add_argument('--bind-probe', action='store_true', help='check IPv6 UDP binding on both links')
+    parser.add_argument('--odhcp6c', type=Path, help='test a stock static odhcp6c binary in PD-only mode')
     args = parser.parse_args()
+    if args.odhcp6c and args.renew:
+        parser.error('--renew is for BusyBox, odhcp6c always renews')
     out = args.out.resolve()
     out.mkdir(parents=True)
-    image = make_payload(out, args.busybox, args.bind_probe)
+    image = make_payload(out, args.busybox, args.bind_probe, args.odhcp6c)
     ports = pppoe.router.backend.reserve_ports(socket.SOCK_DGRAM, 2)
     lan = pppoe.router.Link(1, '192.168.10.2', '192.168.10.1')
     common = ['qemu-system-x86_64', '-machine', 'q35', '-accel', 'kvm',
@@ -172,6 +212,8 @@ def main():
     result = dict(status='failed', passed=[], argv={'router': a20, 'peer': linux},
                   sha256={str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in (args.kernel, args.linux, args.peer_initrd, args.busybox)})
+    if args.odhcp6c:
+        result['sha256'][str(args.odhcp6c)] = hashlib.sha256(args.odhcp6c.read_bytes()).hexdigest()
     Guest = pppoe.router.backend.Guest
     with (out/'peer.log').open('wb') as peer_log, (out/'serial.log').open('wb') as serial:
         peer = Guest(linux, peer_log)
@@ -195,24 +237,34 @@ def main():
                 raise AssertionError(address)
             result['passed'].append('linux_rtnetlink_reports_wan_link_local_and_slaac')
 
-            command = '/extra/busybox udhcpc6 -f -n -d -i en3 -s /extra/pd-event'
-            # BusyBox 1.37 dereferences a NULL IA_NA pointer on PD-only Renew.
-            # Use IA_NA and IA_PD together to exercise stock renewal.
-            guest.send(command + (' & pd=$!' if args.renew else ' -r no -q'))
-            output = guest.until('A20_PD_EVENT event=bound prefix=', timeout=30) + guest.until('valid=36')
-            match = re.search(rb'event=bound prefix=(\S+) valid=(\d+)', output)
-            assert match and int(match[2]) == 36, output
-            prefix = ipaddress.IPv6Network(match[1].decode())
+            if args.odhcp6c:
+                guest.send('/extra/odhcp6c -e -l 7 -k -N none -P 56 -F -s /extra/odhcp-event en3 & pd=$!')
+                prefix, preferred, valid = odhcp_lease(guest, peer, 'bound')
+                result['preferred_seconds'] = preferred
+            else:
+                command = '/extra/busybox udhcpc6 -f -n -d -i en3 -s /extra/pd-event'
+                # BusyBox 1.37 dereferences a NULL IA_NA pointer on PD-only Renew.
+                guest.send(command + (' & pd=$!' if args.renew else ' -r no -q'))
+                output = guest.until('A20_PD_EVENT event=bound prefix=', timeout=30) + guest.until('valid=36')
+                match = re.search(rb'event=bound prefix=(\S+) valid=(\d+)', output)
+                assert match and int(match[2]) == 36, output
+                prefix = ipaddress.IPv6Network(match[1].decode())
+                valid = int(match[2])
             assert prefix.prefixlen == 56 and prefix.subnet_of(ipaddress.IPv6Network('2001:db8:400::/48'))
             result['prefix'] = str(prefix)
-            result['valid_seconds'] = int(match[2])
+            result['valid_seconds'] = valid
             result['passed'].append('kea_prefix_received_by_stock_client')
+            if args.odhcp6c:
+                renewed, preferred, valid = odhcp_lease(guest, peer, 'updated')
+                assert renewed == prefix
+                result['renewed_lifetimes'] = [preferred, valid]
             verify_routing(peer, guest, lan, prefix)
             result['passed'].append('delegated_prefix_routes_in_both_directions')
             if args.renew:
                 output = guest.until('A20_PD_EVENT event=renew prefix=', timeout=35) + guest.until('valid=36')
                 updated = re.search(rb'event=renew prefix=(\S+) valid=36', output)
                 assert updated and ipaddress.IPv6Network(updated[1].decode()) == prefix, output
+            if args.renew or args.odhcp6c:
                 guest.send('kill "$pd"; wait "$pd"; echo A20_PD_CLIENT_STOPPED')
                 guest.until('A20_PD_CLIENT_STOPPED', whole_line=True)
                 guest.until('# ')
@@ -223,7 +275,7 @@ def main():
             guest.send('poweroff')
             guest.until('System is going down for power-off NOW')
             assert guest.process.wait(timeout=15) == 0
-            verify_exchange(out/'wan.pcap', args.renew, args.bind_probe)
+            verify_exchange(out/'wan.pcap', args.renew or args.odhcp6c, args.bind_probe, bool(args.odhcp6c))
             result['passed'].append('solicit_advertise_request_reply_on_wire')
             result['status'] = 'passed'
         except Exception as error:

@@ -61,7 +61,7 @@ int net_backend_register(const net_backend_t *backend) {
     if ((backend->caps & NET_CAP_PMTU) &&
         (!backend->endpoint || !backend->endpoint->pmtu))
         return -EINVAL;
-    if ((backend->caps & NET_CAP_RAW_TX) &&
+    if ((backend->caps & (NET_CAP_RAW_TX | NET_CAP_RAW_IPV6_TX)) &&
         (!backend->endpoint || !backend->endpoint->raw_send))
         return -EINVAL;
     if ((backend->caps & NET_CAP_TUN) &&
@@ -134,6 +134,7 @@ static const struct {
     {NET_CAP_UDP_CONTROL, "udpctrl"},
     {NET_CAP_PMTU, "pmtu"},
     {NET_CAP_RAW_TX, "rawtx"},
+    {NET_CAP_RAW_IPV6_TX, "rawtx6"},
     {NET_CAP_TUN, "tun"},
     {NET_CAP_NEIGH, "neigh"},
     {NET_CAP_ROUTE, "route"},

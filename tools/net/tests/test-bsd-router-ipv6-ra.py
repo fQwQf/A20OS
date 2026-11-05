@@ -141,6 +141,20 @@ def exercise(guest, lan, wan, result):
             and b[4:] == echo and not router.checksum(pseudo(s, d, p, len(b)) + b))
     result['passed'].append('wan_slaac_address_reachable')
 
+    guest.send('netctl raw6-echo en3')
+    raw_echo = b'\xa2\x06\x00\x01raw'
+    request, _ = receive(wan, 5, lambda f, p, h, s, d, b:
+                         p == ICMP6 and h == 255 and d == ALL_ROUTERS
+                         and b[:1] == b'\x80' and b[4:] == raw_echo
+                         and not router.checksum(pseudo(s, d, p, len(b)) + b))
+    raw_source = request[22:38]
+    icmp(wan, WAN_ROUTER, raw_source, 128, raw_echo, hops=64)
+    icmp(wan, WAN_ROUTER, raw_source, 129, raw_echo, hops=64)
+    guest.until('NETCTL: raw IPv6 echo passed', whole_line=True)
+    guest.until('# ')
+    result['passed'].append('raw_ipv6_wire_checksum_filter_scope_and_hop_limit')
+
+
     body = b'routed IPv6 through the RA default'
     udp = struct.pack('!4H', 32000, 42000, 8 + len(body), 0) + body
     csum = router.checksum(pseudo(LAN_HOST, OFF_LINK, 17, len(udp)) + udp) or 0xffff
@@ -184,10 +198,13 @@ def exercise(guest, lan, wan, result):
     receive(wan, 5, forwarded, neighbor=WAN_ROUTER)
     result['passed'].append('default_recovers_after_new_advertisement')
 
-    for state in ('down', 'up'):
-        guest.send(f'netctl set-link en3 {state}')
-        guest.until('NETCTL: link configured', whole_line=True)
-        guest.until('# ')
+    guest.send('netctl watch-link en3 & watch=$!')
+    guest.until('NETCTL: link watch ready', whole_line=True)
+    guest.send('netctl set-link en3 down')
+    guest.until('NETCTL: link watch dropped', whole_line=True)
+    guest.send('netctl set-link en3 up')
+    guest.until('NETCTL: link configured', whole_line=True)
+    guest.until('# ')
     solicit(wan, 2)
     for _ in range(2):
         previous = time.monotonic()
@@ -195,6 +212,8 @@ def exercise(guest, lan, wan, result):
         assert time.monotonic() - previous >= 3.5, 'solicitation sent too soon'
     absent(wan, 5, is_rs)
     result['passed'].append('admin_link_restart_rearms_and_bounds_solicitations')
+    guest.until('NETCTL: link watch passed', whole_line=True)
+    result['passed'].append('netlink_dgram_link_subscription_and_drop')
 
 
 def main():
