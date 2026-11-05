@@ -42,6 +42,10 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off)
     (void)off;
 }
 
+/* This fixture exercises filter rules without a live NAT or CT table. */
+int netfilter_nat_rule_count(void) { return 0; }
+int netfilter_conntrack_count(void) { return 0; }
+
 /* ------------------------------------------------------- conntrack tail stub */
 
 static int g_tail_calls;

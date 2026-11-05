@@ -1,6 +1,6 @@
 # IPv4 NAT 状态与使用边界
 
-当前实现提供 TCP/UDP 的冲突检测及动态源端口分配、事务式绑定和独立同步。完整分片 NAT、本机 socket 的完整 PMTU/差错队列仍处待实现状态。ICMP RELATED 翻译与路由器转发路径的 MTU 差错已接入并有端到端回归，见下文。跨网卡转发见 [router.md](./router.md)，LAN DHCPv4/DNS A 转发见 [lan-services.md](./lan-services.md)。
+当前实现提供 TCP/UDP 的冲突检测及动态源端口分配、事务式绑定和独立同步。BSD 网卡数据路径支持重组后的 IPv4 分片 NAT。本机 socket 的完整 PMTU/差错队列仍处待实现状态。ICMP RELATED 翻译与路由器转发路径的 MTU 差错已接入并有端到端回归，见下文。跨网卡转发见 [router.md](./router.md)，LAN DHCPv4/DNS A 转发见 [lan-services.md](./lan-services.md)。
 
 ## 配置
 
@@ -38,7 +38,7 @@ python3 tools/net/check-net-pcap.py <完整、已完成软件校验的Ethernet�
 
 生产状态机测试覆盖两客户端同端口冲突、回包归属、重传、转发两阶段、固定端口冲突、满表不变换、不驱逐、关闭 tracking、4 线程竞争，以及 1 kHz/2 GHz 时钟与毫秒回绕。重写测试独立重算校验和：TCP 的零值仍是合法计算结果，必须更新；IPv4 UDP 的原始零值表示未启用校验，但变换计算出的零必须编码成 0xffff。
 
-三节点 KVM 测试已覆盖双网卡拓扑及双客户端同源端口冲突。未覆盖项包括组合 DNAT+SNAT/hairpin、完整分片 NAT、本机 socket PMTU/差错队列、完整 TCP 状态检查、独立网络域以及与本地 socket 端口分配器的统一预留，部署配置需遵循上述功能边界约束。
+三节点 KVM 测试已覆盖双网卡拓扑及双客户端同源端口冲突。未覆盖项包括组合 DNAT+SNAT/hairpin、本机 socket PMTU/差错队列、完整 TCP 状态检查、独立网络域以及与本地 socket 端口分配器的统一预留，部署配置需遵循上述功能边界约束。
 
 ## ICMP RELATED 与转发路径 MTU
 
@@ -50,9 +50,26 @@ Rust CT 事务已处理 IPv4 Destination Unreachable、Time Exceeded 和 Paramet
 
 默认/embedded/2GHz 生产 C+Rust 测试覆盖 SNAT/DNAT、TCP/UDP、最短/较长引用、三类差错、校验和、MTU保留以及每个截断前缀。三节点 KVM 的 Linux LAN 使用同一 ELF 和真实 MSG_ERRQUEUE，检查 socket 元组、原始数据、错误类型/代码和1280字节下一跳 MTU。 TUN 普通 IPv4/IPv6 输入/输出也经过过滤/NAT，不是策略旁路。
 
-## 分片的当前处理
+## IPv4 分片
 
-完整分片 NAT 仍需先确定域内重组所有者，统一处理乱序、重叠、配额、超时、过滤和 NAT 的先后顺序。原来首片可能创建绑定，后续片却因没有端口而直接通过，这不是可用的分片 NAT。现在只要存在 NAT 规则，IPv4 分片在分配元组或改写之前明确拒绝，保持原字节并由 filter 计入丢弃；包括携带端口的首片。不能将该保护称为完成分片功能，也不能靠只缓存首片地址映射来跳过重组与分片后 TCP checksum 的问题。
+BSD 网卡入口校验 IPv4 首部后，在本地投递或路由查找前重组。队列按入口、
+FIB、源地址、目的地址、协议和标识隔离。重叠或冲突终点销毁原队列。
+队列使用独立 mbuf，释放网卡 RX token 后再持有分片。沿用 F-Stack 的全局
+配额和约 30 秒超时，每个报文最多等待 64 个分片。
+
+过滤和 conntrack 处理完整报文。出口在 F-Stack 按 MTU 分片前完成 NAT。
+AF_PACKET 仍看到入口的原始 Ethernet 分片。lwIP/native 的帧过滤路径
+在有 NAT 规则时继续整组拒绝分片，避免只转换首片。
+
+双网口 QEMU 回归检查乱序 SNAT/DNAT 及回包、过滤、重叠、配额、超时、
+跨接口队列隔离与出口校验和。测试拓扑使用本地 UDP 承载 Ethernet：
+
+```sh
+make ARCH=x86_64 NET_STACK=bsd NET_ROLE=router NR_CPUS=2 \
+  DRIVER_DEPLOYMENT=embedded RAMFS_USER=1 RAMFS_NET_TESTS=1 kernel-only
+python3 tools/net/tests/test-bsd-router-fragments.py \
+  --kernel <生成的kernel.bin> --out <新证据目录>
+```
 
 ## 懒启用机制
 

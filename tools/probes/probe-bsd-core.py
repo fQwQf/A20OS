@@ -93,6 +93,84 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
     text = text.replace(end, '    return(0);\n#endif\n}\n\nint\nelf_reloc(')
     path.write_text(text)
 
+    # Run ingress policy after validation and before forwarding or local
+    # delivery. Keep native egress route/checksum/fragment handling via pfil.
+    def overlay(source, replacements):
+        path = stage.parent/source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        code = (upstream/source).read_text()
+        for old, new in replacements:
+            if code.count(old) != 1:
+                raise SystemExit(f'F-Stack IPv4 port anchor changed: {source}: {old!r}')
+            code = code.replace(old, new)
+        path.write_text(code)
+
+    overlay('freebsd/netinet/ip_input.c', [
+        ('extern void ipreass_slowtimo(void);',
+         'extern void ipreass_slowtimo(void);\n'
+         'struct mbuf *port_ipv4_input(struct mbuf *);\n'
+         'void port_ipv4_filter_init(pfil_head_t);'),
+        ('V_inet_pfil_head = pfil_head_register(&args);',
+         'V_inet_pfil_head = pfil_head_register(&args);\n'
+         '\tport_ipv4_filter_init(V_inet_pfil_head);'),
+        ('\n\t/*\n\t * Try to forward the packet, but if we fail continue.',
+         '\n\todst = ip->ip_dst;\n'
+         '\tm = port_ipv4_input(m);\n'
+         '\tif (m == NULL)\n\t\treturn;\n'
+         '\tip = mtod(m, struct ip *);\n'
+         '\thlen = ip->ip_hl << 2;\n'
+         '\tip_len = ntohs(ip->ip_len);\n'
+         '\tdchg = (odst.s_addr != ip->ip_dst.s_addr);\n'
+         '\n\t/*\n\t * Try to forward the packet, but if we fail continue.'),
+        ('dchg = (odst.s_addr != ip->ip_dst.s_addr);\n\tifp =',
+         'dchg |= (odst.s_addr != ip->ip_dst.s_addr);\n\tifp ='),
+    ])
+
+    # Retain FreeBSD's mbuf ownership, timer and global quota. Include ingress
+    # interface/FIB in the key and reject whole queues on ambiguous intervals.
+    reass = (upstream/'freebsd/netinet/ip_reass.c').read_text()
+    start = reass.index('\t} else {\n\t\t/*\n\t\t * If we already saw the last fragment')
+    end = reass.index('\t/*\n\t * Check for complete reassembly', start)
+    ecn_start = reass.index('\t/*\n\t * Handle ECN', start)
+    ecn_end = reass.index('\t/*\n\t * Find a segment', ecn_start)
+    find_end = reass.index('\t/*\n\t * If there is a preceding segment,', ecn_end)
+    overlay('freebsd/netinet/ip_reass.c', [
+        ('hashkey[3];', 'hashkey[5];'),
+        ('hash = jenkins_hash32(hashkey,', 'hashkey[3] = srcifp ? srcifp->if_index : 0;\n'
+         '\thashkey[4] = M_GETFIB(m);\n\thash = jenkins_hash32(hashkey,'),
+        ('ip->ip_p == fp->ipq_p)', 'ip->ip_p == fp->ipq_p &&\n'
+         '\t\t    srcifp == fp->ipq_frags->m_pkthdr.rcvif &&\n'
+         '\t\t    M_GETFIB(m) == M_GETFIB(fp->ipq_frags))'),
+        ('V_maxfragsperpacket = 16;', 'V_maxfragsperpacket = 64;'),
+        (reass[start:end],
+         '\t}\n\n'
+         '#define GETIP(m) ((struct ip *)((m)->m_pkthdr.PH_loc.ptr))\n\n'
+         + reass[ecn_end:find_end] +
+         '\tnext = ntohs(ip->ip_off) + ntohs(ip->ip_len);\n'
+         '\tif ((p && ntohs(GETIP(p)->ip_off) + ntohs(GETIP(p)->ip_len) >\n'
+         '\t    ntohs(ip->ip_off)) || (q && next > ntohs(GETIP(q)->ip_off)) ||\n'
+         '\t    ((m->m_flags & M_IP_FRAG) && fp->ipq_maxoff >= 0 && next >= fp->ipq_maxoff) ||\n'
+         '\t    (!(m->m_flags & M_IP_FRAG) && (q || fp->ipq_maxoff >= 0))) {\n'
+         '\t\t/* Neither overlapping data nor conflicting endpoints are safe. */\n'
+         '\t\tipq_drop(&V_ipq[hash], fp);\n'
+         '\t\tfp = NULL;\n'
+         '\t\tgoto dropfrag;\n'
+         '\t}\n\n'
+         '\tfp->ipq_nfrags++;\n'
+         '\tatomic_add_int(&nfrags, 1);\n'
+         '#ifdef MAC\n'
+         '\tmac_ipq_update(m, fp);\n'
+         '#endif\n'
+         + reass[ecn_start:ecn_end] +
+         '\tif (!(m->m_flags & M_IP_FRAG))\n'
+         '\t\tfp->ipq_maxoff = next;\n'
+         '\tm->m_nextpkt = q;\n'
+         '\tif (p)\n'
+         '\t\tp->m_nextpkt = m;\n'
+         '\telse\n'
+         '\t\tfp->ipq_frags = m;\n\n'),
+    ])
+
     return stage
 
 
@@ -187,8 +265,8 @@ def main():
     def compile_one(entry):
         source, owner = entry
         source_path = (upstream if owner == 'upstream' else out if owner == 'generated' else root)/source
-        input_path = (staged_lib/Path(source).name
-                      if staged_lib and owner == 'upstream' and source.startswith('lib/') else source_path)
+        overlay_path = staged_lib.parent/source
+        input_path = overlay_path if owner == 'upstream' and overlay_path.is_file() else source_path
         name = source.replace('/', '_')
         obj = out / (name + '.o')
         argv = [args.cc, *(port_flags if owner == 'a20' else flags), '-c', str(input_path), '-o', str(obj)]
@@ -235,6 +313,8 @@ def main():
                 'port_host_nic_send': 'a20_bsd_host_nic_send',
                 'port_host_nic_poll': 'a20_bsd_host_nic_poll',
                 'port_host_nic_token_freed': 'a20_bsd_host_nic_token_freed',
+                'a20_bsd_capture_input': 'a20_bsd_capture_input',
+                'a20_bsd_netfilter_busy': 'a20_bsd_netfilter_busy',
                 'a20_bsd_netfilter_input': 'a20_bsd_netfilter_input',
                 'a20_bsd_netfilter_output': 'a20_bsd_netfilter_output',
                 '_GLOBAL_OFFSET_TABLE_': '_GLOBAL_OFFSET_TABLE_',
@@ -291,8 +371,8 @@ def main():
     manifest['port_headers'] = {str(path.relative_to(port)): hashlib.sha256(path.read_bytes()).hexdigest()
                                 for path in sorted(port.rglob('*.h'))}
     manifest['generated_inputs'] = {str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                    for directory in (generated, staged_lib)
-                                    for path in sorted(directory.iterdir()) if path.is_file()}
+                                    for directory in (generated, staged_lib.parent)
+                                    for path in sorted(directory.rglob('*')) if path.is_file()}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     for row in rows:
         print(f"{'COMPILED' if row['rc'] == 0 else 'FAILED'} {row['source']}")

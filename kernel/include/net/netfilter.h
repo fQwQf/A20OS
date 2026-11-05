@@ -60,10 +60,9 @@
  *     separate from the table size.
  *   - No helper modules, no fullcone/port-preserving variants beyond what is
  *     listed below, and no NAT of IPv6 (the hook parses IPv4 only).
- *   - Translation applies to unfragmented packets and to first fragments.
- *     A non-first fragment carries no ports, so it is never translated; a
- *     fragmented flow can therefore be silently mangled.  Fragmented NAT is
- *     not implemented.
+ *   - This layer requires complete datagrams for NAT and drops fragments
+ *     while NAT is configured. BSD Ethernet ingress reassembles before
+ *     calling the hook, and its egress hook runs before stack fragmentation.
  *   - The checksum fixup is the standard incremental update of the IP header
  *     checksum and the L4 pseudo-header checksum.  It does not verify the
  *     incoming checksum, so a frame that arrived with a bad checksum keeps a

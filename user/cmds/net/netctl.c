@@ -411,12 +411,48 @@ static void test_rtnetlink(void)
     }
 }
 
-int main(void)
+/* Configure a second link in the RAM-only router test image. */
+static int set_ipv4(int fd, const char *name, const char *ip, const char *mask)
 {
+    struct ifreq request = {0};
+    struct sockaddr_in address = {.sin_family = AF_INET};
+    struct in_addr parsed_ip;
+    if (strlen(name) >= sizeof(request.ifr_name) ||
+        inet_pton(AF_INET, ip, &parsed_ip) != 1 ||
+        inet_pton(AF_INET, mask, &address.sin_addr) != 1) {
+        fprintf(stderr, "NETCTL: FAIL invalid IPv4 configuration\n");
+        return 1;
+    }
+    strcpy(request.ifr_name, name);
+    memcpy(&request.ifr_netmask, &address, sizeof(address));
+    if (ioctl(fd, SIOCSIFNETMASK, &request) == 0) {
+        address.sin_addr = parsed_ip;
+        memcpy(&request.ifr_addr, &address, sizeof(address));
+        if (ioctl(fd, SIOCSIFADDR, &request) == 0) {
+            puts("NETCTL: IPv4 configured");
+            return 0;
+        }
+    }
+    perror("NETCTL: FAIL configure IPv4");
+    return 1;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 1 && (argc != 5 || strcmp(argv[1], "set-ipv4"))) {
+        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK]\n");
+        return 2;
+    }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
         printf("NETCTL: FAIL socket(AF_INET) failed errno=%d\n", errno);
         return 1;
+    }
+
+    if (argc == 5) {
+        int result = set_ipv4(fd, argv[2], argv[3], argv[4]);
+        close(fd);
+        return result;
     }
 
     int count = 0;

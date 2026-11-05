@@ -252,6 +252,8 @@ static void scenario_tracking(void)
     netfilter_conntrack_set_enabled(1);
 }
 
+static void require(int ok, const char *what);
+
 static void scenario_rewrite(void)
 {
     uint8_t f[64];
@@ -281,6 +283,14 @@ static void scenario_rewrite(void)
     g_now = 2000;
     netfilter_conntrack_process(f, len, 1, NETFILTER_DIR_IN, &pkt);
     say("nat: dnat_fwd dst=%08x dport=%u", frame_ip_dst(f), frame_dport(f));
+
+    uint8_t translated[sizeof(f)];
+    memcpy(translated, f, len);
+    pkt.dst_addr = frame_ip_dst(f);
+    pkt.dst_port = frame_dport(f);
+    require(netfilter_conntrack_process(f, len, 1, NETFILTER_DIR_OUT, &pkt) == 0 &&
+            netfilter_conntrack_count() == 1 && !memcmp(f, translated, len),
+            "forwarded DNAT reuses ingress binding");
 
     /* The reply leaves with the original destination restored. */
     net_conntrack_entry_t snap[4];
