@@ -1038,6 +1038,8 @@ int      net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
                                     size_t addrlen,
                                     vfile_t **files, int nfiles);
 int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
+int      net_netlink_connect(net_socket_t *s, const void *addr, size_t addrlen);
+int      net_netlink_membership(net_socket_t *s, int option, const void *value, size_t length);
 int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
                                    const void *addr, size_t addrlen);
 int      net_netlink_route_request(net_socket_t *s, const void *buf, size_t len,

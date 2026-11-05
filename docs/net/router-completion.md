@@ -15,7 +15,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
 | IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
-| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 初次委派、IA_NA + IA_PD 续租和手动 LAN 路由通过 |
+| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 初次委派、含或不含 IA_NA 的续租和手动 LAN 路由通过 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
@@ -187,3 +187,21 @@ Linux 公共接口索引进行 LAN 收发。四个 64 位架构通过 BSD socket
 
 `pd-renew-01` 记录了 BusyBox 1.37.0 使用 `-r no` 时在其 UDP 发送
 函数中解引用空地址指针的用户态崩溃。首次仅前缀委派继续通过。
+
+
+### 仅前缀续租与 IPv6 原始套接字
+
+原版 odhcp6c 使用 `-N none -P 56 -F` 与 Kea 交换报文。
+`pd-odhcp6c-stock-verified` 在 WAN 抓包中确认四报文交换和续租都只含
+IA_PD，Kea 对 `2001:db8:400::/56` 返回 24 秒首选寿命和 36 秒
+有效寿命。`bound` 脚本事件收到扣除启动等待后的剩余寿命，
+`updated` 事件收到续租后的 24 秒和 36 秒。测试仍手动将该前缀的
+第一个 /64 配到 LAN 并验证双向转发。
+[OpenWrt odhcp6c](https://github.com/openwrt/odhcp6c)
+
+`odhcp-netlink-raw-wire-verified` 从第二张网卡收到用户态发送的
+ICMPv6 报文并校验了校验和、跳数与接口作用域，同时验证了 ICMPv6
+过滤和接收。该测试还使用 `NETLINK_ROUTE` 数据报套接字连接内核、
+订阅链路组，观察网口关闭事件，并在退订后确认未收到重开事件。
+该轮使用内核处理 WAN RA，尚未验证 odhcp6c 通过 SIGIO 响应链路
+变化的恢复路径。

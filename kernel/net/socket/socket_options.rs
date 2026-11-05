@@ -55,6 +55,7 @@ const SO_REUSEADDR: i32 = 2;
 const SO_TYPE: i32 = 3;
 const SO_ERROR: i32 = 4;
 const SO_BROADCAST: i32 = 6;
+const SO_PRIORITY: i32 = 12;
 const SO_SNDBUF: i32 = 7;
 const SO_RCVBUF: i32 = 8;
 const SO_KEEPALIVE: i32 = 9;
@@ -749,6 +750,13 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
         }
         return 0;
     }
+    if level == SOL_SOCKET && optname == SO_PRIORITY {
+        if optval.is_null() || optlen < 4 {
+            return -EINVAL;
+        }
+        // The stack's only transmit priority is the default priority zero.
+        return if unsafe { read_i32(optval) } == 0 { 0 } else { -EOPNOTSUPP };
+    }
     if level == SOL_SOCKET && optname == SO_REUSEADDR {
         if optval.is_null() || optlen < 4 {
             return -EINVAL;
@@ -887,6 +895,9 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
     let mut val;
 
     if level == SOL_SOCKET {
+        if optname == SO_PRIORITY {
+            return report_int(rep, optlen, 0);
+        }
         if optname == SO_TYPE {
             return report_int(rep, optlen, sock_type);
         }

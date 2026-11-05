@@ -56,10 +56,17 @@ Solicit、Advertise、Request 与 Reply。测试在 A20OS 手动配置委派前�
 第一个 /64，并在 Linux 上配置返程路由，验证了委派地址的双向转发。
 加上 `--renew --bind-probe` 会同时申请 IA_NA 和 IA_PD，验证首个单播
 续租 Reply、绑定网口的双向收发和解除绑定。BusyBox 1.37.0 使用
-`-r no` 时的续租路径解引用空地址指针。仅前缀续租和 LAN 自动通告
-仍在补全。[BusyBox 1.37.0 源码](https://busybox.net/downloads/busybox-1.37.0.tar.bz2)
+`-r no` 时的续租路径解引用空地址指针。
+[BusyBox 1.37.0 源码](https://busybox.net/downloads/busybox-1.37.0.tar.bz2) ·
 [RFC 9915](https://www.rfc-editor.org/rfc/rfc9915.html) ·
 [Kea 前缀委派](https://kea.readthedocs.io/en/kea-2.6.4/arm/dhcp6-srv.html)
+
+用 `--odhcp6c <静态odhcp6c路径>` 可验证仅前缀续租。原版 odhcp6c
+通过 `-N none -P 56 -F` 向 Kea 请求并续租 /56，四报文交换和续租均
+只含 IA_PD。客户端脚本收到 `bound` 和 `updated` 事件，携带前缀、
+首选寿命和有效寿命。WAN RA/SLAAC 由内核处理。测试仍手动配置 LAN
+地址和上游返程路由，LAN 自动通告待实现。
+[OpenWrt odhcp6c](https://github.com/openwrt/odhcp6c)
 
 ```sh
 python3 tools/net/tests/build-dhcp6-peer.py \

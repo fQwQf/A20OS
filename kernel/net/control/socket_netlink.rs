@@ -288,6 +288,9 @@ unsafe extern "C" {
     fn a20_net_netlink_bucket_unlock(bucket: i32, flags: u64);
     fn a20_net_netlink_slot_socket(bucket: i32, i: i32) -> *mut c_void;
     fn a20_net_netlink_is_live(s: *mut c_void) -> i32;
+    fn a20_net_sendto_collect_read(dst: *mut c_void, wake_q: *mut c_void) -> i32;
+    fn a20_net_sendto_wakeq_init(wake_q: *mut c_void);
+    fn a20_net_sendto_wakeq_flush(wake_q: *mut c_void);
     fn a20_net_netlink_enqueue(s: *mut c_void, buf: *const u8, len: usize,
                                src: *const c_void, srclen: usize) -> i32;
     fn a20_net_netlink_rx_bytes(s: *mut c_void) -> u32;
@@ -1997,42 +2000,48 @@ unsafe fn nlrt_broadcast(msg: *const u8, len: usize, group: u32) -> i32 {
     let mut dropped = 0;
     let buckets = a20_net_netlink_buckets();
     let per_bucket = a20_net_netlink_slots_per_bucket();
+    #[repr(align(16))]
+    struct WakeQ([u8; 2048]);
+    let mut wakeq = WakeQ([0; 2048]);
+    let wake = wakeq.0.as_mut_ptr() as *mut c_void;
     for b in 0..buckets {
-        let mut bf = 0u64;
-        a20_net_netlink_bucket_lock(b, &mut bf);
-        for k in 0..per_bucket {
-            let sp = a20_net_netlink_slot_socket(b, k);
-            if sp.is_null() {
-                continue;
-            }
-            let sv = view_of(sp);
-            let mut sf = 0u64;
-            a20_net_netlink_lock(sp, &mut sf);
-            let mut matched = false;
-            let mut r = -1;
-            if a20_net_netlink_ns_initial(*sv.net_ns) != 0
-                && *sv.domain == AF_NETLINK as i32
-                && *sv.bound != 0
-                && *sv.protocol == NETLINK_ROUTE
-            {
-                if a20_net_netlink_local_groups(sp) & group != 0 {
-                    matched = true;
-                    r = a20_net_netlink_enqueue(sp, msg, len,
-                                                src.as_ptr() as *const c_void,
-                                                NET_SOCKADDR_NL_SIZE);
+        let mut k = 0;
+        while k < per_bucket {
+            a20_net_sendto_wakeq_init(wake);
+            let mut collected = 0;
+            let mut bf = 0u64;
+            a20_net_netlink_bucket_lock(b, &mut bf);
+            // Leave space in the C wake queue and resume at the next slot
+            // after releasing the registry lock and delivering wakeups.
+            while k < per_bucket && collected < 32 {
+                let sp = a20_net_netlink_slot_socket(b, k);
+                k += 1;
+                if sp.is_null() {
+                    continue;
                 }
+                let sv = view_of(sp);
+                let mut sf = 0u64;
+                a20_net_netlink_lock(sp, &mut sf);
+                if a20_net_netlink_ns_initial(*sv.net_ns) != 0
+                    && *sv.domain == AF_NETLINK as i32
+                    && *sv.bound != 0
+                    && *sv.protocol == NETLINK_ROUTE
+                    && a20_net_netlink_local_groups(sp) & group != 0
+                {
+                    let result = a20_net_netlink_enqueue(sp, msg, len,
+                        src.as_ptr() as *const c_void, NET_SOCKADDR_NL_SIZE);
+                    if result < 0 {
+                        dropped += 1;
+                    } else {
+                        delivered += 1;
+                        collected += a20_net_sendto_collect_read(sp, wake);
+                    }
+                }
+                a20_net_netlink_unlock(sp, sf);
             }
-            a20_net_netlink_unlock(sp, sf);
-            if !matched {
-                continue;
-            }
-            if r < 0 {
-                dropped += 1;
-            } else {
-                delivered += 1;
-            }
+            a20_net_netlink_bucket_unlock(b, bf);
+            a20_net_sendto_wakeq_flush(wake);
         }
-        a20_net_netlink_bucket_unlock(b, bf);
     }
     if dropped != 0 {
         /* A silent drop is a gap a listener can never diagnose. */
@@ -2356,6 +2365,13 @@ mod tests {
     unsafe extern "C" fn a20_net_netlink_is_live(s: *mut c_void) -> i32 {
         (*(s as *const Sock)).live
     }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_sendto_collect_read(_dst: *mut c_void,
+                                                     _wake: *mut c_void) -> i32 { 0 }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_sendto_wakeq_init(_wake: *mut c_void) {}
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_sendto_wakeq_flush(_wake: *mut c_void) {}
     #[no_mangle]
     unsafe extern "C" fn a20_net_netlink_enqueue(_s: *mut c_void, buf: *const u8,
                                                  len: usize, _src: *const c_void,

@@ -509,7 +509,7 @@ int net_socket_create(int domain, int type, int protocol) {
         ((domain != AF_INET && domain != AF_INET6) || protocol < 0 || protocol > 255))
         return -EPROTONOSUPPORT;
     if (domain == AF_NETLINK &&
-        (base_type != SOCK_RAW ||
+        ((base_type != SOCK_RAW && base_type != SOCK_DGRAM) ||
          (protocol != NETLINK_SOCK_DIAG &&
           protocol != NETLINK_KOBJECT_UEVENT &&
           protocol != NETLINK_ROUTE &&
@@ -729,6 +729,8 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
 int net_connect_sock(net_socket_t *s, const void *addr, size_t addrlen) {
     if (!s) return -ENOTSOCK;
     if (!addr || addrlen > NET_SOCKADDR_MAX) return -EINVAL;
+    if (s->domain == AF_NETLINK)
+        return net_netlink_connect(s, addr, addrlen);
     if (s->connected) return -EISCONN;
     if (s->domain == AF_UNIX)
         return net_unix_socket_connect(s, addr, addrlen);
@@ -783,6 +785,8 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
         if (in6->sin6_family != AF_INET6 && in6->sin6_family != AF_UNSPEC)
             return -EAFNOSUPPORT;
     }
+    if (net_backend_has(NET_CAP_RAW_IPV6_TX))
+        return net_inet_send_raw_packet(s, buf, len, addr, addrlen, 0, s->protocol);
     if (s->ipv6_checksum_offset >= 0) {
         size_t off = (size_t)s->ipv6_checksum_offset;
         if (off + 1 >= len)

@@ -631,14 +631,22 @@ static int mtu_job_run(void *argument)
 }
 
 typedef struct link_job {
-    void *context;
+    bsd_nic_slot_t *nic;
+    unsigned index;
     int up;
 } link_job_t;
 
 static int link_job_run(void *argument)
 {
     link_job_t *job = argument;
-    return a20_bsd_port_nic_set_up(job->context, job->up);
+    if (job->up == (int)job->nic->up)
+        return 0;
+    int result = a20_bsd_port_nic_set_up(job->nic->context, job->up);
+    if (result == 0) {
+        job->nic->up = job->up;
+        net_netlink_link_notify_one(job->index, job->up);
+    }
+    return result;
 }
 
 typedef struct addr4_job {
@@ -768,11 +776,8 @@ static int if_set_flags(unsigned index, uint32_t value, uint32_t mask)
     if (slot < 0 || !nics[slot].attached) return -ENODEV;
     if (mask & ~(uint32_t)NLRT_IF_FLAGS_UP) return -EOPNOTSUPP;
     int up = (value & NLRT_IF_FLAGS_UP) != 0;
-    if (up == (int)nics[slot].up) return 0;
-    link_job_t job = {.context = nics[slot].context, .up = up};
-    int result = a20_bsd_executor_call(link_job_run, &job);
-    if (result == 0) nics[slot].up = up ? 1 : 0;
-    return result;
+    link_job_t job = {.nic = &nics[slot], .index = index, .up = up};
+    return a20_bsd_executor_call(link_job_run, &job);
 }
 
 typedef struct addr6_job {
@@ -1074,7 +1079,7 @@ const net_backend_t a20_bsd_backend = {
             NET_CAP_PKTINFO | NET_CAP_UDP_CONTROL | NET_CAP_TUN |
             NET_CAP_BINDTODEVICE |
             NET_CAP_IF_DYNAMIC | NET_CAP_IF_ADDR6 | NET_CAP_ROUTE |
-            NET_CAP_PMTU | NET_CAP_RAW | NET_CAP_RAW_TX |
+            NET_CAP_PMTU | NET_CAP_RAW | NET_CAP_RAW_TX | NET_CAP_RAW_IPV6_TX |
             NET_CAP_CONGESTION | NET_CAP_DEVICE_IRQ,
     .cycle = &bsd_cycle_ops,
     .event = &bsd_event_ops,

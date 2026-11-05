@@ -490,11 +490,59 @@ static int has_transport(const net_socket_t *s) { return transport_flags(s) != 0
 static int has_tcp(const net_socket_t *s) { return !!(transport_flags(s) & BSD_KIND_TCP); }
 static uint32_t buffer_default(int send) { (void)send; return 65536; }
 
+typedef struct {
+    int fd, level, option;
+    size_t length;
+    uint8_t value[32];
+} ipv6_option_job_t;
+
+static int ipv6_option_run(void *argument)
+{
+    ipv6_option_job_t *job = argument;
+    size_t index_offset = 0;
+    if (job->option == IPV6_JOIN_GROUP || job->option == IPV6_LEAVE_GROUP)
+        index_offset = 16;
+    if (index_offset || job->option == IPV6_MULTICAST_IF) {
+        unsigned index;
+        memcpy(&index, job->value + index_offset, sizeof(index));
+        if (index) {
+            int native = a20_bsd_ifindex_to_bsd(index);
+            if (native < 0)
+                return native;
+            index = (unsigned)native;
+            memcpy(job->value + index_offset, &index, sizeof(index));
+        }
+    }
+    return a20_bsd_port_socket_ipv6_option(job->fd, job->level, job->option,
+                                           job->value, job->length);
+}
+
 static int option_validate(net_socket_t *s, int level, int option,
                            const void *value, size_t length)
 {
-    (void)s; (void)level; (void)option; (void)value; (void)length;
-    return 0;
+    bsd_socket_t *state = bsd(s);
+    if (s->domain != AF_INET6 || !state || state->fd < 0)
+        return 0;
+    size_t needed;
+    if (level == IPPROTO_ICMPV6 && option == ICMP6_FILTER && s->type == SOCK_RAW)
+        needed = 32;
+    else if (level == IPPROTO_IPV6 &&
+             (option == IPV6_JOIN_GROUP || option == IPV6_LEAVE_GROUP))
+        needed = 20;
+    else if (level == IPPROTO_IPV6 &&
+             (option == IPV6_MULTICAST_IF || option == IPV6_MULTICAST_HOPS ||
+              option == IPV6_MULTICAST_LOOP || option == IPV6_TCLASS ||
+              (option == IPV6_CHECKSUM && s->type == SOCK_RAW)))
+        needed = sizeof(int);
+    else
+        return 0;
+
+    if (!value || length < needed)
+        return -EINVAL;
+    ipv6_option_job_t job = {.fd = state->fd, .level = level, .option = option,
+                             .length = needed};
+    memcpy(job.value, value, needed);
+    return a20_bsd_executor_call(ipv6_option_run, &job);
 }
 
 typedef struct option_job { int fd, level, option, value; } option_job_t;
@@ -609,6 +657,10 @@ static int raw_send_transport(net_socket_t *s, const void *buffer, size_t length
     bsd_socket_t *state = bsd(s);
     if (!state || state->fd < 0 || state->kind != BSD_KIND_RAW)
         return -EOPNOTSUPP;
+    if (s->domain == AF_INET6) {
+        io_job_t job = {state->fd, 0, buffer, length, address, address_length};
+        return a20_bsd_executor_call(send_job, &job);
+    }
     raw_job_t job = {state->fd, hdrincl, buffer, length, address,
                      address_length};
     return a20_bsd_executor_call(raw_job_run, &job);
@@ -688,7 +740,7 @@ static int bind_device(net_socket_t *s, const char *name)
     if (!name) name = "";
     int index = name[0] ? ifreq_name_index(name) : 0;
     if (index < 0) return -ENODEV;
-    if (s->domain == AF_INET6 && state->kind == BSD_KIND_UDP) {
+    if (s->domain == AF_INET6 && (state->kind == BSD_KIND_UDP || state->kind == BSD_KIND_RAW)) {
         bind_device_job_t job = {state, name, index};
         return a20_bsd_executor_call(bind_device6_run, &job);
     }

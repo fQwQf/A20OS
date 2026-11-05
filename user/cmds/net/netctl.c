@@ -19,7 +19,9 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <net/if.h>
+#include <poll.h>
 #include <netinet/in.h>
+#include <netinet/icmp6.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 
@@ -528,14 +530,156 @@ static int set_link(const char *name, const char *state)
     return 0;
 }
 
+static int netlink_watch(const char *name)
+{
+    enum { LEVEL_NETLINK = 270, ADD_MEMBERSHIP = 1, DROP_MEMBERSHIP = 2, LINK_GROUP = 1 };
+    unsigned index = if_nametoindex(name);
+    int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE_);
+    int group = LINK_GROUP;
+    struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
+    struct sockaddr_nl address;
+    socklen_t size = sizeof(address);
+    if (!index || fd < 0 ||
+        connect(fd, (struct sockaddr *)&kernel, sizeof(kernel)) < 0 ||
+        getpeername(fd, (struct sockaddr *)&address, &size) < 0 ||
+        size != sizeof(address) || address.nl_family != AF_NETLINK ||
+        address.nl_pid != 0 || address.nl_groups != 0 ||
+        setsockopt(fd, LEVEL_NETLINK, ADD_MEMBERSHIP, &group, sizeof(group)) < 0 ||
+        getsockname(fd, (struct sockaddr *)&address, &size) < 0 ||
+        address.nl_pid == 0 || address.nl_groups != 1) {
+        perror("NETCTL: FAIL subscribe link");
+        if (fd >= 0) close(fd);
+        return 1;
+    }
+    struct {
+        struct nlmsghdr header;
+        struct ifinfomsg link;
+    } request = {
+        .header = {sizeof(request), NLT_GETLINK, 1, 73, 0},
+        .link = {.ifi_index = (int32_t)index},
+    };
+    struct pollfd ready = {.fd = fd, .events = POLLIN};
+    uint8_t buffer[512];
+    for (int query = 1; query >= 0; --query) {
+        if (query && send(fd, &request, sizeof(request), 0) != sizeof(request))
+            goto fail;
+        if (poll(&ready, 1, 5000) != 1)
+            goto fail;
+        ssize_t length = recv(fd, buffer, sizeof(buffer), 0);
+        struct nlmsghdr header;
+        struct ifinfomsg link;
+        if (length < (ssize_t)(sizeof(header) + sizeof(link)))
+            goto fail;
+        memcpy(&header, buffer, sizeof(header));
+        memcpy(&link, buffer + sizeof(header), sizeof(link));
+        if (header.nlmsg_type != NLT_NEWLINK || link.ifi_index != (int32_t)index)
+            goto fail;
+        if (query) {
+            if (header.nlmsg_seq != 73)
+                goto fail;
+            puts("NETCTL: link watch ready");
+            fflush(stdout);
+        } else if (link.ifi_flags & IFF_UP) {
+            goto fail;
+        }
+    }
+    if (setsockopt(fd, LEVEL_NETLINK, DROP_MEMBERSHIP, &group, sizeof(group)) < 0 ||
+        getsockname(fd, (struct sockaddr *)&address, &size) < 0 || address.nl_groups)
+        goto fail;
+    puts("NETCTL: link watch dropped");
+    fflush(stdout);
+    if (poll(&ready, 1, 1800) != 0)
+        goto fail;
+    close(fd);
+    puts("NETCTL: link watch passed");
+    return 0;
+fail:
+    perror("NETCTL: FAIL link watch");
+    close(fd);
+    return 1;
+}
+
+static int raw6_echo(const char *name)
+{
+    unsigned index = if_nametoindex(name);
+    int fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+    if (!index || fd < 0)
+        goto fail;
+    struct icmp6_filter filter;
+    ICMP6_FILTER_SETBLOCKALL(&filter);
+    ICMP6_FILTER_SETPASS(ICMP6_ECHO_REPLY, &filter);
+    struct ipv6_mreq membership = {.ipv6mr_interface = index};
+    inet_pton(AF_INET6, "ff02::1", &membership.ipv6mr_multiaddr);
+    int checksum = 2, hops = 255, one = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, name, strlen(name)) < 0 ||
+        setsockopt(fd, IPPROTO_ICMPV6, ICMP6_FILTER, &filter, sizeof(filter)) < 0 ||
+        setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &membership, sizeof(membership)) < 0 ||
+        setsockopt(fd, IPPROTO_RAW, IPV6_CHECKSUM, &checksum, sizeof(checksum)) < 0 ||
+        setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops)) < 0 ||
+        setsockopt(fd, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &one, sizeof(one)) < 0)
+        goto fail;
+
+    struct sockaddr_in6 target = {.sin6_family = AF_INET6, .sin6_scope_id = index};
+    inet_pton(AF_INET6, "ff02::2", &target.sin6_addr);
+    const uint8_t request[] = {128, 0, 0, 0, 0xa2, 0x06, 0, 1, 'r', 'a', 'w'};
+    if (sendto(fd, request, sizeof(request), 0, (void *)&target, sizeof(target)) != sizeof(request))
+        goto fail;
+
+    struct pollfd ready = {.fd = fd, .events = POLLIN};
+    if (poll(&ready, 1, 5000) != 1)
+        goto fail;
+    uint8_t packet[64];
+    union {
+        struct cmsghdr align;
+        char bytes[CMSG_SPACE(sizeof(int))];
+    } control;
+    struct sockaddr_in6 peer;
+    struct iovec iov = {.iov_base = packet, .iov_len = sizeof(packet)};
+    struct msghdr reply = {
+        .msg_name = &peer, .msg_namelen = sizeof(peer),
+        .msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes),
+    };
+    ssize_t received = recvmsg(fd, &reply, 0);
+    if (received != sizeof(request) || packet[0] != ICMP6_ECHO_REPLY ||
+        memcmp(packet + 4, request + 4, sizeof(request) - 4) || peer.sin6_scope_id != index) {
+        fprintf(stderr, "raw reply size=%ld type=%u scope=%u expected=%u\n",
+                (long)received, received > 0 ? packet[0] : 0,
+                received >= 0 ? peer.sin6_scope_id : 0, index);
+        goto fail;
+    }
+    struct cmsghdr *meta = CMSG_FIRSTHDR(&reply);
+    if (!meta || meta->cmsg_level != IPPROTO_IPV6 || meta->cmsg_type != IPV6_HOPLIMIT ||
+        meta->cmsg_len != CMSG_LEN(sizeof(int))) {
+        fprintf(stderr, "raw reply ancillary length=%zu\n", (size_t)reply.msg_controllen);
+        goto fail;
+    }
+    memcpy(&hops, CMSG_DATA(meta), sizeof(hops));
+    if (hops != 64) {
+        fprintf(stderr, "raw reply hop limit=%d\n", hops);
+        goto fail;
+    }
+    close(fd);
+    puts("NETCTL: raw IPv6 echo passed");
+    return 0;
+fail:
+    perror("NETCTL: FAIL raw IPv6 echo");
+    if (fd >= 0) close(fd);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "raw6-echo"))
+        return raw6_echo(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "watch-link"))
+        return netlink_watch(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "set-link"))
         return set_link(argv[2], argv[3]);
     if (argc == 5 && !strcmp(argv[1], "set-ipv6"))
         return set_ipv6(argv[2], argv[3], argv[4]);
     if (argc != 1 && (argc != 5 || strcmp(argv[1], "set-ipv4"))) {
-        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX | set-link IF up|down]\n");
+        fprintf(stderr, "usage: netctl [set-ipv4 IF ADDRESS NETMASK | set-ipv6 IF ADDRESS PREFIX | set-link IF up|down | watch-link IF | raw6-echo IF]\n");
         return 2;
     }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
