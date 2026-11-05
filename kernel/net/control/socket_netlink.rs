@@ -1154,8 +1154,59 @@ fn attr_u32(bytes: &[u8]) -> Result<u32, i32> {
     }
     Ok(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
+extern "C" {
+    fn net_stack_route_update_v6(dst: *const u8, prefix: u8, index: u32, remove: i32) -> i32;
+}
+
+unsafe fn apply_route6(msg_type: u16, flags: u16, rt: &RtMsg, attrs: &[u8]) -> i32 {
+    if rt.dst_len > 128 {
+        return -EINVAL;
+    }
+    let remove = msg_type == RTM_DELROUTE;
+    if rt.src_len != 0 || rt.tos != 0 || rt.flags != 0 ||
+        (!remove && flags & NLM_F_REPLACE != 0) ||
+        (rt.type_ != 1 && !(remove && rt.type_ == 0)) {
+        return -EOPNOTSUPP;
+    }
+    let mut table = rt.table as u32;
+    let mut destination = [0u8; 16];
+    let mut have_dst = false;
+    let mut index = 0;
+    let mut it = AttrIter::new(attrs);
+    while let Some((kind, value)) = it.next() {
+        match kind {
+            RTA_DST if value.len() == 16 && !have_dst => {
+                destination.copy_from_slice(value);
+                have_dst = true;
+            }
+            RTA_OIF | RTA_TABLE => match attr_u32(value) {
+                Ok(v) if kind == RTA_OIF => index = v,
+                Ok(v) => table = v,
+                Err(e) => return e,
+            },
+            RTA_DST => return -EINVAL,
+            _ => return -EOPNOTSUPP,
+        }
+    }
+    if it.bad || index == 0 || (rt.dst_len != 0 && !have_dst) {
+        return -EINVAL;
+    }
+    if table != 0 && table != RT_TABLE_MAIN {
+        return -EOPNOTSUPP;
+    }
+    for bit in rt.dst_len as usize..128 {
+        if destination[bit / 8] & (0x80 >> (bit % 8)) != 0 {
+            return -EINVAL;
+        }
+    }
+    net_stack_route_update_v6(destination.as_ptr(), rt.dst_len, index, remove as i32)
+}
+
 unsafe fn apply_route(msg_type: u16, flags: u16, body: *const u8, attrs: &[u8]) -> i32 {
     let rt = ptr::read_unaligned(body as *const RtMsg);
+    if rt.family as i32 == AF_INET6 {
+        return apply_route6(msg_type, flags, &rt, attrs);
+    }
     if rt.family as i32 != AF_INET {
         return -EAFNOSUPPORT;
     }
@@ -2597,6 +2648,11 @@ mod tests {
                                                      _m: *mut u8, _g: *mut u8) -> i32 {
         ptr::copy_nonoverlapping(T_GET_ADDR_IP.as_ptr(), ip, 4);
         T_GET_ADDR_RC
+    }
+    #[no_mangle]
+    unsafe extern "C" fn net_stack_route_update_v6(_d: *const u8, _p: u8,
+                                                    _i: u32, _remove: i32) -> i32 {
+        -EOPNOTSUPP
     }
     #[no_mangle]
     unsafe extern "C" fn net_stack_route_lookup_v6(_d: *const u8, _i: u32,

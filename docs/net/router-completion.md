@@ -14,7 +14,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | 64 位非嵌入式实例统一后端 | 实例检查、四架构真实 BSD 内核编译及 QEMU 网络收发 | 基础迁移完成 |
 | BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
 | BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
-| IPv4 PPPoE 宽带接入 | discovery/session、认证、MTU、断线重连及真实对端 | Linux PAP、CHAP 双网口回归通过 |
+| PPPoE 宽带接入 | discovery/session、认证、MTU、IPv6CP、IPCP DNS 与断线重连 | Linux PAP、CHAP 双栈和 IPv4 回归通过 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 委派与续租、Linux LAN 自动地址与转发、租约撤销和重编号通过 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | 待完成 |
 | WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
@@ -146,7 +146,7 @@ MASQUERADE 绑定，保留其他接口的状态。生产状态机的选择性清
 避免请求者返回后仍访问栈上的完成对象。修复后 20 轮连续打开、关闭和
 重开均通过，记录为 `pppoe-tun-fixed-01` 至 `pppoe-tun-fixed-20`。
 四架构 BSD 网络回归为 `pppoe-sockets-<arch>-racefix`。ARM32/RV32
-的 lwIP 启动关机 smoke 通过。IPv6CP 和 PPP DNS 选项尚未接入。
+的 lwIP 启动关机 smoke 通过。双栈和 DNS 的后续验证见下文。
 
 ## WAN IPv6 RA 与 SLAAC
 
@@ -230,5 +230,20 @@ Linux LAN 从子网编号 `0x2a` 对应的 /64 自动生成地址，并使用通
 Kea 改用另一个 /56 恢复后，原有发布进程重新获得委派，Linux 使用新
 地址恢复通信。正常退出时，发布进程撤销新通告并移除它管理的地址。
 这轮同时验证了 UDP 546 复拨需要的 Linux `SO_REUSEADDR` 和
-`SOCK_CLOEXEC` 行为。多 LAN 部署、进程或整机重启后的旧前缀处理、
-IPv6CP 和 PPP DNS 仍需运行验证或实现。
+`SOCK_CLOEXEC` 行为。多 LAN 部署及进程或整机重启后的旧前缀处理
+仍需运行验证。
+
+
+### 双栈 PPPoE 与 IPCP DNS
+
+`pppoe-dual-chap-final` 和 `pppoe-dual-pap-silent` 使用 Linux
+pppoe-server 和 pppd。在首次拨号和重拨中，抓包确认双方交换
+IPv6CP 配置确认，对端建议的地址标识得到采用，IPv6 数据使用 PPP
+协议号 `0x0057`。Linux 可以探测 A20OS 的 PPP 链路本地地址，
+LAN 可通过 IPv6 默认路由和 PPP 到达 WAN；同一会话也通过 IPv4 NAT
+转发。暂停 PAP 对端会触发 LCP Echo 超时，恢复后重拨成功。
+
+IPCP 确认了 `192.0.2.53` 和 `192.0.2.54`。解析器文件在重拨后
+重新生成并在正常停止后清理。`pppoe-ipcp-dns-reject` 验证对端拒绝
+DNS 选项时 IPv4 仍可拨号和转发。此轮 IPv6 转发使用测试配置的
+LAN 前缀。经 PPP 获取 DHCPv6-PD 及在重拨后恢复委派还需验证。

@@ -20,6 +20,8 @@ int a20_bsd_tun_get_addr(unsigned index, uint8_t address[4], uint8_t mask[4],
                          uint8_t gateway[4]);
 int a20_bsd_tun_set_addr(unsigned index, const uint8_t address[4],
                          const uint8_t mask[4], int add);
+int a20_bsd_tun_route6(const uint8_t destination[16], uint8_t prefix,
+                       unsigned index, int remove);
 int a20_bsd_tun_route4(unsigned index, const uint8_t destination[4],
                        uint8_t prefix, int remove);
 int a20_bsd_tun_set_addr6(unsigned index, const uint8_t address[16],

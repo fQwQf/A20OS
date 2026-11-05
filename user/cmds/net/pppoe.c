@@ -1,7 +1,8 @@
-/* IPv4 PPPoE client. The kernel owns IP routing, NAT and fragmentation. */
+/* PPPoE client. The kernel owns IP routing, NAT and fragmentation. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <net/if.h>
 #include <netpacket/packet.h>
 #include <poll.h>
@@ -25,6 +26,8 @@ enum {
     SERVICE = 0x101, AC_NAME = 0x102, HOST_UNIQ = 0x103, COOKIE = 0x104,
     RELAY = 0x110,
     LCP = 0xc021, PAP = 0xc023, CHAP = 0xc223, IPCP = 0x8021, IPV4 = 0x21,
+    IPV6CP = 0x8057, IPV6 = 0x57, IID = 1, IPCP_ADDRESS = 3,
+    DNS_PRIMARY = 129, DNS_SECONDARY = 131,
     REQUEST = 1, ACK = 2, NAK = 3, REJECT = 4, TERMINATE = 5,
     TERMINATE_ACK = 6, CODE_REJECT = 7, PROTOCOL_REJECT = 8, ECHO = 9, ECHO_REPLY = 10,
 };
@@ -32,6 +35,8 @@ enum {
 struct config {
     const char *wan, *tun, *service;
     uint16_t auth;
+    bool ipv6;
+    const char *dns_file;
     char user[256], password[256];
 };
 
@@ -39,12 +44,15 @@ struct session {
     int disc, data, tun;
     struct sockaddr_ll link;
     uint8_t mac[6], peer[6], token[8], magic[4], address[4], remote[4];
+    uint8_t iid[8], remote_iid[8], suggested_iid[8], dns[2][4];
     uint16_t id, mtu, mru, auth;
     uint8_t next_id, chap_id, echo_id;
     uint8_t peer_lcp[15], peer_lcp_len;
     bool chap_pending, echo_pending;
     unsigned missed;
     int64_t echo_at, auth_at;
+    struct stat dns_owner;
+    bool dns_written;
 };
 
 struct packet {
@@ -356,13 +364,29 @@ static bool valid_address(const uint8_t ip[4])
     return ip[0] != 0 && ip[0] != 127 && ip[0] < 224;
 }
 
+static bool valid_iid(const uint8_t iid[8])
+{
+    return memcmp(iid, "\0\0\0\0\0\0\0\0", 8) != 0;
+}
+
+static void suggest_peer_iid(const uint8_t local[8], uint8_t opt[10])
+{
+    opt[0] = IID;
+    opt[1] = 10;
+    memcpy(opt + 2, local, 8);
+    opt[2] &= (uint8_t)~2;
+    opt[9] ^= 1;
+    if (!valid_iid(opt + 2))
+        opt[9] = 2;
+}
+
 static int peer_request(struct session *s, const struct config *cfg, uint16_t protocol,
                         const uint8_t *p, size_t len, bool *acked)
 {
-    uint8_t rejected[MTU], nak[4];
+    uint8_t rejected[MTU], nak[10];
     size_t rejected_len = 0, nak_len = 0;
     uint16_t peer_mtu = MTU, auth = 0;
-    uint8_t peer_ip[4] = {0};
+    uint8_t peer_ip[4] = {0}, peer_iid[8] = {0};
     bool seen[256] = {0};
     for (size_t off = 4; off < len;) {
         if (len - off < 2 || p[off + 1] < 2 || p[off + 1] > len - off)
@@ -389,9 +413,12 @@ static int peer_request(struct session *s, const struct config *cfg, uint16_t pr
             } else if (type == 5 && n == 6) {
                 ok = memcmp(opt + 2, s->magic, 4) != 0;
             }
-        } else if (!seen[type] && protocol == IPCP && type == 3 && n == 6) {
+        } else if (!seen[type] && protocol == IPCP && type == IPCP_ADDRESS && n == 6) {
             memcpy(peer_ip, opt + 2, 4);
             ok = valid_address(peer_ip);
+        } else if (!seen[type] && protocol == IPV6CP && type == IID && n == 10) {
+            memcpy(peer_iid, opt + 2, 8);
+            ok = true;
         }
         seen[type] = true;
         if (!ok) {
@@ -403,6 +430,13 @@ static int peer_request(struct session *s, const struct config *cfg, uint16_t pr
     *acked = false;
     if (rejected_len)
         return control(s, protocol, REJECT, p[1], rejected, rejected_len);
+    if (protocol == IPV6CP &&
+        (!valid_iid(peer_iid) || !memcmp(peer_iid, s->iid, 8))) {
+        suggest_peer_iid(s->iid, nak);
+        if (!rejected_len)
+            memcpy(s->suggested_iid, nak + 2, 8);
+        nak_len = 10;
+    }
     if (nak_len)
         return control(s, protocol, NAK, p[1], nak, nak_len);
     if (protocol == LCP) {
@@ -414,8 +448,10 @@ static int peer_request(struct session *s, const struct config *cfg, uint16_t pr
         s->peer_lcp_len = (uint8_t)(len - 4);
         s->auth = auth;
         s->mtu = peer_mtu;
-    } else {
+    } else if (protocol == IPCP) {
         memcpy(s->remote, peer_ip, 4);
+    } else {
+        memcpy(s->remote_iid, peer_iid, 8);
     }
     *acked = true;
     return control(s, protocol, ACK, p[1], p + 4, len - 4);
@@ -447,16 +483,89 @@ static int lcp_event(struct session *s, const uint8_t *p, size_t len)
     return 0;
 }
 
+/* A repeated identical request may mean our ACK was lost. A changed request
+ * tears down the installed network configuration and redials. */
+static int ncp_open_event(struct session *s, uint16_t protocol,
+                          const uint8_t *p, size_t len)
+{
+    if (p[0] == TERMINATE) {
+        (void)control(s, protocol, TERMINATE_ACK, p[1], p, 0);
+        return -ECONNRESET;
+    }
+    if (p[0] != REQUEST)
+        return 0;
+    bool same = protocol == IPCP ?
+        ((len == 10 && p[4] == IPCP_ADDRESS && p[5] == 6 && !memcmp(p + 6, s->remote, 4)) ||
+         (len == 4 && !valid_address(s->remote))) :
+        (len == 14 && p[4] == IID && p[5] == 10 && !memcmp(p + 6, s->remote_iid, 8));
+    return same ? control(s, protocol, ACK, p[1], p + 4, len - 4) : -ECONNRESET;
+}
+
+/* IPCP NAKs may supply several independent addresses. Validate the whole
+ * response before applying it. A reject may remove DNS options only. */
+static int ipcp_response(uint8_t opts[18], size_t *size, const uint8_t *data,
+                         size_t length, bool reject)
+{
+    if (!length || length % 6)
+        return 0;
+    uint8_t next[18];
+    memcpy(next, opts, *size);
+    unsigned selected = 0;
+    for (size_t i = 0; i < length; i += 6) {
+        size_t j;
+        for (j = 0; j < *size; j += 6)
+            if (opts[j] == data[i])
+                break;
+        if (j == *size || data[i + 1] != 6 || selected & (1u << (j / 6)))
+            return 0;
+        selected |= 1u << (j / 6);
+        if (reject) {
+            if (memcmp(opts + j, data + i, 6))
+                return 0;
+        } else {
+            if (!valid_address(data + i + 2))
+                return 0;
+            memcpy(next + j + 2, data + i + 2, 4);
+        }
+    }
+    if (reject) {
+        if (selected & 1) /* The address is always the first option. */
+            return -EPROTONOSUPPORT;
+        size_t out = 0;
+        for (size_t j = 0; j < *size; j += 6) {
+            if (!(selected & (1u << (j / 6)))) {
+                memmove(next + out, next + j, 6);
+                out += 6;
+            }
+        }
+        *size = out;
+    }
+    memcpy(opts, next, *size);
+    return 1;
+}
+
 static int negotiate(struct session *s, const struct config *cfg, uint16_t protocol)
 {
-    uint8_t opts[10] = {1, 4, MTU >> 8, MTU & 255, 5, 6};
-    size_t size = sizeof(opts);
+    uint8_t opts[18] = {1, 4, MTU >> 8, MTU & 255, 5, 6};
+    size_t size = 10;
     memcpy(opts + 6, s->magic, 4);
     if (protocol == IPCP) {
-        opts[0] = 3;
+        opts[0] = IPCP_ADDRESS;
         opts[1] = 6;
         memcpy(opts + 2, s->address, 4);
         size = 6;
+        if (cfg->dns_file) {
+            opts[6] = DNS_PRIMARY;
+            opts[7] = 6;
+            memset(opts + 8, 0, 4);
+            opts[12] = DNS_SECONDARY;
+            opts[13] = 6;
+            size = 18;
+        }
+    } else if (protocol == IPV6CP) {
+        opts[0] = IID;
+        opts[1] = 10;
+        memcpy(opts + 2, s->iid, 8);
     }
     bool ours = false, theirs = false;
     for (unsigned retry = 0; retry < 10 && !stopping; ++retry) {
@@ -473,25 +582,55 @@ static int negotiate(struct session *s, const struct config *cfg, uint16_t proto
                 continue;
             uint8_t *p = packet.bytes + HEADER + 2;
             if (packet.protocol != protocol) {
-                if (packet.protocol == LCP && (rc = lcp_event(s, p, len)) < 0)
+                if (packet.protocol == LCP) {
+                    if (p[0] == PROTOCOL_REJECT && len >= 6 && get16(p + 4) == protocol)
+                        return -EPROTONOSUPPORT;
+                    if ((rc = lcp_event(s, p, len)) < 0)
+                        return rc;
+                } else if (protocol == IPV6CP && packet.protocol == IPCP &&
+                           (rc = ncp_open_event(s, IPCP, p, len)) < 0) {
                     return rc;
+                }
                 continue;
             }
             if (p[0] == REQUEST) {
                 rc = peer_request(s, cfg, protocol, p, len, &theirs);
                 if (rc < 0)
                     return rc;
-            } else if (protocol == LCP && p[0] == TERMINATE) {
-                return lcp_event(s, p, len);
+            } else if (p[0] == TERMINATE) {
+                return protocol == LCP ? lcp_event(s, p, len) : ncp_open_event(s, protocol, p, len);
             } else if (p[1] == id) {
                 if (p[0] == ACK && len == size + 4 && !memcmp(p + 4, opts, size)) {
-                    if (protocol == IPCP && !valid_address(s->address))
-                        return -EADDRNOTAVAIL;
+                    if (protocol == IPCP) {
+                        if (!valid_address(opts + 2))
+                            return -EADDRNOTAVAIL;
+                        memcpy(s->address, opts + 2, 4);
+                        memset(s->dns, 0, sizeof(s->dns));
+                        for (size_t j = 6; j < size; j += 6)
+                            memcpy(s->dns[opts[j] == DNS_SECONDARY], opts + j + 2, 4);
+                    }
                     ours = true;
-                } else if (protocol == IPCP && p[0] == NAK && len == 10 &&
-                           p[4] == 3 && p[5] == 6 && valid_address(p + 6)) {
-                    memcpy(s->address, p + 6, 4);
-                    memcpy(opts + 2, p + 6, 4);
+                } else if (protocol == IPCP && (p[0] == NAK || p[0] == REJECT)) {
+                    rc = ipcp_response(opts, &size, p + 4, len - 4, p[0] == REJECT);
+                    if (rc < 0)
+                        return rc;
+                    if (rc)
+                        break;
+                } else if (protocol == IPV6CP && p[0] == NAK && len == 14 &&
+                           p[4] == IID && p[5] == 10 && valid_iid(p + 6)) {
+                    if (!memcmp(s->remote_iid, p + 6, 8) ||
+                        !memcmp(s->suggested_iid, p + 6, 8)) {
+                        if (getrandom(s->iid, sizeof(s->iid), 0) != sizeof(s->iid))
+                            return -EIO;
+                        s->iid[0] &= (uint8_t)~2;
+                        if (!valid_iid(s->iid))
+                            s->iid[7] = 1;
+                    } else {
+                        memcpy(s->iid, p + 6, 8);
+                    }
+                    memcpy(opts + 2, s->iid, 8);
+                    if (!memcmp(s->iid, s->remote_iid, 8))
+                        theirs = false;
                     break;
                 } else if (protocol == LCP && p[0] == NAK && len == 8 &&
                            p[4] == 1 && p[5] == 4 &&
@@ -599,32 +738,16 @@ static int authenticate(struct session *s, const struct config *cfg)
     return -ETIMEDOUT;
 }
 
-static int default_route(unsigned index)
+static int netlink_ack(const void *request, size_t size)
 {
-    /* Linux RTM_NEWROUTE with RTA_OIF. Use an exclusive add so an
-     * existing uplink route belongs to its original owner. */
-    enum { NEW_ROUTE = 24, MAIN_TABLE = 254, OUT_IF = 4, NL_ERROR = 2,
-           REQUEST_ACK_CREATE_EXCL = 1 | 4 | 0x400 | 0x200 };
-    struct {
-        uint32_t len;
-        uint16_t type, flags;
-        uint32_t seq, pid;
-        uint8_t family, dst_len, src_len, tos, table, protocol, scope, kind;
-        uint32_t route_flags;
-        uint16_t attr_len, attr_type;
-        uint32_t ifindex;
-    } req = {
-        .len = sizeof(req), .type = NEW_ROUTE, .flags = REQUEST_ACK_CREATE_EXCL,
-        .seq = 1, .family = AF_INET, .table = MAIN_TABLE, .protocol = 4, .scope = 253,
-        .kind = 1, .attr_len = 8, .attr_type = OUT_IF, .ifindex = index,
-    };
+    enum { NL_ERROR = 2 };
     struct { uint16_t family, pad; uint32_t pid, groups; } local = {.family = AF_NETLINK};
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, 0);
     if (fd < 0)
         return -errno;
     int rc;
     if (bind(fd, (void *)&local, sizeof(local)) < 0 ||
-        send(fd, &req, sizeof(req), 0) < 0) {
+        send(fd, request, size, 0) < 0) {
         rc = -errno;
     } else {
         rc = wait_fd(fd, now_ms() + 2000);
@@ -641,13 +764,56 @@ static int default_route(unsigned index)
                 memcpy(&type, ack + 4, 2);
                 memcpy(&seq, ack + 8, 4);
                 memcpy(&error, ack + 16, 4);
-                if (type == NL_ERROR && seq == req.seq && error <= 0)
+                if (type == NL_ERROR && seq == 1 && error <= 0)
                     rc = error;
             }
         }
     }
     close(fd);
     return rc;
+}
+
+static int default_route(unsigned index, int family)
+{
+    /* Linux RTM_NEWROUTE with RTA_OIF. Use an exclusive add so an
+     * existing uplink route belongs to its original owner. */
+    enum { NEW_ROUTE = 24, MAIN_TABLE = 254, OUT_IF = 4,
+           REQUEST_ACK_CREATE_EXCL = 1 | 4 | 0x400 | 0x200 };
+    struct {
+        uint32_t len;
+        uint16_t type, flags;
+        uint32_t seq, pid;
+        uint8_t family, dst_len, src_len, tos, table, protocol, scope, kind;
+        uint32_t route_flags;
+        uint16_t attr_len, attr_type;
+        uint32_t ifindex;
+    } req = {
+        .len = sizeof(req), .type = NEW_ROUTE, .flags = REQUEST_ACK_CREATE_EXCL,
+        .seq = 1, .family = family, .table = MAIN_TABLE, .protocol = 4, .scope = 253,
+        .kind = 1, .attr_len = 8, .attr_type = OUT_IF, .ifindex = index,
+    };
+    return netlink_ack(&req, sizeof(req));
+}
+
+static int set_link_local(unsigned index, const uint8_t iid[8])
+{
+    enum { NEW_ADDRESS = 20, LOCAL = 2, REQUEST_ACK_CREATE_EXCL = 1 | 4 | 0x400 | 0x200 };
+    struct {
+        uint32_t len;
+        uint16_t type, flags;
+        uint32_t seq, pid;
+        uint8_t family, prefix, address_flags, scope;
+        uint32_t ifindex;
+        uint16_t attr_len, attr_type;
+        uint8_t address[16];
+    } req = {
+        .len = sizeof(req), .type = NEW_ADDRESS, .flags = REQUEST_ACK_CREATE_EXCL,
+        .seq = 1, .family = AF_INET6, .prefix = 64, .scope = 253,
+        .ifindex = index, .attr_len = 20, .attr_type = LOCAL,
+        .address = {0xfe, 0x80},
+    };
+    memcpy(req.address + 8, iid, 8);
+    return netlink_ack(&req, sizeof(req));
 }
 
 static int set_address(int fd, const char *name, unsigned long op, const uint8_t ip[4])
@@ -683,7 +849,20 @@ static int open_tun(struct session *s, const struct config *cfg, int ctl)
     if (ioctl(ctl, SIOCSIFFLAGS, &ifr) < 0)
         return -errno;
     unsigned index = if_nametoindex(cfg->tun);
-    return index ? default_route(index) : -ENODEV;
+    if (!index)
+        return -ENODEV;
+    if ((rc = default_route(index, AF_INET)) < 0 || !cfg->ipv6)
+        return rc;
+    if ((rc = set_link_local(index, s->iid)) < 0)
+        return rc;
+    return default_route(index, AF_INET6);
+}
+
+static bool valid_datagram(uint16_t protocol, const uint8_t *p, size_t len)
+{
+    return protocol == IPV4 ?
+        (len >= 20 && p[0] >> 4 == 4 && get16(p + 2) == len) :
+        (len >= 40 && p[0] >> 4 == 6 && (size_t)get16(p + 4) + 40 == len);
 }
 
 static int online(struct session *s, const struct config *cfg)
@@ -714,8 +893,10 @@ static int online(struct session *s, const struct config *cfg)
             ssize_t n = read(s->tun, packet.bytes, sizeof(packet.bytes));
             if (n < 0 && errno != EAGAIN && errno != EINTR)
                 return -errno;
-            if (n >= 20 && n <= s->mtu && packet.bytes[0] >> 4 == 4) {
-                rc = ppp_send(s, IPV4, packet.bytes, (size_t)n);
+            uint16_t proto = n > 0 && packet.bytes[0] >> 4 == 6 ? IPV6 : IPV4;
+            if (n > 0 && n <= s->mtu && (proto == IPV4 || cfg->ipv6) &&
+                valid_datagram(proto, packet.bytes, n)) {
+                rc = ppp_send(s, proto, packet.bytes, (size_t)n);
                 if (rc < 0 && rc != -ENOBUFS && rc != -EAGAIN)
                     return rc;
             }
@@ -724,8 +905,8 @@ static int online(struct session *s, const struct config *cfg)
         if (!rc)
             continue;
         const uint8_t *p = packet.bytes + HEADER + 2;
-        if (packet.protocol == IPV4) {
-            if (packet.len >= 20 && p[0] >> 4 == 4 && get16(p + 2) == packet.len) {
+        if (packet.protocol == IPV4 || (cfg->ipv6 && packet.protocol == IPV6)) {
+            if (valid_datagram(packet.protocol, p, packet.len)) {
                 ssize_t n = write(s->tun, p, packet.len);
                 if (n < 0 && errno != EAGAIN && errno != ENOBUFS && errno != EINTR)
                     return -errno;
@@ -738,19 +919,11 @@ static int online(struct session *s, const struct config *cfg)
         } else if (packet.protocol == CHAP && s->auth == CHAP && control_packet(&packet, &len)) {
             bool success;
             rc = chap_event(s, cfg, p, len, &success);
-        } else if (packet.protocol == IPCP && control_packet(&packet, &len)) {
-            if (p[0] == REQUEST) {
-                if ((len == 10 && p[4] == 3 && p[5] == 6 && !memcmp(p + 6, s->remote, 4)) ||
-                    (len == 4 && !valid_address(s->remote)))
-                    rc = control(s, IPCP, ACK, p[1], p + 4, len - 4);
-                else
-                    return -ECONNRESET;
-            } else if (p[0] == TERMINATE) {
-                (void)control(s, IPCP, TERMINATE_ACK, p[1], p, 0);
-                return -ECONNRESET;
-            }
+        } else if (packet.protocol == IPCP || (cfg->ipv6 && packet.protocol == IPV6CP)) {
+            if (control_packet(&packet, &len))
+                rc = ncp_open_event(s, packet.protocol, p, len);
         } else if (packet.protocol != PAP && packet.protocol != CHAP &&
-                   packet.protocol != LCP && packet.protocol != IPCP) {
+                   packet.protocol != LCP) {
             /* Reject an unimplemented network protocol without resetting IPv4. */
             size_t reject_len = packet.len + 2;
             if (reject_len > (size_t)s->mtu - 4)
@@ -764,6 +937,57 @@ static int online(struct session *s, const struct config *cfg)
     return 0;
 }
 
+/* Publish a complete per-link resolv.conf. The caller supplies a path
+ * reserved for this link, and the exclusive link never replaces a file. */
+static int publish_dns(struct session *s, const char *path)
+{
+    if (!path || (!valid_address(s->dns[0]) && !valid_address(s->dns[1])))
+        return 0;
+    char temporary[PATH_MAX];
+    int length = snprintf(temporary, sizeof(temporary), "%s.XXXXXX", path);
+    if (length < 0 || (size_t)length >= sizeof(temporary))
+        return -ENAMETOOLONG;
+    int fd = mkstemp(temporary);
+    if (fd < 0)
+        return -errno;
+    FILE *output = fdopen(fd, "w");
+    if (!output) {
+        int error = -errno;
+        close(fd);
+        unlink(temporary);
+        return error;
+    }
+    int rc = 0;
+    for (unsigned i = 0; i < 2 && !rc; ++i) {
+        if (valid_address(s->dns[i])) {
+            char addr[INET_ADDRSTRLEN];
+            if (!inet_ntop(AF_INET, s->dns[i], addr, sizeof(addr)) ||
+                fprintf(output, "nameserver %s\n", addr) < 0)
+                rc = -errno;
+        }
+    }
+    if (!rc && (fchmod(fd, 0644) < 0 || fstat(fd, &s->dns_owner) < 0))
+        rc = -errno;
+    if (fclose(output) < 0 && !rc)
+        rc = -errno;
+    if (!rc) {
+        if (link(temporary, path) < 0)
+            rc = -errno;
+        else
+            s->dns_written = true;
+    }
+    unlink(temporary);
+    return rc;
+}
+
+static void remove_dns(struct session *s, const char *path)
+{
+    struct stat status;
+    if (s->dns_written && lstat(path, &status) == 0 &&
+        status.st_dev == s->dns_owner.st_dev && status.st_ino == s->dns_owner.st_ino)
+        (void)unlink(path);
+}
+
 static int dial(struct session *s, const struct config *cfg, int ctl)
 {
     s->link.sll_ifindex = (int)if_nametoindex(cfg->wan);
@@ -773,6 +997,11 @@ static int dial(struct session *s, const struct config *cfg, int ctl)
     if (ioctl(ctl, SIOCGIFHWADDR, &ifr) < 0)
         return -errno;
     memcpy(s->mac, ifr.ifr_hwaddr.sa_data, 6);
+    memcpy(s->iid, s->mac, 3);
+    s->iid[0] ^= 2; /* Modified EUI-64, stable across reconnects. */
+    s->iid[3] = 0xff;
+    s->iid[4] = 0xfe;
+    memcpy(s->iid + 5, s->mac + 3, 3);
     if (getrandom(s->token, sizeof(s->token), 0) != sizeof(s->token) ||
         getrandom(s->magic, sizeof(s->magic), 0) != sizeof(s->magic))
         return -EIO;
@@ -790,15 +1019,31 @@ static int dial(struct session *s, const struct config *cfg, int ctl)
         rc = authenticate(s, cfg);
     if (!rc)
         rc = negotiate(s, cfg, IPCP);
+    if (!rc && cfg->ipv6) {
+        if (s->mtu < 1280 || s->mru < 1280)
+            return -EMSGSIZE;
+        rc = negotiate(s, cfg, IPV6CP);
+    }
     if (!rc)
         rc = open_tun(s, cfg, ctl);
     if (rc < 0)
+        return rc;
+    if ((rc = publish_dns(s, cfg->dns_file)) < 0)
         return rc;
     char ip[INET_ADDRSTRLEN];
     if (!inet_ntop(AF_INET, s->address, ip, sizeof(ip)))
         return -errno;
     printf("PPPOE UP session=%u auth=%s ip=%s mtu=%u\n", s->id,
            s->auth == PAP ? "pap" : "chap", ip, s->mtu);
+    if (cfg->ipv6) {
+        uint8_t local[16] = {0xfe, 0x80}, remote[16] = {0xfe, 0x80};
+        char a[INET6_ADDRSTRLEN], b[INET6_ADDRSTRLEN];
+        memcpy(local + 8, s->iid, 8);
+        memcpy(remote + 8, s->remote_iid, 8);
+        if (inet_ntop(AF_INET6, local, a, sizeof(a)) &&
+            inet_ntop(AF_INET6, remote, b, sizeof(b)))
+            printf("PPPOE IPV6 local=%s peer=%s\n", a, b);
+    }
     fflush(stdout);
     return online(s, cfg);
 }
@@ -848,16 +1093,39 @@ static bool read_credentials(const char *path, struct config *cfg)
 
 int main(int argc, char **argv)
 {
+    struct config cfg = {0};
+    int option;
+    while ((option = getopt(argc, argv, "+6d:")) != -1) {
+        if (option == '6')
+            cfg.ipv6 = true;
+        else if (option == 'd' && optarg[0])
+            cfg.dns_file = optarg;
+        else
+            return 2;
+    }
+    argv += optind - 1;
+    argc -= optind - 1;
     if (argc != 6 || !argv[1][0] || strlen(argv[1]) >= IFNAMSIZ ||
         !argv[2][0] || strlen(argv[2]) >= IFNAMSIZ || strlen(argv[3]) > 255 ||
         (strcmp(argv[4], "pap") && strcmp(argv[4], "chap"))) {
-        fprintf(stderr, "usage: pppoe WAN TUN SERVICE|- pap|chap CREDENTIALS\n");
+        fprintf(stderr, "usage: pppoe [-6] [-d DNS-FILE] WAN TUN SERVICE|- pap|chap CREDENTIALS\n");
         return 2;
     }
-    struct config cfg = {
-        .wan = argv[1], .tun = argv[2], .service = strcmp(argv[3], "-") ? argv[3] : "",
-        .auth = !strcmp(argv[4], "pap") ? PAP : CHAP,
-    };
+    cfg.wan = argv[1];
+    cfg.tun = argv[2];
+    cfg.service = strcmp(argv[3], "-") ? argv[3] : "";
+    cfg.auth = !strcmp(argv[4], "pap") ? PAP : CHAP;
+    if (cfg.dns_file) {
+        struct stat status;
+        if (lstat(cfg.dns_file, &status) == 0) {
+            fprintf(stderr, "pppoe DNS output already exists: %s\n", cfg.dns_file);
+            return 1;
+        }
+        if (errno != ENOENT) {
+            perror("pppoe DNS output");
+            return 1;
+        }
+    }
     if (!read_credentials(argv[5], &cfg)) {
         perror("pppoe credentials");
         return 1;
@@ -880,6 +1148,7 @@ int main(int argc, char **argv)
         };
         memcpy(s.peer, broadcast, 6);
         int rc = dial(&s, &cfg, ctl);
+        remove_dns(&s, cfg.dns_file);
         if (s.tun >= 0)
             close(s.tun);
         if (s.id)

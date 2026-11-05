@@ -270,35 +270,45 @@ int a20_bsd_tun_set_addr(unsigned index, const uint8_t address[4],
     return a20_bsd_executor_call(tun_addr_job_run, &job);
 }
 
-typedef struct tun_route4_job {
+typedef struct tun_route_job {
     unsigned index;
-    uint8_t destination[4];
+    uint8_t destination[16];
     uint8_t prefix;
-    int remove;
-} tun_route4_job_t;
+    int remove, ipv6;
+} tun_route_job_t;
 
-static int tun_route4_job_run(void *argument)
+static int tun_route_job_run(void *argument)
 {
-    tun_route4_job_t *job = argument;
+    tun_route_job_t *job = argument;
     uint64_t flags = spin_lock_irqsave(&g_tun_lock);
     bsd_tun_slot_t *slot = slot_of(job->index);
     void *context = slot ? slot->context : NULL;
     spin_unlock_irqrestore(&g_tun_lock, flags);
     if (!context)
         return -ENODEV;
+    if (job->ipv6)
+        return -a20_bsd_port_tun_route6(context, job->destination, job->prefix, job->remove);
     return -a20_bsd_port_tun_route4(context, job->destination, job->prefix, job->remove);
 }
 
 int a20_bsd_tun_route4(unsigned index, const uint8_t destination[4],
                        uint8_t prefix, int remove)
 {
-    tun_route4_job_t job = {.index = index, .prefix = prefix, .remove = remove};
-    memcpy(job.destination, destination, sizeof(job.destination));
-    return a20_bsd_executor_call(tun_route4_job_run, &job);
+    tun_route_job_t job = {.index = index, .prefix = prefix, .remove = remove};
+    memcpy(job.destination, destination, 4);
+    return a20_bsd_executor_call(tun_route_job_run, &job);
+}
+
+int a20_bsd_tun_route6(const uint8_t destination[16], uint8_t prefix,
+                       unsigned index, int remove)
+{
+    tun_route_job_t job = {.index = index, .prefix = prefix, .remove = remove, .ipv6 = 1};
+    memcpy(job.destination, destination, 16);
+    return a20_bsd_executor_call(tun_route_job_run, &job);
 }
 
 typedef struct tun_addr6_job {
-    void *context;
+    unsigned index;
     uint8_t address[16];
     uint8_t prefix;
     int add, exclusive;
@@ -308,7 +318,13 @@ typedef struct tun_addr6_job {
 static int tun_addr6_job_run(void *argument)
 {
     tun_addr6_job_t *job = argument;
-    int rc = a20_bsd_port_tun_set_addr6(job->context, job->address,
+    uint64_t flags = spin_lock_irqsave(&g_tun_lock);
+    bsd_tun_slot_t *slot = slot_of(job->index);
+    void *context = slot ? slot->context : NULL;
+    spin_unlock_irqrestore(&g_tun_lock, flags);
+    if (!context)
+        return -ENODEV;
+    int rc = a20_bsd_port_tun_set_addr6(context, job->address,
                                         job->prefix, job->add, job->valid,
                                         job->preferred, job->exclusive);
     return rc < 0 ? rc : -rc;
@@ -318,11 +334,7 @@ int a20_bsd_tun_set_addr6(unsigned index, const uint8_t address[16],
                           uint8_t prefix, int add, uint32_t valid,
                           uint32_t preferred, int exclusive)
 {
-    bsd_tun_slot_t *slot = slot_of(index);
-    if (!slot) return -ENODEV;
-    tun_addr6_job_t job;
-    memset(&job, 0, sizeof(job));
-    job.context = slot->context;
+    tun_addr6_job_t job = {.index = index};
     memcpy(job.address, address, 16);
     job.prefix = prefix;
     job.add = add;

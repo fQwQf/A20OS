@@ -1070,6 +1070,7 @@ static const net_backend_if_ops_t bsd_iface_ops = {
     .set_addr = if_set_addr,
     .set_addr6 = if_set_addr6,
     .del_addr6 = if_del_addr6,
+    .route_update_v6 = a20_bsd_tun_route6,
     .route_lookup_v6 = route_lookup_v6,
     .route_update_v4 = route_update_v4,
     .neighbor_update_v4 = neighbor_update_v4,

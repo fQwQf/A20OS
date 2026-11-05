@@ -121,6 +121,8 @@ int a20_bsd_port_tun_get_addr(void *context, uint8_t address[4],
                               uint8_t mask[4], uint8_t gateway[4]);
 int a20_bsd_port_tun_set_addr(void *context, const uint8_t address[4],
                               const uint8_t mask[4], int add);
+int a20_bsd_port_tun_route6(void *context, const uint8_t destination[16],
+                            uint8_t prefix, int remove);
 int a20_bsd_port_tun_route4(void *context, const uint8_t destination[4],
                             uint8_t prefix, int remove);
 int a20_bsd_port_tun_set_addr6(void *context, const uint8_t address[16],

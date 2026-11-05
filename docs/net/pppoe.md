@@ -1,4 +1,4 @@
-# BSD 软路由的 IPv4 PPPoE
+# BSD 软路由的 PPPoE
 
 使用 BSD/F-Stack 路由内核。下面以 `en2` 为 LAN、`en3` 为 WAN，
 `ppp-wan` 为客户端创建的 TUN。WAN 以太网口保持启用，IPv4 出口
@@ -25,8 +25,25 @@ LAN 源地址的 NAT 仍通过现有规则配置。以下规则用于单台示�
 echo 'natadd out proto=any src=192.168.10.2 action=masquerade' > /proc/a20/netfilter
 ```
 
-当前拨号承载 IPv4，使用 PAP 或 CHAP-MD5。IPv6CP 和 PPP 的 DNS 选项
-属于后续地址与服务配置工作。发现、会话和 1492 字节上限依据
+默认拨号承载 IPv4。双栈接入时加上 `-6`，客户端完成 IPCP 和
+IPv6CP 后启动 TUN。IPv6CP 协商本端与对端的链路本地标识，TUN 使用
+协商出的本端地址，并在主表安装经该点对点接口的 IPv6 默认路由。
+只有协商后的收发 MTU 均至少为 1280 才启用 IPv6。IPv6CP 负责链路，
+可路由的 LAN 前缀需另行配置。
+
+```sh
+pppoe -6 -d /run/ppp-wan.resolv en3 ppp-wan - chap /etc/pppoe.credentials
+```
+
+可单独使用 `-d` 请求 IPCP 的主、备用 DNS 地址。对端支持时，客户端
+生成包含 `nameserver` 行的每链路文件，供解析器或 dnsmasq 的
+`--resolv-file` 读取。路径须留给该拨号进程，所在目录须预先存在；
+客户端会拒绝已存在的文件。正常断线和退出时，客户端移除自己生成的
+文件。对端拒绝 DNS 选项时仍可完成 IPv4 协商。
+[RFC 5072](https://www.rfc-editor.org/rfc/rfc5072.html) ·
+[RFC 1877](https://www.rfc-editor.org/rfc/rfc1877.html)
+
+发现、会话和 1492 字节上限依据
 [RFC 2516](https://www.rfc-editor.org/rfc/rfc2516.html)。
 控制和认证协议见 [LCP](https://www.rfc-editor.org/rfc/rfc1661)、
 [IPCP](https://www.rfc-editor.org/rfc/rfc1332)、
@@ -55,5 +72,8 @@ python3 tools/net/tests/test-bsd-pppoe-kvm.py \
 ```
 
 将 `--auth` 改为 `chap` 验证 CHAP-MD5。添加 `--silent` 会暂停
-Linux 对端并验证 LCP Echo 超时。回归发送经过 NAT 的 LAN UDP 流，
-重拨时让对端分配新地址后复用原五元组，并检查错误密码不会建立 TUN。
+Linux 对端并验证 LCP Echo 超时。添加 `--dual` 可验证 IPv6CP
+采用对端建议的标识、双向 IPv6 转发及 IPCP DNS，添加 `--dns-reject`
+可验证对端拒绝 DNS 选项时 IPv4 正常拨号。回归发送经过 NAT 的 LAN
+UDP 流，重拨时让对端分配新地址后复用原五元组，并检查错误密码不会
+建立 TUN。
