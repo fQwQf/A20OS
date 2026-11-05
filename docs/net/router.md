@@ -19,7 +19,8 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 
 DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
-BSD 的多 FIB 与源策略仍在补全。IPv6 UDP 和原始套接字的
+BSD 路由器的 IPv4 和 IPv6 转发及本机 TCP/UDP 均可使用多 FIB 与源策略。
+IPv6 UDP 和原始套接字的
 `SO_BINDTODEVICE` 支持选择 IPv6 接口并限制收发。
 
 ## WAN IPv6 自动配置
@@ -49,8 +50,8 @@ DAD 状态和剩余寿命。Linux 的 `ip -6 addr` 和 `getifaddrs()` 已用真�
 地址验证。`RTM_NEWADDR` 可通过 `IFA_CACHEINFO` 设置首选寿命和
 有效寿命。更新地址时，手动配置的直连前缀按同一前缀下最长的剩余
 有效寿命更新。内核到期后清理地址和直连路由。`RTM_GETROUTE`
-可查询主 IPv6 转发表的匹配项、下一跳和出口接口。IPv6 路由表的
-转储和策略查询仍在补全。
+可查询 IPv6 策略转发表的匹配项、下一跳和出口接口。IPv6 路由列表包含
+手动配置的条目。相关命令见 [双栈路由说明](./routing.md)。
 
 ### DHCPv6 前缀委派互操作
 

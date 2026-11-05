@@ -25,15 +25,17 @@ ra = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ra)
 
 
-def make_payload(out, busybox, probe, odhcp6c):
+def make_payload(out, busybox, probe, odhcp6c, *, extra_probes=()):
     image = out/'payload.img'
     with tempfile.TemporaryDirectory(prefix='a20-pd-payload-') as directory:
         root = Path(directory)
         shutil.copy2(busybox, root/'busybox')
+        sources = list(extra_probes)
         if probe:
-            source = Path(__file__).with_name('bsd-udp6-bind-probe.c')
+            sources.append(Path(__file__).with_name('bsd-udp6-bind-probe.c'))
+        for source in sources:
             subprocess.run(['cc', '-static', '-Wall', '-Wextra', '-Werror', '-O2',
-                            str(source), '-o', str(root/'udp6-bind-probe')], check=True)
+                            str(source), '-o', str(root/source.stem.removeprefix('bsd-'))], check=True)
         if odhcp6c:
             shutil.copy2(odhcp6c, root/'odhcp6c')
             event = root/'odhcp-event'

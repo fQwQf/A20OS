@@ -137,10 +137,10 @@ def arguments(description):
     return parser.parse_args()
 
 
-def run_router(args, test):
+def run_router(args, test, *, probes=()):
     out = args.out.resolve()
     out.mkdir(parents=True)
-    image = pd.make_payload(out, args.busybox, False, None)
+    image = pd.make_payload(out, args.busybox, False, None, extra_probes=probes)
     links = [wire.Link(1, '192.168.10.2', '192.168.10.1'),
              wire.Link(2, '10.20.0.2', '10.20.0.1'),
              wire.Link(3, '10.30.0.2', '10.30.0.1')]

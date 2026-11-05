@@ -20,7 +20,7 @@ ip route del 198.51.100.0/24 via 10.0.2.2 dev en2 table 100
 
 lwIP 路由 hook 查询这一 FIB。ARP 网关 hook 对同一源和目的地址查表并取得网关值副本。应用明确绑定的源地址可以参与策略匹配。
 
-F-Stack 路由器为 IPv4 与 IPv6 转发提供主表和最多 8 个附加 FIB。两种协议共享 Linux 表号到原生 FIB 的映射，各自维护路由和规则。入口按源和目的地址选择首个有匹配路由的原生 FIB，IPv4 在完成分片重组、过滤与 DNAT 后选表。附加表通过显式出口连接下一跳，较低 metric 的路由进入原生 FIB，删除后由同前缀的下一条接管。本机地址与 IPv6 链路本地流量由主表处理，转发产生的 ICMP/ICMPv6 差错也经主表回送。F-Stack 本机 socket 的策略选择待接入。
+F-Stack 路由器为 IPv4 与 IPv6 转发提供主表和最多 8 个附加 FIB。两种协议共享 Linux 表号到原生 FIB 的映射，各自维护路由和规则。入口按源和目的地址选择首个有匹配路由的原生 FIB，IPv4 在完成分片重组、过滤与 DNAT 后选表。附加表通过显式出口连接下一跳，较低 metric 的路由进入原生 FIB，删除后由同前缀的下一条接管。本机地址与 IPv6 链路本地流量由主表处理，转发产生的 ICMP/ICMPv6 差错也经主表回送。本机 TCP 和 UDP 也按源与目的地址选表。绑定源地址后，该地址直接参与匹配。未绑定的套接字可以先用仅匹配目的的规则选择出口和源地址。IPv6 显式指定出口或下一跳时遵循套接字设置。规则变化后，已经连接的套接字会在后续发送时重新选路。TCP 的 MSS 查询使用策略出口的 MTU。
 
 下面的 IPv6 示例使用 en4 链路上的下一跳 `fe80::2`：
 
@@ -60,5 +60,12 @@ IPv6 回归给两个 WAN 使用相同的链路本地网关地址，检查邻居�
 
 ```sh
 python3 tools/net/tests/test-bsd-policy-v6.py --kernel <x86_64-router-kernel.bin> \
+  --busybox <静态BusyBox> --out <新的证据目录>
+```
+
+本机套接字回归保持连接打开，增删规则后在两条 WAN 上抓包。测试涵盖绑定源地址的双栈 TCP 和 UDP、仅存在于附加表的目的路由、IPv6 显式绑定出口，以及较小 WAN MTU 对 TCP SYN MSS 的影响。
+
+```sh
+python3 tools/net/tests/test-bsd-policy-local.py --kernel <x86_64-router-kernel.bin> \
   --busybox <静态BusyBox> --out <新的证据目录>
 ```
