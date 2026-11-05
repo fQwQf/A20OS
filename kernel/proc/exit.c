@@ -188,30 +188,19 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
     return proc_ignores_sigchld(parent);
 }
 
-/* Wake the tasks blocked in wait4() whose reaper is *parent*.
- *
- * E2: tasklist_lock walks the global list, and each candidate's ->waiting_for_child
- * and ->tgid are park_lock-owned, so the walk nests tasklist_lock -> park_lock.
- * The parent's own tgid is sampled in its own critical section *before* the
- * walk, so no two task park_locks are ever held at once (INV-P3). */
+/* Parent references keep their thread-group leader alive even after list
+ * detachment. tasklist_lock protects this group's chain and closes the
+ * wait4 scan-to-registration window; each waiter flag/token is sampled under
+ * its own park_lock. Never use an unlocked "no waiters" hint here. */
 void proc_wake_child_waiters(task_t *parent)
 {
     if (!parent)
         return;
 
-    int parent_tgid;
-    {
-        uint64_t pf = spin_lock_irqsave(&parent->park_lock);
-        parent_tgid = proc_task_tgid(parent);
-        spin_unlock_irqrestore(&parent->park_lock, pf);
-    }
-
     uint64_t lf = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (!t->waiting_for_child)
-            continue;
-        if (proc_task_tgid(t) != parent_tgid)
-            continue;
+    task_t *leader = parent->tg_leader ? parent->tg_leader : parent;
+    int parent_tgid = proc_task_tgid(parent);
+    for (task_t *t = leader; t; t = t->tg_next) {
         uint64_t plf = spin_lock_irqsave(&t->park_lock);
         if (t->waiting_for_child && proc_task_tgid(t) == parent_tgid)
             (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
@@ -544,7 +533,8 @@ static void exit_parent_bookkeeping(void *opaque)
     } else {
         proc_wake_child_waiters(ctx->parent);
     }
-    if (ctx->completed_parent)
+    if (ctx->completed_parent &&
+        (ctx->auto_reap || ctx->completed_parent != ctx->parent))
         proc_wake_child_waiters(ctx->completed_parent);
 #ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
     proc_put(ctx->completed_parent);
