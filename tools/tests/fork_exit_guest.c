@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #define SZ (2u * 1024 * 1024)
+#define FILE_PAGES 256u
 
 static void fail(const char *message)
 {
@@ -63,14 +64,14 @@ static void high_fd_inheritance(void)
 static void check_file_maps(volatile unsigned char *clean,
                             volatile unsigned char *modified)
 {
-    for (size_t i = 0; i < 32; i++) {
+    for (size_t i = 0; i < FILE_PAGES; i++) {
         unsigned char original = (unsigned char)(i + 1);
         unsigned char changed = i < 16 && i % 2 == 0 ? 0xa5 : original;
         if (clean[i * 4096] != original || clean[i * 4096 + 17] != original ||
             modified[i * 4096] != original || modified[i * 4096 + 17] != changed)
             _exit(20);
     }
-    if (mprotect((void *)modified, 32 * 4096, PROT_READ | PROT_WRITE))
+    if (mprotect((void *)modified, FILE_PAGES * 4096, PROT_READ | PROT_WRITE))
         _exit(21);
     modified[0] = 0xee;
     if (clean[0] != 1) _exit(22);
@@ -82,16 +83,17 @@ static void file_mapping_inheritance(void)
     int fd = mkstemp(name);
     if (fd < 0) fail("file create");
     unsigned char page[4096];
-    for (unsigned i = 0; i < 33; i++) {
+    for (unsigned i = 0; i <= FILE_PAGES; i++) {
         memset(page, i, sizeof(page));
         if (write(fd, page, sizeof(page)) != sizeof(page)) fail("file fill");
     }
-    const size_t len = 32 * 4096;
+    const size_t len = FILE_PAGES * 4096;
     volatile unsigned char *clean = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 4096);
     volatile unsigned char *modified = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 4096);
     if (clean == MAP_FAILED || modified == MAP_FAILED) fail("file mmap");
-    for (unsigned i = 0; i < 32; i++)
-        if (clean[i * 4096] != i + 1 || modified[i * 4096] != i + 1)
+    for (unsigned i = 0; i < FILE_PAGES; i++)
+        if (clean[i * 4096] != (unsigned char)(i + 1) ||
+            modified[i * 4096] != (unsigned char)(i + 1))
             fail("file initial read");
     if (mprotect((void *)modified, 16 * 4096, PROT_READ | PROT_WRITE))
         fail("file writable protection");

@@ -14,6 +14,7 @@
 #define VM_PFNMAP 256
 #define VM_DONTFORK 512
 #define VM_WIPEONFORK 1024
+#define VM_EXEC 2048
 #define MM_SAFE_UFFD 1
 #define MM_SAFE_NO_FA 2
 #define MM_SAFE_MASK 3
@@ -255,7 +256,7 @@ int main(void) {
     assert(vma_lookups==0&&frame_gets==0&&locks==1&&unlocks==1&&locked==-1);
     /* The elision proof is cache ownership, never read-only permission. */
     reset(); vma.vm_flags=VM_FILE;vma.file=vma.file_vnode=&vma;
-    vma.start=0;vma.end=16*PAGE_SIZE;metadata.cache_owner=cache_owners;
+    vma.start=0;vma.end=1024*1024;metadata.cache_owner=cache_owners;
     for(int i=0;i<16;i++) {
         metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_FILE_PRIVATE);
         cache_owners[i]=&cache;
@@ -263,6 +264,11 @@ int main(void) {
     }
     pte_t clean=tables[0][0];
     assert(cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));
+    vma.end=1024*1024-PAGE_SIZE;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));vma.end=1024*1024;
+    vma.vm_flags|=VM_EXEC;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean|PTE_X));
+    vma.vm_flags&=~VM_EXEC;
     assert(!cow_file_leaf_refaultable(&vma,&metadata,0,1,clean));
     assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean|PTE_W));
     for(unsigned flags=VM_SHARED;flags<=VM_PFNMAP;flags*=2) {
@@ -280,8 +286,6 @@ int main(void) {
     }
     metadata.safe[0]=0;cache_pfn=10;
     assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));cache_pfn=9;
-    assert(cow_file_leaf_refaultable(&vma,&metadata,0,0,clean|PTE_X)==
-           !ARCH_INSN_FAULT_UNRECOVERABLE);
     assert(a20_cow_share_snapshot_at_vma(&parent,0,0,&tables[0][0],tables[0],&vma,&snap)==0);
     assert(!frame_gets&&!cache.pin&&locked==-1&&snap.slot==NULL);
     /* A modified private page later mprotected read-only still has to copy. */
