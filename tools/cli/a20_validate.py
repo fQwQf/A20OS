@@ -227,6 +227,11 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append("net.lanes: must be >= 1")
     if n.resource_profile is not None and n.resource_profile not in (1, 2, 3):
         e.append("net.resource_profile: must be 1 (embedded), 2 (default) or 3 (server)")
+    if n.conntrack_entries is not None:
+        if n.stack != "bsd":
+            e.append("net.conntrack_entries: requires net.stack = bsd")
+        if n.conntrack_entries not in (256, 512, 1024, 2048, 4096, 8192, 16384):
+            e.append("net.conntrack_entries: must be a power of two from 256 to 16384")
     if n.role is not None and n.role not in ("host", "router"):
         e.append(f"net.role: '{n.role}' must be host or router")
     if n.stack == "bsd":

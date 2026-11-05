@@ -277,6 +277,16 @@ class TestDeriveMakeVars(unittest.TestCase):
         self.assertEqual(_qemu_hostfwd("tcp::2222-192.168.7.9:22"),
                          "hostfwd=tcp::2222-192.168.7.9:22=on")
 
+    def test_conntrack_capacity_reaches_make(self) -> None:
+        got = derived(self.tmp, """
+            arch = "x86_64"
+            [net]
+            stack = "bsd"
+            role = "router"
+            conntrack_entries = 8192
+        """)
+        self.assertEqual(got["NET_CONNTRACK_ENTRIES"], "8192")
+
     def test_cluster_backend_fields_derive_to_net_variables(self) -> None:
         """[net].mac/backend/guest_* -> the variables the Makefile net block reads.
 
@@ -467,6 +477,18 @@ class TestValidateInstance(unittest.TestCase):
                                     'localaddr=127.0.0.1:44121"\n'
                                     'guest_ip = "10.0.3.2"\n'
                                     'guest_netmask = "255.255.255.0"\n'), [])
+
+    def test_conntrack_capacity_checks_backend_and_range(self) -> None:
+        base = 'arch = "x86_64"\n[net]\n'
+        self.assertEqual(self.check(base + 'stack = "bsd"\nconntrack_entries = 16384\n'), [])
+        for settings in (
+            'stack = "bsd"\nconntrack_entries = 3000\n',
+            'stack = "bsd"\nconntrack_entries = 32768\n',
+            'stack = "lwip"\nconntrack_entries = 8192\n',
+        ):
+            with self.subTest(settings=settings):
+                self.assertTrue(any("net.conntrack_entries" in error
+                                    for error in self.check(base + settings)))
 
     def test_backend_must_carry_id_net(self) -> None:
         """The default NIC attaches as -device ...,netdev=net; another id

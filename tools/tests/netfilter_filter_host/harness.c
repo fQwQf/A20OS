@@ -397,7 +397,11 @@ static void scenario_format(void)
     r.src_port = NETFILTER_NO_PORT;
     r.dst_port = 80;
     netfilter_add_rule(&r);
-    memset(buf, 0, sizeof(buf));
+    char tiny[] = "zzzzX";
+    netfilter_format(tiny, sizeof(tiny) - 2);
+    if (memcmp(tiny, "pol\0X", sizeof(tiny) - 1) != 0)
+        g_fail = 1;
+    memset(buf, 'z', sizeof(buf));
     netfilter_format(buf, sizeof(buf));
     printf("%s", buf);
     netfilter_reset();

@@ -26,6 +26,27 @@ MASQUERADE 使用实际出口的地址；出口没有地址时拒绝创建映射
 
 超时统一为 32 位回绕毫秒，不能把高频原始 tick 截断后当作毫秒。默认 TCP NEW 30 秒、 ESTABLISHED 120 秒、UDP/echo 30 秒；活跃流刷新时间，闲置流由有界 sweeper 回收。这些是当前状态跟踪超时，不等同于完整 TCP 状态机或抗攻击策略。
 
+## BSD 连接表预算
+
+`NET_ROLE=router NET_STACK=bsd` 默认分配 4096 条。用
+`NET_CONNTRACK_ENTRIES` 或实例的 `[net].conntrack_entries` 选择 256 至
+16384 的 2 的幂。该容量随内核构建固定。连接表与两组哈希索引的占用
+显示在 `/proc/a20/netfilter` 的 `ct_storage_bytes`。
+
+新建连接从空闲链表取槽位，满表时保留已有映射并拒绝新连接。
+BSD 执行器每约 50 毫秒检查最多 256 个槽位，过期后回收原正向和回包索引，
+将槽位放回空闲链表。以此节奏，最大表每约 3.2 秒巡完一轮。
+
+双网口回归用真实 UDP 流两次填满连接表，中间验证满表拒绝、
+已有流回包归属以及没有入站流量时的超时回收。使用同一构建方式：
+
+```sh
+make ARCH=x86_64 NET_STACK=bsd NET_ROLE=router NET_CONNTRACK_ENTRIES=16384 \
+  NR_CPUS=2 DRIVER_DEPLOYMENT=embedded RAMFS_USER=1 RAMFS_NET_TESTS=1 kernel-only
+python3 tools/net/tests/test-bsd-router-capacity.py --capacity 16384 \
+  --kernel <生成的kernel.bin> --out <新证据目录>
+```
+
 ## 验证与未覆盖项
 
 ```sh

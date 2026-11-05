@@ -231,11 +231,8 @@ def exercise(lan, wan, passed):
     passed.append('forwarding_after_fragment_drops')
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kernel', type=Path, required=True)
-    parser.add_argument('--out', type=Path, required=True)
-    args = parser.parse_args()
+def run_router(args, rules, test):
+    """Boot the shared dual-link wire fixture and persist evidence."""
     kernel = args.kernel.resolve(strict=True)
     out = args.out.resolve()
     out.mkdir(parents=True)
@@ -261,15 +258,13 @@ def main():
             guest.send(f'netctl set-ipv4 en3 10.20.0.1 {MASK}')
             guest.until('NETCTL: IPv4 configured')
             guest.until('# ')
-            guest.send("echo 'natadd out proto=udp dst=10.20.0.2 action=masquerade' > /proc/a20/netfilter && "
-                       "echo 'add in proto=udp dport=42001 action=drop' > /proc/a20/netfilter && "
-                       "echo 'natadd in proto=udp dport=45000 action=dnat "
-                       "to=192.168.10.2 toport=45001' > /proc/a20/netfilter && "
-                       "echo A20_ROUTER_POLICY_READY")
+            setup = ' && '.join(f"echo '{rule}' > /proc/a20/netfilter" for rule in rules)
+            guest.send(setup + ' && echo A20_ROUTER_POLICY_READY')
             guest.until('A20_ROUTER_POLICY_READY', whole_line=True)
+            guest.until('# ')
             lan.resolve()
             wan.resolve()
-            exercise(lan, wan, result['passed'])
+            test(guest, lan, wan, result)
             guest.send('poweroff')
             guest.until('System is going down for power-off NOW')
             assert guest.process.wait(timeout=15) == 0
@@ -282,6 +277,17 @@ def main():
             lan.sock.close()
             wan.sock.close()
             (out / 'manifest.json').write_text(json.dumps(result, indent=2) + '\n')
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--kernel', type=Path, required=True)
+    parser.add_argument('--out', type=Path, required=True)
+    args = parser.parse_args()
+    rules = [
+        'natadd out proto=udp dst=10.20.0.2 action=masquerade',
+        'add in proto=udp dport=42001 action=drop',
+        'natadd in proto=udp dport=45000 action=dnat to=192.168.10.2 toport=45001',
+    ]
+    run_router(args, rules, lambda guest, lan, wan, result: exercise(lan, wan, result['passed']))
     print('BSD_ROUTER_FRAGMENTS: PASS')
 
 

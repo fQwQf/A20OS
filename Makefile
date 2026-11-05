@@ -403,6 +403,19 @@ endif
 # boards, 32-bit targets and NOMMU keep lwIP; MCU firmware has no stack.
 NET_HOSTED_BOARDS := $(addprefix qemu-virt-,riscv64 loongarch64 aarch64 x86_64) x86_64-pc virtualbox-aarch64
 NET_STACK ?= $(if $(MCU_PROFILE_SELECTED),none,$(if $(filter 1,$(NOMMU)),lwip,$(if $(filter $(BOARD),$(NET_HOSTED_BOARDS)),bsd,lwip)))
+# Router flow storage is independent of the BSD socket and mbuf profile.
+NET_CONNTRACK_ENTRIES ?= $(if $(and $(filter bsd,$(NET_STACK)),$(filter router,$(NET_ROLE))),4096)
+ifneq ($(strip $(NET_CONNTRACK_ENTRIES)),)
+ifneq ($(NET_STACK),bsd)
+$(error NET_CONNTRACK_ENTRIES requires NET_STACK=bsd)
+endif
+ifneq ($(words $(NET_CONNTRACK_ENTRIES)),1)
+$(error NET_CONNTRACK_ENTRIES must be one capacity)
+endif
+ifeq ($(filter 256 512 1024 2048 4096 8192 16384,$(NET_CONNTRACK_ENTRIES)),)
+$(error NET_CONNTRACK_ENTRIES must be a power of two from 256 to 16384)
+endif
+endif
 # Instances set NET_STACK through [net].stack (tools/a20 or NET_INSTANCE=).
 # The default above is only for a bare `make` with no manifest.
 .PHONY: check-net-backend-host
@@ -1254,6 +1267,7 @@ BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter router,$(NET_ROLE)),-router,)-$(NET_STACK)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(strip $(NET_CONNTRACK_ENTRIES)),-ct$(NET_CONNTRACK_ENTRIES),)
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(RAMFS_NET_TESTS)),-net-tests,)
 ifneq ($(strip $(BSD_BOOTSTRAP_OBJECT)),)
 ifneq ($(ARCH),x86_64)
@@ -1919,6 +1933,9 @@ CFLAGS = $(if $(filter lwip,$(NET_STACK)),-DCONFIG_LWIP_UPSTREAM=1,) -Wall -Wext
          -DCONFIG_NET_BACKEND_NAME='"$(NET_STACK)"' \
          -DCONFIG_CLUSTER_PROFILE=$(CLUSTER_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
+ifneq ($(strip $(NET_CONNTRACK_ENTRIES)),)
+CFLAGS += -DCONFIG_NET_CONNTRACK_ENTRIES=$(NET_CONNTRACK_ENTRIES)
+endif
 ifneq ($(filter lwip native,$(NET_STACK)),)
 CFLAGS += -DCONFIG_NET_BACKEND_LWIP=1
 endif

@@ -228,6 +228,16 @@ static void stack_progress(void *argument)
     }
     while (due--) a20_bsd_port_hardclock();
 
+    /* Sweep from the executor even with idle NICs. At the target cadence,
+     * 256 slots per pass visits the largest configured table in 3.2 s. */
+    static uint64_t sweep_at;
+    uint64_t now = timer_get_ticks();
+    if ((int64_t)(now - sweep_at) >= 0) {
+        sweep_at = now + MS_TO_TICKS(50);
+        if (netfilter_busy())
+            netfilter_conntrack_expire(256);
+    }
+
     unsigned budget = __atomic_exchange_n(&progress_budget, BSD_RX_BUDGET,
                                           __ATOMIC_ACQ_REL);
     for (unsigned i = 0; i < BSD_MAX_NICS; ++i) {

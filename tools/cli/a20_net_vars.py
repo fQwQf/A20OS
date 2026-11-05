@@ -23,7 +23,7 @@ from a20_derive import derive_make_vars  # noqa: E402
 from a20_instance import InstanceError, parse_instance  # noqa: E402
 
 _KEYS = ("ARCH", "BOARD", "ABI", "PROFILE", "NOMMU", "NET_STACK", "NET_LANES",
-         "NET_PROFILE", "NET_ROLE")
+         "NET_PROFILE", "NET_ROLE", "NET_CONNTRACK_ENTRIES")
 
 
 def main(argv: list[str]) -> int:
