@@ -21,6 +21,7 @@ def ip(text):
 
 
 ALL_NODES = ip('ff02::1')
+ALL_ROUTERS = ip('ff02::2')
 WAN_ROUTER = ip('fe80::1')
 WAN_PREFIX = ip('2001:db8:20::')
 ROGUE_PREFIX = ip('2001:db8:bad::')
@@ -44,9 +45,11 @@ def icmp(link, src, dst, kind, body, *, hops=255, mac=None):
          hops=hops, mac=mac)
 
 
-def advertise(link, prefix, *, lifetime=30, hops=255):
+def advertise(link, prefix, *, lifetime=30, hops=255, invalid_lladdr=False):
     body = struct.pack('!BBHII', 64, 0, lifetime, 0, 0)
-    body += b'\x01\x01' + link.mac
+    body += bytes((1, 2 if invalid_lladdr else 1)) + link.mac
+    if invalid_lladdr:
+        body += bytes(8)
     if prefix is not None:
         body += struct.pack('!BBBBIII16s', 3, 4, 64, 0xc0, 60, 30, 0, prefix)
     icmp(link, WAN_ROUTER, ALL_NODES, 134, body, hops=hops,
@@ -86,16 +89,43 @@ def absent(link, timeout, match):
     raise AssertionError('unexpected IPv6 frame')
 
 
+def is_rs(frame, protocol, hops, src, dst, payload):
+    return protocol == ICMP6 and payload[:1] == b'\x85'
+
+
+def solicit(link, timeout):
+    def validate(frame, protocol, hops, src, dst, payload):
+        if not is_rs(frame, protocol, hops, src, dst, payload):
+            return False
+        assert frame[:12] == bytes.fromhex('333300000002') + link.router_mac
+        assert hops == 255 and dst == ALL_ROUTERS and payload[1] == 0
+        assert not router.checksum(pseudo(src, dst, protocol, len(payload)) + payload)
+        assert payload[4:8] == bytes(4)
+        if any(src):
+            assert src.startswith(ip('fe80::')[:8])
+            assert payload[8:] == b'\x01\x01' + link.router_mac
+        else:
+            assert len(payload) == 8
+        return True
+
+    return receive(link, timeout, validate)
+
+
 def exercise(guest, lan, wan, result):
     guest.send('netctl set-ipv6 en2 2001:db8:10::1 64')
     guest.until('NETCTL: IPv6 configured', whole_line=True)
     guest.until('# ')
     advertise(lan, ROGUE_PREFIX)
-    absent(lan, 1.5, dad_for(ROGUE_PREFIX))
-    result['passed'].append('lan_ra_ignored')
+    absent(lan, 1.5, lambda *frame: is_rs(*frame) or dad_for(ROGUE_PREFIX)(*frame))
+    result['passed'].append('lan_ignores_ra_and_does_not_solicit')
+
+    solicit(wan, 5)
     advertise(wan, WAN_PREFIX, hops=254)
-    absent(wan, 1.5, dad_for(WAN_PREFIX))
-    result['passed'].append('bad_hop_limit_ignored')
+    absent(wan, 1, dad_for(WAN_PREFIX))
+    advertise(wan, None, invalid_lladdr=True)
+    advertise(wan, None, lifetime=0)
+    solicit(wan, 6)
+    result['passed'].append('wan_solicits_and_retries_without_a_valid_router')
     advertise(wan, WAN_PREFIX)
     _, solicitation = receive(wan, 5, dad_for(WAN_PREFIX))
     address = solicitation[8:24]
@@ -130,6 +160,8 @@ def exercise(guest, lan, wan, result):
             and f[:6] == lan.mac and b[:1] == b'\x80' and b[4:] == echo
             and not router.checksum(pseudo(s, d, p, len(b)) + b), neighbor=LAN_HOST)
     result['passed'].append('return_traffic_reaches_lan')
+    absent(wan, 4.5, is_rs)
+    result['passed'].append('valid_ra_stops_solicitation')
 
     advertise(wan, None, lifetime=0)
     time.sleep(0.5)
@@ -151,6 +183,18 @@ def exercise(guest, lan, wan, result):
     send(lan, LAN_HOST, OFF_LINK, 17, udp, hops=64)
     receive(wan, 5, forwarded, neighbor=WAN_ROUTER)
     result['passed'].append('default_recovers_after_new_advertisement')
+
+    for state in ('down', 'up'):
+        guest.send(f'netctl set-link en3 {state}')
+        guest.until('NETCTL: link configured', whole_line=True)
+        guest.until('# ')
+    solicit(wan, 2)
+    for _ in range(2):
+        previous = time.monotonic()
+        solicit(wan, 6)
+        assert time.monotonic() - previous >= 3.5, 'solicitation sent too soon'
+    absent(wan, 5, is_rs)
+    result['passed'].append('admin_link_restart_rearms_and_bounds_solicitations')
 
 
 def main():

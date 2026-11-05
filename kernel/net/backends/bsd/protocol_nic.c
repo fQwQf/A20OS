@@ -9,12 +9,15 @@
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <sys/eventhandler.h>
+#include <sys/epoch.h>
+#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/sockio.h>
 #include <sys/socketvar.h>
 #include <sys/proc.h>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <net/if_var.h>
 #include <net/if_llatbl.h>
 #include <net/ethernet.h>
@@ -25,7 +28,10 @@
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
+#include <netinet6/scope6_var.h>
+#include <netinet/icmp6.h>
 #include <netinet/ip.h>
+#include <netinet/ip6.h>
 #include <machine/in_cksum.h>
 #include <netinet/ip_var.h>
 #include <netinet6/ip6_var.h>
@@ -78,6 +84,10 @@ struct ff_dpdk_if_context {
     void *softc;
     void *ifp;
     int port_id;
+    bool rs_enabled;
+    bool rs_seen;
+    unsigned rs_sent;
+    uint32_t rs_at;
     nic_token_t tokens[NIC_RX_TOKENS];
     nic_token_t *free_tokens;
     unsigned rx_outstanding;
@@ -312,8 +322,92 @@ int ff_dpdk_if_send(struct ff_dpdk_if_context *ctx, void *m, int total)
     return result;
 }
 
-static void nic_enable_ra(struct ifnet *ifp)
+static void nic_restart_rs(struct ff_dpdk_if_context *ctx)
 {
+    ctx->rs_seen = false;
+    ctx->rs_sent = 0;
+    ctx->rs_at = (uint32_t)ticks + arc4random() % (MAX_RTR_SOLICITATION_DELAY * hz);
+}
+
+void port_ipv6_router_seen(struct ifnet *ifp)
+{
+    struct ff_dpdk_if_context *ctx = nic_for_ifp(ifp);
+    if (ctx && ctx->rs_enabled)
+        ctx->rs_seen = true;
+}
+
+static void nic_send_rs(struct ifnet *ifp)
+{
+    struct in6_ifaddr *ia =
+        in6ifa_ifpforlinklocal(ifp, IN6_IFF_NOTREADY | IN6_IFF_ANYCAST);
+    struct in6_addr source = in6addr_any;
+    if (ia) {
+        source = ia->ia_addr.sin6_addr;
+        ifa_free(&ia->ia_ifa);
+    }
+    struct in6_addr destination = IN6ADDR_LINKLOCAL_ALLROUTERS_INIT;
+    if (in6_setscope(&destination, ifp, NULL) != 0)
+        return;
+
+    bool have_source = !IN6_IS_ADDR_UNSPECIFIED(&source);
+    unsigned icmp_length = sizeof(struct nd_router_solicit) + (have_source ? 8 : 0);
+    unsigned length = sizeof(struct ip6_hdr) + icmp_length;
+    struct mbuf *m = max_linkhdr + length > MHLEN ?
+        m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR) : m_gethdr(M_NOWAIT, MT_DATA);
+    if (!m)
+        return;
+
+    m->m_data += max_linkhdr;
+    m->m_pkthdr.len = m->m_len = length;
+    m->m_flags |= M_MCAST;
+    M_SETFIB(m, ifp->if_fib);
+    struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
+    memset(ip6, 0, length);
+    ip6->ip6_vfc = IPV6_VERSION;
+    ip6->ip6_plen = htons(icmp_length);
+    ip6->ip6_nxt = IPPROTO_ICMPV6;
+    ip6->ip6_hlim = 255;
+    ip6->ip6_src = source;
+    ip6->ip6_dst = destination;
+    struct nd_router_solicit *rs = (struct nd_router_solicit *)(ip6 + 1);
+    rs->nd_rs_type = ND_ROUTER_SOLICIT;
+    if (have_source) {
+        struct nd_opt_hdr *option = (struct nd_opt_hdr *)(rs + 1);
+        option->nd_opt_type = ND_OPT_SOURCE_LINKADDR;
+        option->nd_opt_len = 1;
+        memcpy(option + 1, IF_LLADDR(ifp), ETHER_ADDR_LEN);
+    }
+    rs->nd_rs_cksum = in6_cksum(m, IPPROTO_ICMPV6, sizeof(*ip6), icmp_length);
+
+    struct ip6_moptions multicast = {
+        .im6o_multicast_ifp = ifp,
+        .im6o_multicast_hlim = 255,
+    };
+    ip6_output(m, NULL, NULL, have_source ? 0 : IPV6_UNSPECSRC,
+               &multicast, NULL, NULL);
+}
+
+static void nic_poll_rs(struct ff_dpdk_if_context *ctx)
+{
+    struct ifnet *ifp = ctx->ifp;
+    if (!ctx->rs_enabled || !(ifp->if_flags & IFF_UP) ||
+        (ND_IFINFO(ifp)->flags & ND6_IFF_IFDISABLED) ||
+        ctx->rs_sent >= MAX_RTR_SOLICITATIONS || (ctx->rs_sent && ctx->rs_seen))
+        return;
+    uint32_t now = (uint32_t)ticks;
+    if ((int32_t)(now - ctx->rs_at) < 0)
+        return;
+    ctx->rs_sent++;
+    ctx->rs_at = now + RTR_SOLICITATION_INTERVAL * hz;
+    struct epoch_tracker et;
+    NET_EPOCH_ENTER(et);
+    nic_send_rs(ifp);
+    NET_EPOCH_EXIT(et);
+}
+
+static void nic_enable_ra(struct ff_dpdk_if_context *ctx)
+{
+    struct ifnet *ifp = ctx->ifp;
     struct in6_ndireq req = {0};
     int error = nd6_ioctl(SIOCGIFINFO_IN6, (caddr_t)&req, ifp);
     if (!error) {
@@ -332,6 +426,8 @@ static void nic_enable_ra(struct ifnet *ifp)
     }
     /* Receive a default router on the selected WAN even while forwarding. */
     V_ip6_rfc6204w3 = 1;
+    ctx->rs_enabled = true;
+    nic_restart_rs(ctx);
     printf("[NET] BSD IPv6 RA enabled on %s\n", ifp->if_xname);
 }
 
@@ -356,7 +452,7 @@ void *port_nic_attach(const a20_bsd_nic_config_t *config)
             struct ifnet *ifp = ctx->ifp;
             if_up(ifp);
             if (config->accept_ra)
-                nic_enable_ra(ifp);
+                nic_enable_ra(ctx);
         }
     }
     return context;
@@ -367,6 +463,7 @@ void port_nic_progress(void *context, unsigned budget)
     struct ff_dpdk_if_context *ctx = context;
     if (!ctx) return;
     port_host_nic_poll(ctx);
+    nic_poll_rs(ctx);
     if (!budget) budget = 32;
     for (unsigned i = 0; i < budget; ++i) {
         nic_token_t *token = token_take(ctx);
@@ -631,7 +728,13 @@ int port_nic_set_up(void *context, int up)
     struct ifnet *ifp;
     if (!ctx || !ctx->ifp) return ENODEV;
     ifp = ctx->ifp;
-    if (up) if_up(ifp); else if_down(ifp);
+    if (up) {
+        if_up(ifp);
+        if (ctx->rs_enabled)
+            nic_restart_rs(ctx);
+    } else {
+        if_down(ifp);
+    }
     return 0;
 }
 

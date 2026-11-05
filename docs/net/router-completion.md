@@ -156,3 +156,9 @@ RA 被拒绝。有效 RA 生成了可达的 WAN 地址和可用的默认路由�
 记录了双向 LAN 转发、零寿命撤销、无续期自然过期和收到新通告后恢复。
 同一 x86_64 内核通过了 TUN 与 Linux CHAP PPPoE 回归。四个 64 位
 架构通过 BSD socket 回归，ARM32 和 RV32 通过 lwIP 启动关机 smoke。
+
+`rs-before` 在没有主动通告的对端上复现了 WAN 无法主动发现路由器。
+`rs-wire-final` 验证了 WAN 上的 Router Solicitation 组播、校验和及
+重试，错误 Hop Limit、错误链路层选项和零寿命通告均不会终止探测。
+对端在收到第二次请求后才发送有效通告。随后观察到 SLAAC、双向转发
+和停止探测。管理命令关闭并重开 WAN 时，重新发送了三次请求。
