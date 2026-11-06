@@ -56,6 +56,9 @@ static fs_bsd_flock_t g_bsd_flocks[FS_FILE_LOCK_MAX];
 static spinlock_t g_file_lock_table_lock = SPINLOCK_INIT;
 static wait_queue_t g_file_lock_waiters = WAIT_QUEUE_INIT;
 static uint64_t g_file_lock_generation;
+/* Protected by g_file_lock_table_lock, like every table mutation. Closing an
+ * fd in the common empty-table case must not scan all 256 lock slots. */
+static unsigned g_file_lock_used;
 
 static int fs_lock_wait(uint64_t table_flags)
 {
@@ -361,10 +364,7 @@ retry:
     }
 
     /* 6. The result has to fit once this owner's old ranges are withdrawn. */
-    int used = 0;
-    for (int i = 0; i < FS_FILE_LOCK_MAX; i++)
-        if (g_file_locks[i].used)
-            used++;
+    int used = (int)__atomic_load_n(&g_file_lock_used, __ATOMIC_RELAXED);
     if (used - own_count + merged_count > FS_FILE_LOCK_MAX) {
         spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
         kfree(sc);
@@ -397,6 +397,7 @@ retry:
         }
     }
 
+    __atomic_store_n(&g_file_lock_used, used - own_count + merged_count, __ATOMIC_RELEASE);
     int wake_waiters = changed || lk->l_type == F_UNLCK;
     if (wake_waiters)
         g_file_lock_generation++;
@@ -411,13 +412,23 @@ retry:
  * pthread cannot release another thread's locks or leave them tied to a TID. */
 void fs_locks_release_native(void *owner, vfile_t *file)
 {
+    /* Linearize an empty release at this acquire load. A concurrent new
+     * lock is committed by the release-store while holding the table lock,
+     * and may legitimately be ordered after this close/release operation. */
+    if (!__atomic_load_n(&g_file_lock_used, __ATOMIC_ACQUIRE))
+        return;
     uintptr_t key = file ? fs_lock_key(file) : 0;
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    if (!g_file_lock_used) {
+        spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+        return;
+    }
     int changed = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
         if (g_file_locks[i].used && g_file_locks[i].owner_kind == FS_LOCK_OWNER_NATIVE &&
             g_file_locks[i].owner == (uintptr_t)owner && (!file || g_file_locks[i].key == key)) {
             g_file_locks[i].used = 0;
+            __atomic_fetch_sub(&g_file_lock_used, 1, __ATOMIC_RELEASE);
             changed = 1;
         }
     }
@@ -428,13 +439,23 @@ void fs_locks_release_native(void *owner, vfile_t *file)
 
 void fs_locks_release_process(int pid)
 {
+    /* Linearize an empty release at this acquire load. A concurrent new
+     * lock is committed by the release-store while holding the table lock,
+     * and may legitimately be ordered after this close/release operation. */
+    if (!__atomic_load_n(&g_file_lock_used, __ATOMIC_ACQUIRE))
+        return;
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    if (!g_file_lock_used) {
+        spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+        return;
+    }
     int changed = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
         if (g_file_locks[i].used &&
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID &&
             g_file_locks[i].owner == (uintptr_t)pid) {
             g_file_locks[i].used = 0;
+            __atomic_fetch_sub(&g_file_lock_used, 1, __ATOMIC_RELEASE);
             changed = 1;
         }
     }
@@ -447,8 +468,17 @@ void fs_locks_release_process(int pid)
 
 void fs_locks_release_process_file(vfile_t *vf, int pid)
 {
+    /* Linearize an empty release at this acquire load. A concurrent new
+     * lock is committed by the release-store while holding the table lock,
+     * and may legitimately be ordered after this close/release operation. */
+    if (!__atomic_load_n(&g_file_lock_used, __ATOMIC_ACQUIRE))
+        return;
     uintptr_t key = fs_lock_key(vf);
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    if (!g_file_lock_used) {
+        spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+        return;
+    }
     int changed = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
         if (g_file_locks[i].used &&
@@ -456,6 +486,7 @@ void fs_locks_release_process_file(vfile_t *vf, int pid)
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID &&
             g_file_locks[i].owner == (uintptr_t)pid) {
             g_file_locks[i].used = 0;
+            __atomic_fetch_sub(&g_file_lock_used, 1, __ATOMIC_RELEASE);
             changed = 1;
         }
     }
@@ -478,6 +509,7 @@ void fs_locks_release_file(vfile_t *vf, uintptr_t owner)
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_OFD &&
             g_file_locks[i].owner == owner) {
             g_file_locks[i].used = 0;
+            __atomic_fetch_sub(&g_file_lock_used, 1, __ATOMIC_RELEASE);
             changed = 1;
         }
         if (g_file_locks[i].used &&
@@ -485,6 +517,7 @@ void fs_locks_release_file(vfile_t *vf, uintptr_t owner)
             g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID &&
             g_file_locks[i].owner == (uintptr_t)cur_pid) {
             g_file_locks[i].used = 0;
+            __atomic_fetch_sub(&g_file_lock_used, 1, __ATOMIC_RELEASE);
             changed = 1;
         }
         if (g_bsd_flocks[i].used &&

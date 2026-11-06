@@ -30,6 +30,19 @@ extern void a20_vmo_destroy_rust(struct vmo *vmo);
 extern void a20_vmo_ref_rust(struct vmo *vmo);
 extern void a20_vmo_release_rust(struct vmo *vmo);
 extern pfn_t a20_vmo_peek_page_rust(struct vmo *vmo, uint32_t index);
+extern pfn_t a20_vmo_sparse_peek(void *root, uint32_t index);
+extern int a20_vmo_sparse_reserve(void **root, uint32_t index);
+extern int a20_vmo_sparse_publish(void *root, uint32_t index, pfn_t pfn);
+extern void a20_vmo_sparse_destroy(void *root, struct vmo *vmo);
+
+struct vmo_charge {
+    struct vmo_charge *next;
+    struct cg_node *cg;
+    uint64_t pages;
+};
+
+void *a20_vmo_sparse_alloc_node(size_t bytes) { return kcalloc_atomic(1, bytes); }
+void a20_vmo_sparse_free_node(void *node) { kfree(node); }
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
@@ -40,12 +53,17 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
     uint64_t count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (count > (uint32_t)-1 || count > SIZE_MAX / sizeof(pfn_t))
         return NULL;
-    struct vmo *vmo = kmalloc(sizeof(*vmo));
+    /* Shared mmap enters with mm->lock held. Sparse creation allocates only
+     * this object, using the non-reclaiming allocator under that lock. */
+    struct vmo *vmo = type == VMO_SHARED_ANON
+                          ? kmalloc_atomic(sizeof(*vmo)) : kmalloc(sizeof(*vmo));
     if (!vmo) return NULL;
 
     uint32_t npages = (uint32_t)count;
     vmo->pages = NULL;
-    if (npages > 0) {
+    vmo->sparse_root = NULL;
+    vmo->shared_charges = NULL;
+    if (npages > 0 && type != VMO_SHARED_ANON) {
         vmo->pages = kmalloc(npages * sizeof(pfn_t));
         if (!vmo->pages) {
             kfree(vmo);
@@ -135,7 +153,8 @@ uint32_t a20_vmo_lifecycle_page_count_locked(struct vmo *vmo)
 
 pfn_t a20_vmo_lifecycle_slot_locked(struct vmo *vmo, uint32_t index)
 {
-    return vmo->pages[index];
+    return vmo->type == VMO_SHARED_ANON
+        ? a20_vmo_sparse_peek(vmo->sparse_root, index) : vmo->pages[index];
 }
 
 /*
@@ -254,7 +273,28 @@ void a20_vmo_page_unlock(struct vmo *vmo, uint64_t flags)
 
 pfn_t a20_vmo_page_slot_locked(struct vmo *vmo, uint32_t index)
 {
-    return vmo->pages[index];
+    return a20_vmo_lifecycle_slot_locked(vmo, index);
+}
+
+/* Caller holds vmo->lock. Failure leaves at most empty, VMO-owned metadata;
+ * there is no charge/frame to roll back. A ledger pin outlives every faulter. */
+int a20_vmo_page_prepare_locked(struct vmo *vmo, uint32_t index, struct cg_node *cg)
+{
+    if (vmo->type != VMO_SHARED_ANON)
+        return 0;
+    int r = a20_vmo_sparse_reserve(&vmo->sparse_root, index);
+    if (r < 0 || !cg)
+        return r;
+    for (struct vmo_charge *c = vmo->shared_charges; c; c = c->next)
+        if (c->cg == cg)
+            return 0;
+    struct vmo_charge *charge = kmalloc_atomic(sizeof(*charge));
+    if (!charge)
+        return -ENOMEM;
+    cg_group_pin(cg);
+    *charge = (struct vmo_charge){ .next = vmo->shared_charges, .cg = cg };
+    vmo->shared_charges = charge;
+    return 0;
 }
 
 int a20_vmo_page_is_paged_locked(struct vmo *vmo)
@@ -267,14 +307,18 @@ int a20_vmo_page_paged_fault(struct vmo *vmo, uint32_t index, int write_access)
     return vmo_paged_fault(vmo, index, write_access);
 }
 
-int a20_vmo_page_charge(struct cg_node *cg)
+int a20_vmo_page_charge(struct vmo *vmo, struct cg_node *cg)
 {
-    return cg_mem_charge(cg, 1);
+    return vmo->type == VMO_SHARED_ANON ? cg_mem_charge_shared_anon(cg, 1)
+                                       : cg_mem_charge(cg, 1);
 }
 
-void a20_vmo_page_uncharge(struct cg_node *cg)
+void a20_vmo_page_uncharge(struct vmo *vmo, struct cg_node *cg)
 {
-    cg_mem_uncharge(cg, 1);
+    if (vmo->type == VMO_SHARED_ANON)
+        cg_mem_uncharge_shared_anon(cg, 1);
+    else
+        cg_mem_uncharge(cg, 1);
 }
 
 pfn_t a20_vmo_page_alloc(void)
@@ -299,17 +343,31 @@ void a20_vmo_page_zero(pfn_t pfn)
 void a20_vmo_page_publish_locked(struct vmo *vmo, uint32_t index,
                                  pfn_t pfn, struct cg_node *cg)
 {
-    vmo->pages[index] = pfn;
+    if (vmo->type == VMO_SHARED_ANON) {
+        if (a20_vmo_sparse_publish(vmo->sparse_root, index, pfn) != 0)
+            panic("shared anon VMO: unreserved or duplicate page publication");
+    } else {
+        vmo->pages[index] = pfn;
+    }
     vmo->phys_size += PAGE_SIZE;
     a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
     if (cg) {
-        vmo->charge_cg = cg;
+        if (vmo->type == VMO_SHARED_ANON) {
+            struct vmo_charge *charge = vmo->shared_charges;
+            while (charge && charge->cg != cg) charge = charge->next;
+            if (!charge) panic("shared anon VMO: unreserved charge owner");
+            charge->pages++;
+        } else {
+            vmo->charge_cg = cg;
+        }
         vmo->charged_pages++;
     }
 }
 
 int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 {
+    if (vmo && vmo->type == VMO_SHARED_ANON)
+        return -EPERM;
     return a20_vmo_resize_rust(vmo, new_size);
 }
 
@@ -416,7 +474,7 @@ void a20_vmo_destroy_detach_pager(struct vmo *vmo)
 
 uint32_t a20_vmo_destroy_page_count(struct vmo *vmo)
 {
-    return vmo->page_count;
+    return vmo->type == VMO_SHARED_ANON ? 0 : vmo->page_count;
 }
 
 pfn_t a20_vmo_destroy_page(struct vmo *vmo, uint32_t index)
@@ -458,16 +516,32 @@ void a20_vmo_destroy_release_page(struct vmo *vmo, uint32_t index, pfn_t pfn)
 
 void a20_vmo_destroy_uncharge(struct vmo *vmo, uint64_t pages)
 {
+    if (vmo->type == VMO_SHARED_ANON) {
+        for (struct vmo_charge *c = vmo->shared_charges; c; c = c->next)
+            if (c->pages) cg_mem_uncharge_shared_anon(c->cg, c->pages);
+        return;
+    }
     if (vmo->charge_cg)
         cg_mem_uncharge(vmo->charge_cg, pages);
 }
 
 void a20_vmo_destroy_free_pages(struct vmo *vmo)
 {
+    if (vmo->type == VMO_SHARED_ANON) {
+        a20_vmo_sparse_destroy(vmo->sparse_root, vmo);
+        vmo->sparse_root = NULL;
+    }
     kfree(vmo->pages);
 }
 
 void a20_vmo_destroy_free_object(struct vmo *vmo)
 {
+    struct vmo_charge *c = vmo->shared_charges;
+    while (c) {
+        struct vmo_charge *next = c->next;
+        cg_group_unpin(c->cg);
+        kfree(c);
+        c = next;
+    }
     kfree(vmo);
 }

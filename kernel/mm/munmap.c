@@ -442,6 +442,59 @@ int a20_munmap_leaf_hold(void *mm_ptr, void *vma_ptr, uintptr_t va, uint32_t pfn
     return 0;
 }
 
+/* Batch only canonical private-file leaves with explicit mapping pins.
+ * The transaction owns mm->lock; file faults and mapping replacements cannot
+ * change this run. Reserve one batch hold before clearing any PTE; allocation
+ * failure leaves both mappings and reference counts intact.
+ * Shared, huge, unannotated and privately copied pages retain the scalar path. */
+int a20_munmap_file_run(void *mm_ptr, uintptr_t va, uintptr_t end)
+{
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    mm_struct_t *mm = mm_ptr;
+    /* mremap reserves scalar holds before commit/rollback. Preserve that
+     * no-allocation guarantee instead of requesting a new batch allocation. */
+    if (mm->tlb_spares)
+        return 0;
+    enum { RUN = 64 };
+    page_cache_page_t *owners[RUN];
+    paddr_t addresses[RUN];
+    pte_t *table = mm_pt_leaf_table(mm->pgdir, va);
+    pt_meta_t *meta = mm_pt_meta(table);
+    if (!meta || meta->level != 0 || end <= va)
+        return 0;
+    size_t limit = (end - va) / PAGE_SIZE;
+    if (limit > RUN) limit = RUN;
+    int first = arch_pt_vpn(va, 0), count = 0;
+    mm_pt_node_observe_lock(table);
+    for (size_t i = 0; i < limit && first + (int)i < arch_pt_level_entries(0); i++) {
+        int index = first + (int)i;
+        pte_t entry = table[index];
+        page_cache_page_t *owner = mm_pt_cache_peek(table, index);
+        if (!(entry & PTE_V) || !arch_pte_is_leaf(entry) || (entry & PTE_W) ||
+            MM_ST_GET_CLASS(meta->cls[index]) != MM_ST_FILE_PRIVATE ||
+            !owner || page_cache_pfn(owner) != phys_to_pfn(arch_pte_addr(entry)))
+            break;
+        owners[count++] = owner;
+    }
+    mm_pt_node_unlock(table);
+    if (count < 2)
+        return 0;
+    if (mm_tlb_hold_pages(mm, owners, count) < 0)
+        return -ENOMEM;
+    int cleared = pt_unmap_leaf_run_owned(mm, va, count, addresses, NULL);
+    if (cleared > 0) {
+        mm_tlb_note_change(mm, va, (size_t)cleared * PAGE_SIZE);
+        for (int i = 0; i < cleared; i++)
+            page_cache_put(owners[i]); /* mapping pin; hold survives shootdown */
+        mm_rss_sub_clamped(mm, cleared);
+    }
+    return cleared;
+#else
+    (void)mm_ptr; (void)va; (void)end;
+    return 0;
+#endif
+}
+
 int a20_munmap_leaf_unmap(void *mm_ptr, uintptr_t va,
                           struct a20_munmap_leaf *out)
 {

@@ -11,6 +11,7 @@
 #include "mm/mm.h"
 #include "mm/pt.h"
 #include "mm/vm.h"
+#include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #ifdef CONFIG_SWAP
@@ -202,7 +203,7 @@ static inline unsigned pt_cpu(void)
 
 /* The MCS node is stashed in the descriptor while the lock is held so that
  * unlock can find it; only the holder ever touches that field. */
-static uint32_t mcs_lock(pt_meta_t *m)
+static uint32_t mcs_lock_mode(pt_meta_t *m, int mutate)
 {
     /* Nodes and nesting depth are CPU-local.  Pin the task before selecting
      * the pool and keep it pinned until the matching unlock has popped this
@@ -268,7 +269,16 @@ static uint32_t mcs_lock(pt_meta_t *m)
             }
         }
     }
+    if (mutate) {
+        m->fork_file_clean_before_lock = m->fork_file_clean;
+        m->fork_file_clean = 0;
+    }
     return d;
+}
+
+static uint32_t mcs_lock(pt_meta_t *m)
+{
+    return mcs_lock_mode(m, 1);
 }
 
 static void mcs_unlock(pt_meta_t *m)
@@ -380,8 +390,10 @@ pt_meta_t *mm_pt_meta(pte_t *table)
 
 void mm_pt_meta_set_stale(pt_meta_t *m, int stale)
 {
-    if (m)
+    if (m) {
+        m->fork_file_clean = 0;
         __atomic_store_n(&m->stale, stale ? 1u : 0u, __ATOMIC_RELEASE);
+    }
 }
 
 /* Take/release the lock of the PT node reached by `table`, for callers that
@@ -399,6 +411,13 @@ void mm_pt_node_lock(pte_t *table)
     pt_meta_t *pm = mm_pt_meta(table);
     if (pm)
         mcs_lock(pm);
+}
+
+void mm_pt_node_observe_lock(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    if (pm)
+        mcs_lock_mode(pm, 0);
 }
 
 void mm_pt_node_unlock(pte_t *table)
@@ -504,6 +523,7 @@ void mm_pt_copy_table(pte_t *src, pte_t *dst)
     pt_meta_t *dm = mm_pt_meta(dst);
     if (!sm || !dm)
         return;
+    dm->fork_file_clean = 0;
     memcpy(dst, src, PAGE_SIZE);
     memcpy(dm->cls, sm->cls, sizeof(dm->cls));
     memcpy(dm->safe, sm->safe, sizeof(dm->safe));
@@ -790,7 +810,9 @@ static inline mm_seg_t *segtab_seg(const mm_segtab_t *st, uint8_t slot)
  * separate so bulk callers (provisioning a whole leaf table) can hoist the
  * mm_pt_meta() lookup out of their per-entry loop instead of paying three
  * dependent loads -- virt_to_pfn, the frame flag check, the .pt deref -- once
- * per page.
+ * per page. Legacy metadata writers may be serialized by the owning mm->lock
+ * rather than a node lock; invalidate the fork proof in these helpers too.
+ * The proof observer holds both locks, so it cannot observe a partial update.
  */
 static void pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte)
 {
@@ -799,6 +821,7 @@ static void pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte)
         return;
     if (MM_ST_GET_CLASS(*slot) == MM_ST_INVALID)
         m->nr_present++;
+    m->fork_file_clean = 0;
     *slot = cls_byte;
 }
 
@@ -843,6 +866,7 @@ int mm_pt_sync_status_meta(pt_meta_t *m, int idx, uint8_t cls, pte_t pte)
         return -EINVAL;
     if (!m)
         return 0;
+    m->fork_file_clean = 0;
     uint8_t *slot = cls_slot(m, idx);
     if (!slot)
         return 0;
@@ -879,6 +903,7 @@ void mm_pt_note_absent(pte_t *table, int level, int idx)
         return;
     if (MM_ST_GET_CLASS(*slot) != MM_ST_INVALID && m->nr_present)
         m->nr_present--;
+    m->fork_file_clean = 0;
     *slot = 0;
     struct page_cache_page **owner = cache_owner_slot(m, idx);
     if (owner)
@@ -903,6 +928,7 @@ int mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags)
     if (MM_ST_GET_CLASS(cls_slot(m, idx) ? *cls_slot(m, idx) : 0) ==
         MM_ST_INVALID)
         return -ENOENT;
+    m->fork_file_clean = 0;
     *sb |= (uint8_t)(flags & MM_SAFE_MASK);
     return 0;
 }
@@ -910,9 +936,11 @@ int mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags)
 int mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags)
 {
     (void)level;
-    uint8_t *sb = safe_bit(mm_pt_meta(table), idx);
+    pt_meta_t *m = mm_pt_meta(table);
+    uint8_t *sb = safe_bit(m, idx);
     if (!sb)
         return -EINVAL;
+    m->fork_file_clean = 0;
     *sb &= (uint8_t)~(flags & MM_SAFE_MASK);
     return 0;
 }
@@ -1013,6 +1041,7 @@ int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level)
         return -EINVAL;
     if (dst->lock != 0)
         return -EBUSY;      /* the clone target must not be visible yet */
+    dst->fork_file_clean = 0;
     memcpy(dst->cls, src->cls, sizeof(src->cls));
     /* safe[] used to be left out here.  That is a real defect rather than a
      * simplification: MM_SAFE_NO_FA mirrors VM_SEALED, and a forked child that
@@ -2165,6 +2194,102 @@ int mm_cursor_map_if_absent(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
     return cursor_install(cur, addr, pa, flags, cls, NULL, 1);
 }
 
+/* The caller holds mm->lock. File slots lend an owned cache pin; VMO slots
+ * borrow frames protected by the caller's VMO reference. Clear only installed
+ * slots, retain existing PTEs (including swaps), and report partial progress.
+ * The caller accounts RSS and performs any required TLB synchronization. */
+static int map_resident_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                                struct page_cache_page **pages, pfn_t *pfns,
+                                size_t count, pte_t flags, uint8_t cls)
+{
+    if (!mm || start >= end || ((start | end) & (PAGE_SIZE - 1)))
+        return 0;
+    size_t span = (end - start) / PAGE_SIZE;
+    if (count > span)
+        count = span;
+    if (!count)
+        return 0;
+    mm_cursor_t cur;
+    if (mm_addrspace_lock(mm, start, end, &cur) != 0)
+        return 0;
+    size_t done = 0;
+    int installed = 0;
+    while (done < count) {
+        vaddr_t va = start + done * PAGE_SIZE;
+        if (!cursor_leaf_slot(&cur, va, 1))
+            break;
+        pte_t *table = cursor_leaf_table(&cur);
+        pt_meta_t *meta = mm_pt_meta(table);
+        if (!meta) {
+            cursor_leaf_unlock(&cur);
+            break;
+        }
+        /* The ordinary lock revoked the proof before any write. This
+         * specialized installer only fills empty slots with canonical,
+         * read-only cache pages, so it may preserve the previous proof or
+         * establish one for a table with no mapping/status entries. The
+         * snapshot is holder-private and never trusted after unlocking. */
+        int preserve_file_proof = pages && cls == MM_ST_FILE_PRIVATE &&
+            !(flags & (PTE_W | PTE_X)) && (flags & PTE_V) &&
+            (meta->fork_file_clean_before_lock || meta->nr_present == 0);
+        int first = arch_pt_vpn(va, 0);
+        if (pages && !meta->cache_owner) {
+            pfn_t owner = pfa_alloc_flags(0, 0);
+            if (owner != PFN_NONE) {
+                meta->cache_owner = pfn_to_virt(owner);
+                memset(meta->cache_owner, 0, PAGE_SIZE);
+            }
+        }
+        if (pages && !meta->cache_owner) {
+            cursor_leaf_unlock(&cur);
+            break;
+        }
+        for (int i = first; i < arch_pt_level_entries(0) && done < count;
+             i++, done++) {
+            if ((meta->safe[i >> 3] & MM_SAFE_MASK) ||
+                (pages ? !pages[done] : pfns[done] == PFN_NONE) || table[i])
+                continue;
+            pfn_t pfn = pages ? page_cache_pfn(pages[done]) : pfns[done];
+            if (!pfn_valid(pfn))
+                continue;
+            if (flags & PTE_X)
+                arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+            table[i] = arch_pte_leaf(pfn_to_phys(pfn), flags);
+            mm_pt_note_present_meta(meta, i, status_byte(cls, flags));
+            if (pages) {
+                meta->cache_owner[i] = pages[done];
+                pages[done] = NULL;
+            } else {
+                pfns[done] = PFN_NONE;
+            }
+            installed++;
+        }
+        if (preserve_file_proof)
+            meta->fork_file_clean = 1;
+        cursor_leaf_unlock(&cur);
+    }
+    mm_cursor_unlock(&cur);
+    return installed;
+}
+
+int mm_map_private_cache_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                                struct page_cache_page **pages, size_t count,
+                                pte_t flags)
+{
+    if (!pages || (flags & (PTE_W | PTE_X)) || !(flags & PTE_COW))
+        return 0;
+    return map_resident_window(mm, start, end, pages, NULL, count, flags,
+                               MM_ST_FILE_PRIVATE);
+}
+
+int mm_map_borrowed_vmo_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                               pfn_t *pfns, size_t count, pte_t flags)
+{
+    if (!pfns)
+        return 0;
+    return map_resident_window(mm, start, end, NULL, pfns, count, flags, MM_ST_VMO);
+}
+
 int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
                   uint8_t cls)
 {
@@ -2310,6 +2435,7 @@ int mm_pt_refresh_leaf_prot(pte_t *table, int idx, pte_t ptef)
     pt_meta_t *m = mm_pt_meta(table);
     if (!m)
         return 0;
+    m->fork_file_clean = 0;
     uint8_t *slot = cls_slot(m, idx);
     if (!slot)
         return 0;
@@ -2509,6 +2635,29 @@ int mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags)
                             flags);
     cursor_leaf_unlock(cur);
     return r;
+}
+
+/* A negative-only preflight for the status fault path. Do not materialize
+ * page tables or invalidate file proofs just to discover that a file/VMO
+ * fault is not an ANON_VIRT fault. A positive result is only a hint: the
+ * existing locked cursor must recheck every fact before serving the fault. */
+int mm_pt_anon_status_candidate(mm_struct_t *mm, vaddr_t addr)
+{
+    if (!mm || !mm->pgdir)
+        return 0;
+    mm_pt_read_enter(mm);
+    pte_t *table = mm_pt_leaf_table(mm->pgdir, addr);
+    pt_meta_t *meta = mm_pt_meta(table);
+    int candidate = 0;
+    if (meta && meta->level == 0) {
+        mm_pt_node_observe_lock(table);
+        int idx = arch_pt_vpn(addr, 0);
+        candidate = !meta->stale && !(table[idx] & PTE_V) &&
+            MM_ST_GET_CLASS(meta->cls[idx]) == MM_ST_ANON_VIRT;
+        mm_pt_node_unlock(table);
+    }
+    mm_pt_read_exit(mm);
+    return candidate;
 }
 
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,

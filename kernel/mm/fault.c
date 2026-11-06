@@ -315,7 +315,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
  */
 #ifndef CONFIG_NOMMU
 static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
-                            const mm_seg_t *vma)
+                            const mm_seg_t *vma, int copied)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     /* A COW break can also run on a huge leaf (the rc>1 branch copies the
@@ -344,8 +344,20 @@ static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
         else
             cls = MM_ST_ANON_MAPPED;
     }
-    (void)mm_pt_sync_status(tab, level, idx, cls);
+    if (copied && vma &&
+        (vma->vm_flags & (VM_FILE | VM_SHARED)) == VM_FILE) {
+        /* A private copy is now frame-owned anonymous memory. The retired
+         * cache pin belongs to the caller's post-shootdown release, not this
+         * new leaf. Preserve this distinction through later forks. */
+        pte_t pte = tab[idx];
+        mm_pt_note_present(tab, level, idx,
+            MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED) | mm_pt_prot_bits(pte) |
+            ((pte & PTE_COW) ? MM_ST_COW_BIT : 0));
+    } else {
+        (void)mm_pt_sync_status(tab, level, idx, cls);
+    }
 #else
+    (void)copied;
     /* arm32's short-descriptor backend has no per-PTE status sidecar, so
      * there is no status to bring in step: the PTE-level COW bookkeeping is
      * the whole of the break there. */
@@ -535,7 +547,7 @@ void a20_cowf_install(void *mm_ptr, uintptr_t stval, uint32_t new_pfn,
         return;
     pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, kind);
     *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags, size);
-    cow_sync_status(mm, base, vma_ptr);
+    cow_sync_status(mm, base, vma_ptr, 1);
     a20_cowf_diag_after(diag, t_ptr, mm, stval, pte, tag);
     arch_tlb_flush_page_local(stval);
 }
@@ -553,7 +565,7 @@ void a20_cowf_reuse_install(void *mm_ptr, uintptr_t stval, uintptr_t old_pa,
     if (pte) {
         pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, 0);
         *pte = cow_replacement_leaf((paddr_t)old_pa, flags, size);
-        cow_sync_status(mm, base, vma_ptr);
+        cow_sync_status(mm, base, vma_ptr, 0);
         a20_cowf_diag_after(diag, t_ptr, mm, stval, pte, 2);
     }
     spin_unlock_irqrestore(&pfa.lock, pfa_flags);
@@ -571,7 +583,7 @@ void a20_cowf_write_d(void *mm_ptr, uintptr_t stval, uintptr_t snapshot_pte,
     pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, 1);
     *pte = cow_replacement_leaf(arch_pte_addr((pte_t)snapshot_pte), flags,
                                 size);
-    cow_sync_status(mm, base, vma_ptr);
+    cow_sync_status(mm, base, vma_ptr, 0);
     arch_tlb_flush_page_local(stval);
 }
 #endif /* !CONFIG_NOMMU */
@@ -789,6 +801,34 @@ out_mm:
 }
 #endif
 
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+/* mm->lock stabilizes the VMA; its VMO reference protects the borrowed PFNs.
+ * Gather before locking page tables, and stop at the first canonical hole. */
+static void shared_anon_fault_around(mm_struct_t *mm, mm_seg_t *vma,
+                                    uint64_t page_va, uint64_t voff)
+{
+    pfn_t resident[31];
+    size_t count = 0;
+    for (unsigned i = 1; i < 32; i++) {
+        uint64_t next = page_va + (uint64_t)i * PAGE_SIZE;
+        uint64_t offset = voff + (uint64_t)i * PAGE_SIZE;
+        if (next >= vma->end || offset >= vma->vmo->size)
+            break;
+        pfn_t pfn = vmo_peek_page(vma->vmo, (uint32_t)(offset / PAGE_SIZE));
+        if (pfn == PFN_NONE)
+            break;
+        resident[count++] = pfn;
+    }
+    /* Resolve the VMO before taking a page-table node lock. */
+    if (count) {
+        uint64_t start = page_va + PAGE_SIZE;
+        int mapped = mm_map_borrowed_vmo_window(mm, start,
+                        start + count * PAGE_SIZE, resident, count, vma->pte_flags);
+        mm_rss_add(mm, mapped);
+    }
+}
+#endif
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {
@@ -993,7 +1033,9 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             }
             uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
             pfn_t vpfn;
-            int r = vmo_get_page_charged(vma->vmo, pg_idx, t->cgroup, &vpfn);
+            struct cg_node *charge = cg_task_group_pin(t);
+            int r = vmo_get_page_charged(vma->vmo, pg_idx, charge, &vpfn);
+            cg_group_unpin(charge);
             if (r == -ENOMEM)
                 return -ENOMEM;
             if (r != 0 || vpfn == PFN_NONE)
@@ -1005,6 +1047,14 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 return -1;
 
             mm_rss_add(t->mm, 1);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+            /* The VMA pins every canonical frame until teardown. Populate
+             * only already resident neighbours: no speculative allocation,
+             * charge or frame reference is acquired by these borrowed PTEs.
+             * mm->lock keeps the VMA permissions and page table stable. */
+            if (vma->vmo->type == VMO_SHARED_ANON && !(vma->vm_flags & VM_SEALED))
+                shared_anon_fault_around(t->mm, vma, page_va, voff);
+#endif
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -1188,6 +1238,23 @@ static uint64_t fault_file_size(vnode_t *vn)
     return vn ? vn->size : 0;
 }
 
+enum { FILE_RESIDENT_WINDOW = 64 };
+
+/* Called with mm->lock held. A preceding mapped page is a cheap locality
+ * hint, not an ownership decision. Keep isolated faults on the small window. */
+static int file_fault_around_pages(mm_struct_t *mm, uint64_t start,
+                                   uint64_t page_va, pte_t flags, uint64_t vm_flags)
+{
+    if ((vm_flags & (VM_SHARED | VM_SEALED)) || (flags & PTE_W))
+        return 0;
+    if (page_va <= start || (flags & PTE_X) || arch_fork_requires_private_copy())
+        return PAGE_CACHE_FAULT_AROUND_PAGES;
+    pte_t *previous = pt_lookup_leaf(mm->pgdir, page_va - PAGE_SIZE,
+                                    NULL, NULL, NULL);
+    return previous && (*previous & PTE_V)
+        ? FILE_RESIDENT_WINDOW : PAGE_CACHE_FAULT_AROUND_PAGES;
+}
+
 static int handle_file_fault(task_t *t, uint64_t page_va,
                              uint64_t file_pos, uint64_t vma_end,
                              int shared, int fault_around, int executable,
@@ -1205,7 +1272,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
         return -1;
     }
 
-    page_cache_page_t *window[PAGE_CACHE_FAULT_AROUND_PAGES] = {0};
+    page_cache_page_t *window[FILE_RESIDENT_WINDOW] = {0};
     size_t window_count = 1;
     window[0] = page_cache_get(vf->vnode, file_pos / PAGE_SIZE, 1);
     if (!window[0]) {
@@ -1215,36 +1282,48 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
         return -1;
     }
 
-    /* Read-only MAP_PRIVATE mappings can safely populate and install a small
-     * forward window.  Each installed PTE still receives its own anonymous
-     * copy, so a later mprotect()/write cannot modify the file cache. */
+    /* Read-only private mappings may populate a forward window. Canonical
+     * cache frames remain COW; eager-copy architectures retain private copies. */
     if (fault_around && vf->vnode->ops->readpages && vma_end > page_va) {
         uint64_t vma_pages = (vma_end - page_va) / PAGE_SIZE;
         uint64_t file_bytes = vf->vnode->size - file_pos;
         uint64_t file_pages = (file_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
         uint64_t limit = vma_pages < file_pages ? vma_pages : file_pages;
-        if (limit > PAGE_CACHE_FAULT_AROUND_PAGES)
-            limit = PAGE_CACHE_FAULT_AROUND_PAGES;
+        if (limit > (uint64_t)fault_around)
+            limit = (uint64_t)fault_around;
         for (uint64_t i = 1; i < limit; i++) {
             page_cache_page_t *ahead = page_cache_get(
-                vf->vnode, file_pos / PAGE_SIZE + i, 1);
+                vf->vnode, file_pos / PAGE_SIZE + i,
+                i < PAGE_CACHE_FAULT_AROUND_PAGES);
             if (!ahead)
                 break;
+            /* Extend only across resident pages; do not increase the I/O
+             * or allocation window for isolated accesses to a cold file. */
+            if (i >= PAGE_CACHE_FAULT_AROUND_PAGES &&
+                !page_cache_is_uptodate(ahead)) {
+                page_cache_put(ahead);
+                break;
+            }
             window[window_count++] = ahead;
         }
     }
 
     int fill_r = 0;
     int needs_fill = 0;
-    for (size_t i = 0; i < window_count; i++) {
+    /* The resident extension is not an I/O request. Keep the fill within
+     * the original 16 pages, including after concurrent invalidation. The
+     * generic fill transaction also has a smaller fixed scratch capacity. */
+    size_t fill_count = window_count < PAGE_CACHE_FAULT_AROUND_PAGES
+        ? window_count : PAGE_CACHE_FAULT_AROUND_PAGES;
+    for (size_t i = 0; i < fill_count; i++) {
         if (!page_cache_is_uptodate(window[i])) {
             needs_fill = 1;
             break;
         }
     }
     if (needs_fill) {
-        if (window_count > 1)
-            fill_r = page_cache_fill_vfile_pages(vf, window, window_count);
+        if (fill_count > 1)
+            fill_r = page_cache_fill_vfile_pages(vf, window, fill_count);
         else
             fill_r = page_cache_fill_vfile_page(vf, window[0]);
 
@@ -1269,9 +1348,9 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
         return -1;
     }
 
-    pfn_t candidates[PAGE_CACHE_FAULT_AROUND_PAGES];
-    unsigned char charged[PAGE_CACHE_FAULT_AROUND_PAGES] = {0};
-    for (size_t i = 0; i < PAGE_CACHE_FAULT_AROUND_PAGES; i++)
+    pfn_t candidates[FILE_RESIDENT_WINDOW];
+    unsigned char charged[FILE_RESIDENT_WINDOW] = {0};
+    for (size_t i = 0; i < FILE_RESIDENT_WINDOW; i++)
         candidates[i] = PFN_NONE;
 
     /* Private file leaves may retain a canonical cache frame when the
@@ -1371,9 +1450,28 @@ retry_mapping_validation:
     size_t installed = 0;
     if (mapping_valid) {
         size_t map_count = candidate_count;
-        if (shared || (vma->pte_flags & PTE_W) || !fault_around)
+        if (shared || (vma->pte_flags & PTE_W) || !fault_around ||
+            (vma->vm_flags & VM_SEALED))
             map_count = 1;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+        if (direct_private && !executable && map_count > 1) {
+            uint64_t end = page_va + map_count * PAGE_SIZE;
+            if (end > vma->end) end = vma->end;
+            uint64_t flags = (vma->pte_flags & ~(uint64_t)(PTE_W | PTE_D)) | PTE_COW;
+            int mapped = mm_map_private_cache_window(mm, page_va, end,
+                                                     window, map_count, flags);
+            installed += mapped;
+            mm_rss_add(mm, mapped);
+            for (size_t i = 0; i < map_count; i++) {
+                if (!window[i]) {
+                    candidates[i] = PFN_NONE;
+                    if (i == 0) result = 0;
+                }
+            }
+        }
+#endif
         for (size_t i = 0; i < map_count; i++) {
+            if (candidates[i] == PFN_NONE) continue;
             uint64_t va = page_va + i * PAGE_SIZE;
             uint64_t pos = file_pos + i * PAGE_SIZE;
             if (va >= vma->end ||
@@ -1702,6 +1800,8 @@ int a20_fault_status_open(void *ctx_ptr, mm_struct_t *mm, uintptr_t page_va,
     *cls_out = 0;
     *already_out = 0;
     *uffd_out = 0;
+    if (!mm_pt_anon_status_candidate(mm, page_va))
+        return 0;
     if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &ctx->cur) != 0)
         return 0;
     *already_out = mm_cursor_query(&ctx->cur, page_va, cls_out, NULL);
@@ -1877,6 +1977,8 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
          * right file instead of failing. */
         uint64_t file_pos = seg->backing_offset + (page_va - seg->start);
         vaddr_t seg_end = seg->end;
+        int fault_around = file_fault_around_pages(mm, seg->start, page_va,
+                                                   seg_ptef, seg->vm_flags);
         /* Take our own reference on the open file description: the segment's
          * own reference can drop the moment mm_seg_put() does, and the fault
          * runs with mm->lock released. */
@@ -1899,7 +2001,6 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
         int executable = (seg_ptef & PTE_X) != 0;
-        int fault_around = !shared && !(seg_ptef & PTE_W);
         spin_unlock(&mm->lock);
         vfile_t *vf = seg_vf;
         if (!vf || !vf->vnode) {
@@ -1940,7 +2041,8 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
         int executable = (vma->pte_flags & PTE_X) != 0;
-        int fault_around = !shared && !(vma->pte_flags & PTE_W);
+        int fault_around = file_fault_around_pages(mm, vma->start, page_va,
+                                                   vma->pte_flags, vma->vm_flags);
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
         int write_grant = shared && (vma->pte_flags & PTE_W);

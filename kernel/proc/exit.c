@@ -188,36 +188,98 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
     return proc_ignores_sigchld(parent);
 }
 
-/* Wake the tasks blocked in wait4() whose reaper is *parent*.
- *
- * E2: tasklist_lock walks the global list, and each candidate's ->waiting_for_child
- * and ->tgid are park_lock-owned, so the walk nests tasklist_lock -> park_lock.
- * The parent's own tgid is sampled in its own critical section *before* the
- * walk, so no two task park_locks are ever held at once (INV-P3). */
+/* Parent references keep their thread-group leader alive even after list
+ * detachment. tasklist_lock protects this group's chain and closes the
+ * wait4 scan-to-registration window; each waiter flag/token is sampled under
+ * its own park_lock. Never use an unlocked "no waiters" hint here. */
 void proc_wake_child_waiters(task_t *parent)
 {
     if (!parent)
         return;
 
-    int parent_tgid;
-    {
-        uint64_t pf = spin_lock_irqsave(&parent->park_lock);
-        parent_tgid = proc_task_tgid(parent);
-        spin_unlock_irqrestore(&parent->park_lock, pf);
-    }
-
     uint64_t lf = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (!t->waiting_for_child)
-            continue;
-        if (proc_task_tgid(t) != parent_tgid)
-            continue;
+    task_t *leader = parent->tg_leader ? parent->tg_leader : parent;
+    int parent_tgid = proc_task_tgid(parent);
+    for (task_t *t = leader; t; t = t->tg_next) {
         uint64_t plf = spin_lock_irqsave(&t->park_lock);
         if (t->waiting_for_child && proc_task_tgid(t) == parent_tgid)
             (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
         spin_unlock_irqrestore(&t->park_lock, plf);
     }
     spin_unlock_irqrestore(&tasklist_lock, lf);
+}
+
+/* The outgoing kernel stack is inactive before this notification. A waiter
+ * that observed the old CPU slot publishes its park token under tasklist_lock
+ * before this notifier can acquire that lock, so the ready event cannot fall
+ * between its scan and registration. The caller's pin also retains tg_leader.
+ * Reap can win first: UNUSED tasks no longer own a parent/children link, and
+ * their stale parent pointer must not be dereferenced. */
+void proc_notify_reap_ready(task_t *task)
+{
+    task_t *parent = NULL, *group_parent = NULL;
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+    if (proc_task_state_get(task) == PROC_ZOMBIE &&
+        task->parent != proc_idle_task())
+        parent = proc_get(task->parent);
+    task_t *leader = task->tg_leader;
+    if (leader && leader != task &&
+        proc_task_state_get(leader) == PROC_ZOMBIE &&
+        proc_tg_group_dead_locked(leader) && leader->parent != proc_idle_task())
+        group_parent = proc_get(leader->parent);
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+    proc_wake_child_waiters(parent);
+    if (group_parent != parent)
+        proc_wake_child_waiters(group_parent);
+    proc_put(group_parent);
+    proc_put(parent);
+}
+
+/* CPU completion owns these transferred pins. WNOHANG consumers must receive
+ * their one exit signal after the reportable child has left every CPU. The
+ * early direct wait wake independently overlaps exit and parent dispatch. */
+void proc_finish_exit_signal(task_t *task)
+{
+#ifdef A20_TASK_OBJECTS_ENABLED
+    if (task->exit_events_pending) {
+        task->exit_events_pending = 0;
+        /* The CPU-completion pin also owns task->a20_object until final put,
+         * even if a competing reaper has detached its weak task binding. */
+        a20_task_object_notify(task, A20_EVENT_EXITED,
+                               (uint64_t)task->exit_code, 0, 1);
+    }
+#endif
+    task_t *parent = task->exit_signal_parent;
+    task_t *child = task->exit_signal_child;
+    int sig = task->exit_signal_pending;
+    task->exit_signal_parent = NULL;
+    task->exit_signal_child = NULL;
+    task->exit_signal_pending = 0;
+    if (parent && child && child != task) {
+        uint64_t pf = spin_lock_irqsave(&child->park_lock);
+        if (proc_task_is_current_any_cpu(child)) {
+            /* The last sibling can leave its CPU before the zombie leader.
+             * Group notification is claimed exactly once under tasklist_lock.
+             * Transfer both pins to the leader; its CPU release takes this
+             * same park_lock before publishing the slot as empty. */
+            child->exit_signal_parent = parent;
+            child->exit_signal_child = child;
+            child->exit_signal_pending = sig;
+            spin_unlock_irqrestore(&child->park_lock, pf);
+            return;
+        }
+        spin_unlock_irqrestore(&child->park_lock, pf);
+    }
+    if (parent && sig > 0) {
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+        if (child)
+            signal_notify_child_exit(parent, child);
+        else
+#endif
+            signal_send_task(parent, sig);
+    }
+    proc_put(child);
+    proc_put(parent);
 }
 
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
@@ -368,8 +430,8 @@ typedef struct task_exit_context {
     task_t *thread_leader;
     task_t *completed_parent;
     int completed_signal;
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     task_t *notify_leader;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     struct hyp_bridge_drop hyp_drop;
 #endif
 } task_exit_context_t;
@@ -510,10 +572,8 @@ static void exit_parent_bookkeeping(void *opaque)
     ctx->completed_parent = proc_group_exit_parent_get_locked(
         group_leader, &completed_signal);
     ctx->completed_signal = completed_signal;
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (ctx->completed_parent && completed_signal > 0)
         ctx->notify_leader = proc_get(group_leader);
-#endif
     spin_unlock_irqrestore(&tasklist_lock, lf);
 #else
     if (ctx->thread_leader) {
@@ -541,10 +601,12 @@ static void exit_parent_bookkeeping(void *opaque)
         t->ppid = 0;
         proc_children_unlink_locked(t);
         spin_unlock_irqrestore(&tasklist_lock, lf);
-    } else {
-        proc_wake_child_waiters(ctx->parent);
     }
-    if (ctx->completed_parent)
+    /* Start the parent's dispatch while this CPU finishes exit. A waiter
+     * that still sees CPU ownership requests one completion notification
+     * under the child's park_lock before parking, closing the release race. */
+    proc_wake_child_waiters(ctx->parent);
+    if (ctx->completed_parent != ctx->parent)
         proc_wake_child_waiters(ctx->completed_parent);
 #ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
     proc_put(ctx->completed_parent);
@@ -566,7 +628,9 @@ static void exit_task_services(void *opaque)
     a20_registry_task_exit(t->pid);
 #endif
 #ifdef A20_TASK_OBJECTS_ENABLED
-    a20_task_object_notify(t, A20_EVENT_EXITED, (uint64_t)ctx->exit_code, 0, 1);
+    /* Native event consumers can use TASK_WAIT_NONBLOCK, just like pidfd /
+     * SIGCHLD consumers use WNOHANG. Publish EXITED only after CPU release. */
+    t->exit_events_pending = 1;
 #else
     a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
                      A20_EVENT_EXITED, (uint64_t)ctx->exit_code, 0);
@@ -590,19 +654,23 @@ static void exit_tracer_detach(void *opaque)
 static void exit_notify_parent(void *opaque)
 {
     task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (ctx->notify_leader)
-        signal_notify_child_exit(ctx->completed_parent, ctx->notify_leader);
+    if (ctx->completed_parent && ctx->completed_signal > 0) {
+        t->exit_signal_parent = ctx->completed_parent;
+        t->exit_signal_pending = ctx->completed_signal;
+        ctx->completed_parent = NULL;
+        t->exit_signal_child = ctx->notify_leader;
+        ctx->notify_leader = NULL;
+    }
     proc_put(ctx->notify_leader);
-#else
-    if (ctx->completed_parent && ctx->completed_signal > 0)
-        signal_send_task(ctx->completed_parent, ctx->completed_signal);
-#endif
     proc_put(ctx->completed_parent);
 #else
-    if (!ctx->auto_reap && ctx->parent && ctx->task->exit_signal > 0)
-        signal_send_task(ctx->parent, ctx->task->exit_signal);
+    if (!ctx->auto_reap && ctx->parent && t->exit_signal > 0) {
+        t->exit_signal_parent = ctx->parent;
+        t->exit_signal_pending = t->exit_signal;
+        ctx->parent = NULL;
+    }
 #endif
     proc_put(ctx->parent);
     ctx->parent = NULL;

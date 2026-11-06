@@ -86,6 +86,9 @@ int proc_task_is_current_any_cpu(task_t *task);
 int proc_sched_resume_stopped(task_t *task, int report_continued);
 int proc_sched_stop_for_debug(task_t *task, int sig);
 void proc_wake_child_waiters(task_t *parent);
+/* Caller pins task and holds no scheduler or park lock. */
+void proc_notify_reap_ready(task_t *task);
+void proc_finish_exit_signal(task_t *task);
 void proc_switch_complete(void);
 /* Finish a pending outgoing task left by a previous switch on this CPU.
  * Separate window (g_cpu_switch_out[cpu] -> park_lock) so the context-switch

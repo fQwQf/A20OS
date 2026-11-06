@@ -154,6 +154,7 @@ unsafe extern "C" {
     ) -> i32;
     fn a20_munmap_is_nommu() -> i32;
     fn a20_munmap_release_flat(mm: *mut c_void, vma: *mut c_void, s: usize, e: usize);
+    fn a20_munmap_file_run(mm: *mut c_void, va: usize, end: usize) -> i32;
     fn a20_munmap_leaf_probe(mm: *mut c_void, va: usize, out: *mut Leaf);
     fn a20_munmap_retire_reservation(mm: *mut c_void, va: usize);
     fn a20_munmap_demote(mm: *mut c_void, va: usize) -> i32;
@@ -208,6 +209,16 @@ unsafe fn release_leaves(
     let mut va = clip_start;
 
     while va < clip_end {
+        if info.vm_flags & (VM_FILE | VM_SHARED | VM_PFNMAP | VM_VMO) == VM_FILE {
+            let run = unsafe { a20_munmap_file_run(mm, va, clip_end) };
+            if run < 0 {
+                return Err(run);
+            }
+            if run > 0 {
+                va += run as usize * PAGE_SIZE;
+                continue;
+            }
+        }
         let mut leaf = Leaf::default();
         unsafe { a20_munmap_leaf_probe(mm, va, &mut leaf) };
 

@@ -56,7 +56,7 @@ void proc_current_slots_init(void)
  * task to its runqueue.  Caller holds g_cpu_switch_out[cpu] and, once a
  * pending outgoing task exists, that task's park_lock.
  */
-static int proc_switch_complete_locked(unsigned cpu)
+static task_t *proc_switch_complete_locked(unsigned cpu)
 {
     task_t *old =
         __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE);
@@ -94,11 +94,14 @@ static int proc_switch_complete_locked(unsigned cpu)
     }
     proc_sched_assert_task_locked(old);
 
-    int zombie = old->state == PROC_ZOMBIE;
+    /* Transfer the CPU slot's pin to the unlocked notifier on zombie exit.
+     * Another CPU may reap immediately after the switching slot is cleared;
+     * the pin keeps the task and its thread-group anchor alive meanwhile. */
+    task_t *reap = old->state == PROC_ZOMBIE ? old : NULL;
     __atomic_store_n(&g_cpu_switching_out[cpu], NULL, __ATOMIC_RELEASE);
-    /* Drop the CPU slot reference after the outgoing stack is inactive. */
-    proc_put(old);
-    return zombie;
+    if (!reap)
+        proc_put(old);
+    return reap;
 }
 
 /*
@@ -121,11 +124,17 @@ void proc_switch_out_finish_pending(void)
         return;
     }
     uint64_t pf = spin_lock_irqsave(&pending->park_lock);
-    int reap = proc_switch_complete_locked(cpu);
+    task_t *reap = proc_switch_complete_locked(cpu);
     spin_unlock_irqrestore(&pending->park_lock, pf);
     spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
-    if (reap)
+    if (reap) {
+        /* No scheduler/park lock may nest outside tasklist_lock. */
+        proc_finish_exit_signal(reap);
+        if (reap->reap_wait_requested)
+            proc_notify_reap_ready(reap);
         proc_sched_note_zombie();
+        proc_put(reap);
+    }
 }
 
 task_t *proc_current(void)
@@ -230,11 +239,17 @@ void proc_switch_complete(void)
         return;
     }
     uint64_t pf = spin_lock_irqsave(&old->park_lock);
-    int reap = proc_switch_complete_locked(cpu);
+    task_t *reap = proc_switch_complete_locked(cpu);
     spin_unlock_irqrestore(&old->park_lock, pf);
     spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
-    if (reap)
+    if (reap) {
+        /* No scheduler/park lock may nest outside tasklist_lock. */
+        proc_finish_exit_signal(reap);
+        if (reap->reap_wait_requested)
+            proc_notify_reap_ready(reap);
         proc_sched_note_zombie();
+        proc_put(reap);
+    }
 }
 
 task_t *proc_current_on_cpu(unsigned cpu)

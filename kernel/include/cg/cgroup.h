@@ -20,6 +20,7 @@ typedef struct cg_mem_state {
     size_t limit;            /* max RSS in pages (SIZE_MAX = unlimited) */
     size_t swap_limit;       /* physical swap slots; 0 forbids, SIZE_MAX unlimited */
     size_t rss;              /* current resident set size in pages */
+    size_t shared_anon_rss;  /* subset owned by shared VMOs, not exiting MMs */
     size_t cache;            /* page cache pages */
     size_t swap_usage;       /* charged physical swap slots, independent of PTE aliases */
     size_t total_vm;         /* total virtual memory in pages */
@@ -76,6 +77,8 @@ void cg_cpuset_init(cg_cpuset_state_t *cs, unsigned nr_cpus);
 /* ---- Memory controller API ---- */
 int  cg_mem_charge(struct cg_node *cg, size_t nr_pages);
 void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages);
+int  cg_mem_charge_shared_anon(struct cg_node *cg, size_t nr_pages);
+void cg_mem_uncharge_shared_anon(struct cg_node *cg, size_t nr_pages);
 int  cg_mem_swap_charge(struct task_t *t, size_t pages);
 void cg_mem_swap_uncharge(struct task_t *t, size_t pages);
 int cg_mem_swap_charge_node(struct cg_node *cg, size_t pages);
