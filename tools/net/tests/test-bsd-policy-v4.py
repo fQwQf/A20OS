@@ -138,17 +138,18 @@ def arguments(description):
     return parser.parse_args()
 
 
-def run_router(args, test, *, probes=(), qmp=False):
+def run_router(args, test, *, probes=(), qmp=False, bootargs='', files=None, image=None):
     out = args.out.resolve()
     out.mkdir(parents=True)
-    image = pd.make_payload(out, args.busybox, False, None, extra_probes=probes)
+    if image is None:
+        image = pd.make_payload(out, args.busybox, False, None, extra_probes=probes, files=files)
     links = [wire.Link(1, '192.168.10.2', '192.168.10.1'),
              wire.Link(2, '10.20.0.2', '10.20.0.1'),
              wire.Link(3, '10.30.0.2', '10.30.0.1')]
     argv = ['qemu-system-x86_64', '-machine', 'q35', '-accel', 'kvm', '-m', '1024',
             '-smp', '2', '-nographic', '-monitor', 'none', '-no-reboot',
             '-kernel', str(args.kernel.resolve()), '-append',
-            'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0',
+            'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0 ' + bootargs,
             '-drive', f'file={image},if=none,format=raw,id=payload',
             '-device', 'virtio-blk-pci,drive=payload']
     for index, link in enumerate(links):

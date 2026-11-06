@@ -103,7 +103,7 @@ int a20_bsd_port_policy_route4(unsigned fib, unsigned index,
                                int replace, int remove, int check_only);
 int a20_bsd_port_nic_route4(void *context, const uint8_t destination[4],
                             uint8_t prefix, const uint8_t gateway[4],
-                            int remove);
+                            int remove, int scoped);
 int a20_bsd_port_ifindex_from_slot(int slot);
 int a20_bsd_port_ifindex_to_slot(unsigned ifindex, int *slot);
 int a20_bsd_port_addr6_snapshot(nl_addr6_out_t *out, int maximum);

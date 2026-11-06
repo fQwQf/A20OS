@@ -3399,6 +3399,10 @@ endif
 # not grow and existing submission artifacts remain unchanged.
 RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
                       echo uname mkdir rm cp sync poweroff reboot
+ifeq ($(RAMFS_USER):$(NET_STACK):$(NET_ROLE),1:bsd:router)
+RAMFS_USER_PROGRAMS += wanctl
+CFLAGS += -DCONFIG_RAMFS_WAN
+endif
 ifeq ($(RAMFS_NET_TESTS),1)
 ifneq ($(RAMFS_USER),1)
 $(error RAMFS_NET_TESTS=1 requires RAMFS_USER=1)

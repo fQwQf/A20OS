@@ -701,7 +701,7 @@ typedef struct route4_job {
     uint8_t destination[4], gateway[4];
     uint8_t prefix;
     int remove;
-    int have_gateway;
+    int have_gateway, scoped;
 } route4_job_t;
 
 static int addr4_job_run(void *argument)
@@ -719,7 +719,7 @@ static int route4_job_run(void *argument)
     return a20_bsd_port_nic_route4(job->context, job->destination,
                                    job->prefix,
                                    job->have_gateway ? job->gateway : NULL,
-                                   job->remove);
+                                   job->remove, job->scoped);
 }
 
 static int route_update_v4(const uint8_t *destination, uint8_t prefix,
@@ -739,6 +739,7 @@ static int route_update_v4(const uint8_t *destination, uint8_t prefix,
     memcpy(job.destination, destination, 4);
     job.prefix = prefix;
     job.remove = remove;
+    job.scoped = ifindex != 0;
     if (gateway) {
         memcpy(job.gateway, gateway, 4);
         job.have_gateway = 1;
@@ -994,20 +995,35 @@ void a20_bsd_policy_flush_if(unsigned index, unsigned filter_slot)
 static int if_set_addr(unsigned index, const uint8_t *address,
                        const uint8_t *mask, const uint8_t *gateway)
 {
-    if (a20_bsd_tun_is_index(index))
-        return a20_bsd_tun_set_addr(index, address, mask, 1);
+    if (!address)
+        return -EINVAL;
+    bool have_ip = address[0] || address[1] || address[2] || address[3];
+    if (have_ip && !mask)
+        return -EINVAL;
+    if (a20_bsd_tun_is_index(index)) {
+        /* A netmask ioctl may precede address assignment on a new TUN.
+         * Rtnetlink deletion is the all-zero address with no mask. */
+        if (mask)
+            return a20_bsd_tun_set_addr(index, address, mask, 1);
+        uint8_t previous[4], previous_mask[4], previous_gateway[4];
+        int rc = a20_bsd_tun_get_addr(index, previous, previous_mask, previous_gateway);
+        return rc < 0 ? rc : a20_bsd_tun_set_addr(index, previous, previous_mask, 0);
+    }
     int slot = nic_slot_for_index(index);
-    if (slot < 0 || !nics[slot].attached || !address || !mask) return -ENODEV;
+    if (slot < 0 || !nics[slot].attached)
+        return -ENODEV;
     bsd_nic_slot_t *nic = &nics[slot];
     addr4_job_t job;
     memset(&job, 0, sizeof(job));
     job.context = nic->context;
     memcpy(job.address, address, 4);
-    memcpy(job.mask, mask, 4);
+    if (mask) memcpy(job.mask, mask, 4);
     memcpy(job.old_address, nic->ip, 4);
     memcpy(job.old_mask, nic->mask, 4);
     memcpy(job.old_gateway, nic->gw, 4);
-    if (gateway) {
+    if (!have_ip) {
+        job.have_gateway = 1;
+    } else if (gateway) {
         memcpy(job.gateway, gateway, 4);
         job.have_gateway = 1;
     } else if (slot == 0) {
@@ -1018,15 +1034,15 @@ static int if_set_addr(unsigned index, const uint8_t *address,
     if (result < 0) return result;
 
     memcpy(nic->ip, address, 4);
-    memcpy(nic->mask, mask, 4);
-    nic->has_ip = address[0] || address[1] || address[2] || address[3];
-    if (gateway) memcpy(nic->gw, gateway, 4);
+    memcpy(nic->mask, job.mask, 4);
+    nic->has_ip = have_ip;
+    if (job.have_gateway) memcpy(nic->gw, job.gateway, 4);
 
     if (slot == 0) {
         uint64_t flags = spin_lock_irqsave(&config_lock);
         memcpy(&g_a20_net_config.ip, address, 4);
-        memcpy(&g_a20_net_config.netmask, mask, 4);
-        if (gateway) memcpy(&g_a20_net_config.gateway, gateway, 4);
+        memcpy(&g_a20_net_config.netmask, job.mask, 4);
+        if (job.have_gateway) memcpy(&g_a20_net_config.gateway, job.gateway, 4);
         spin_unlock_irqrestore(&config_lock, flags);
     }
     return 0;

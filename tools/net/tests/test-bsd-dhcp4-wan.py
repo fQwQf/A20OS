@@ -62,7 +62,7 @@ def receive(link, kind, timeout=15):
         return frame, message
 
 
-def respond(link, request, kind, *, lease=12, address=LEASE, dns=DNS, unicast=False):
+def respond(link, request, kind, *, lease=12, address=LEASE, dns=DNS, gateway=SERVER, unicast=False):
     response = bytearray(236)
     response[:3] = b'\x02\x01\x06'
     response[4:8] = request[4:8]
@@ -71,7 +71,7 @@ def respond(link, request, kind, *, lease=12, address=LEASE, dns=DNS, unicast=Fa
     response[20:24] = SERVER
     response[28:44] = request[28:44]
     opts = [(53, bytes((kind,))), (54, SERVER), (51, struct.pack('!I', lease)),
-            (1, b'\xff\xff\xff\x00'), (3, SERVER), (6, dns)]
+            (1, b'\xff\xff\xff\x00'), (3, gateway), (6, dns)]
     response += COOKIE + b''.join(bytes((t, len(v))) + v for t, v in opts) + b'\xff'
     response = response.ljust(300, b'\0')
     dst = address if unicast else BROADCAST
@@ -80,14 +80,14 @@ def respond(link, request, kind, *, lease=12, address=LEASE, dns=DNS, unicast=Fa
               link.router_mac if unicast else b'\xff' * 6)
 
 
-def acquire(wan):
+def acquire(wan, *, address=LEASE, dns=DNS, lease=12, gateway=SERVER):
     _, discovery = receive(wan, 1)
-    respond(wan, discovery, 2)
+    respond(wan, discovery, 2, address=address, dns=dns, lease=lease, gateway=gateway)
     _, request = receive(wan, 3)
     opts = options(request[240:])
     assert request[4:8] == discovery[4:8]
-    assert opts[50] == LEASE and opts[54] == SERVER
-    respond(wan, request, 5)
+    assert opts[50] == address and opts[54] == SERVER
+    respond(wan, request, 5, address=address, dns=dns, lease=lease, gateway=gateway)
 
 
 def set_link(qmp, up):

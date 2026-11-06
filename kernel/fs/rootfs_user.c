@@ -42,6 +42,10 @@ extern const unsigned char _binary_cluster_threads_start[], _binary_cluster_thre
 extern const unsigned char _binary_sched_stress_start[], _binary_sched_stress_end[];
 #endif
 
+#ifdef CONFIG_RAMFS_WAN
+extern const unsigned char _binary_wanctl_start[], _binary_wanctl_end[];
+#endif
+
 #ifdef CONFIG_RAMFS_NET_TESTS
 #define NET_PROGRAM(name) extern const unsigned char _binary_##name##_start[], _binary_##name##_end[]
 NET_PROGRAM(tcp_loopback_test);
@@ -72,6 +76,9 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     { "/etc/a20-ramfs-shell", ramfs_shell_marker,
       sizeof(ramfs_shell_marker) - 1, 0644 },
     USER_ENTRY("/bin/init", init),
+#ifdef CONFIG_RAMFS_WAN
+    USER_ENTRY("/bin/wanctl", wanctl),
+#endif
 #ifdef CONFIG_RAMFS_NET_TESTS
     USER_ENTRY("/bin/tcp_loopback_test", tcp_loopback_test),
     USER_ENTRY("/bin/udp_loopback_test", udp_loopback_test),
