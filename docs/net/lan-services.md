@@ -1,6 +1,6 @@
 # LAN DHCP 与 DNS 转发
 
-网络服务使用 Alpine 的原版 Linux ELF，不在内核重新实现 DHCP/DNS 服务。已在三节点隔离 KVM 拓扑验证 dnsmasq 2.91-r1、BusyBox udhcpc 1.37.0 的 DHCPv4 租约与 DNS A 查询转发。它是功能验收，尚未覆盖 DHCPv6、RA、DNS TCP、大规模租约、重启恢复或服务安全加固，不能据此称为生产软路由。
+网络服务使用 Alpine 的原版 Linux ELF，不在内核重新实现 DHCP/DNS 服务。已在三节点隔离 KVM 拓扑验证 dnsmasq 2.91-r1、BusyBox udhcpc 1.37.0 的 DHCPv4 租约与 DNS A 查询转发。该轮覆盖 DHCPv4 和 UDP DNS A 转发。F-Stack 最终内核的服务重启验证见下文。
 
 ## 配置示例
 
@@ -44,6 +44,26 @@ python3 tools/net/tests/test-net-router-kvm.py \
 工具复制镜像并安装测试，不改动输入镜像或宿主网络。Linux WAN 和 A20OS 使用同一探针 ELF，检查具体地址/wildcard 绑定、接口选项、IP_PKTINFO 和零长度 UDP。随后 Linux LAN 验证 DHCP OFFER/REQUEST/ACK 的租约、网关与 DNS，查询上游专属的 `upstream.test`。查询有 10 秒截止时间，所有报文独立重算校验和。转发 TTL 与路由器新发 DNS 的初始 TTL 分别检查，避免把本机发包误判为未递减的转发包。
 
 成功证据：`build/evidence/net-refactor-20261028/router-services-buckets-kvm/manifest.json`。两个内核均输出 `NET_SOCKET_ABI_PASS`，LAN 输出 `DHCP_LEASE_OK`、`LAN_SERVICES_PASS`，四份抓包校验和检查通过。失败样本保留在同级目录，UDP connect 自环可由 ABI 探针复现。
+
+## F-Stack 三节点复验
+
+以下测试将同一静态 dnsmasq 2.91 安装在 A20OS 路由器与 Linux WAN
+对端。Linux LAN 用 BusyBox 获取地址、默认网关和 DNS，并查询
+WAN 对端提供的记录。复验同时记录 DHCP 抓包和服务重启后的第二次
+DNS 查询。路由器的租约文件保存在可写的 `/extra`。
+
+```sh
+python3 tools/net/tests/test-bsd-lan-services.py \
+  --kernel <F-Stack-router的kernel.bin> --linux <匹配的Linux内核> \
+  --peer-initrd <Linux测试对端的peer-initramfs.cpio.gz> --busybox <静态BusyBox> \
+  --dnsmasq <静态dnsmasq> --out <新的证据目录>
+```
+
+对端镜像可复用 [IPv6 PD 测试](./router.md#自动发布委派前缀) 的 Linux
+镜像。静态测试二进制来自 dnsmasq 2.91 源码，构建时指定
+`LDFLAGS=-static`。证据目录为 `lan-services-fstack-second`，包含
+输入哈希、启动参数、抓包及四项验证结果。
+[dnsmasq 源码](https://thekelleys.org.uk/dnsmasq/doc.html)
 
 ## 原版默认后端
 
