@@ -71,7 +71,11 @@ fork 可以省略可从后备恢复的子 PTE。目前仅对至少 1 MiB、非�
 
 文件映射的冷页填充窗口保持 16 页。当同一 VMA 内的前一页已经映射，且映射为非可执行、只读私有映射时，窗口可扩展到 64 页；第 17 页起只查询已驻留且 uptodate 的缓存页，遇到缺页即停止，不扩大磁盘读取或缓存分配窗口。孤立访问仍用 16 页，避免用顺序读取收益换取稀疏读取退化。窗口边界在 I/O 后依据当前 VMA 再验证。sealed VMA 不使用推测映射，批量安装也尊重叶节点安全位。
 
-文件 fork 的叶节点检查可以先作只读范围证明：在同一个源节点锁内，验证当前 VMA 范围中的所有非零叶都只读、具有文件私有状态、没有安全标记，且 cache owner 的 PFN 与 PTE 一致。全部满足时直接略过该范围，不再创建空的 Rust 克隆事务或检查子页表。任一页面不满足则回退到常规克隆，保留修改后又改为只读的私有页。该证明每次 fork 重新计算，仍是线性扫描，没有依赖可能因 COW、mprotect 或 remap 失效的持久摘要。
+文件 fork 的叶节点检查可以先作只读范围证明：在同一个源节点锁内，验证当前 VMA 范围中的所有非零叶都只读、具有文件私有状态、没有安全标记，且 cache owner 的 PFN 与 PTE 一致。全部满足时直接略过该范围，不再创建空的 Rust 克隆事务或检查子页表。任一页面不满足则回退到常规克隆，保留修改后又改为只读的私有页。完整 L0 页表通过验证后缓存正向结果，后续 fork 仍检查当前 VMA 策略，但无需再次逐页检查。首次验证与失效后重建仍为线性扫描；未覆盖整张表的边界范围不产生摘要，可以使用已有的完整摘要。稳定映射的重复 fork 因此按叶页表数量检查，而非按驻留页数检查。
+
+摘要只证明页表自身的 PTE、类别、安全位和 cache owner，不缓存 VMA 的文件身份或策略。普通节点写锁在取得锁后撤销摘要；状态、权限、安全位、元数据复制和失效节点更新也显式撤销，覆盖持有 mm->lock 的旧调用路径。唯一保留摘要的观察锁仍是互斥 MCS 锁，并保持原有禁止抢占与 CPU 固定规则。fork 的观察同时持有 parent->lock；任何元数据或 PTE 写入都必须由普通节点锁或已有地址空间锁协议保护，不能绕过这些失效路径。
+
+遍历每层页表时直接计算与范围重叠的首槽位，保留宽整数边界检查和部分大页的原有规则。空 PTE 在进入批量事务前跳过，避免对稀疏叶表的空前缀创建 Rust 守卫、探测子页表和取得源节点锁；非零交换项继续走原有路径。
 
 普通克隆事务最多处理 64 页；C 与 Rust 的容量必须一致，且批量不能跨叶页表或 VMA 边界。失败时未转移的帧引用和缓存页 pin 由事务守卫回收。父 PTE 已等于目标 COW 编码时只同步软件状态，不重复写 PTE 或记录 TLB 失效；实际权限变更仍遵守原有 shootdown 时序。
 
@@ -88,6 +92,9 @@ python3 tools/tests/test_shared_anon_host.py
 python3 tools/tests/test_vmo_page_host.py
 python3 tools/tests/test_anon_final_destroy_host.py
 python3 tools/tests/test_cow_snapshot_token.py
+python3 tools/tests/test_pt_mcs_preempt_window.py
+python3 tools/tests/test_pt_cache_owner.py
+python3 tools/tests/test_cow_clone_range.py
 python3 tools/tests/test_cow_private_copy_status.py
 python3 tools/tests/test_cow_anon_child_batch.py
 python3 tools/tests/test_reap_ready_host.py
