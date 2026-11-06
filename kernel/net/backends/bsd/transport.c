@@ -36,7 +36,7 @@ typedef struct bsd_socket {
     int connecting;
     int connect_result;
     char bound_device[16];
-    unsigned bound_if6; /* private BSD index, owned by the executor */
+    unsigned bound_if; /* private BSD index, owned by the executor */
     completion_t connect_done;
 } bsd_socket_t;
 
@@ -721,7 +721,7 @@ static void publish_bound_device(bsd_socket_t *state, const char *name)
     net_sock_unlock(state->socket, flags);
 }
 
-static int bind_device6_run(void *argument)
+static int bind_datagram_device_run(void *argument)
 {
     bind_device_job_t *job = argument;
     bsd_socket_t *state = job->state;
@@ -730,11 +730,13 @@ static int bind_device6_run(void *argument)
     int index = job->index ? a20_bsd_ifindex_to_bsd(job->index) : 0;
     if (index < 0)
         return index;
-    if (state->bound_if6 != (unsigned)index) {
-        int result = a20_bsd_port_socket_bind_if6(state->fd, index);
+    if (state->bound_if != (unsigned)index) {
+        int result = state->socket->domain == AF_INET6 ?
+                     a20_bsd_port_socket_bind_if6(state->fd, index) :
+                     a20_bsd_port_socket_bind_if4(state->fd, index);
         if (result < 0)
             return result;
-        state->bound_if6 = index;
+        state->bound_if = index;
     }
     publish_bound_device(state, job->name);
     return 0;
@@ -747,9 +749,10 @@ static int bind_device(net_socket_t *s, const char *name)
     if (!name) name = "";
     int index = name[0] ? ifreq_name_index(name) : 0;
     if (index < 0) return -ENODEV;
-    if (s->domain == AF_INET6 && (state->kind == BSD_KIND_UDP || state->kind == BSD_KIND_RAW)) {
+    if ((s->domain == AF_INET && state->kind == BSD_KIND_UDP) ||
+        (s->domain == AF_INET6 && (state->kind == BSD_KIND_UDP || state->kind == BSD_KIND_RAW))) {
         bind_device_job_t job = {state, name, index};
-        return a20_bsd_executor_call(bind_device6_run, &job);
+        return a20_bsd_executor_call(bind_datagram_device_run, &job);
     }
     /* Preserve the legacy primary-device compatibility for other sockets. */
     if (index && index != net_stack_if_default_index())
@@ -803,7 +806,7 @@ static void receive_one(bsd_socket_t *state)
             wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
             return;
         }
-        if (state->bound_if6 && pinfo.ifindex != state->bound_if6)
+        if (state->bound_if && pinfo.ifindex != state->bound_if)
             continue;
         if (got == 0) {
             if (state->kind != BSD_KIND_TCP) return;
@@ -1239,7 +1242,11 @@ static int interface_ioctl(net_socket_t *s, unsigned long request, void *argumen
     case BSD_SIOCGIFFLAGS: {
         short value = BSD_IFF_BROADCAST;
         if (index == 2) value |= BSD_IFF_LOOPBACK;
-        if (net_stack_if_up((unsigned)index)) value |= BSD_IFF_UP | BSD_IFF_RUNNING;
+        if (net_stack_if_up((unsigned)index)) {
+            value |= BSD_IFF_UP;
+            if (a20_bsd_if_carrier((unsigned)index))
+                value |= BSD_IFF_RUNNING;
+        }
         return copy_to_user((uint8_t *)argument + BSD_IFNAMSIZ, &value,
                             sizeof(value)) < 0 ? -EFAULT : 0;
     }

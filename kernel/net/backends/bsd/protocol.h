@@ -46,6 +46,7 @@ int a20_bsd_port_socket_getpeername(int fd, void *address, size_t *length);
 int a20_bsd_port_socket_getsockname(int fd, void *address, size_t *length);
 int a20_bsd_port_socket_set_int(int fd, int level, int option, int value);
 int a20_bsd_port_socket_enable_pktinfo(int fd, int domain);
+int a20_bsd_port_socket_bind_if4(int fd, unsigned ifindex);
 int a20_bsd_port_socket_bind_if6(int fd, unsigned ifindex);
 int a20_bsd_port_socket_ipv6_option(int fd, int level, int option,
                                    const void *value, size_t length);
@@ -80,6 +81,7 @@ void *a20_bsd_port_nic_attach(const a20_bsd_nic_config_t *config);
 void a20_bsd_port_nic_progress(void *context, unsigned budget);
 void a20_bsd_port_nic_stats(void *context, a20_bsd_nic_stats_t *out);
 int a20_bsd_port_nic_set_mtu(void *context, int mtu);
+void a20_bsd_port_nic_set_carrier(void *context, int carrier);
 int a20_bsd_port_nic_set_up(void *context, int up);
 /* Replace the primary IPv4 address. old_* is the address currently installed
  * in FreeBSD; a failed add restores it. gateway may be NULL to keep the

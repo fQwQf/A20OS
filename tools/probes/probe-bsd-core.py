@@ -140,10 +140,28 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
          'int\nnhop_get_rtflags'),
     ])
     output_fib = '\tfibnum = (inp != NULL) ? inp->inp_inc.inc_fibnum : M_GETFIB(m);'
+    overlay('freebsd/netinet/in_pcb.h', [
+        ('int\tinp_flags2;\t\t/* (i) generic IP/datagram flags #2*/',
+         'int\tinp_flags2;\t\t/* (i) generic IP/datagram flags #2*/\n'
+         '\tunsigned inp_a20_boundif4;\t/* (i) IPv4 UDP device binding */'),
+    ])
     overlay('freebsd/netinet/ip_output.c', [
-        policy_include,
+        (policy_include[0], policy_include[1] + '\n#include <a20_bsd_ipv4.h>'),
+        ('\t/* Catch a possible divide by zero later. */',
+         '\tif (inp != NULL && inp->inp_a20_boundif4 && inp->inp_a20_boundif4 != ifp->if_index) {\n'
+         '\t\terror = EHOSTUNREACH;\n\t\tgoto bad;\n\t}\n\n'
+         '\t/* Catch a possible divide by zero later. */'),
+        ('case SOPT_SET:\n\t\tswitch (sopt->sopt_name) {\n\t\tcase IP_OPTIONS:',
+         'case SOPT_SET:\n\t\tswitch (sopt->sopt_name) {\n'
+         '\t\tcase A20_IP_BOUND_IF:\n'
+         '\t\t\terror = sooptcopyin(sopt, &optval, sizeof(optval), sizeof(optval));\n'
+         '\t\t\tif (error == 0) {\n\t\t\t\tINP_WLOCK(inp);\n'
+         '\t\t\t\tinp->inp_a20_boundif4 = (unsigned)optval;\n'
+         '\t\t\t\tRO_INVALIDATE_CACHE(&inp->inp_route);\n'
+         '\t\t\t\tINP_WUNLOCK(inp);\n\t\t\t}\n\t\t\tbreak;\n'
+         '\t\tcase IP_OPTIONS:'),
         (output_fib, output_fib + '\n#ifdef A20_BSD_ROUTER_POLICY\n'
-         '\tif (inp != NULL && (flags & (IP_FORWARDING | IP_ROUTETOIF | IP_SENDONES)) == 0) {\n'
+         '\tif (inp != NULL && !inp->inp_a20_boundif4 && (flags & (IP_FORWARDING | IP_ROUTETOIF | IP_SENDONES)) == 0) {\n'
          '\t\tfibnum = port_policy_fib4(&ip->ip_src, &ip->ip_dst, fibnum, m->m_pkthdr.flowid);\n'
          '\t\tM_SETFIB(m, fibnum);\n'
          '\t}\n'
@@ -169,7 +187,8 @@ def prepare_port_sources(upstream, out, sources, explicit_tls):
          '\tif ((inp->inp_socket->so_options & SO_DONTROUTE) == 0) {\n'
          '\t\tuint32_t fib = inp->inp_inc.inc_fibnum;\n'
          '#ifdef A20_BSD_ROUTER_POLICY\n'
-         '\t\tfib = port_policy_fib4(laddr, faddr, fib, 0);\n'
+          '\t\tif (!inp->inp_a20_boundif4)\n'
+         '\t\t\tfib = port_policy_fib4(laddr, faddr, fib, 0);\n'
          '#endif\n'
          '\t\tnh = fib4_lookup(fib, *faddr, 0, NHR_NONE, 0);\n\t}'),
     ])
@@ -344,7 +363,7 @@ def main():
              '-DHAVE_KERNEL_OPTION_HEADERS', '-include', str(upstream/'lib/opt/opt_global.h')]
     explicit_tls = args.emulated_tls and args.arch == 'loongarch64'
     staged_lib = prepare_port_sources(upstream, out, sources, explicit_tls)
-    flags += ['-I' + str(staged_lib)]
+    flags += ['-I' + str(staged_lib), '-I' + str(staged_lib.parent/'freebsd')]
     if args.router:
         (staged_lib/'opt_route.h').write_text('#define ROUTETABLES 9\n')
         flags += ['-DA20_BSD_ROUTER_POLICY=1']

@@ -12,6 +12,7 @@
 #include <net/if_dl.h>
 #include "ff_api.h"
 #include "ff_host_interface.h"
+#include <a20_bsd_ipv4.h>
 #include "protocol_abi.h"
 
 extern int port_last_error(void);
@@ -214,6 +215,13 @@ int port_socket_enable_pktinfo(int fd, int domain)
                                             &one, sizeof(one)));
     }
     return -EAFNOSUPPORT;
+}
+
+int port_socket_bind_if4(int fd, unsigned ifindex)
+{
+    int option = (int)ifindex;
+    return result(ff_setsockopt_freebsd(fd, IPPROTO_IP, A20_IP_BOUND_IF,
+                                        &option, sizeof(option)));
 }
 
 int port_socket_bind_if6(int fd, unsigned ifindex)

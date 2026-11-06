@@ -203,6 +203,7 @@ typedef struct {
     int have_mq;
     int have_csum;
     int have_guest_csum;
+    int have_status;
     uint32_t rx_packets;
     uint32_t tx_packets;
     uint32_t rx_drops;
@@ -557,7 +558,8 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
     uint32_t driver_lo = 0;
     if (features_lo & (1U << VIRTIO_NET_F_MAC))
         driver_lo |= (1U << VIRTIO_NET_F_MAC);
-    if (features_lo & (1U << VIRTIO_NET_F_STATUS))
+    net->have_status = (features_lo & (1U << VIRTIO_NET_F_STATUS)) != 0;
+    if (net->have_status)
         driver_lo |= (1U << VIRTIO_NET_F_STATUS);
     /*
      * MRG_RXBUF is acknowledged only on a modern (version 1) transport.
@@ -1194,11 +1196,23 @@ void virtio_net_dev_stats(struct device *dev, net_dev_stats_t *out) {
     spin_unlock_irqrestore(&net->lock, flags);
 }
 
+static int virtio_net_class_link_up(device_t *dev)
+{
+    virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
+    if (!net || !net->valid)
+        return 0;
+    if (!net->have_status)
+        return 1;
+    /* The 16-bit status follows the six MAC bytes. */
+    return (net->vt.read32(&net->vt, VIRTIO_MMIO_CONFIG + 4) & (1U << 16)) != 0;
+}
+
 static net_dev_ops_t virtio_net_class_ops = {
     .send = virtio_net_class_send,
     .recv = virtio_net_class_recv,
     .mac  = virtio_net_class_mac,
     .poll = virtio_net_class_poll,
+    .link_up = virtio_net_class_link_up,
     .rx_irq_driven = virtio_net_class_rx_irq_driven,
     .caps = virtio_net_class_caps,
 };
