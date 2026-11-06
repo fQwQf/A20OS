@@ -78,6 +78,7 @@ def exercise(guest, lan, wan_a, wan_b, result):
     exchange(SOURCE_B, 0x7202, wan_b, wan_a)
     result['passed'].append('source_rules_select_distinct_native_fibs_with_empty_table_fallback')
 
+    configure(guest, "echo 'natadd out proto=udp dst=198.51.100.9 action=masquerade' >/proc/a20/netfilter")
     probe = wire.udp(lan.peer_ip, DESTINATION, 32000, 42000, b'policy-ttl')
     packet = bytearray(wire.ipv4(lan.peer_ip, DESTINATION, 0x72ff, probe))
     packet[8] = 1
@@ -93,10 +94,12 @@ def exercise(guest, lan, wan_a, wan_b, result):
         icmp = ip[20:struct.unpack_from('!H', ip, 2)[0]]
         assert ip[12:20] == lan.router_ip + lan.peer_ip
         assert icmp[:2] == bytes((11, 0)) and wire.checksum(icmp) == 0
+        assert wire.checksum(ip[:20]) == 0
         assert icmp[20:28] == lan.peer_ip + DESTINATION
         assert icmp[28:32] == probe[:4]
         break
-    result['passed'].append('ttl_exceeded_returns_on_main_without_wan_route_to_lan')
+    configure(guest, "echo 'natdel 0' >/proc/a20/netfilter")
+    result['passed'].append('ttl_exceeded_returns_on_main_with_nat_enabled')
 
     reply = b'policy-return'
     wan_b.fragment(lan.peer_ip, 0x7203, wire.udp(DESTINATION, lan.peer_ip, 42000, 32000, reply),
