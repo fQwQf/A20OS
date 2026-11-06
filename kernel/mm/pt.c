@@ -11,6 +11,7 @@
 #include "mm/mm.h"
 #include "mm/pt.h"
 #include "mm/vm.h"
+#include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #ifdef CONFIG_SWAP
@@ -2163,6 +2164,92 @@ int mm_cursor_map_if_absent(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
                             pte_t flags, uint8_t cls)
 {
     return cursor_install(cur, addr, pa, flags, cls, NULL, 1);
+}
+
+/* The caller holds mm->lock. File slots lend an owned cache pin; VMO slots
+ * borrow frames protected by the caller's VMO reference. Clear only installed
+ * slots, retain existing PTEs (including swaps), and report partial progress.
+ * The caller accounts RSS and performs any required TLB synchronization. */
+static int map_resident_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                                struct page_cache_page **pages, pfn_t *pfns,
+                                size_t count, pte_t flags, uint8_t cls)
+{
+    if (!mm || start >= end || ((start | end) & (PAGE_SIZE - 1)))
+        return 0;
+    size_t span = (end - start) / PAGE_SIZE;
+    if (count > span)
+        count = span;
+    if (!count)
+        return 0;
+    mm_cursor_t cur;
+    if (mm_addrspace_lock(mm, start, end, &cur) != 0)
+        return 0;
+    size_t done = 0;
+    int installed = 0;
+    while (done < count) {
+        vaddr_t va = start + done * PAGE_SIZE;
+        if (!cursor_leaf_slot(&cur, va, 1))
+            break;
+        pte_t *table = cursor_leaf_table(&cur);
+        pt_meta_t *meta = mm_pt_meta(table);
+        if (!meta) {
+            cursor_leaf_unlock(&cur);
+            break;
+        }
+        int first = arch_pt_vpn(va, 0);
+        if (pages && !meta->cache_owner) {
+            pfn_t owner = pfa_alloc_flags(0, 0);
+            if (owner != PFN_NONE) {
+                meta->cache_owner = pfn_to_virt(owner);
+                memset(meta->cache_owner, 0, PAGE_SIZE);
+            }
+        }
+        if (pages && !meta->cache_owner) {
+            cursor_leaf_unlock(&cur);
+            break;
+        }
+        for (int i = first; i < arch_pt_level_entries(0) && done < count;
+             i++, done++) {
+            if ((meta->safe[i >> 3] & MM_SAFE_MASK) ||
+                (pages ? !pages[done] : pfns[done] == PFN_NONE) || table[i])
+                continue;
+            pfn_t pfn = pages ? page_cache_pfn(pages[done]) : pfns[done];
+            if (!pfn_valid(pfn))
+                continue;
+            if (flags & PTE_X)
+                arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+            table[i] = arch_pte_leaf(pfn_to_phys(pfn), flags);
+            mm_pt_note_present_meta(meta, i, status_byte(cls, flags));
+            if (pages) {
+                meta->cache_owner[i] = pages[done];
+                pages[done] = NULL;
+            } else {
+                pfns[done] = PFN_NONE;
+            }
+            installed++;
+        }
+        cursor_leaf_unlock(&cur);
+    }
+    mm_cursor_unlock(&cur);
+    return installed;
+}
+
+int mm_map_private_cache_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                                struct page_cache_page **pages, size_t count,
+                                pte_t flags)
+{
+    if (!pages || (flags & (PTE_W | PTE_X)) || !(flags & PTE_COW))
+        return 0;
+    return map_resident_window(mm, start, end, pages, NULL, count, flags,
+                               MM_ST_FILE_PRIVATE);
+}
+
+int mm_map_borrowed_vmo_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                               pfn_t *pfns, size_t count, pte_t flags)
+{
+    if (!pfns)
+        return 0;
+    return map_resident_window(mm, start, end, NULL, pfns, count, flags, MM_ST_VMO);
 }
 
 int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,

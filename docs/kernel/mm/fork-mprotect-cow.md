@@ -67,11 +67,17 @@ fork 可以省略可从后备恢复的子 PTE。目前仅对至少 1 MiB、非�
 
 共享匿名 VMO 缺页后，还会尝试映射后续至多 31 个连续驻留页面；遇到后备空洞、VMA/后备边界或页表分配失败即停止，已有 PTE 保留。该窗口不分配 canonical 页面、不新增 cgroup 计费或帧引用，借用帧仍由 VMA 持有的后备引用保护。
 
+驻留页窗口通过同一个地址空间游标，按叶页表节点批量安装 PTE、更新状态和记录 cache owner。已有非零 PTE（包括 swap 项）不覆盖；中途分配失败保留已完成部分，只有实际安装的输入槽会被清空，调用者据此统计 RSS、转移引用和清理未消费的页面。私有文件页保持只读 COW，并转移一份 page-cache pin；共享匿名页只借用 VMO 帧，不能增加或释放帧引用。VMO 查询先于页表加锁，避免引入页表锁到 VMO 锁的顺序依赖。可执行 VMO 页仍须在发布 PTE 前同步指令缓存。
+
+文件映射的冷页填充窗口保持 16 页。当同一 VMA 内的前一页已经映射，且映射为非可执行、只读私有映射时，窗口可扩展到 64 页；第 17 页起只查询已驻留且 uptodate 的缓存页，遇到缺页即停止，不扩大磁盘读取或缓存分配窗口。孤立访问仍用 16 页，避免用顺序读取收益换取稀疏读取退化。窗口边界在 I/O 后依据当前 VMA 再验证。sealed VMA 不使用推测映射，批量安装也尊重叶节点安全位。
+
 这项策略将页表复制成本移到子进程后续访问。fork 后退出或 exec 的负载通常受益；子进程立即读取全部映射会产生更多缺页，可能更慢。评估时必须同时测量两种访问模式，不能仅凭 fork 返回时间判断整体收益。
 
 宿主检查覆盖真实 C/Rust 适配器的分配失败、并发首次触页、计费与生命周期；guest 检查覆盖内容、权限、别名、驻留、COW、帧复用和回收事件。可执行：
 
 ```sh
+python3 tools/tests/test_file_cache_window.py
+python3 tools/tests/test_shared_fault_around.py
 python3 tools/tests/test_shared_anon_host.py
 python3 tools/tests/test_vmo_page_host.py
 python3 tools/tests/test_anon_final_destroy_host.py
@@ -83,6 +89,6 @@ bash tools/host-tests/test-mseal-policy-host.sh
 bash tools/host-tests/build-fork-exit-probes.sh
 ```
 
-`fork-exit-bench` 接受 `file|shared-sparse|shared-dense`、轮数、MiB、子进程是否读取每页四个参数。父进程在计时前触页（`shared-sparse` 除外）；结果包含整个 fork/wait 周期和父进程侧累计 fork、wait 时间。两侧应使用同一二进制、相同 vCPU/内存/CPU affinity 和透明大页设置，并把诊断计数与正式计时分开。
+`fork-exit-bench` 接受 `file|shared-sparse|shared-dense`、轮数、MiB、子进程读取模式四个参数（0：不读；1：逐页读取；2：每隔 1 MiB 读取；3：只读首个页面）。父进程在计时前触页（`shared-sparse` 除外）；结果包含整个 fork/wait 周期和父进程侧累计 fork、wait 时间。两侧应使用同一二进制、相同 vCPU/内存/CPU affinity 和透明大页设置，并把诊断计数与正式计时分开。
 
 回收完成还有独立于页表的 CPU 生命周期边界：`ZOMBIE` 不意味着退出任务已经离开 CPU。阻塞 wait 在子任务的 `park_lock` 内注册完成通知，CPU slot 的任务引用移交给完成回调，保护并发回收。SIGCHLD 与 pidfd 可读状态必须等到对应进程可以非阻塞回收后才可见；线程组信号若先由最后一个 sibling 产生，还须等待仍在 CPU 上的 leader。原生任务对象的逐任务 EXITED 事件也移到该任务释放 CPU 之后，保持原有的任务与线程组事件范围。

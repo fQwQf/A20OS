@@ -784,6 +784,14 @@ int mm_pt_sync_status_meta(pt_meta_t *m, int idx, uint8_t cls, pte_t pte);
 void mm_pt_note_absent(pte_t *table, int level, int idx);
 /* Cache annotation does not acquire a reference. The caller already owns the
  * mapping pin. Peek runs under the leaf node lock or on an unpublished table. */
+/* Consumes cache pins only for installed leaves, clearing those array slots. */
+int mm_map_private_cache_window(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                                struct page_cache_page **pages, size_t count,
+                                pte_t flags);
+/* Caller pins the VMO and holds mm->lock. No frame references are acquired;
+ * installed slots become PFN_NONE, while the VMO remains their sole owner. */
+int mm_map_borrowed_vmo_window(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                               pfn_t *pfns, size_t count, pte_t flags);
 void mm_pt_cache_note(pt_root_t *pgdir, vaddr_t va,
                       struct page_cache_page *page);
 struct page_cache_page *mm_pt_cache_peek(pte_t *table, int idx);
