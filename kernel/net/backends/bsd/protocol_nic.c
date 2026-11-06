@@ -862,6 +862,20 @@ done:
     return -port_linux_errno(error);
 }
 
+struct route4_owner {
+    struct ifnet *ifp;
+    uint32_t gateway;
+};
+
+static int route4_match(const struct rtentry *rt, const struct nhop_object *nh, void *arg)
+{
+    (void)rt;
+    const struct route4_owner *owner = arg;
+    return nh->nh_ifp == owner->ifp &&
+           (!owner->gateway || ((nh->nh_flags & NHF_GATEWAY) &&
+                                nh->gw4_sa.sin_addr.s_addr == owner->gateway));
+}
+
 static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,
                   uint32_t gateway, int add)
 {
@@ -872,7 +886,9 @@ static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,
                          prefix >= 32 ? 0xffffffffU :
                          htonl(~((1u << (32 - prefix)) - 1));
 
-    (void)ifp;
+    struct sockaddr_dl link = {.sdl_len = sizeof(link), .sdl_family = AF_LINK};
+    struct route4_owner owner = {ifp, gateway};
+    struct epoch_tracker epoch;
     bzero(&info, sizeof(info));
     bzero(&gw, sizeof(gw));
     bzero(&dst, sizeof(dst));
@@ -888,9 +904,20 @@ static int route4(struct ifnet *ifp, uint32_t destination, uint8_t prefix,
         info.rti_info[RTAX_GATEWAY] = (struct sockaddr *)&gw;
     }
     info.rti_info[RTAX_DST] = (struct sockaddr *)&dst;
-    info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
-    return rib_action(RT_DEFAULT_FIB, add ? RTM_ADD : RTM_DELETE,
-                      &info, &rci);
+    if (prefix != 32)
+        info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
+    if (ifp && add) {
+        link.sdl_index = ifp->if_index;
+        link.sdl_type = ifp->if_type;
+        info.rti_info[RTAX_IFP] = (struct sockaddr *)&link;
+    } else if (ifp) {
+        info.rti_filter = route4_match;
+        info.rti_filterdata = &owner;
+    }
+    NET_EPOCH_ENTER(epoch);
+    int error = rib_action(RT_DEFAULT_FIB, add ? RTM_ADD : RTM_DELETE, &info, &rci);
+    NET_EPOCH_EXIT(epoch);
+    return error;
 }
 
 int port_policy_route4(unsigned fib, unsigned index, uint32_t destination,
@@ -1178,11 +1205,11 @@ int port_nic_set_up(void *context, int up)
 }
 
 int port_nic_route4(void *context, const uint8_t destination[4],
-                    uint8_t prefix, const uint8_t gateway[4], int remove)
+                    uint8_t prefix, const uint8_t gateway[4], int remove, int scoped)
 {
     struct ff_dpdk_if_context *ctx = context;
     if (!ctx || !ctx->ifp || !destination || prefix > 32) return EINVAL;
-    return route4(ctx->ifp, ipv4_word(destination), prefix,
+    return route4(scoped ? ctx->ifp : NULL, ipv4_word(destination), prefix,
                   gateway ? ipv4_word(gateway) : 0, !remove);
 }
 
@@ -1212,8 +1239,11 @@ int port_nic_set_ipv4(void *context,
     if (addr == 0) {
         /* RTM_DELADDR passes an all-zero address.  Remove the configured
          * address (and its connected route) without installing 0.0.0.0. */
-        if (prev_addr)
-            (void)v4_addr_ctl(ifp, prev_addr, prev_mask, prev_broadcast, 0);
+        if (prev_addr) {
+            int error = v4_addr_ctl(ifp, prev_addr, prev_mask, prev_broadcast, 0);
+            if (error && error != EADDRNOTAVAIL)
+                return error;
+        }
         if (gateway_changed && old_gw)
             (void)route_default(old_gw, 0);
         return 0;

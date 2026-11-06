@@ -96,6 +96,7 @@ const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
+const EEXIST: i32 = 17;
 const ENOSYS: i32 = 38;
 const ENODEV: i32 = 19;
 const EOPNOTSUPP: i32 = 95;
@@ -2039,6 +2040,9 @@ unsafe fn apply_addr(msg_type: u16, flags: u16, ifa: &IfAddrMsg,
         return a20_net_netlink_if_set_addr(ifindex, none.as_ptr(),
                                            ptr::null(), ptr::null());
     }
+    if !ip4_isany(&cur) && flags & NLM_F_EXCL != 0 {
+        return -EEXIST;
+    }
     /* One IPv4 slot per netif: a different configured address can only be
      * replaced by an explicit NLM_F_REPLACE. */
     if !ip4_isany(&cur) && cur != want && (flags & NLM_F_REPLACE) == 0 {
@@ -3524,6 +3528,12 @@ mod tests {
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, req2.as_ptr() as *const c_void,
                                                      req2.len() as usize, ptr::null(),
                                                      0), 0);
+
+            T_GET_ADDR_IP = [10, 0, 2, 15];
+            let exclusive = route_req(RTM_NEWADDR, NLM_F_EXCL, &body[..16]);
+            assert_eq!(a20_net_netlink_route_request(s as *mut c_void,
+                                                     exclusive.as_ptr() as *const c_void,
+                                                     exclusive.len(), ptr::null(), 0), -EEXIST);
 
             /* A delete of the configured address applies; of another address it
              * is EADDRNOTAVAIL. */

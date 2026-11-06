@@ -35,6 +35,46 @@ python3 tools/net/tests/test-bsd-dhcp4-wan.py --kernel <路由内核的kernel.bi
   --busybox <静态BusyBox> --out <新的证据目录>
 ```
 
+### 开机配置和链路恢复
+
+F-Stack 路由器构建在 `RAMFS_USER=1` 时包含 `/bin/wanctl`。将配置放在
+持久存储上，例如挂载到 `/extra` 的磁盘中的 `wan.conf`。给 A20OS 自带
+init 的内核启动参数添加 `a20.wan_config=/extra/wan.conf`。也可以从前台运行
+`/bin/wanctl /extra/wan.conf`。
+
+DHCP 配置使用原版静态 BusyBox：
+
+```ini
+interface=en3
+mode=dhcp
+busybox=/extra/busybox
+resolver=/etc/resolv.conf
+```
+
+静态配置示例：
+
+```ini
+interface=en3
+mode=static
+address=10.20.0.12/24
+gateway=10.20.0.2
+dns=192.0.2.53 192.0.2.54
+resolver=/etc/resolv.conf
+```
+
+`gateway` 和 `dns` 在静态模式下可省略。省略 `resolver` 时使用
+`/tmp/wan-resolv.conf`。指定 `/etc/resolv.conf` 会为系统 DNS 客户端发布地址，
+该路径需要预留给服务使用。服务以独占方式添加地址和默认路由，保留已有配置。
+收到 DHCP 续租时更新 DNS 或网络配置。载波消失、租约到期、客户端退出或服务
+正常停止时，撤销该服务拥有的地址、默认路由和 DNS 文件。链路恢复后重新应用
+静态配置或开始 DHCP，客户端意外退出后自动重启。当前每台系统运行一个 IPv4
+以太网 WAN 监督进程。IPv6 RA、DHCPv6-PD 和 PPPoE 的配置见各自章节。
+
+```sh
+python3 tools/net/tests/test-bsd-wan-config.py --kernel <路由内核的kernel.bin> \
+  --busybox <静态BusyBox> --out <新的证据目录>
+```
+
 ## WAN IPv6 自动配置
 
 启动时传入 `a20.ipv6_ra=en3`，指定接收 IPv6 Router Advertisement 的
