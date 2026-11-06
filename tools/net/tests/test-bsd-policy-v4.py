@@ -134,10 +134,11 @@ def arguments(description):
     parser = argparse.ArgumentParser(description=description)
     for argument in ('kernel', 'busybox', 'out'):
         parser.add_argument('--' + argument, required=True, type=Path)
+    parser.add_argument('--nic-model', choices=('virtio-net-pci', 'e1000', 'e1000e'), default='virtio-net-pci')
     return parser.parse_args()
 
 
-def run_router(args, test, *, probes=()):
+def run_router(args, test, *, probes=(), qmp=False):
     out = args.out.resolve()
     out.mkdir(parents=True)
     image = pd.make_payload(out, args.busybox, False, None, extra_probes=probes)
@@ -151,9 +152,13 @@ def run_router(args, test, *, probes=()):
             '-drive', f'file={image},if=none,format=raw,id=payload',
             '-device', 'virtio-blk-pci,drive=payload']
     for index, link in enumerate(links):
-        argv.extend(link.argv(index, out))
+        argv.extend(link.argv(index, out, model=args.nic_model))
     result = dict(argv=argv, status='failed', passed=[],
                   kernel_sha256=hashlib.sha256(args.kernel.read_bytes()).hexdigest())
+    if qmp:
+        port, = wire.backend.reserve_ports(socket.SOCK_STREAM, 1)
+        result['qmp_port'] = port
+        argv += ['-qmp', f'tcp:127.0.0.1:{port},server=on,wait=off']
     with (out/'serial.log').open('wb') as log:
         guest = wire.backend.Guest(argv, log)
         try:

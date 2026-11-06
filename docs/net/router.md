@@ -20,8 +20,20 @@ BSD 已验证（三节点 QEMU socket 拓扑）：
 DHCPv4 服务端（dnsmasq `--dhcp-range`）已在 en2 上完成完整租约交换：`udhcpc` 拿到 `192.168.10.51`、`router=192.168.10.1`、`dns=192.168.10.1`，随后用租约地址通过该路由器解析上游名字成功。这条路径依赖三处修复：`MSG_PEEK` 的 `IP_PKTINFO` 家族字段、`RTM_GETADDR` 的 `IFA_BROADCAST`，以及 BSD 后端对 `SIOCSARP` 的支持——dnsmasq 在客户端还没有地址时用 `SIOCSARP`预置邻居项，否则 OFFER/ACK 会卡在 FreeBSD 的 ARP hold 队列里。
 
 BSD 路由器的 IPv4 和 IPv6 转发及本机 TCP/UDP 均可使用多 FIB 与源策略。
-IPv6 UDP 和原始套接字的
-`SO_BINDTODEVICE` 支持选择 IPv6 接口并限制收发。
+IPv4 和 IPv6 UDP、IPv6 原始套接字可使用 `SO_BINDTODEVICE` 限制收发网口。
+IPv4 UDP 需要一条经绑定网口的路由，指向其他出口的发送请求返回不可达。
+
+## WAN IPv4 DHCP
+
+原版 BusyBox `udhcpc` 可在 F-Stack 路由器的第二张网卡上获取 IPv4 租约。
+初次发现使用链路层广播，续租使用绑定 WAN 的 IPv4 UDP 套接字。租约的地址、
+路由和 DNS 通过客户端脚本应用。VirtIO 与 E1000 系列驱动的载波变化可由
+`RTM_NEWLINK` 或 `SIOCGIFFLAGS` 读取。
+
+```sh
+python3 tools/net/tests/test-bsd-dhcp4-wan.py --kernel <路由内核的kernel.bin> \
+  --busybox <静态BusyBox> --out <新的证据目录>
+```
 
 ## WAN IPv6 自动配置
 

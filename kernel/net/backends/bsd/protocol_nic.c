@@ -464,6 +464,7 @@ static void nic_poll_rs(struct ff_dpdk_if_context *ctx)
 {
     struct ifnet *ifp = ctx->ifp;
     if (!ctx->rs_enabled || !(ifp->if_flags & IFF_UP) ||
+        ifp->if_link_state == LINK_STATE_DOWN ||
         (ND_IFINFO(ifp)->flags & ND6_IFF_IFDISABLED) ||
         ctx->rs_sent >= MAX_RTR_SOLICITATIONS || (ctx->rs_sent && ctx->rs_seen))
         return;
@@ -1149,6 +1150,15 @@ void port_nic_set_forwarding(int ipv4, int ipv6)
     (void)ipv6;
 #endif
     printf("[NET] BSD forwarding ipv4=%d ipv6=%d\n", ipv4, ipv6);
+}
+
+void port_nic_set_carrier(void *context, int carrier)
+{
+    struct ff_dpdk_if_context *ctx = context;
+    struct ifnet *ifp = ctx->ifp;
+    if_link_state_change(ifp, carrier ? LINK_STATE_UP : LINK_STATE_DOWN);
+    if (carrier && ctx->rs_enabled && (ifp->if_flags & IFF_UP))
+        nic_restart_rs(ctx);
 }
 
 int port_nic_set_up(void *context, int up)

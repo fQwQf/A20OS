@@ -60,11 +60,11 @@ class Link:
         self.router_mac = bytes.fromhex(f'52 54 00 01 00 {index:02x}')
         self.port, = backend.reserve_ports(socket.SOCK_DGRAM, 1)
 
-    def argv(self, index, out):
+    def argv(self, index, out, *, model='virtio-net-pci'):
         return [
             '-netdev', f'socket,id=net{index},udp=127.0.0.1:{self.sock.getsockname()[1]},'
                        f'localaddr=127.0.0.1:{self.port}',
-            '-device', f'virtio-net-pci,netdev=net{index},mac={self.router_mac.hex(":")}',
+            '-device', f'{model},netdev=net{index},mac={self.router_mac.hex(":")}',
             '-object', f'filter-dump,id=cap{index},netdev=net{index},file={out / f"link{index}.pcap"}',
         ]
 

@@ -17,7 +17,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | PPPoE 宽带接入 | discovery/session、认证、MTU、IPv6CP、IPCP DNS 与断线重连 | Linux PAP、CHAP 双栈和 IPv4 回归通过 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 委派与续租、Linux LAN 自动地址与转发、租约撤销和重编号通过 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | IPv4 和 IPv6 转发、本机 TCP/UDP 双 WAN 均通过 |
-| WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | 待完成 |
+| WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | IPv4 DHCP 获取、单播续租和载波事件通过，监督与持久配置待完成 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
 | 真机验证 | 具体硬件 PCI ID、双网口收发、中断/链路恢复和长时负载 | 待硬件验收 |
 
@@ -163,6 +163,19 @@ MASQUERADE 绑定，保留其他接口的状态。生产状态机的选择性清
 重开均通过，记录为 `pppoe-tun-fixed-01` 至 `pppoe-tun-fixed-20`。
 四架构 BSD 网络回归为 `pppoe-sockets-<arch>-racefix`。ARM32/RV32
 的 lwIP 启动关机 smoke 通过。双栈和 DNS 的后续验证见下文。
+
+## WAN DHCPv4 和载波事件
+
+`dhcp4-wan-virtio-net-pci-verified`、`dhcp4-wan-e1000-verified` 和
+`dhcp4-wan-e1000e-verified` 保存三网口 QEMU 的抓包。原版 BusyBox 在没有 IPv4
+地址的 en3 上取得租约，并从租约地址发出单播续租。测试从 LAN 注入同一事务的
+ACK，确认客户端只接受 WAN 上的回应。IPv4 UDP 绑定 WAN 后，发往其他接口的
+请求返回不可达。QMP 模拟物理链路中断和恢复，`RTM_NEWLINK` 与
+`SIOCGIFFLAGS` 都能区分载波变化和管理员的 UP 状态。
+
+E1000 多卡验证复现了共享设备状态导致 en3 报文从第三张卡发出的问题。
+驱动改为每设备分配状态后，三个网口各自用配置的地址与 MAC 回应 ARP，en3
+载波中断与恢复也从正确的接口报告。
 
 ## WAN IPv6 RA 与 SLAAC
 

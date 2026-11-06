@@ -36,6 +36,8 @@ extern void net_packet_bottom_half_process(void);
 extern int a20_bsd_socket_format_status(char *, size_t);
 extern void a20_bsd_port_memory_snapshot(struct bsd_memory_stats *);
 
+enum { NIC_CARRIER_DOWN = 1, NIC_CARRIER_UP };
+
 typedef struct bsd_nic_slot {
     device_t *device;
     class_device_t *binding;
@@ -43,7 +45,7 @@ typedef struct bsd_nic_slot {
     unsigned present;
     unsigned attached;
     unsigned rx_pending;
-    unsigned up;
+    unsigned up, carrier;
     uint16_t mtu;
     uint8_t mac[6];
     uint8_t ip[4], mask[4], gw[4];
@@ -220,6 +222,25 @@ static int attach_job_run(void *argument)
     return job->context ? 0 : -ENODEV;
 }
 
+static void poll_carrier(void)
+{
+    for (unsigned i = 0; i < BSD_MAX_NICS; ++i) {
+        bsd_nic_slot_t *nic = &nics[i];
+        if (!nic->context)
+            continue;
+        class_device_t *binding = binding_get(nic);
+        bool carrier = binding && class_net_link_up(binding) > 0;
+        class_device_put(binding);
+        unsigned state = carrier ? NIC_CARRIER_UP : NIC_CARRIER_DOWN;
+        if (state == __atomic_load_n(&nic->carrier, __ATOMIC_ACQUIRE))
+            continue;
+        a20_bsd_port_nic_set_carrier(nic->context, carrier);
+        __atomic_store_n(&nic->carrier, state, __ATOMIC_RELEASE);
+        net_netlink_link_notify_one(nic_index_for_slot(i),
+                                    carrier && __atomic_load_n(&nic->up, __ATOMIC_ACQUIRE));
+    }
+}
+
 static void stack_progress(void *argument)
 {
     (void)argument;
@@ -234,7 +255,7 @@ static void stack_progress(void *argument)
 
     /* Sweep from the executor even with idle NICs. At the target cadence,
      * 256 slots per pass visits the largest configured table in 3.2 s. */
-    static uint64_t sweep_at;
+    static uint64_t sweep_at, carrier_at;
     uint64_t now = timer_get_ticks();
     if ((int64_t)(now - sweep_at) >= 0) {
         sweep_at = now + MS_TO_TICKS(50);
@@ -242,6 +263,10 @@ static void stack_progress(void *argument)
             netfilter_conntrack_expire(256);
     }
 
+    if ((int64_t)(now - carrier_at) >= 0) {
+        carrier_at = now + MS_TO_TICKS(250);
+        poll_carrier();
+    }
     unsigned budget = __atomic_exchange_n(&progress_budget, BSD_RX_BUDGET,
                                           __ATOMIC_ACQ_REL);
     for (unsigned i = 0; i < BSD_MAX_NICS; ++i) {
@@ -370,7 +395,7 @@ static int attach_one_nic(int slot, const a20_net_config_t *config,
 
     nics[slot].context = job.context;
     nics[slot].attached = 1;
-    nics[slot].up = 1;
+    __atomic_store_n(&nics[slot].up, 1, __ATOMIC_RELEASE);
     nics[slot].mtu = 1500;
     ifindex_job_t index_job = {job.context, -1};
     if (a20_bsd_executor_call(ifindex_job_run, &index_job) == 0)
@@ -531,7 +556,11 @@ static int interface_snapshot(void *outp, int maximum)
         nic_name_for_slot(slot, entry->name, sizeof(entry->name));
         entry->index = nic_index_for_slot(slot);
         entry->mtu = nic->mtu;
-        entry->flags = (nic->up ? NLRT_IF_FLAGS_UP | NLRT_IF_FLAGS_RUNNING : 0);
+        if (__atomic_load_n(&nic->up, __ATOMIC_ACQUIRE)) {
+            entry->flags = NLRT_IF_FLAGS_UP;
+            if (__atomic_load_n(&nic->carrier, __ATOMIC_ACQUIRE) == NIC_CARRIER_UP)
+                entry->flags |= NLRT_IF_FLAGS_RUNNING;
+        }
         memcpy(entry->mac, nic->mac, 6);
         if (nic->has_ip) {
             entry->has_ip = 1;
@@ -567,11 +596,19 @@ static int if_default_index(void)
         if (nics[slot].attached) return (int)nic_index_for_slot(slot);
     return 2;
 }
+int a20_bsd_if_carrier(unsigned index)
+{
+    int slot = nic_slot_for_index(index);
+    if (slot >= 0 && slot < BSD_MAX_NICS)
+        return __atomic_load_n(&nics[slot].carrier, __ATOMIC_ACQUIRE) == NIC_CARRIER_UP;
+    return net_stack_if_up(index);
+}
+
 static int if_up(unsigned index)
 {
     if (a20_bsd_tun_is_index(index)) return a20_bsd_tun_up(index);
     int slot = nic_slot_for_index(index);
-    if (slot >= 0) return nics[slot].attached && nics[slot].up;
+    if (slot >= 0) return nics[slot].attached && __atomic_load_n(&nics[slot].up, __ATOMIC_ACQUIRE);
     if (index == 2) return 1;
     return 0;
 }
@@ -641,12 +678,13 @@ typedef struct link_job {
 static int link_job_run(void *argument)
 {
     link_job_t *job = argument;
-    if (job->up == (int)job->nic->up)
+    if (job->up == (int)__atomic_load_n(&job->nic->up, __ATOMIC_ACQUIRE))
         return 0;
     int result = a20_bsd_port_nic_set_up(job->nic->context, job->up);
     if (result == 0) {
-        job->nic->up = job->up;
-        net_netlink_link_notify_one(job->index, job->up);
+        __atomic_store_n(&job->nic->up, job->up, __ATOMIC_RELEASE);
+        net_netlink_link_notify_one(job->index,
+                                    job->up && __atomic_load_n(&job->nic->carrier, __ATOMIC_ACQUIRE) == NIC_CARRIER_UP);
     }
     return result;
 }

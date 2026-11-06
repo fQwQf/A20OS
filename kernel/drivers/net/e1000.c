@@ -305,8 +305,6 @@ typedef struct {
     int rx_multi_reported;
 } e1000_device_t;
 
-static e1000_device_t g_e1000;
-
 static inline uint32_t e1000_read(e1000_device_t *nic, uint32_t reg)
 {
     return readl((const volatile void *)(nic->regs + reg));
@@ -920,12 +918,16 @@ static int e1000_probe(device_t *dev)
     if (!bar || bar->end < bar->start || bar->end - bar->start + 1U < 0x6000U)
         return -1;
 
-    e1000_device_t *nic = &g_e1000;
+    uintptr_t regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!regs)
+        return -EIO;
+    e1000_device_t *nic = kmalloc(sizeof(*nic));
+    if (!nic)
+        return -ENOMEM;
     memset(nic, 0, sizeof(*nic));
     nic->msix_base = -1;
     spin_init(&nic->lock);
-    nic->regs = (uintptr_t)pci_map_bar(dev, 0);
-    if (!nic->regs) return -EIO;
+    nic->regs = regs;
 
     uint32_t ral = e1000_read(nic, E1000_RAL0);
     uint32_t rah = e1000_read(nic, E1000_RAH0);
@@ -939,8 +941,9 @@ static int e1000_probe(device_t *dev)
      * MAC[0] and RAH[15:8] is MAC[5].  RAH[31] AV is the address-valid bit and
      * reads 0 on a part with no EEPROM-supplied MAC, which is how an
      * unprogrammed device is told apart from a live one. */
+    int rc = -EINVAL;
     if (!(rah & (1U << 31)))
-        return -1;
+        goto free_nic;
 
     /* 64-bit, from what this driver itself programs rather than from a
      * datasheet reading: RDBAL/RDBAH and TDBAL/TDBAH are each a 64-bit ring
@@ -953,18 +956,18 @@ static int e1000_probe(device_t *dev)
      *
      * Declared before the rings are allocated, which is the only point at which
      * it can still change what is allocated. */
-    int mask = dma_set_mask(dev, DMA_MASK_64BIT);
-    if (mask < 0)
-        return mask;
+    rc = dma_set_mask(dev, DMA_MASK_64BIT);
+    if (rc < 0)
+        goto free_nic;
 
     /* After the MAC read, before anything is programmed: a NIC whose rings
      * cannot be allocated must fail the probe, not come up with a device
      * pointing at memory this driver does not own -- and, since the allocation
      * now has to fit the declared window, that includes a machine whose RAM
      * starts above 4 GiB. */
-    int rings = e1000_alloc_rings(nic, dev);
-    if (rings < 0)
-        return rings;
+    rc = e1000_alloc_rings(nic, dev);
+    if (rc < 0)
+        goto free_nic;
 
     /* IMC is write-1-to-clear against IMS, so writing all ones masks every
      * cause; the ICR read immediately after is the acknowledge of anything the
@@ -1053,6 +1056,10 @@ static int e1000_probe(device_t *dev)
           nic->poll_only ? " dataplane=polling" : "",
           (unsigned)E1000_RING_SIZE, (unsigned)nic->itr_us);
     return 0;
+
+free_nic:
+    kfree(nic);
+    return rc;
 }
 
 static int e1000_remove(device_t *dev)
@@ -1082,11 +1089,18 @@ static int e1000_remove(device_t *dev)
      * above are what stop it. */
     e1000_free_rings(nic);
     dev->drv_priv = NULL;
-    memset(nic, 0, sizeof(*nic));
+    kfree(nic);
     return 0;
 }
 
+static int e1000_link_up(device_t *dev)
+{
+    e1000_device_t *nic = dev ? dev->drv_priv : NULL;
+    return nic && (e1000_read(nic, E1000_STATUS) & 2U) != 0;
+}
+
 static const net_dev_ops_t e1000_ops = {
+    .link_up = e1000_link_up,
     .send = e1000_send,
     .recv = e1000_recv,
     .mac = e1000_mac,
