@@ -141,6 +141,50 @@ static void check_file_maps(volatile unsigned char *clean,
     if (clean[0] != 1) _exit(22);
 }
 
+static void file_unmap_runs(void)
+{
+    const size_t len = 4u * 1024 * 1024;
+    char name[] = "/tmp/fork-unmap-run-XXXXXX";
+    int fd = mkstemp(name), gate[2];
+    if (fd < 0 || ftruncate(fd, len) || pipe(gate)) fail("file run setup");
+    volatile unsigned char *map = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) fail("file run mmap");
+    for (size_t i = 0; i < len; i += 4096)
+        if (map[i]) fail("file run initial content");
+    if (mprotect((void *)(map + 65 * 4096), 4096, PROT_READ | PROT_WRITE))
+        fail("file run protect");
+    map[65 * 4096] = 55;
+    if (mprotect((void *)(map + 65 * 4096), 4096, PROT_READ)) fail("file run readonly");
+    pid_t child = fork();
+    if (!child) {
+        char token;
+        close(gate[1]);
+        if (read(gate[0], &token, 1) != 1) _exit(70);
+        for (size_t i = 0; i < len; i += 4096)
+            if (map[i] != (i == 65 * 4096 ? 55 : 0)) _exit(71);
+        _exit(0);
+    }
+    if (child < 0) fail("file run fork");
+    close(gate[0]);
+    if (unlink(name) || close(fd) || munmap((void *)(map + 5 * 4096), len - 10 * 4096))
+        fail("file run partial unmap");
+    unsigned char resident;
+    errno = 0;
+    if (mincore((void *)(map + 5 * 4096), 4096, &resident) != -1 || errno != ENOMEM)
+        fail("file run unmapped hole");
+    for (size_t i = 0; i < 5 * 4096; i += 4096)
+        if (map[i] || map[len - 5 * 4096 + i]) fail("file run retained edges");
+    void *poison = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (poison == MAP_FAILED) fail("file run poison");
+    memset(poison, 0xa5, len);
+    if (write(gate[1], "x", 1) != 1) fail("file run gate");
+    close(gate[1]);
+    wait_ok(child);
+    if (munmap(poison, len) || munmap((void *)map, 5 * 4096) ||
+        munmap((void *)(map + len - 5 * 4096), 5 * 4096)) fail("file run cleanup");
+    puts("FORK_EXIT_PROBE: batched partial file unmap, mixed COW, retained edges/child, poison PASS");
+}
+
 static void file_mapping_inheritance(void)
 {
     char name[] = "/tmp/fork-exit-file-XXXXXX";
@@ -503,6 +547,7 @@ int main(void)
         fail("sparse munmap");
     high_fd_inheritance();
     file_mapping_inheritance();
+    file_unmap_runs();
     file_lock_lifetime();
     small_shared_batch_lifetime();
     file_fork_proof_invalidation();

@@ -30,6 +30,7 @@
 #define VM_PFNMAP (1UL << 17)
 #define VM_SEALED (1UL << 18)
 
+static int batch_result, batch_calls;
 static int failures;
 static int checks;
 
@@ -97,6 +98,7 @@ static void reset(void)
     g_mm.has_pgdir = 1;
     g_nvma = g_nleaf = 0;
     idx_clear_calls = drop_whole_calls = cut_head_calls = cut_tail_calls = 0;
+    batch_result = batch_calls = 0;
     cut_middle_calls = account_calls = demote_calls = retire_calls = 0;
     hold_calls = unmap_calls = release_calls = page_put_calls = 0;
     harvest_calls = harvest_shared_file = 0;
@@ -298,6 +300,9 @@ int a20_munmap_cut_middle(void *mm, void *vma, uintptr_t clip_start, uintptr_t c
 int a20_munmap_is_nommu(void) { return g_is_nommu; }
 void a20_munmap_release_flat(void *mm, void *vma, uintptr_t s, uintptr_t e)
 { (void)mm; (void)vma; (void)s; (void)e; flat_release_calls++; }
+
+int a20_munmap_file_run(void *mm, uintptr_t va, uintptr_t end)
+{ (void)mm; (void)va; (void)end; batch_calls++; return batch_result; }
 
 void a20_munmap_leaf_probe(void *mm, uintptr_t va, struct a20_munmap_leaf *out)
 {
@@ -618,8 +623,23 @@ static void run_release_mixed(void)
     run_cache_puts = run_frame_puts = 0;
 }
 
+static void file_batch_decisions(void)
+{
+    reset(); add_vma(0x1000, 0x3000, VM_READ | VM_FILE); batch_result = 2;
+    check(a20_munmap_rust(&g_mm, 0x1000, 0x2000) == 0, "batch success");
+    check(batch_calls == 1 && unmap_calls == 0 && drop_whole_calls == 1,
+          "batch advances exactly its run without scalar duplicate teardown");
+    reset(); add_vma(0x1000, 0x3000, VM_READ | VM_FILE); batch_result = -12;
+    check(a20_munmap_rust(&g_mm, 0x1000, 0x2000) == -12, "batch OOM propagated");
+    check(!drop_whole_calls && !unmap_calls && !account_calls, "batch failure leaves VMA/accounting intact");
+    reset(); add_vma(0x1000, 0x3000, VM_READ | VM_FILE | VM_SHARED); batch_result = -12;
+    check(a20_munmap_rust(&g_mm, 0x1000, 0x2000) == 0 && !batch_calls,
+          "shared files keep dirty-harvesting scalar policy");
+}
+
 int main(void)
 {
+    file_batch_decisions();
     run_release_mixed();
     whole_record();
     partial_cuts();

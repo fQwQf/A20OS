@@ -40,6 +40,7 @@ static void reap(pid_t p) {
 }
 struct result {
     uint64_t fork_ns, wait_ns, setup_ns, total_ns;
+    uint64_t mmap_ns, prefault_ns, unmap_ns;
 };
 static struct result work(const char *mode, int rounds, int scale, int pattern,
                           int ready, int gate) {
@@ -130,9 +131,12 @@ static struct result work(const char *mode, int rounds, int scale, int pattern,
             map = mmap(NULL, len, prot, flags, fd, 0);
             if (map == MAP_FAILED)
                 die("fresh mmap");
+            uint64_t mapped = now();
+            r.mmap_ns += mapped - setup;
             for (size_t i = 0; i < len; i += 4096)
                 if (map[i])
                     die("fresh content");
+            r.prefault_ns += now() - mapped;
         }
         r.setup_ns += now() - setup;
         uint64_t begin = now();
@@ -170,7 +174,9 @@ static struct result work(const char *mode, int rounds, int scale, int pattern,
             setup = now();
             if (munmap((void *)map, len))
                 die("fresh unmap");
-            r.setup_ns += now() - setup;
+            uint64_t unmapped = now();
+            r.unmap_ns += unmapped - setup;
+            r.setup_ns += unmapped - setup;
             map = NULL;
         }
     }
@@ -254,6 +260,9 @@ int main(int argc, char **argv) {
             sum.wait_ns += r.wait_ns;
             sum.setup_ns += r.setup_ns;
             sum.total_ns += r.total_ns;
+            sum.mmap_ns += r.mmap_ns;
+            sum.prefault_ns += r.prefault_ns;
+            sum.unmap_ns += r.unmap_ns;
         }
         for (int w = 0; w < workers; w++)
             reap(children[w]);
@@ -265,11 +274,14 @@ int main(int argc, char **argv) {
         n *= scale;
     printf("mode=%s workers=%d n=%d scale=%d pattern=%d ns_per_op=%.3f "
            "fork_ns=%llu wait_ns=%llu setup_ns=%llu total_ns=%llu "
-           "throughput=%.3f\n",
+           "throughput=%.3f mmap_ns=%llu prefault_ns=%llu unmap_ns=%llu\n",
            argv[1], workers, n * workers, scale, pattern,
            (double)(sum.fork_ns + sum.wait_ns) / (n * workers),
            (unsigned long long)sum.fork_ns, (unsigned long long)sum.wait_ns,
            (unsigned long long)sum.setup_ns, (unsigned long long)sum.total_ns,
-           (double)n * workers * 1e9 / wall);
+           (double)n * workers * 1e9 / wall,
+           (unsigned long long)sum.mmap_ns,
+           (unsigned long long)sum.prefault_ns,
+           (unsigned long long)sum.unmap_ns);
     return 0;
 }

@@ -15,9 +15,11 @@ p=argparse.ArgumentParser(description='Fork/wait/exit matrix; identical static p
 for option in ['image','fat','linux-kernel','linux-initrd','probe']:
     p.add_argument('--'+option,required=True)
 p.add_argument('--cpus',default='4,6')
+p.add_argument('--case',action='append',help='Run only named cases (repeatable); default is the complete matrix.')
+p.add_argument('--iterations',type=int,help='Override probe iteration count for longer focused measurements (does not change stress-ng).')
 p.add_argument('--out',required=True);p.add_argument('--kernel',required=True);p.add_argument('--runs',type=int,default=3);p.add_argument('--smp',type=int,default=2);p.add_argument('--diag',action='store_true');p.add_argument('--a20-only',action='store_true');a=p.parse_args()
-if a.runs < 1 or a.smp < 1:
-    p.error('--runs and --smp must be positive')
+if a.runs < 1 or a.smp < 1 or (a.iterations is not None and a.iterations < 1):
+    p.error('--runs, --smp and --iterations must be positive')
 out=Path(a.out).resolve();out.mkdir(parents=True,exist_ok=False)
 micro=Path(a.probe).resolve()
 base=Path(a.image).resolve()
@@ -41,8 +43,17 @@ for mode in ['burst-any','burst-pid']:
 matrix.append(('fork-exec',['exec','40','1','0','1']))
 commands=[(name,['/usr/bin/fork-analysis-micro']+args) for name,args in matrix]
 commands += [('stress-fork',['stress-ng','--fork','1','--timeout','3s','--metrics-brief'])]
+if a.case:
+    unknown=set(a.case)-{name for name,_ in commands}
+    if unknown: p.error('unknown case(s): '+', '.join(sorted(unknown)))
+    commands=[item for item in commands if item[0] in a.case]
 
-manifest={'git_head':b.command(['git','rev-parse','HEAD']),'uname':b.command(['uname','-a']),'runs':a.runs,'smp':a.smp,'cpus':a.cpus,'diag':a.diag,'inputs':{str(f):b.sha(f) for f in [Path(a.kernel),base,fat,micro,lkernel,linit]},'samples':[],'boots':[]}
+
+if a.iterations is not None:
+    for _,cmd in commands:
+        if cmd[0]=='/usr/bin/fork-analysis-micro': cmd[2]=str(a.iterations)
+
+manifest={'commands':commands,'git_head':b.command(['git','rev-parse','HEAD']),'uname':b.command(['uname','-a']),'runs':a.runs,'smp':a.smp,'cpus':a.cpus,'diag':a.diag,'inputs':{str(f):b.sha(f) for f in [Path(a.kernel),base,fat,micro,lkernel,linit]},'samples':[],'boots':[]}
 def save(): (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 def ctr(t): return {m[1]:int(m[2]) for m in re.finditer(r'^([A-Za-z0-9_]+): (\d+)\s*$',t,re.M)}
 save()
@@ -86,7 +97,7 @@ for run in range(1,a.runs+1):
                 if m:
                     row.update(ns_per_op=float(m[1]),fork_ns=int(m[2]),wait_ns=int(m[3]))
                     row['n']=int(re.search(r' n=(\d+)',output)[1])
-                    for field in ['setup_ns','total_ns','throughput']:
+                    for field in ['setup_ns','total_ns','throughput','mmap_ns','prefault_ns','unmap_ns']:
                         value=re.search(field+r'=([\d.]+)',output)
                         if value: row[field]=float(value[1])
                 else: row['ops_per_s']=b.metric('fork',output,3)

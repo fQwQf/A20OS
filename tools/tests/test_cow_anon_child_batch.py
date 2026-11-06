@@ -60,7 +60,7 @@ class AnonChildBatch(unittest.TestCase):
         limit = next(line for line in header.splitlines() if line.startswith("#define A20_COW_ANON_BATCH_PAGES "))
         fixture = fixture.replace("#define A20_COW_ANON_BATCH_PAGES 16", limit)
         assert_start = header.rindex("#if __SIZEOF_POINTER__ == 8", 0, header.index("_Static_assert(sizeof(struct a20_cow_anon_batch_page)"))
-        assert_end = header.index("/* Map a bounded private fork batch", assert_start)
+        assert_end = header.index("/* Map a bounded", assert_start)
         fixture = fixture.replace("/* ANON_BATCH_ABI_ASSERTS */", header[assert_start:assert_end])
         with tempfile.TemporaryDirectory() as tmp:
             cfile, exe = Path(tmp) / "mapper.c", Path(tmp) / "mapper"
@@ -100,7 +100,7 @@ class AnonChildBatch(unittest.TestCase):
         limit = next(line for line in header.splitlines() if line.startswith("#define A20_COW_ANON_BATCH_PAGES "))
         fixture = fixture.replace("#define A20_COW_ANON_BATCH_PAGES 16", limit)
         assert_start = header.rindex("#if __SIZEOF_POINTER__ == 8", 0, header.index("_Static_assert(sizeof(struct a20_cow_anon_batch_page)"))
-        assert_end = header.index("/* Map a bounded private fork batch", assert_start)
+        assert_end = header.index("/* Map a bounded", assert_start)
         fixture = fixture.replace("/* ANON_BATCH_ABI_ASSERTS */", header[assert_start:assert_end])
         with tempfile.TemporaryDirectory() as tmp:
             cfile, exe = Path(tmp) / "negative.c", Path(tmp) / "negative"
