@@ -42,12 +42,12 @@ extern const unsigned char _binary_cluster_threads_start[], _binary_cluster_thre
 extern const unsigned char _binary_sched_stress_start[], _binary_sched_stress_end[];
 #endif
 
-#ifdef CONFIG_RAMFS_WAN
+#ifdef CONFIG_RAMFS_ROUTER
 extern const unsigned char _binary_wanctl_start[], _binary_wanctl_end[];
 #endif
 
-#ifdef CONFIG_RAMFS_NET_TESTS
 #define NET_PROGRAM(name) extern const unsigned char _binary_##name##_start[], _binary_##name##_end[]
+#ifdef CONFIG_RAMFS_NET_TESTS
 NET_PROGRAM(tcp_loopback_test);
 NET_PROGRAM(udp_loopback_test);
 NET_PROGRAM(ipv6_loopback_test);
@@ -55,11 +55,13 @@ NET_PROGRAM(net_lane_hostfwd_test);
 NET_PROGRAM(udp_hostfwd_test);
 NET_PROGRAM(bsd_scale_test);
 NET_PROGRAM(bsd_tun_router_test);
+#endif
+#if defined(CONFIG_RAMFS_ROUTER) || defined(CONFIG_RAMFS_NET_TESTS)
 NET_PROGRAM(pppoe);
 NET_PROGRAM(pd_lan);
 NET_PROGRAM(netctl);
-#undef NET_PROGRAM
 #endif
+#undef NET_PROGRAM
 
 #ifdef CONFIG_RAMFS_MEDIA
 extern const unsigned char _binary_videoplay_start[], _binary_videoplay_end[];
@@ -76,7 +78,7 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     { "/etc/a20-ramfs-shell", ramfs_shell_marker,
       sizeof(ramfs_shell_marker) - 1, 0644 },
     USER_ENTRY("/bin/init", init),
-#ifdef CONFIG_RAMFS_WAN
+#ifdef CONFIG_RAMFS_ROUTER
     USER_ENTRY("/bin/wanctl", wanctl),
 #endif
 #ifdef CONFIG_RAMFS_NET_TESTS
@@ -87,6 +89,8 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/udp_hostfwd_test", udp_hostfwd_test),
     USER_ENTRY("/bin/bsd_scale_test", bsd_scale_test),
     USER_ENTRY("/bin/bsd_tun_router_test", bsd_tun_router_test),
+#endif
+#if defined(CONFIG_RAMFS_ROUTER) || defined(CONFIG_RAMFS_NET_TESTS)
     USER_ENTRY("/bin/pppoe", pppoe),
     USER_ENTRY("/bin/pd-lan", pd_lan),
     USER_ENTRY("/bin/netctl", netctl),

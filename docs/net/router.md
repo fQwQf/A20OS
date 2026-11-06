@@ -23,6 +23,37 @@ BSD 路由器的 IPv4 和 IPv6 转发及本机 TCP/UDP 均可使用多 FIB 与�
 IPv4 和 IPv6 UDP、IPv6 原始套接字可使用 `SO_BINDTODEVICE` 限制收发网口。
 IPv4 UDP 需要一条经绑定网口的路由，指向其他出口的发送请求返回不可达。
 
+## x86_64 PC 的 UEFI 镜像
+
+`router-x86_64-pc` 使用 PC 板级配置、F-Stack 和内存根文件系统。
+镜像包含 `netctl`、`wanctl`、`pppoe` 和 `pd-lan`。用以下命令
+打包可挂载持久配置卷的版本。
+
+```sh
+PATH="$PATH:/usr/sbin" tools/a20 package router-x86_64-pc -- RAMFS_DISTRO=1
+```
+
+产物是 `build/x86_64-pc/a20os-router-uefi.img`。在使用原生 64 位
+UEFI、COM1 和受支持有线网卡的 PC 上，用串口 38400 8N1 检查启动。
+启动盘提供 EFI 加载器和内核。将静态 BusyBox、odhcp6c 和 WAN
+配置放入内核可识别的可写 ext4 分区。GPT 分区类型使用 Linux
+filesystem，分区名使用 `A20OS distro`。内核将该分区挂载到
+`/extra`。当前 AHCI 驱动在每个控制器上选择首个就绪磁盘。
+
+先按串口日志的 MAC 地址确认 LAN 和 WAN 接口，再配置地址和 WAN
+服务。以下示例使用 `en2` 作为 LAN，配置文件使用 `en3` 作为 WAN。
+
+```sh
+/bin/netctl set-ipv4 en2 192.168.10.1 255.255.255.0
+/bin/wanctl /extra/wan.conf
+```
+
+双物理网口验收需要在测试机上记录两张卡的 PCI ID 和 MAC、驱动绑定与
+中断变化，再用隔离的 LAN 和 WAN 对端验证双向转发、持续负载及拔插
+WAN 网线后的恢复。路由器侧可用 `/proc/interrupts`、`/proc/net/dev`、
+`/proc/a20/netmem` 和 `/proc/a20/netfilter` 采样。
+[PC 串口和启动条件](../platforms/x86_64-pc.md)
+
 ## WAN IPv4 DHCP
 
 原版 BusyBox `udhcpc` 可在 F-Stack 路由器的第二张网卡上获取 IPv4 租约。

@@ -220,11 +220,11 @@ $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BUILD_STAMP)
 # BOOTX64.EFI rather than GRUB, because GRUB 2.12 drops the multiboot ACPI tags
 # and the kernel then never learns the RSDP (see instances/vbox-x86_64.toml).
 ifeq ($(RAMFS_USER),1)
-$(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) tools/mk_uefi_fat_image.sh
-	tools/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ - BOOTX64.EFI
+$(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) tools/boot/mk_uefi_fat_image.sh
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ - BOOTX64.EFI
 else
-$(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified $(FAT32_IMG) tools/mk_uefi_fat_image.sh
-	tools/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI
+$(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified $(FAT32_IMG) tools/boot/mk_uefi_fat_image.sh
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI
 endif
 
 .PHONY: x86_64-uefi-loader
@@ -284,11 +284,11 @@ $(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(FAT32_IMG) $(USER
 		--arch "$(ARCH)" --board "$(BOARD)" --abi "$(ABI)" \
 		--bringup "$(BRINGUP)" --nommu "$(NOMMU)" --opt="$(OPT)"
 
-$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/mk_uefi_fat_image.sh
-	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
+$(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/boot/mk_uefi_fat_image.sh
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
 
-$(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/mk_uefi_fat_image.sh
-	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
+$(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/boot/mk_uefi_fat_image.sh
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
 
 # ---- kallsyms: two-pass link ----
 # Pass 1 links the kernel without the symbol table; tools/gen_kallsyms.py

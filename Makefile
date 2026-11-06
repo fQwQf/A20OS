@@ -3400,15 +3400,17 @@ endif
 RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
                       echo uname mkdir rm cp sync poweroff reboot
 ifeq ($(RAMFS_USER):$(NET_STACK):$(NET_ROLE),1:bsd:router)
-RAMFS_USER_PROGRAMS += wanctl
-CFLAGS += -DCONFIG_RAMFS_WAN
+RAMFS_USER_PROGRAMS += wanctl netctl pppoe pd-lan
+CFLAGS += -DCONFIG_RAMFS_ROUTER
+else ifeq ($(RAMFS_NET_TESTS),1)
+RAMFS_USER_PROGRAMS += netctl pppoe pd-lan
 endif
 ifeq ($(RAMFS_NET_TESTS),1)
 ifneq ($(RAMFS_USER),1)
 $(error RAMFS_NET_TESTS=1 requires RAMFS_USER=1)
 endif
 RAMFS_USER_PROGRAMS += tcp_loopback_test udp_loopback_test ipv6_loopback_test \
-                      net_lane_hostfwd_test udp_hostfwd_test bsd_scale_test bsd_tun_router_test netctl pppoe pd-lan
+                      net_lane_hostfwd_test udp_hostfwd_test bsd_scale_test bsd_tun_router_test
 CFLAGS += -DCONFIG_RAMFS_NET_TESTS
 endif
 ifeq ($(RAMFS_FPU_TESTS),1)
