@@ -17,7 +17,7 @@ F-Stack，并完成软路由功能与运行验证；编译通过不代替网络�
 | PPPoE 宽带接入 | discovery/session、认证、MTU、IPv6CP、IPCP DNS 与断线重连 | Linux PAP、CHAP 双栈和 IPv4 回归通过 |
 | IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 委派与续租、Linux LAN 自动地址与转发、租约撤销和重编号通过 |
 | 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | IPv4 和 IPv6 转发、本机 TCP/UDP 双 WAN 均通过 |
-| WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | IPv4 以太网 WAN 的 DHCP、静态配置及开机恢复通过，IPv6 PD 跨重启租约状态待完成 |
+| WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | IPv4 DHCP、静态配置和开机恢复通过。IPv6 PD 的两条 LAN 均通过跨重启前缀撤销和重编号验证 |
 | 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | 待完成 |
 | 真机验证 | 具体硬件 PCI ID、双网口收发、中断/链路恢复和长时负载 | 待硬件验收 |
 
@@ -268,8 +268,14 @@ Linux LAN 从子网编号 `0x2a` 对应的 /64 自动生成地址，并使用通
 Kea 改用另一个 /56 恢复后，原有发布进程重新获得委派，Linux 使用新
 地址恢复通信。正常退出时，发布进程撤销新通告并移除它管理的地址。
 这轮同时验证了 UDP 546 复拨需要的 Linux `SO_REUSEADDR` 和
-`SOCK_CLOEXEC` 行为。多 LAN 部署及进程或整机重启后的旧前缀处理
-仍需运行验证。
+`SOCK_CLOEXEC` 行为。
+
+`pd-lan-persistent-final` 在同一 /56 委派下为两条 LAN 分配不同的
+/64 并分别抓包。停止 Kea 后强杀并重启管理进程，两条 LAN 收到旧前缀
+撤销，路由器清理自己管理的旧地址。保持 Linux 对端运行，终止路由器
+虚拟机并使用原磁盘重新启动，新的通告在 Kea 回应前继续撤销各自的旧
+前缀。Kea 更换委派后，两条 LAN 分别通告新 /64，独立的 Linux LAN
+客户端通过 SLAAC 恢复与 WAN 的通信。
 
 
 ### 双栈 PPPoE 与 IPCP DNS
