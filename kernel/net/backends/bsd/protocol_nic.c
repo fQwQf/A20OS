@@ -136,6 +136,16 @@ static struct mbuf *filter_ipv4(struct mbuf *m, int port_id, bool output)
         m_freem(m);
         return NULL;
     }
+    /* Locally generated ICMP errors reach PFIL_OUT before ip_output
+     * fills the IPv4 header checksum. Conntrack validates it for RELATED. */
+    if (output && m->m_len >= sizeof(struct ip)) {
+        struct ip *ip = mtod(m, struct ip *);
+        unsigned header = ip->ip_hl << 2;
+        if (ip->ip_p == IPPROTO_ICMP && header >= sizeof(*ip) && header <= (unsigned)length) {
+            ip->ip_sum = 0;
+            ip->ip_sum = in_cksum(m, header);
+        }
+    }
     size_t frame_len = ETHER_HDR_LEN + (size_t)length;
     uint8_t *frame = small_frame;
     if (frame_len > sizeof(small_frame))
