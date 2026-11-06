@@ -24,7 +24,7 @@ class EfiEspImage(unittest.TestCase):
                 stream.truncate(32 * 1048576)
             subprocess.run(['/usr/sbin/mkfs.ext4', '-q', '-F', str(world)], check=True)
             image = work/'media.img'
-            subprocess.run(['sh', str(ROOT/'tools/mk_uefi_fat_image.sh'), str(loader),
+            subprocess.run(['sh', str(ROOT/'tools/boot/mk_uefi_fat_image.sh'), str(loader),
                             str(image), '-', 'BOOTX64.EFI', str(world)], check=True,
                            capture_output=True, env={**os.environ,
                                'PATH':os.environ['PATH']+':/usr/sbin', 'TMPDIR':str(work)})
@@ -57,7 +57,7 @@ class EfiEspImage(unittest.TestCase):
             loader = work/'loader'; loader.write_bytes(b'loader')
             world = work/'world'; world.write_bytes(b'not ext4')
             image = work/'image'; image.write_bytes(b'keep existing image')
-            run = subprocess.run(['sh', str(ROOT/'tools/mk_uefi_fat_image.sh'), str(loader),
+            run = subprocess.run(['sh', str(ROOT/'tools/boot/mk_uefi_fat_image.sh'), str(loader),
                                   str(image), '-', 'BOOTX64.EFI', str(world)], capture_output=True)
             self.assertNotEqual(run.returncode, 0)
             self.assertEqual(image.read_bytes(), b'keep existing image')
@@ -73,7 +73,7 @@ class EfiEspImage(unittest.TestCase):
             parted.write_text('#!/bin/sh\nexit 0\n');parted.chmod(0o755)
             loader=work/'loader.efi';loader.write_bytes(b'A20-ESP-loader-fixture')
             image=work/'media.img'
-            subprocess.run(['sh',str(ROOT/'tools/mk_uefi_fat_image.sh'),str(loader),
+            subprocess.run(['sh',str(ROOT/'tools/boot/mk_uefi_fat_image.sh'),str(loader),
                             str(image),'-','BOOTX64.EFI'],check=True,capture_output=True,
                            env={**os.environ,'PATH':str(commands)+os.pathsep+os.environ['PATH'],
                                 'TMPDIR':str(work)})

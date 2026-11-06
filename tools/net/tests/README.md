@@ -35,3 +35,10 @@ while the two clients send probes, checks DHCP and fresh TCP/UDP traffic after
 link recovery, and checks idle conntrack reclamation. The manifest records
 samples as the run progresses. The QEMU links use loopback UDP and require no
 host network configuration.
+
+To exercise the physical PC image under OVMF, first package it with
+`tools/a20 package router-x86_64-pc -- RAMFS_DISTRO=1`. Replace
+`--kernel` in the command with `--router-image <a20os-router-uefi.img>`
+and add `--ovmf-code <OVMF_CODE.fd> --ovmf-vars <OVMF_VARS.fd>`.
+This mode verifies the production router tools and starts WAN configuration
+from the serial console.

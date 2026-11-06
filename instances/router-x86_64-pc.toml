@@ -1,0 +1,29 @@
+# Native UEFI soft-router image for a PC with supported wired NICs and COM1.
+name = "router-x86_64-pc"
+description = "x86_64 PC soft router with F-Stack and a RAM shell"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+ramfs_user = true
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[package]
+kind = "uefi-disk"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 38400
+boot_timeout = "180s"
+console_check = ["[RAM] usable", "[NET] BSD attached", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/x86_64-pc/a20os-router-uefi.img"]
+media_device = "/dev/sdX"
+log = ".kernel-build/console/router-x86_64-pc.log"
+
+[net]
+stack = "bsd"
+role = "router"

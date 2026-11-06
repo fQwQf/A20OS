@@ -141,11 +141,19 @@ def exercise(args, guests, result, checkpoint):
           '/net-microbench server tcp 39021 >/tmp/tcp.log 2>&1 & '
           '/net-microbench server udp 39022 >/tmp/udp.log 2>&1 & true)')
     router.until('[INIT] entering scheduler...')
+    if args.router_image:
+        router.until('# ', timeout=30)
+        shell(router, 'test -x /bin/netctl && test -x /bin/wanctl && test -x /bin/pppoe && '
+              'test -x /bin/pd-lan && test ! -e /bin/bsd_scale_test', (wan, *clients))
+        result['passed'].append('uefi_router_image_contains_production_tools_without_net_diagnostics')
+        shell(router, 'test -f /extra/wan.conf && netctl set-ipv4 en2 192.168.10.1 255.255.255.0',
+              (wan, *clients))
+        router.send('/bin/wanctl /extra/wan.conf &')
     router.until('WANCTL: en3 configured 10.20.0.10/24', timeout=30)
     shell(router, 'netctl set-ipv4 en4 192.168.11.1 255.255.255.0 && '
           f"echo 'natadd out proto=tcp dst={WAN} action=masquerade' >/proc/a20/netfilter && "
           f"echo 'natadd out proto=udp dst={WAN} action=masquerade' >/proc/a20/netfilter && "
-          f"echo 'natadd out proto=icmp action=masquerade' >/proc/a20/netfilter",
+          "echo 'natadd out proto=icmp action=masquerade' >/proc/a20/netfilter",
           (wan, *clients))
     for client, network in zip(clients, NETWORKS):
         out = shell(client, f'ip addr add {network}.2/24 dev eth0 && '
@@ -208,8 +216,13 @@ def exercise(args, guests, result, checkpoint):
     time.sleep(2)
     carrier(result['qmp_port'], False)
     router.until('WANCTL: en3 carrier down', timeout=8, drain_peer=(wan, *clients))
-    route = shell(router, '/extra/busybox ip -4 route show', (wan, *clients))
-    assert b'default via' not in route, route
+    deadline = time.monotonic() + 5
+    while True:
+        route = shell(router, '/extra/busybox ip -4 route show', (wan, *clients))
+        if b'default via' not in route:
+            break
+        assert time.monotonic() < deadline, route
+        time.sleep(0.2)
     time.sleep(5)
     restored = time.monotonic()
     carrier(result['qmp_port'], True)
@@ -243,12 +256,21 @@ def exercise(args, guests, result, checkpoint):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('kernel', 'linux', 'peer-initrd', 'busybox', 'out'):
+    boot = parser.add_mutually_exclusive_group(required=True)
+    boot.add_argument('--kernel', type=Path, help='direct QEMU kernel boot')
+    boot.add_argument('--router-image', type=Path, help='native UEFI PC router image')
+    parser.add_argument('--ovmf-code', type=Path, help='OVMF firmware for --router-image')
+    parser.add_argument('--ovmf-vars', type=Path, help='OVMF variable store template for --router-image')
+    for name in ('linux', 'peer-initrd', 'busybox', 'out'):
         parser.add_argument('--'+name, type=Path, required=True)
     parser.add_argument('--nic-model', choices=('virtio-net-pci', 'e1000e'), default='virtio-net-pci')
     parser.add_argument('--duration', type=int, default=1800, help='seconds of steady-state concurrent traffic')
     parser.add_argument('--interval', type=int, default=30, help='seconds between router memory samples')
     args = parser.parse_args()
+    if args.router_image and not (args.ovmf_code and args.ovmf_vars):
+        parser.error('--router-image requires both --ovmf-code and --ovmf-vars')
+    if not args.router_image and (args.ovmf_code or args.ovmf_vars):
+        parser.error('OVMF inputs require --router-image')
     if not (2 <= args.interval and args.duration >= max(12, 3*args.interval)):
         parser.error('duration must be >=12s and allow at least three samples, with interval >=2s')
     out = args.out.resolve()
@@ -258,14 +280,27 @@ def main():
     ports = backend.reserve_ports(socket.SOCK_DGRAM, 6)
     qmp, = backend.reserve_ports(socket.SOCK_STREAM, 1)
     common = ['qemu-system-x86_64', '-machine', 'q35', '-accel', 'kvm', '-m', '768',
-              '-smp', '2', '-nographic', '-monitor', 'none', '-no-reboot']
-    router = [*common, '-kernel', str(args.kernel.resolve()),
-              '-append', 'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0 '
-                         'a20.wan_config=/extra/wan.conf',
-              '-drive', f'file={image},if=none,format=raw,id=payload',
-              '-device', 'virtio-blk-pci,drive=payload',
-              '-qmp', f'tcp:127.0.0.1:{qmp},server=on,wait=off']
-    linux = [*common, '-cpu', 'host', '-kernel', str(args.linux.resolve()), '-initrd', str(initrd),
+              '-nographic', '-monitor', 'none', '-no-reboot']
+    router = [*common, '-smp', '1' if args.router_image else '2']
+    boot_inputs = [args.kernel]
+    if args.router_image:
+        variables = out/'OVMF_VARS.fd'
+        shutil.copyfile(args.ovmf_vars, variables)
+        router += ['-drive', f'if=pflash,unit=0,format=raw,readonly=on,file={args.ovmf_code.resolve()}',
+                   '-drive', f'if=pflash,unit=1,format=raw,file={variables}',
+                   '-drive', f'if=none,id=boot,format=raw,file={args.router_image.resolve()},snapshot=on',
+                   '-device', 'ide-hd,bus=ide.1,drive=boot,bootindex=1']
+        boot_inputs = [args.router_image, args.ovmf_code, args.ovmf_vars]
+    else:
+        router += ['-kernel', str(args.kernel.resolve()),
+                   '-append', 'a20.ip=192.168.10.1 a20.netmask=255.255.255.0 a20.dhcp=0 '
+                              'a20.wan_config=/extra/wan.conf']
+    # The PC AHCI driver exposes the first ready disk on the controller.
+    payload_device = 'ide-hd,bus=ide.0' if args.router_image else 'virtio-blk-pci'
+    router += ['-drive', f'file={image},if=none,format=raw,id=payload',
+               '-device', f'{payload_device},drive=payload',
+               '-qmp', f'tcp:127.0.0.1:{qmp},server=on,wait=off']
+    linux = [*common, '-smp', '2', '-cpu', 'host', '-kernel', str(args.linux.resolve()), '-initrd', str(initrd),
              '-append', 'console=ttyS0 quiet net.ifnames=0 a20_lan_peer=1']
     def link(local, remote, number, model, peer):
         mac = f'52:54:00:0{number}:00:0{peer}'
@@ -279,7 +314,7 @@ def main():
     result = dict(status='running', passed=[], qmp_port=qmp, duration_seconds=args.duration,
                   interval_seconds=args.interval, nic_model=args.nic_model, argv=nodes,
                   sha256={str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                          for path in (args.kernel, args.linux, initrd, args.busybox)})
+                          for path in (*boot_inputs, args.linux, initrd, args.busybox)})
     manifest = out/'manifest.json'
     def checkpoint():
         temporary = manifest.with_suffix('.tmp')

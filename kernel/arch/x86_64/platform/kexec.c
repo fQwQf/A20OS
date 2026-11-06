@@ -58,6 +58,7 @@ void x86_64_kexec_ipi(void)
         __asm__ __volatile__("cli; hlt" ::: "memory");
 }
 
+#if defined(CONFIG_BOARD_QEMU_VIRT_X86_64) && !defined(CONFIG_NOMMU)
 static int stop_other_cpus(void)
 {
     uint32_t online = smp_online_cpu_mask();
@@ -79,6 +80,8 @@ static int stop_other_cpus(void)
     return 0;
 }
 
+#endif
+
 static void resume_other_cpus(void)
 {
     uint32_t stopped = __atomic_load_n(&g_stopped_mask, __ATOMIC_ACQUIRE);
@@ -92,6 +95,7 @@ static void resume_other_cpus(void)
     }
 }
 
+#if defined(CONFIG_BOARD_QEMU_VIRT_X86_64) && !defined(CONFIG_NOMMU)
 static int destination_identity_ok(const kexec_handoff_t *control)
 {
     for (uint32_t i = 0; i < control->nr; i++) {
@@ -152,6 +156,8 @@ static int snapshot_boot_memory(void)
     g_kexec_mbinfo_pa = (uint32_t)copy_pa;
     return 0;
 }
+
+#endif
 
 void machine_kexec_cancel(void)
 {
