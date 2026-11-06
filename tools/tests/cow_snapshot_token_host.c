@@ -153,6 +153,8 @@ int main(void) {
         a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
         assert((tables[0][0]&PTE_COW)&&!(tables[0][0]&PTE_W));
         assert(tables[1][0]==0&&changes==1&&changed_size==vm_pt_level_size(level)&&statuses==1);
+        a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
+        assert(changes==1&&statuses==2);
         a20_cow_share_unlock(&snap);
         assert(locked==-1&&locks==1&&unlocks==1&&leaf_walks==1&&node_walks==1);
         a20_cow_release_ref(&snap);
@@ -263,6 +265,24 @@ int main(void) {
         tables[0][i]=0x9000|PTE_V|PTE_LEAF|PTE_COW;
     }
     pte_t clean=tables[0][0];
+    assert(cow_file_range_refaultable(&vma,tables[0],0,16));
+    for(int bad=0;bad<16;bad++) {
+        cache_owners[bad]=NULL;
+        assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
+        assert(locked==-1);
+        cache_owners[bad]=&cache;
+        tables[0][bad]|=PTE_W;
+        assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
+        tables[0][bad]=clean;
+    }
+    metadata.safe[1]=MM_SAFE_MASK;
+    assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
+    assert(cow_file_range_refaultable(&vma,tables[0],0,8));
+    metadata.safe[1]=0;
+    tables[0][15]=0;
+    assert(cow_file_range_refaultable(&vma,tables[0],0,16));
+    tables[0][15]=clean;
+
     assert(cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));
     vma.end=1024*1024-PAGE_SIZE;
     assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));vma.end=1024*1024;

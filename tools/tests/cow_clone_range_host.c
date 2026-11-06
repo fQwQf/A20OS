@@ -34,6 +34,11 @@ static _Alignas(8) pte_t nodes[32][4];
 static unsigned used;
 static int swap_result;
 static size_t hint_calls, hint_validations;
+static int proof_enabled, proof_first, proof_count;
+static int cow_file_range_refaultable(const mm_seg_t *v, pte_t *node, int first, int count) {
+    assert(v && node && first >= 0 && count > 0 && first + count <= 4);
+    proof_first=first; proof_count=count; return proof_enabled;
+}
 static size_t vm_pt_level_size(int level) { return PAGE_SIZE << (2*level); }
 static int arch_pt_level_entries(int level) { (void)level; return 4; }
 static int arch_pt_vpn(uintptr_t va,int level) { return (va/(PAGE_SIZE << (2*level)))&3; }
@@ -185,6 +190,14 @@ int main(void) {
             assert(ar==br);same(&a,&b);
         }
     }
+    pte_t leaf[4]={PTE_V|LEAF,PTE_V|LEAF,PTE_V|LEAF,PTE_V|LEAF};
+    mm_seg_t vma={9*PAGE_SIZE,11*PAGE_SIZE};
+    memset(&a,0,sizeof(a));proof_enabled=1;
+    assert(mm_fork_clone_level(&a,&p,leaf,0,8*PAGE_SIZE,9*PAGE_SIZE,11*PAGE_SIZE,0,0,&vma)==0);
+    assert(!a.count && proof_first==1 && proof_count==2);
+    vma=(mm_seg_t){0,FULL};
+    assert(mm_fork_clone_level(&a,&p,leaf,0,8*PAGE_SIZE,0,FULL,0,0,&vma)==0);
+    assert(!a.count && proof_first==0 && proof_count==4);
     puts("fork range real C walkers PASS: 200000 randomized ranges, policy/dst/huge/swap/errors");
     return 0;
 }

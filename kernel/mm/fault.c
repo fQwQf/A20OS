@@ -315,7 +315,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
  */
 #ifndef CONFIG_NOMMU
 static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
-                            const mm_seg_t *vma)
+                            const mm_seg_t *vma, int copied)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     /* A COW break can also run on a huge leaf (the rc>1 branch copies the
@@ -344,8 +344,20 @@ static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
         else
             cls = MM_ST_ANON_MAPPED;
     }
-    (void)mm_pt_sync_status(tab, level, idx, cls);
+    if (copied && vma &&
+        (vma->vm_flags & (VM_FILE | VM_SHARED)) == VM_FILE) {
+        /* A private copy is now frame-owned anonymous memory. The retired
+         * cache pin belongs to the caller's post-shootdown release, not this
+         * new leaf. Preserve this distinction through later forks. */
+        pte_t pte = tab[idx];
+        mm_pt_note_present(tab, level, idx,
+            MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED) | mm_pt_prot_bits(pte) |
+            ((pte & PTE_COW) ? MM_ST_COW_BIT : 0));
+    } else {
+        (void)mm_pt_sync_status(tab, level, idx, cls);
+    }
 #else
+    (void)copied;
     /* arm32's short-descriptor backend has no per-PTE status sidecar, so
      * there is no status to bring in step: the PTE-level COW bookkeeping is
      * the whole of the break there. */
@@ -535,7 +547,7 @@ void a20_cowf_install(void *mm_ptr, uintptr_t stval, uint32_t new_pfn,
         return;
     pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, kind);
     *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags, size);
-    cow_sync_status(mm, base, vma_ptr);
+    cow_sync_status(mm, base, vma_ptr, 1);
     a20_cowf_diag_after(diag, t_ptr, mm, stval, pte, tag);
     arch_tlb_flush_page_local(stval);
 }
@@ -553,7 +565,7 @@ void a20_cowf_reuse_install(void *mm_ptr, uintptr_t stval, uintptr_t old_pa,
     if (pte) {
         pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, 0);
         *pte = cow_replacement_leaf((paddr_t)old_pa, flags, size);
-        cow_sync_status(mm, base, vma_ptr);
+        cow_sync_status(mm, base, vma_ptr, 0);
         a20_cowf_diag_after(diag, t_ptr, mm, stval, pte, 2);
     }
     spin_unlock_irqrestore(&pfa.lock, pfa_flags);
@@ -571,7 +583,7 @@ void a20_cowf_write_d(void *mm_ptr, uintptr_t stval, uintptr_t snapshot_pte,
     pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, 1);
     *pte = cow_replacement_leaf(arch_pte_addr((pte_t)snapshot_pte), flags,
                                 size);
-    cow_sync_status(mm, base, vma_ptr);
+    cow_sync_status(mm, base, vma_ptr, 0);
     arch_tlb_flush_page_local(stval);
 }
 #endif /* !CONFIG_NOMMU */

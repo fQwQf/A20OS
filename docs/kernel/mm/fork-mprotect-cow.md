@@ -71,6 +71,12 @@ fork 可以省略可从后备恢复的子 PTE。目前仅对至少 1 MiB、非�
 
 文件映射的冷页填充窗口保持 16 页。当同一 VMA 内的前一页已经映射，且映射为非可执行、只读私有映射时，窗口可扩展到 64 页；第 17 页起只查询已驻留且 uptodate 的缓存页，遇到缺页即停止，不扩大磁盘读取或缓存分配窗口。孤立访问仍用 16 页，避免用顺序读取收益换取稀疏读取退化。窗口边界在 I/O 后依据当前 VMA 再验证。sealed VMA 不使用推测映射，批量安装也尊重叶节点安全位。
 
+文件 fork 的叶节点检查可以先作只读范围证明：在同一个源节点锁内，验证当前 VMA 范围中的所有非零叶都只读、具有文件私有状态、没有安全标记，且 cache owner 的 PFN 与 PTE 一致。全部满足时直接略过该范围，不再创建空的 Rust 克隆事务或检查子页表。任一页面不满足则回退到常规克隆，保留修改后又改为只读的私有页。该证明每次 fork 重新计算，仍是线性扫描，没有依赖可能因 COW、mprotect 或 remap 失效的持久摘要。
+
+普通克隆事务最多处理 64 页；C 与 Rust 的容量必须一致，且批量不能跨叶页表或 VMA 边界。失败时未转移的帧引用和缓存页 pin 由事务守卫回收。父 PTE 已等于目标 COW 编码时只同步软件状态，不重复写 PTE 或记录 TLB 失效；实际权限变更仍遵守原有 shootdown 时序。
+
+私有文件页发生实际 COW 复制后，新页面是进程所有的匿名帧。状态更新必须清除旧 cache owner，并记录 `MM_ST_ANON_MAPPED`；旧缓存页引用仍由调用者在 TLB 同步后释放。后续 fork、COW 和最终拆除据此使用帧所有权路径，不再因 VMA 仍属文件映射而反复查询 page cache。仅做权限更新或共享文件写入不能据此改变所有权类别。
+
 这项策略将页表复制成本移到子进程后续访问。fork 后退出或 exec 的负载通常受益；子进程立即读取全部映射会产生更多缺页，可能更慢。评估时必须同时测量两种访问模式，不能仅凭 fork 返回时间判断整体收益。
 
 宿主检查覆盖真实 C/Rust 适配器的分配失败、并发首次触页、计费与生命周期；guest 检查覆盖内容、权限、别名、驻留、COW、帧复用和回收事件。可执行：
@@ -82,6 +88,8 @@ python3 tools/tests/test_shared_anon_host.py
 python3 tools/tests/test_vmo_page_host.py
 python3 tools/tests/test_anon_final_destroy_host.py
 python3 tools/tests/test_cow_snapshot_token.py
+python3 tools/tests/test_cow_private_copy_status.py
+python3 tools/tests/test_cow_anon_child_batch.py
 python3 tools/tests/test_reap_ready_host.py
 bash tools/host-tests/test-mmap-policy-host.sh
 bash tools/host-tests/test-mseal-policy-host.sh

@@ -113,7 +113,7 @@ static void fill(struct a20_cow_anon_batch_page *pages, size_t n, uintptr_t flag
         .class=MM_ST_ANON_MAPPED, .flags=flags, .pcp=NULL, .kind=1 };
 }
 int main(void) {
-    struct a20_cow_anon_batch_page pages[16];
+    struct a20_cow_anon_batch_page pages[A20_COW_ANON_BATCH_PAGES];
     const vaddr_t start=0x20000;
     reset(); fill(pages,16,PTE_U|PTE_X);
     reset();
@@ -181,7 +181,7 @@ int main(void) {
 
     reset(); fill(pages,16,PTE_U);
     assert(pt_map_anon_batch(child_slots,start,pages,0,0)<0);
-    assert(pt_map_anon_batch(child_slots,start,pages,17,0)<0);
+    assert(pt_map_anon_batch(child_slots,start,pages,A20_COW_ANON_BATCH_PAGES+1,0)<0);
     assert(pt_map_anon_batch(child_slots,start+1,pages,16,0)<0);
     assert(pt_map_anon_batch(child_slots,USER_VA_LIMIT-PAGE_SIZE,pages,16,0)<0);
     assert(pt_map_anon_batch(child_slots,0x1ff000,pages,16,0)<0); /* crosses L0 */
@@ -205,6 +205,9 @@ int main(void) {
     reset(); fill(pages,16,PTE_U); bad_meta=1;
     assert(pt_map_anon_batch(child_slots,start,pages,16,0)<0);
     assert(walk_calls==1 && installs==0 && status_calls==0 && frame_puts==0);
+    reset(); fill(pages,A20_COW_ANON_BATCH_PAGES,PTE_U);
+    assert(pt_map_anon_batch(child_slots,start,pages,A20_COW_ANON_BATCH_PAGES,0)==0);
+    assert(installs==A20_COW_ANON_BATCH_PAGES && status_calls==A20_COW_ANON_BATCH_PAGES);
     puts("ANON_CHILD_BATCH_C_MAPPER: actual extracted functions, whole-run preflight and install PASS");
     return 0;
 }

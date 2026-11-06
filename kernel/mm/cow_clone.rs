@@ -37,7 +37,7 @@ const VM_WIPEONFORK: u64 = 1 << 10;
 const EEXIST: i32 = -17;
 const EAGAIN: i32 = -11;
 const ENOMEM: i32 = -12;
-const ANON_BATCH_PAGES: usize = 16;
+const ANON_BATCH_PAGES: usize = 64;
 const PAGE_SIZE: usize = 4096;
 
 const PFN_NONE: u32 = u32::MAX;
