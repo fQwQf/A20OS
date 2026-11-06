@@ -42,11 +42,11 @@ lease_file /tmp/soak.leases
 CLIENT = '''#!/bin/sh
 set -eu
 case "$1" in
-    tcp) size=32768; port=39021 ;;
-    udp) size=512; port=39022 ;;
+    tcp) mode=client; size=32768; port=39021 ;;
+    udp) mode=probe; size=512; port=39022 ;;
     *) exit 2 ;;
 esac
-exec /net-microbench client "$1" "$port" 10.20.0.2 "$size" "$2"
+exec /net-microbench "$mode" "$1" "$port" 10.20.0.2 "$size" "$2"
 '''
 
 
@@ -77,20 +77,26 @@ def shell(guest, line, peers=(), timeout=25):
 
 
 def sample(router, peers, start):
-    out = shell(router, 'cat /proc/a20/netmem /proc/a20/netfilter /proc/meminfo /proc/net/dev', peers)
+    marker = f'A20_SOAK_SAMPLE_{time.monotonic_ns()}'
+    router.send(f'echo {marker}_BEGIN; '
+                f'cat /proc/a20/netmem /proc/a20/netfilter /proc/meminfo /proc/net/dev && echo {marker}_END')
+    router.until(marker + '_BEGIN', timeout=30, whole_line=True, drain_peer=peers)
+    out = router.until(marker + '_END', timeout=30, whole_line=True, drain_peer=peers)
     backing = re.search(rb'(?m)^BSD backing: ([^\r\n]+)', out)
     assert backing, out
     memory = {key.decode(): int(value) for key, value in
               re.findall(rb'(MemAvailable|MemFree|Slab):\s+(\d+) kB', out)}
     track = {key.decode(): int(value) for key, value in
              re.findall(rb'(?m)^(ct_\w+): (\d+)\r?$', out)}
+    filtered = {key.decode(): int(value) for key, value in
+                re.findall(rb'(?m)^((?:in|out)_(?:dropped|packets)): (\d+)\r?$', out)}
     devices = {}
     for name, row in re.findall(rb'(?m)^(en\d+): (rx=[^\r\n]+)', out):
         devices[name.decode()] = {key.decode(): int(value) for key, value in
                                   re.findall(rb'(\w+)=(\d+)', row)}
-    assert 'MemAvailable' in memory and 'ct_packets' in track and len(devices) == 3, out
+    assert 'MemAvailable' in memory and 'ct_packets' in track and len(filtered) == 4 and len(devices) == 3, out
     return dict(seconds=round(time.monotonic()-start, 3), memory_kib=memory, conntrack=track,
-                devices=devices, bsd_bytes={key.decode(): int(value) for key, value in
+                devices=devices, netfilter=filtered, bsd_bytes={key.decode(): int(value) for key, value in
                                             re.findall(rb'(\w+)=(\d+)', backing[1])})
 
 
@@ -126,6 +132,9 @@ def await_result(client, path, peers):
                     for line in re.findall(rb'(?m)^RESULT ([^\r\n]+)', out)]
             assert {row['protocol'] for row in rows} == {'tcp', 'udp'}, out
             assert all(row['verified'] == '1' and int(row['count']) > 10 for row in rows), rows
+            udp = next(row for row in rows if row['protocol'] == 'udp')
+            sent, lost = int(udp['sent']), int(udp['lost'])
+            assert sent == int(udp['count']) + lost and lost <= sent * 0.01, udp
             return rows
         time.sleep(0.4)
     raise TimeoutError(path)
@@ -173,9 +182,18 @@ def exercise(args, guests, result, checkpoint):
         shell(client, f'busybox ping -i 1 -c {args.duration} -W 3 {PROBE} '
               '>/tmp/steady.ping 2>&1 </dev/null & true', (router, wan))
     deadline = time.monotonic() + args.duration
+    missed = result['missed_sample_seconds'] = []
+    consecutive_misses = 0
     while True:
         time.sleep(max(0, min(args.interval, deadline-time.monotonic())))
-        samples.append(sample(router, (wan, *clients), start))
+        try:
+            samples.append(sample(router, (wan, *clients), start))
+            consecutive_misses = 0
+        except TimeoutError:
+            consecutive_misses += 1
+            missed.append(round(time.monotonic() - start, 3))
+            if consecutive_misses == 3:
+                raise
         checkpoint()
         if time.monotonic() >= deadline:
             break

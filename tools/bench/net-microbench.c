@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <poll.h>
 #include <netinet/tcp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -58,37 +59,103 @@ static void server(int udp,int port,int ready) {
         for(;;) { ssize_t n=recv(c,b,sizeof(b),0);if(n<0 && errno==EINTR)continue;if(n<0)die("server recv");if(!n)_exit(0);exact(c,b,n,1); }
     }
 }
+/* Late echoes from earlier attempts are excluded from latency and loss. */
+static int udp_probe_reply(int fd, void *buffer, size_t size, uint64_t sequence,
+                           double deadline)
+{
+    for (;;) {
+        double remaining = deadline - now();
+        if (remaining <= 0)
+            return 0;
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int ready = poll(&pfd, 1, (int)(remaining * 1000) + 1);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready < 0)
+            die("udp poll");
+        if (ready == 0)
+            return 0;
+        ssize_t bytes = recv(fd, buffer, size + 1, MSG_DONTWAIT);
+        if (bytes < 0 && (errno == EAGAIN || errno == EINTR))
+            continue;
+        if (bytes < 0)
+            die("udp recv");
+        uint64_t reply;
+        if ((size_t)bytes != size) {
+            fprintf(stderr, "unexpected UDP echo size\n");
+            exit(2);
+        }
+        memcpy(&reply, buffer, sizeof(reply));
+        if (reply >= sequence)
+            return 1;
+    }
+}
+
 static void client(int udp,const char *ip,int port,size_t size,double seconds,
-                   const char *source_ip,int source_port) {
+                   const char *source_ip,int source_port,int measure_loss) {
     int s=sock(udp);
     if(source_ip) {
         struct sockaddr_in source=addr(source_ip,source_port);
         if(bind(s,(void*)&source,sizeof(source)))die("client bind");
     }
     struct sockaddr_in a=addr(ip,port);if(connect(s,(void*)&a,sizeof(a)))die("connect");
-    unsigned char tx[65536],rx[65536];
+    unsigned char tx[65536],rx[65537];
     for(size_t j=0;j<size;j++)tx[j]=(unsigned char)(j*17+93);
     const size_t cap=1048576;
     double *lat=malloc(cap*sizeof(*lat));if(!lat)die("latency allocation");
-    uint64_t count=0;double start=now(),end=start;
+    uint64_t count = 0, sent = 0;
+    double start = now(), end = start, total_us = 0;
     do {
-        memcpy(tx,&count,sizeof(count));
-        if(udp) { if(send(s,tx,size,0)!=(ssize_t)size)die("udp send");if(recv(s,rx,sizeof(rx),0)!=(ssize_t)size)die("udp recv"); }
-        else {exact(s,tx,size,1);exact(s,rx,size,0);}
-        if(memcmp(tx,rx,size)) {fprintf(stderr,"payload mismatch\n");exit(2);}
-        double t=now();lat[count%cap]=(t-end)*1e6;count++;end=t;
-    } while(end-start<seconds);
+        double sent_at = measure_loss ? now() : end;
+        memcpy(tx, &sent, sizeof(sent));
+        if (udp) {
+            if (send(s, tx, size, 0) != (ssize_t)size)
+                die("udp send");
+            if (measure_loss) {
+                if (!udp_probe_reply(s, rx, size, sent, sent_at + 0.100)) {
+                    ++sent;
+                    end = now();
+                    continue;
+                }
+            } else if (recv(s, rx, sizeof(rx), 0) != (ssize_t)size) {
+                die("udp recv");
+            }
+        } else {
+            exact(s, tx, size, 1);
+            exact(s, rx, size, 0);
+        }
+        if (memcmp(tx, rx, size)) {
+            fprintf(stderr, "payload mismatch\n");
+            exit(2);
+        }
+        double received_at = now();
+        double latency = (received_at - (measure_loss ? sent_at : end)) * 1e6;
+        lat[count % cap] = latency;
+        total_us += latency;
+        ++count;
+        ++sent;
+        end = received_at;
+    } while (end - start < seconds);
     close(s);
-    size_t n=count<cap?count:cap;qsort(lat,n,sizeof(*lat),cmp_double);
-    printf("RESULT protocol=%s size=%zu count=%llu seconds=%.9f rps=%.3f MiBps=%.6f mean_us=%.3f p50_us=%.3f p99_us=%.3f latency_samples=%zu verified=1\n",
-           udp?"udp":"tcp",size,(unsigned long long)count,end-start,count/(end-start),count*size/(end-start)/1048576,1e6*(end-start)/count,lat[n/2],lat[(n-1)*99/100],n);
+    size_t n = count < cap ? count : cap;
+    qsort(lat, n, sizeof(*lat), cmp_double);
+    printf("RESULT protocol=%s size=%zu count=%llu seconds=%.9f rps=%.3f MiBps=%.6f mean_us=%.3f p50_us=%.3f p99_us=%.3f latency_samples=%zu verified=1",
+           udp ? "udp" : "tcp", size, (unsigned long long)count, end - start,
+           count / (end - start), count * size / (end - start) / 1048576,
+           count ? total_us / count : 0, n ? lat[n / 2] : 0, n ? lat[(n - 1) * 99 / 100] : 0, n);
+    if (measure_loss)
+        printf(" sent=%llu lost=%llu", (unsigned long long)sent, (unsigned long long)(sent - count));
+    putchar('\n');
     free(lat);
 }
 int main(int argc,char **argv) {
-    if(argc<4) {fprintf(stderr,"server tcp|udp PORT; client/local tcp|udp PORT IP SIZE SECONDS\n");return 2;}
+    if(argc<4) {fprintf(stderr,"server tcp|udp PORT; client/local tcp|udp PORT IP SIZE SECONDS; probe udp PORT IP SIZE SECONDS\n");return 2;}
     signal(SIGPIPE,SIG_IGN);int udp=!strcmp(argv[2],"udp"),port=atoi(argv[3]);
     if(!strcmp(argv[1],"server"))server(udp,port,-1);
     if(argc!=7 && argc!=9)return 2;
+    int measure_loss = !strcmp(argv[1], "probe");
+    if (measure_loss && !udp)
+        return 2;
     const char *source_ip=argc==9?argv[7]:NULL;
     int source_port=argc==9?atoi(argv[8]):0;
     if(source_ip && (source_port<1 || source_port>65535))return 2;
@@ -99,7 +166,7 @@ int main(int argc,char **argv) {
         pid_t children[4];double start=now();int bad=0;
         for(int i=0;i<4;i++) {
             children[i]=fork();if(children[i]<0)die("multi fork");
-            if(!children[i]) {client(udp,argv[4],port,size,seconds,NULL,0);fflush(stdout);_exit(0);}
+            if(!children[i]) {client(udp,argv[4],port,size,seconds,NULL,0,0);fflush(stdout);_exit(0);}
         }
         for(int i=0;i<4;i++) {int status;if(waitpid(children[i],&status,0)<0)die("wait");if(!WIFEXITED(status)||WEXITSTATUS(status))bad=1;}
         printf("PARALLEL clients=4 wall=%.9f verified=%d\n",now()-start,!bad);
@@ -111,7 +178,7 @@ int main(int argc,char **argv) {
         if(!child) {close(p[0]);server(udp,port,p[1]);_exit(0);}
         close(p[1]);char c;if(read(p[0],&c,1)!=1)die("server start");close(p[0]);
     }
-    client(udp,argv[4],port,size,seconds,source_ip,source_port);
+    client(udp,argv[4],port,size,seconds,source_ip,source_port,measure_loss);
     if(child) {kill(child,SIGTERM);waitpid(child,0,0);}
     return 0;
 }

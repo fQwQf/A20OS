@@ -29,8 +29,10 @@ python3 tools/net/tests/test-bsd-router-soak.py \
 The default run uses 30 minutes of concurrent traffic on VirtIO-net.
 Use `--nic-model e1000e` for emulated Intel adapters. The TCP and UDP results
 record one direction of verified payload throughput and echo round-trip latency.
-The test records ICMP loss independently and samples guest memory, F-Stack
-backing allocations, NIC counters, and conntrack. It then drops WAN carrier
+The UDP probe records replies that miss its 100 ms window as losses and keeps
+sending. Late echoes do not count as replies to later probes. The test records
+ICMP loss independently and samples guest memory, F-Stack backing allocations,
+NIC counters, and filter and conntrack counters. It then drops WAN carrier
 while the two clients send probes, checks DHCP and fresh TCP/UDP traffic after
 link recovery, and checks idle conntrack reclamation. The manifest records
 samples as the run progresses. The QEMU links use loopback UDP and require no
