@@ -1,10 +1,18 @@
 #include <assert.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MM_PT_META_ENTRIES 512
 #define MM_ST_INVALID 0u
+#define MM_ST_PT_NODE 1u
+#define MM_ST_CLASS_MAX 16u
+#define MM_ST_CLS_BYTE(c) ((c)<<4)
+#define MM_ST_COW_BIT 8u
+#define MM_ST_PROT_MASK 7u
+#define PTE_COW 256u
+static uint8_t mm_pt_prot_bits(uintptr_t pte) { return pte&7; }
 #define MM_ST_ANON_MAPPED 2u
 #define MM_ST_GET_CLASS(b) (((b) >> 4) & 0xFu)
 #define MM_SAFE_MASK 0x0fu
@@ -18,7 +26,7 @@ typedef struct page_cache_page { uintptr_t token; } page_cache_page_t;
 typedef struct pt_meta {
     uintptr_t lock, node;
     uint16_t nr_present;
-    uint8_t level, stale;
+    uint8_t level, stale, fork_file_clean;
     uint8_t cls[MM_PT_META_ENTRIES];
     uint8_t safe[(MM_PT_META_ENTRIES + 7) / 8];
     void *segtab;
@@ -40,7 +48,7 @@ static int arch_pt_vpn(vaddr_t va, int level) {
     (void)level;
     return (int)((va >> 12) & 511);
 }
-static void mm_pt_node_lock(pte_t *t) { (void)t; locks++; }
+static void mm_pt_node_lock(pte_t *t) { (void)t; meta.fork_file_clean=0; locks++; }
 static void mm_pt_node_unlock(pte_t *t) { (void)t; unlocks++; }
 static uint8_t owner_page[4096];
 static pfn_t pfa_alloc_flags(int order, int can_reclaim) {
@@ -83,5 +91,24 @@ int main(void) {
 
     pfa_free(virt_to_pfn(meta.cache_owner), 0);
     meta.cache_owner = NULL;
+    mm_pt_note_present(table, 0, 0, MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED));
+    meta.fork_file_clean = 1;
+    assert(mm_pt_safe_set(table, 0, 0, 1) == 0 && !meta.fork_file_clean);
+    meta.fork_file_clean = 1;
+    assert(mm_pt_safe_clear(table, 0, 0, 1) == 0 && !meta.fork_file_clean);
+    meta.fork_file_clean = 1;
+    assert(mm_pt_refresh_leaf_prot(table, 0, 3) == 0 && !meta.fork_file_clean);
+    meta.fork_file_clean = 1;
+    assert(mm_pt_sync_status_meta(&meta, 0, MM_ST_ANON_MAPPED, 3) == 0);
+    assert(!meta.fork_file_clean);
+    meta.fork_file_clean = 1;
+    mm_pt_note_present(table, 0, 0, MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED));
+    assert(!meta.fork_file_clean);
+    meta.fork_file_clean = 1;
+    mm_pt_note_absent(table, 0, 0);
+    assert(!meta.fork_file_clean);
+    meta.fork_file_clean = 1;
+    mm_pt_meta_set_stale(&meta, 1);
+    assert(!meta.fork_file_clean && meta.stale);
     return 0;
 }

@@ -6,8 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 #define PAGE_SIZE 4096UL
-#define A20_COW_ANON_BATCH_PAGES 16
-static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, size_t nr, int shared) { (void)c; (void)p; (void)va; (void)n; (void)nr; (void)shared; return 0; }
+#define A20_COW_ANON_BATCH_PAGES 64
+static unsigned batch_attempts;
+static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, size_t nr, int shared) { (void)c; (void)p; (void)va; (void)n; (void)nr; (void)shared; batch_attempts++; return 0; }
 typedef struct { uintptr_t start, end; } mm_seg_t;
 #define ARCH_PT_ROOT_LEVEL 2
 #define ARCH_HAS_PGTABLE_OPS 1
@@ -167,6 +168,10 @@ int main(void) {
     assert(mm_fork_clone_range(&a,&p,0,FULL,0)==0);
     assert(reference_range(&b,&p,0,FULL,0)==0);
     assert(a.calls==0&&b.calls==NPAGES); /* Skip an entire absent subtree. */
+    mm_seg_t sparse_vma = { .start=0, .end=4*PAGE_SIZE };
+    nodes[0][2]=PTE_V|LEAF;
+    assert(mm_fork_clone_level(&a,&p,nodes[0],0,0,0,4*PAGE_SIZE,0,0,&sparse_vma)==0);
+    assert(batch_attempts==1 && a.count==1 && a.events[0].va==2*PAGE_SIZE);
     for(int tree=0;tree<1000;tree++) {
         memset(nodes,0,sizeof(nodes));used=0;p.pgdir=new_table(ARCH_PT_ROOT_LEVEL);
         for(int i=0;i<NPAGES;i++)p.policy[i]=(random_u32()%8==0);

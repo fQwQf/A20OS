@@ -45,6 +45,7 @@ typedef struct pt_mcs_node {
 typedef struct pt_meta {
     uintptr_t lock;
     unsigned level;
+    unsigned fork_file_clean;
 } pt_meta_t;
 typedef struct pt_mcs_pool {
     pt_mcs_node_t *nodes;
@@ -148,6 +149,13 @@ int main(void) {
     assert(g_pt_mcs_pool[0].held[0] == &foreign_meta);
     return 0;
 #else
+    outer.fork_file_clean = 1;
+    mcs_lock_mode(&outer, 0);
+    assert(outer.fork_file_clean);
+    mcs_unlock(&outer);
+    mcs_lock(&outer);
+    assert(!outer.fork_file_clean);
+    mcs_unlock(&outer);
     migrate_pending = 1;
     uint32_t base = mcs_lock(&outer);
     assert(base == 0 && cpu_id == 0);
@@ -177,7 +185,7 @@ int main(void) {
 
 def main() -> None:
     source = PT_SOURCE.read_text()
-    lock = extract_function(source, "static uint32_t mcs_lock(pt_meta_t *m)")
+    lock = extract_function(source, "static uint32_t mcs_lock_mode(") + "\n" + extract_function(source, "static uint32_t mcs_lock(pt_meta_t *m)")
     unlock = extract_function(source, "static void mcs_unlock(pt_meta_t *m)")
     cursor_unlock = extract_function(source, "void mm_cursor_unlock(mm_cursor_t *cur)")
     with tempfile.TemporaryDirectory(prefix="a20-pt-mcs-test-") as tmp:

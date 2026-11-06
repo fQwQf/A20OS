@@ -32,7 +32,7 @@ typedef uint32_t pfn_t;
 typedef struct { pte_t *pgdir; } mm_struct_t;
 typedef struct { unsigned vm_flags; uintptr_t start, end; void *file, *file_vnode; } mm_seg_t;
 typedef struct { int pin; } page_cache_page_t;
-typedef struct { uint8_t cls[512], safe[64]; page_cache_page_t **cache_owner; } pt_meta_t;
+typedef struct { uint8_t cls[512], safe[64], fork_file_clean; page_cache_page_t **cache_owner; } pt_meta_t;
 struct a20_cow_anon_batch_page { uint32_t pfn, class; uintptr_t flags; void *pcp; uint32_t kind; };
 static pt_meta_t metadata;
 static page_cache_page_t *cache_owners[512];
@@ -63,8 +63,12 @@ static pte_t *mm_pt_leaf_table(pte_t *pgdir,uintptr_t va) {
     (void)pgdir;(void)va;node_walks++;return tables[active];
 }
 static void mm_pt_node_lock(pte_t *table) {
-    assert(locked==-1);locked=table==tables[0]?0:1;locks++;
+    assert(locked==-1);metadata.fork_file_clean=0;locked=table==tables[0]?0:1;locks++;
     if(vanish_on_lock) { tables[locked][expected_index]=0; vanish_on_lock=0; }
+}
+static void mm_pt_node_observe_lock(pte_t *table) {
+    int clean=metadata.fork_file_clean;
+    mm_pt_node_lock(table);metadata.fork_file_clean=clean;
 }
 static void mm_pt_node_unlock(pte_t *table) {
     assert(locked==(table==tables[0]?0:1));locked=-1;unlocks++;
@@ -92,7 +96,9 @@ static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *v,uintptr_t va,pfn
     (void)v;(void)va;assert(locked==0&&pfn==9);
     if(cache_mode){cache.pin++;return &cache;}return NULL;
 }
+static unsigned cache_pfn_reads;
 static pfn_t page_cache_pfn(page_cache_page_t *page) {
+    cache_pfn_reads++;
     assert(page==&cache);return cache_pfn;
 }
 static void page_cache_pin(page_cache_page_t *page) {
@@ -266,6 +272,7 @@ int main(void) {
     }
     pte_t clean=tables[0][0];
     assert(cow_file_range_refaultable(&vma,tables[0],0,16));
+    assert(!metadata.fork_file_clean);
     for(int bad=0;bad<16;bad++) {
         cache_owners[bad]=NULL;
         assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
@@ -327,6 +334,27 @@ int main(void) {
     assert(frame_gets==prior_gets+1&&batch[7].kind==1&&batch[7].class==MM_ST_FILE_PRIVATE);
     for(int i=0;i<16;i++) if(i!=7) assert(!batch[i].class&&!batch[i].kind);
     frame_put(batch[7].pfn);
+    reset();vma.vm_flags=VM_FILE;vma.file=vma.file_vnode=&vma;
+    vma.start=0;vma.end=4*1024*1024;metadata.cache_owner=cache_owners;
+    for(int i=0;i<512;i++) {
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_FILE_PRIVATE);
+        cache_owners[i]=&cache;tables[0][i]=clean;
+    }
+    unsigned before_proof = cache_pfn_reads;
+    assert(cow_file_range_refaultable(&vma,tables[0],0,512));
+    assert(cache_pfn_reads == before_proof + 512);
+    assert(metadata.fork_file_clean);
+    assert(cow_file_range_refaultable(&vma,tables[0],0,512));
+    assert(cache_pfn_reads == before_proof + 512); /* no repeated leaf proof */
+    vma.vm_flags |= VM_EXEC;
+    assert(!cow_file_range_refaultable(&vma,tables[0],0,512));
+    vma.vm_flags &= ~VM_EXEC;
+    assert(metadata.fork_file_clean);
+    assert(cow_file_range_refaultable(&vma,tables[0],3,17));
+    assert(metadata.fork_file_clean);
+    mm_pt_node_lock(tables[0]);tables[0][511]|=PTE_W;mm_pt_node_unlock(tables[0]);
+    assert(!metadata.fork_file_clean);
+    assert(!cow_file_range_refaultable(&vma,tables[0],0,512));
     puts("COW_SNAPSHOT_TOKEN: PASS tokens, refs, geometry, cache-only refault, safe bits and mixed batches");
     return 0;
 }

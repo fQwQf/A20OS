@@ -341,8 +341,9 @@ static int cow_file_leaf_refaultable(const mm_seg_t *vma, pt_meta_t *meta,
     return owner && page_cache_pfn(owner) == phys_to_pfn(arch_pte_addr(source));
 }
 /* Read-only proof, with parent->lock held: avoid constructing empty clone
- * transactions for a whole range of recoverable cache leaves. No persistent
- * summary is trusted, so every replacement and permission change stays valid. */
+ * transactions for recoverable cache leaves. A full-table positive proof
+ * survives read-only observations; node writers and metadata mutators revoke
+ * it before the next observation. VMA policy is checked each time. */
 static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
                                       int first, int count)
 {
@@ -355,7 +356,11 @@ static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
     if (!meta || !meta->cache_owner)
         return 0;
     int recoverable = 1;
-    mm_pt_node_lock(node);
+    mm_pt_node_observe_lock(node);
+    if (meta->fork_file_clean) {
+        mm_pt_node_unlock(node);
+        return 1;
+    }
     for (int i = first; i < first + count; i++) {
         pte_t source = node[i];
         if (!source)
@@ -369,6 +374,8 @@ static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
             break;
         }
     }
+    if (recoverable && first == 0 && count == arch_pt_level_entries(0))
+        meta->fork_file_clean = 1;
     mm_pt_node_unlock(node);
     return recoverable;
 }
@@ -829,13 +836,27 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             return 0;
     }
 #endif
-    for (int i = 0; i < entries; i++) {
+    /* A VMA may begin near the end of every table on its path. Jump to its
+     * first overlapping slot instead of scanning the preceding entries. Keep
+     * the wide offset until the bound check (public callers can pass disjoint
+     * ranges); partial huge leaves still follow the checked base rule below. */
+    vaddr_t first_slot = start > base ? (start - base) / span : 0;
+    if (first_slot >= (vaddr_t)entries)
+        return 0;
+    for (int i = (int)first_slot; i < entries; i++) {
         vaddr_t entry_base = base + (vaddr_t)i * span;
         vaddr_t entry_end = entry_base + span;
         if (entry_end <= start)
             continue;
         if (entry_base >= end)
             break;
+
+        pte_t *pte = &table[i];
+        /* Empty slots carry no references. In particular, do not construct
+         * a Rust batch, probe the child, or lock the source for a hole-only
+         * prefix of a sparsely populated leaf table. */
+        if (!*pte)
+            continue;
 
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
         if (!checked && vma && level == 0 && entry_base >= start &&
@@ -862,7 +883,6 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
         }
 #endif
 
-        pte_t *pte = &table[i];
 #ifdef CONFIG_SWAP
         if (level == 0 && pte_is_swap(*pte)) {
             int r = checked

@@ -187,6 +187,49 @@ static void file_mapping_inheritance(void)
     puts("FORK_EXIT_PROBE: clean file refault, modified read-only COW, orphaned backing PASS");
 }
 
+/* Align two complete L0 tables, warm their fork proofs, then invalidate them
+ * through protection changes and private copies. A stale proof loses data. */
+static void file_fork_proof_invalidation(void)
+{
+    const size_t len = 2 * SZ, reserve_len = len + SZ;
+    char name[] = "/tmp/fork-file-proof-XXXXXX";
+    int fd = mkstemp(name);
+    if (fd < 0 || unlink(name) || ftruncate(fd, len)) fail("proof file");
+    void *reserve = mmap(NULL, reserve_len, PROT_NONE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (reserve == MAP_FAILED) fail("proof reserve");
+    uintptr_t aligned = ((uintptr_t)reserve + SZ - 1) & ~(uintptr_t)(SZ - 1);
+    volatile unsigned char *map = mmap((void *)aligned, len, PROT_READ,
+                                       MAP_PRIVATE | MAP_FIXED, fd, 0);
+    if (map == MAP_FAILED) fail("proof map");
+    for (size_t i = 0; i < len; i += 4096)
+        if (map[i]) fail("proof initial read");
+    for (unsigned round = 0; round < 4; round++) {
+        pid_t child = fork();
+        if (!child) { if (map[0] || map[len - 4096]) _exit(40); _exit(0); }
+        wait_ok(child);
+    }
+    if (mprotect((void *)map, len, PROT_READ | PROT_WRITE)) fail("proof writable");
+    for (size_t i = 0; i < len; i += 4096)
+        map[i] = (unsigned char)(i / 4096 % 251 + 1);
+    if (mprotect((void *)map, len, PROT_READ)) fail("proof readonly");
+    if (close(fd)) fail("proof close");
+    for (unsigned round = 0; round < 4; round++) {
+        pid_t child = fork();
+        if (!child) {
+            for (size_t i = 0; i < len; i += 4096)
+                if (map[i] != (unsigned char)(i / 4096 % 251 + 1)) _exit(41);
+            if (mprotect((void *)map, len, PROT_READ | PROT_WRITE)) _exit(42);
+            map[SZ] = 0xee;
+            _exit(0);
+        }
+        wait_ok(child);
+        if (map[SZ] != (unsigned char)(SZ / 4096 % 251 + 1)) fail("proof child COW");
+    }
+    if (munmap(reserve, reserve_len)) fail("proof release");
+    puts("FORK_EXIT_PROBE: full file table proof, mprotect, private copy, nested COW PASS");
+}
+
 static void targeted_waits(void)
 {
     enum { CHILDREN = 32 };
@@ -386,6 +429,7 @@ int main(void)
         fail("sparse munmap");
     high_fd_inheritance();
     file_mapping_inheritance();
+    file_fork_proof_invalidation();
     file_fault_cold_prefix();
     targeted_waits();
     sparse_shared_semantics();

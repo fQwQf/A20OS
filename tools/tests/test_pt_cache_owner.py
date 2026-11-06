@@ -34,6 +34,11 @@ class PtCacheOwner(unittest.TestCase):
             "void mm_pt_note_present_meta(",
             "void mm_pt_note_present(",
             "void mm_pt_note_absent(",
+            "int mm_pt_safe_set(",
+            "int mm_pt_safe_clear(",
+            "int mm_pt_refresh_leaf_prot(",
+            "int mm_pt_sync_status_meta(",
+            "void mm_pt_meta_set_stale(",
         ])
         fixture = (ROOT / "tools/tests/pt_cache_owner_host.c").read_text()
         fixture = fixture.replace("/* REAL_CACHE_HELPERS */", helpers)
