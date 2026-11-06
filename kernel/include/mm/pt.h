@@ -200,6 +200,7 @@ typedef struct pt_meta {
     uint16_t          nr_present;   /* present or PT-node entries */
     uint8_t           level;        /* page-table depth of this page */
     uint8_t           fork_file_clean; /* full L0 proof; invalidated on mutation */
+    uint8_t           fork_file_clean_before_lock; /* holder-private snapshot */
     uint8_t           stale;        /* detached from parent; subtree poisoned */
     /* The status byte: 4 bits of class, 1 of COW, 3 of protection.  COW lives
      * HERE and nowhere else.  There used to be a second `cow[]` bitmap beside
@@ -647,6 +648,7 @@ void mm_pt_meta_set_stale(pt_meta_t *m, int stale);
  * Writers use the ordinary node lock; metadata helpers also invalidate for
  * legacy callers serialized by the owning mm->lock. */
 void mm_pt_node_observe_lock(pte_t *table);
+int mm_pt_anon_status_candidate(struct mm_struct *mm, vaddr_t addr);
 void mm_pt_node_lock(pte_t *table);
 void mm_pt_node_unlock(pte_t *table);
 

@@ -1800,6 +1800,8 @@ int a20_fault_status_open(void *ctx_ptr, mm_struct_t *mm, uintptr_t page_va,
     *cls_out = 0;
     *already_out = 0;
     *uffd_out = 0;
+    if (!mm_pt_anon_status_candidate(mm, page_va))
+        return 0;
     if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &ctx->cur) != 0)
         return 0;
     *already_out = mm_cursor_query(&ctx->cur, page_va, cls_out, NULL);

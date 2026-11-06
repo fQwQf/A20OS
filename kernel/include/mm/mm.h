@@ -71,9 +71,10 @@ _Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, class) == 4,
 _Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, flags) == 8,
                "private batch flags offset");
 
-/* Map a bounded private fork batch into an unpublished child whose page
- * table is exclusively owned by the caller.  The caller owns the cache/frame
- * pins and updates child RSS; this routine validates the whole run before
+/* Map a bounded fork batch into an unpublished child whose page table is
+ * exclusively owned by the caller. The caller owns cache/frame pins (VMO
+ * leaves instead borrow their VMA-owned frames) and updates child RSS.
+ * This routine validates the whole run before
  * writing any leaf and does not acquire/drop backing references. */
 int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                       const struct a20_cow_anon_batch_page *pages,
