@@ -1007,6 +1007,29 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 return -1;
 
             mm_rss_add(t->mm, 1);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+            /* The VMA pins every canonical frame until teardown. Populate
+             * only already resident neighbours: no speculative allocation,
+             * charge or frame reference is acquired by these borrowed PTEs.
+             * mm->lock keeps the VMA permissions and page table stable. */
+            if (vma->vmo->type == VMO_SHARED_ANON) {
+                for (unsigned i = 1; i < 32; i++) {
+                    uint64_t next = page_va + (uint64_t)i * PAGE_SIZE;
+                    uint64_t offset = voff + (uint64_t)i * PAGE_SIZE;
+                    if (next >= vma->end || offset >= vma->vmo->size)
+                        break;
+                    pte_t *existing = pt_lookup_leaf(t->mm->pgdir, next, NULL, NULL, NULL);
+                    if (existing && *existing)
+                        continue;
+                    pfn_t resident = vmo_peek_page(vma->vmo, (uint32_t)(offset / PAGE_SIZE));
+                    if (resident == PFN_NONE)
+                        break; /* Stop at a hole; first-touch need not scan an empty window. */
+                    if (fault_map(t->mm, next, resident, vma->pte_flags, MM_ST_VMO) < 0)
+                        break;
+                    mm_rss_add(t->mm, 1);
+                }
+            }
+#endif
             arch_tlb_flush_page_local(stval);
             return 0;
         }
