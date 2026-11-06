@@ -1,6 +1,8 @@
 /* Execute actual C snapshot/downgrade/unlock/ref-drop adapters. */
 #include <assert.h>
 #include <stdint.h>
+#define a20_perf_count(...) ((void)0)
+#define a20_perf_add(k,v) ((void)(v))
 #include <stdio.h>
 #include <string.h>
 #define PAGE_SIZE 4096UL
@@ -29,8 +31,8 @@ typedef uintptr_t pte_t;
 typedef uintptr_t paddr_t;
 typedef uintptr_t vaddr_t;
 typedef uint32_t pfn_t;
-typedef struct { pte_t *pgdir; } mm_struct_t;
-typedef struct { unsigned vm_flags; uintptr_t start, end; void *file, *file_vnode; } mm_seg_t;
+typedef struct mm_seg { unsigned vm_flags; uintptr_t start, end; void *file, *file_vnode; struct mm_seg *next; } mm_seg_t;
+typedef struct { pte_t *pgdir; mm_seg_t *mmap; } mm_struct_t;
 typedef struct { int pin; } page_cache_page_t;
 typedef struct { uint8_t cls[512], safe[64], fork_file_clean; page_cache_page_t **cache_owner; } pt_meta_t;
 struct a20_cow_anon_batch_page { uint32_t pfn, class; uintptr_t flags; void *pcp; uint32_t kind; };
@@ -143,7 +145,7 @@ static void reset(void) {
     expected_level=-1;expected_index=0;expected_va=0;vanish_on_lock=0;
 }
 int main(void) {
-    mm_struct_t parent={tables[0]};struct a20_cow_shared_snapshot snap;
+    mm_struct_t parent={.pgdir=tables[0]};struct a20_cow_shared_snapshot snap;
     for(int level=0;level<2;level++)for(int kind=0;kind<3;kind++) {
         reset();if(kind==1){cache_mode=1;vma.vm_flags=VM_FILE;}if(kind==2)vma.vm_flags=VM_VMO;
         expected_index=0;expected_va=0;
@@ -355,6 +357,31 @@ int main(void) {
     mm_pt_node_lock(tables[0]);tables[0][511]|=PTE_W;mm_pt_node_unlock(tables[0]);
     assert(!metadata.fork_file_clean);
     assert(!cow_file_range_refaultable(&vma,tables[0],0,512));
+    reset();present_vma=0;parent.mmap=NULL;
+    for(int i=0;i<16;i++) {
+        tables[0][i]=(9UL*PAGE_SIZE)|PTE_V|PTE_LEAF|PTE_COW;
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+    }
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==1);
+    assert(frame_gets==16);
+    for(int i=0;i<16;i++) frame_put(batch[i].pfn);
+    /* An interior VMA invalidates the gap proof even with empty endpoints. */
+    parent.mmap=&vma;vma.start=4*PAGE_SIZE;vma.end=6*PAGE_SIZE;vma.next=NULL;
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==0);
+    parent.mmap=NULL;
+    metadata.cls[7]=MM_ST_CLS_BYTE(MM_ST_FILE_PRIVATE);
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==0);
+    reset();parent.mmap=NULL;vma.vm_flags=VM_VMO;vma.start=0;vma.end=16*PAGE_SIZE;
+    for(int i=0;i<16;i++) {
+        tables[0][i]=(9UL*PAGE_SIZE)|PTE_V|PTE_LEAF|PTE_W;
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_VMO);
+    }
+    assert(!a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0));
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,1)==1);
+    assert(!frame_gets&&!frame_puts&&!changes);
+    for(int i=0;i<16;i++)assert(batch[i].class==MM_ST_VMO&&!batch[i].kind&&!batch[i].pcp&&(batch[i].flags&PTE_W));
+    metadata.cls[7]=MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+    assert(!a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,1));
     puts("COW_SNAPSHOT_TOKEN: PASS tokens, refs, geometry, cache-only refault, safe bits and mixed batches");
     return 0;
 }

@@ -269,8 +269,10 @@ static uint32_t mcs_lock_mode(pt_meta_t *m, int mutate)
             }
         }
     }
-    if (mutate)
+    if (mutate) {
+        m->fork_file_clean_before_lock = m->fork_file_clean;
         m->fork_file_clean = 0;
+    }
     return d;
 }
 
@@ -2222,6 +2224,14 @@ static int map_resident_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             cursor_leaf_unlock(&cur);
             break;
         }
+        /* The ordinary lock revoked the proof before any write. This
+         * specialized installer only fills empty slots with canonical,
+         * read-only cache pages, so it may preserve the previous proof or
+         * establish one for a table with no mapping/status entries. The
+         * snapshot is holder-private and never trusted after unlocking. */
+        int preserve_file_proof = pages && cls == MM_ST_FILE_PRIVATE &&
+            !(flags & (PTE_W | PTE_X)) && (flags & PTE_V) &&
+            (meta->fork_file_clean_before_lock || meta->nr_present == 0);
         int first = arch_pt_vpn(va, 0);
         if (pages && !meta->cache_owner) {
             pfn_t owner = pfa_alloc_flags(0, 0);
@@ -2254,6 +2264,8 @@ static int map_resident_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             }
             installed++;
         }
+        if (preserve_file_proof)
+            meta->fork_file_clean = 1;
         cursor_leaf_unlock(&cur);
     }
     mm_cursor_unlock(&cur);
@@ -2623,6 +2635,29 @@ int mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags)
                             flags);
     cursor_leaf_unlock(cur);
     return r;
+}
+
+/* A negative-only preflight for the status fault path. Do not materialize
+ * page tables or invalidate file proofs just to discover that a file/VMO
+ * fault is not an ANON_VIRT fault. A positive result is only a hint: the
+ * existing locked cursor must recheck every fact before serving the fault. */
+int mm_pt_anon_status_candidate(mm_struct_t *mm, vaddr_t addr)
+{
+    if (!mm || !mm->pgdir)
+        return 0;
+    mm_pt_read_enter(mm);
+    pte_t *table = mm_pt_leaf_table(mm->pgdir, addr);
+    pt_meta_t *meta = mm_pt_meta(table);
+    int candidate = 0;
+    if (meta && meta->level == 0) {
+        mm_pt_node_observe_lock(table);
+        int idx = arch_pt_vpn(addr, 0);
+        candidate = !meta->stale && !(table[idx] & PTE_V) &&
+            MM_ST_GET_CLASS(meta->cls[idx]) == MM_ST_ANON_VIRT;
+        mm_pt_node_unlock(table);
+    }
+    mm_pt_read_exit(mm);
+    return candidate;
 }
 
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,

@@ -515,7 +515,8 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                 return -EINVAL;
             continue;
         }
-        int shared_class = cls == MM_ST_ANON_SHARED || cls == MM_ST_FILE_SHARED;
+        int shared_class = cls == MM_ST_ANON_SHARED || cls == MM_ST_FILE_SHARED ||
+                           (shared && cls == MM_ST_VMO);
         if (!pfn_valid((pfn_t)pages[i].pfn) ||
             (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE &&
              !shared_class) || !(pages[i].flags & PTE_U) ||

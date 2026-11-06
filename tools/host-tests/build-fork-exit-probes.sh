@@ -8,10 +8,11 @@ probe_musl="$repo/user/external/musl"
 probe_lib="$probe_musl/build-x86_64/lib"
 probe_include=$("$probe_cc" -print-file-name=include)
 mkdir -p "$probe_out"
-for probe in fork_exit_guest fork_exit_bench; do
+for probe in fork_exit_guest fork_exit_bench fork_matrix; do
     case "$probe" in
         fork_exit_guest) probe_name=fork-exit-guest ;;
         fork_exit_bench) probe_name=fork-exit-bench ;;
+        fork_matrix) probe_name=fork-matrix ;;
     esac
     "$probe_cc" -O2 -static -nostdlib -nostdinc -fno-stack-protector -no-pie \
         -I "$probe_musl/build-x86_64/obj/include" -I "$probe_musl/arch/x86_64" \

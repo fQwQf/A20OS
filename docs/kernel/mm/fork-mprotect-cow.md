@@ -107,3 +107,63 @@ bash tools/host-tests/build-fork-exit-probes.sh
 `fork-exit-bench` 接受 `file|shared-sparse|shared-dense`、轮数、MiB、子进程读取模式四个参数（0：不读；1：逐页读取；2：每隔 1 MiB 读取；3：只读首个页面）。父进程在计时前触页（`shared-sparse` 除外）；结果包含整个 fork/wait 周期和父进程侧累计 fork、wait 时间。两侧应使用同一二进制、相同 vCPU/内存/CPU affinity 和透明大页设置，并把诊断计数与正式计时分开。
 
 回收完成还有独立于页表的 CPU 生命周期边界：`ZOMBIE` 不意味着退出任务已经离开 CPU。阻塞 wait 在子任务的 `park_lock` 内注册完成通知，CPU slot 的任务引用移交给完成回调，保护并发回收。SIGCHLD 与 pidfd 可读状态必须等到对应进程可以非阻塞回收后才可见；线程组信号若先由最后一个 sibling 产生，还须等待仍在 CPU 上的 leader。原生任务对象的逐任务 EXITED 事件也移到该任务释放 CPU 之后，保持原有的任务与线程组事件范围。
+
+## 首次文件 fork、借用帧批处理与扩大性能矩阵
+
+只在第一次 fork 扫描后缓存证明，仍会让第一次 fork 与文件驻留页数线性相关。
+`map_resident_window()` 现在在安装 canonical、只读、非执行的私有文件缓存页时增量建立
+`fork_file_clean`：普通节点锁先撤销证明并记录本次持锁前的值；专用安装器仅在此前已有
+证明或整个叶表没有映射/状态条目时恢复它。该安装器只填空槽，不覆盖已有内容；普通写入、
+私有 COW、保护和安全位变更继续撤销证明。锁前快照仅供当前持锁者使用，不能跨解锁读取。
+这让已知干净的整张叶表在首次 fork 即可跳过扫描；混合、脏页和不满足策略的范围仍走验证路径。
+
+状态缺页入口过去会先获取可写 cursor，再发现文件/VMO 缺页不适用，从而在每次触页时
+无意义地撤销证明。`mm_pt_anon_status_candidate()` 改用页表读侧生命周期保护和节点观察锁
+执行否定预检，不分配页表。肯定结果只是提示，原 cursor 路径仍重新验证状态、权限和安全位。
+不能将预检结果作为绕过 VMA 或 UFFD 检查的授权。
+
+小型共享 VMO 的叶现在也可以批量克隆。子 VMA 已持有 VMO，`MM_ST_VMO` PTE 借用帧，
+不获得普通 PTE 所有的 frame/cache pin；Rust 失败回滚也不释放这些借用帧。私有 VMO 模式、
+混合状态和安全位不满足条件时回退。子映射保留共享可写权限。旧式 brk/stack 克隆只遍历
+VMA 未覆盖的区间；无 VMA 批处理还须证明整个批次不穿过任何 VMA，并只接受匿名映射状态。
+
+扩大测试还发现高 FD 数退出反复扫描空文件锁表。文件锁表现在维护原子发布的条目数，
+无 POSIX 锁时进程/每 FD 清理直接返回；非空表仍持原锁执行原有操作。最终文件关闭仍处理
+OFD 和 BSD flock，不能只因 POSIX 表为空就跳过。随机分裂/合并、容量/OOM 回滚、并发清理
+和 guest 跨 fork 生命周期测试验证计数与所有权。
+
+`tools/tests/fork_matrix.c` 与 `tools/host-tests/bench-fork-matrix.py` 提供 58 项共同 Linux/A20
+负载，覆盖 1/16/64 MiB、私有文件/匿名/共享/稀疏映射、子进程无访问/读/写、首次 fork、
+256/1024 个 VMA、64/512/4090 个 FD、2/4 个 worker、8/32/128 个突发子进程、wait-any/wait-pid、
+exec 和 stress-ng。fork/wait 延迟包含子进程工作，不等于单独 fork 系统调用耗时；并发另报
+墙钟吞吐。`file-first` 每次重新 mmap 和预触页，单独记录 setup（含 unmap）与总耗时，
+避免把转移到准备/拆除阶段的成本隐藏掉。4090 个 FD 给标准描述符留出空间，4096 会触及
+当前固定 `MAX_FILES=4096` 限制。
+
+复现时先运行 `tools/host-tests/build-fork-exit-probes.sh OUT_DIR`，然后使用：
+
+```sh
+python3 tools/host-tests/bench-fork-matrix.py \
+  --image BENCHMARK_EXT4 --fat BOOT_FAT \
+  --linux-kernel VMLINUZ --linux-initrd INITRD \
+  --probe OUT_DIR/fork-matrix --kernel ABSOLUTE_KERNEL_ELF \
+  --out NEW_RESULT_DIR --cpus 4,6 --smp 2 --runs 3
+```
+
+脚本使用镜像副本和 QEMU snapshot，记录输入散列并核验前后不变；相同静态探针在两个系统
+执行，交替启动顺序，Linux 关闭 THP，正式测量关闭并审计 A20 计数器。`--diag` 单独归因，
+不能与正式计时混合。四核应同时增加可用宿主 CPU，例如 `--cpus 4,6,8,10 --smp 4`。
+新增证明命中/扫描数、批量/单页克隆时间和子页表安装时间；安装时间嵌套于批量和克隆时间，
+不能重复相加。
+
+2026-11-06 的两核三轮矩阵中，首次 64 MiB 文件 fork/wait 从 365 降到 175 µs，
+4090 FD 从 1391 降到 519 µs；首次文件证明扫描计数为零。三组交替旧/新内核的 stress
+提升 6.2%、8.5%、6.8%。完整矩阵 stress 中位吞吐为 4098 ops/s，Linux 5499 ops/s；
+首次文件包含 mmap/prefault/unmap 的完整迭代仍为 19.099 ms，Linux 5.721 ms。
+因此尚未达到全面 Linux 水平。58 项没有超过 10% 的中位耗时退化，但三轮和未锁频环境
+不足以证明所有工作负载都无退化。完整样本、范围、吞吐、诊断和剩余瓶颈保存在
+`build/fork-fast/wide-results.json`、`wide-report.txt` 与各原始 manifest/串口日志中。
+
+四核另做一轮 58 项双系统矩阵（116 个样本）及六组 guest 回归，均通过；它与两核三轮
+中位数分开报告。四 worker 文件 fork 吞吐为 10637 ops/s，Linux 19280 ops/s，仍有
+明显并发差距。23 项宿主回归和 x86 SMP4/AArch64/RISC-V 双 ABI 构建通过；后两者仅编译验证。

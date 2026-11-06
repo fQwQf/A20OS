@@ -802,6 +802,29 @@ void mm_destroy(mm_struct_t *mm) {
         a20_perf_add(A20_PERF_MM_DESTROY_TICKS, timer_get_ticks() - start);
 }
 
+/* All VMAs have already been cloned (or deliberately omitted). Legacy brk
+ * and stack bounds may overlap them: walk only uncovered intervals instead
+ * of probing every inherited page again. parent->lock keeps the list stable.
+ * The checked walker remains responsible for huge-leaf boundaries and any
+ * overlap between the two legacy ranges themselves. */
+static int mm_fork_clone_uncovered(mm_struct_t *child, mm_struct_t *parent,
+                                   vaddr_t start, vaddr_t end)
+{
+    for (mm_seg_t *v = parent->mmap; v && start < end; v = v->next) {
+        if (v->end <= start)
+            continue;
+        if (v->start >= end)
+            break;
+        if (start < v->start) {
+            int r = mm_fork_clone_range(child, parent, start, v->start, 0);
+            if (r < 0)
+                return r;
+        }
+        start = v->end;
+    }
+    return start < end ? mm_fork_clone_range(child, parent, start, end, 0) : 0;
+}
+
 /* MM_FORK_COW_REGRESSION_GUARD:
  * parent->lock is held while the parent's page table is modified (the COW flags
  * are set), which keeps this out of a race with the parent's concurrent page
@@ -993,15 +1016,15 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
     }
 
     if (parent->start_brk < parent->brk) {
-        if (mm_fork_clone_range(child, parent, parent->start_brk,
-                                parent->brk, 0) < 0) {
+        if (mm_fork_clone_uncovered(child, parent, parent->start_brk,
+                                parent->brk) < 0) {
             goto fail_locked;
         }
     }
 
     if (parent->stack_bottom && parent->stack_top) {
-        if (mm_fork_clone_range(child, parent, parent->stack_bottom,
-                                parent->stack_top, 0) < 0) {
+        if (mm_fork_clone_uncovered(child, parent, parent->stack_bottom,
+                                parent->stack_top) < 0) {
             goto fail_locked;
         }
     }

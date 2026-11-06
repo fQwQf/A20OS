@@ -8,6 +8,8 @@
 #include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "core/string.h"
+#include "core/perf.h"
+#include "core/timer.h"
 
 #ifndef CONFIG_NOMMU
 
@@ -308,7 +310,12 @@ int a20_cow_map_child_anon_batch(
     mm_struct_t *child = child_ptr;
     if (!child || !child->pgdir)
         return -EINVAL;
-    return pt_map_anon_batch(child->pgdir, va, pages, nr, shared);
+    int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    uint64_t begin = timed ? timer_get_ticks() : 0;
+    int result = pt_map_anon_batch(child->pgdir, va, pages, nr, shared);
+    if (timed)
+        a20_perf_add(A20_PERF_MM_FORK_MAP_TICKS, timer_get_ticks() - begin);
+    return result;
 #else
     (void)child_ptr;
     (void)va;
@@ -358,10 +365,13 @@ static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
     int recoverable = 1;
     mm_pt_node_observe_lock(node);
     if (meta->fork_file_clean) {
+        a20_perf_count(A20_PERF_MM_FORK_FILE_PROOF_HITS);
         mm_pt_node_unlock(node);
         return 1;
     }
+    unsigned scanned = 0;
     for (int i = first; i < first + count; i++) {
+        scanned++;
         pte_t source = node[i];
         if (!source)
             continue;
@@ -374,6 +384,7 @@ static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
             break;
         }
     }
+    a20_perf_add(A20_PERF_MM_FORK_FILE_PROOF_SCANS, scanned);
     if (recoverable && first == 0 && count == arch_pt_level_entries(0))
         meta->fork_file_clean = 1;
     mm_pt_node_unlock(node);
@@ -658,13 +669,24 @@ int a20_cow_share_anon_batch_snapshot(
     /* mm_fork() holds parent->lock, so this single VMA record and its policy
      * remain stable for the complete source snapshot. */
     mm_seg_t *vma = mm_seg_find(parent, start);
-    const uint64_t excluded = VM_PFNMAP | VM_VMO |
-                              VM_DONTFORK | VM_WIPEONFORK;
-    if (!vma || start < vma->start || end > vma->end)
-        return 0;
-    if (!(vma->vm_flags & (VM_ANON | VM_FILE)) ||
-        (vma->vm_flags & excluded))
-        return 0;
+    int borrowed_vmo = vma && (vma->vm_flags & VM_VMO) && shared;
+    const uint64_t excluded = VM_PFNMAP | VM_DONTFORK | VM_WIPEONFORK;
+    if (vma) {
+        if (start < vma->start || end > vma->end ||
+            (!(vma->vm_flags & (VM_ANON | VM_FILE)) && !borrowed_vmo) ||
+            ((vma->vm_flags & VM_VMO) && !borrowed_vmo) ||
+            (vma->vm_flags & excluded))
+            return 0;
+    } else {
+        /* Legacy brk/stack pages have no VMA. Prove the entire batch lies in
+         * a gap, not merely its endpoints; a protected VMA may sit inside. */
+        for (mm_seg_t *v = parent->mmap; v; v = v->next) {
+            if (v->start >= end)
+                break;
+            if (v->end > start)
+                return 0;
+        }
+    }
 
     /* Inspect the unpublished destination before source pinning/downgrade.
      * An absent upper subtree costs one lookup; an existing empty L0 table
@@ -689,8 +711,11 @@ int a20_cow_share_anon_batch_snapshot(
         uint8_t status = node_meta->cls[index];
         uint32_t cls = MM_ST_GET_CLASS(status);
         if (!(source & PTE_V) || !arch_pte_is_leaf(source) ||
+            (!vma && cls != MM_ST_ANON_MAPPED) ||
             (cls != MM_ST_ANON_MAPPED && cls != MM_ST_ANON_SHARED &&
-             cls != MM_ST_FILE_PRIVATE && cls != MM_ST_FILE_SHARED) ||
+             cls != MM_ST_FILE_PRIVATE && cls != MM_ST_FILE_SHARED &&
+             !(borrowed_vmo && cls == MM_ST_VMO)) ||
+            (borrowed_vmo && cls != MM_ST_VMO) ||
             (node_meta->safe[index >> 3] &
              (MM_SAFE_UFFD | MM_SAFE_NO_FA))) {
             mm_pt_node_unlock(node);
@@ -713,15 +738,20 @@ int a20_cow_share_anon_batch_snapshot(
     for (size_t i = 0; i < nr; i++) {
         if (!out[i].class)
             continue;
+        /* The child already retained the VMO through its VMA. Its leaves
+         * borrow canonical frames, just like scalar VMO cloning; no PTE-owned
+         * frame reference is acquired or released on rollback. */
+        if (borrowed_vmo)
+            continue;
         uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
-        page_cache_page_t *pcp = (vma->vm_flags & VM_FILE) &&
+        page_cache_page_t *pcp = vma && (vma->vm_flags & VM_FILE) &&
                                          node_meta->cache_owner
             ? node_meta->cache_owner[first + (int)i] : NULL;
         if (pcp && page_cache_pfn(pcp) == pfns[i])
             page_cache_pin(pcp);
         else
             pcp = NULL;
-        if (!pcp && (vma->vm_flags & VM_FILE) &&
+        if (!pcp && vma && (vma->vm_flags & VM_FILE) &&
             out[i].class != MM_ST_ANON_MAPPED)
             pcp = mm_file_cache_mapping_get(vma, va, pfns[i]);
         if (pcp) {
@@ -859,11 +889,12 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             continue;
 
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-        if (!checked && vma && level == 0 && entry_base >= start &&
-            entry_base >= vma->start && entry_base < vma->end) {
+        if (level == 0 && entry_base >= start &&
+            ((!checked && vma && entry_base >= vma->start && entry_base < vma->end) ||
+             (checked && !vma && !mm_seg_find(parent, entry_base)))) {
             size_t nr = A20_COW_ANON_BATCH_PAGES;
             size_t range_pages = (end - entry_base) / PAGE_SIZE;
-            size_t vma_pages = (vma->end - entry_base) / PAGE_SIZE;
+            size_t vma_pages = vma ? (vma->end - entry_base) / PAGE_SIZE : range_pages;
             if (nr > (size_t)(entries - i))
                 nr = entries - i;
             if (nr > range_pages)
@@ -871,8 +902,14 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             if (nr > vma_pages)
                 nr = vma_pages;
             if (nr >= 2) {
+                int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+                uint64_t begin = timed ? timer_get_ticks() : 0;
                 int batch = a20_cow_clone_anon_batch_rust(
                     child, parent, entry_base, table, nr, shared);
+                if (timed) {
+                    a20_perf_count(A20_PERF_MM_FORK_BATCH_CALLS);
+                    a20_perf_add(A20_PERF_MM_FORK_BATCH_TICKS, timer_get_ticks() - begin);
+                }
                 if (batch < 0)
                     return batch;
                 if (batch > 0) {
@@ -902,6 +939,8 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             if (checked && entry_base < start)
                 continue;
             int r;
+            int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+            uint64_t begin = timed ? timer_get_ticks() : 0;
 #if defined(ARCH_HAS_PGTABLE_OPS)
             /* This leaf and its table came from the active walker. The caller
              * holds parent->lock, so Rust can apply checked policy/dst rules
@@ -915,6 +954,10 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
                     : mm_fork_clone_leaf(child, parent, pte, entry_base, level,
                                          shared);
 #endif
+            if (timed) {
+                a20_perf_count(A20_PERF_MM_FORK_SCALAR_CALLS);
+                a20_perf_add(A20_PERF_MM_FORK_SCALAR_TICKS, timer_get_ticks() - begin);
+            }
             if (r < 0)
                 return r;
             continue;

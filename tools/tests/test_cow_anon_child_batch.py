@@ -136,6 +136,7 @@ static mut PRIVATE_COPY:i32=0;
 static mut SNAPSHOT_RESULT:i32=1;
 static mut MAP_RESULT:i32=0;
 static mut SPARSE:i32=0;
+static mut BORROWED:bool=false;
 static mut SNAPSHOTS:usize=0;
 static mut MAP_CALLS:usize=0;
 static mut PINS:usize=0;
@@ -147,9 +148,10 @@ static mut RSS:usize=0;
 #[no_mangle] unsafe extern "C" fn mock_snapshot(_p:*mut c_void,_c:*mut c_void,_v:usize,_n:*mut c_void,
                                                    out:*mut AnonBatchPage,count:usize,_shared:i32)->i32 {
     unsafe { SNAPSHOTS+=1; if SNAPSHOT_RESULT!=1 { return SNAPSHOT_RESULT; }
-        PINS=if SPARSE==2 {0} else if SPARSE!=0 {count-1} else {count}; for i in 0..count {
+        PINS=if SPARSE==2 || BORROWED {0} else if SPARSE!=0 {count-1} else {count}; for i in 0..count {
             if SPARSE==2 { *out.add(i)=AnonBatchPage::default(); continue; }
             if SPARSE!=0 && i==0 { *out.add(i)=AnonBatchPage::default(); continue; }
+            if BORROWED { *out.add(i)=AnonBatchPage{pfn:(i+1) as u32,class:6,flags:0x205,pcp:core::ptr::null_mut(),kind:0}; continue; }
             let cache=i%3==0;
             *out.add(i)=AnonBatchPage{pfn:(i+1) as u32,
                 class:if cache {4} else {2},flags:0x205,
@@ -164,9 +166,9 @@ static mut RSS:usize=0;
         let mut present=0;
         for i in 0..count { let p=*pages.add(i); if p.class==0 { continue; }
             assert_eq!(p.pfn,(i+1) as u32);
-            assert_eq!(p.class,if i%3==0 {4} else {2}); assert_eq!(p.flags,0x205);
+            assert_eq!(p.class,if BORROWED {6} else if i%3==0 {4} else {2}); assert_eq!(p.flags,0x205);
             present+=1; }
-        if MAP_RESULT==0 { PINS-=present; CHILD_REFS+=present; }
+        if MAP_RESULT==0 { if !BORROWED {PINS-=present;} CHILD_REFS+=present; }
         MAP_RESULT }
 }
 #[no_mangle] unsafe extern "C" fn mock_put_many(pfns:*const u32,count:usize) {
@@ -177,9 +179,15 @@ static mut RSS:usize=0;
     unsafe { assert!(!page.is_null()); assert!(PINS>0); PINS-=1; CACHE_RELEASED+=1; }
 }
 #[no_mangle] unsafe extern "C" fn mock_rss(_c:*mut c_void,pages:usize) { unsafe { RSS+=pages; } }
-unsafe fn reset() { unsafe { PRIVATE_COPY=0; SNAPSHOT_RESULT=1; MAP_RESULT=0; SPARSE=0;
+unsafe fn reset() { unsafe { PRIVATE_COPY=0; SNAPSHOT_RESULT=1; MAP_RESULT=0; SPARSE=0; BORROWED=false;
     SNAPSHOTS=0; MAP_CALLS=0; PINS=0; RELEASED=0; CACHE_RELEASED=0; CHILD_REFS=0; RSS=0; } }
 fn main() { unsafe {
+    for result in [0,ENOMEM] {
+        reset();BORROWED=true;MAP_RESULT=result;
+        assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,1),if result==0 {1} else {result});
+        assert_eq!((PINS,RELEASED,CACHE_RELEASED),(0,0,0));
+        assert_eq!(RSS,if result==0 {16} else {0});
+    }
     reset(); PRIVATE_COPY=1;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),0);
     assert_eq!((SNAPSHOTS,MAP_CALLS),(0,0));

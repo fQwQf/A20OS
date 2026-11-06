@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #define SZ (2u * 1024 * 1024)
@@ -230,6 +231,79 @@ static void file_fork_proof_invalidation(void)
     puts("FORK_EXIT_PROBE: full file table proof, mprotect, private copy, nested COW PASS");
 }
 
+/* Below the lazy-VMO threshold: exercise borrowed batch clone/teardown. */
+static void small_shared_batch_lifetime(void)
+{
+    const size_t len=64*4096;
+    volatile unsigned char *map=mmap(NULL,len,PROT_READ|PROT_WRITE,
+                                     MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    if(map==MAP_FAILED)fail("small shared map");
+    for(size_t i=0;i<len;i+=4096)map[i]=0;
+    for(unsigned round=1;round<=32;round++) {
+        pid_t child=fork();
+        if(!child){for(size_t i=0;i<len;i+=4096){if(map[i]!=round-1)_exit(56);map[i]=round;}_exit(0);}
+        wait_ok(child);
+        for(size_t i=0;i<len;i+=4096)if(map[i]!=round)fail("small shared contents");
+    }
+    int gate[2];if(pipe(gate))fail("small shared gate");
+    pid_t child=fork();
+    if(!child){char token;if(read(gate[0],&token,1)!=1)_exit(57);for(size_t i=0;i<len;i+=4096)if(map[i]!=32)_exit(58);_exit(0);}
+    if(child<0||munmap((void *)map,len))fail("small shared parent release");
+    void *poison=mmap(NULL,4*len,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if(poison==MAP_FAILED)fail("small shared poison");memset(poison,0xa5,4*len);
+    if(write(gate[1],"x",1)!=1)fail("small shared wake");wait_ok(child);
+    munmap(poison,4*len);close(gate[0]);close(gate[1]);
+    puts("FORK_EXIT_PROBE: small VMO batch, repeated child writes, last mapper, frame reuse PASS");
+}
+
+static void file_lock_lifetime(void)
+{
+    char name[] = "/tmp/fork-lock-life-XXXXXX";
+    int fd = mkstemp(name);
+    int other = fd < 0 ? -1 : open(name, O_RDWR);
+    if (fd < 0 || other < 0 || unlink(name)) fail("lock file");
+    struct flock lock = { .l_type=F_WRLCK, .l_whence=SEEK_SET, .l_start=0, .l_len=100 };
+    if (fcntl(fd, F_SETLK, &lock)) fail("parent lock");
+    for (int round=0; round<2; round++) {
+        pid_t child=fork();
+        if (!child) {
+            errno=0;
+            if (fcntl(other,F_SETLK,&lock)!=-1 || (errno!=EAGAIN && errno!=EACCES)) _exit(50);
+            _exit(0);
+        }
+        wait_ok(child); /* Child close must not release the parent's locks. */
+    }
+    lock.l_type=F_UNLCK;lock.l_start=40;lock.l_len=20;
+    if (fcntl(fd,F_SETLK,&lock)) fail("split lock");
+    pid_t child=fork();
+    if (!child) {
+        lock.l_type=F_WRLCK;
+        if (fcntl(other,F_SETLK,&lock)) _exit(51);
+        lock.l_start=0;lock.l_len=10;
+        if (fcntl(other,F_SETLK,&lock)!=-1) _exit(52);
+        _exit(0);
+    }
+    wait_ok(child);
+    int alias=dup(fd);
+    if(alias<0 || close(alias)) fail("POSIX close release");
+    child=fork();
+    if(!child) {lock.l_type=F_WRLCK;lock.l_start=0;lock.l_len=100;if(fcntl(other,F_SETLK,&lock))_exit(53);_exit(0);}
+    wait_ok(child);
+    lock.l_type=F_WRLCK;lock.l_start=0;lock.l_len=100;
+    if(fcntl(fd,F_OFD_SETLK,&lock))fail("OFD lock");
+    child=fork();
+    if(!child){if(fcntl(other,F_OFD_SETLK,&lock)!=-1)_exit(54);_exit(0);}
+    wait_ok(child);
+    if(fcntl(other,F_OFD_SETLK,&lock)!=-1)fail("OFD child exit ownership");
+    lock.l_type=F_UNLCK;if(fcntl(fd,F_OFD_SETLK,&lock))fail("OFD unlock");
+    if(flock(fd,LOCK_EX|LOCK_NB))fail("flock acquire");
+    child=fork();if(!child){if(flock(other,LOCK_EX|LOCK_NB)!=-1)_exit(55);_exit(0);}wait_ok(child);
+    if(flock(other,LOCK_EX|LOCK_NB)!=-1)fail("flock child exit ownership");
+    if(flock(fd,LOCK_UN)||flock(other,LOCK_EX|LOCK_NB))fail("flock release");
+    close(other);close(fd);
+    puts("FORK_EXIT_PROBE: POSIX split/close, OFD/flock fork/exit lifetime PASS");
+}
+
 static void targeted_waits(void)
 {
     enum { CHILDREN = 32 };
@@ -429,6 +503,8 @@ int main(void)
         fail("sparse munmap");
     high_fd_inheritance();
     file_mapping_inheritance();
+    file_lock_lifetime();
+    small_shared_batch_lifetime();
     file_fork_proof_invalidation();
     file_fault_cold_prefix();
     targeted_waits();

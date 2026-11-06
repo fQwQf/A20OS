@@ -3,6 +3,10 @@
  * unchanged Rust transaction has its own ownership/failure differential test. */
 #include <assert.h>
 #include <stdint.h>
+#define a20_perf_count(...) ((void)0)
+#define a20_perf_add(k,v) ((void)(v))
+static unsigned g_a20_perf_enabled;
+static uint64_t timer_get_ticks(void) { return 0; }
 #include <stdio.h>
 #include <string.h>
 #define PAGE_SIZE 4096UL
@@ -31,6 +35,7 @@ typedef struct {
     size_t count, calls;
     uintptr_t fail_at;
 } mm_struct_t;
+static mm_seg_t *mm_seg_find(mm_struct_t *mm, uintptr_t va) { (void)mm; (void)va; return NULL; }
 static _Alignas(8) pte_t nodes[32][4];
 static unsigned used;
 static int swap_result;

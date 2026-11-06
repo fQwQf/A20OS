@@ -45,7 +45,7 @@ typedef struct pt_mcs_node {
 typedef struct pt_meta {
     uintptr_t lock;
     unsigned level;
-    unsigned fork_file_clean;
+    unsigned fork_file_clean, fork_file_clean_before_lock;
 } pt_meta_t;
 typedef struct pt_mcs_pool {
     pt_mcs_node_t *nodes;
@@ -154,7 +154,7 @@ int main(void) {
     assert(outer.fork_file_clean);
     mcs_unlock(&outer);
     mcs_lock(&outer);
-    assert(!outer.fork_file_clean);
+    assert(!outer.fork_file_clean && outer.fork_file_clean_before_lock);
     mcs_unlock(&outer);
     migrate_pending = 1;
     uint32_t base = mcs_lock(&outer);

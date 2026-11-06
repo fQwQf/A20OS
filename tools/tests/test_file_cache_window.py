@@ -27,7 +27,7 @@ typedef uintptr_t pte_t;
 typedef uintptr_t vaddr_t;
 typedef struct { pte_t *pgdir; } mm_struct_t;
 struct page_cache_page { pfn_t pfn; int pins; };
-typedef struct { struct page_cache_page **cache_owner; uint8_t safe[64]; } pt_meta_t;
+typedef struct { struct page_cache_page **cache_owner; uint8_t safe[64], fork_file_clean, fork_file_clean_before_lock; unsigned nr_present; } pt_meta_t;
 typedef struct { int node; } mm_cursor_t;
 static pte_t tables[2][512];
 static pt_meta_t metas[2];
@@ -38,6 +38,8 @@ static int mm_addrspace_lock(mm_struct_t *m,vaddr_t s,vaddr_t e,mm_cursor_t *c) 
 }
 static pte_t *cursor_leaf_slot(mm_cursor_t *c,vaddr_t va,int create) {
  assert(!held && create);c->node=va/(512*PAGE_SIZE);assert(c->node<2);held=1;
+ metas[c->node].fork_file_clean_before_lock=metas[c->node].fork_file_clean;
+ metas[c->node].fork_file_clean=0;
  return &tables[c->node][va/PAGE_SIZE%512];
 }
 static pte_t *cursor_leaf_table(mm_cursor_t *c) { assert(held);return tables[c->node]; }
@@ -52,7 +54,7 @@ static pfn_t page_cache_pfn(struct page_cache_page *p) { assert(p->pins==1);retu
 static int pfn_valid(pfn_t p) { return p<100; }
 static pte_t arch_pte_leaf(uintptr_t p,pte_t f) { return p|f; }
 static int status_byte(int c,pte_t f) { assert((c==6||c==3)&&f);return c; }
-static void mm_pt_note_present_meta(pt_meta_t *m,int i,int s) { assert(held&&m&&i<512&&(s==6||s==3));writes++; }
+static void mm_pt_note_present_meta(pt_meta_t *m,int i,int s) { assert(held&&m&&i<512&&(s==6||s==3));writes++;m->nr_present++;m->fork_file_clean=0; }
 static void cursor_leaf_unlock(mm_cursor_t *c) { (void)c;assert(held);held=0; }
 static void mm_cursor_unlock(mm_cursor_t *c) { (void)c;assert(!held);closes++; }
 static pte_t previous;
@@ -69,7 +71,7 @@ int main(void) {
   memset(tables,0,sizeof(tables));memset(metas,0,sizeof(metas));
   held=opens=closes=writes=allocs=fail_open=0;fail_alloc=-1;
   for(int i=0;i<6;i++){pages[i]=(struct page_cache_page){i,1};pins[i]=&pages[i];}
-  if(mode==1)tables[0][510]=0xdead; /* Never overwrite even non-present entries. */
+  if(mode==1){tables[0][510]=0xdead;metas[0].nr_present=1;} /* Never overwrite even non-present entries. */
   if(mode==2)fail_alloc=1; /* Second leaf metadata allocation fails. */
   if(mode==4)fail_open=1;
   if(mode==5)metas[0].safe[63]=MM_SAFE_MASK;
@@ -84,6 +86,18 @@ int main(void) {
   }
   if(mode==1)assert(tables[0][510]==0xdead);
  }
+ /* Incremental proof survives separate canonical fills, but an ordinary
+  * writer invalidates it and mixed tables cannot re-establish it. */
+ memset(tables,0,sizeof(tables));memset(metas,0,sizeof(metas));
+ held=opens=closes=writes=allocs=fail_open=0;fail_alloc=-1;
+ for(int i=0;i<6;i++){pages[i]=(struct page_cache_page){i,1};pins[i]=&pages[i];}
+ assert(mm_map_private_cache_window(&mm,0,PAGE_SIZE,pins,1,5)==1);
+ assert(metas[0].fork_file_clean);
+ assert(mm_map_private_cache_window(&mm,PAGE_SIZE,2*PAGE_SIZE,pins+1,1,5)==1);
+ assert(metas[0].fork_file_clean && metas[0].nr_present==2);
+ metas[0].fork_file_clean=0; /* unrelated writer/protection/COW */
+ assert(mm_map_private_cache_window(&mm,2*PAGE_SIZE,3*PAGE_SIZE,pins+2,1,5)==1);
+ assert(!metas[0].fork_file_clean);
  /* Borrowed executable VMO frames use no cache-owner allocation/pin. */
  memset(tables,0,sizeof(tables));memset(metas,0,sizeof(metas));
  held=opens=closes=writes=allocs=fail_open=icache=0;fail_alloc=0;
