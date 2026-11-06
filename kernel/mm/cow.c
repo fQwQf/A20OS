@@ -340,6 +340,39 @@ static int cow_file_leaf_refaultable(const mm_seg_t *vma, pt_meta_t *meta,
     page_cache_page_t *owner = meta->cache_owner[index];
     return owner && page_cache_pfn(owner) == phys_to_pfn(arch_pte_addr(source));
 }
+/* Read-only proof, with parent->lock held: avoid constructing empty clone
+ * transactions for a whole range of recoverable cache leaves. No persistent
+ * summary is trusted, so every replacement and permission change stays valid. */
+static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
+                                      int first, int count)
+{
+    if (!vma || !vma->file || !vma->file_vnode ||
+        vma->end - vma->start < 1024 * 1024 || (vma->vm_flags & VM_EXEC) ||
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_VMO | VM_PFNMAP)) != VM_FILE ||
+        arch_fork_requires_private_copy())
+        return 0;
+    pt_meta_t *meta = mm_pt_meta(node);
+    if (!meta || !meta->cache_owner)
+        return 0;
+    int recoverable = 1;
+    mm_pt_node_lock(node);
+    for (int i = first; i < first + count; i++) {
+        pte_t source = node[i];
+        if (!source)
+            continue;
+        page_cache_page_t *owner = meta->cache_owner[i];
+        if (!(source & PTE_V) || !arch_pte_is_leaf(source) || (source & PTE_W) ||
+            MM_ST_GET_CLASS(meta->cls[i]) != MM_ST_FILE_PRIVATE ||
+            (meta->safe[i >> 3] & MM_SAFE_MASK) || !owner ||
+            page_cache_pfn(owner) != phys_to_pfn(arch_pte_addr(source))) {
+            recoverable = 0;
+            break;
+        }
+    }
+    mm_pt_node_unlock(node);
+    return recoverable;
+}
+
 #endif
 
 /* MM_FORK_SNAPSHOT_PIN: snapshot and pin the source leaf under the parent's
@@ -401,7 +434,7 @@ static int a20_cow_share_snapshot_from_slot(
             pcp = NULL;
     }
 #endif
-    if (!pcp && is_file)
+    if (!pcp && is_file && cls != MM_ST_ANON_MAPPED)
         pcp = mm_file_cache_mapping_get(vma, va, pfn);
     if (!pcp && !is_vmo)
         frame_get(pfn);
@@ -488,15 +521,21 @@ static void cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
     if (!src_pte)
         return;
     uintptr_t pa = snapshot->pa;
+    pte_t desired;
 #ifdef ARCH_HAS_PTE_BLOCK
     size_t leaf_size = vm_pt_level_size(level);
-    *src_pte = (leaf_size >= PMD_SIZE)
+    desired = (leaf_size >= PMD_SIZE)
                    ? arch_pte_block((paddr_t)pa, (pte_t)flags)
                    : arch_pte_leaf((paddr_t)pa, (pte_t)flags);
 #else
-    *src_pte = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+    desired = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
 #endif
-    mm_tlb_note_change(parent, va, vm_pt_level_size(level));
+    /* Repeated forks often see an already clean, read-only COW leaf.
+     * Identical PTEs require neither a rewrite nor a TLB invalidation. */
+    if (*src_pte != desired) {
+        *src_pte = desired;
+        mm_tlb_note_change(parent, va, vm_pt_level_size(level));
+    }
 #if defined(ARCH_HAS_PGTABLE_OPS)
     if (snapshot->node) {
         int idx = arch_pt_vpn(va, level);
@@ -675,7 +714,8 @@ int a20_cow_share_anon_batch_snapshot(
             page_cache_pin(pcp);
         else
             pcp = NULL;
-        if (!pcp && (vma->vm_flags & VM_FILE))
+        if (!pcp && (vma->vm_flags & VM_FILE) &&
+            out[i].class != MM_ST_ANON_MAPPED)
             pcp = mm_file_cache_mapping_get(vma, va, pfns[i]);
         if (pcp) {
             out[i].pcp = pcp;
@@ -779,6 +819,16 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
 
     size_t span = vm_pt_level_size(level);
     int entries = arch_pt_level_entries(level);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    if (!checked && !shared && level == 0 && vma &&
+        start >= vma->start && end <= vma->end) {
+        int first = start > base ? (start - base) / PAGE_SIZE : 0;
+        int last = end - base < (vaddr_t)entries * PAGE_SIZE
+            ? (int)((end - base) / PAGE_SIZE) : entries;
+        if (first < last && cow_file_range_refaultable(vma, table, first, last - first))
+            return 0;
+    }
+#endif
     for (int i = 0; i < entries; i++) {
         vaddr_t entry_base = base + (vaddr_t)i * span;
         vaddr_t entry_end = entry_base + span;
