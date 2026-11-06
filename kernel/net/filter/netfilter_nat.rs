@@ -333,7 +333,12 @@ fn ct_reply_tuple(e: &ConntrackEntry) -> (u32, u32, u16, u16) {
         _ => {}
     }
     if e.proto == PROTO_ICMP {
-        (rsrc, rdst, ICMP_ECHO_REQUEST, e.dst_port)
+        let id = if matches!(e.nat, NAT_SNAT | NAT_MASQUERADE) && e.nat_src_port != 0 {
+            e.nat_src_port
+        } else {
+            e.dst_port
+        };
+        (rsrc, rdst, ICMP_ECHO_REQUEST, id)
     } else {
         (rsrc, rdst, rsport, rdport)
     }
@@ -360,7 +365,11 @@ unsafe fn ct_find_except(
 ) -> Option<(usize, bool)> {
     let buckets = v.0.buckets;
     let b0 = ct_hash(src, dst, sport, dport, proto, buckets);
-    let b1 = ct_hash(dst, src, dport, sport, proto, buckets);
+    let b1 = if proto == PROTO_ICMP {
+        ct_hash(dst, src, sport, dport, proto, buckets)
+    } else {
+        ct_hash(dst, src, dport, sport, proto, buckets)
+    };
 
     for pass in 0..2 {
         let b = if pass == 0 { b0 } else { b1 };
@@ -409,11 +418,7 @@ unsafe fn ct_find_except(
         }
         if e.proto == proto {
             let (rsrc, rdst, rsport, rdport) = ct_reply_tuple(&e);
-            if proto == PROTO_ICMP {
-                if rsrc == src && rdst == dst && e.dst_port == dport {
-                    return Some((idx as usize, true));
-                }
-            } else if rsrc == src && rdst == dst && rsport == sport && rdport == dport {
+            if rsrc == src && rdst == dst && rsport == sport && rdport == dport {
                 return Some((idx as usize, true));
             }
         }
@@ -870,19 +875,18 @@ unsafe fn select_nat(
     if e.nat_src_addr == 0 {
         return -EINVAL;
     }
-    // ICMP identifiers are not TCP/UDP ports; never feed them to a port writer.
-    if e.proto == PROTO_ICMP {
-        return if binding_free(v, e, skip) { 0 } else { -ENOSPC };
-    }
-    e.nat_src_port = if rule.nat_port != 0 {
-        rule.nat_port
+    let fixed_port = if e.proto == PROTO_ICMP { 0 } else { rule.nat_port };
+    e.nat_src_port = if e.proto == PROTO_ICMP {
+        e.dst_port
+    } else if fixed_port != 0 {
+        fixed_port
     } else {
         e.src_port
     };
     if binding_free(v, e, skip) {
         return 0;
     }
-    if rule.nat_port != 0 {
+    if fixed_port != 0 {
         return -ENOSPC;
     } // Explicit fixed mapping is a contract.
     const FIRST: u32 = 1024;
@@ -900,6 +904,16 @@ unsafe fn select_nat(
     }
     -ENOSPC
 }
+fn rewrite_echo_id(frame: &mut [u8], pkt: &Frame, id: u16) {
+    let at = pkt.icmp_off as usize;
+    if at == 0 || frame.len() < at + 8 || pkt.icmp_id == id {
+        return;
+    }
+    let check = delta16(wire16(frame, at + 2), wire16(frame, at + 4), id);
+    put16(frame, at + 2, check);
+    put16(frame, at + 4, id);
+}
+
 unsafe fn translate(
     frame: *mut u8,
     len: usize,
@@ -911,12 +925,16 @@ unsafe fn translate(
     if e.nat == NAT_SNAT || e.nat == NAT_MASQUERADE {
         if reverse && dir == DIR_IN {
             a20_netfilter_rewrite_set_addr(frame, len, pkt, pkt.src_addr, e.src_addr);
-            if e.proto != PROTO_ICMP {
+            if e.proto == PROTO_ICMP {
+                rewrite_echo_id(core::slice::from_raw_parts_mut(frame, len), pkt, e.dst_port);
+            } else {
                 a20_netfilter_rewrite_set_port(frame, len, pkt, 0, e.src_port);
             }
         } else if !reverse && dir == DIR_OUT {
             a20_netfilter_rewrite_set_addr(frame, len, pkt, e.nat_src_addr, pkt.dst_addr);
-            if e.proto != PROTO_ICMP {
+            if e.proto == PROTO_ICMP {
+                rewrite_echo_id(core::slice::from_raw_parts_mut(frame, len), pkt, e.nat_src_port);
+            } else {
                 a20_netfilter_rewrite_set_port(frame, len, pkt, 1, e.nat_src_port);
             }
         }
@@ -1008,7 +1026,11 @@ fn quote_rewrite(
     }
     put32(b, at + 12, new.0);
     put32(b, at + 16, new.1);
-    if proto != PROTO_ICMP {
+    if proto == PROTO_ICMP {
+        let check = delta16(wire16(b, transport + 2), old.3, new.3);
+        put16(b, transport + 2, check);
+        put16(b, transport + 4, new.3);
+    } else {
         put16(b, transport, new.2);
         put16(b, transport + 2, new.3);
     }
@@ -1109,11 +1131,7 @@ unsafe fn translate_icmp_error(v: &View, bytes: &mut [u8], pkt: &Frame, dir: u8)
         rd,
         rs,
         if protocol == PROTO_ICMP { 8 } else { rdp },
-        if protocol == PROTO_ICMP {
-            e.dst_port
-        } else {
-            rsp
-        },
+        if protocol == PROTO_ICMP { rdp } else { rsp },
     );
     let original_reply = (
         e.dst_addr,
@@ -1148,11 +1166,7 @@ unsafe fn translate_icmp_error(v: &View, bytes: &mut [u8], pkt: &Frame, dir: u8)
                 rs,
                 rd,
                 if protocol == PROTO_ICMP { 8 } else { rsp },
-                if protocol == PROTO_ICMP {
-                    e.dst_port
-                } else {
-                    rdp
-                },
+                rdp,
             ),
             if snat && pkt.src_addr == e.src_addr {
                 rd

@@ -260,7 +260,7 @@ typedef struct {
     uint8_t  dir;           /* netfilter_dir_t of the packet that created it */
     uint32_t nat_src_addr;  /* SNAT/MASQ: translated source */
     uint32_t nat_dst_addr;  /* DNAT: translated destination */
-    uint16_t nat_src_port;  /* translated source port, 0 = unchanged */
+    uint16_t nat_src_port;  /* translated source port or echo ID, 0 = unchanged */
     uint16_t nat_dst_port;
     uint32_t last_ms;       /* idle-timeout reference and LRU key */
     uint64_t packets;
@@ -299,14 +299,9 @@ typedef enum {
  * MASQUERADE takes its address from the outgoing netif at translation time,
  * which is why it carries no address here; SNAT and DNAT require one.
  *
- * HONEST LIMIT: ports are never remapped.  `nat_port` of 0 means "keep the
- * original port", and a non-zero `nat_port` is applied verbatim -- there is no
- * allocator picking a free source port.  This is the right default for the
- * two cases that matter here (container egress masquerade, where the
- * translated address is already unique per flow; and port forwarding, where
- * the forwarded port is unique by construction), but a host that translated
- * many flows onto one address and one port would have them collapse onto a
- * single binding.
+ * SNAT and MASQUERADE preserve the original source port or ICMP echo
+ * identifier while the reply tuple is free. A collision takes a free port or
+ * identifier. An explicit TCP/UDP nat_port reserves that fixed port.
  */
 typedef struct {
     uint8_t  dir;          /* netfilter_dir_t */
