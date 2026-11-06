@@ -18,6 +18,7 @@ struct State {
     paged: bool,
     charge_fail: bool,
     alloc_fail: bool,
+    prepare_fail: bool,
     pager_rc: i32,
     pager_supplies: bool,
     locked: bool,
@@ -50,6 +51,7 @@ struct State {
     destroy_phys_pages: u64,
 }
 static STATE: Mutex<State> = Mutex::new(State {
+    prepare_fail:false,
     slot:u32::MAX, paged:false, charge_fail:false, alloc_fail:false,
     pager_rc:0, pager_supplies:false, locked:false, charge:0, uncharge:0,
     alloc:0, free:0, zero:0, publish:0,
@@ -87,11 +89,11 @@ unsafe extern "C" fn a20_vmo_page_paged_fault(_: *mut core::ffi::c_void, _: u32,
     s.pager_rc
 }
 #[no_mangle]
-unsafe extern "C" fn a20_vmo_page_charge(_: *mut core::ffi::c_void) -> i32 {
+unsafe extern "C" fn a20_vmo_page_charge(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) -> i32 {
     let mut s=STATE.lock().unwrap(); assert!(s.locked); s.charge+=1; if s.charge_fail {-12} else {0}
 }
 #[no_mangle]
-unsafe extern "C" fn a20_vmo_page_uncharge(_: *mut core::ffi::c_void) {
+unsafe extern "C" fn a20_vmo_page_uncharge(_: *mut core::ffi::c_void, _: *mut core::ffi::c_void) {
     let mut s=STATE.lock().unwrap(); assert!(s.locked); s.uncharge+=1;
 }
 #[no_mangle]
@@ -105,6 +107,10 @@ unsafe extern "C" fn a20_vmo_page_zero(_: u32) { let mut s=STATE.lock().unwrap()
 #[no_mangle]
 unsafe extern "C" fn a20_vmo_page_publish_locked(_: *mut core::ffi::c_void, _: u32, p: u32, _: *mut core::ffi::c_void) {
     let mut s=STATE.lock().unwrap(); assert!(s.locked); assert_eq!(s.slot,u32::MAX); s.slot=p; s.publish+=1;
+}
+#[no_mangle]
+unsafe extern "C" fn a20_vmo_page_prepare_locked(_: *mut core::ffi::c_void, _: u32, _: *mut core::ffi::c_void) -> i32 {
+    let s=STATE.lock().unwrap(); assert!(s.locked); if s.prepare_fail {-12} else {0}
 }
 
 #[no_mangle]
@@ -191,6 +197,7 @@ fn reset() {
     let old_table=STATE.lock().unwrap().resize_table_ptr;
     if old_table != 0 { unsafe { a20_vmo_resize_free_table(old_table as *mut _) }; }
     *STATE.lock().unwrap() = State {
+    prepare_fail:false,
     slot:u32::MAX, paged:false, charge_fail:false, alloc_fail:false,
     pager_rc:0, pager_supplies:false, locked:false, charge:0, uncharge:0,
     alloc:0, free:0, zero:0, publish:0,
@@ -278,6 +285,13 @@ fn destroy_flushes_before_pages_then_uncharges_before_free_object() {
     reset(); { let mut s=STATE.lock().unwrap();s.resize_count=3;s.resize_slots[0]=11;s.resize_slots[2]=13;s.resize_phys_size=8192;s.resize_charged=2; }
     unsafe { production::test_destroy(obj()); }
     let s=STATE.lock().unwrap();assert_eq!(s.destroy_notify,1);assert_eq!(s.destroy_detach,1);assert_eq!(s.destroy_phys_pages,2);assert_eq!(s.destroy_flush,1);assert_eq!(s.destroy_release,2);assert_eq!(s.destroy_uncharge,1);assert_eq!(s.destroy_free_pages,1);assert_eq!(s.destroy_free_object,1);
+}
+#[test]
+fn sparse_metadata_failure_acquires_no_frame_or_charge() {
+    reset(); STATE.lock().unwrap().prepare_fail=true;
+    let r=unsafe { production::test_materialize(obj(),0,&CG as *const _ as *mut _,true,true) };
+    assert_eq!(r,Err(-12));
+    let s=STATE.lock().unwrap();assert_eq!(s.charge,0);assert_eq!(s.alloc,0);assert_eq!(s.publish,0);assert!(!s.locked);
 }
 #[test]
 fn destroy_routes_invalid_pfn_to_c_fail_stop_primitive() {

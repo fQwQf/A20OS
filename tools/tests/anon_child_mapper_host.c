@@ -33,6 +33,7 @@ static pfa_t pfa;
 #define EEXIST 17
 #define ENOMEM 12
 #define MM_ST_ANON_MAPPED 2u
+#define MM_ST_VMO 6u
 #define MM_ST_ANON_SHARED 3u
 #define MM_ST_FILE_PRIVATE 4u
 #define MM_ST_FILE_SHARED 5u
@@ -82,7 +83,8 @@ static void mm_pt_note_present(pte_t *owner, int level, int idx, uint8_t cls) {
     assert((cls & 0x7f) == MM_ST_ANON_MAPPED ||
            (cls & 0x7f) == MM_ST_ANON_SHARED ||
            (cls & 0x7f) == MM_ST_FILE_PRIVATE ||
-           (cls & 0x7f) == MM_ST_FILE_SHARED); status_calls++;
+           (cls & 0x7f) == MM_ST_FILE_SHARED ||
+           (cls & 0x7f) == MM_ST_VMO); status_calls++;
 }
 static void mm_pt_note_present_meta(pt_meta_t *meta, int idx, uint8_t cls) {
     (void)meta;
@@ -113,7 +115,7 @@ static void fill(struct a20_cow_anon_batch_page *pages, size_t n, uintptr_t flag
         .class=MM_ST_ANON_MAPPED, .flags=flags, .pcp=NULL, .kind=1 };
 }
 int main(void) {
-    struct a20_cow_anon_batch_page pages[16];
+    struct a20_cow_anon_batch_page pages[A20_COW_ANON_BATCH_PAGES];
     const vaddr_t start=0x20000;
     reset(); fill(pages,16,PTE_U|PTE_X);
     reset();
@@ -181,7 +183,7 @@ int main(void) {
 
     reset(); fill(pages,16,PTE_U);
     assert(pt_map_anon_batch(child_slots,start,pages,0,0)<0);
-    assert(pt_map_anon_batch(child_slots,start,pages,17,0)<0);
+    assert(pt_map_anon_batch(child_slots,start,pages,A20_COW_ANON_BATCH_PAGES+1,0)<0);
     assert(pt_map_anon_batch(child_slots,start+1,pages,16,0)<0);
     assert(pt_map_anon_batch(child_slots,USER_VA_LIMIT-PAGE_SIZE,pages,16,0)<0);
     assert(pt_map_anon_batch(child_slots,0x1ff000,pages,16,0)<0); /* crosses L0 */
@@ -205,6 +207,14 @@ int main(void) {
     reset(); fill(pages,16,PTE_U); bad_meta=1;
     assert(pt_map_anon_batch(child_slots,start,pages,16,0)<0);
     assert(walk_calls==1 && installs==0 && status_calls==0 && frame_puts==0);
+    reset(); fill(pages,A20_COW_ANON_BATCH_PAGES,PTE_U);
+    assert(pt_map_anon_batch(child_slots,start,pages,A20_COW_ANON_BATCH_PAGES,0)==0);
+    assert(installs==A20_COW_ANON_BATCH_PAGES && status_calls==A20_COW_ANON_BATCH_PAGES);
+    reset(); fill(pages,16,PTE_U|PTE_W);
+    for(int i=0;i<16;i++){pages[i].class=MM_ST_VMO;pages[i].kind=0;}
+    assert(pt_map_anon_batch(child_slots,start,pages,16,1)==0);
+    assert(installs==16 && status_calls==16 && !frame_puts);
+    for(int i=0;i<16;i++)assert(child_slots[32+i]&PTE_W);
     puts("ANON_CHILD_BATCH_C_MAPPER: actual extracted functions, whole-run preflight and install PASS");
     return 0;
 }

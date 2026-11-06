@@ -14,6 +14,7 @@ static task_t *current_task;
 static int finalized_files;
 static int finalizer_error;
 static int fail_next_kmalloc;
+static int fail_kmalloc_after = -1;
 static int fail_vfile_get_at = -1;
 static int vfile_get_attempts;
 static void *expected_table_free;
@@ -47,8 +48,14 @@ void *kmalloc(size_t size)
 {
     if (__atomic_exchange_n(&fail_next_kmalloc, 0, __ATOMIC_RELAXED))
         return NULL;
+    if (fail_kmalloc_after == 0) {
+        fail_kmalloc_after = -1;
+        return NULL;
+    }
+    if (fail_kmalloc_after > 0) fail_kmalloc_after--;
     return malloc(size);
 }
+void *kmalloc_atomic(size_t size) { return kmalloc(size); }
 void kfree(void *ptr)
 {
     if (ptr && ptr == expected_table_free)
@@ -202,7 +209,7 @@ static int inspect_current_vfile(vfile_t *vf, void *opaque)
 static void close_all_slots(task_t *task)
 {
     files_struct_t *files = (files_struct_t *)task->files;
-    for (int fd = 0; fd < MAX_FILES; fd++)
+    for (int fd = 0; (size_t)fd < files->capacity; fd++)
         if (files->fd[fd])
             check(fdtable_close_files(files, fd, task->pid) == 0, "close slot");
 }
@@ -302,7 +309,7 @@ static void test_lifecycle(void)
     /* An occupied bitmap bit without a vfile makes clone validation fail.
      * unshare must discard its partially allocated destination and retain
      * the shared table and all existing file references. */
-    const int malformed_fd = MAX_FILES - 1;
+    const int malformed_fd = (int)parent_files->capacity - 1;
     parent_files->open_mask[malformed_fd / 64] |=
         UINT64_C(1) << (malformed_fd % 64);
     int old_table_refs = parent_files->refcount.value;
@@ -371,6 +378,12 @@ static void test_checked_copy_failure_atomicity(void)
     check(dst.files == original_dst && original_dst->owners == 1 &&
               original_dst->fd[0] == &replaced && replaced.ref_count.value == 1,
           "allocation failure preserves destination pointer/owners/refs");
+    fail_kmalloc_after = 1; /* table succeeds; backing-array growth fails */
+    check(fdtable_copy_checked(&dst, &src) == -ENOMEM &&
+          dst.files == original_dst && replaced.ref_count.value == 1,
+          "clone storage OOM preserves published destination");
+    for (int i = 0; i < 3; i++)
+        check(inherited[i].ref_count.value == 1, "clone growth OOM acquires no refs");
     for (int failure = 0; failure < 3; failure++) {
         fail_vfile_get_at = failure;
         vfile_get_attempts = 0;
@@ -683,8 +696,11 @@ static void test_bulk_close_on_exec_allocation_paths(void)
         check(fdtable_set_cloexec(&task, afd, 1) == 0 &&
                   fdtable_set_cloexec(&task, cfd, 1) == 0,
               "bulk close-on-exec subset flagged");
-        if (fail_alloc)
+        if (fail_alloc) {
+            check(fdtable_dup(&task, afd, 64, 0) == 64 &&
+                  fdtable_close(&task, 64) == 0, "grow for heap scratch OOM");
             fail_next_kmalloc = 1;
+        }
         fdtable_close_on_exec(&task);
         files_struct_t *files = (files_struct_t *)task.files;
         check(files->fd[afd] == NULL && files->fd[bfd] == &b &&
@@ -813,6 +829,8 @@ static void test_oom_closeexec_concurrent_reuse(void)
     check(fdtable_set_cloexec(&task, 0, 1) == 0 &&
               fdtable_set_cloexec(&task, 2, 1) == 0,
           "concurrent OOM closeexec flags set");
+    check(fdtable_dup(&task, 0, 64, 0) == 64 &&
+          fdtable_close(&task, 64) == 0, "grow concurrent OOM scratch table");
     close_race_vfile = &first;
     close_race_task = &task;
     close_race_replacement = &replacement;
@@ -915,9 +933,56 @@ static void test_concurrent_allocation(void)
     puts("FDTABLE_DIFF: concurrent allocation/dup/conditional-close churn PASS");
 }
 
+static void test_capacity_growth(void)
+{
+    task_t task;
+    vfile_t vf[MAX_FILES];
+    init_task(&task, 111);
+    current_task = &task;
+    files_struct_t *files = task.files;
+    check(files->capacity == FDTABLE_INLINE_FILES && files->fd == files->inline_fd,
+          "new table has inline storage");
+    for (int i = 0; i < MAX_FILES; i++) init_vfile(&vf[i], 1100 + i);
+    for (int i = 0; i < FDTABLE_INLINE_FILES; i++)
+        check(fdtable_install_vfile(&task, &vf[i], 0) == i, "fill inline capacity");
+    check(fdtable_get(&task, MAX_FILES - 1) == -EBADF &&
+          fdtable_get_file_ref(&task, MAX_FILES - 1, NULL) == NULL &&
+          fdtable_close(&task, MAX_FILES - 1) == -EBADF &&
+          fdtable_get_cloexec(&task, MAX_FILES - 1) == -EBADF,
+          "unallocated high descriptors fail without out-of-bounds access");
+    task.limits.nofile = FDTABLE_INLINE_FILES;
+    check(fdtable_install_vfile(&task, &vf[64], 0) == -EMFILE &&
+          files->fd == files->inline_fd, "rlimit prevents expansion");
+    task.limits.nofile = MAX_FILES;
+    fail_next_kmalloc = 1;
+    check(fdtable_install_vfile(&task, &vf[64], 0) == -ENOMEM &&
+          vf[64].ref_count.value == 1 && files->fd == files->inline_fd,
+          "install growth failure retains caller reference and old storage");
+    fail_next_kmalloc = 1;
+    check(fdtable_dup_to(&task, 0, MAX_FILES - 1, 0) == -ENOMEM &&
+          vf[0].ref_count.value == 1 && files->capacity == 64,
+          "dup_to growth failure retains source ownership");
+    fail_next_kmalloc = 1;
+    check(fdtable_dup(&task, 0, 64, 0) == -ENOMEM && vf[0].ref_count.value == 1,
+          "dup growth failure acquires no reference");
+    for (int i = 64; i < MAX_FILES; i++)
+        check(fdtable_install_vfile(&task, &vf[i], i & 1 ? O_CLOEXEC : 0) == i,
+              "grow through word boundary and partial final word");
+    check(files->capacity == MAX_FILES && files->fd != files->inline_fd,
+          "growth is capped at descriptor maximum");
+    for (int i = 0; i < MAX_FILES; i++)
+        check(files->fd[i] == &vf[i] && vf[i].ref_count.value == 1,
+              "growth moves references without get/put");
+    fdtable_release_files(&task);
+    for (int i = 0; i < MAX_FILES; i++)
+        check(vf[i].ref_count.value == 0, "grown table releases every reference once");
+    puts("FDTABLE_DIFF: capacity growth, bounds, rlimit and allocation rollback PASS");
+}
+
 int main(void)
 {
     spin_init(&tasklist_lock);
+    test_capacity_growth();
     test_lifecycle();
     test_checked_copy_failure_atomicity();
     test_unshare_allocation_failure_preserves_shared_table();
@@ -962,7 +1027,7 @@ int main(void)
         fdtable_release_files(&task);
         current_task = NULL;
     }
-    check(finalized_files == 42, "finalizer called once per owned file");
+    check(finalized_files == 42 + MAX_FILES, "finalizer called once per owned file");
 #ifdef CONFIG_FDTABLE_STATE_RUST
     puts("FDTABLE_DIFF: rust-selected production fdtable.c PASS");
 #else

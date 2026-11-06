@@ -1,6 +1,8 @@
 /* Execute actual C snapshot/downgrade/unlock/ref-drop adapters. */
 #include <assert.h>
 #include <stdint.h>
+#define a20_perf_count(...) ((void)0)
+#define a20_perf_add(k,v) ((void)(v))
 #include <stdio.h>
 #include <string.h>
 #define PAGE_SIZE 4096UL
@@ -10,19 +12,41 @@
 #define VM_VMO 16
 #define VM_FILE 32
 #define VM_SHARED 64
+#define VM_ANON 128
+#define VM_PFNMAP 256
+#define VM_DONTFORK 512
+#define VM_WIPEONFORK 1024
+#define VM_EXEC 2048
+#define MM_SAFE_UFFD 1
+#define MM_SAFE_NO_FA 2
+#define MM_SAFE_MASK 3
+#define A20_COW_ANON_BATCH_PAGES 16
 /* CLASS_DEFINITIONS */
 #define PTE_V 1UL
 #define PTE_W 2UL
 #define PTE_COW 4UL
 #define PTE_LEAF 8UL
+#define PTE_X 16UL
 typedef uintptr_t pte_t;
 typedef uintptr_t paddr_t;
 typedef uintptr_t vaddr_t;
 typedef uint32_t pfn_t;
-typedef struct { pte_t *pgdir; } mm_struct_t;
-typedef struct { unsigned vm_flags; uintptr_t start, end; } mm_seg_t;
+typedef struct mm_seg { unsigned vm_flags; uintptr_t start, end; void *file, *file_vnode; struct mm_seg *next; } mm_seg_t;
+typedef struct { pte_t *pgdir; mm_seg_t *mmap; } mm_struct_t;
 typedef struct { int pin; } page_cache_page_t;
-typedef struct { int unused; } pt_meta_t;
+typedef struct { uint8_t cls[512], safe[64], fork_file_clean; page_cache_page_t **cache_owner; } pt_meta_t;
+struct a20_cow_anon_batch_page { uint32_t pfn, class; uintptr_t flags; void *pcp; uint32_t kind; };
+static pt_meta_t metadata;
+static page_cache_page_t *cache_owners[512];
+static int private_copy;
+static pfn_t cache_pfn;
+static int arch_fork_requires_private_copy(void) { return private_copy; }
+static pt_meta_t *mm_pt_meta(pte_t *table) { (void)table; return &metadata; }
+static int mm_pt_meta_level(pt_meta_t *meta) { (void)meta; return 0; }
+static int pfn_valid(pfn_t pfn) { return pfn == 9; }
+static int cow_child_batch_empty(mm_struct_t *mm, uintptr_t va, size_t nr, int first) {
+    (void)mm; (void)va; (void)nr; (void)first; return 1;
+}
 static pte_t tables[2][512];
 static mm_seg_t vma;
 static page_cache_page_t cache;
@@ -41,8 +65,12 @@ static pte_t *mm_pt_leaf_table(pte_t *pgdir,uintptr_t va) {
     (void)pgdir;(void)va;node_walks++;return tables[active];
 }
 static void mm_pt_node_lock(pte_t *table) {
-    assert(locked==-1);locked=table==tables[0]?0:1;locks++;
+    assert(locked==-1);metadata.fork_file_clean=0;locked=table==tables[0]?0:1;locks++;
     if(vanish_on_lock) { tables[locked][expected_index]=0; vanish_on_lock=0; }
+}
+static void mm_pt_node_observe_lock(pte_t *table) {
+    int clean=metadata.fork_file_clean;
+    mm_pt_node_lock(table);metadata.fork_file_clean=clean;
 }
 static void mm_pt_node_unlock(pte_t *table) {
     assert(locked==(table==tables[0]?0:1));locked=-1;unlocks++;
@@ -64,19 +92,24 @@ static uint8_t mm_pt_peek(pte_t *table,int level,int idx) {
 /* CLASS_HELPER */
 static page_cache_page_t *mm_pt_cache_peek(pte_t *table,int idx) {
     assert(locked==0&&table==tables[0]&&idx==expected_index);
-    return NULL;
+    return metadata.cache_owner ? metadata.cache_owner[idx] : NULL;
 }
 static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *v,uintptr_t va,pfn_t pfn) {
     (void)v;(void)va;assert(locked==0&&pfn==9);
     if(cache_mode){cache.pin++;return &cache;}return NULL;
 }
+static unsigned cache_pfn_reads;
 static pfn_t page_cache_pfn(page_cache_page_t *page) {
-    assert(page==&cache);return 9;
+    cache_pfn_reads++;
+    assert(page==&cache);return cache_pfn;
 }
 static void page_cache_pin(page_cache_page_t *page) {
     assert(page==&cache);cache.pin++;
 }
 static void frame_get(pfn_t pfn) {assert(locked==0&&pfn==9);frame_gets++;}
+static void frame_get_many(const pfn_t *pfns, size_t count) {
+    for (size_t i=0; i<count; i++) frame_get(pfns[i]);
+}
 static void frame_put(pfn_t pfn) {assert(locked==-1&&pfn==9);frame_puts++;}
 static void page_cache_put(page_cache_page_t *p) {assert(locked==-1&&p==&cache);cache.pin--;cache_puts++;}
 static size_t vm_pt_level_size(int level) {return level?PMD_SIZE:PAGE_SIZE;}
@@ -106,11 +139,13 @@ static void reset(void) {
     tables[0][0]=0x9000|PTE_V|PTE_W|PTE_LEAF;
     active=leaf_walks=node_walks=locks=unlocks=frame_gets=frame_puts=cache_puts=statuses=changes=0;
     cache_mode=0;cache.pin=0;vma.vm_flags=0;present_vma=1;
+    vma.file=vma.file_vnode=NULL;private_copy=0;cache_pfn=9;
+    memset(&metadata,0,sizeof(metadata));memset(cache_owners,0,sizeof(cache_owners));
     stored_class=expected_class=MM_ST_FILE_PRIVATE;status_reads=vma_lookups=0;
     expected_level=-1;expected_index=0;expected_va=0;vanish_on_lock=0;
 }
 int main(void) {
-    mm_struct_t parent={tables[0]};struct a20_cow_shared_snapshot snap;
+    mm_struct_t parent={.pgdir=tables[0]};struct a20_cow_shared_snapshot snap;
     for(int level=0;level<2;level++)for(int kind=0;kind<3;kind++) {
         reset();if(kind==1){cache_mode=1;vma.vm_flags=VM_FILE;}if(kind==2)vma.vm_flags=VM_VMO;
         expected_index=0;expected_va=0;
@@ -126,6 +161,8 @@ int main(void) {
         a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
         assert((tables[0][0]&PTE_COW)&&!(tables[0][0]&PTE_W));
         assert(tables[1][0]==0&&changes==1&&changed_size==vm_pt_level_size(level)&&statuses==1);
+        a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
+        assert(changes==1&&statuses==2);
         a20_cow_share_unlock(&snap);
         assert(locked==-1&&locks==1&&unlocks==1&&leaf_walks==1&&node_walks==1);
         a20_cow_release_ref(&snap);
@@ -227,6 +264,124 @@ int main(void) {
     assert(a20_cow_share_snapshot_at_vma(&parent,0,0,&tables[0][0],tables[0],
                                          &vma,&snap)==0);
     assert(vma_lookups==0&&frame_gets==0&&locks==1&&unlocks==1&&locked==-1);
-    puts("COW_SNAPSHOT_TOKEN: real C adapters PASS old+walker tokens, no-root-walk, refs, huge/status and vanished leaf");
+    /* The elision proof is cache ownership, never read-only permission. */
+    reset(); vma.vm_flags=VM_FILE;vma.file=vma.file_vnode=&vma;
+    vma.start=0;vma.end=1024*1024;metadata.cache_owner=cache_owners;
+    for(int i=0;i<16;i++) {
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_FILE_PRIVATE);
+        cache_owners[i]=&cache;
+        tables[0][i]=0x9000|PTE_V|PTE_LEAF|PTE_COW;
+    }
+    pte_t clean=tables[0][0];
+    assert(cow_file_range_refaultable(&vma,tables[0],0,16));
+    assert(!metadata.fork_file_clean);
+    for(int bad=0;bad<16;bad++) {
+        cache_owners[bad]=NULL;
+        assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
+        assert(locked==-1);
+        cache_owners[bad]=&cache;
+        tables[0][bad]|=PTE_W;
+        assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
+        tables[0][bad]=clean;
+    }
+    metadata.safe[1]=MM_SAFE_MASK;
+    assert(!cow_file_range_refaultable(&vma,tables[0],0,16));
+    assert(cow_file_range_refaultable(&vma,tables[0],0,8));
+    metadata.safe[1]=0;
+    tables[0][15]=0;
+    assert(cow_file_range_refaultable(&vma,tables[0],0,16));
+    tables[0][15]=clean;
+
+    assert(cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));
+    vma.end=1024*1024-PAGE_SIZE;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));vma.end=1024*1024;
+    vma.vm_flags|=VM_EXEC;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean|PTE_X));
+    vma.vm_flags&=~VM_EXEC;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,1,clean));
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean|PTE_W));
+    for(unsigned flags=VM_SHARED;flags<=VM_PFNMAP;flags*=2) {
+        if(flags==VM_ANON) continue;
+        vma.vm_flags=VM_FILE|flags;
+        assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));
+    }
+    vma.vm_flags=VM_FILE|VM_VMO;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));
+    vma.vm_flags=VM_FILE;private_copy=1;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));private_copy=0;
+    for(unsigned safe=1;safe<=MM_SAFE_MASK;safe++) {
+        metadata.safe[0]=safe;
+        assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));
+    }
+    metadata.safe[0]=0;cache_pfn=10;
+    assert(!cow_file_leaf_refaultable(&vma,&metadata,0,0,clean));cache_pfn=9;
+    assert(a20_cow_share_snapshot_at_vma(&parent,0,0,&tables[0][0],tables[0],&vma,&snap)==0);
+    assert(!frame_gets&&!cache.pin&&locked==-1&&snap.slot==NULL);
+    /* A modified private page later mprotected read-only still has to copy. */
+    cache_owners[0]=NULL;
+    assert(a20_cow_share_snapshot_at_vma(&parent,0,0,&tables[0][0],tables[0],&vma,&snap)==1);
+    assert(frame_gets==1&&snap.kind==1);
+    a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);cache_owners[0]=&cache;
+
+    struct a20_cow_anon_batch_page batch[16];
+    int prior_gets=frame_gets,prior_changes=changes;
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==1);
+    for(int i=0;i<16;i++) {
+        assert(!batch[i].class&&!batch[i].kind&&!batch[i].pcp&&!batch[i].pfn&&!batch[i].flags);
+        assert(tables[0][i]==clean); /* no COW rewrite/status change for omissions */
+    }
+    assert(frame_gets==prior_gets&&changes==prior_changes&&!cache.pin&&locked==-1);
+    tables[0][4]=0;cache_owners[7]=NULL;expected_va=7*PAGE_SIZE;
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==1);
+    assert(frame_gets==prior_gets+1&&batch[7].kind==1&&batch[7].class==MM_ST_FILE_PRIVATE);
+    for(int i=0;i<16;i++) if(i!=7) assert(!batch[i].class&&!batch[i].kind);
+    frame_put(batch[7].pfn);
+    reset();vma.vm_flags=VM_FILE;vma.file=vma.file_vnode=&vma;
+    vma.start=0;vma.end=4*1024*1024;metadata.cache_owner=cache_owners;
+    for(int i=0;i<512;i++) {
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_FILE_PRIVATE);
+        cache_owners[i]=&cache;tables[0][i]=clean;
+    }
+    unsigned before_proof = cache_pfn_reads;
+    assert(cow_file_range_refaultable(&vma,tables[0],0,512));
+    assert(cache_pfn_reads == before_proof + 512);
+    assert(metadata.fork_file_clean);
+    assert(cow_file_range_refaultable(&vma,tables[0],0,512));
+    assert(cache_pfn_reads == before_proof + 512); /* no repeated leaf proof */
+    vma.vm_flags |= VM_EXEC;
+    assert(!cow_file_range_refaultable(&vma,tables[0],0,512));
+    vma.vm_flags &= ~VM_EXEC;
+    assert(metadata.fork_file_clean);
+    assert(cow_file_range_refaultable(&vma,tables[0],3,17));
+    assert(metadata.fork_file_clean);
+    mm_pt_node_lock(tables[0]);tables[0][511]|=PTE_W;mm_pt_node_unlock(tables[0]);
+    assert(!metadata.fork_file_clean);
+    assert(!cow_file_range_refaultable(&vma,tables[0],0,512));
+    reset();present_vma=0;parent.mmap=NULL;
+    for(int i=0;i<16;i++) {
+        tables[0][i]=(9UL*PAGE_SIZE)|PTE_V|PTE_LEAF|PTE_COW;
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+    }
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==1);
+    assert(frame_gets==16);
+    for(int i=0;i<16;i++) frame_put(batch[i].pfn);
+    /* An interior VMA invalidates the gap proof even with empty endpoints. */
+    parent.mmap=&vma;vma.start=4*PAGE_SIZE;vma.end=6*PAGE_SIZE;vma.next=NULL;
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==0);
+    parent.mmap=NULL;
+    metadata.cls[7]=MM_ST_CLS_BYTE(MM_ST_FILE_PRIVATE);
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0)==0);
+    reset();parent.mmap=NULL;vma.vm_flags=VM_VMO;vma.start=0;vma.end=16*PAGE_SIZE;
+    for(int i=0;i<16;i++) {
+        tables[0][i]=(9UL*PAGE_SIZE)|PTE_V|PTE_LEAF|PTE_W;
+        metadata.cls[i]=MM_ST_CLS_BYTE(MM_ST_VMO);
+    }
+    assert(!a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,0));
+    assert(a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,1)==1);
+    assert(!frame_gets&&!frame_puts&&!changes);
+    for(int i=0;i<16;i++)assert(batch[i].class==MM_ST_VMO&&!batch[i].kind&&!batch[i].pcp&&(batch[i].flags&PTE_W));
+    metadata.cls[7]=MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+    assert(!a20_cow_share_anon_batch_snapshot(&parent,&parent,0,tables[0],batch,16,1));
+    puts("COW_SNAPSHOT_TOKEN: PASS tokens, refs, geometry, cache-only refault, safe bits and mixed batches");
     return 0;
 }

@@ -515,7 +515,8 @@ int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
                 return -EINVAL;
             continue;
         }
-        int shared_class = cls == MM_ST_ANON_SHARED || cls == MM_ST_FILE_SHARED;
+        int shared_class = cls == MM_ST_ANON_SHARED || cls == MM_ST_FILE_SHARED ||
+                           (shared && cls == MM_ST_VMO);
         if (!pfn_valid((pfn_t)pages[i].pfn) ||
             (cls != MM_ST_ANON_MAPPED && cls != MM_ST_FILE_PRIVATE &&
              !shared_class) || !(pages[i].flags & PTE_U) ||
@@ -1033,10 +1034,16 @@ static void pt_destroy_user_recursive(mm_struct_t *mm, pte_t *table, int level,
         if (!(pte & PTE_V)) continue;
 
         int is_leaf = arch_pte_is_leaf(pte);
-        vaddr_t va = base | ((vaddr_t)i << (ARCH_PT_BITS * level));
+        vaddr_t va = base | ((vaddr_t)i * pt_level_size(level));
 
         if (is_leaf) {
             pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+            if (mm && meta && MM_ST_GET_CLASS(meta->cls[i]) == MM_ST_VMO) {
+                /* Canonical VMO frames have no PTE-owned reference. The
+                 * retained VMAs release their backing after this root walk. */
+                table[i] = 0;
+                continue;
+            }
             page_cache_page_t *owner = meta && meta->cache_owner
                                            ? meta->cache_owner[i] : NULL;
             if (owner) {

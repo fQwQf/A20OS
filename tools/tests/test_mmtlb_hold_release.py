@@ -44,7 +44,7 @@ class MMTlbHoldReleaseTests(unittest.TestCase):
         fixture = (ROOT / "tools/tests/mmtlb_hold_release_host.c").read_text()
         fixture = fixture.replace(
             "/* INSERT_PRODUCTION_MM_TLB_HOLD_DEFINITIONS */",
-            definitions + "\n" + hold_type,
+            definitions + "\n" + hold_type + "\n" + extract_block(vm_source, "typedef struct mm_tlb_page_run {", "} mm_tlb_page_run_t;"),
         )
         fixture = fixture.replace(
             "/* INSERT_PRODUCTION_MM_TLB_RELEASE_HELPER */", helper

@@ -57,8 +57,10 @@ class AnonChildBatch(unittest.TestCase):
             extract_block(source, "int pt_map_anon_batch("),
         )
         header = (TREE / "kernel/include/mm/mm.h").read_text()
+        limit = next(line for line in header.splitlines() if line.startswith("#define A20_COW_ANON_BATCH_PAGES "))
+        fixture = fixture.replace("#define A20_COW_ANON_BATCH_PAGES 16", limit)
         assert_start = header.rindex("#if __SIZEOF_POINTER__ == 8", 0, header.index("_Static_assert(sizeof(struct a20_cow_anon_batch_page)"))
-        assert_end = header.index("/* Map a bounded private fork batch", assert_start)
+        assert_end = header.index("/* Map a bounded", assert_start)
         fixture = fixture.replace("/* ANON_BATCH_ABI_ASSERTS */", header[assert_start:assert_end])
         with tempfile.TemporaryDirectory() as tmp:
             cfile, exe = Path(tmp) / "mapper.c", Path(tmp) / "mapper"
@@ -95,8 +97,10 @@ class AnonChildBatch(unittest.TestCase):
         fixture = fixture.replace(flush_assert,
                                   "assert(walk_calls==1 && installs==16 && status_calls==16 && exec_flushes==0);", 1)
         header = (TREE / "kernel/include/mm/mm.h").read_text()
+        limit = next(line for line in header.splitlines() if line.startswith("#define A20_COW_ANON_BATCH_PAGES "))
+        fixture = fixture.replace("#define A20_COW_ANON_BATCH_PAGES 16", limit)
         assert_start = header.rindex("#if __SIZEOF_POINTER__ == 8", 0, header.index("_Static_assert(sizeof(struct a20_cow_anon_batch_page)"))
-        assert_end = header.index("/* Map a bounded private fork batch", assert_start)
+        assert_end = header.index("/* Map a bounded", assert_start)
         fixture = fixture.replace("/* ANON_BATCH_ABI_ASSERTS */", header[assert_start:assert_end])
         with tempfile.TemporaryDirectory() as tmp:
             cfile, exe = Path(tmp) / "negative.c", Path(tmp) / "negative"
@@ -132,6 +136,7 @@ static mut PRIVATE_COPY:i32=0;
 static mut SNAPSHOT_RESULT:i32=1;
 static mut MAP_RESULT:i32=0;
 static mut SPARSE:i32=0;
+static mut BORROWED:bool=false;
 static mut SNAPSHOTS:usize=0;
 static mut MAP_CALLS:usize=0;
 static mut PINS:usize=0;
@@ -143,8 +148,10 @@ static mut RSS:usize=0;
 #[no_mangle] unsafe extern "C" fn mock_snapshot(_p:*mut c_void,_c:*mut c_void,_v:usize,_n:*mut c_void,
                                                    out:*mut AnonBatchPage,count:usize,_shared:i32)->i32 {
     unsafe { SNAPSHOTS+=1; if SNAPSHOT_RESULT!=1 { return SNAPSHOT_RESULT; }
-        PINS=if SPARSE!=0 {count-1} else {count}; for i in 0..count {
+        PINS=if SPARSE==2 || BORROWED {0} else if SPARSE!=0 {count-1} else {count}; for i in 0..count {
+            if SPARSE==2 { *out.add(i)=AnonBatchPage::default(); continue; }
             if SPARSE!=0 && i==0 { *out.add(i)=AnonBatchPage::default(); continue; }
+            if BORROWED { *out.add(i)=AnonBatchPage{pfn:(i+1) as u32,class:6,flags:0x205,pcp:core::ptr::null_mut(),kind:0}; continue; }
             let cache=i%3==0;
             *out.add(i)=AnonBatchPage{pfn:(i+1) as u32,
                 class:if cache {4} else {2},flags:0x205,
@@ -155,13 +162,13 @@ static mut RSS:usize=0;
 }
 #[no_mangle] unsafe extern "C" fn mock_map_batch(_c:*mut c_void,va:usize,
                                                   pages:*const AnonBatchPage,count:usize,_shared:i32)->i32 {
-    unsafe { MAP_CALLS+=1; assert_eq!(va,0x20000); assert!(count>0 && count<=16);
+    unsafe { MAP_CALLS+=1; assert_eq!(va,0x20000); assert!(count>0 && count<=ANON_BATCH_PAGES);
         let mut present=0;
         for i in 0..count { let p=*pages.add(i); if p.class==0 { continue; }
             assert_eq!(p.pfn,(i+1) as u32);
-            assert_eq!(p.class,if i%3==0 {4} else {2}); assert_eq!(p.flags,0x205);
+            assert_eq!(p.class,if BORROWED {6} else if i%3==0 {4} else {2}); assert_eq!(p.flags,0x205);
             present+=1; }
-        if MAP_RESULT==0 { PINS-=present; CHILD_REFS+=present; }
+        if MAP_RESULT==0 { if !BORROWED {PINS-=present;} CHILD_REFS+=present; }
         MAP_RESULT }
 }
 #[no_mangle] unsafe extern "C" fn mock_put_many(pfns:*const u32,count:usize) {
@@ -172,9 +179,15 @@ static mut RSS:usize=0;
     unsafe { assert!(!page.is_null()); assert!(PINS>0); PINS-=1; CACHE_RELEASED+=1; }
 }
 #[no_mangle] unsafe extern "C" fn mock_rss(_c:*mut c_void,pages:usize) { unsafe { RSS+=pages; } }
-unsafe fn reset() { unsafe { PRIVATE_COPY=0; SNAPSHOT_RESULT=1; MAP_RESULT=0; SPARSE=0;
+unsafe fn reset() { unsafe { PRIVATE_COPY=0; SNAPSHOT_RESULT=1; MAP_RESULT=0; SPARSE=0; BORROWED=false;
     SNAPSHOTS=0; MAP_CALLS=0; PINS=0; RELEASED=0; CACHE_RELEASED=0; CHILD_REFS=0; RSS=0; } }
 fn main() { unsafe {
+    for result in [0,ENOMEM] {
+        reset();BORROWED=true;MAP_RESULT=result;
+        assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,1),if result==0 {1} else {result});
+        assert_eq!((PINS,RELEASED,CACHE_RELEASED),(0,0,0));
+        assert_eq!(RSS,if result==0 {16} else {0});
+    }
     reset(); PRIVATE_COPY=1;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),0);
     assert_eq!((SNAPSHOTS,MAP_CALLS),(0,0));
@@ -187,6 +200,9 @@ fn main() { unsafe {
     reset(); SPARSE=1;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),1);
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,15,1,15));
+    reset(); SPARSE=2; MAP_RESULT=ENOMEM;
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),1);
+    assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,0,0,0,0));
     reset(); MAP_RESULT=ENOMEM;
     assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),16,0),ENOMEM);
     assert_eq!((PINS,RELEASED,CACHE_RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,10,6,0,1,0));
@@ -201,6 +217,21 @@ fn main() { unsafe {
     assert_eq!((PINS,RELEASED,CHILD_REFS,MAP_CALLS,RSS),(0,0,0,0,0));
 } }
 '''.replace("/* ACTUAL_RUST_BATCH_CODE */", code)
+        limit = next(line for line in source.splitlines() if line.startswith("const ANON_BATCH_PAGES:"))
+        c_limit = next(line for line in (TREE / "kernel/include/mm/mm.h").read_text().splitlines() if line.startswith("#define A20_COW_ANON_BATCH_PAGES "))
+        self.assertEqual(int(limit.split("=")[1].strip(" ;")), int(c_limit.split()[-1]))
+        harness = harness.replace("const ANON_BATCH_PAGES: usize = 16;", limit)
+        # Exercise the production bound, including complete rollback at it.
+        extra = r"""
+    reset();
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),ANON_BATCH_PAGES,0),1);
+    assert_eq!((PINS,CHILD_REFS,RSS),(0,ANON_BATCH_PAGES,ANON_BATCH_PAGES));
+    reset(); MAP_RESULT=ENOMEM;
+    assert_eq!(a20_cow_clone_anon_batch_rust(core::ptr::null_mut(),core::ptr::null_mut(),0x20000,core::ptr::null_mut(),ANON_BATCH_PAGES,0),ENOMEM);
+    assert_eq!((PINS,RELEASED+CACHE_RELEASED,CHILD_REFS),(0,ANON_BATCH_PAGES,0));
+"""
+        last = harness.rindex("} }")
+        harness = harness[:last] + extra + harness[last:]
         with tempfile.TemporaryDirectory() as tmp:
             rs, exe = Path(tmp) / "batch.rs", Path(tmp) / "batch"
             rs.write_text(harness)

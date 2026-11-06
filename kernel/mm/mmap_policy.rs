@@ -120,6 +120,8 @@ unsafe extern "C" {
     fn a20_mmap_user_va_limit() -> usize;
     fn a20_mmap_base_addr() -> usize;
     fn a20_mmap_is_nommu() -> i32;
+    fn a20_mmap_shared_anon_create(len: usize) -> *mut c_void;
+    fn vmo_release(vmo: *mut c_void);
     fn a20_mmap_nommu_alloc(len: usize, addr_out: *mut usize) -> *mut c_void;
 }
 
@@ -345,9 +347,23 @@ pub unsafe extern "C" fn a20_mmap_anon_rust(
         unsafe { abandon(core::ptr::null_mut(), &placed) };
         return errno(ENOMEM);
     }
+    // A shared object, rather than per-process zero-fill, preserves first
+    // touch sharing after fork without materializing the entire VMA. Very
+    // large ranges beyond the VMO's u32 page domain retain the legacy path.
+    let shared_backing = if vmf & VM_SHARED != 0 && vmf & VM_HUGEPAGE == 0 && native_cap < 0 &&
+        len / PAGE_SIZE <= u32::MAX as usize && unsafe { a20_mmap_is_nommu() } == 0 {
+        let backing = unsafe { a20_mmap_shared_anon_create(len) };
+        if backing.is_null() {
+            unsafe { abandon(vma, &placed) };
+            return errno(ENOMEM);
+        }
+        vmf |= VM_VMO;
+        backing
+    } else { core::ptr::null_mut() };
     match unsafe { mlock_admission(mm, len) } {
         Ok(bits) => vmf |= bits,
         Err(e) => {
+            if !shared_backing.is_null() { unsafe { vmo_release(shared_backing) }; }
             unsafe { abandon(vma, &placed) };
             return errno(e);
         }
@@ -367,7 +383,7 @@ pub unsafe extern "C" fn a20_mmap_anon_rust(
         file: core::ptr::null_mut(),
         backing_offset: 0,
         file_vnode: core::ptr::null_mut(),
-        vmo: core::ptr::null_mut(),
+        vmo: shared_backing,
         vmar_owner: core::ptr::null_mut(),
     };
     unsafe { a20_mmap_seg_fill(vma, &spec, placed.nommu_raw) };

@@ -8,6 +8,8 @@
 #include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "core/string.h"
+#include "core/perf.h"
+#include "core/timer.h"
 
 #ifndef CONFIG_NOMMU
 
@@ -308,7 +310,12 @@ int a20_cow_map_child_anon_batch(
     mm_struct_t *child = child_ptr;
     if (!child || !child->pgdir)
         return -EINVAL;
-    return pt_map_anon_batch(child->pgdir, va, pages, nr, shared);
+    int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    uint64_t begin = timed ? timer_get_ticks() : 0;
+    int result = pt_map_anon_batch(child->pgdir, va, pages, nr, shared);
+    if (timed)
+        a20_perf_add(A20_PERF_MM_FORK_MAP_TICKS, timer_get_ticks() - begin);
+    return result;
 #else
     (void)child_ptr;
     (void)va;
@@ -318,6 +325,73 @@ int a20_cow_map_child_anon_batch(
     return -EOPNOTSUPP;
 #endif
 }
+
+#if defined(ARCH_HAS_PGTABLE_OPS)
+/* Called with the source node locked and parent->lock holding VMA policy
+ * stable. A canonical cache-owned private leaf can be recovered through the
+ * child's retained file mapping. A private copy made writable and later
+ * mprotected read-only has no cache owner and must still be inherited.
+ * Preserve executable and small mappings: their first child faults cost more
+ * than cloning their PTEs on A20. Elision targets bulk file data (>= 1 MiB). */
+static int cow_file_leaf_refaultable(const mm_seg_t *vma, pt_meta_t *meta,
+                                     int index, int level, pte_t source)
+{
+    if (!vma || level != 0 || !meta || !vma->file || !vma->file_vnode ||
+        vma->end - vma->start < 1024 * 1024 || (vma->vm_flags & VM_EXEC) ||
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_VMO | VM_PFNMAP)) != VM_FILE ||
+        !(source & PTE_V) || !arch_pte_is_leaf(source) || (source & PTE_W) ||
+        MM_ST_GET_CLASS(meta->cls[index]) != MM_ST_FILE_PRIVATE ||
+        (meta->safe[index >> 3] & MM_SAFE_MASK) || !meta->cache_owner ||
+        arch_fork_requires_private_copy())
+        return 0;
+    page_cache_page_t *owner = meta->cache_owner[index];
+    return owner && page_cache_pfn(owner) == phys_to_pfn(arch_pte_addr(source));
+}
+/* Read-only proof, with parent->lock held: avoid constructing empty clone
+ * transactions for recoverable cache leaves. A full-table positive proof
+ * survives read-only observations; node writers and metadata mutators revoke
+ * it before the next observation. VMA policy is checked each time. */
+static int cow_file_range_refaultable(const mm_seg_t *vma, pte_t *node,
+                                      int first, int count)
+{
+    if (!vma || !vma->file || !vma->file_vnode ||
+        vma->end - vma->start < 1024 * 1024 || (vma->vm_flags & VM_EXEC) ||
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_VMO | VM_PFNMAP)) != VM_FILE ||
+        arch_fork_requires_private_copy())
+        return 0;
+    pt_meta_t *meta = mm_pt_meta(node);
+    if (!meta || !meta->cache_owner)
+        return 0;
+    int recoverable = 1;
+    mm_pt_node_observe_lock(node);
+    if (meta->fork_file_clean) {
+        a20_perf_count(A20_PERF_MM_FORK_FILE_PROOF_HITS);
+        mm_pt_node_unlock(node);
+        return 1;
+    }
+    unsigned scanned = 0;
+    for (int i = first; i < first + count; i++) {
+        scanned++;
+        pte_t source = node[i];
+        if (!source)
+            continue;
+        page_cache_page_t *owner = meta->cache_owner[i];
+        if (!(source & PTE_V) || !arch_pte_is_leaf(source) || (source & PTE_W) ||
+            MM_ST_GET_CLASS(meta->cls[i]) != MM_ST_FILE_PRIVATE ||
+            (meta->safe[i >> 3] & MM_SAFE_MASK) || !owner ||
+            page_cache_pfn(owner) != phys_to_pfn(arch_pte_addr(source))) {
+            recoverable = 0;
+            break;
+        }
+    }
+    a20_perf_add(A20_PERF_MM_FORK_FILE_PROOF_SCANS, scanned);
+    if (recoverable && first == 0 && count == arch_pt_level_entries(0))
+        meta->fork_file_clean = 1;
+    mm_pt_node_unlock(node);
+    return recoverable;
+}
+
+#endif
 
 /* MM_FORK_SNAPSHOT_PIN: snapshot and pin the source leaf under the parent's
  * node lock.  The lock is RELEASED by a20_cow_share_unlock() on every success
@@ -365,6 +439,11 @@ static int a20_cow_share_snapshot_from_slot(
     uint8_t cls = mm_fork_page_class(stab, level, va, vma);
     page_cache_page_t *pcp = NULL;
 #if defined(ARCH_HAS_PGTABLE_OPS)
+    if (stab && cow_file_leaf_refaultable(vma, mm_pt_meta(stab),
+                                         arch_pt_vpn(va, level), level, source)) {
+        mm_pt_node_unlock(stab);
+        return 0;
+    }
     if (is_file && stab) {
         pcp = mm_pt_cache_peek(stab, arch_pt_vpn(va, level));
         if (pcp && page_cache_pfn(pcp) == pfn)
@@ -373,7 +452,7 @@ static int a20_cow_share_snapshot_from_slot(
             pcp = NULL;
     }
 #endif
-    if (!pcp && is_file)
+    if (!pcp && is_file && cls != MM_ST_ANON_MAPPED)
         pcp = mm_file_cache_mapping_get(vma, va, pfn);
     if (!pcp && !is_vmo)
         frame_get(pfn);
@@ -460,15 +539,21 @@ static void cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
     if (!src_pte)
         return;
     uintptr_t pa = snapshot->pa;
+    pte_t desired;
 #ifdef ARCH_HAS_PTE_BLOCK
     size_t leaf_size = vm_pt_level_size(level);
-    *src_pte = (leaf_size >= PMD_SIZE)
+    desired = (leaf_size >= PMD_SIZE)
                    ? arch_pte_block((paddr_t)pa, (pte_t)flags)
                    : arch_pte_leaf((paddr_t)pa, (pte_t)flags);
 #else
-    *src_pte = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+    desired = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
 #endif
-    mm_tlb_note_change(parent, va, vm_pt_level_size(level));
+    /* Repeated forks often see an already clean, read-only COW leaf.
+     * Identical PTEs require neither a rewrite nor a TLB invalidation. */
+    if (*src_pte != desired) {
+        *src_pte = desired;
+        mm_tlb_note_change(parent, va, vm_pt_level_size(level));
+    }
 #if defined(ARCH_HAS_PGTABLE_OPS)
     if (snapshot->node) {
         int idx = arch_pt_vpn(va, level);
@@ -584,13 +669,24 @@ int a20_cow_share_anon_batch_snapshot(
     /* mm_fork() holds parent->lock, so this single VMA record and its policy
      * remain stable for the complete source snapshot. */
     mm_seg_t *vma = mm_seg_find(parent, start);
-    const uint64_t excluded = VM_PFNMAP | VM_VMO |
-                              VM_DONTFORK | VM_WIPEONFORK;
-    if (!vma || start < vma->start || end > vma->end)
-        return 0;
-    if (!(vma->vm_flags & (VM_ANON | VM_FILE)) ||
-        (vma->vm_flags & excluded))
-        return 0;
+    int borrowed_vmo = vma && (vma->vm_flags & VM_VMO) && shared;
+    const uint64_t excluded = VM_PFNMAP | VM_DONTFORK | VM_WIPEONFORK;
+    if (vma) {
+        if (start < vma->start || end > vma->end ||
+            (!(vma->vm_flags & (VM_ANON | VM_FILE)) && !borrowed_vmo) ||
+            ((vma->vm_flags & VM_VMO) && !borrowed_vmo) ||
+            (vma->vm_flags & excluded))
+            return 0;
+    } else {
+        /* Legacy brk/stack pages have no VMA. Prove the entire batch lies in
+         * a gap, not merely its endpoints; a protected VMA may sit inside. */
+        for (mm_seg_t *v = parent->mmap; v; v = v->next) {
+            if (v->start >= end)
+                break;
+            if (v->end > start)
+                return 0;
+        }
+    }
 
     /* Inspect the unpublished destination before source pinning/downgrade.
      * An absent upper subtree costs one lookup; an existing empty L0 table
@@ -615,8 +711,11 @@ int a20_cow_share_anon_batch_snapshot(
         uint8_t status = node_meta->cls[index];
         uint32_t cls = MM_ST_GET_CLASS(status);
         if (!(source & PTE_V) || !arch_pte_is_leaf(source) ||
+            (!vma && cls != MM_ST_ANON_MAPPED) ||
             (cls != MM_ST_ANON_MAPPED && cls != MM_ST_ANON_SHARED &&
-             cls != MM_ST_FILE_PRIVATE && cls != MM_ST_FILE_SHARED) ||
+             cls != MM_ST_FILE_PRIVATE && cls != MM_ST_FILE_SHARED &&
+             !(borrowed_vmo && cls == MM_ST_VMO)) ||
+            (borrowed_vmo && cls != MM_ST_VMO) ||
             (node_meta->safe[index >> 3] &
              (MM_SAFE_UFFD | MM_SAFE_NO_FA))) {
             mm_pt_node_unlock(node);
@@ -627,6 +726,8 @@ int a20_cow_share_anon_batch_snapshot(
             mm_pt_node_unlock(node);
             return 0;
         }
+        if (!shared && cow_file_leaf_refaultable(vma, node_meta, index, 0, source))
+            continue;
         pfns[i] = pfn;
         out[i].pfn = pfn;
         out[i].class = cls;
@@ -637,15 +738,21 @@ int a20_cow_share_anon_batch_snapshot(
     for (size_t i = 0; i < nr; i++) {
         if (!out[i].class)
             continue;
+        /* The child already retained the VMO through its VMA. Its leaves
+         * borrow canonical frames, just like scalar VMO cloning; no PTE-owned
+         * frame reference is acquired or released on rollback. */
+        if (borrowed_vmo)
+            continue;
         uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
-        page_cache_page_t *pcp = (vma->vm_flags & VM_FILE) &&
+        page_cache_page_t *pcp = vma && (vma->vm_flags & VM_FILE) &&
                                          node_meta->cache_owner
             ? node_meta->cache_owner[first + (int)i] : NULL;
         if (pcp && page_cache_pfn(pcp) == pfns[i])
             page_cache_pin(pcp);
         else
             pcp = NULL;
-        if (!pcp && (vma->vm_flags & VM_FILE))
+        if (!pcp && vma && (vma->vm_flags & VM_FILE) &&
+            out[i].class != MM_ST_ANON_MAPPED)
             pcp = mm_file_cache_mapping_get(vma, va, pfns[i]);
         if (pcp) {
             out[i].pcp = pcp;
@@ -657,6 +764,8 @@ int a20_cow_share_anon_batch_snapshot(
     }
     frame_get_many(frame_pfns, frame_count);
     for (size_t i = 0; i < nr; i++) {
+        if (!out[i].class)
+            continue;
         pte_t source = *slots[i];
         if (!shared && (source & (PTE_W | PTE_COW))) {
             struct a20_cow_shared_snapshot snap = {0};
@@ -747,7 +856,24 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
 
     size_t span = vm_pt_level_size(level);
     int entries = arch_pt_level_entries(level);
-    for (int i = 0; i < entries; i++) {
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    if (!checked && !shared && level == 0 && vma &&
+        start >= vma->start && end <= vma->end) {
+        int first = start > base ? (start - base) / PAGE_SIZE : 0;
+        int last = end - base < (vaddr_t)entries * PAGE_SIZE
+            ? (int)((end - base) / PAGE_SIZE) : entries;
+        if (first < last && cow_file_range_refaultable(vma, table, first, last - first))
+            return 0;
+    }
+#endif
+    /* A VMA may begin near the end of every table on its path. Jump to its
+     * first overlapping slot instead of scanning the preceding entries. Keep
+     * the wide offset until the bound check (public callers can pass disjoint
+     * ranges); partial huge leaves still follow the checked base rule below. */
+    vaddr_t first_slot = start > base ? (start - base) / span : 0;
+    if (first_slot >= (vaddr_t)entries)
+        return 0;
+    for (int i = (int)first_slot; i < entries; i++) {
         vaddr_t entry_base = base + (vaddr_t)i * span;
         vaddr_t entry_end = entry_base + span;
         if (entry_end <= start)
@@ -755,12 +881,20 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
         if (entry_base >= end)
             break;
 
+        pte_t *pte = &table[i];
+        /* Empty slots carry no references. In particular, do not construct
+         * a Rust batch, probe the child, or lock the source for a hole-only
+         * prefix of a sparsely populated leaf table. */
+        if (!*pte)
+            continue;
+
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-        if (!checked && vma && level == 0 && entry_base >= start &&
-            entry_base >= vma->start && entry_base < vma->end) {
+        if (level == 0 && entry_base >= start &&
+            ((!checked && vma && entry_base >= vma->start && entry_base < vma->end) ||
+             (checked && !vma && !mm_seg_find(parent, entry_base)))) {
             size_t nr = A20_COW_ANON_BATCH_PAGES;
             size_t range_pages = (end - entry_base) / PAGE_SIZE;
-            size_t vma_pages = (vma->end - entry_base) / PAGE_SIZE;
+            size_t vma_pages = vma ? (vma->end - entry_base) / PAGE_SIZE : range_pages;
             if (nr > (size_t)(entries - i))
                 nr = entries - i;
             if (nr > range_pages)
@@ -768,8 +902,14 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             if (nr > vma_pages)
                 nr = vma_pages;
             if (nr >= 2) {
+                int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+                uint64_t begin = timed ? timer_get_ticks() : 0;
                 int batch = a20_cow_clone_anon_batch_rust(
                     child, parent, entry_base, table, nr, shared);
+                if (timed) {
+                    a20_perf_count(A20_PERF_MM_FORK_BATCH_CALLS);
+                    a20_perf_add(A20_PERF_MM_FORK_BATCH_TICKS, timer_get_ticks() - begin);
+                }
                 if (batch < 0)
                     return batch;
                 if (batch > 0) {
@@ -780,7 +920,6 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
         }
 #endif
 
-        pte_t *pte = &table[i];
 #ifdef CONFIG_SWAP
         if (level == 0 && pte_is_swap(*pte)) {
             int r = checked
@@ -800,6 +939,8 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             if (checked && entry_base < start)
                 continue;
             int r;
+            int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+            uint64_t begin = timed ? timer_get_ticks() : 0;
 #if defined(ARCH_HAS_PGTABLE_OPS)
             /* This leaf and its table came from the active walker. The caller
              * holds parent->lock, so Rust can apply checked policy/dst rules
@@ -813,6 +954,10 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
                     : mm_fork_clone_leaf(child, parent, pte, entry_base, level,
                                          shared);
 #endif
+            if (timed) {
+                a20_perf_count(A20_PERF_MM_FORK_SCALAR_CALLS);
+                a20_perf_add(A20_PERF_MM_FORK_SCALAR_TICKS, timer_get_ticks() - begin);
+            }
             if (r < 0)
                 return r;
             continue;

@@ -133,13 +133,13 @@ SCENARIOS = [
         ],
     },
     {
-        "name": "reap_pending_yield",
+        "name": "reap_pending_park",
         "setup": self_and_child("W_PROC_ZOMBIE") + """
     world->current_hits = 1;
     """,
         "runs": [{"pid": -1, "options": "0", "status": True,
                   "expect": (11, 0x700),
-                  "events": ["current_cpu:11=1", "yield",
+                  "events": ["current_cpu:11=1", "commit:",
                              "current_cpu:11=0", "get:11"]}],
     },
     {
@@ -149,7 +149,40 @@ SCENARIOS = [
     """,
         "runs": [{"pid": -1, "options": "0", "status": True,
                   "expect": (11, 0x700),
-                  "events": ["yield", "yield", "get:11", "detach:11"]}],
+                  "events": ["commit:", "commit:", "get:11", "detach:11"]}],
+    },
+    {
+        "name": "on_cpu_wnohang_does_not_poll",
+        "setup": self_and_child("W_PROC_ZOMBIE") + "world->current_hits = 100;",
+        "runs": [{"pid": -1, "options": "WNOHANG", "status": True,
+                  "expect": (0, -777),
+                  "absent": ["yield", "commit:", "get:", "detach:"]}],
+    },
+    {
+        "name": "pid_lookup_skips_siblings_and_pins_wnowait",
+        "setup": self_and_child("W_PROC_ZOMBIE") + """
+    task_t *other = wt(world, 2); wcfg(other, 12, 12, 100, 50, W_PROC_RUNNING);
+    wlink(self, other);
+    """,
+        "runs": [
+            {"pid": 11, "options": "WNOWAIT", "status": True,
+             "expect": (11, 0x700), "events": ["lookup:11", "put:11"],
+             "absent": ["state:12", "get:11", "detach:"]},
+            {"pid": 11, "options": "0", "status": True,
+             "expect": (11, 0x700), "absent": ["state:12"]},
+            {"pid": 11, "options": "0", "status": True,
+             "expect": (-10, -777)},
+        ],
+    },
+    {
+        "name": "pid_lookup_rejects_foreign_child",
+        "setup": self_and_child("W_PROC_ZOMBIE") + """
+    task_t *foreign = wt(world, 2); wcfg(foreign, 200, 200, 0, 50, W_PROC_RUNNING);
+    self->children = NULL; c->parent = foreign; c->ppid = 200;
+    """,
+        "runs": [{"pid": 11, "options": "WNOHANG", "status": True,
+                  "expect": (-10, -777), "events": ["lookup:11", "put:11"],
+                  "absent": ["get:11", "detach:", "destroy:"]}],
     },
     {
         "name": "wnowait_then_reap",

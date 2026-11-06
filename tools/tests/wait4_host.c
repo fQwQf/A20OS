@@ -84,10 +84,11 @@ struct task_t {
     int stop_report_pending, continue_report_pending;
     int ptrace_stop_active, ptrace_event;
     int waiting_for_child;
+    int reap_wait_requested;
     uint64_t total_time, stime_ticks, child_utime, child_stime;
     task_t *parent, *tg_leader, *tg_next, *children, *sibling_next;
     w_spinlock_t park_lock;
-    int get_count, put_count, destroyed;
+    int get_count, put_count, destroyed, lookup_count;
 };
 
 typedef struct w_wait_token {
@@ -193,6 +194,20 @@ static W_UNUSED int proc_task_state_get(task_t *t)
     return state;
 }
 
+static W_UNUSED task_t *proc_find_get(int pid)
+{
+    CHECK(!w.lock_depth && !w.park_depth);
+    for (int i = 0; i < w.task_count; i++) {
+        task_t *t = &w.tasks[i];
+        if (t->pid == pid && t->state != W_PROC_UNUSED) {
+            ev("lookup:%d", pid);
+            t->lookup_count++;
+            return t;
+        }
+    }
+    return NULL;
+}
+
 static W_UNUSED task_t *proc_get(task_t *t)
 {
     CHECK(w.lock_depth == 1);
@@ -212,6 +227,7 @@ static W_UNUSED void proc_reap_detach_list_locked(task_t *t)
     CHECK(w.lock_depth == 1);
     CHECK(w.park_depth == 0);
     ev("detach:%d", t->pid);
+    t->state = W_PROC_UNUSED;
     task_t *p = t->parent;
     if (p) {
         task_t **pp = &p->children;
@@ -437,6 +453,8 @@ static void run_one(const char *scenario, const wrun_t *r, int run_index)
     for (int i = before_events; i < w.event_count; i++)
         printf("  ev %s\n", w.events[i]);
     print_digest();
+    for (int i = 0; i < w.task_count; i++)
+        CHECK(w.tasks[i].get_count + w.tasks[i].lookup_count == w.tasks[i].put_count);
 }
 
 int main(void)

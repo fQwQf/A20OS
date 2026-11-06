@@ -10,6 +10,10 @@
 use core::ffi::c_void;
 use core::ptr;
 
+#[cfg(not(test))]
+#[path = "vmo_sparse.rs"]
+mod sparse;
+
 const PFN_NONE: u32 = u32::MAX;
 const EIO: i32 = -5;
 const ENOMEM: i32 = -12;
@@ -22,9 +26,10 @@ unsafe extern "C" {
     fn a20_vmo_page_unlock(vmo: *mut c_void, flags: u64);
     fn a20_vmo_page_slot_locked(vmo: *mut c_void, index: u32) -> u32;
     fn a20_vmo_page_is_paged_locked(vmo: *mut c_void) -> i32;
+    fn a20_vmo_page_prepare_locked(vmo: *mut c_void, index: u32, cgroup: *mut c_void) -> i32;
     fn a20_vmo_page_paged_fault(vmo: *mut c_void, index: u32, write: i32) -> i32;
-    fn a20_vmo_page_charge(cgroup: *mut c_void) -> i32;
-    fn a20_vmo_page_uncharge(cgroup: *mut c_void);
+    fn a20_vmo_page_charge(vmo: *mut c_void, cgroup: *mut c_void) -> i32;
+    fn a20_vmo_page_uncharge(vmo: *mut c_void, cgroup: *mut c_void);
     fn a20_vmo_page_alloc() -> u32;
     fn a20_vmo_page_free(pfn: u32);
     fn a20_vmo_page_zero(pfn: u32);
@@ -100,6 +105,7 @@ impl Drop for VmoLock {
 /// Resources are acquired while the VMO lock is held. Declaring this guard
 /// after VmoLock makes it roll back before the lock is released on early exit.
 struct PageTxn {
+    vmo: *mut c_void,
     pfn: u32,
     cgroup: *mut c_void,
     charged: bool,
@@ -107,8 +113,8 @@ struct PageTxn {
 }
 
 impl PageTxn {
-    fn new(cgroup: *mut c_void) -> Self {
-        Self { pfn: PFN_NONE, cgroup, charged: false, committed: false }
+    fn new(vmo: *mut c_void, cgroup: *mut c_void) -> Self {
+        Self { vmo, pfn: PFN_NONE, cgroup, charged: false, committed: false }
     }
 }
 
@@ -124,7 +130,7 @@ impl Drop for PageTxn {
                 a20_vmo_page_free(self.pfn);
             }
             if self.charged {
-                a20_vmo_page_uncharge(self.cgroup);
+                a20_vmo_page_uncharge(self.vmo, self.cgroup);
             }
         }
     }
@@ -171,11 +177,15 @@ unsafe fn materialize(
         return Ok(existing);
     }
 
-    let mut txn = PageTxn::new(cgroup);
+    // Reserve sparse metadata / the accounting owner before acquiring a
+    // charge or frame. Publish below remains a non-failing ownership transfer.
+    let prepared = unsafe { a20_vmo_page_prepare_locked(vmo, index, cgroup) };
+    if prepared != 0 { return Err(prepared); }
+    let mut txn = PageTxn::new(vmo, cgroup);
     if charged && !cgroup.is_null() {
         // SAFETY: the cgroup pointer is borrowed from the fault caller for this
         // synchronous call; the matching release is owned by PageTxn.
-        let rc = unsafe { a20_vmo_page_charge(cgroup) };
+        let rc = unsafe { a20_vmo_page_charge(vmo, cgroup) };
         if rc != 0 {
             return Err(ENOMEM);
         }
@@ -322,7 +332,9 @@ unsafe fn destroy(vmo: *mut c_void) {
     let charged_pages = unsafe { a20_vmo_destroy_charged_pages(vmo) };
     unsafe { a20_vmo_destroy_stats(phys_size) };
 
-    let mut has_pages = false;
+    // Sparse VMOs expose no dense iteration range, but phys_size still
+    // proves that their owner must cross the TLB barrier before tree drop.
+    let mut has_pages = phys_size != 0;
     for index in 0..count {
         if unsafe { a20_vmo_destroy_page(vmo, index) } != PFN_NONE {
             has_pages = true;

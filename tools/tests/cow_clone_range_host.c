@@ -3,11 +3,16 @@
  * unchanged Rust transaction has its own ownership/failure differential test. */
 #include <assert.h>
 #include <stdint.h>
+#define a20_perf_count(...) ((void)0)
+#define a20_perf_add(k,v) ((void)(v))
+static unsigned g_a20_perf_enabled;
+static uint64_t timer_get_ticks(void) { return 0; }
 #include <stdio.h>
 #include <string.h>
 #define PAGE_SIZE 4096UL
-#define A20_COW_ANON_BATCH_PAGES 16
-static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, size_t nr, int shared) { (void)c; (void)p; (void)va; (void)n; (void)nr; (void)shared; return 0; }
+#define A20_COW_ANON_BATCH_PAGES 64
+static unsigned batch_attempts;
+static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n, size_t nr, int shared) { (void)c; (void)p; (void)va; (void)n; (void)nr; (void)shared; batch_attempts++; return 0; }
 typedef struct { uintptr_t start, end; } mm_seg_t;
 #define ARCH_PT_ROOT_LEVEL 2
 #define ARCH_HAS_PGTABLE_OPS 1
@@ -30,10 +35,16 @@ typedef struct {
     size_t count, calls;
     uintptr_t fail_at;
 } mm_struct_t;
+static mm_seg_t *mm_seg_find(mm_struct_t *mm, uintptr_t va) { (void)mm; (void)va; return NULL; }
 static _Alignas(8) pte_t nodes[32][4];
 static unsigned used;
 static int swap_result;
 static size_t hint_calls, hint_validations;
+static int proof_enabled, proof_first, proof_count;
+static int cow_file_range_refaultable(const mm_seg_t *v, pte_t *node, int first, int count) {
+    assert(v && node && first >= 0 && count > 0 && first + count <= 4);
+    proof_first=first; proof_count=count; return proof_enabled;
+}
 static size_t vm_pt_level_size(int level) { return PAGE_SIZE << (2*level); }
 static int arch_pt_level_entries(int level) { (void)level; return 4; }
 static int arch_pt_vpn(uintptr_t va,int level) { return (va/(PAGE_SIZE << (2*level)))&3; }
@@ -162,6 +173,10 @@ int main(void) {
     assert(mm_fork_clone_range(&a,&p,0,FULL,0)==0);
     assert(reference_range(&b,&p,0,FULL,0)==0);
     assert(a.calls==0&&b.calls==NPAGES); /* Skip an entire absent subtree. */
+    mm_seg_t sparse_vma = { .start=0, .end=4*PAGE_SIZE };
+    nodes[0][2]=PTE_V|LEAF;
+    assert(mm_fork_clone_level(&a,&p,nodes[0],0,0,0,4*PAGE_SIZE,0,0,&sparse_vma)==0);
+    assert(batch_attempts==1 && a.count==1 && a.events[0].va==2*PAGE_SIZE);
     for(int tree=0;tree<1000;tree++) {
         memset(nodes,0,sizeof(nodes));used=0;p.pgdir=new_table(ARCH_PT_ROOT_LEVEL);
         for(int i=0;i<NPAGES;i++)p.policy[i]=(random_u32()%8==0);
@@ -185,6 +200,14 @@ int main(void) {
             assert(ar==br);same(&a,&b);
         }
     }
+    pte_t leaf[4]={PTE_V|LEAF,PTE_V|LEAF,PTE_V|LEAF,PTE_V|LEAF};
+    mm_seg_t vma={9*PAGE_SIZE,11*PAGE_SIZE};
+    memset(&a,0,sizeof(a));proof_enabled=1;
+    assert(mm_fork_clone_level(&a,&p,leaf,0,8*PAGE_SIZE,9*PAGE_SIZE,11*PAGE_SIZE,0,0,&vma)==0);
+    assert(!a.count && proof_first==1 && proof_count==2);
+    vma=(mm_seg_t){0,FULL};
+    assert(mm_fork_clone_level(&a,&p,leaf,0,8*PAGE_SIZE,0,FULL,0,0,&vma)==0);
+    assert(!a.count && proof_first==0 && proof_count==4);
     puts("fork range real C walkers PASS: 200000 randomized ranges, policy/dst/huge/swap/errors");
     return 0;
 }

@@ -47,7 +47,38 @@ enum {
     MM_TLB_HOLD_FRAME = 1,
     MM_TLB_HOLD_PAGE = 2,
     MM_TLB_HOLD_PT = 3,
+    MM_TLB_HOLD_PAGES = 4,
 };
+
+/* One allocation retains a bounded run; the embedded list node is first so
+ * the common drain can free the allocation through its mm_tlb_hold_t pointer. */
+typedef struct mm_tlb_page_run {
+    mm_tlb_hold_t hold;
+    size_t count;
+    page_cache_page_t *pages[];
+} mm_tlb_page_run_t;
+
+/* Caller owns mm->lock and a live pin for every supplied object. */
+int mm_tlb_hold_pages(mm_struct_t *mm, page_cache_page_t **pages, size_t count)
+{
+    if (!mm || !pages || !count || count > 64)
+        return -EINVAL;
+    for (size_t i = 0; i < count; i++)
+        if (!pages[i] || !pages[i]->vnode)
+            return -EINVAL;
+    mm_tlb_page_run_t *run = kcalloc_atomic(1, sizeof(*run) + count * sizeof(*pages));
+    if (!run)
+        return -ENOMEM;
+    run->count = count;
+    run->hold.kind = MM_TLB_HOLD_PAGES;
+    for (size_t i = 0; i < count; i++) {
+        page_cache_pin(pages[i]);
+        run->pages[i] = pages[i];
+    }
+    run->hold.next = mm->tlb_holds;
+    mm->tlb_holds = &run->hold;
+    return 0;
+}
 
 /* Reserve bookkeeping before a mutation whose commit/rollback must not
  * allocate. The caller owns mm->lock and the transaction's tlb_lock. */
@@ -213,14 +244,9 @@ static int mm_tlb_queue_hold(mm_struct_t *mm, pfn_t frame,
             kfree(hold);
             return -EINVAL;
         }
-        page_cache_page_t *pinned = page_cache_get(page->vnode,
-                                                    page->index, 0);
-        if (pinned != page) {
-            if (pinned)
-                page_cache_put(pinned);
-            kfree(hold);
-            return -EINVAL;
-        }
+        /* Callers already own a mapping/lookup pin. Reacquire a reference
+         * to that exact live object, without a redundant global hash lookup. */
+        page_cache_pin(page);
     } else {
         kfree(hold);
         return -EINVAL;
@@ -267,6 +293,10 @@ static void mm_tlb_release_holds(mm_tlb_hold_t *hold)
             frame_chunk[frame_count++] = hold->frame;
         } else if (hold->kind == MM_TLB_HOLD_PAGE) {
             page_cache_put(hold->page);
+        } else if (hold->kind == MM_TLB_HOLD_PAGES) {
+            mm_tlb_page_run_t *run = (mm_tlb_page_run_t *)hold;
+            for (size_t i = 0; i < run->count; i++)
+                page_cache_put(run->pages[i]);
         }
         kfree(hold);
         hold = next;
@@ -636,12 +666,28 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
 }
 
 /* The final unpublished MM may leave ordinary anonymous and private-file
- * leaves for the terminal page-table walk. Shared-file dirty harvesting, VMO,
- * PFNMAP and SysV retain their VMA-specific teardown. */
+ * leaves for the terminal page-table walk. Shared-file dirty harvesting, native
+ * VMOs, PFNMAP and SysV retain VMA-specific teardown. Shared anonymous VMOs
+ * retain their canonical pages until the walk has discarded borrowed leaves. */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 static int mm_destroy_can_defer_leaf_release(const mm_seg_t *vma)
 {
-    const uint64_t excluded = VM_SHARED | VM_PFNMAP | VM_VMO | VM_SYSV_SHM;
+    const uint64_t excluded = VM_PFNMAP | VM_VMO | VM_SYSV_SHM;
+
+    /* The retained VMA keeps canonical sparse-VMO frames alive through the
+     * final TLB barrier and root walk, which skips borrowed MM_ST_VMO leaves. */
+    if (vma && vma->vmo && vma->vmo->type == VMO_SHARED_ANON &&
+        (vma->vm_flags & (VM_VMO | VM_ANON | VM_SHARED | VM_PFNMAP | VM_SYSV_SHM | VM_FILE)) ==
+            (VM_VMO | VM_ANON | VM_SHARED) && !vma->vmar_owner)
+        return 1;
+
+    /* Ordinary shared-anonymous leaves own one frame reference per mapping,
+     * just like private anonymous leaves. Keep those references until the
+     * final TLB synchronization, then release them in the terminal PT walk.
+     * Shared files still need free_vma_pages() to harvest dirty state. */
+    if (vma && (vma->vm_flags & (VM_SHARED | VM_FILE)) ==
+                   (VM_SHARED | VM_FILE))
+        return 0;
 
     if (!vma || !(vma->vm_flags & (VM_ANON | VM_FILE)) ||
         (vma->vm_flags & excluded) || vma->vmo || vma->vmar_owner)
@@ -784,6 +830,29 @@ void mm_destroy(mm_struct_t *mm) {
     mm_destroy_impl(mm);
     if (perf_timed)
         a20_perf_add(A20_PERF_MM_DESTROY_TICKS, timer_get_ticks() - start);
+}
+
+/* All VMAs have already been cloned (or deliberately omitted). Legacy brk
+ * and stack bounds may overlap them: walk only uncovered intervals instead
+ * of probing every inherited page again. parent->lock keeps the list stable.
+ * The checked walker remains responsible for huge-leaf boundaries and any
+ * overlap between the two legacy ranges themselves. */
+static int mm_fork_clone_uncovered(mm_struct_t *child, mm_struct_t *parent,
+                                   vaddr_t start, vaddr_t end)
+{
+    for (mm_seg_t *v = parent->mmap; v && start < end; v = v->next) {
+        if (v->end <= start)
+            continue;
+        if (v->start >= end)
+            break;
+        if (start < v->start) {
+            int r = mm_fork_clone_range(child, parent, start, v->start, 0);
+            if (r < 0)
+                return r;
+        }
+        start = v->end;
+    }
+    return start < end ? mm_fork_clone_range(child, parent, start, end, 0) : 0;
 }
 
 /* MM_FORK_COW_REGRESSION_GUARD:
@@ -945,6 +1014,13 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
         if (pv->vm_flags & VM_VMO) {
+            /* Shared-anonymous bulk data is recoverable through the retained
+             * canonical object. Keep small/hot and executable mappings eager;
+             * shared VMAs cannot carry a userfaultfd MISSING registration. */
+            if (pv->vmo && pv->vmo->type == VMO_SHARED_ANON &&
+                pv->end - pv->start >= 1024 * 1024 && !(pv->vm_flags & VM_EXEC) &&
+                !arch_fork_requires_private_copy())
+                continue;
             /* VMO mappings share canonical frames across fork: the child's
              * struct-copied VMA already holds a VMO reference (vma_ref_fork).
              * Clone already-present frames as shared and leave the rest to
@@ -970,15 +1046,15 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
     }
 
     if (parent->start_brk < parent->brk) {
-        if (mm_fork_clone_range(child, parent, parent->start_brk,
-                                parent->brk, 0) < 0) {
+        if (mm_fork_clone_uncovered(child, parent, parent->start_brk,
+                                parent->brk) < 0) {
             goto fail_locked;
         }
     }
 
     if (parent->stack_bottom && parent->stack_top) {
-        if (mm_fork_clone_range(child, parent, parent->stack_bottom,
-                                parent->stack_top, 0) < 0) {
+        if (mm_fork_clone_uncovered(child, parent, parent->stack_bottom,
+                                parent->stack_top) < 0) {
             goto fail_locked;
         }
     }

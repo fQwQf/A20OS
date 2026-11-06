@@ -649,6 +649,8 @@ int  mm_tlb_reserve_holds(mm_struct_t *mm, size_t count);
 int  mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn);
 int  mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level);
 int  mm_tlb_hold_page(mm_struct_t *mm, struct page_cache_page *page);
+/* Bounded (1..64) live page pins retained until the transaction shootdown. */
+int  mm_tlb_hold_pages(mm_struct_t *mm, struct page_cache_page **pages, size_t count);
 void mm_context_enter(mm_struct_t *mm, unsigned cpu);
 void mm_context_leave(mm_struct_t *mm, unsigned cpu);
 

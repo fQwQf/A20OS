@@ -216,6 +216,11 @@ void proc_task_init_base(task_t *t, task_t *parent)
     t->fault_storm_start = 0;
     t->fault_storm_count = 0;
     t->waiting_for_child = 0;
+    t->reap_wait_requested = 0;
+    t->exit_signal_parent = NULL;
+    t->exit_signal_child = NULL;
+    t->exit_signal_pending = 0;
+    t->exit_events_pending = 0;
     t->exit_pending = 0;
     t->pending_exit_code = 0;
     t->stop_report_pending = 0;

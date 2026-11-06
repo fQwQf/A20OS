@@ -107,6 +107,7 @@ void userns_release_task(task_t *task);
 vfile_t *devfs_create_stdio(int fd);
 void panic(const char *fmt, ...);
 void *kmalloc(size_t size);
+void *kmalloc_atomic(size_t size);
 void kfree(void *ptr);
 uint64_t timer_get_ticks(void);
 unsigned x86_64_apic_to_cpu(unsigned apic_id);

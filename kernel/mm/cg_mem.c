@@ -17,6 +17,7 @@ void cg_mem_init(cg_mem_state_t *mem)
     mem->limit = SIZE_MAX;
     mem->swap_limit = SIZE_MAX;
     mem->rss = 0;
+    mem->shared_anon_rss = 0;
     mem->cache = 0;
     mem->swap_usage = 0;
     mem->total_vm = 0;
@@ -29,7 +30,7 @@ void cg_mem_init(cg_mem_state_t *mem)
     mem->low_val = 0;
 }
 
-int cg_mem_charge(struct cg_node *cg, size_t nr_pages)
+static int cg_mem_charge_kind(struct cg_node *cg, size_t nr_pages, int shared_anon)
 {
     if (!cg) return 0;
     cg_node_t *node = (cg_node_t *)cg;
@@ -42,15 +43,28 @@ int cg_mem_charge(struct cg_node *cg, size_t nr_pages)
     a20_perf_count(A20_PERF_MM_CG_LOCK_ACQUIRES);
     cg_mem_state_t *m = &node->res.mem;
 
-    if (m->limit != SIZE_MAX && m->rss + nr_pages > m->limit) {
+    if (nr_pages > SIZE_MAX - m->rss ||
+        (m->limit != SIZE_MAX && m->rss + nr_pages > m->limit)) {
         m->failcnt++;
         spin_unlock_irqrestore(&node->lock, flags);
         return -ENOMEM;
     }
 
     m->rss += nr_pages;
+    if (shared_anon)
+        m->shared_anon_rss += nr_pages;
     spin_unlock_irqrestore(&node->lock, flags);
     return 0;
+}
+
+int cg_mem_charge(struct cg_node *cg, size_t nr_pages)
+{
+    return cg_mem_charge_kind(cg, nr_pages, 0);
+}
+
+int cg_mem_charge_shared_anon(struct cg_node *cg, size_t nr_pages)
+{
+    return cg_mem_charge_kind(cg, nr_pages, 1);
 }
 
 void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages)
@@ -60,10 +74,23 @@ void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages)
 
     uint64_t flags = spin_lock_irqsave(&node->lock);
     cg_mem_state_t *m = &node->res.mem;
-    if (m->rss >= nr_pages)
-        m->rss -= nr_pages;
-    else
-        m->rss = 0;
+    /* Exit's legacy RSS-based accounting also sees borrowed shared leaves.
+     * It must not release a live VMO's physical-memory charge; that charge
+     * belongs to the backing object until its last reference is destroyed. */
+    size_t owned_by_mm = m->rss - m->shared_anon_rss;
+    m->rss -= nr_pages < owned_by_mm ? nr_pages : owned_by_mm;
+    spin_unlock_irqrestore(&node->lock, flags);
+}
+
+void cg_mem_uncharge_shared_anon(struct cg_node *cg, size_t nr_pages)
+{
+    if (!cg) return;
+    cg_node_t *node = (cg_node_t *)cg;
+    uint64_t flags = spin_lock_irqsave(&node->lock);
+    cg_mem_state_t *m = &node->res.mem;
+    size_t released = nr_pages < m->shared_anon_rss ? nr_pages : m->shared_anon_rss;
+    m->shared_anon_rss -= released;
+    m->rss -= released;
     spin_unlock_irqrestore(&node->lock, flags);
 }
 

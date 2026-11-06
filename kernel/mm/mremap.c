@@ -64,6 +64,12 @@ static vaddr_t mm_remap_allocate(mm_struct_t *mm, vaddr_t addr, size_t len,
 static int mm_remap_copy_backing(mm_struct_t *mm, mm_seg_t *dst,
                                   mm_seg_t *src, vaddr_t addr)
 {
+    /* The fresh shared-anonymous destination may own an empty sparse VMO.
+     * Retain the source backing before releasing that reservation. */
+    uint64_t offset = src->backing_offset + (addr - src->start);
+    if (offset < src->backing_offset)
+        return -EINVAL;
+    struct vmo *reserved = dst->vmo;
     dst->vm_flags = src->vm_flags;
     if (dst->vm_flags & VM_LOCKED) mm->locked_vm += dst->end - dst->start;
     dst->pte_flags = src->pte_flags;
@@ -73,8 +79,10 @@ static int mm_remap_copy_backing(mm_struct_t *mm, mm_seg_t *dst,
     dst->file = src->file;
     dst->file_vnode = src->file_vnode;
     dst->vmo = src->vmo;
-    dst->backing_offset = src->backing_offset + (addr - src->start);
+    dst->backing_offset = offset;
     int r = vma_ref_fork(dst);
+    if (reserved)
+        vmo_release(reserved);
     if (r < 0) {
         /* vma_ref_fork has already rolled back file references; VMO and
          * placement references are acquired only after the fallible IPC step. */
@@ -746,8 +754,12 @@ static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_s
         return -EFAULT;
     if ((vma->vm_flags & VM_VMO) && vma->vmo) {
         uint64_t offset = vma->backing_offset + (old_addr - vma->start);
-        if (offset < vma->backing_offset || offset > vma->vmo->size ||
-            new_len > vma->vmo->size - offset)
+        if (offset < vma->backing_offset || new_len > UINT64_MAX - offset)
+            return -EINVAL;
+        /* Linux shared-anonymous mremap may extend the VMA, but the shmem
+         * extent is unchanged; touching the extension faults with SIGBUS. */
+        if (vma->vmo->type != VMO_SHARED_ANON &&
+            (offset > vma->vmo->size || new_len > vma->vmo->size - offset))
             return -EINVAL;
     }
     if ((flags & MREMAP_DONTUNMAP) && old_len != new_len)

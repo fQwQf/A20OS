@@ -109,6 +109,8 @@ static int vnode_put_count;
 static int shared_inc_count;
 static int vmar_acquire_count;
 static int vmo_ref_count;
+static int shared_create_count, shared_release_count, shared_create_fail;
+static unsigned long shared_length;
 static int free_count;
 static int alloc_count;
 static int gap_count;
@@ -135,6 +137,7 @@ static void reset_state(void)
     provision_count = munmap_count = insert_count = 0;
     vnode_get_count = vnode_put_count = shared_inc_count = 0;
     vmar_acquire_count = vmo_ref_count = 0;
+    shared_create_count = shared_release_count = shared_create_fail = 0;
     free_count = alloc_count = gap_count = 0;
     is_nommu = 0;
     nommu_fail = 0;
@@ -244,6 +247,14 @@ void vnode_get(void *vn) { (void)vn; vnode_get_count++; }
 void vnode_put(void *vn) { (void)vn; vnode_put_count++; }
 void vmar_acquire(void *vmar) { (void)vmar; vmar_acquire_count++; }
 void vmo_ref(void *vmo) { (void)vmo; vmo_ref_count++; }
+void *a20_mmap_shared_anon_create(unsigned long len) {
+    shared_create_count++; shared_length = len;
+    return shared_create_fail ? NULL : &shared_length;
+}
+void vmo_release(void *vmo) {
+    check(vmo == &shared_length, "shared: release reserved backing identity");
+    shared_release_count++;
+}
 
 /* ------------------------------------------------------- Rust bridges ---- */
 
@@ -702,6 +713,45 @@ static void nommu_vmo_is_unsupported(void)
     check(alloc_count == 0, "nommu: the refused VMO mapping creates no record");
 }
 
+static void shared_anon_backing_transaction(void)
+{
+    reset_state();
+    unsigned long r = a20_mmap_anon_rust(&g_mm, 0, 3 * PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                        MAP_SHARED | MAP_ANONYMOUS, -1);
+    struct stub_seg *v = only_seg();
+    check(!result_is_error(r) && shared_create_count == 1 && shared_length == 3 * PAGE_SIZE,
+          "shared: create one canonical backing for the rounded extent");
+    check(v && v->vmo == &shared_length && (v->vm_flags & VM_VMO) && !provision_count,
+          "shared: publish VMO ownership without allocating private pages");
+    check(shared_release_count == 0 && vmo_ref_count == 0,
+          "shared: creation reference transfers to the VMA exactly once");
+
+    reset_state(); shared_create_fail = 1; g_mm.def_locked = 1;
+    r = a20_mmap_anon_rust(&g_mm, 0, PAGE_SIZE, PROT_READ, MAP_SHARED | MAP_ANONYMOUS, -1);
+    check(result_is_error(r) && result_errno(r) == -ENOMEM && !insert_count,
+          "shared: backing allocation failure publishes nothing");
+    check(!g_mm.locked_vm && !g_mm.total_vm && free_count == 1,
+          "shared: failed backing leaves no lock charge or VMA");
+
+    reset_state(); g_mm.def_locked = 1; g_mm.memlock = PAGE_SIZE;
+    r = a20_mmap_anon_rust(&g_mm, 0, 2 * PAGE_SIZE, PROT_READ, MAP_SHARED | MAP_ANONYMOUS, -1);
+    check(result_is_error(r) && shared_create_count == 1 && shared_release_count == 1,
+          "shared: refused memlock drops the unpublished backing");
+    check(!insert_count && !g_mm.locked_vm && free_count == 1,
+          "shared: memlock rollback preserves accounting");
+
+    reset_state();
+    r = a20_mmap_anon_rust(&g_mm, 0, PAGE_SIZE, PROT_READ, MAP_SHARED | MAP_ANONYMOUS, PROT_READ);
+    check(!result_is_error(r) && !shared_create_count,
+          "shared: native anonymous capability creation retains its existing policy");
+
+    reset_state();
+    r = a20_mmap_anon_rust(&g_mm, 0, 2 * 1024 * 1024, PROT_READ,
+                          MAP_SHARED | MAP_ANONYMOUS | MAP_HUGETLB, -1);
+    check(!result_is_error(r) && !shared_create_count,
+          "shared: explicit huge pages retain their original frame ownership");
+}
+
 int main(void)
 {
     anon_publication_and_accounting();
@@ -717,6 +767,7 @@ int main(void)
     nommu_flat_allocation_ignores_the_request();
     nommu_allocation_failure_and_rollback();
     nommu_vmo_is_unsupported();
+    shared_anon_backing_transaction();
     reset_state();
 
     if (failures) {

@@ -401,6 +401,14 @@ typedef struct task_t {
     uint64_t fault_storm_start;
     uint32_t fault_storm_count;
     int      waiting_for_child;
+    /* park_lock protects registration before the final CPU-slot release.
+     * Frozen after that release; the completion callback holds a task pin. */
+    int      reap_wait_requested;
+    /* Owned pins transferred by exit to the CPU completion callback. */
+    struct task_t *exit_signal_parent;
+    struct task_t *exit_signal_child;
+    int      exit_signal_pending;
+    int      exit_events_pending;
     int      exit_pending;
     int      pending_exit_code;
     int      stop_report_pending;

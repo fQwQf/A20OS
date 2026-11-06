@@ -73,6 +73,11 @@ HARNESS = r"""
 #define CONFIG_SWAP 1
 #define PTE_D 1
 #define ARCH_PT_ROOT_LEVEL 2
+#define ARCH_PT_BITS 2
+#define MM_ST_FILE_PRIVATE 2
+#define MM_ST_VMO 6
+#define VMO_SHARED_ANON 3
+#define MM_ST_GET_CLASS(x) (x)
 #define ARCH_PT_ROOT_ORDER 2
 #define ARCH_PT_USER_END 3
 #define PAGE_SIZE 4096u
@@ -87,15 +92,18 @@ HARNESS = r"""
 #define VM_SYSV_SHM (1ULL << 16)
 #define VM_PFNMAP (1ULL << 17)
 
+typedef uint64_t vaddr_t;
 typedef uint64_t pte_t;
 typedef uint64_t pfn_t;
 typedef uint64_t paddr_t;
 typedef pte_t pt_root_t;
+struct vmo { int type; };
 typedef struct mm_seg {
     uint64_t vm_flags;
+    vaddr_t start, end;
     void *file;
     void *file_vnode;
-    void *vmo;
+    struct vmo *vmo;
     void *vmar_owner;
     struct mm_seg *next;
 } mm_seg_t;
@@ -118,6 +126,7 @@ static void kerr(const char *format, ...) { (void)format; }
 static pte_t *arch_pte_to_ptr(pte_t pte);
 static int pfn_valid(pfn_t pfn);
 static int arch_pt_level_entries(int level) { (void)level; return 4; }
+static size_t pt_level_size(int level) { return (size_t)PAGE_SIZE << (ARCH_PT_BITS * level); }
 
 static unsigned frame_put_calls[64];
 static unsigned frame_refs[64];
@@ -144,6 +153,9 @@ static pte_t root_table[4];
 static pte_t user_table_a[4];
 static pte_t user_table_b[4];
 static pte_t *table_by_pfn[64];
+static int file_fixture;
+static int vmo_fixture;
+static mm_seg_t *expected_file_vma;
 
 static void reset_state(void) {
     memset(frame_put_calls, 0, sizeof(frame_put_calls));
@@ -160,6 +172,7 @@ static void reset_state(void) {
     deferred_pending = release_saw_null_pgdir = mm_kfree_calls = 0;
     pt_destroy_finished = tlb_finish_calls = tlb_finished = 0;
     pt_destroy_expected = queue_from_retire_drain = 0;
+    file_fixture = vmo_fixture = 0; expected_file_vma = NULL;
 }
 
 static pte_t leaf(pfn_t pfn, int user) {
@@ -194,6 +207,22 @@ static void frame_put_many(const pfn_t *pfns, size_t count) {
     for (size_t i = 0; i < count; ++i) frame_put(pfns[i]);
 }
 static void swap_free(uint64_t entry) { (void)entry; swap_free_calls++; }
+typedef struct { int refs; } page_cache_page_t;
+typedef struct { unsigned char cls[4]; page_cache_page_t **cache_owner; } pt_meta_t;
+static page_cache_page_t file_page;
+static pt_meta_t *mm_pt_meta(pte_t *table) {
+    static pt_meta_t file_meta = { .cls = {MM_ST_FILE_PRIVATE, 0, 0, 0} };
+    static pt_meta_t vmo_meta = { .cls = {MM_ST_VMO, MM_ST_VMO, 0, 0} };
+    if (vmo_fixture && (table == user_table_a || table == user_table_b)) return &vmo_meta;
+    return file_fixture && table == user_table_b ? &file_meta : NULL;
+}
+static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *vma, vaddr_t va, pfn_t pfn) {
+    if (file_fixture && vma == expected_file_vma && va == 65536 && pfn == 12) {
+        file_page.refs++; return &file_page;
+    }
+    return NULL;
+}
+static void page_cache_put(page_cache_page_t *page) { page->refs--; }
 static void mm_pt_note_absent(pte_t *table, int level, int index) {
     (void)table; (void)level; (void)index;
 }
@@ -220,11 +249,13 @@ static void pt_free_table(pte_t *table, int level) {
     if (pfn == 1) pt_destroy_finished = 1;
 }
 
+static void mm_vma_flush_deferred(mm_struct_t *mm);
 static void mm_tlb_invalidate_begin(mm_struct_t *mm) { (void)mm; }
 static void mm_tlb_invalidate_finish(mm_struct_t *mm) {
     (void)mm;
     tlb_finish_calls++;
     tlb_finished = 1;
+    mm_vma_flush_deferred(mm);
 }
 static void arch_tlb_flush(void) {}
 static void aio_context_reap_mm(mm_struct_t *mm) { (void)mm; }
@@ -245,6 +276,7 @@ static void mm_seg_index_clear(mm_struct_t *mm) { (void)mm; }
 static void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma) {
     (void)mm; (void)vma; free_vma_pages_calls++;
 }
+static void vma_get(mm_seg_t *vma) { (void)vma; }
 static void vma_put(mm_struct_t *mm, mm_seg_t *vma) { (void)mm; (void)vma; }
 static void mm_pt_retire_drain(mm_struct_t *mm) {
     if (queue_from_retire_drain && !mm->pgdir) deferred_pending++;
@@ -252,8 +284,7 @@ static void mm_pt_retire_drain(mm_struct_t *mm) {
 static void arch_mm_context_release(int asid) { (void)asid; }
 static void kfree(void *ptr) { (void)ptr; mm_kfree_calls++; }
 
-static void pt_destroy_user_recursive(pte_t *table, int level);
-static void pt_destroy_user(pt_root_t *pgdir);
+void pt_destroy_user_mm(mm_struct_t *mm);
 
 /* Production eligibility and mm_destroy_impl functions are inserted here. */
 /* INSERT_VM_FUNCTIONS */
@@ -280,20 +311,24 @@ static void setup_anon_tree(void) {
     frame_refs[10] = frame_refs[11] = frame_refs[12] = frame_refs[13] = 1;
 }
 
-static int test_eligible_final_destroy(void) {
+static int test_eligible_final_destroy(int shared) {
     mm_struct_t mm = { .refcount = 1, .arch_asid = 1, .pgdir = root_table };
     mm_seg_t vma = { .vm_flags = VM_ANON };
     reset_state();
     setup_anon_tree();
+    if (shared) {
+        vma.vm_flags |= VM_SHARED;
+        frame_refs[10]++; frame_refs[11]++; frame_refs[12]++;
+    }
     mm.mmap = &vma;
     mm_destroy_impl(&mm);
 
     CHECK(free_vma_pages_calls == 0, "eligible anon VMA skipped range walk");
-    CHECK(frame_put_calls[10] == 1 && frame_refs[10] == 0,
+    CHECK(frame_put_calls[10] == 1 && frame_refs[10] == (unsigned)shared,
           "base anonymous leaf released exactly once");
-    CHECK(frame_put_calls[11] == 1 && frame_refs[11] == 0,
+    CHECK(frame_put_calls[11] == 1 && frame_refs[11] == (unsigned)shared,
           "protected anonymous leaf released exactly once");
-    CHECK(frame_put_calls[12] == 1 && frame_refs[12] == 0,
+    CHECK(frame_put_calls[12] == 1 && frame_refs[12] == (unsigned)shared,
           "huge anonymous head released exactly once");
     CHECK(frame_put_calls[13] == 0 && frame_refs[13] == 1,
           "shared kernel-half frame was not released");
@@ -327,13 +362,40 @@ static int test_ineligible(uint64_t flags, int pointer_kind) {
     mm.mmap = &vma;
     if (pointer_kind == 1) vma.file = &marker;
     if (pointer_kind == 2) vma.file_vnode = &marker;
-    if (pointer_kind == 3) vma.vmo = &marker;
+    if (pointer_kind == 3) vma.vmo = (void *)&marker;
     if (pointer_kind == 4) vma.vmar_owner = &marker;
     mm_destroy_impl(&mm);
     CHECK(free_vma_pages_calls == 1,
           "ineligible/special VMA used original page-release walk");
     CHECK(root_free_order_calls == 1 && pt_free_calls == 1,
           "ineligible empty address space still destroyed its root once");
+    return 0;
+}
+
+static int test_file_owner_fallback_address(void) {
+    mm_struct_t mm = { .refcount = 1, .arch_asid = 1, .pgdir = root_table };
+    mm_seg_t file = { .vm_flags = VM_FILE, .start = 65536, .end = 81920,
+                     .file_vnode = &mm };
+    mm_seg_t anon = { .vm_flags = VM_ANON, .start = 0, .end = 65536, .next = &file };
+    reset_state(); setup_anon_tree(); mm.mmap = &anon;
+    file_fixture = 1; expected_file_vma = &file; file_page.refs = 1;
+    mm_destroy_impl(&mm);
+    CHECK(file_page.refs == 0, "terminal cache fallback uses byte-addressed VMA offset");
+    CHECK(frame_put_calls[12] == 0, "cache-owned leaf never releases an ordinary frame ref");
+    CHECK(invalid_frame_put_calls == 0, "cache fallback keeps terminal release ordering");
+    return 0;
+}
+
+static int test_sparse_vmo_borrowed_leaves(void) {
+    mm_struct_t mm = { .refcount = 1, .arch_asid = 1, .pgdir = root_table };
+    struct vmo backing = { .type = VMO_SHARED_ANON };
+    mm_seg_t vma = { .vm_flags = VM_ANON | VM_SHARED | VM_VMO, .vmo = &backing };
+    reset_state(); setup_anon_tree(); mm.mmap = &vma; vmo_fixture = 1;
+    mm_destroy_impl(&mm);
+    CHECK(free_vma_pages_calls == 0, "sparse VMO terminal path avoids per-page unmaps");
+    CHECK(frame_put_calls[10] + frame_put_calls[11] + frame_put_calls[12] == 0,
+          "VMO canonical frames are borrowed even when protected");
+    CHECK(tlb_finished && pt_destroy_finished, "borrowed leaves cross final barrier and root release");
     return 0;
 }
 
@@ -368,9 +430,9 @@ static int test_final_flush_without_root(void) {
 }
 
 int main(void) {
-    if (test_eligible_final_destroy()) return 1;
+    if (test_eligible_final_destroy(0) || test_eligible_final_destroy(1)) return 1;
     if (test_ineligible(VM_FILE, 0)) return 1;
-    if (test_ineligible(VM_SHARED, 0)) return 1;
+    if (test_ineligible(VM_SHARED | VM_FILE, 2)) return 1;
     if (test_ineligible(VM_PFNMAP, 0)) return 1;
     if (test_ineligible(VM_VMO, 0)) return 1;
     if (test_ineligible(VM_SYSV_SHM, 0)) return 1;
@@ -378,6 +440,8 @@ int main(void) {
         test_ineligible(0, 3) || test_ineligible(0, 4)) return 1;
     if (test_nonfinal_reference()) return 1;
     if (test_final_flush_without_root()) return 1;
+    if (test_file_owner_fallback_address()) return 1;
+    if (test_sparse_vmo_borrowed_leaves()) return 1;
     puts("anon-final-destroy-host: PASS");
     return 0;
 }
@@ -390,7 +454,7 @@ def main() -> int:
     vm_functions = "\n\n".join(
         extract_function(vm, signature)
         for signature in (
-            "static int mm_destroy_can_defer_anon_leaf_release(",
+            "static int mm_destroy_can_defer_leaf_release(",
             "static void mm_destroy_impl(",
         )
     )
@@ -398,7 +462,7 @@ def main() -> int:
         extract_function(mm, signature)
         for signature in (
             "static void pt_destroy_user_recursive(",
-            "void pt_destroy_user(",
+            "void pt_destroy_user_mm(",
         )
     )
     generated = HARNESS.replace("/* INSERT_VM_FUNCTIONS */", vm_functions)
