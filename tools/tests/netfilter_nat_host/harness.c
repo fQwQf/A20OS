@@ -771,6 +771,75 @@ static void error_packet(uint8_t *out, size_t *len, const uint8_t *quote, size_t
     fix_ip(out+14);
     pkt->proto=1; pkt->icmp_off=0; pkt->l4_off=0; pkt->has_ports=0;
 }
+static void echo_packet(uint8_t *frame, size_t *len, netfilter_frame_t *view,
+                        uint32_t source, uint32_t destination, uint8_t type, uint16_t id)
+{
+    build_frame(frame, len, view, NETFILTER_PROTO_ICMP, source, destination, 0, 0);
+    *len = 14 + 20 + 8;
+    netfilter_put16(frame + 16, 28);
+    memset(frame + 34, 0, 8);
+    frame[34] = type;
+    netfilter_put16(frame + 38, id);
+    netfilter_put16(frame + 40, 7);
+    netfilter_put16(frame + 36, independent_checksum(frame + 34, 8, 0));
+    fix_ip(frame + 14);
+    view->has_ports = 0;
+    view->l4_off = view->icmp_off = 34;
+    view->icmp_type = type;
+    view->icmp_id = id;
+}
+
+static void scenario_icmp_shared_identifier(void)
+{
+    const uint32_t lan[] = {0xc0a80a02, 0xc0a80b02};
+    const uint32_t wan = 0xc0000201, remote = 0xc6336409;
+    const uint16_t identifier = 0x1234;
+    uint8_t requests[2][64], reply[64], error[128];
+    uint16_t wire_ids[2];
+    netfilter_frame_t view;
+    size_t len;
+    netfilter_nat_reset();
+    netfilter_conntrack_flush();
+    netfilter_conntrack_set_enabled(1);
+    net_nat_rule_t rule = {
+        .dir = NETFILTER_DIR_OUT, .proto = NETFILTER_PROTO_ICMP, .nat = NET_NAT_SNAT,
+        .src_addr = NO_ADDR, .dst_addr = NO_ADDR, .src_port = NO_PORT, .dst_port = NO_PORT,
+        .nat_addr = wan,
+    };
+    require(netfilter_nat_add_rule(&rule) == 0, "echo SNAT rule");
+    for (size_t i = 0; i < 2; ++i) {
+        echo_packet(requests[i], &len, &view, lan[i], remote, NETFILTER_ICMP_ECHO_REQUEST, identifier);
+        require(netfilter_conntrack_process(requests[i], len, 0, NETFILTER_DIR_IN, &view) == 0,
+                "echo request ingress");
+        require(netfilter_conntrack_process(requests[i], len, 1, NETFILTER_DIR_OUT, &view) == 0,
+                "echo request egress");
+        require(frame_ip_src(requests[i]) == wan &&
+                independent_checksum(requests[i] + 34, 8, 0) == 0, "translated echo request");
+        wire_ids[i] = netfilter_get16(requests[i] + 38);
+    }
+    require(wire_ids[0] == identifier && wire_ids[1] != identifier, "distinct WAN echo identifiers");
+    for (size_t i = 0; i < 2; ++i) {
+        echo_packet(reply, &len, &view, remote, wan, NETFILTER_ICMP_ECHO_REPLY, wire_ids[i]);
+        require(netfilter_conntrack_process(reply, len, 1, NETFILTER_DIR_IN, &view) == 0,
+                "translated echo reply ingress");
+        require(frame_ip_dst(reply) == lan[i] && netfilter_get16(reply + 38) == identifier,
+                "echo reply owner");
+        view.dst_addr = lan[i];
+        view.icmp_id = identifier;
+        require(netfilter_conntrack_process(reply, len, 0, NETFILTER_DIR_OUT, &view) == 0 &&
+                frame_ip_src(reply) == remote && independent_checksum(reply + 34, 8, 0) == 0,
+                "echo reply egress preserves remote source and checksum");
+
+        error_packet(error, &len, requests[i] + 14, 28, 11, remote, &view);
+        require(netfilter_conntrack_process(error, len, 1, NETFILTER_DIR_IN, &view) == 0 &&
+                frame_ip_dst(error) == lan[i] && netfilter_get16(error + 66) == identifier &&
+                independent_checksum(error + 34, len - 34, 0) == 0 &&
+                independent_checksum(error + 62, 8, 0) == 0, "related quote restores echo identifier");
+    }
+    net_conntrack_entry_t entries[4];
+    require(netfilter_conntrack_snapshot(entries, 4) == 2, "no reverse echo binding");
+}
+
 static void scenario_icmp_errors(void) {
     for (int dnat=0;dnat<2;++dnat) for (int tcp=0;tcp<2;++tcp) {
         uint8_t original[128],forward[128],error[160],before[160];
@@ -857,6 +926,7 @@ int main(void)
     scenario_napt();
     scenario_napt_concurrency();
     scenario_icmp_errors();
+    scenario_icmp_shared_identifier();
     say("HARNESS OK");
     return g_fail ? 1 : 0;
 }
