@@ -306,6 +306,26 @@ static void sparse_shared_semantics(void)
     puts("FORK_EXIT_PROBE: sparse shared first-touch, split, alias, move, DONTNEED, last mapper, SIGBUS PASS");
 }
 
+/* Resident lookahead must not send a 64-page mixed window to the bounded
+ * fill transaction: the first 16 pages can be cold while its tail is hot. */
+static void file_fault_cold_prefix(void)
+{
+    char name[] = "/tmp/a20-cold-prefix-XXXXXX";
+    int fd = mkstemp(name);
+    size_t len = 1024 * 1024;
+    if (fd < 0 || unlink(name) || ftruncate(fd, len)) fail("cold-prefix file");
+    unsigned char *buf = malloc(64 * 4096);
+    if (!buf || pread(fd, buf, 64 * 4096, 32 * 4096) != 64 * 4096)
+        fail("cold-prefix warm tail");
+    volatile unsigned char *p = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (p == MAP_FAILED) fail("cold-prefix mmap");
+    if (p[0] || p[15 * 4096] || p[16 * 4096] || p[79 * 4096])
+        fail("cold-prefix contents");
+    if (munmap((void *)p, len) || close(fd)) fail("cold-prefix cleanup");
+    free(buf);
+    puts("FILE_COLD_PREFIX: PASS bounded fill with resident tail");
+}
+
 int main(void)
 {
     signal_only_waits();
@@ -366,6 +386,7 @@ int main(void)
         fail("sparse munmap");
     high_fd_inheritance();
     file_mapping_inheritance();
+    file_fault_cold_prefix();
     targeted_waits();
     sparse_shared_semantics();
     puts("SHARED_EXIT_PROBE: PASS rounds=128 shared_visibility=1 mprotect=1 "
