@@ -47,7 +47,38 @@ enum {
     MM_TLB_HOLD_FRAME = 1,
     MM_TLB_HOLD_PAGE = 2,
     MM_TLB_HOLD_PT = 3,
+    MM_TLB_HOLD_PAGES = 4,
 };
+
+/* One allocation retains a bounded run; the embedded list node is first so
+ * the common drain can free the allocation through its mm_tlb_hold_t pointer. */
+typedef struct mm_tlb_page_run {
+    mm_tlb_hold_t hold;
+    size_t count;
+    page_cache_page_t *pages[];
+} mm_tlb_page_run_t;
+
+/* Caller owns mm->lock and a live pin for every supplied object. */
+int mm_tlb_hold_pages(mm_struct_t *mm, page_cache_page_t **pages, size_t count)
+{
+    if (!mm || !pages || !count || count > 64)
+        return -EINVAL;
+    for (size_t i = 0; i < count; i++)
+        if (!pages[i] || !pages[i]->vnode)
+            return -EINVAL;
+    mm_tlb_page_run_t *run = kcalloc_atomic(1, sizeof(*run) + count * sizeof(*pages));
+    if (!run)
+        return -ENOMEM;
+    run->count = count;
+    run->hold.kind = MM_TLB_HOLD_PAGES;
+    for (size_t i = 0; i < count; i++) {
+        page_cache_pin(pages[i]);
+        run->pages[i] = pages[i];
+    }
+    run->hold.next = mm->tlb_holds;
+    mm->tlb_holds = &run->hold;
+    return 0;
+}
 
 /* Reserve bookkeeping before a mutation whose commit/rollback must not
  * allocate. The caller owns mm->lock and the transaction's tlb_lock. */
@@ -213,14 +244,9 @@ static int mm_tlb_queue_hold(mm_struct_t *mm, pfn_t frame,
             kfree(hold);
             return -EINVAL;
         }
-        page_cache_page_t *pinned = page_cache_get(page->vnode,
-                                                    page->index, 0);
-        if (pinned != page) {
-            if (pinned)
-                page_cache_put(pinned);
-            kfree(hold);
-            return -EINVAL;
-        }
+        /* Callers already own a mapping/lookup pin. Reacquire a reference
+         * to that exact live object, without a redundant global hash lookup. */
+        page_cache_pin(page);
     } else {
         kfree(hold);
         return -EINVAL;
@@ -267,6 +293,10 @@ static void mm_tlb_release_holds(mm_tlb_hold_t *hold)
             frame_chunk[frame_count++] = hold->frame;
         } else if (hold->kind == MM_TLB_HOLD_PAGE) {
             page_cache_put(hold->page);
+        } else if (hold->kind == MM_TLB_HOLD_PAGES) {
+            mm_tlb_page_run_t *run = (mm_tlb_page_run_t *)hold;
+            for (size_t i = 0; i < run->count; i++)
+                page_cache_put(run->pages[i]);
         }
         kfree(hold);
         hold = next;
