@@ -17,6 +17,7 @@ pd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pd)
 
 LAN_MAC = bytes.fromhex('525400010001')
+LAN2_MAC = bytes.fromhex('525400020001')
 WAN_MAC = bytes.fromhex('525400770002')
 UPSTREAM = '2001:db8:30::1'
 SUBNET = 0x2A
@@ -59,9 +60,9 @@ def frames(capture):
         yield sec + usec / 1000000, data[start:off]
 
 
-def advertisements(capture):
+def advertisements(capture, mac=LAN_MAC):
     for stamp, frame in frames(capture):
-        if len(frame) < 70 or frame[6:12] != LAN_MAC or frame[12:14] != pd.ra.IPV6:
+        if len(frame) < 70 or frame[6:12] != mac or frame[12:14] != pd.ra.IPV6:
             continue
         size, proto, hops, src, dst = struct.unpack('!HBB16s16s', frame[18:54])
         packet = frame[54:54 + size]
@@ -78,7 +79,7 @@ def advertisements(capture):
             assert len(options) >= 2 and options[1] and len(options) >= options[1] * 8
             kind, length = options[0], options[1] * 8
             if kind == 1:
-                assert length == 8 and options[2:8] == LAN_MAC
+                assert length == 8 and options[2:8] == mac
                 seen_link = True
             elif kind == 3:
                 assert length == 32 and options[2:4] == b'\x40\xc0'
@@ -207,6 +208,130 @@ def exercise(a20, wan, lan, out, result):
                    for _, frame in frames(out/'wan.pcap')), 'LAN advertisement leaked to WAN'
 
 
+def exercise_restart(guests, restart_router, out, result):
+    a20, wan, lan = guests
+    wan.until('A20_LINUX_DHCP6_PEER_READY')
+    wan.until('DHCP6_STARTED')
+    lan.until('A20_LINUX_LAN_READY')
+    manager = 'pd-lan --state /extra/pd-state /extra/odhcp6c en3 56 en2:42 en4:43'
+    lans = [('lan', LAN_MAC, 42, 'en2'), ('lan2', LAN2_MAC, 43, 'en4')]
+
+    def start(a20):
+        a20.until('[INIT] entering scheduler...')
+        rc, output = command(a20, '/extra/busybox ip link set dev en4 up', wan)
+        assert rc == 0, output
+        a20.send(manager + ' & manager=$!')
+        a20.until('pd-lan: running on', 8, drain_peer=wan)
+
+    def wait_pios(a20, suffix, check, *, after=None):
+        deadline = time.monotonic() + 30
+        for name, mac, subnet, _ in lans:
+            capture = out/f'{name}{suffix}.pcap'
+            observed = []
+            while time.monotonic() < deadline:
+                command(a20, 'true', (wan, lan))
+                observed = list(advertisements(capture, mac))
+                start = after[name] if after else 0
+                if any(check(default, pios, subnet) for _, default, pios in observed[start:]):
+                    break
+                time.sleep(0.4)
+            else:
+                raise AssertionError((capture, observed))
+
+    def prefix(delegation, subnet):
+        return ipaddress.IPv6Network(f'2001:db8:{delegation}:{subnet:x}::/64')
+
+    start(a20)
+    wait_pios(a20, '', lambda default, pios, subnet: default and
+              pios.get(prefix(400, subnet), (0, 0))[0] > 0)
+    rc, output = command(a20, '/extra/busybox cat /extra/pd-state', wan)
+    assert rc == 0 and all(str(prefix(400, subnet)).encode() in output for _, _, subnet, _ in lans), output
+    result['passed'].append('both_lans_advertise_and_persist_their_own_delegated_prefix')
+    rc, output = command(a20, manager, wan)
+    assert rc != 0 and b'open prefix journal' in output, output
+    result['passed'].append('state_lock_prevents_a_second_manager_from_writing')
+    assert command(wan, 'kill -TERM "$(busybox pidof kea-dhcp6)"')[0] == 0
+
+    rc, output = command(a20, 'kill -KILL "$manager"; wait "$manager"; ' +
+                         manager + ' & manager=$!', wan)
+    assert rc == 0, output
+    a20.until('pd-lan: running on', 8, drain_peer=wan)
+
+    def withdrawal(default, pios, subnet):
+        return default == 0 and pios == {prefix(400, subnet): (0, 0)}
+
+    wait_pios(a20, '', withdrawal)
+    for _, _, _, dev in lans:
+        rc, output = command(a20, f'/extra/busybox ip -6 addr show dev {dev}', wan)
+        assert rc == 0 and b'2001:db8:400:' not in output, output
+    result['passed'].append('manager_sigkill_then_restart_withdraws_both_prefixes_and_removes_owned_addresses')
+
+    a20 = restart_router()
+    start(a20)
+    wait_pios(a20, '-restart', withdrawal)
+    for name, mac, _, dev in lans:
+        assert all(default == 0 and all(lifetimes == (0, 0) for lifetimes in pios.values())
+                   for _, default, pios in advertisements(out/f'{name}-restart.pcap', mac))
+        rc, output = command(a20, f'/extra/busybox ip -6 addr show dev {dev}', wan)
+        assert rc == 0 and b'2001:db8:400:' not in output, output
+    result['passed'].append('abrupt_router_reboot_with_same_disk_withdraws_old_prefixes_before_dhcpv6_returns')
+
+    assert command(wan, f'ip -6 addr add {UPSTREAM}/128 dev lo && '
+                   'ip -6 route add 2001:db8:500::/56 via fe80::5054:ff:fe77:2 dev eth0 && '
+                   'busybox sed -i s/2001:db8:400::/2001:db8:500::/ /etc/kea-dhcp6.conf')[0] == 0
+    rc, output = command(a20, '/extra/busybox mv /extra/pd-state /extra/pd-backup && '
+                         '/extra/busybox mkdir /extra/pd-state', wan)
+    assert rc == 0, output
+    wan.send('kea-dhcp6 -c /etc/kea-dhcp6.conf &')
+    a20.until('pd-lan: save prefix journal', 25, drain_peer=(wan, lan))
+    for name, mac, _, _ in lans:
+        assert all(default == 0 and all(lifetimes == (0, 0) for lifetimes in pios.values())
+                   for _, default, pios in advertisements(out/f'{name}-restart.pcap', mac))
+    rc, output = command(a20, '/extra/busybox rmdir /extra/pd-state && '
+                         '/extra/busybox mv /extra/pd-backup /extra/pd-state', wan)
+    assert rc == 0, output
+    result['passed'].append('journal_write_failure_prevents_unrecorded_prefix_advertisements')
+    wait_pios(a20, '-restart', lambda default, pios, subnet: default and
+              pios.get(prefix(500, subnet), (0, 0))[0] > 0)
+    for name, mac, subnet, _ in lans:
+        assert all(pios.get(prefix(400, subnet), (0, 0)) == (0, 0)
+                   for _, _, pios in advertisements(out/f'{name}-restart.pcap', mac))
+    wait_linux(lan, 'ip -6 addr show dev eth0',
+               lambda b: b'2001:db8:500:2a:' in b and b'tentative' not in b, (wan, a20))
+    assert command(lan, f'busybox ping -6 -c 2 -W 2 {UPSTREAM}', (wan, a20))[0] == 0
+    result['passed'].append('replacement_delegation_renumbers_both_lans_and_restores_linux_forwarding')
+
+    def set_carrier(qmp, up):
+        request = {'execute': 'set_link', 'arguments': {'name': 'pd-wan', 'up': up}}
+        qmp.write(json.dumps(request).encode() + b'\r\n')
+        while True:
+            message = json.loads(qmp.readline())
+            if 'event' not in message:
+                assert 'return' in message, message
+                return
+
+    def capture_positions():
+        return {name: len(list(advertisements(out/f'{name}-restart.pcap', mac)))
+                for name, mac, _, _ in lans}
+
+    with socket.create_connection(('127.0.0.1', result['qmp_port']), timeout=5) as monitor:
+        with monitor.makefile('rwb', buffering=0) as qmp:
+            assert 'QMP' in json.loads(qmp.readline())
+            qmp.write(b'{"execute":"qmp_capabilities"}\r\n')
+            assert 'return' in json.loads(qmp.readline())
+            down = capture_positions()
+            set_carrier(qmp, False)
+            wait_pios(a20, '-restart', lambda default, pios, subnet:
+                      default == 0 and pios.get(prefix(500, subnet)) == (0, 0), after=down)
+            up = capture_positions()
+            set_carrier(qmp, True)
+            wait_pios(a20, '-restart', lambda default, pios, subnet:
+                      default and pios.get(prefix(500, subnet), (0, 0))[0] > 0, after=up)
+    assert command(lan, f'busybox ping -6 -c 2 -W 2 {UPSTREAM}', (wan, a20))[0] == 0
+    result['passed'].append('ethernet_carrier_drop_withdraws_delegation_and_reacquisition_restores_forwarding')
+    assert command(a20, 'kill "$manager"; wait "$manager"', wan, timeout=14)[0] == 0
+
+
 def verify_ppp_delegations(capture):
     identities, prefixes = set(), set()
     for source, kind, _, options in dhcp_packets(capture):
@@ -282,7 +407,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ('kernel', 'linux', 'peer-initrd', 'busybox', 'odhcp6c', 'out'):
         parser.add_argument(f'--{arg}', type=Path, required=True)
-    parser.add_argument('--pppoe-peer-initrd', type=Path, help='run the WAN peer through PPPoE')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--pppoe-peer-initrd', type=Path, help='run the WAN peer through PPPoE')
+    modes.add_argument('--restart-state', action='store_true', help='verify persistent withdrawals on two LANs')
     parser.add_argument('--trace-odhcp6c', action='store_true')
     args = parser.parse_args()
     out = args.out.resolve()
@@ -308,6 +435,14 @@ def main():
               *wan_link(rwan, wan, '52:54:00:77:00:02', out/'wan.pcap'),
               '-drive', f'file={payload},if=none,format=raw,id=payload',
               '-device', 'virtio-blk-pci,drive=payload']
+    if args.restart_state:
+        qmp_port, = pd.pppoe.router.backend.reserve_ports(socket.SOCK_STREAM, 1)
+        router = [arg.replace('virtio-net-pci,netdev=wan', 'virtio-net-pci,id=pd-wan,netdev=wan')
+                  for arg in router]
+        router.extend(('-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off'))
+        rlan2, lan2 = pd.pppoe.router.backend.reserve_ports(socket.SOCK_DGRAM, 2)
+        router.extend(item.replace('id=lan', 'id=lan2').replace('netdev=lan', 'netdev=lan2')
+                      for item in lan_link(rlan2, lan2, '52:54:00:02:00:01', out/'lan2.pcap'))
     wan_initrd = args.pppoe_peer_initrd or args.peer_initrd
     wan_args = 'console=ttyS0 quiet net.ifnames=0'
     if args.pppoe_peer_initrd:
@@ -320,9 +455,11 @@ def main():
                   sha256={str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in (args.kernel, args.linux, args.peer_initrd, wan_initrd,
                                     args.busybox, args.odhcp6c)})
+    if args.restart_state:
+        result['qmp_port'] = qmp_port
     Guest = pd.pppoe.router.backend.Guest
     with (out/'serial.log').open('wb') as router_log, (out/'wan.log').open('wb') as wan_log, \
-         (out/'lan.log').open('wb') as lan_log:
+         (out/'lan.log').open('wb') as lan_log, (out/'restart.log').open('wb') as restart_log:
         guests = []
         try:
             guests.append(Guest(router, router_log))
@@ -330,6 +467,17 @@ def main():
             guests.append(Guest(lan_cmd, lan_log))
             if args.pppoe_peer_initrd:
                 exercise_ppp(*guests, out, result)
+            elif args.restart_state:
+                def restart_router():
+                    guests.pop(0).close()
+                    argv = router.copy()
+                    for name in ('lan', 'lan2', 'wan'):
+                        argv = [arg.replace(f'{name}.pcap', f'{name}-restart.pcap') for arg in argv]
+                    result['argv']['restart'] = argv
+                    guests.insert(0, Guest(argv, restart_log))
+                    return guests[0]
+
+                exercise_restart(guests, restart_router, out, result)
             else:
                 exercise(*guests, out, result)
             guests[0].send('poweroff')

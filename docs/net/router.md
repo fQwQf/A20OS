@@ -146,7 +146,7 @@ python3 tools/net/tests/test-bsd-dhcp6-pd.py \
 以及 LAN 接口与子网编号。
 
 ```sh
-/bin/pd-lan /usr/sbin/odhcp6c en3 56 en2:0x2a
+/bin/pd-lan --state /extra/pd-state /usr/sbin/odhcp6c en3 56 en2:0x2a
 ```
 
 该命令在前台运行。从委派的 /56 为 `en2` 分配子网编号 `0x2a`
@@ -154,12 +154,21 @@ python3 tools/net/tests/test-bsd-dhcp6-pd.py \
 可以提供多个不同的 `LAN:子网编号` 参数。带 PD 排除选项的租约会跳过
 重叠子网。通告寿命受上游剩余租约约束。WAN 默认路由失效时，通告中的
 路由器寿命变为零，仍有效的前缀继续发布。租约失效或命令正常退出时，
-程序撤销通告并清理它管理的地址。重启后的租约和过期通告状态持久化
-仍在补全。WAN 接口可以是普通以太网接口或 IPv6CP 建立的
-[PPP 接口](./pppoe.md#在-ppp-上取得并发布-ipv6-前缀)。服务会等待
-WAN 链路本地地址，接口销毁或关闭时重启 DHCPv6 会话。
-[RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html) ·
-[RFC 9096](https://www.rfc-editor.org/rfc/rfc9096.html)
+程序撤销通告并清理它管理的地址。WAN 接口可以是普通以太网接口或
+IPv6CP 建立的 PPP 接口。服务等待 WAN 链路本地地址，接口关闭、
+销毁或载波丢失后等待链路恢复，再启动 DHCPv6 会话。
+[PPP 配置](./pppoe.md#在-ppp-上取得并发布-ipv6-前缀) ·
+[RFC 4861](https://www.rfc-editor.org/rfc/rfc4861.html)
+
+`--state` 接受可写持久卷上的绝对路径。部署时每个进程使用独立文件，
+在进程或整机重启后使用相同路径以及相同 LAN 接口名和 MAC。
+程序在通告前记录各 LAN 的 /64 和通告寿命。重新启动后，它以零首选
+寿命和零有效寿命撤销历史前缀。上游再次委派同一前缀后，程序恢复
+该前缀的正常通告。恢复后的撤销期限以本次启动的单调时钟计算，时长
+取此前通告的最长有效寿命。每个 LAN 同时跟踪最多 16 个已发布或待撤销
+的前缀。达到上限时，新前缀等待可用记录。省略 `--state` 时，记录只
+存在于进程内存中。
+[RFC 9096 §3.5](https://www.rfc-editor.org/rfc/rfc9096.html#section-3.5)
 
 以下测试复用上述 Kea 对端镜像，分别启动 Linux WAN 和 LAN 虚拟机。
 Linux LAN 通过 SLAAC 配置自己的地址及默认路由，测试只在模拟 ISP
@@ -171,6 +180,9 @@ python3 tools/net/tests/test-bsd-pd-lan.py \
   --peer-initrd <对端目录>/peer-initramfs.cpio.gz --busybox <静态BusyBox路径> \
   --odhcp6c <静态odhcp6c路径> --out <新的证据目录>
 ```
+
+加上 `--restart-state` 可以验证两条 LAN 各自的前缀，以及路由器重启、
+上游换号和持久卷写入失败后的通告行为。
 
 ## 最小双网卡配置
 

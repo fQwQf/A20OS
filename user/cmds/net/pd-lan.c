@@ -19,9 +19,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -48,6 +50,7 @@ _Static_assert(sizeof(struct update) <= 4096, "lease snapshots must fit a pipe w
 struct prefix {
     struct in6_addr network;
     uint64_t preferred_until, valid_until, withdraw_until;
+    uint32_t advertised_valid;
     bool installed, wanted;
 };
 
@@ -59,6 +62,12 @@ struct lan {
     uint8_t mac[6];
     uint64_t next_ra, last_ra;
     struct prefix prefixes[MAX_PREFIXES];
+};
+
+struct journal {
+    const char *path;
+    int directory;
+    bool dirty;
 };
 
 static volatile sig_atomic_t stopping;
@@ -335,6 +344,177 @@ static void schedule_ra(struct lan *lan, uint64_t when)
         lan->next_ra = when;
 }
 
+/* The version fixes the PIO A/L flags. Entries are keyed by LAN name and
+ * Ethernet address so a state file cannot silently follow another link. */
+static void lan_mac(const struct lan *lan, char text[13])
+{
+    snprintf(text, 13, "%02x%02x%02x%02x%02x%02x", lan->mac[0], lan->mac[1],
+             lan->mac[2], lan->mac[3], lan->mac[4], lan->mac[5]);
+}
+
+static int journal_load(const struct journal *state, struct lan *lans, unsigned count)
+{
+    int fd = open(state->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        return errno == ENOENT ? 0 : -1;
+    struct stat status;
+    int error = 0;
+    if (fstat(fd, &status) < 0)
+        error = errno;
+    else if (!S_ISREG(status.st_mode))
+        error = EINVAL;
+    if (error) {
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    FILE *file = fdopen(fd, "r");
+    if (!file) {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    char line[128];
+    if (!fgets(line, sizeof(line), file) || strcmp(line, "PDLAN1\n"))
+        goto invalid;
+    uint64_t now = now_ms();
+    while (fgets(line, sizeof(line), file)) {
+        char name[IF_NAMESIZE], mac[13], address[INET6_ADDRSTRLEN + 4], hold[11], extra;
+        struct in6_addr network;
+        unsigned length;
+        uint64_t duration;
+        if (!strchr(line, '\n') ||
+            sscanf(line, "%15s %12s %49s %10s %c", name, mac, address, hold, &extra) != 4 ||
+            !read_prefix(address, &network, &length) || length != 64 ||
+            !number(hold, 10, MAX_PIO_VALID, &duration) || !duration)
+            goto invalid;
+        struct lan *lan = NULL;
+        for (unsigned i = 0; i < count; ++i) {
+            if (strcmp(lans[i].name, name))
+                continue;
+            char expected[13];
+            lan_mac(&lans[i], expected);
+            if (!strcmp(expected, mac))
+                lan = &lans[i];
+            break;
+        }
+        if (!lan)
+            goto invalid;
+        struct prefix *empty = NULL;
+        for (unsigned i = 0; i < MAX_PREFIXES; ++i) {
+            struct prefix *entry = &lan->prefixes[i];
+            if (!entry->advertised_valid) {
+                if (!empty)
+                    empty = entry;
+            } else if (!memcmp(&entry->network, &network, sizeof(network))) {
+                goto invalid;
+            }
+        }
+        if (!empty)
+            goto invalid;
+        /* Keep the entire previous lifetime without trusting the RTC. The
+         * journal is a withdrawal record, never an upstream delegation. */
+        *empty = (struct prefix){
+            .network = network, .advertised_valid = (uint32_t)duration,
+            .withdraw_until = now + duration * 1000, .installed = true,
+        };
+        schedule_ra(lan, now);
+    }
+    if (ferror(file))
+        goto invalid;
+    return fclose(file);
+
+invalid:
+    fclose(file);
+    errno = EINVAL;
+    return -1;
+}
+
+static int journal_open(struct journal *state, struct lan *lans, unsigned count)
+{
+    if (!state->path)
+        return 0;
+    size_t length = strlen(state->path);
+    if (state->path[0] != '/' || length >= PATH_MAX - 16 || state->path[length - 1] == '/') {
+        errno = EINVAL;
+        return -1;
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s.lock", state->path);
+    int lock = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) < 0)
+        return -1;
+    /* The process owns the open lock for its lifetime. */
+    strcpy(path, state->path);
+    char *slash = strrchr(path, '/');
+    if (slash == path)
+        ++slash;
+    *slash = '\0';
+    state->directory = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (state->directory < 0)
+        return -1;
+    return journal_load(state, lans, count);
+}
+
+static bool journal_save(struct journal *state, const struct lan *lans, unsigned count)
+{
+    if (!state->path)
+        state->dirty = false;
+    if (!state->dirty)
+        return true;
+    struct stat status;
+    if (lstat(state->path, &status) == 0) {
+        if (!S_ISREG(status.st_mode)) {
+            errno = EINVAL;
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        return false;
+    }
+    char temporary[PATH_MAX];
+    snprintf(temporary, sizeof(temporary), "%s.XXXXXX", state->path);
+    int fd = mkstemp(temporary);
+    if (fd < 0)
+        return false;
+    FILE *file = fdopen(fd, "w");
+    if (!file) {
+        int error = errno;
+        close(fd);
+        unlink(temporary);
+        errno = error;
+        return false;
+    }
+    bool ok = fputs("PDLAN1\n", file) != EOF;
+    for (unsigned i = 0; ok && i < count; ++i) {
+        char mac[13];
+        lan_mac(&lans[i], mac);
+        for (unsigned j = 0; ok && j < MAX_PREFIXES; ++j) {
+            const struct prefix *entry = &lans[i].prefixes[j];
+            if (!entry->advertised_valid)
+                continue;
+            char network[INET6_ADDRSTRLEN];
+            ok = inet_ntop(AF_INET6, &entry->network, network, sizeof(network)) &&
+                 fprintf(file, "%s %s %s/64 %u\n", lans[i].name, mac, network,
+                         entry->advertised_valid) > 0;
+        }
+    }
+    if (ok)
+        ok = fflush(file) == 0 && fsync(fd) == 0;
+    int error = ok ? 0 : errno;
+    if (fclose(file) < 0 && !error)
+        error = errno;
+    if (!error && (rename(temporary, state->path) < 0 || fsync(state->directory) < 0))
+        error = errno;
+    if (error) {
+        unlink(temporary);
+        errno = error;
+        return false;
+    }
+    state->dirty = false;
+    return true;
+}
+
 static void withdraw(int rtnl, struct lan *lan, struct prefix *prefix, uint64_t now)
 {
     if (configure_address(rtnl, lan, prefix, false, 0, 0) < 0 &&
@@ -346,17 +526,22 @@ static void withdraw(int rtnl, struct lan *lan, struct prefix *prefix, uint64_t 
     }
     if (!prefix->withdraw_until) {
         uint32_t valid = bounded(remaining(prefix->valid_until, now), MAX_PIO_VALID);
+        if (prefix->advertised_valid > valid)
+            valid = prefix->advertised_valid;
         prefix->withdraw_until = now + (valid > 12 ? valid : 12) * UINT64_C(1000);
         schedule_ra(lan, now);
     }
 }
 
-static void reconcile(int rtnl, struct lan *lan, const struct update *leases, uint64_t now)
+static void reconcile(int rtnl, struct lan *lan, const struct update *leases, uint64_t now,
+                      struct journal *journal)
 {
     for (unsigned i = 0; i < MAX_PREFIXES; ++i) {
         struct prefix *prefix = &lan->prefixes[i];
-        if (prefix->withdraw_until && prefix->withdraw_until <= now && !prefix->installed)
+        if (prefix->withdraw_until && prefix->withdraw_until <= now && !prefix->installed) {
+            journal->dirty |= prefix->advertised_valid != 0;
             memset(prefix, 0, sizeof(*prefix));
+        }
         prefix->wanted = false;
     }
     for (unsigned i = 0; i < leases->count; ++i) {
@@ -374,8 +559,7 @@ static void reconcile(int rtnl, struct lan *lan, const struct update *leases, ui
                 entry = candidate;
                 break;
             }
-            if (!candidate->installed && (!reusable ||
-                candidate->withdraw_until < reusable->withdraw_until))
+            if (!candidate->installed && !candidate->withdraw_until && !reusable)
                 reusable = candidate;
         }
         if (!entry)
@@ -391,6 +575,7 @@ static void reconcile(int rtnl, struct lan *lan, const struct update *leases, ui
         struct prefix next = {
             .network = network, .preferred_until = lease->preferred_until,
             .valid_until = lease->valid_until, .installed = entry->installed, .wanted = true,
+            .advertised_valid = entry->advertised_valid,
         };
         if (configure_address(rtnl, lan, &next, true,
                               remaining(next.preferred_until, now), valid) < 0) {
@@ -480,8 +665,26 @@ static bool solicitation(int fd)
     return false;
 }
 
-static void advertise(struct lan *lan, bool have_default, uint64_t now, bool final)
+static void advertise(struct lan *lan, bool have_default, uint64_t now, bool final,
+                      struct journal *journal, const struct lan *lans, unsigned lan_count)
 {
+    if (!final) {
+        for (unsigned i = 0; i < MAX_PREFIXES; ++i) {
+            struct prefix *entry = &lan->prefixes[i];
+            if (!entry->installed || entry->withdraw_until)
+                continue;
+            uint32_t valid = bounded(remaining(entry->valid_until, now), MAX_PIO_VALID);
+            if (valid > entry->advertised_valid) {
+                entry->advertised_valid = valid;
+                journal->dirty = true;
+            }
+        }
+    }
+    bool durable = journal_save(journal, lans, lan_count);
+    if (!durable)
+        perror("pd-lan: save prefix journal");
+    now = now_ms();
+
     struct {
         struct nd_router_advert header;
         uint8_t link[8];
@@ -499,6 +702,8 @@ static void advertise(struct lan *lan, bool have_default, uint64_t now, bool fin
             continue;
         uint32_t valid = final || entry->withdraw_until ? 0 :
                          bounded(remaining(entry->valid_until, now), MAX_PIO_VALID);
+        if (valid && !durable)
+            continue;
         uint32_t preferred = bounded(valid, bounded(remaining(entry->preferred_until, now),
                                                     MAX_PIO_PREFERRED));
         if (valid) {
@@ -513,7 +718,7 @@ static void advertise(struct lan *lan, bool have_default, uint64_t now, bool fin
             .nd_opt_pi_prefix = entry->network,
         };
     }
-    lan->next_ra = 0;
+    lan->next_ra = durable ? 0 : now + 1000;
     if (!count)
         return;
     if (have_default && longest >= 4)
@@ -660,7 +865,8 @@ static unsigned wan_index(int ioctl_fd, const char *name)
 {
     struct ifreq request = {0};
     strcpy(request.ifr_name, name);
-    if (ioctl(ioctl_fd, SIOCGIFFLAGS, &request) < 0 || !(request.ifr_flags & IFF_UP))
+    if (ioctl(ioctl_fd, SIOCGIFFLAGS, &request) < 0 ||
+        (request.ifr_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING))
         return 0;
     return if_nametoindex(name);
 }
@@ -705,7 +911,7 @@ static void lose_link(struct client *client, struct update *leases, uint64_t now
 }
 
 static int run(int rtnl, int ioctl_fd, int links, struct lan *lans,
-               unsigned count, struct client *client)
+               unsigned count, struct client *client, struct journal *journal)
 {
     struct pollfd fds[MAX_LANS + 2] = {{-1, POLLIN, 0}, {links, POLLIN, 0}};
     for (unsigned i = 0; i < count; ++i)
@@ -726,10 +932,12 @@ static int run(int rtnl, int ioctl_fd, int links, struct lan *lans,
             bool available = index && wan_default_route(rtnl, index);
             now = now_ms();
             for (unsigned i = 0; i < count; ++i) {
-                reconcile(rtnl, &lans[i], &leases, now);
+                reconcile(rtnl, &lans[i], &leases, now, journal);
                 if (available != have_default)
                     schedule_ra(&lans[i], now);
             }
+            if (!journal_save(journal, lans, count))
+                perror("pd-lan: prune prefix journal");
             have_default = available;
             now = now_ms();
             next_check = now + 1000;
@@ -737,7 +945,7 @@ static int run(int rtnl, int ioctl_fd, int links, struct lan *lans,
         uint64_t wake = next_check;
         for (unsigned i = 0; i < count; ++i) {
             if (lans[i].next_ra && lans[i].next_ra <= now)
-                advertise(&lans[i], have_default, now, false);
+                advertise(&lans[i], have_default, now, false, journal, lans, count);
             if (lans[i].next_ra && lans[i].next_ra < wake)
                 wake = lans[i].next_ra;
         }
@@ -777,7 +985,7 @@ static int run(int rtnl, int ioctl_fd, int links, struct lan *lans,
     stop_client(client, now_ms());
     const struct update empty = {0};
     for (unsigned i = 0; i < count; ++i)
-        reconcile(rtnl, &lans[i], &empty, now_ms());
+        reconcile(rtnl, &lans[i], &empty, now_ms(), journal);
     for (unsigned i = 0; i < count; ++i) {
         uint64_t now = now_ms();
         uint64_t earliest = lans[i].last_ra + RA_MIN_SPACING;
@@ -787,7 +995,7 @@ static int run(int rtnl, int ioctl_fd, int links, struct lan *lans,
             while (nanosleep(&delay, &delay) < 0 && errno == EINTR)
                 ;
         }
-        advertise(&lans[i], false, now_ms(), true);
+        advertise(&lans[i], false, now_ms(), true, journal, lans, count);
     }
     while (client->pid > 0) {
         reap_client(client, now_ms());
@@ -804,9 +1012,15 @@ int main(int argc, char **argv)
     if (argc == 3 && event_pipe && number(event_pipe, 10, INT_MAX, &event_fd))
         return send_update(event_fd, argv[2]);
 
+    struct journal journal = {.directory = -1};
+    if (argc >= 3 && !strcmp(argv[1], "--state")) {
+        journal.path = argv[2];
+        argv += 2;
+        argc -= 2;
+    }
     if (argc < 5 || argc > MAX_LANS + 4 || !argv[2][0] || strlen(argv[2]) >= IF_NAMESIZE ||
         !number(argv[3], 10, 64, &length) || length == 0) {
-        fprintf(stderr, "usage: pd-lan ODHCP6C WAN PREFIX-LENGTH LAN[:SUBNET-ID] ...\n");
+        fprintf(stderr, "usage: pd-lan [--state ABSOLUTE-PATH] ODHCP6C WAN PREFIX-LENGTH LAN[:SUBNET-ID] ...\n");
         return 2;
     }
     if (access(argv[1], X_OK) < 0) {
@@ -846,6 +1060,10 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    if (journal_open(&journal, lans, count) < 0) {
+        perror("pd-lan: open prefix journal");
+        return 1;
+    }
     enum { NETLINK_LEVEL = 270, ADD_MEMBERSHIP = 1, LINK_GROUP = 1 };
     int links = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     int group = LINK_GROUP;
@@ -863,5 +1081,5 @@ int main(int argc, char **argv)
     struct client client = {.program = argv[1], .wan = argv[2], .length = argv[3], .event_fd = -1};
     fprintf(stderr, "pd-lan: running on %u LAN interface(s) for %s\n", count, argv[2]);
     random_seed = now_ms() ^ getpid();
-    return run(rtnl, ioctl_fd, links, lans, count, &client);
+    return run(rtnl, ioctl_fd, links, lans, count, &client, &journal);
 }
