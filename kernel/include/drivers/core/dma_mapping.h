@@ -42,6 +42,22 @@ struct driver_dma_checked_ops {
     void (*release)(void *);
 };
 
+/* Hardware-owned domain with uncertain map failures and fallible detach.
+ * map_page sets needs_unmap=true whenever it installed/reserved an address,
+ * including failures. That address must remain valid for unmap retry until
+ * unmap succeeds. Success requires needs_unmap=true. Failure with false
+ * guarantees no residual translation/invalidation for that page.
+ * deactivate runs only after every mapping/cleanup handle is drained; success
+ * confirms hardware no longer references provider resources. release then
+ * disposes software context on the final put. All callbacks are task context,
+ * serialized per domain, and must not reenter this domain's map/unmap/shutdown. */
+struct driver_dma_managed_ops {
+    int (*map_page)(void *, uint64_t, enum driver_dma_direction, uint64_t *, bool *needs_unmap);
+    int (*unmap_page)(void *, uint64_t, enum driver_dma_direction);
+    int (*deactivate)(void *);
+    void (*release)(void *);
+};
+
 /* Task context, outside spinlocks. Success transfers one context ownership
  * reference to the domain; failure leaves it with the caller. The domain
  * pins the device object and snapshots its DMA mask. It does not keep a
@@ -52,6 +68,18 @@ int driver_dma_domain_create(struct device *device,
 int driver_dma_domain_create_checked(struct device *device,
                                      const struct driver_dma_checked_ops *ops,
                                      void *context, struct driver_dma_domain **out);
+/* Success retains an internal provider reference until shutdown succeeds.
+ * Final owner put without shutdown therefore leaks safely, never detaches or
+ * frees live hardware context. Caller must retain a reference for retry. */
+int driver_dma_domain_create_managed(struct device *device,
+                                     const struct driver_dma_managed_ops *ops,
+                                     void *context, struct driver_dma_domain **out);
+/* Caller holds a domain reference and has stopped DMA. Permanently closes
+ * new maps, returns -EBUSY while mapping/cleanup handles remain; unmap them
+ * then retry. Deactivation failure retains context/internal reference for
+ * retry. Success is idempotent and does not consume caller's reference.
+ * Only managed domains support shutdown; others return -EOPNOTSUPP. */
+int driver_dma_domain_shutdown(struct driver_dma_domain *domain);
 /* Explicit opt-in ONLY for a platform configured for identity DMA. This is
  * never a fallback after an IOMMU/provider error. No isolation is promised. */
 int driver_dma_domain_create_direct(struct device *device,
