@@ -219,6 +219,10 @@ static int iommu_cmd(uint64_t dword0, uint64_t dword1)
     if (!g_iommu_cq)
         return -1;
     uint64_t flags = spin_lock_irqsave(&g_iommu_cq_lock);
+    if (iommu_read32(IOMMU_REG_CQCSR) & IOMMU_QUEUE_ERROR) {
+        spin_unlock_irqrestore(&g_iommu_cq_lock, flags);
+        return -1;
+    }
     uint32_t tail = g_iommu_cq_tail & IOMMU_CQ_MASK;
     uint32_t next = (tail + 1) & IOMMU_CQ_MASK;
     if ((iommu_read32(IOMMU_REG_CQH) & IOMMU_CQ_MASK) == next) {
@@ -228,6 +232,10 @@ static int iommu_cmd(uint64_t dword0, uint64_t dword1)
     g_iommu_cq[tail * 2] = dword0;
     g_iommu_cq[tail * 2 + 1] = dword1;
     wmb();
+    /* Ownership transfers on publication, not on observed completion. A
+     * timed-out command may still be consumed later; never overwrite its
+     * slot on retry. Queue-full admission protects all outstanding slots. */
+    g_iommu_cq_tail = next;
     iommu_write32(IOMMU_REG_CQT, next);
     int done = 0;
     for (unsigned i = 0; i < 1000000; i++) {
@@ -237,9 +245,7 @@ static int iommu_cmd(uint64_t dword0, uint64_t dword1)
         }
     }
     uint32_t csr = iommu_read32(IOMMU_REG_CQCSR);
-    if (done && !(csr & IOMMU_QUEUE_ERROR))
-        g_iommu_cq_tail = next;
-    else
+    if (!done || (csr & IOMMU_QUEUE_ERROR))
         kerr("[IOMMU] command failed op=0x%lx head=%u tail=%u csr=0x%x\n",
              (unsigned long)dword0,
              iommu_read32(IOMMU_REG_CQH) & IOMMU_CQ_MASK, next, csr);
@@ -650,8 +656,9 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
 int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
                              uint32_t npages)
 {
-    if (!npages || iova < IOMMU_USER_IOVA ||
-        ((iova - IOMMU_USER_IOVA) & (PAGE_SIZE - 1)))
+    if (!npages || npages > IOMMU_USER_MAX_PAGES || iova < IOMMU_USER_IOVA ||
+        ((iova - IOMMU_USER_IOVA) & (PAGE_SIZE - 1)) ||
+        (iova - IOMMU_USER_IOVA) / PAGE_SIZE > IOMMU_USER_MAX_PAGES - npages)
         return -1;
     uint32_t first = (uint32_t)((iova - IOMMU_USER_IOVA) / PAGE_SIZE);
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
