@@ -1122,7 +1122,28 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
         if (i >= 64) DMA_CHECK(second[i] == 0xcc);
     }
     pci_cfg_write16(device, 4, command & ~4U);
+    /* Keep test-owned guard references over the negative DMA attempt. Even
+     * a stale-translation regression must not corrupt reallocated RAM. */
+    frame_get(pages[0]); frame_get(pages[1]);
     DMA_CHECK(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+    memset(first, 0x3c, PAGE_SIZE); memset(second, 0x3c, PAGE_SIZE);
+    dma_sync_for_device(first, PAGE_SIZE); dma_sync_for_device(second, PAGE_SIZE);
+    uint32_t before_fault = iommu_read32(IOMMU_REG_FQT);
+    pci_cfg_write16(device, 4, command | 4);
+    native_test_edu_transfer(bar, 0x40000, address + PAGE_SIZE - 64, true);
+    DMA_CHECK(iommu_read32(IOMMU_REG_FQT) != before_fault);
+    struct riscv_iommu_dma_fault fault;
+    DMA_CHECK(!riscv_iommu_dma_fault_poll(device, &fault));
+    DMA_CHECK(fault.count && fault.cause == 15 && fault.blocked && fault.isolated);
+    DMA_CHECK(!fault.queue_error && !fault.isolation_error);
+    DMA_CHECK(fault.address >= address && fault.address < next + PAGE_SIZE);
+    DMA_CHECK(!(pci_cfg_read16(device, 4) & 4));
+    DMA_CHECK(driver_dma_map_pages(domain, &gap, 1, DRIVER_DMA_TO_DEVICE, &mapping) == -EIO);
+    DMA_CHECK(!mapping);
+    dma_sync_for_cpu(first, PAGE_SIZE); dma_sync_for_cpu(second, PAGE_SIZE);
+    for (unsigned i = 0; i < PAGE_SIZE; i++)
+        DMA_CHECK(first[i] == 0x3c && second[i] == 0x3c && guard[i] == 0x5a);
+    frame_put(pages[0]); frame_put(pages[1]);
     frame_put(gap);
 #undef DMA_CHECK
 }
@@ -1166,7 +1187,7 @@ void driver_iommu_native_selftest(void)
     driver_dma_domain_put(domain);
     pci_cfg_write16(device, 4, command);
     device_put(device);
-    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1\n");
+    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1 fault=1\n");
 #undef IOMMU_CHECK
 }
 
