@@ -166,12 +166,48 @@ static bool boot_flag(const char *args, const char *key)
     return false;
 }
 
+static void exercise_resources(void) {
+    /* Metadata-only claims outside usable device/RAM addresses. No MMIO map,
+     * port access or hardware reservation is performed by this test. */
+    resource_t range = {
+        .type = RES_MMIO, .start = ~(uint64_t)0 - 0x3fff, .end = ~(uint64_t)0};
+    device_t a = {.name = "resource-selftest-a",
+                  .res = &range,
+                  .res_count = 1,
+                  .references = 1};
+    device_t b = {.name = "resource-selftest-b", .references = 1};
+    driver_resource_claim_t *first, *second, *conflict;
+    CHECK(!driver_resource_request(&a, &range, &first) && a.references == 2);
+    CHECK(driver_resource_request(&b, &range, &conflict) == -EBUSY &&
+          !conflict);
+    CHECK(!driver_resource_request(&a, &range, &second) && a.references == 3);
+    driver_resource_release(first);
+    CHECK(driver_resource_request(&b, &range, &conflict) == -EBUSY &&
+          !conflict);
+    driver_resource_release(second);
+    CHECK(a.references == 1 && !driver_resource_request(&b, &range, &first));
+    driver_resource_release(first);
+    CHECK(!device_claim_resource(&a, &range) && a.references == 2);
+    CHECK(driver_resource_request(&b, &range, &conflict) == -EBUSY &&
+          !conflict);
+    device_release_resources(&a);
+    CHECK(!a.resource_actions && a.references == 1);
+    CHECK(!driver_resource_request(&b, &range, &first));
+    driver_resource_release(first);
+    CHECK(b.references == 1);
+    device_put(&a);
+    device_put(&b);
+    kinfo(
+        "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1\n");
+}
+
 void driver_runtime_selftest_boot(void)
 {
     const char *args = bootargs_get();
     if (!boot_flag(args, "driver.runtime_test=1"))
         return;
     kinfo("DRIVER_RUNTIME: START\n");
+    exercise_resources();
     exercise();
     exercise_firmware();
     if (boot_flag(args, "driver.iommu_native_test=1"))
