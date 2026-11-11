@@ -1,18 +1,18 @@
 # 原生驱动运行时：GPU 开发的第一阶段基础
 
-本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、页级 DMA mapping、原生异步 fence、可取消的工作队列和 IRQ 排空接口；不表示 AMD/NVIDIA 硬件加速已经可用。接口适用于 hosted 内核，MCU profile 不编入 DMA mapping/fence 实现。
+本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。接口适用于 hosted 内核，MCU profile 不编入这些 hosted 运行时实现。
 
 ## 分层与边界
 
 | 层次 | 职责 |
 |---|---|
 | 设备核心 | device/driver/bus/class、绑定、引用、依赖、资源回收、下线顺序 |
-| 通用运行时 | DMA mapping/domain、IRQ 排空、工作队列、等待与原生 fence；后续扩展固件加载 |
+| 通用运行时 | DMA mapping/domain、IRQ 排空、工作队列、等待与原生 fence、固件读取 |
 | GPU 子系统 | 后续实现 BO、GPUVM、上下文、任务队列、显示设备、同步 UAPI |
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
 
-内置驱动与 `.a20drv` 使用同一 `driver_t`。本阶段增加 `driver_t.quiesce`，驱动 ABI 更新为 **9**，旧模块必须重建。新增 DMA/fence 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
+内置驱动与 `.a20drv` 使用同一 `driver_t`。本阶段增加 `driver_t.quiesce`，驱动 ABI 更新为 **9**，旧模块必须重建。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
 
 ## 下线与资源生命周期
 
@@ -100,10 +100,28 @@ cancel 成功后其他 producer 仍可重新提交，释放 context 前必须先
 
 此接口当前是有界 handler 契约下的忙等排空，没有 IRQ 域重构、自动线程化 handler 或通用设备 IRQ 隔离。
 
+## 固件数据与显式来源
+
+头文件：`kernel/include/drivers/core/firmware.h`；实现：`kernel/drivers/core/firmware.c`、`firmware_vfs.c`。这些接口只在可睡眠的任务上下文调用，不能在 IRQ 或自旋锁中加载固件。
+
+- `driver_firmware_source_create(ops, context, &source)` 复制 provider ops；成功接管 context 的一份所有权，失败由调用者处理。每次成功 open 都恰好 close 一次，包括尺寸、内存分配和读取失败。provider 支持独立 stream 并发；代码和 context 的有效期持续到最后一次 source put。
+- `driver_firmware_load(source, name, max_size, &image)` 从一个显式来源加载完整固件，失败置空输出并回收部分数据。调用者必须持有 source 引用。没有隐式搜索路径、后备来源或用户态 helper。
+- 名称是最多 255 字节的相对路径，允许子目录；拒绝绝对路径、空组件、`.`、`..`、重复或结尾斜线。文件长度必须非零，同时不超过调用者的 `max_size` 和 64 MiB 硬上限。
+- 每次读取最多 64 KiB，支持正数短读；提前 EOF、返回超出请求长度、声明长度后仍有数据都视为 `-EIO`，负 errno 原样传回。空文件返回 `-ENODATA`，过大返回 `-EFBIG`。不会因中断错误无限重试，也没有通用读取超时或取消功能。
+- `driver_firmware_from_memory(data, size, max_size, &image)` 为内置固件建立独立副本，不保留原始指针。image 通过 get/put 共享不可变字节，与 source 和原始文件的生命周期独立。
+
+VFS 来源由可信启动配置打开固件目录，再调用 `driver_firmware_source_create_vfs(directory, &source)` 创建。函数保留已打开目录的 vfile 引用及其既有 mount pin；调用者可立即关闭 fd。后续加载直接从该目录 vnode 查找实际子项，不重新解析当前线程的 cwd、chroot 或 mount namespace，也不把临时固件文件安装进调用者的 fdtable。
+
+该后端不遍历挂载表、不进入子挂载，lookup 返回其他 mount 的节点时拒绝；中间和最终 symlink 均拒绝，特殊文件在 open 前通过 type 和 inode mode 双重检查。固件包应部署为该目录同一文件系统内的普通、未压缩文件，别名需要预先展开。内核读取有意不按当前任务的 DAC 权限重新授权；目录、文件及其写入者必须可信，这不是面向不可信可变目录的路径沙箱。
+
+一次 VFS open/read/close 全程保留 fileop admission，阻止关机并发关闭后端；已经关闭 admission 或 backend 的来源返回 `-ESHUTDOWN`。普通错误路径释放临时 vnode、vfile、mount pin 和 admission。source 引用不意味着已关闭的文件系统可以恢复服务。
+
+image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 DMA 的驱动应另行准备可映射页面并完成同步，不能把 image 指针当作设备地址。完整复制并不提供对并发写入的原子快照、固件签名认证、格式验证或解压，部署时应保证文件不可变。设备固件协议、上传、启动超时和恢复仍归硬件驱动负责。接口也不实现 Linux `request_firmware()` 的全部语义。
+
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync -v
+python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
 tools/a20 test smoke-driver-runtime-x86_64
@@ -117,7 +135,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 
 ## 下一阶段
 
-1. 固件读取服务、可选线程化 IRQ，以及工作队列资源/故障策略。
+1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
 2. 通用 IOMMU domain 接口及 x86 AMD-Vi 后端，逐步统一内核和用户态驱动的地址契约。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
@@ -129,3 +147,5 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 本轮新增主机测试使用实际工作队列/IRQ 核心代码，pthread 仅替代任务和硬件后端：覆盖并发启动、两个并发取消者、deadline 提前、超时销毁重试、EOI 阻塞期间同步等待及共享 handler 的存储保留。IRQ 测试的阻塞 handler 仅用于制造测试窗口，不授权真实 ISR 睡眠。
 
 本轮验证代码提交：`1d88ac8ab`（工作队列、显式启动自检及单核/双核实例）、`5909bf80b`（IRQ 排空及共享 flags）。两项新增主机测试与前置 quiesce/DMA/fence 回归在独立导出的提交树中通过；QEMU 单核、双核均输出 `DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1`；AArch64 embedded 构建通过。普通启动不含该参数时不进入自检。这里的双核门禁是功能验证，不声明所有回调必然跨 CPU 执行或已完成 SMP 压力测试。
+
+固件读取实现提交：`bf402c953`；真实 VFS 自检提交：`68c3e9aee`。新增固件主机测试与前置 7 项回归在独立导出的待提交树上通过（共 8 项）；覆盖字节副本、短读、提前 EOF、长度增长、错误/分配失败回滚、目录引用、特殊文件拒绝与关机 admission 释放。QEMU 单核、双核均输出包含 `firmware=1` 的完整 PASS 标记，验证关闭目录 fd 后加载、拒绝符号链接、超限失败，以及释放 source/删除文件后 image 仍保留字节。AArch64 embedded 构建通过。固件测试使用人工字节，没有加载厂商 GPU 固件或执行硬件上传。

@@ -1,6 +1,6 @@
 # 驱动运行时契约
 
-原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和 remove；页级 DMA mapping、原生 fence、可取消工作队列及 IRQ 排空已提供独立接口，硬件 GPU 驱动仍待实现。
+原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和 remove；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
@@ -133,3 +133,9 @@ spin_unlock_irqrestore(&priv->lock, flags);
 类驱动的 read/write 只处理内核 buffer。VFS/ABI 适配层负责 `copy_to_user/copy_from_user`。audio 通用 ioctl 和 block 的标准查询已在 devfs 封送，但自定义 block/char ioctl 当前仍会收到原始 `arg`；驱动不得直接解引用，应先扩展通用适配层。所有结构长度、枚举值、位图范围、乘加溢出和映射边界必须在适配层验证。
 
 违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing-gates.md)。
+
+## 固件读取
+
+使用 `drivers/core/firmware.h`，在可睡眠的任务上下文从显式 source 加载。VFS source 接收可信启动配置已经打开的目录并独立持有引用，后续读取不依赖调用线程的 cwd/chroot，也不占用其 fd。名称必须是规范相对路径；只支持实际普通文件，不跟随 symlink、不进入子挂载、不自动解压或搜索其他来源。目录及其写入者必须可信，内核读取不套用当前用户的 DAC 权限。
+
+驱动应给每类固件设置合理的非零 `max_size`，同时受 64 MiB 硬上限限制；短读可继续，提前 EOF、长度增长、空文件或超限均失败并释放部分资源。只有成功返回的 image 才可交给格式解析器。image 是独立的不可变 CPU 字节副本，持有引用期间有效；它不提供 DMA 地址、签名认证或设备初始化。读取过程不排斥并发修改，应部署不可变固件。详细的 provider、VFS 生命周期和错误语义见 [原生驱动运行时](native-runtime.md#固件数据与显式来源)。
