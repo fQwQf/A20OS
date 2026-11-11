@@ -26,6 +26,7 @@
 #include "drivers/core/riscv_iommu.h"
 #include "drivers/core/riscv_iommu_internal.h"
 #include "drivers/core/dma_mapping.h"
+#include "drivers/core/fence.h"
 #include "core/errno.h"
 #include "mm/slab.h"
 #include "core/panic.h"
@@ -1094,6 +1095,20 @@ static void native_test_edu_transfer(volatile uint8_t *bar, uint64_t source,
     panic("DRIVER_IOMMU_NATIVE: EDU DMA timeout (pins retained)");
 }
 
+struct native_watch_test {
+    struct driver_fence *done;
+    struct riscv_iommu_dma_fault fault;
+};
+
+static void native_test_fault_callback(void *opaque, int status,
+                                       const struct riscv_iommu_dma_fault *fault)
+{
+    struct native_watch_test *test = opaque;
+    test->fault = *fault;
+    int error = status ? status : fault->isolated && !fault->isolation_error ? 0 : -EIO;
+    (void)driver_fence_signal(test->done, error);
+}
+
 static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain *domain)
 {
 #define DMA_CHECK(test) do { if (!(test)) \
@@ -1149,8 +1164,17 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
     pci_cfg_write16(device, 4, command | 4);
     native_test_edu_transfer(bar, 0x40000, address + PAGE_SIZE - 64, true);
     DMA_CHECK(iommu_read32(IOMMU_REG_FQT) != before_fault);
-    struct riscv_iommu_dma_fault fault;
-    DMA_CHECK(!riscv_iommu_dma_fault_poll(device, &fault));
+    struct native_watch_test test = {.done=driver_fence_create()};
+    DMA_CHECK(test.done);
+    driver_fence_get(test.done); /* Producer lives until watch stop drains it. */
+    struct riscv_iommu_dma_watch *watch;
+    uint64_t period = clock_ticks_per_sec() / 100;
+    DMA_CHECK(!riscv_iommu_dma_watch_start(device, period ? period : 1,
+                native_test_fault_callback, &test, &watch));
+    DMA_CHECK(!driver_fence_wait(test.done, clock_get_ticks() + 2 * clock_ticks_per_sec(), false));
+    DMA_CHECK(!riscv_iommu_dma_watch_stop(&watch, clock_get_ticks() + 2 * clock_ticks_per_sec()));
+    struct riscv_iommu_dma_fault fault = test.fault;
+    driver_fence_put(test.done); driver_fence_put(test.done);
     DMA_CHECK(fault.count && fault.cause == 15 && fault.blocked && fault.isolated);
     DMA_CHECK(!fault.queue_error && !fault.isolation_error);
     DMA_CHECK(fault.address >= address && fault.address < next + PAGE_SIZE);
@@ -1204,7 +1228,7 @@ void driver_iommu_native_selftest(void)
     driver_dma_domain_put(domain);
     pci_cfg_write16(device, 4, command);
     device_put(device);
-    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1 fault=1\n");
+    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1 fault=1 watch=1\n");
 #undef IOMMU_CHECK
 }
 
