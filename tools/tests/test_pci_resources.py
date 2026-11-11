@@ -25,6 +25,7 @@ static unsigned nonbar_writes, status_clears;
 int fixture_routed_irq=-1, fixture_route_calls;
 int klog_level=10;
 void klog_write(const char *fmt, ...) {(void)fmt;}
+int klog_write_ex(int level,const char *fmt, ...) {(void)level;(void)fmt;return 0;}
 static pci_virtio_transport_t transport_storage;
 static unsigned mapped_bars;
 void *kmalloc(size_t size) {assert(size==sizeof(transport_storage));return &transport_storage;}
@@ -78,9 +79,15 @@ int device_hotplug(device_t *dev,int event) {
  if(event==BUS_EVENT_ADD)added++;else if(event==BUS_EVENT_REMOVE)removed++;else assert(0);
  return 0;
 }
-void driver_discovery_begin(void) {assert(!depth);depth++;transactions++;}
-void driver_discovery_end(void) {assert(depth==1);depth--;}
+void driver_discovery_begin(void) {depth++;transactions++;}
+void driver_discovery_end(void) {assert(depth>0);depth--;}
 int driver_retry_deferred(void) {assert(!depth);retried++;return 0;}
+int driver_resource_check_range(device_t *owner,const resource_t *res,uint64_t *busy_end) {
+ (void)owner;(void)res; if(busy_end)*busy_end=0;return 0;
+}
+int driver_resource_check_claims(device_t *owner,const resource_t *res) {
+ (void)owner;(void)res;assert(depth>0);return 0;
+}
 
 static struct function *function_at(int b,int d,unsigned header) {
  struct function *h=&hardware[b][d][0];h->present=1;h->cfg[0]=0x56781234;

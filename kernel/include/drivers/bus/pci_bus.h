@@ -18,6 +18,11 @@ typedef struct pci_user_device_info {
 } pci_user_device_info_t;
 
 bus_type_t *get_pci_bus(void);
+/* Process context; caller must quiesce hardware before BAR sizing/relocation.
+ * Serializes with discovery and checked aperture claims. Plans and validates
+ * every BAR before writing a new address; failed planning preserves command,
+ * BARs and published resources (the monotonic allocation cursor may advance).
+ * It does not drain in-flight DMA or make config writes fallible. */
 int pci_enable_and_assign_bars(device_t *dev);
 /*
  * Config-space access for an already published function.  All reads and writes

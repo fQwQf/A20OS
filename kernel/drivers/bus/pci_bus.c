@@ -325,32 +325,59 @@ static uint64_t pci_bar_address(const pci_dev_info_t *info, int bar,
 static int pci_allocate_mmio(uint64_t size, int is_64, uint64_t *address) {
     uint64_t base, length;
     int rc = arch_pci_mmio_window(&base, &length);
-    if (rc) return rc;
-    if (!size || !length || length > (~(uint64_t)0) - base) return -ERANGE;
+    if (rc)
+        return rc;
+    if (!size || !length || length > (~(uint64_t)0) - base)
+        return -ERANGE;
     uint64_t cursor = g_pci_mmio_alloc > base ? g_pci_mmio_alloc : base;
-    for (unsigned attempt = 0; attempt <= PCI_MAX_PUBLISHED_DEVICES * 6U; attempt++) {
-        if (cursor > (~(uint64_t)0) - (size - 1U)) return -ERANGE;
+    for (unsigned attempt = 0; attempt <= PCI_MAX_PUBLISHED_DEVICES * 6U;
+         attempt++) {
+        if (cursor > (~(uint64_t)0) - (size - 1U))
+            return -ERANGE;
         uint64_t aligned = (cursor + size - 1U) & ~(size - 1U);
-        if (aligned < base || aligned > base + length || size > base + length - aligned ||
-            (!is_64 && (aligned > (~(uint32_t)0) || size - 1U > (~(uint32_t)0) - aligned)))
+        if (aligned < base || aligned > base + length ||
+            size > base + length - aligned ||
+            (!is_64 && (aligned > (~(uint32_t)0) ||
+                        size - 1U > (~(uint32_t)0) - aligned)))
             return -ERANGE;
         uint64_t next = aligned;
         for (unsigned slot = 0; slot < PCI_MAX_PUBLISHED_DEVICES; slot++) {
-            if (!g_pci_in_use[slot]) continue;
+            if (!g_pci_in_use[slot])
+                continue;
             const pci_dev_info_t *info = &g_pci_infos[slot];
             for (int i = 0; i < 6; i++) {
                 uint64_t address = info->bar[i], length = info->bar_size[i];
-                if (info->bar_io[i] || !address || !length) continue;
-                if (length - 1U > (~(uint64_t)0) - address) return -ERANGE;
+                if (info->bar_io[i] || !address || !length)
+                    continue;
+                if (length - 1U > (~(uint64_t)0) - address)
+                    return -ERANGE;
                 uint64_t end = address + length - 1U;
                 if (aligned <= end && address <= aligned + size - 1U) {
-                    if (end == (~(uint64_t)0)) return -ERANGE;
-                    if (end + 1U > next) next = end + 1U;
+                    if (end == (~(uint64_t)0))
+                        return -ERANGE;
+                    if (end + 1U > next)
+                        next = end + 1U;
                 }
             }
         }
-        if (next != aligned) { cursor = next; continue; }
-        if (!arch_pci_bar_reachable(aligned, size)) return -ERANGE;
+        if (next != aligned) {
+            cursor = next;
+            continue;
+        }
+        resource_t candidate = {
+            .type = RES_MMIO, .start = aligned, .end = aligned + size - 1U};
+        uint64_t busy_end;
+        rc = driver_resource_check_range(NULL, &candidate, &busy_end);
+        if (rc == -EBUSY) {
+            if (busy_end == ~(uint64_t)0)
+                return -ERANGE;
+            cursor = busy_end + 1U;
+            continue;
+        }
+        if (rc)
+            return rc;
+        if (!arch_pci_bar_reachable(aligned, size))
+            return -ERANGE;
         g_pci_mmio_alloc = aligned + size;
         *address = aligned;
         return 0;
@@ -358,26 +385,42 @@ static int pci_allocate_mmio(uint64_t size, int is_64, uint64_t *address) {
     return -ENOSPC;
 }
 
-static int pci_assign_bars(device_t *dev, int bus_master) {
+static int pci_assign_bars_locked(device_t *dev, int bus_master) {
     pci_dev_info_t *info = dev ? dev->plat_data : NULL;
-    if (!info)
-        return -1;
+    if (!info || dev->bus != &pci_bus || !dev->res)
+        return -ENODEV;
 
-    unsigned header = (pci_ecam_read(info->bus, info->dev, info->func, 0x0c) >> 16) & 0x7f;
+    unsigned header =
+        (pci_ecam_read(info->bus, info->dev, info->func, 0x0c) >> 16) & 0x7f;
     int bar_count = header == 0 ? 6 : header == 1 ? 2 : 0;
-    if (!bar_count) return -EOPNOTSUPP;
+    if (!bar_count)
+        return -EOPNOTSUPP;
 
     /* BAR sizing writes all ones into the BAR.  Disable address decoding
      * while doing that, as required by PCI, then restore it below. */
-    uint32_t command = pci_ecam_read(info->bus, info->dev, info->func, 0x04) & 0xffffU;
-    pci_ecam_write(info->bus, info->dev, info->func, 0x04, command & ~0x3U);
+    uint32_t command =
+        pci_ecam_read(info->bus, info->dev, info->func, 0x04) & 0xffffU;
+    uint32_t original_command = command;
+    pci_ecam_write(info->bus, info->dev, info->func, 0x04, command & ~0x7U);
+
+    /* Build and validate the entire assignment before moving any BAR or
+     * publishing partial metadata. Failed planning may consume the monotonic
+     * host cursor, but leaves all BARs/resources and the command unchanged. */
+    pci_dev_info_t planned = *info;
+    memset(planned.bar, 0, sizeof(planned.bar));
+    memset(planned.bar_size, 0, sizeof(planned.bar_size));
+    memset(planned.bar_io, 0, sizeof(planned.bar_io));
+    resource_t resources[7] = {0};
+    uint32_t bar_values[6] = {0};
+    unsigned rewrite = 0;
 
     int res_count = 0;
     for (int bar = 0; bar < 6; bar++)
-        info->bar_resource[bar] = -1;
+        planned.bar_resource[bar] = -1;
     for (int bar = 0; bar < bar_count; bar++) {
         uint32_t offset = 0x10U + (uint32_t)bar * 4U;
-        uint32_t bar_lo = pci_ecam_read(info->bus, info->dev, info->func, offset);
+        uint32_t bar_lo =
+            pci_ecam_read(info->bus, info->dev, info->func, offset);
         if (bar_lo == 0xFFFFFFFFU)
             continue;
 
@@ -387,52 +430,66 @@ static int pci_assign_bars(device_t *dev, int bus_master) {
             continue;
         if (!size || (size & (size - 1U)) != 0) {
             kerr("[PCI] %02x:%02x.%x BAR%d invalid size 0x%lx (raw=0x%x)\n",
-                 info->bus, info->dev, info->func, bar,
-                 (unsigned long)size, bar_lo);
-            pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
+                 info->bus, info->dev, info->func, bar, (unsigned long)size,
+                 bar_lo);
+            pci_ecam_write(info->bus, info->dev, info->func, 0x04,
+                           original_command);
             return -1;
         }
 
         int is_io = (bar_flags & 1U) != 0;
         int is_64 = !is_io && ((bar_flags & 0x6U) == 0x4U);
-        uint64_t addr = is_io ? (bar_lo & ~0x3U) :
-                                pci_bar_address(info, bar, bar_lo, is_64);
+        uint64_t addr = is_io ? (bar_lo & ~0x3U)
+                              : pci_bar_address(info, bar, bar_lo, is_64);
 
         if (!is_io && (!addr || !arch_pci_bar_reachable(addr, size))) {
             uint64_t aligned;
             int rc = pci_allocate_mmio(size, is_64, &aligned);
             if (rc) {
-                kerr("[PCI] %02x:%02x.%x BAR%d has no usable host MMIO allocation: %d\n",
+                kerr("[PCI] %02x:%02x.%x BAR%d has no usable host MMIO "
+                     "allocation: %d\n",
                      info->bus, info->dev, info->func, bar, rc);
-                pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
+                pci_ecam_write(info->bus, info->dev, info->func, 0x04,
+                               original_command);
                 return rc;
             }
-            pci_ecam_write(info->bus, info->dev, info->func, offset,
-                           (uint32_t)(aligned | (bar_flags & 0xFU)));
-            if (is_64)
-                pci_ecam_write(info->bus, info->dev, info->func, offset + 4U,
-                               (uint32_t)(aligned >> 32));
+            rewrite |= 1U << bar;
+            bar_values[bar] = (uint32_t)(aligned | (bar_flags & 0xFU));
+            if (is_64) {
+                rewrite |= 1U << (bar + 1);
+                bar_values[bar + 1] = (uint32_t)(aligned >> 32);
+            }
             addr = aligned;
         }
-        if (!is_io && size - 1U > (~(uint64_t)0) - addr) {
-            pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
+        if (size - 1U > (~(uint64_t)0) - addr) {
+            pci_ecam_write(info->bus, info->dev, info->func, 0x04,
+                           original_command);
             return -ERANGE;
         }
 
         if (addr && res_count < 6) {
-            dev->res[res_count].type = is_io ? RES_IOPORT : RES_MMIO;
-            dev->res[res_count].start = addr;
-            dev->res[res_count].end = dev->res[res_count].start + size - 1U;
-            dev->res[res_count].flags = is_io ? 0 : (is_64 ? IORESOURCE_MMIO_64BIT :
-                                                IORESOURCE_MMIO_32BIT) |
-                                                ((bar_flags & 8U) ? IORESOURCE_PREFETCH : 0);
-            info->bar_resource[bar] = res_count;
+            resources[res_count].type = is_io ? RES_IOPORT : RES_MMIO;
+            resources[res_count].start = addr;
+            resources[res_count].end = addr + size - 1U;
+            resources[res_count].flags =
+                is_io
+                    ? 0
+                    : (is_64 ? IORESOURCE_MMIO_64BIT : IORESOURCE_MMIO_32BIT) |
+                          ((bar_flags & 8U) ? IORESOURCE_PREFETCH : 0);
+            int rc = driver_resource_check_claims(dev, &resources[res_count]);
+            if (rc) {
+                pci_ecam_write(info->bus, info->dev, info->func, 0x04,
+                               original_command);
+                return rc;
+            }
+            planned.bar_resource[bar] = res_count;
             res_count++;
-            if (is_io) command |= 1U;
+            if (is_io)
+                command |= 1U;
         }
-        info->bar[bar] = addr;
-        info->bar_size[bar] = size;
-        info->bar_io[bar] = is_io;
+        planned.bar[bar] = addr;
+        planned.bar_size[bar] = size;
+        planned.bar_io[bar] = is_io;
         if (is_64)
             bar++;
     }
@@ -442,19 +499,32 @@ static int pci_assign_bars(device_t *dev, int bus_master) {
         command |= 0x4U;
     else
         command &= ~0x4U;
-    pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
     /* Only a host-routed driver IRQ is a usable resource. The PCI Interrupt
      * Line byte is firmware metadata, never an architecture IRQ identifier. */
     int irq = pci_intx_irq(dev);
     if (irq >= 0 && res_count < 7) {
-        dev->res[res_count].type = RES_IRQ;
-        dev->res[res_count].start = (uint32_t)irq;
-        dev->res[res_count].end = (uint32_t)irq;
-        dev->res[res_count].flags = IORESOURCE_IRQ_LEVEL;
+        resources[res_count].type = RES_IRQ;
+        resources[res_count].start = (uint32_t)irq;
+        resources[res_count].end = (uint32_t)irq;
+        resources[res_count].flags = IORESOURCE_IRQ_LEVEL;
         res_count++;
     }
+    for (int bar = 0; bar < bar_count; bar++)
+        if (rewrite & (1U << bar))
+            pci_ecam_write(info->bus, info->dev, info->func, 0x10U + bar * 4U,
+                           bar_values[bar]);
+    memcpy(dev->res, resources, sizeof(resources));
+    *info = planned;
     dev->res_count = res_count;
+    pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
     return 0;
+}
+
+static int pci_assign_bars(device_t *dev, int bus_master) {
+    driver_discovery_begin();
+    int ret = pci_assign_bars_locked(dev, bus_master);
+    driver_discovery_end();
+    return ret;
 }
 
 int pci_enable_and_assign_bars(device_t *dev) {
@@ -475,7 +545,7 @@ void *pci_map_bar(device_t *dev, unsigned int bar) {
     return device_map_resource(dev, pci_get_bar_resource(dev, bar));
 }
 
-int pci_user_device_find_index(uint16_t vendor, uint16_t device,
+static int pci_user_device_find_index_locked(uint16_t vendor, uint16_t device,
                                unsigned index, pci_user_device_info_t *out)
 {
     if (!out)
@@ -502,6 +572,14 @@ int pci_user_device_find_index(uint16_t vendor, uint16_t device,
         return 0;
     }
     return -1;
+}
+
+int pci_user_device_find_index(uint16_t vendor, uint16_t device,
+                               unsigned index, pci_user_device_info_t *out) {
+    driver_discovery_begin();
+    int ret = pci_user_device_find_index_locked(vendor, device, index, out);
+    driver_discovery_end();
+    return ret;
 }
 
 int pci_user_device_find(uint16_t vendor, uint16_t device,
