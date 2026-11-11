@@ -51,11 +51,17 @@ provider 的 `map_page` 每次映射一整页，失败不得留下该页翻译�
 
 解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留引用的页面数量。失败时全部 frame 引用保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
 
-probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。`release` 仍是不可失败的软件 context 销毁，硬件 domain detach 必须在 provider 的更高层完成协调。本接口没有自动隔离区或后台恢复 worker，也没有把 RISC-V 用户态 IOMMU 直接包装为原生 provider：其 map 失败路径目前尚不能保证完成失效，仍需后续整改。AMD-Vi 后端也尚未提供。
+probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。`release` 仍是不可失败的软件 context 销毁，硬件 domain detach 必须在 provider 的更高层完成协调。本接口没有自动隔离区或后台恢复 worker，也没有把 RISC-V 用户态 IOMMU 直接包装为原生 provider：其 map 失败时虽已保留页面并阻止新映射，但尚不能保证完成失效，不满足原生 map callback 的无残留契约。AMD-Vi 后端也尚未提供。
 
 provider context、ops 所在模块及硬件资源的生命周期由 provider/驱动协调，直到最后一个 domain 引用释放。domain 引用只保持 device 对象和 context 的软件生命周期，不保持驱动绑定或硬件在线。创建/映射/提交必须与设备撤销串行化，解除绑定前停止 DMA 并销毁 mapping。
 
-RISC-V IOMMU 命令队列的 tail 在写入 CQT 发布命令之前推进，表示槽位已经交给硬件；等待超时不会撤销所有权或让下一次提交覆盖该槽位。后续提交仍依靠 CQH 的队列满检查，CQCSR 有错误时不再发布；恢复 CQ 错误或超时后的完整设备重置仍由后续工作完成。解除映射入口在构造位图和缩小索引之前检查 64 位 IOVA 范围和页数，防止越界、移位未定义行为或高位截断造成槽位别名。这些修正不代表 map 失败后的页面隔离已完成。
+RISC-V IOMMU 命令队列的 tail 在写入 CQT 发布命令之前推进，表示槽位已经交给硬件；等待超时不会撤销所有权或让下一次提交覆盖该槽位。后续提交仍依靠 CQH 的队列满检查，CQCSR 有错误时不再发布；恢复 CQ 错误或超时后的完整设备重置仍由后续工作完成。解除映射入口在构造位图和缩小索引之前检查 64 位 IOVA 范围和页数，防止越界、移位未定义行为或高位截断造成槽位别名。这些队列修正本身不代表硬件恢复或原生 provider 接入已完成。
+
+用户态 DMA heap 的连续块在交给 VMO 前通过 `pfa_split_allocated(head, order)` 转成每页独立的 order-0 所有权。这个操作只允许独占的、元数据一致的分配，不增加可用页计数；失败不修改元数据。请求大小不足整个块时，剩余尾页立即 frame_put。VMO 的页分配回滚、缩小和销毁也改为释放自身引用，不能用直接 free 覆盖 IOMMU 或其他持有者的 pin。转换后不得再按原始高阶块整体释放。
+
+RISC-V 用户态 domain 映射还独立保留每个 RAM 页的 frame 引用。map 只接受调用者持有引用的已分配 order-0 RAM，先验证整个物理区间、pin 页面并保留 IOVA，再发布 PTE。失效命令失败时清除 PTE、保留 IOVA/页引用并将 domain 标为 blocked，拒绝后续 map；即使上层因返回错误而销毁 VMO，这些页也不会提前回收。unmap 失败仍保留引用，只有成功失效或安全 block/release 后才能释放；`mapped_pages` 统计包含隔离保留的页面。软件 blocked 不表示硬件 DMA 已停止。
+
+设备 context 安装失败同样先尝试安全 block，无法确认时保留三层页表及 owner。原 owner 再次 claim 会先重试释放失败 claim 的页表，成功后才建立新 claim；已经成功 claim 后进入 blocked 状态的 domain 必须显式 release。release 调用者先停止 DMA/bus mastering；失败仍保留全部资源。当前没有后台回收器，硬件持续故障时这些有界资源可能一直保留，不能以回收内存为由绕过确认。
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
@@ -161,3 +167,5 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 DMA 可失败失效提交：`67fccfdf1`。主机测试执行生产 mapping 代码，注入解除映射超时、部分成功后重试、映射失败回滚超时和返回地址非法后的清理超时，检查全部 pin/domain 保留、成功页不重复解除、清理状态拒绝地址/sync 及 CPU 同步时机。该测试与前置 7 项回归在独立导出的待提交树上通过，x86_64 与 AArch64 embedded 构建通过。这里的失效由测试 provider 模拟，不表示硬件 IOMMU 超时恢复已验证。
 
 RISC-V IOMMU 队列与解除映射边界提交：`e985ff07f`。新增主机测试使用生产 `riscv_iommu.c` 的命令函数和解除映射函数，以假 MMIO 模拟超时后的延迟消费、满队列、回绕与 CQ 错误，同时验证超大页数、高位 IOVA 截断和最后一个合法页槽位。独立导出的待提交树上共 9 项主机回归通过，启用 ASan/UBSan。标准 `tools/a20 test smoke-iommu-discovery` 在 `ufsd-rv` 用户态链接处因既有 `klog_write_ex` 未定义而失败；不能声称此门禁通过。该构建生成的当前 RISC-V 内核直接用 QEMU `virt`、`riscv-iommu-pci` 和 `driver.runtime_test=1` 启动，观察到 `translation domain verified`、未映射 IOVA 故障及包含 `firmware=1` 的运行时 PASS 标记并关机。启动中其他模块也有同一日志符号的加载失败，因此该验证只覆盖 IOMMU 初始化/翻译和驱动运行时，不覆盖完整用户态或所有模块。实际硬件队列超时恢复尚未验证。
+
+页所有权转换提交：`a6f0d385b`；IOMMU 数据/页表保留提交：`51d0c7f48`。PFA 生产函数提取测试验证独占块转换、共享/错误 order 拒绝、引用保留和最终 buddy 合并；17 项 VMO Rust 主机测试通过。独立导出的提交/待提交树中 9 项驱动主机回归通过，IOMMU 测试注入 context 发布后的命令错误、map/unmap/release 超时，模拟原始数据引用被销毁，检查数据与页表保留及恢复重试。最终 RISC-V 内核构建与直接 QEMU 启动通过，观察到翻译验证、未映射地址故障和运行时 PASS。该启动沿用显式 `driver.runtime_test=1`；没有执行用户态 DMA 分配 syscall，也未注入实际硬件超时，不能代替端到端用户态 DMA 或实体硬件恢复验证。标准用户态门禁仍受前述日志符号问题影响。
