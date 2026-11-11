@@ -40,6 +40,7 @@ extern void acpi_os_start_worker(void);
 #include "net/socket.h"
 #include "net/stack.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/core/runtime_test.h"
 #include "drvmod/drvmod.h"
 #include "drivers/usb/usb.h"
 #include "drivers/usb/usb_storage.h"
@@ -379,6 +380,7 @@ void init_kthread(void) {
     task_t *cur = proc_current();
     printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
 
+    driver_runtime_selftest_boot();
     arch_run_bootarg_selftests();
     hyp_boot_selftest();
 
