@@ -37,15 +37,21 @@
 头文件：`kernel/include/drivers/core/dma_mapping.h`；实现：`kernel/drivers/core/dma_mapping.c`。
 
 - `driver_dma_domain_create(dev, ops, context, &domain)`：建立显式地址转换 domain，复制 provider ops，保留 device 引用和 DMA mask 快照。成功接管 context 的一份所有权；失败不调用 provider release。
+- `driver_dma_domain_create_checked()`：接收独立的 `driver_dma_checked_ops`，允许解除映射返回错误，保留原有 provider 结构与模块 ABI。
 - `driver_dma_domain_create_direct()`：仅在总线/平台已确认采用恒等 DMA 时显式使用。它不提供隔离，不能作为 IOMMU 失败时的降级，也不探测 AMD-Vi。
 - `driver_dma_map_pages()`：映射调用者已持有的 order-0 RAM 页数组。页面可以物理不连续；每页获得独立的设备 DMA 地址。
 - `driver_dma_page_address()`：读取设备地址，不根据 PFN 或 CPU 地址推算。地址 0 可以合法，错误由返回值区分。
 - `driver_dma_mapping_sync_for_device/cpu()`：在 CPU 与设备停止访问的边界执行缓存同步。映射时自动执行初次 device 同步，成功映射解除时执行必要的 CPU 同步。
-- `driver_dma_unmap_pages(&mapping)`：硬件停止访问后，逆序解除翻译，再释放页面和 domain 引用，并置空 mapping 指针。
+- `driver_dma_try_unmap_pages(&mapping)`：硬件停止访问后，逆序解除翻译；全部成功才同步 CPU、释放页面和 domain 引用并置空指针。失败返回负 errno 并保留 mapping，必须重试。
+- `driver_dma_unmap_pages(&mapping)`：原有 infallible provider 的兼容入口；内部也保留失败对象，但不返回状态，checked provider 应使用 try 接口。
 
-映射独立保留每一页的 frame 引用。调用者可在映射成功后释放原始页面引用，设备仍使用的 RAM 不会因此回收。任何页映射失败都会回滚之前的翻译及页面引用；回滚没有完成初次 device 同步的 mapping 时不执行 CPU invalidate，避免丢失尚未交给设备的 CPU 数据。
+映射独立保留每一页的 frame 引用。调用者可在映射成功后释放原始页面引用，设备仍使用的 RAM 不会因此回收。页映射失败会尝试回滚之前的翻译及页面引用；checked 回滚如果失败，`driver_dma_map_pages()` 返回原始映射错误，同时通过非空 `*out` 交出仅供清理的句柄。调用者必须保留并反复 try_unmap，不能只判断返回码就丢弃输出。回滚没有完成初次 device 同步的 mapping 时不执行 CPU invalidate，避免丢失尚未交给设备的 CPU 数据。
 
-provider 的 `map_page` 每次映射一整页，失败不得留下该页翻译；`unmap_page` 返回前必须完成设备地址翻译失效。设备地址需要页对齐且整页落在 domain 的 mask 内，违反条件时解除该页及之前映射，返回错误，绝不回退到物理地址。
+provider 的 `map_page` 每次映射一整页，失败不得留下该页翻译或未确认的失效。旧 `unmap_page` 返回前必须完成设备地址翻译失效；checked `unmap_page` 只有返回 0 才确认失效，失败时必须保留 IOVA，且允许重试已经清除 PTE 的操作。设备地址需要页对齐且整页落在 domain 的 mask 内，违反条件时解除该页及之前映射，返回错误，绝不回退到物理地址。
+
+解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留引用的页面数量。失败时全部 frame 引用保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
+
+probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。`release` 仍是不可失败的软件 context 销毁，硬件 domain detach 必须在 provider 的更高层完成协调。本接口没有自动隔离区或后台恢复 worker，也没有把 RISC-V 用户态 IOMMU 直接包装为原生 provider：其 map 失败路径目前尚不能保证完成失效，仍需后续整改。AMD-Vi 后端也尚未提供。
 
 provider context、ops 所在模块及硬件资源的生命周期由 provider/驱动协调，直到最后一个 domain 引用释放。domain 引用只保持 device 对象和 context 的软件生命周期，不保持驱动绑定或硬件在线。创建/映射/提交必须与设备撤销串行化，解除绑定前停止 DMA 并销毁 mapping。
 
@@ -149,3 +155,5 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 本轮验证代码提交：`1d88ac8ab`（工作队列、显式启动自检及单核/双核实例）、`5909bf80b`（IRQ 排空及共享 flags）。两项新增主机测试与前置 quiesce/DMA/fence 回归在独立导出的提交树中通过；QEMU 单核、双核均输出 `DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1`；AArch64 embedded 构建通过。普通启动不含该参数时不进入自检。这里的双核门禁是功能验证，不声明所有回调必然跨 CPU 执行或已完成 SMP 压力测试。
 
 固件读取实现提交：`bf402c953`；真实 VFS 自检提交：`68c3e9aee`。新增固件主机测试与前置 7 项回归在独立导出的待提交树上通过（共 8 项）；覆盖字节副本、短读、提前 EOF、长度增长、错误/分配失败回滚、目录引用、特殊文件拒绝与关机 admission 释放。QEMU 单核、双核均输出包含 `firmware=1` 的完整 PASS 标记，验证关闭目录 fd 后加载、拒绝符号链接、超限失败，以及释放 source/删除文件后 image 仍保留字节。AArch64 embedded 构建通过。固件测试使用人工字节，没有加载厂商 GPU 固件或执行硬件上传。
+
+DMA 可失败失效提交：`67fccfdf1`。主机测试执行生产 mapping 代码，注入解除映射超时、部分成功后重试、映射失败回滚超时和返回地址非法后的清理超时，检查全部 pin/domain 保留、成功页不重复解除、清理状态拒绝地址/sync 及 CPU 同步时机。该测试与前置 7 项回归在独立导出的待提交树上通过，x86_64 与 AArch64 embedded 构建通过。这里的失效由测试 provider 模拟，不表示硬件 IOMMU 超时恢复已验证。
