@@ -5,12 +5,16 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/fence.h"
 #include "drivers/core/workqueue.h"
+#include "drivers/core/firmware.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
 #include "core/klog.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/timer.h"
+#include "core/fcntl.h"
+#include "fs/vfs.h"
+#include "fs/file.h"
 
 #define CHECK(test) do { if (!(test)) \
     panic("DRIVER_RUNTIME: FAIL line=%d: %s", __LINE__, #test); } while (0)
@@ -110,6 +114,45 @@ static void exercise(void)
     driver_fence_put(test.release);
 }
 
+static void exercise_firmware(void)
+{
+    const char bytes[] = {'A', '2', '0', '\0', 1, 2, 3};
+    const char *root = "/driver-firmware-test";
+    const char *subdir = "/driver-firmware-test/vendor";
+    const char *path = "/driver-firmware-test/vendor/gpu.bin";
+    const char *alias = "/driver-firmware-test/alias";
+    struct driver_firmware *image;
+    CHECK(!driver_firmware_from_memory(bytes, sizeof(bytes), sizeof(bytes), &image));
+    CHECK(driver_firmware_size(image) == sizeof(bytes));
+    CHECK(!memcmp(driver_firmware_data(image), bytes, sizeof(bytes)));
+    driver_firmware_put(image);
+    CHECK(!vfs_mkdir(root, 0755) && !vfs_mkdir(subdir, 0755));
+    int fd = vfs_open(path, O_CREAT | O_WRONLY, 0644);
+    CHECK(fd >= 0);
+    CHECK(vfs_write(fd, bytes, sizeof(bytes)) == sizeof(bytes));
+    CHECK(!vfs_close(fd));
+    fd = vfs_open(root, O_RDONLY | O_DIRECTORY, 0);
+    CHECK(fd >= 0);
+    vfile_t *directory = vfs_get_file_ref(fd);
+    struct driver_firmware_source *source;
+    CHECK(directory && !driver_firmware_source_create_vfs(directory, &source));
+    vfs_put_file(directory);
+    CHECK(!vfs_close(fd)); /* Loads must outlive the caller's descriptor. */
+    CHECK(driver_firmware_load(source, "../outside", 128, &image) == -EINVAL);
+    CHECK(driver_firmware_load(source, "missing", 128, &image) == -ENOENT);
+    CHECK(!vfs_symlink("vendor/gpu.bin", alias));
+    CHECK(driver_firmware_load(source, "alias", 128, &image) == -ELOOP);
+    CHECK(driver_firmware_load(source, "vendor/gpu.bin", sizeof(bytes)-1, &image) == -EFBIG);
+    CHECK(!driver_firmware_load(source, "vendor/gpu.bin", sizeof(bytes), &image));
+    driver_firmware_source_put(source);
+    CHECK(!vfs_unlink(alias) && !vfs_unlink(path));
+    CHECK(!vfs_rmdir(subdir) && !vfs_rmdir(root));
+    /* The image owns its bytes independently of the source and inode. */
+    CHECK(driver_firmware_size(image) == sizeof(bytes));
+    CHECK(!memcmp(driver_firmware_data(image), bytes, sizeof(bytes)));
+    driver_firmware_put(image);
+}
+
 void driver_runtime_selftest_boot(void)
 {
     const char *args = bootargs_get();
@@ -129,7 +172,8 @@ void driver_runtime_selftest_boot(void)
         return;
     kinfo("DRIVER_RUNTIME: START\n");
     exercise();
-    kinfo("DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1\n");
+    exercise_firmware();
+    kinfo("DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n");
     if (current_board && current_board->poweroff)
         current_board->poweroff();
     panic("DRIVER_RUNTIME: poweroff returned");
