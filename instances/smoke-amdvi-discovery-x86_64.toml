@@ -1,0 +1,16 @@
+name = "smoke-amdvi-discovery-x86_64"
+description = "Read-only AMD IVRS discovery; no AMD-Vi hardware activation"
+arch = "x86_64"
+abi = "linux"
+
+[machine]
+memory = "1G"
+smp = 1
+extra_qemu = ["-machine", "q35", "-device", "amd-iommu", "-append", "driver.runtime_test=1"]
+
+[test]
+expect = ["AMDVI: IVHD type=0x10", "AMDVI: IVRS revision=1 hardware_records=2 memory_records=0 unknown_blocks=0 driver_enabled=0", "DRIVER_RUNTIME: PASS"]
+timeout = "60s"
+
+[net]
+stack = "bsd"
