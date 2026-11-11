@@ -64,6 +64,7 @@ struct vnode_ops;
 struct mount;
 struct page_cache_page;
 struct readiness_source;
+struct task_t;
 
 struct bcache;
 struct block_dev;
