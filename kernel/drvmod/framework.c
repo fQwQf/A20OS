@@ -21,6 +21,8 @@
  */
 
 #include "drvmod/export.h"
+#include "drivers/core/dma_mapping.h"
+#include "drivers/core/fence.h"
 #include "drvmod/drvmod.h"
 
 #include "core/bootargs.h"
@@ -329,6 +331,24 @@ const struct drv_export drv_export_table[] = {
     { "drv_alloc",           drv_alloc },
     { "drv_free",            drv_free },
     { "drv_log",             drv_log },
+    /* Native asynchronous driver runtime. Providers and producers retain
+     * their module until domain disposal / final fence signal has returned. */
+    { "driver_dma_domain_create", driver_dma_domain_create },
+    { "driver_dma_domain_create_direct", driver_dma_domain_create_direct },
+    { "driver_dma_domain_get", driver_dma_domain_get },
+    { "driver_dma_domain_put", driver_dma_domain_put },
+    { "driver_dma_map_pages", driver_dma_map_pages },
+    { "driver_dma_mapping_count", driver_dma_mapping_count },
+    { "driver_dma_page_address", driver_dma_page_address },
+    { "driver_dma_mapping_sync_for_device", driver_dma_mapping_sync_for_device },
+    { "driver_dma_mapping_sync_for_cpu", driver_dma_mapping_sync_for_cpu },
+    { "driver_dma_unmap_pages", driver_dma_unmap_pages },
+    { "driver_fence_create", driver_fence_create },
+    { "driver_fence_get", driver_fence_get },
+    { "driver_fence_put", driver_fence_put },
+    { "driver_fence_signal", driver_fence_signal },
+    { "driver_fence_status", driver_fence_status },
+    { "driver_fence_wait", driver_fence_wait },
     { "drv_map_mmio",        drv_map_mmio },
     { "device_map_mmio",     device_map_mmio },
     { "arch_device_map_mmio", arch_device_map_mmio },
