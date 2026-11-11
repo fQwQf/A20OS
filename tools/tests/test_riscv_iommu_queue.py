@@ -30,6 +30,8 @@ struct device;
 uint64_t dma_get_mask(const struct device *);
 void dma_sync_for_device(void *, size_t);
 void dma_sync_for_cpu(void *, size_t);
+uint64_t clock_get_ticks(void);
+uint64_t clock_ticks_per_sec(void);
 #define readl host_read32
 #define writel host_write32
 '''}
