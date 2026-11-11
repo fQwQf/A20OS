@@ -1,6 +1,6 @@
 # 驱动运行时契约
 
-原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和 remove；页级 DMA mapping 与原生 fence 已提供独立接口，硬件 GPU 驱动仍待实现。
+原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和 remove；页级 DMA mapping、原生 fence、可取消工作队列及 IRQ 排空已提供独立接口，硬件 GPU 驱动仍待实现。
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
@@ -85,6 +85,7 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 int request_irq(uint32_t irq, irq_handler_t handler,
                 unsigned long flags, void *priv);
 void free_irq(uint32_t irq, void *priv);
+int synchronize_irq(uint32_t irq);
 ```
 
 成功注册后由驱动拥有，remove 和 probe 回滚必须成对 `free_irq`。`priv` 应是设备实例，释放时必须传回同一值。重复注册已占用 IRQ 返回 `-EBUSY`；驱动只有在协议明确支持轮询时才可降级。
@@ -94,6 +95,12 @@ handler 返回 `int`，当前 dispatch 不使用返回值。handler 必须：确
 当前限制：IRQ 表固定 256 项。`IRQF_SHARED` 已实现单链表 handler chain；首个注册和所有追加注册都必须带共享标志，否则重复注册返回 `-EBUSY`。VirtualBox ARM 的 PCI 驱动目前多数采用轮询，直到 ACPI MSI/INTx 路由完整。
 
 `priv` 同时是 handler 参数和 IRQ 所有权 token。`free_irq(irq, priv)` 的 `priv` 必须与 `request_irq` 完全相同；不匹配不会移除他人的 handler。成功释放会先从 dispatch 表摘除 handler、屏蔽中断线，并等待已取得快照的在途 handler 返回，因此随后才能释放 `priv` 指向的内存。不得从该 IRQ 自己的 handler 中调用 `free_irq`。
+
+`synchronize_irq()` 保留注册，等待已进入核心的完整分发（包含 EOI/重启用）返回。它不是对未来中断的屏障，不替代 `free_irq()` 或工作队列取消。必须先停止设备 IRQ 来源，不能在同一 IRQ handler 内或持有其需要的锁时调用。
+
+## 后台工作与延迟执行
+
+原生驱动可使用 `driver_workqueue_*` / `driver_work_*`，将可能睡眠的完成处理和恢复操作放入独立内核 worker。提交/重设 deadline 在 IRQ 中不分配内存；cancel_sync、flush、destroy 只在任务上下文且不持有回调需要的锁时执行。销毁超时保留对象，不能立即释放 context。接口语义和引用规则见 [原生驱动运行时](native-runtime.md#后台工作延迟任务与销毁)。
 
 ## 锁
 
