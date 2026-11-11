@@ -3,6 +3,19 @@
 
 #include "core/types.h"
 
+struct device;
+struct driver_dma_domain;
+/* Native PCI requester -> managed DMA domain. Task context; serialize with
+ * driver binding/user ownership. DMA stopped and PCI bus mastering disabled
+ * before create and shutdown. No physical-DMA fallback. Native owners use
+ * distinct negative tokens, never PID identities. No BME enable is performed.
+ * On creation error, non-NULL *out is a closed cleanup handle: retry shutdown,
+ * then put. Never discard it or release provider hardware/module resources.
+ * Hardware currently provides 8 domains, 64 pages/domain and a one-level DDT;
+ * unsupported requesters are rejected. Caller uses generic mapping APIs. */
+int riscv_iommu_dma_domain_create(struct device *device,
+                                  struct driver_dma_domain **out);
+
 /* One device, one translation domain.  These calls fail closed when the
  * RISC-V IOMMU is absent; callers must never fall back to physical DMA for a
  * device that requested isolation. */
