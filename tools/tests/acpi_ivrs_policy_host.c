@@ -86,9 +86,22 @@ static void alternatives(void) {
         acpi_ivrs_route_t r = route(3, 0xabcd, 0);
         assert(r.hardware.type == 0x40 && r.settings == 0x40 &&
                r.requester == 0xabcd);
+        acpi_table_t t = finish();
+        size_t count = 99;
+        acpi_ivrs_hardware_t h;
+        assert(!acpi_ivrs_unit_count(&t, &count) && count == 1);
+        assert(!acpi_ivrs_unit_get(&t, 0, &h) && h.type == 0x40 &&
+               h.segment == 3);
+        assert(acpi_ivrs_unit_get(&t, 1, &h) == ACPI_NOT_FOUND && !h.entries);
         route(0, 0xabcd, ACPI_NOT_FOUND);
         entry(hardware(0x10, 1, 3, 4), 1, 0, 0, 0);
         route(3, 0xabcd, ACPI_IVRS_AMBIGUOUS);
+        t = finish();
+        count = 99;
+        assert(acpi_ivrs_unit_count(&t, &count) == ACPI_IVRS_AMBIGUOUS &&
+               !count);
+        assert(acpi_ivrs_unit_get(&t, 0, &h) == ACPI_IVRS_AMBIGUOUS &&
+               !h.entries);
     }
     begin();
     entry(hardware(0x10, 1, 3, 4), 1, 0, 0, 0);
@@ -137,6 +150,29 @@ static void scopes(void) {
     route(0, 0x123, ACPI_IVRS_AMBIGUOUS);
     entry(d + 4, 2, 0x123, 1, 0);
     route(0, 0x123, 0);
+}
+static void unit_enumeration(void) {
+    begin();
+    entry(hardware(0x10, 3, 4, 4), 2, 0x100, 0, 0);
+    entry(hardware(0x10, 1, 2, 4), 2, 0x100, 0, 0);
+    entry(hardware(0x11, 3, 4, 4), 2, 0x100, 0, 0);
+    acpi_table_t t = finish();
+    size_t count;
+    acpi_ivrs_hardware_t h;
+    assert(!acpi_ivrs_unit_count(&t, &count) && count == 2);
+    assert(!acpi_ivrs_unit_get(&t, 0, &h) && h.device_id == 3 &&
+           h.type == 0x11);
+    assert(!acpi_ivrs_unit_get(&t, 1, &h) && h.device_id == 1 &&
+           h.type == 0x10);
+    assert(acpi_ivrs_unit_get(&t, SIZE_MAX, &h) == ACPI_NOT_FOUND &&
+           !h.entries);
+    assert(acpi_ivrs_unit_count(NULL, &count) == ACPI_INVALID && !count);
+    assert(acpi_ivrs_unit_get(NULL, 0, &h) == ACPI_INVALID && !h.entries);
+    assert(acpi_ivrs_unit_count(&t, NULL) == ACPI_INVALID);
+    assert(acpi_ivrs_unit_get(&t, 0, NULL) == ACPI_INVALID);
+    bytes[9]++;
+    count = 99;
+    assert(acpi_ivrs_unit_count(&t, &count) == ACPI_INVALID && !count);
 }
 static void aliases_and_memory(void) {
     begin();
@@ -266,6 +302,7 @@ static void bounds(void) {
 int main(void) {
     alternatives();
     scopes();
+    unit_enumeration();
     aliases_and_memory();
     unsupported();
     bounds();

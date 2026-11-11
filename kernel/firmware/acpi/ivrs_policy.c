@@ -127,6 +127,32 @@ static int collect(const acpi_table_t *t, struct units *units) {
     return 0;
 }
 
+int acpi_ivrs_unit_count(const acpi_table_t *t, size_t *count) {
+    if (!count)
+        return ACPI_INVALID;
+    *count = 0;
+    struct units units;
+    int ret = collect(t, &units);
+    if (!ret)
+        *count = units.count;
+    return ret;
+}
+
+int acpi_ivrs_unit_get(const acpi_table_t *t, size_t index,
+                       acpi_ivrs_hardware_t *out) {
+    if (!out)
+        return ACPI_INVALID;
+    *out = (acpi_ivrs_hardware_t){0};
+    struct units units;
+    int ret = collect(t, &units);
+    if (ret)
+        return ret;
+    if (index >= units.count)
+        return ACPI_NOT_FOUND;
+    *out = at(t, units.offsets[index]);
+    return 0;
+}
+
 struct match {
     uint16_t dma;
     uint8_t settings;

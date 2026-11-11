@@ -67,6 +67,11 @@ int acpi_ivrs_route(const acpi_table_t *, uint16_t segment, uint16_t requester,
  * deduplicate, merge or enact permissions/unity/exclusion ranges. */
 int acpi_ivrs_route_memory(const acpi_table_t *, uint16_t segment, uint16_t requester,
                              size_t index, acpi_ivrs_memory_t *out);
+/* Enumerate selected, unique unit candidates with the SAME whole-table policy
+ * checks as route(). Order follows first appearance of a unit in firmware.
+ * These are not initialized units. Errors clear the count/view. */
+int acpi_ivrs_unit_count(const acpi_table_t *, size_t *count);
+int acpi_ivrs_unit_get(const acpi_table_t *, size_t index, acpi_ivrs_hardware_t *);
 /* Read-only boot diagnostic: maps/releases IVRS, logs raw records without
  * deduplicating alternative IVHD formats. No MMIO writes or DMA activation. */
 int amd_iommu_firmware_report(const acpi_context_t *);
