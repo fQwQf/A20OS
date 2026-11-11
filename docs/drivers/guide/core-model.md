@@ -72,6 +72,10 @@ uint64_t size = res->end - res->start + 1;
 
 `device_claim_resource(dev, res)` 可仅申请受管 MMIO/port I/O 占用；`driver_resource_request()` / `driver_resource_release()` 则提供显式句柄，适合需要跨 unbind 保留资源的恢复路径。显式句柄保留设备引用但不保留绑定，须由调用者管理 stopping 状态和释放时机。占用登记只覆盖使用这些 API 的访问者，未自动导入所有固件/RAM/PCI window 预留；完整契约见 [原生驱动运行时](native-runtime.md)。
 
+需要核对未绑定设备的地址声明时，使用 `driver_resource_request_checked()`：owner 必须已注册，核心在生命周期锁内核对其他已发布设备的 MMIO/`RES_MEM`/port 声明及 active claims，再建立句柄。句柄存续时，新设备不能发布冲突声明；owner 注销后保留的句柄仍然生效。此接口不推断 parent/window 的共享例外，资源归属歧义须显式解决。
+
+总线修改地址前，须在 `driver_discovery_begin/end` 事务内查询资源并完成硬件和元数据更新。PCI BAR 分配已接入该事务：分配新地址跳过声明和占用区间，保留已有 BAR 时检查 active claims；全部 BAR 规划通过后才写入新地址。调用者仍须先停止设备，配置写入失败/硬件消失的恢复不由此接口保证。
+
 ### `driver_t`
 
 platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
