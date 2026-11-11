@@ -29,6 +29,19 @@ struct driver_dma_ops {
     void (*release)(void *context);
 };
 
+/* Fallible invalidation provider. A successful unmap confirms translations
+ * are no longer usable and the IOVA may be recycled. Failure MUST reserve
+ * that address until retry succeeds, even if its PTE was already cleared.
+ * Retry must accept that partially completed operation. map failure still
+ * guarantees no translation or outstanding invalidation for that page.
+ * release is infallible software disposal after all mappings were drained;
+ * hardware domain detach must be coordinated separately by the provider. */
+struct driver_dma_checked_ops {
+    int (*map_page)(void *, uint64_t, enum driver_dma_direction, uint64_t *);
+    int (*unmap_page)(void *, uint64_t, enum driver_dma_direction);
+    void (*release)(void *);
+};
+
 /* Task context, outside spinlocks. Success transfers one context ownership
  * reference to the domain; failure leaves it with the caller. The domain
  * pins the device object and snapshots its DMA mask. It does not keep a
@@ -36,6 +49,9 @@ struct driver_dma_ops {
 int driver_dma_domain_create(struct device *device,
                              const struct driver_dma_ops *ops, void *context,
                              struct driver_dma_domain **out);
+int driver_dma_domain_create_checked(struct device *device,
+                                     const struct driver_dma_checked_ops *ops,
+                                     void *context, struct driver_dma_domain **out);
 /* Explicit opt-in ONLY for a platform configured for identity DMA. This is
  * never a fallback after an IOMMU/provider error. No isolation is promised. */
 int driver_dma_domain_create_direct(struct device *device,
@@ -47,11 +63,16 @@ void driver_dma_domain_put(struct driver_dma_domain *domain);
  * an independent reference on each frame and the domain. Never use MMIO,
  * reserved VRAM, unmaterialized VMO slots or higher-order allocation tails.
  * Each page gets a device-visible address, which may differ from its PA.
- * Success performs initial CPU->device cache synchronization. Failures roll
- * back every translation and pin; *out is NULL. No fixed page-count limit. */
+ * Success performs initial CPU->device cache synchronization. Failure rolls
+ * back translations and pins. If checked rollback fails, *out is a cleanup
+ * handle: caller MUST retain it and retry try_unmap, even though map returned
+ * an error. It cannot be synced, queried for addresses or submitted. Original
+ * map errno is preserved; try_unmap returns the current cleanup error.
+ * Infallible providers keep the original NULL-on-failure contract. */
 int driver_dma_map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
                           size_t count, enum driver_dma_direction direction,
                           struct driver_dma_mapping **out);
+/* Number of pinned pages, including while a failed cleanup is retained. */
 size_t driver_dma_mapping_count(const struct driver_dma_mapping *mapping);
 int driver_dma_page_address(const struct driver_dma_mapping *mapping,
                              size_t index, uint64_t *out);
@@ -60,9 +81,16 @@ int driver_dma_page_address(const struct driver_dma_mapping *mapping,
 int driver_dma_mapping_sync_for_device(struct driver_dma_mapping *mapping);
 int driver_dma_mapping_sync_for_cpu(struct driver_dma_mapping *mapping);
 /* Task context, after DMA has stopped. Invalidates translations, syncs writes
- * back to the CPU and drops pins. Consumes *mapping and sets it to NULL.
+ * back to the CPU and drops pins on success, consuming *mapping to NULL.
  * A mapping is single-owner; serialize sync/address/unmap against each other.
  * No automatic devres release: a timeout must never free active DMA memory. */
 void driver_dma_unmap_pages(struct driver_dma_mapping **mapping);
+/* Required for checked providers. Success consumes *mapping. Failure retains
+ * all page pins, domain and the pointer, and disables address/sync operations
+ * with -ESHUTDOWN. Retry resumes at the failed page; previously invalidated
+ * pages are not unmapped twice. Caller must keep hardware stopped throughout.
+ * NULL pointer argument is -EINVAL; an already NULL mapping succeeds.
+ * Legacy unmap above also preserves failed mappings but discards status. */
+int driver_dma_try_unmap_pages(struct driver_dma_mapping **mapping);
 
 #endif

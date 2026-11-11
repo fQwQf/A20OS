@@ -336,6 +336,7 @@ const struct drv_export drv_export_table[] = {
     /* Native asynchronous driver runtime. Providers and producers retain
      * their module until domain disposal / final fence signal has returned. */
     { "driver_dma_domain_create", driver_dma_domain_create },
+    { "driver_dma_domain_create_checked", driver_dma_domain_create_checked },
     { "driver_dma_domain_create_direct", driver_dma_domain_create_direct },
     { "driver_dma_domain_get", driver_dma_domain_get },
     { "driver_dma_domain_put", driver_dma_domain_put },
@@ -345,6 +346,7 @@ const struct drv_export drv_export_table[] = {
     { "driver_dma_mapping_sync_for_device", driver_dma_mapping_sync_for_device },
     { "driver_dma_mapping_sync_for_cpu", driver_dma_mapping_sync_for_cpu },
     { "driver_dma_unmap_pages", driver_dma_unmap_pages },
+    { "driver_dma_try_unmap_pages", driver_dma_try_unmap_pages },
     { "driver_fence_create", driver_fence_create },
     { "driver_fence_get", driver_fence_get },
     { "driver_fence_put", driver_fence_put },
