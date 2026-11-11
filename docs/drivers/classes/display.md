@@ -11,7 +11,7 @@ if (gpu_device_register(dev) < 0)
     goto fail;
 ```
 
-第一个成功注册的 display 成为 `/dev/fb0` 默认设备。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 不会自动选择第二个设备接替；这是热拔插限制，不应在新驱动里再建私有全局 getter。
+第一个成功注册的 display 成为 `/dev/fb0` 默认设备。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，但 framebuffer/DRM 仍依赖单个默认设备，不等于完整的多 GPU 或热拔插保护。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
 
 典型的注册、probe、使用与 remove 顺序：
 

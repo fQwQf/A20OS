@@ -265,6 +265,7 @@ nav:
           - 热插拔与 PnP: drivers/guide/hotplug-and-pnp.md
           - 内核模块: drivers/guide/kernel-modules.md
           - 运行时契约: drivers/guide/runtime-contracts.md
+          - 原生异步驱动运行时: drivers/guide/native-runtime.md
           - 锁顺序: drivers/guide/lock-order.md
           - 部署配置: drivers/guide/deployment-profiles.md
       - 设备类参考:

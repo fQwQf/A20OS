@@ -40,7 +40,7 @@ res[] ------> MMIO/IRQ/DMA/MEM resources
 matched_id --> matched id_table entry
 ```
 
-`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。remove 前核心先把 class device 标记为 offline，阻止新调用，并等待已经进入驱动的 class 调用退出；已打开的文件随后返回 `-ENODEV`。
+`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止硬件并结束请求，再等待已进入驱动的 class 调用退出，最后调用 `remove` 释放存储；已打开的文件随后返回 `-ENODEV`。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
 
 ## 数据结构字段
 
@@ -107,12 +107,13 @@ UNINIT --match--> probe
                     |
         remove/device_unregister/driver_unregister
                     v
-          REMOVING -> class_device offline -> REMOVED
+          REMOVING -> class offline -> quiesce -> active calls drain
+                    -> remove -> managed resources release -> REMOVED
 
 probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 ```
 
-核心在 probe 失败和 remove 后逆序执行受管资源动作并清理依赖；MMIO 映射 helper 自动登记回收。驱动必须回滚未托管的分配，停止 DMA 并撤销 IRQ。返回 `-EPROBE_DEFER` 表示 provider 尚未就绪；使用 `device_dependency_get()` 建立依赖后，核心负责有界重试及 provider 撤销时先解除 consumer 绑定。`remove` 在 driver registry spinlock 之外调用，可以释放 IRQ/DMA，也可以执行有界等待，但仍应尽快停止设备。
+核心在 probe 失败和 remove 后逆序执行受管资源动作并清理依赖；MMIO 映射 helper 自动登记回收。驱动必须回滚未托管的分配，停止 DMA 并撤销 IRQ。返回 `-EPROBE_DEFER` 表示 provider 尚未就绪；使用 `device_add_dependency()` 建立依赖后，核心负责有界重试及 provider 撤销时先解除 consumer 绑定。`quiesce/remove` 在 driver registry spinlock 之外调用，但仍持有 lifecycle mutex，不得等待需要该 mutex 的操作。成功 probe 后类发布失败也会调用 quiesce/remove；失败的 probe 自行停止已启动的硬件。
 
 ### 推荐 probe 顺序
 
@@ -127,14 +128,16 @@ probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 9. 设置 `dev->drv_priv`。
 10. 如有类级 registry（例如 display），注册后再设置实例 ready；最后返回 `0`。
 
-### 推荐 remove 顺序
+### 推荐 quiesce 与 remove 顺序
 
-1. 在实例锁下把 `removing/ready` 置为不可用，阻止新 I/O。
-2. 屏蔽设备中断，再调用 `free_irq()`。
-3. 停止队列/DMA；必要时等待当前请求有界结束。
-4. 从 display 等类级 registry 注销。
-5. 释放未托管的 DMA 和普通内存；已登记的映射及动作由核心回收。
-6. 清空 `dev->drv_priv` 和实例槽。核心随后再次清空绑定字段，因此清理必须幂等。
+1. quiesce 在实例锁下设置 stopping 状态，禁止新提交；核心此前已拒绝新的 class 调用。
+2. 排空队列，必要时停止/复位 DMA。确认硬件不再使用请求缓冲区后，使未完成请求成功或以错误结束，唤醒等待者。
+3. 同步中断并取消后台工作。可以在 quiesce 中释放 IRQ，必须保留仍在途调用可能访问的实例存储。
+4. 核心等待在途 class 调用结束，然后进入 remove。
+5. remove 注销 display 等私有 registry，解除 DMA mapping 并释放未托管存储；受管映射及动作随后由核心回收。
+6. 清空 `dev->drv_priv` 和实例槽。核心随后再次清空绑定字段。
+
+只有同步有界操作的驱动可以保持 quiesce 为空；需要取消等待的驱动不能将全部停止逻辑留到 remove。
 
 > 不要在枚举函数栈上创建 `device_t` 或 `resource_t`；不要从 `kernel_main` 手动调用 `probe`；不要把所有错误返回裸 `-1`；也不要在同一平台已经接入总线模型后，又通过 `arch_virtio_*_probe()` 扫描 PCI 并重新分配 BAR。这些做法都会破坏已绑定驱动的 MMIO/notify 地址，导致设备 status 归零、queue 停止。
 
