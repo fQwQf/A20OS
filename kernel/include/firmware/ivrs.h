@@ -4,6 +4,7 @@
 #include "firmware/acpi.h"
 
 #define ACPI_IVRS_UNSUPPORTED (-3)
+#define ACPI_IVRS_AMBIGUOUS (-4)
 typedef struct { const acpi_table_t *table; size_t offset; } acpi_ivrs_iterator_t;
 typedef struct { const uint8_t *data; size_t length; uint8_t type, flags; } acpi_ivrs_block_t;
 typedef struct {
@@ -40,6 +41,32 @@ int acpi_ivrs_memory(const acpi_ivrs_block_t *, acpi_ivrs_memory_t *);
  * resolution or alias expansion is implied. Advances offset only on success. */
 int acpi_ivrs_device_next(const acpi_ivrs_hardware_t *, size_t *offset,
                            acpi_ivrs_device_t *); /* 1/0/error */
+typedef struct {
+    acpi_ivrs_hardware_t hardware;
+    uint16_t requester, dma_requester;
+    uint8_t settings;
+    uint32_t extended;
+    bool alias, non_pci_entries;
+    size_t memory_count;
+} acpi_ivrs_route_t;
+/* Read-only firmware routing candidate, not a DMA isolation group or an
+ * activation permit. Chooses 40h > 11h > 10h per (segment, IOMMU DeviceID,
+ * capability); contradictory bases, duplicate formats, overlapping MMIO
+ * windows or overlapping requester owners fail closed. ALL is a fallback
+ * within a unit; conflicting explicit matches
+ * are ambiguous. Unknown policy in any alternative, undeclared alias targets
+ * and alias chains are UNSUPPORTED. ALL plus an alias match is ambiguous.
+ * An ALL-only result still needs hardware PCI coverage validation. All views
+ * borrow the immutable table. Limits: 64 units, 1024 blocks. Errors clear out.
+ * PCI capability coverage, shared alias groups, HID binding and actual IOMMU
+ * capabilities must still be checked by the hardware driver. */
+int acpi_ivrs_route(const acpi_table_t *, uint16_t segment, uint16_t requester,
+                      acpi_ivrs_route_t *out);
+/* Returns raw matching IVMDs in firmware order across all formats of this
+ * unit, preserving constraints on the original OR aliased requester. Does not
+ * deduplicate, merge or enact permissions/unity/exclusion ranges. */
+int acpi_ivrs_route_memory(const acpi_table_t *, uint16_t segment, uint16_t requester,
+                             size_t index, acpi_ivrs_memory_t *out);
 /* Read-only boot diagnostic: maps/releases IVRS, logs raw records without
  * deduplicating alternative IVHD formats. No MMIO writes or DMA activation. */
 int amd_iommu_firmware_report(const acpi_context_t *);
