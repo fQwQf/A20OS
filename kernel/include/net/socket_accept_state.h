@@ -54,7 +54,7 @@ void a20_net_accept_txn_child_ready(void *child);
 size_t a20_net_accept_txn_child_peer_len(void *child);
 void a20_net_accept_txn_child_peer_copy(void *child, void *addr, size_t n);
 void a20_net_accept_txn_child_set_nonblock(void *child, int nonblock);
-int  a20_net_accept_txn_install(void *child);
+int  a20_net_accept_txn_install(void *child, int flags);
 
 void a20_net_accept_txn_snapshot_peer(void *child, void **out_peer);
 void a20_net_accept_txn_lock2(void *a, void *b, net_accept_pair_t *out);

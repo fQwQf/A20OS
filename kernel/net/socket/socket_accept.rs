@@ -69,7 +69,7 @@ unsafe extern "C" {
     fn a20_net_accept_txn_child_peer_len(child: *mut c_void) -> usize;
     fn a20_net_accept_txn_child_peer_copy(child: *mut c_void, addr: *mut c_void, n: usize);
     fn a20_net_accept_txn_child_set_nonblock(child: *mut c_void, nonblock: i32);
-    fn a20_net_accept_txn_install(child: *mut c_void) -> i32;
+    fn a20_net_accept_txn_install(child: *mut c_void, flags: i32) -> i32;
     fn a20_net_accept_txn_snapshot_peer(child: *mut c_void, out_peer: *mut *mut c_void);
     fn a20_net_accept_txn_lock2(a: *mut c_void, b: *mut c_void, out: *mut AcceptPair);
     fn a20_net_accept_txn_unlock2(pair: *const AcceptPair);
@@ -200,17 +200,18 @@ pub unsafe extern "C" fn a20_net_accept_sock(
         *addrlen = n;
     }
 
-    /* An accepted socket inherits the listener's blocking mode unless the
-     * caller asked for a nonblocking one. */
+    /* Linux accept/accept4 do not inherit O_NONBLOCK from the listener.
+     * A nonblocking service listener may hand blocking request I/O to its
+     * worker; inheriting here races the client's first write and loses it. */
     a20_net_accept_txn_child_set_nonblock(
         child,
         if (flags & SOCK_NONBLOCK) != 0 {
             1
         } else {
-            *v.nonblock
+            0
         },
     );
-    let newfd = a20_net_accept_txn_install(child);
+    let newfd = a20_net_accept_txn_install(child, flags);
     if newfd < 0 {
         let mut wake_q = WakeQ::new();
         a20_net_accept_txn_wakeq_init(wake_q.as_mut_ptr());
@@ -318,6 +319,7 @@ mod tests {
     static mut T_PARK_RC: [i32; 4] = [0; 4];
     static mut T_READY: i32 = 0;
     static mut T_INSTALL: i32 = 0;
+    static mut T_INSTALL_FLAGS: i32 = 0;
     static mut T_SNAPSHOT: i32 = 0;
     static mut T_LOCK2: i32 = 0;
     static mut T_MARK_CLOSED: i32 = 0;
@@ -368,6 +370,7 @@ mod tests {
         T_PARK_RC = [0; 4];
         T_READY = 0;
         T_INSTALL = 0;
+        T_INSTALL_FLAGS = 0;
         T_SNAPSHOT = 0;
         T_LOCK2 = 0;
         T_MARK_CLOSED = 0;
@@ -494,8 +497,9 @@ mod tests {
         (*(c as *mut Sock)).nonblock = v;
     }
     #[no_mangle]
-    unsafe extern "C" fn a20_net_accept_txn_install(c: *mut c_void) -> i32 {
+    unsafe extern "C" fn a20_net_accept_txn_install(c: *mut c_void, flags: i32) -> i32 {
         T_INSTALL += 1;
+        T_INSTALL_FLAGS = flags;
         (*(c as *mut Sock)).install_rc
     }
     #[no_mangle]
@@ -655,25 +659,26 @@ mod tests {
     }
 
     #[test]
-    fn the_nonblock_mode_is_inherited_unless_the_caller_asks_otherwise() {
+    fn accepted_nonblock_depends_only_on_accept_flags() {
         unsafe {
             let _serial = serial();
-            reset();
-            assert_eq!(a20_net_accept_sock(sock(), ptr::null_mut(),
-                                           ptr::null_mut(), 0), 7);
-            assert_eq!((*(child() as *mut Sock)).nonblock, 0);
-
-            reset();
-            me().nonblock = 1;
-            assert_eq!(a20_net_accept_sock(sock(), ptr::null_mut(),
-                                           ptr::null_mut(), 0), 7);
-            assert_eq!((*(child() as *mut Sock)).nonblock, 1);
-
-            /* SOCK_NONBLOCK on the call wins over a blocking listener. */
-            reset();
-            assert_eq!(a20_net_accept_sock(sock(), ptr::null_mut(),
-                                           ptr::null_mut(), SOCK_NONBLOCK), 7);
-            assert_eq!((*(child() as *mut Sock)).nonblock, 1);
+            for (domain, sock_type) in [(AF_INET, SOCK_STREAM), (AF_INET6, SOCK_STREAM),
+                                        (AF_UNIX, SOCK_STREAM), (AF_UNIX, SOCK_SEQPACKET)] {
+                for listener_nonblock in [0, 1] {
+                    for flags in [0, SOCK_CLOEXEC, SOCK_NONBLOCK, SOCK_NONBLOCK | SOCK_CLOEXEC] {
+                        reset();
+                        me().domain = domain;
+                        me().sock_type = sock_type;
+                        me().nonblock = listener_nonblock;
+                        assert_eq!(a20_net_accept_sock(sock(), ptr::null_mut(),
+                                                       ptr::null_mut(), flags), 7);
+                        assert_eq!((*(child() as *mut Sock)).nonblock,
+                                   if flags & SOCK_NONBLOCK != 0 { 1 } else { 0 });
+                        assert_eq!(me().nonblock, listener_nonblock);
+                        assert_eq!(T_INSTALL_FLAGS, flags);
+                    }
+                }
+            }
         }
     }
 

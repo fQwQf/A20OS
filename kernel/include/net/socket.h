@@ -207,6 +207,8 @@ int net_set_nonblock(int gfd, int nonblock);
 int net_set_nonblock_vfile(struct vfile *vf, int nonblock);
 int net_poll_events(int gfd, short events);
 int net_is_socket_vfile(struct vfile *vf);
+struct kstat;
+int net_socket_stat_vfile(struct vfile *vf, struct kstat *st);
 struct net_socket *net_socket_from_vfile(struct vfile *vf);
 /* Resolve a local fd under its table lock and pin both the vfile and socket.
  * Keep both references for the complete syscall; release with vfs_put_file()

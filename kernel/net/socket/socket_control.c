@@ -223,9 +223,10 @@ void a20_net_accept_txn_child_set_nonblock(void *child, int nonblock) {
     ((net_socket_t *)child)->nonblock = nonblock ? 1 : 0;
 }
 
-int a20_net_accept_txn_install(void *child) {
+int a20_net_accept_txn_install(void *child, int flags) {
     net_socket_t *c = (net_socket_t *)child;
-    return net_socket_install_file(c, O_RDWR | (c->nonblock ? O_NONBLOCK : 0));
+    return net_socket_install_file(c, O_RDWR | (c->nonblock ? O_NONBLOCK : 0) |
+                                      ((flags & SOCK_CLOEXEC) ? O_CLOEXEC : 0));
 }
 
 /*
