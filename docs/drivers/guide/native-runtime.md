@@ -1,6 +1,6 @@
 # 原生驱动运行时：GPU 开发的第一阶段基础
 
-本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。接口适用于 hosted 内核，MCU profile 不编入这些 hosted 运行时实现。
+本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、资源占用申请、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。DMA/fence/workqueue/firmware 和本页运行时自检面向 hosted 内核；资源占用接口随完整 driver core 编入，相应 MCU 配置不包含 hosted 异步运行时。
 
 ## 分层与边界
 
@@ -31,6 +31,21 @@
 成功 probe 后 class 发布失败也会执行 `quiesce -> remove -> devres`。失败的 probe 仍自行撤销已经启动的硬件，再返回错误；核心只回收它已登记的资源，不能判断哪些硬件阶段成功。
 
 当前生命周期回调仍持有全局 lifecycle mutex，禁止等待需要该锁的工作或递归注销自己。quiesce 没有通用超时后强制释放内存的语义：如果不能证实 DMA 已停止，驱动不能继续释放硬件仍可能访问的存储。按设备并发的生命周期协调与通用恢复策略仍需后续开发。
+
+## 资源占用与受管映射
+
+`kernel/drivers/core/driver_core.h` / `driver_core.c` 提供 owner 绑定的地址区间申请，并通过模块导出表供 `.a20drv` 使用，没有修改 `device_t` / `driver_t` 布局。
+
+- `driver_resource_request(owner, resource, &claim)`：复制 inclusive type/start/end，保留一份 device 引用，返回显式句柄。同一 namespace 中不同 owner 的区间重叠返回 `-EBUSY`；同一 owner 可持有重叠的独立句柄。支持 `RES_MMIO` 和 16-bit `RES_IOPORT`，二者使用独立 namespace；其他类型或反向区间返回 `-EINVAL`。申请失败清空输出，分配失败返回 `-ENOMEM`，无法保留 owner 引用返回 `-ENODEV`。
+- `driver_resource_release(claim)`：移除占用并释放 owner 引用；NULL 无操作，非空句柄必须准确释放一次。显式句柄不会在 unbind 时自动释放，适合在硬件清理失败时继续保留 aperture。申请时调用者须持有 owner 的有效引用，成功后由 claim 保留设备存储；调用者继续持有有效 claim 句柄，并自行协调 stopping 状态。device pin 不等于有效绑定或模块代码保留。
+- `device_claim_resource(dev, resource)`：只申请占用并登记 devres 回收，resource 必须是 `dev->res` 的元素，适用于 MMIO 或 port I/O。登记动作分配失败会立即撤销申请。
+- `device_map_resource_exclusive(dev, resource, &mapping)`：只接收所属设备的 MMIO 资源。先申请占用再调用 architecture mapper，返回精确错误并在失败时清空输出。长度超出 `size_t` 返回 `-EOVERFLOW`；mapper 返回 NULL 记为 `-ENOMEM`。映射或 devres 登记失败立即回滚；成功映射的占用持续到 architecture unmap 返回之后。
+
+现有 `device_map_resource()`、`device_map_mmio()` 及 `pci_map_bar()` 已接入相同申请路径；它们仍以 NULL 表示失败，不会在冲突时绕开登记重新映射。显式 claim 和同 owner 的受管映射拥有各自的引用，提前释放其中一份不会解除其余占用。正常 unbind 在 quiesce、class drain、remove 之后逆序回收受管映射；probe 失败也会回收。受管申请及 devres 链更新须处于串行化的 probe/lifecycle 上下文，不能与同设备的 devres 回收并发修改链表。显式句柄的全局冲突检查/释放使用 registry spinlock；分配、owner finalizer 和 MMIO 回调在该锁之外执行。
+
+这是参与者之间的占用登记，未实现资源地址分配、RAM 预留导入、PCI host window 树或 page cache 属性仲裁。raw architecture 映射、旧 `drv_map_mmio()` 和直接 port I/O 仍不自动登记；未申请的固件/未绑定设备资源也不自动变成 busy。x86 architecture unmap 的共享永久映射契约仍然有效，claim 释放不撤销旧指针。AMD-Vi 的只读报告尚未创建 owner 或申请完整 aperture；后续硬件接管仍需资源清单核对、实际所有权及 DMA 隔离。
+
+显式 `driver.runtime_test=1` 会在生产内核执行 metadata-only 的资源自检，输出 `DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1`。该自检不访问测试区间的物理地址，验证重复句柄、冲突、引用及受管申请回收；并发申请、阻塞 unmap 和失败注入另由主机 fixture 验证。资源和运行时 PASS 标记在测试末尾同一条日志中输出，避免 best-effort SMP 控制台只丢失早期资源标记。
 
 ## 原生 DMA domain 与页映射
 
@@ -250,3 +265,7 @@ IVRS 路由候选提交：`3d23c9e86`。独立导出的待提交树中 14 项驱
 IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603`。独立导出的待提交树中 15 项驱动主机回归通过；新增测试启用 ASan/UBSan，覆盖精确 capability 偏移、完整链尾/循环、payload 边界、QEMU revision-0 身份限制、decoder 关闭时零 MMIO 访问、启用时 control/EFR 读取、地址宽度、aperture 对齐与 transport 失败清空输出。x86_64 bringup/dev 与 AArch64 embedded 内核构建通过，110 个实例清单及文档引用检查通过。
 
 本轮正式 `tools/a20 test smoke-amdvi-discovery-x86_64` 在 `ufsd-x86_64` 链接处因既有日志改动的 `klog_write_ex` 未定义而失败，不能记为完整门禁通过。最新 dev 内核改用 `timeout 60s qemu-system-x86_64 -machine q35 -m 1G -smp 1 -nic none -device amd-iommu -kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-6d99d92e3642d9cf/kernel.bin -nographic -monitor none -append 'driver.runtime_test=1'` 直接启动，正常关机，匹配实例全部五条预期标记。日志为两条 IVHD、一个去重 11h 单元、`verified=1 failed=0 driver_enabled=0`，并有完整的 `DRIVER_RUNTIME: PASS ... firmware=1`。该 QEMU 10.0.13 单元实际报告 `revision_quirk=1 pa_bits=40 va_bits=48 mmio_enabled=0 registers_read=0`；这验证了实际 PCI capability 读取和关闭 decoder 的路径，没有读取实际 MMIO。已启用 MMIO、counter aperture 及失败注入分支由主机 fixture 验证；没有启用 AMD-Vi、执行 AMD DMA 隔离或 GPU 加速。
+
+资源占用提交：`b643e0f0b`；内核自检提交：`8ec0e2843`；SMP 结果输出提交：`6c0a7588d`。独立导出的待提交树中 46 项主机回归通过，包含新的 pthread 竞争申请、阻塞 unmap、owner 最终引用、三阶段分配失败与 mapper 失败回滚，以及既有固件、class、PCI/USB、simplefb、板级音频、DMA/IOMMU 和异步运行时回归。资源测试使用生产 driver_core/class 代码，ASan/UBSan 开启；硬件和任务锁由主机后端替代。x86_64 dev 单核/双核与 AArch64 embedded 内核构建通过，实例清单及引用检查通过。
+
+本轮直接用 q35、amd-iommu、`driver.runtime_test=1` 启动单核与双核内核，两次正常关机并匹配对应 runtime 实例全部标记。双核日志确认 `2/2 configured CPUs online`；最初早期资源 PASS 行因当前 best-effort 控制台竞争未显示，已将两项 PASS 合并到测试末尾同一条日志，复验两项均完整出现。资源自检仅操作元数据，未对测试区间执行 MMIO 或 port I/O；并发申请和 unmap 窗口由主机线程验证，不据此声明完成真实硬件 SMP 压力测试。没有重跑依赖完整用户态构建的 `tools/a20 test`，也没有启用 AMD-Vi 或 GPU 加速；已有的用户态日志符号链接问题未在本轮处理。

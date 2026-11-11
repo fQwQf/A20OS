@@ -8,6 +8,10 @@
 
 `resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在 probe 失败或解除绑定时回收，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
 
+这些映射 helper 自动申请 owner 独占区间；另一设备持有重叠区间时拒绝映射。`device_map_resource_exclusive(dev, res, &address)` 返回详细错误（如 `-EBUSY`、`-ENOMEM`、`-EOVERFLOW`），失败清空 address；原有指针接口返回 NULL。受管映射保留设备引用，architecture unmap 完成后才归还区间。驱动应在 quiesce/remove 中停止访问，不能将地址区间的释放当作 CPU 访问撤销或 DMA 停止。
+
+port I/O 可先调用 `device_claim_resource()` 申请 `dev->res` 中的 `RES_IOPORT`，范围限 0..ffffh。显式 `driver_resource_request()` 句柄需要独立释放，且会跨 unbind 保留占用；其 device 引用只保护对象存储，不保证绑定仍在线。受管申请及 devres 链操作限已经串行化的 probe/lifecycle 上下文。raw `arch_device_map_mmio()`、`drv_map_mmio()` 和直接 port I/O 访问不自动参与占用登记，不能据此宣称所有硬件访问都已隔离。
+
 使用 `readb/readw/readl/readq` 和 `writeb/writew/writel/writeq`。这些操作保留 volatile 访问并带读/写屏障。`*_relaxed` 不带屏障，只能在协议明确允许、且外层已有正确屏障的紧密循环中使用。
 
 寄存器访问必须按硬件规定宽度，不能把 8 位 W1C 寄存器用 32 位 read-modify-write。W1C/W0C、读清除、写入触发等副作用要在寄存器定义旁说明。轮询循环必须同时具备硬件条件和超时：
