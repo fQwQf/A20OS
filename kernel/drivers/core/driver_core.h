@@ -277,6 +277,25 @@ typedef struct driver_resource_claim driver_resource_claim_t;
  * raw architecture mapping/port access does not participate automatically. */
 int driver_resource_request(device_t *owner, const resource_t *,
                               driver_resource_claim_t **out);
+/* Stronger, process-context claim: owner must be registered. Under the
+ * lifecycle mutex, checks every other published device's MMIO/RES_MEM or
+ * I/O-port declarations, then creates a claim. No ancestor/window exceptions
+ * are inferred. Registration of a conflicting declaration is rejected while
+ * this claim survives, including after its owner has been unregistered.
+ * Resource mutation must use the bus discovery transaction and range check
+ * below. This still does not import RAM maps or revoke raw hardware access. */
+int driver_resource_request_checked(device_t *owner, const resource_t *,
+                                      driver_resource_claim_t **out);
+/* Observation only, not a claim. Checks published declarations and active
+ * claims, ignoring owner (NULL ignores none). busy_end receives the greatest conflicting inclusive
+ * end on -EBUSY, zero otherwise. Optional output; valid address zero is allowed.
+ * Bus mutators must hold driver_discovery_begin/end across this check AND the
+ * hardware/metadata update. Checked claims use that same lifecycle mutex. */
+int driver_resource_check_range(device_t *owner, const resource_t *, uint64_t *busy_end);
+/* Active claims only, for retaining an already assigned firmware BAR without
+ * treating enclosing/duplicate firmware declarations as active users. Bus
+ * mutators use the same discovery transaction as check_range(). */
+int driver_resource_check_claims(device_t *owner, const resource_t *);
 void driver_resource_release(driver_resource_claim_t *);
 /* Managed claims/maps are for serialized probe/lifecycle context, like other
  * devres operations. Resource must be an element of dev->res. Explicit claim

@@ -17,6 +17,20 @@ class DriverResources(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="a20-resources-") as folder:
             work = Path(folder)
             stubs = {**STUBS, "core/lock.h": LOCK_STUB,
+                     "core/sync.h": '''#pragma once
+#include <assert.h>
+#include <pthread.h>
+typedef pthread_mutex_t mutex_t;
+#define MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
+static inline void mutex_init(mutex_t *m) {
+ pthread_mutexattr_t a; assert(!pthread_mutexattr_init(&a));
+ assert(!pthread_mutexattr_settype(&a,PTHREAD_MUTEX_RECURSIVE));
+ assert(!pthread_mutex_init(m,&a)); assert(!pthread_mutexattr_destroy(&a));
+}
+static inline void mutex_lock(mutex_t *m) { assert(!pthread_mutex_lock(m)); }
+static inline void mutex_unlock(mutex_t *m) { assert(!pthread_mutex_unlock(m)); }
+static inline int mutex_trylock(mutex_t *m) { return !pthread_mutex_trylock(m); }
+''',
                      "net/socket/socket_internal.h":
                      '#include "core/types.h"\n'
                      'void netlink_uevent_emit(const char *, const char *, const char *, uint64_t);\n'}

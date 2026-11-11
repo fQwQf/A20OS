@@ -273,6 +273,7 @@ struct driver_resource_claim {
     device_t *owner;
     enum resource_type type;
     uint64_t start, end;
+    bool checked;
     struct driver_resource_claim *next;
 };
 /* Protected by the registry spinlock. Allocation, owner finalizers and MMIO
@@ -280,8 +281,8 @@ struct driver_resource_claim {
  * firmware declaration or an enclosing host-bridge aperture. */
 static driver_resource_claim_t *resource_claims;
 
-int driver_resource_request(device_t *owner, const resource_t *res,
-                            driver_resource_claim_t **out) {
+static int resource_request(device_t *owner, const resource_t *res,
+                            driver_resource_claim_t **out, bool checked) {
     if (!out)
         return -EINVAL;
     *out = NULL;
@@ -295,8 +296,8 @@ int driver_resource_request(device_t *owner, const resource_t *res,
         kfree(claim);
         return -ENODEV;
     }
-    *claim =
-        (driver_resource_claim_t){owner, res->type, res->start, res->end, NULL};
+    *claim = (driver_resource_claim_t){owner,    res->type, res->start,
+                                       res->end, checked,   NULL};
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
     for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
         if (at->owner != owner && at->type == claim->type &&
@@ -311,6 +312,127 @@ int driver_resource_request(device_t *owner, const resource_t *res,
     resource_claims = claim;
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
     *out = claim;
+    return 0;
+}
+
+int driver_resource_request(device_t *owner, const resource_t *res,
+                            driver_resource_claim_t **out) {
+    return resource_request(owner, res, out, false);
+}
+
+static enum resource_type resource_space(enum resource_type type) {
+    return type == RES_MEM ? RES_MMIO : type;
+}
+static bool valid_range(const resource_t *res) {
+    return res &&
+           (resource_space(res->type) == RES_MMIO || res->type == RES_IOPORT) &&
+           res->start <= res->end &&
+           (res->type != RES_IOPORT || res->end <= 0xffff);
+}
+/* Lifecycle mutex held: declarations cannot be published/withdrawn or changed
+ * by a cooperating bus. The claim list additionally needs the registry lock. */
+static int check_range(device_t *owner, const resource_t *res,
+                       uint64_t *busy_end) {
+    uint64_t end = 0;
+    bool busy = false;
+    for (int i = 0; i < g_device_count; i++) {
+        device_t *dev = g_devices[i];
+        if (dev == owner)
+            continue;
+        if (dev->res_count < 0 || (dev->res_count && !dev->res))
+            return -EINVAL;
+        for (int j = 0; j < dev->res_count; j++) {
+            const resource_t *at = &dev->res[j];
+            if (resource_space(at->type) != resource_space(res->type))
+                continue;
+            if (!valid_range(at))
+                return -EINVAL;
+            if (at->start <= res->end && res->start <= at->end) {
+                if (at->end > end)
+                    end = at->end;
+                busy = true;
+            }
+        }
+    }
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
+        if (at->owner != owner && at->type == resource_space(res->type) &&
+            at->start <= res->end && res->start <= at->end) {
+            if (at->end > end)
+                end = at->end;
+            busy = true;
+        }
+    }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    if (busy && busy_end)
+        *busy_end = end;
+    return busy ? -EBUSY : 0;
+}
+int driver_resource_check_range(device_t *owner, const resource_t *res,
+                                uint64_t *busy_end) {
+    if (busy_end)
+        *busy_end = 0;
+    if (!valid_range(res))
+        return -EINVAL;
+    driver_ops_lock();
+    int ret = check_range(owner, res, busy_end);
+    driver_ops_unlock();
+    return ret;
+}
+int driver_resource_check_claims(device_t *owner, const resource_t *res) {
+    if (!valid_range(res))
+        return -EINVAL;
+    int ret = 0;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
+        if (at->owner != owner && at->type == resource_space(res->type) &&
+            at->start <= res->end && res->start <= at->end) {
+            ret = -EBUSY;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    return ret;
+}
+int driver_resource_request_checked(device_t *owner, const resource_t *res,
+                                    driver_resource_claim_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!owner || !valid_range(res) || res->type == RES_MEM)
+        return -EINVAL;
+    driver_ops_lock();
+    bool registered = false;
+    for (int i = 0; i < g_device_count; i++)
+        if (g_devices[i] == owner)
+            registered = true;
+    int ret = registered && owner->state != DEV_STATE_REMOVING
+                  ? check_range(owner, res, NULL)
+                  : -ENODEV;
+    if (!ret)
+        ret = resource_request(owner, res, out, true);
+    driver_ops_unlock();
+    return ret;
+}
+/* Registry spinlock and lifecycle mutex held. Only checked claims restrict
+ * publication; basic claims retain their original cooperative semantics. */
+static int declaration_conflict(device_t *dev) {
+    if (dev->res_count < 0 || (dev->res_count && !dev->res))
+        return -EINVAL;
+    for (int i = 0; i < dev->res_count; i++) {
+        const resource_t *res = &dev->res[i];
+        if (resource_space(res->type) != RES_MMIO && res->type != RES_IOPORT)
+            continue;
+        for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
+            if (!at->checked || at->owner == dev ||
+                at->type != resource_space(res->type))
+                continue;
+            if (!valid_range(res))
+                return -EINVAL;
+            if (at->start <= res->end && res->start <= at->end)
+                return -EBUSY;
+        }
+    }
     return 0;
 }
 
@@ -727,6 +849,13 @@ int device_register(device_t *dev) {
         if (!held_parent) { driver_ops_unlock(); return -ENODEV; }
     }
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    int conflict = declaration_conflict(dev);
+    if (conflict) {
+        spin_unlock_irqrestore(&g_driver_core_lock, flags);
+        driver_ops_unlock();
+        device_put(held_parent);
+        return conflict;
+    }
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int insert = a20_driver_registry_insert((void **)&g_devices,
         &g_device_count, &g_device_cap, dev, driver_registry_grow_device);

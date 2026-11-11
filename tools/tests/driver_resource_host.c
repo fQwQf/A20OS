@@ -47,8 +47,9 @@ void kfree(void *p) {
         free(p);
     }
 }
+static _Thread_local int task_marker;
 struct task_t *proc_current(void) {
-    return NULL;
+    return (struct task_t *)&task_marker;
 }
 void host_log(const char *fmt, ...) {
     (void)fmt;
@@ -317,6 +318,103 @@ static void lifecycle(void) {
     bus_unregister(&bus);
     device_put(&dev);
 }
+static void inventory(void) {
+    driver_resource_claim_t *claim = (void *)1;
+    uint64_t end = 99;
+    assert(driver_resource_request_checked(&a, &region, &claim) == -ENODEV &&
+           !claim);
+    assert(!device_register(&a) && !device_register(&b));
+    assert(!a.drv && !b.drv);
+    assert(driver_resource_check_range(&a, &region, &end) == -EBUSY &&
+           end == region.end);
+    assert(!driver_resource_check_claims(
+        &a, &region)); /* An unbound declaration is not a basic claim. */
+    assert(driver_resource_request_checked(&a, &region, &claim) == -EBUSY &&
+           !claim);
+    resource_t physical_ram = region;
+    physical_ram.type = RES_MEM;
+    b.res = &physical_ram;
+    assert(driver_resource_request_checked(&a, &region, &claim) == -EBUSY &&
+           !claim);
+    physical_ram.end = physical_ram.start - 1;
+    assert(driver_resource_check_range(&a, &region, &end) == -EINVAL && !end);
+    b.res = &region;
+    device_unregister(&b);
+    fail_after = 0;
+    assert(driver_resource_request_checked(&a, &region, &claim) == -ENOMEM &&
+           !claim);
+    fail_after = -1;
+    assert(a.references == 2);
+    assert(!driver_resource_check_range(&a, &region, &end) && !end);
+    assert(driver_resource_check_range(NULL, &region, &end) == -EBUSY &&
+           end == region.end);
+    assert(!driver_resource_request_checked(&a, &region, &claim));
+    device_t parent = {.name = "inventory-parent", .references = 1};
+    b.parent = &parent;
+    assert(device_register(&b) == -EBUSY && parent.references == 1 &&
+           !b.parent_reference);
+    b.parent = NULL;
+    device_unregister(&a); /* The retained lease still rejects publication. */
+    assert(a.references == 2 && device_register(&b) == -EBUSY);
+    driver_resource_claim_t *second;
+    assert(driver_resource_request_checked(&a, &region, &second) == -ENODEV &&
+           !second);
+    assert(driver_resource_check_claims(&b, &region) == -EBUSY);
+    driver_resource_release(claim);
+    assert(a.references == 1 && !device_register(&b));
+    device_unregister(&b);
+    assert(a.references == 1 && b.references == 1);
+}
+struct inventory_race {
+    device_t *candidate;
+    driver_resource_claim_t *claim;
+    int result;
+};
+static void *inventory_compete(void *opaque) {
+    struct inventory_race *race = opaque;
+    pthread_barrier_wait(&start);
+    race->result =
+        race->candidate
+            ? device_register(race->candidate)
+            : driver_resource_request_checked(&a, &region, &race->claim);
+    pthread_barrier_wait(&attempted);
+    pthread_barrier_wait(&proceed);
+    if (!race->result && race->candidate)
+        device_unregister(race->candidate);
+    driver_resource_release(race->claim);
+    return NULL;
+}
+static void inventory_concurrency(void) {
+    assert(!device_register(&a));
+    pthread_barrier_init(&start, NULL, 3);
+    pthread_barrier_init(&attempted, NULL, 3);
+    pthread_barrier_init(&proceed, NULL, 3);
+    for (unsigned i = 0; i < 16; i++) {
+        device_t candidate = {.name = "publication-race",
+                              .res = &region,
+                              .res_count = 1,
+                              .references = 1};
+        struct inventory_race races[2] = {{0}, {.candidate = &candidate}};
+        pthread_t workers[2];
+        for (unsigned k = 0; k < 2; k++)
+            assert(!pthread_create(&workers[k], NULL, inventory_compete,
+                                   &races[k]));
+        pthread_barrier_wait(&start);
+        pthread_barrier_wait(&attempted);
+        assert((!races[0].result && races[1].result == -EBUSY) ||
+               (!races[1].result && races[0].result == -EBUSY));
+        pthread_barrier_wait(&proceed);
+        for (unsigned k = 0; k < 2; k++)
+            assert(!pthread_join(workers[k], NULL));
+        assert(a.references == 2 && candidate.references == 1);
+        device_put(&candidate);
+    }
+    pthread_barrier_destroy(&start);
+    pthread_barrier_destroy(&attempted);
+    pthread_barrier_destroy(&proceed);
+    device_unregister(&a);
+    assert(a.references == 1);
+}
 int main(void) {
     driver_core_init();
     int baseline = allocations;
@@ -325,6 +423,8 @@ int main(void) {
     failures_and_managed();
     draining_unmap();
     concurrency();
+    inventory();
+    inventory_concurrency();
     lifecycle();
     assert(allocations == baseline && a.references == 1 && b.references == 1 &&
            maps >= unmaps);
