@@ -8,6 +8,7 @@
 #include "fs/page_cache.h"
 #include "fs/ext4.h"
 #include "proc/proc.h"
+#include "net/socket.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/consts.h"
@@ -31,6 +32,8 @@ int vfs_vfile_stat(vfile_t *vf, kstat_t *st)
         fill_pipe_kstat(st);
         return 0;
     }
+    if (net_is_socket_vfile(vf))
+        return net_socket_stat_vfile(vf, st);
     return -EBADF;
 }
 

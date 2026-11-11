@@ -321,6 +321,8 @@ typedef struct net_socket {
      */
     uint64_t rxq_tally;
     int gfd;                       /* creating task's fd carrying this socket */
+    uint32_t stat_uid;             /* immutable creator metadata for sockfs stat */
+    uint32_t stat_gid;
     struct vfile *vf;              /* the socket's vfile (EventQ identity) */
     /*
      * This socket's own lock: everything above in this struct except the

@@ -195,6 +195,23 @@ int net_is_socket_vfile(struct vfile *vf)
     return vf && vf->ops == &g_net_ops && vf->priv;
 }
 
+int net_socket_stat_vfile(struct vfile *vf, kstat_t *st)
+{
+    if (!net_is_socket_vfile(vf))
+        return -EBADF;
+    if (!st)
+        return -EINVAL;
+    net_socket_t *s = vf->priv;
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFSOCK | 0777;
+    st->st_ino = vf->identity;
+    st->st_uid = s->stat_uid;
+    st->st_gid = s->stat_gid;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+    return 0;
+}
+
 net_socket_t *net_socket_from_vfile(vfile_t *vf) {
     return (vf && net_is_socket_vfile(vf) && vf->priv) ?
            (net_socket_t *)vf->priv : NULL;
@@ -377,6 +394,9 @@ void *a20_net_install_prepare(void *sp, int flags)
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_net_ops;
     vf->priv = s;
+    task_t *creator = proc_current();
+    s->stat_uid = creator ? (uint32_t)creator->cred.fsuid : 0;
+    s->stat_gid = creator ? (uint32_t)creator->cred.fsgid : 0;
     return vf;
 }
 
