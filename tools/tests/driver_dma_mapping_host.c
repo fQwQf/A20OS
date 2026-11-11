@@ -30,6 +30,7 @@ struct provider {
     uint64_t addresses[128];
     uint64_t offset;
     unsigned attempts, count, releases, fail_at, bad_at;
+    unsigned unmap_attempts, unmap_fail_at;
     int failure;
 };
 static int map(void *opaque, uint64_t physical,
@@ -54,6 +55,16 @@ static void unmap(void *opaque, uint64_t address, enum driver_dma_direction dire
 static void release(void *opaque)
 { struct provider *p = opaque; assert(!p->count); p->releases++; }
 static const struct driver_dma_ops ops = {map, unmap, release};
+static int checked_unmap(void *opaque, uint64_t address,
+                           enum driver_dma_direction direction)
+{
+    struct provider *p = opaque;
+    if (++p->unmap_attempts == p->unmap_fail_at)
+        return -ETIMEDOUT;
+    unmap(opaque, address, direction);
+    return 0;
+}
+static const struct driver_dma_checked_ops checked_ops = {map, checked_unmap, release};
 
 static void setup(void)
 {
@@ -162,8 +173,61 @@ static void failures(void)
     driver_dma_domain_put(domain);
     assert(p.releases == 1 && d.references == 1 && !allocations);
 }
+static void fallible_cleanup(void)
+{
+    /* Successful mapping: one page invalidated, next times out. No pin may
+     * drop until retry confirms the remaining translations are gone. */
+    setup();
+    device_t d = {.references=1};
+    struct provider p = {.offset=0x200000, .unmap_fail_at=2};
+    struct driver_dma_domain *domain;
+    struct driver_dma_mapping *mapping;
+    pfn_t pages[] = {100, 102, 110};
+    assert(!driver_dma_domain_create_checked(&d, &checked_ops, &p, &domain));
+    assert(!driver_dma_map_pages(domain, pages, 3, DRIVER_DMA_FROM_DEVICE, &mapping));
+    driver_dma_domain_put(domain);
+    assert(driver_dma_try_unmap_pages(&mapping) == -ETIMEDOUT);
+    assert(mapping && p.count == 2 && !p.releases && d.references == 2);
+    assert(!cpu_syncs && device_syncs == 3);
+    for (unsigned i = 0; i < 3; i++) assert(refs[pages[i]] == 2);
+    uint64_t address;
+    assert(driver_dma_page_address(mapping, 0, &address) == -ESHUTDOWN);
+    assert(driver_dma_mapping_sync_for_device(mapping) == -ESHUTDOWN);
+    assert(driver_dma_mapping_sync_for_cpu(mapping) == -ESHUTDOWN);
+    assert(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+    assert(p.unmap_attempts == 4 && !p.count && p.releases == 1 && cpu_syncs == 3);
+    for (unsigned i = 0; i < 3; i++) assert(refs[pages[i]] == 1);
+    assert(!allocations && d.references == 1);
+    assert(!driver_dma_try_unmap_pages(&mapping));
+    assert(driver_dma_try_unmap_pages(NULL) == -EINVAL);
+
+    /* Map failure and bad returned address both require retryable rollback.
+     * Neither failure published data to hardware, so CPU sync is forbidden. */
+    for (unsigned bad_address = 0; bad_address < 2; bad_address++) {
+        setup();
+        p = (struct provider){.offset=0x200000, .unmap_fail_at=1,
+                              .fail_at=bad_address ? 0 : 3,
+                              .bad_at=bad_address ? 3 : 0, .failure=-ENOMEM};
+        assert(!driver_dma_domain_create_checked(&d, &checked_ops, &p, &domain));
+        assert(driver_dma_map_pages(domain, pages, 3, DRIVER_DMA_FROM_DEVICE,
+                                     &mapping) == (bad_address ? -ERANGE : -ENOMEM));
+        assert(mapping && p.count == (bad_address ? 3 : 2));
+        assert(!cpu_syncs && !device_syncs && refs[100] == 2 && refs[102] == 2);
+        assert(refs[110] == (bad_address ? 2U : 1U));
+        driver_dma_domain_put(domain);
+        assert(driver_dma_page_address(mapping, 0, &address) == -ESHUTDOWN);
+        /* Even legacy void cleanup must retain the pointer on another error. */
+        p.unmap_fail_at = p.unmap_attempts + 1;
+        driver_dma_unmap_pages(&mapping);
+        assert(mapping && !p.releases);
+        assert(!driver_dma_try_unmap_pages(&mapping) && !mapping && p.releases == 1);
+        assert(!allocations && !cpu_syncs && !device_syncs && d.references == 1);
+    }
+}
+
 int main(void)
 {
     direct_and_lifetime(); translated(); rollback(); failures();
+    fallible_cleanup();
     puts("native DMA mappings: PASS"); return 0;
 }
