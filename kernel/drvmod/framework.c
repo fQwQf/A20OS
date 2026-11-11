@@ -23,6 +23,7 @@
 #include "drvmod/export.h"
 #include "drivers/core/dma_mapping.h"
 #include "drivers/core/fence.h"
+#include "drivers/core/workqueue.h"
 #include "drvmod/drvmod.h"
 
 #include "core/bootargs.h"
@@ -349,6 +350,15 @@ const struct drv_export drv_export_table[] = {
     { "driver_fence_signal", driver_fence_signal },
     { "driver_fence_status", driver_fence_status },
     { "driver_fence_wait", driver_fence_wait },
+    { "driver_workqueue_create", driver_workqueue_create },
+    { "driver_work_create", driver_work_create },
+    { "driver_work_get", driver_work_get },
+    { "driver_work_put", driver_work_put },
+    { "driver_work_schedule", driver_work_schedule },
+    { "driver_work_reschedule", driver_work_reschedule },
+    { "driver_work_cancel_sync", driver_work_cancel_sync },
+    { "driver_workqueue_flush", driver_workqueue_flush },
+    { "driver_workqueue_destroy", driver_workqueue_destroy },
     { "drv_map_mmio",        drv_map_mmio },
     { "device_map_mmio",     device_map_mmio },
     { "arch_device_map_mmio", arch_device_map_mmio },

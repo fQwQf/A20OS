@@ -1,0 +1,16 @@
+name = "smoke-driver-runtime-smp2-x86_64"
+description = "Native driver worker lifecycle and fences with two QEMU CPUs"
+arch = "x86_64"
+abi = "linux"
+
+[machine]
+memory = "1G"
+smp = 2
+extra_qemu = ["-append", "driver.runtime_test=1"]
+
+[test]
+expect = ["DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1"]
+timeout = "60s"
+
+[net]
+stack = "bsd"
