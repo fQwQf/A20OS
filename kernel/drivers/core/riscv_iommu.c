@@ -24,6 +24,7 @@
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/pci_hal.h"
 #include "drivers/core/riscv_iommu.h"
+#include "drivers/core/riscv_iommu_internal.h"
 #include "drivers/core/dma_mapping.h"
 #include "core/errno.h"
 #include "mm/slab.h"
@@ -1000,12 +1001,9 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
     return 0;
 }
 
-int riscv_iommu_dma_fault_poll(device_t *device, struct riscv_iommu_dma_fault *out)
+int riscv_iommu_native_identity(device_t *device, uint16_t *devid, int *owner)
 {
-    if (!out)
-        return -EINVAL;
-    memset(out, 0, sizeof(*out));
-    if (!device)
+    if (!device || !devid || !owner)
         return -EINVAL;
     if (!g_iommu_ready)
         return -ENODEV;
@@ -1015,17 +1013,31 @@ int riscv_iommu_dma_fault_poll(device_t *device, struct riscv_iommu_dma_fault *o
         return ret;
     if (bus > 255 || slot > 31 || function > 7)
         return -EINVAL;
-    uint16_t devid = (bus << 8) | (slot << 3) | function;
+    *devid = (bus << 8) | (slot << 3) | function;
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    iommu_user_domain_t *hardware = iommu_domain_by_devid(devid);
-    int owner = hardware && hardware->native_device == device ? hardware->owner_pid : 0;
+    iommu_user_domain_t *hardware = iommu_domain_by_devid(*devid);
+    *owner = hardware && hardware->native_device == device ? hardware->owner_pid : 0;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-    if (owner >= 0)
+    return *owner < 0 ? 0 : -ENODEV;
+}
+
+int riscv_iommu_fault_poll_owned(device_t *device, int expected_owner,
+                                 struct riscv_iommu_dma_fault *out)
+{
+    if (!out)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    uint16_t devid;
+    int owner;
+    int ret = riscv_iommu_native_identity(device, &devid, &owner);
+    if (ret)
+        return ret;
+    if (expected_owner && expected_owner != owner)
         return -ENODEV;
     if (riscv_iommu_domain_fault(devid, owner, NULL, NULL, NULL, NULL))
         return -ENODEV;
-    flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    hardware = iommu_domain_for(devid, owner);
+    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    iommu_user_domain_t *hardware = iommu_domain_for(devid, owner);
     if (hardware && hardware->native_device == device) {
         *out = (struct riscv_iommu_dma_fault){
             hardware->fault_count, hardware->last_iova, hardware->last_cause, hardware->fault_queue_error,
@@ -1037,6 +1049,11 @@ int riscv_iommu_dma_fault_poll(device_t *device, struct riscv_iommu_dma_fault *o
     }
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return ret;
+}
+
+int riscv_iommu_dma_fault_poll(device_t *device, struct riscv_iommu_dma_fault *out)
+{
+    return riscv_iommu_fault_poll_owned(device, 0, out);
 }
 
 static uint64_t native_test_translation(uint16_t devid, uint64_t address, bool read)

@@ -342,6 +342,8 @@ const struct drv_export drv_export_table[] = {
     { "driver_dma_domain_shutdown", driver_dma_domain_shutdown },
     { "riscv_iommu_dma_domain_create", riscv_iommu_dma_domain_create },
     { "riscv_iommu_dma_fault_poll", riscv_iommu_dma_fault_poll },
+    { "riscv_iommu_dma_watch_start", riscv_iommu_dma_watch_start },
+    { "riscv_iommu_dma_watch_stop", riscv_iommu_dma_watch_stop },
     { "driver_dma_domain_create_direct", driver_dma_domain_create_direct },
     { "driver_dma_domain_get", driver_dma_domain_get },
     { "driver_dma_domain_put", driver_dma_domain_put },

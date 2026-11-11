@@ -35,6 +35,26 @@ struct riscv_iommu_dma_fault {
  * count is then only a lower bound. Hardware queue recovery is separate. */
 int riscv_iommu_dma_fault_poll(struct device *device, struct riscv_iommu_dma_fault *out);
 
+struct riscv_iommu_dma_watch;
+/* Task context after scheduler start. Own worker, device reference and owner
+ * token. period is a nonzero native-tick interval after each completed poll.
+ * Callback runs unlocked on that worker for changed fault/isolation state;
+ * healthy unchanged snapshots stay quiet. A poll error is delivered once and
+ * ends polling. Snapshot is borrowed until callback returns; copy if needed.
+ * Callback may run before start returns. Initialize context first and keep
+ * code/module/context alive until stop succeeds. Serialize start/stop retries
+ * and binding changes; do not wait for the binding lock inside the callback.
+ * Failure can return a non-NULL cleanup handle if worker draining failed. */
+int riscv_iommu_dma_watch_start(struct device *, uint64_t period,
+                                void (*callback)(void *, int, const struct riscv_iommu_dma_fault *),
+                                void *context, struct riscv_iommu_dma_watch **out);
+/* Permanently stops scheduling and drains callback. Success frees/NULLs the
+ * watch; deadline is absolute ticks, 0 unbounded. Timeout/interruption keeps
+ * the object and context live for retry. Self-stop returns -EDEADLK without
+ * freeing anything. Stop before domain shutdown/device teardown. No automatic
+ * fence completion, engine reset or IRQ delivery is implied by this worker. */
+int riscv_iommu_dma_watch_stop(struct riscv_iommu_dma_watch **, uint64_t deadline);
+
 /* One device, one translation domain.  These calls fail closed when the
  * RISC-V IOMMU is absent; callers must never fall back to physical DMA for a
  * device that requested isolation. */
