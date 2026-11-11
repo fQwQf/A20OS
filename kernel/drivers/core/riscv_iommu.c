@@ -973,6 +973,82 @@ static uint64_t native_test_translation(uint16_t devid, uint64_t address, bool r
     panic("DRIVER_IOMMU_NATIVE: translation timeout");
 }
 
+/* EDU DMA uses a timer. Bound both elapsed time and iterations; timeout is a
+ * fail-stop test result and must never proceed to free active DMA storage. */
+static void native_test_edu_transfer(volatile uint8_t *bar, uint64_t source,
+                                      uint64_t destination, bool to_ram)
+{
+    if (readl(bar + 0x98) & 1)
+        panic("DRIVER_IOMMU_NATIVE: EDU unexpectedly busy (pins retained)");
+    writel((uint32_t)(source >> 32), bar + 0x84);
+    writel((uint32_t)source, bar + 0x80);
+    writel((uint32_t)(destination >> 32), bar + 0x8c);
+    writel((uint32_t)destination, bar + 0x88);
+    writel(128, bar + 0x90);
+    writel(0, bar + 0x94);
+    wmb();
+    writel(to_ram ? 3 : 1, bar + 0x98);
+    uint64_t start = clock_get_ticks();
+    uint64_t budget = 2 * clock_ticks_per_sec();
+    for (unsigned i = 0; i < 20000000; i++) {
+        if (!(readl(bar + 0x98) & 1))
+            return;
+        if (clock_get_ticks() - start >= budget)
+            break;
+    }
+    panic("DRIVER_IOMMU_NATIVE: EDU DMA timeout (pins retained)");
+}
+
+static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain *domain)
+{
+#define DMA_CHECK(test) do { if (!(test)) \
+    panic("DRIVER_IOMMU_NATIVE: DMA FAIL line=%d: %s", __LINE__, #test); } while (0)
+    volatile uint8_t *bar = pci_map_bar(device, 0);
+    DMA_CHECK(bar);
+    pfn_t pages[2], gap;
+    pages[0] = pfa_alloc_page(); gap = pfa_alloc_page(); pages[1] = pfa_alloc_page();
+    DMA_CHECK(pages[0] != PFN_NONE && pages[1] != PFN_NONE && gap != PFN_NONE);
+    if (pfn_to_phys(pages[1]) == pfn_to_phys(pages[0]) + PAGE_SIZE) {
+        pfn_t swap = pages[1]; pages[1] = gap; gap = swap;
+    }
+    DMA_CHECK(pfn_to_phys(pages[1]) != pfn_to_phys(pages[0]) + PAGE_SIZE);
+    uint8_t *first = pfn_to_virt(pages[0]), *second = pfn_to_virt(pages[1]);
+    uint8_t *guard = pfn_to_virt(gap);
+    memset(first, 0xcc, PAGE_SIZE); memset(second, 0xcc, PAGE_SIZE);
+    memset(guard, 0x5a, PAGE_SIZE);
+    for (unsigned i = 0; i < 128; i++) {
+        uint8_t value = (uint8_t)(0xa5 ^ (i * 17));
+        if (i < 64) first[PAGE_SIZE - 64 + i] = value;
+        else second[i - 64] = value;
+    }
+    struct driver_dma_mapping *mapping;
+    DMA_CHECK(!driver_dma_map_pages(domain, pages, 2, DRIVER_DMA_BIDIRECTIONAL, &mapping));
+    uint64_t address, next;
+    DMA_CHECK(!driver_dma_page_address(mapping, 0, &address));
+    DMA_CHECK(!driver_dma_page_address(mapping, 1, &next) && next == address + PAGE_SIZE);
+    DMA_CHECK(address != pfn_to_phys(pages[0]) && next != pfn_to_phys(pages[1]));
+    frame_put(pages[0]); frame_put(pages[1]); /* Mapping and backend own all pins. */
+    uint16_t command = pci_cfg_read16(device, 4);
+    pci_cfg_write16(device, 4, command | 4);
+    native_test_edu_transfer(bar, address + PAGE_SIZE - 64, 0x40000, false);
+    DMA_CHECK(!driver_dma_mapping_sync_for_cpu(mapping));
+    memset(first + PAGE_SIZE - 64, 0, 64); memset(second, 0, 64);
+    DMA_CHECK(!driver_dma_mapping_sync_for_device(mapping));
+    native_test_edu_transfer(bar, 0x40000, address + PAGE_SIZE - 64, true);
+    DMA_CHECK(!driver_dma_mapping_sync_for_cpu(mapping));
+    for (unsigned i = 0; i < 128; i++)
+        DMA_CHECK((i < 64 ? first[PAGE_SIZE - 64 + i] : second[i - 64]) == (uint8_t)(0xa5 ^ (i * 17)));
+    for (unsigned i = 0; i < PAGE_SIZE; i++) {
+        DMA_CHECK(guard[i] == 0x5a);
+        if (i < PAGE_SIZE - 64) DMA_CHECK(first[i] == 0xcc);
+        if (i >= 64) DMA_CHECK(second[i] == 0xcc);
+    }
+    pci_cfg_write16(device, 4, command & ~4U);
+    DMA_CHECK(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+    frame_put(gap);
+#undef DMA_CHECK
+}
+
 void driver_iommu_native_selftest(void)
 {
 #define IOMMU_CHECK(test) do { if (!(test)) \
@@ -1006,12 +1082,13 @@ void driver_iommu_native_selftest(void)
     }
     IOMMU_CHECK(!driver_dma_try_unmap_pages(&mapping) && !mapping);
     IOMMU_CHECK(native_test_translation(info.devid, address, true) & IOMMU_TR_RESP_FAULT);
+    native_test_edu_roundtrip(device, domain);
     IOMMU_CHECK(!driver_dma_domain_shutdown(domain));
     IOMMU_CHECK(native_test_translation(info.devid, address, true) & IOMMU_TR_RESP_FAULT);
     driver_dma_domain_put(domain);
     pci_cfg_write16(device, 4, command);
     device_put(device);
-    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1\n");
+    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1\n");
 #undef IOMMU_CHECK
 }
 
