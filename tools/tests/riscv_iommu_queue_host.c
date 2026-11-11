@@ -1,11 +1,29 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "drivers/core/riscv_iommu.c"
 
 /* Registration keeps the probe linked under ASan. It must never run here. */
 pfa_t pfa;
 bus_type_t pci_bus;
+struct test_bdf { unsigned bus, slot, function; uint16_t command; };
+static unsigned allocations;
+void *kmalloc(size_t size) { void *p = malloc(size); assert(p); allocations++; return p; }
+void kfree(void *p) { if (p) { assert(allocations); allocations--; free(p); } }
+device_t *device_get(device_t *d) { assert(d->references); d->references++; return d; }
+void device_put(device_t *d) { assert(d->references > 1); d->references--; }
+uint64_t dma_get_mask(const device_t *d) { return d->dma_mask ? d->dma_mask : ~(uint64_t)0; }
+void dma_sync_for_device(void *p, size_t n) { assert(p && n == PAGE_SIZE); }
+void dma_sync_for_cpu(void *p, size_t n) { assert(p && n == PAGE_SIZE); }
+int pci_device_location(const device_t *d, unsigned *bus, unsigned *slot, unsigned *function)
+{
+    if (d->bus != &pci_bus || !d->plat_data) return -ENODEV;
+    struct test_bdf *bdf = d->plat_data;
+    *bus = bdf->bus; *slot = bdf->slot; *function = bdf->function; return 0;
+}
+uint16_t pci_cfg_read16(const device_t *d, uint32_t reg)
+{ assert(reg == 4); return ((struct test_bdf *)d->plat_data)->command; }
 int pci_enable_and_assign_bars(device_t *dev) { (void)dev; assert(0); return -1; }
 resource_t *pci_get_bar_resource(device_t *dev, unsigned bar)
 { (void)dev; (void)bar; assert(0); return NULL; }
@@ -124,6 +142,68 @@ static void domain_lifetimes(void)
         assert(!g_iommu_stats.mapped_pages && !g_user_domains[0].active);
     }
 }
+
+static void native_domains(void)
+{
+    static uint64_t contexts[512];
+    for (unsigned failure = 0; failure < 3; failure++) {
+        setup(); complete = 1;
+        memset(contexts, 0, sizeof(contexts));
+        g_iommu_ddt = (uint8_t *)contexts;
+        g_iommu_dc_stride = 32; g_iommu_ready = 1;
+        struct test_bdf bdf = {0, 1, 0, 0};
+        device_t d = {.bus=&pci_bus, .plat_data=&bdf, .references=1};
+        struct driver_dma_domain *domain, *other;
+        d.user_owned = 1;
+        assert(riscv_iommu_dma_domain_create(&d, &domain) == -EBUSY && !domain);
+        d.user_owned = 0; bdf.command = 4;
+        assert(riscv_iommu_dma_domain_create(&d, &domain) == -EBUSY && !domain);
+        bdf.command = 0; bdf.bus = 1;
+        assert(riscv_iommu_dma_domain_create(&d, &domain) == -EOPNOTSUPP && !domain);
+        bdf.bus = 0;
+        assert(!riscv_iommu_domain_claim(8, 42));
+        assert(riscv_iommu_dma_domain_create(&d, &domain) < 0 && !domain);
+        assert(!riscv_iommu_domain_release(8, 42) && !allocations);
+        if (failure == 2) fail_publish_at = publications + 6;
+        int ret = riscv_iommu_dma_domain_create(&d, &domain);
+        assert(domain && d.references == 2 && g_user_domains[0].owner_pid < 0);
+        if (failure == 2) {
+            assert(ret < 0);
+            assert(driver_dma_domain_shutdown(domain) < 0 && allocations == 2);
+            registers[IOMMU_REG_CQCSR / 4] = 0; fail_publish_at = 0;
+        } else {
+            assert(!ret);
+            assert(riscv_iommu_dma_domain_create(&d, &other) < 0 && !other);
+            assert(riscv_iommu_domain_claim(8, 42) < 0);
+            refs[110] = refs[111] = 1;
+            pfn_t pages[] = {110, 111};
+            struct driver_dma_mapping *mapping;
+            if (failure == 1) fail_publish_at = publications + 1;
+            ret = driver_dma_map_pages(domain, pages, 2, DRIVER_DMA_TO_DEVICE, &mapping);
+            assert(mapping);
+            if (failure == 1) {
+                assert(ret < 0 && refs[110] == 3 && refs[111] == 1);
+                assert(driver_dma_try_unmap_pages(&mapping) < 0 && refs[110] == 3);
+                registers[IOMMU_REG_CQCSR / 4] = 0; fail_publish_at = 0;
+            } else {
+                uint64_t address;
+                assert(!ret && refs[110] == 3 && refs[111] == 3);
+                assert(!driver_dma_page_address(mapping, 0, &address));
+                assert(address == IOMMU_USER_IOVA && address != pfn_to_phys(110));
+                assert(!(g_user_domains[0].l0[0] & IOMMU_PTE_W));
+            }
+            assert(driver_dma_domain_shutdown(domain) == -EBUSY);
+            assert(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+            assert(refs[110] == 1 && refs[111] == 1);
+            bdf.command = 4;
+            assert(driver_dma_domain_shutdown(domain) == -EBUSY);
+            bdf.command = 0;
+        }
+        assert(!driver_dma_domain_shutdown(domain));
+        driver_dma_domain_put(domain);
+        assert(!allocations && d.references == 1 && !g_user_domains[0].active);
+    }
+}
 int main(void)
 {
     setup();
@@ -179,6 +259,7 @@ int main(void)
     assert(!riscv_iommu_domain_unmap(8, 42, IOMMU_USER_IOVA + PAGE_SIZE*63, 1));
     assert(!l0[63] && !domain->mapped_pages && !g_iommu_stats.mapped_pages);
     domain_lifetimes();
+    native_domains();
     puts("RISC-V IOMMU: CQ retries, bounds, data/table pins and recovery PASS");
     return 0;
 }

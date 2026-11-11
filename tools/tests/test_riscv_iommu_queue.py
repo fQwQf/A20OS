@@ -26,6 +26,10 @@ class RiscvIommuQueue(unittest.TestCase):
 #include "core/types.h"
 uint32_t host_read32(const volatile void *);
 void host_write32(uint32_t, volatile void *);
+struct device;
+uint64_t dma_get_mask(const struct device *);
+void dma_sync_for_device(void *, size_t);
+void dma_sync_for_cpu(void *, size_t);
 #define readl host_read32
 #define writel host_write32
 '''}
@@ -42,6 +46,7 @@ void host_write32(uint32_t, volatile void *);
                 "-I" + str(work), "-I" + str(ROOT / "kernel/include"),
                 "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests/riscv_iommu_queue_host.c"), "-o", str(binary),
+                str(ROOT / "kernel/drivers/core/dma_mapping.c"),
             ], check=True)
             subprocess.run([str(binary)], check=True, timeout=15)
 

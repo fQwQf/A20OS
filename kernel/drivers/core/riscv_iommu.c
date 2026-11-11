@@ -24,6 +24,9 @@
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/pci_hal.h"
 #include "drivers/core/riscv_iommu.h"
+#include "drivers/core/dma_mapping.h"
+#include "core/errno.h"
+#include "mm/slab.h"
 #include "mm/frame.h"
 #include "core/defs.h"
 #include "core/klog.h"
@@ -147,6 +150,7 @@ typedef struct iommu_user_domain {
 
 static iommu_user_domain_t g_user_domains[IOMMU_USER_DOMAINS];
 static riscv_iommu_stats_t g_iommu_stats;
+static unsigned g_native_owner_serial;
 
 /* Caller holds g_iommu_domain_lock. */
 static iommu_user_domain_t *iommu_domain_for(uint16_t devid, int owner_pid)
@@ -522,9 +526,9 @@ static int riscv_iommu_probe(device_t *dev)
     return 0;
 }
 
-int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
+static int domain_claim(uint16_t devid, int owner_pid)
 {
-    if (!g_iommu_ready || owner_pid <= 0 || !iommu_dc(devid))
+    if (!g_iommu_ready || !owner_pid || !iommu_dc(devid))
         return -1;
 
 retry:
@@ -627,12 +631,19 @@ retry:
     return 0;
 }
 
-int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
-                           uint32_t npages, uint64_t *out_iova)
+int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
+{
+    return owner_pid > 0 ? domain_claim(devid, owner_pid) : -1;
+}
+
+static int domain_map(uint16_t devid, int owner_pid, uint64_t phys,
+                        uint32_t npages, uint64_t *out_iova, bool *needs_unmap,
+                        enum driver_dma_direction direction)
 {
     if (!out_iova)
         return -1;
     *out_iova = 0;
+    *needs_unmap = false;
     if (!npages || npages > IOMMU_USER_MAX_PAGES ||
         (phys & (PAGE_SIZE - 1)) ||
         phys > ~(uint64_t)0 - ((uint64_t)npages * PAGE_SIZE - 1))
@@ -666,11 +677,13 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
         d->pinned[first + i] = pages[i];
         d->l0[first + i] = ((phys + (uint64_t)i * PAGE_SIZE) >> 12)
                            << IOMMU_PTE_PPN_SHIFT |
-                           IOMMU_PTE_V | IOMMU_PTE_R | IOMMU_PTE_W |
-                           IOMMU_PTE_U | IOMMU_PTE_A | IOMMU_PTE_D;
+                           IOMMU_PTE_V | IOMMU_PTE_R | IOMMU_PTE_U | IOMMU_PTE_A |
+                           (direction == DRIVER_DMA_TO_DEVICE ? 0 : IOMMU_PTE_W | IOMMU_PTE_D);
     }
     d->mapped_pages |= run << first;
     g_iommu_stats.mapped_pages += npages;
+    *out_iova = IOMMU_USER_IOVA + (uint64_t)first * PAGE_SIZE;
+    *needs_unmap = true;
     wmb();
     if (iommu_cmd(IOMMU_CMD_IOTINVAL, 0) < 0 ||
         iommu_cmd(IOMMU_CMD_IOFENCE, 0) < 0) {
@@ -685,9 +698,19 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
         return -1;
     }
     g_iommu_stats.maps++;
-    *out_iova = IOMMU_USER_IOVA + (uint64_t)first * PAGE_SIZE;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return 0;
+}
+
+int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
+                           uint32_t npages, uint64_t *out_iova)
+{
+    bool pending;
+    int ret = domain_map(devid, owner_pid, phys, npages, out_iova, &pending,
+                           DRIVER_DMA_BIDIRECTIONAL);
+    if (ret && out_iova)
+        *out_iova = 0; /* Legacy API owns quarantine internally on failure. */
+    return ret;
 }
 
 int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
@@ -835,6 +858,104 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     kinfo("[IOMMU] user domain released did=%u owner=%d\n",
           devid, owner_pid);
+    return 0;
+}
+
+struct native_iommu_context {
+    device_t *device; /* retained by the managed domain */
+    uint16_t devid;
+    int owner;
+};
+
+static int native_map(void *opaque, uint64_t physical,
+                        enum driver_dma_direction direction, uint64_t *address,
+                        bool *needs_unmap)
+{
+    struct native_iommu_context *context = opaque;
+    return domain_map(context->devid, context->owner, physical, 1, address,
+                        needs_unmap, direction) ? -EIO : 0;
+}
+
+static int native_unmap(void *opaque, uint64_t address,
+                          enum driver_dma_direction direction)
+{
+    (void)direction;
+    struct native_iommu_context *context = opaque;
+    return riscv_iommu_domain_unmap(context->devid, context->owner, address, 1)
+           ? -EIO : 0;
+}
+
+static int native_deactivate(void *opaque)
+{
+    struct native_iommu_context *context = opaque;
+    if (pci_cfg_read16(context->device, 0x04) & 4)
+        return -EBUSY; /* Caller must stop DMA and disable bus mastering. */
+    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    bool present = iommu_domain_for(context->devid, context->owner) != NULL;
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    if (!present)
+        return 0; /* A failed claim may have left no hardware resources. */
+    return riscv_iommu_domain_release(context->devid, context->owner) ? -EIO : 0;
+}
+
+static void native_release(void *opaque)
+{
+    kfree(opaque);
+}
+
+int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **out)
+{
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!device)
+        return -EINVAL;
+    if (!g_iommu_ready)
+        return -ENODEV;
+    if (device->user_owned)
+        return -EBUSY;
+    unsigned bus, slot, function;
+    int ret = pci_device_location(device, &bus, &slot, &function);
+    if (ret)
+        return ret;
+    if (bus > 255 || slot > 31 || function > 7)
+        return -EINVAL;
+    uint16_t devid = (bus << 8) | (slot << 3) | function;
+    if (!iommu_dc(devid))
+        return -EOPNOTSUPP;
+    if (pci_cfg_read16(device, 0x04) & 4)
+        return -EBUSY;
+    struct native_iommu_context *context = kmalloc(sizeof(*context));
+    if (!context)
+        return -ENOMEM;
+    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    if (g_native_owner_serial == 0x7fffffffU) {
+        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+        kfree(context);
+        return -ENOSPC;
+    }
+    int owner = -(int)++g_native_owner_serial;
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    *context = (struct native_iommu_context){device, devid, owner};
+    const struct driver_dma_managed_ops ops = {
+        native_map, native_unmap, native_deactivate, native_release,
+    };
+    struct driver_dma_domain *domain;
+    ret = driver_dma_domain_create_managed(device, &ops, context, &domain);
+    if (ret) {
+        kfree(context);
+        return ret;
+    }
+    if (domain_claim(devid, owner)) {
+        /* Even a failed claim can leave hardware referencing page tables.
+         * Preserve a closed managed handle if cleanup cannot be confirmed. */
+        if (driver_dma_domain_shutdown(domain))
+            *out = domain;
+        else
+            driver_dma_domain_put(domain);
+        return -EIO;
+    }
+    *out = domain;
     return 0;
 }
 

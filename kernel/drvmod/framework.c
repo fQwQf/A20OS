@@ -22,6 +22,7 @@
 
 #include "drvmod/export.h"
 #include "drivers/core/dma_mapping.h"
+#include "drivers/core/riscv_iommu.h"
 #include "drivers/core/fence.h"
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
@@ -339,6 +340,7 @@ const struct drv_export drv_export_table[] = {
     { "driver_dma_domain_create_checked", driver_dma_domain_create_checked },
     { "driver_dma_domain_create_managed", driver_dma_domain_create_managed },
     { "driver_dma_domain_shutdown", driver_dma_domain_shutdown },
+    { "riscv_iommu_dma_domain_create", riscv_iommu_dma_domain_create },
     { "driver_dma_domain_create_direct", driver_dma_domain_create_direct },
     { "driver_dma_domain_get", driver_dma_domain_get },
     { "driver_dma_domain_put", driver_dma_domain_put },
