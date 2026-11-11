@@ -126,11 +126,13 @@ typedef struct iommu_user_domain {
     int owner_pid;
     int active;
     int blocked;
+    int claim_failed;
     pfn_t root_pfn;
     pfn_t l1_pfn;
     pfn_t l0_pfn;
     uint64_t *l0;
     uint64_t mapped_pages;
+    pfn_t pinned[IOMMU_USER_MAX_PAGES]; /* independent RAM refs per IOVA */
     uint64_t fault_count;
     uint32_t last_cause;
     uint64_t last_iova;
@@ -525,10 +527,20 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
     if (!g_iommu_ready || owner_pid <= 0 || !iommu_dc(devid))
         return -1;
 
+retry:
+    ; /* a label precedes a statement in C99 */
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    if (iommu_domain_for(devid, owner_pid)) {
+    iommu_user_domain_t *existing = iommu_domain_for(devid, owner_pid);
+    if (existing) {
+        int failed = existing->claim_failed;
+        int blocked = existing->blocked;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-        return 0;                       /* idempotent for the owner */
+        if (failed) {
+            if (riscv_iommu_domain_release(devid, owner_pid) < 0)
+                return -1;
+            goto retry;
+        }
+        return blocked ? -1 : 0; /* only healthy claims are idempotent */
     }
     for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
         if (g_user_domains[i].active != 0 && g_user_domains[i].devid == devid) {
@@ -579,27 +591,34 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
                << IOMMU_PTE_PPN_SHIFT | IOMMU_PTE_V;
     wmb();
 
-    uint32_t pscid = (uint32_t)(d - g_user_domains) + 1U;
-    if (iommu_context_translate(devid, pfn_to_phys(root_pfn), pscid) < 0) {
-        flags = spin_lock_irqsave(&g_iommu_domain_lock);
-        memset(d, 0, sizeof(*d));
-        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-        pfa_free_page(root_pfn);
-        pfa_free_page(l1_pfn);
-        pfa_free_page(l0_pfn);
-        return -1;
-    }
-
+    /* Record ownership before publishing a context that can reference these
+     * page tables. Failed context invalidation is not permission to free them. */
     flags = spin_lock_irqsave(&g_iommu_domain_lock);
     d->root_pfn = root_pfn;
     d->l1_pfn = l1_pfn;
     d->l0_pfn = l0_pfn;
     d->l0 = l0;
-    d->mapped_pages = 0;
-    d->fault_count = 0;
-    d->last_cause = 0;
-    d->last_iova = 0;
-    d->blocked = 0;
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    uint32_t pscid = (uint32_t)(d - g_user_domains) + 1U;
+    if (iommu_context_translate(devid, pfn_to_phys(root_pfn), pscid) < 0) {
+        int safe = iommu_context_block(devid) == 0;
+        flags = spin_lock_irqsave(&g_iommu_domain_lock);
+        if (safe)
+            memset(d, 0, sizeof(*d));
+        else {
+            d->active = 1;
+            d->blocked = d->claim_failed = 1;
+        }
+        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+        if (safe) {
+            pfa_free_page(root_pfn);
+            pfa_free_page(l1_pfn);
+            pfa_free_page(l0_pfn);
+        }
+        return -1;
+    }
+
+    flags = spin_lock_irqsave(&g_iommu_domain_lock);
     d->active = 1;
     g_iommu_stats.domains_claimed++;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
@@ -611,9 +630,20 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
 int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
                            uint32_t npages, uint64_t *out_iova)
 {
-    if (!out_iova || !npages || npages > IOMMU_USER_MAX_PAGES ||
-        (phys & (PAGE_SIZE - 1)))
+    if (!out_iova)
         return -1;
+    *out_iova = 0;
+    if (!npages || npages > IOMMU_USER_MAX_PAGES ||
+        (phys & (PAGE_SIZE - 1)) ||
+        phys > ~(uint64_t)0 - ((uint64_t)npages * PAGE_SIZE - 1))
+        return -1;
+    pfn_t pages[IOMMU_USER_MAX_PAGES];
+    for (uint32_t i = 0; i < npages; i++) {
+        uint64_t pa = phys + (uint64_t)i * PAGE_SIZE;
+        pages[i] = phys_to_pfn(pa);
+        if (!pfn_valid(pages[i]) || pfn_to_phys(pages[i]) != pa)
+            return -1;
+    }
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
     iommu_user_domain_t *d = iommu_domain_for(devid, owner_pid);
     if (!d || d->blocked) {
@@ -631,23 +661,30 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
-    for (uint32_t i = 0; i < npages; i++)
+    for (uint32_t i = 0; i < npages; i++) {
+        frame_get(pages[i]);
+        d->pinned[first + i] = pages[i];
         d->l0[first + i] = ((phys + (uint64_t)i * PAGE_SIZE) >> 12)
                            << IOMMU_PTE_PPN_SHIFT |
                            IOMMU_PTE_V | IOMMU_PTE_R | IOMMU_PTE_W |
                            IOMMU_PTE_U | IOMMU_PTE_A | IOMMU_PTE_D;
+    }
+    d->mapped_pages |= run << first;
+    g_iommu_stats.mapped_pages += npages;
     wmb();
     if (iommu_cmd(IOMMU_CMD_IOTINVAL, 0) < 0 ||
         iommu_cmd(IOMMU_CMD_IOFENCE, 0) < 0) {
         for (uint32_t i = 0; i < npages; i++)
             d->l0[first + i] = 0;
+        wmb();
+        /* Hardware may have cached these PTEs before the command timed out.
+         * Keep the slots and pins until successful domain block/release. */
+        d->blocked = 1;
         g_iommu_stats.map_failures++;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
-    d->mapped_pages |= run << first;
     g_iommu_stats.maps++;
-    g_iommu_stats.mapped_pages += npages;
     *out_iova = IOMMU_USER_IOVA + (uint64_t)first * PAGE_SIZE;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return 0;
@@ -679,6 +716,8 @@ int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
         d->mapped_pages &= ~mask;
         g_iommu_stats.unmaps++;
         g_iommu_stats.mapped_pages -= npages;
+        for (uint32_t i = 0; i < npages; i++)
+            frame_put(d->pinned[first + i]);
     }
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return r;
@@ -782,6 +821,9 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
+    for (unsigned i = 0; i < IOMMU_USER_MAX_PAGES; i++)
+        if (mapped & (1ull << i))
+            frame_put(d->pinned[i]);
     pfa_free_page(root_pfn);
     pfa_free_page(l1_pfn);
     pfa_free_page(l0_pfn);
