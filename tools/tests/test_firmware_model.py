@@ -89,6 +89,7 @@ void arch_device_unmap_mmio(void *p,size_t n) {
 int udriver_mmio_user_owned(uint64_t pa) { (void)pa;return 0; }
 static class_device_t fake_class;
 int class_device_publish(device_t *d) { d->class_dev=&fake_class;return 0; }
+void class_device_mark_offline(device_t *d) { (void)d; }
 void class_device_unpublish(device_t *d) { d->class_dev=NULL; }
 class_device_t *class_device_ref_for_device(const device_t *d) { return d->class_dev; }
 class_device_t *class_device_get_by_type(uint32_t type,unsigned index) { (void)type;(void)index;return NULL; }

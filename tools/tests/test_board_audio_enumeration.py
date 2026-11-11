@@ -42,6 +42,7 @@ void arch_device_unmap_mmio(void*p,size_t n){(void)p;(void)n;abort();}
 int riscv_sg2002_dma_cache_prepare(void){abort();}
 void udelay(unsigned n){(void)n;abort();}void mdelay(unsigned n){(void)n;abort();}
 int class_device_publish(device_t*d){(void)d;abort();}
+void class_device_mark_offline(device_t *d) { (void)d; }
 void class_device_unpublish(device_t*d){(void)d;}
 class_device_t *class_device_ref_for_device(const device_t*d){(void)d;return NULL;}
 class_device_t *class_device_get_by_type(uint32_t t,unsigned i){(void)t;(void)i;return NULL;}

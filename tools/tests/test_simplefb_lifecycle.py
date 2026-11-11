@@ -30,6 +30,7 @@ int boot_framebuffer_flush(void){return flush_failure?-EIO:0;}
 int gpu_device_register(device_t*d){(void)d;gpus++;return 0;}
 void gpu_device_unregister(device_t*d){(void)d;gpus--;}
 int class_device_publish(device_t*d){(void)d;return 0;}
+void class_device_mark_offline(device_t *d) { (void)d; }
 void class_device_unpublish(device_t*d){(void)d;}
 int firmware_irq_domains_prepare(const fw_node_t*n,fw_irq_domain_t**d){(void)n;*d=NULL;return 0;}
 void firmware_irq_domains_abort(fw_irq_domain_t*d){(void)d;}

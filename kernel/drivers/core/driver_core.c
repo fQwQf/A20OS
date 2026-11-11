@@ -349,6 +349,9 @@ static void device_unbind(device_t *dev) {
     }
     driver_t *drv = dev->drv;
     dev->state = DEV_STATE_REMOVING;
+    class_device_mark_offline(dev);
+    if (drv && drv->quiesce)
+        drv->quiesce(dev);
     class_device_unpublish(dev);
     if (drv && drv->remove) drv->remove(dev);
     device_release_resources(dev);
@@ -386,6 +389,8 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
         dev->state = DEV_STATE_PROBED;
         ret = class_device_publish(dev);
         if (ret < 0) {
+            if (drv->quiesce)
+                drv->quiesce(dev);
             if (drv->remove)
                 drv->remove(dev);
             device_release_resources(dev);

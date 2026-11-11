@@ -192,6 +192,13 @@ typedef struct driver {
     /* Polling-only adapters may omit IRQ resources while their controller
      * domain is unavailable. Malformed IRQ descriptors remain fatal. */
     int                 irq_optional;
+    /* Optional task-context stop phase, after class calls have been disabled
+     * but BEFORE the core waits for active calls. Cancel/wake requests and
+     * stop DMA/IRQ/work producers here; retain storage until remove(). This
+     * must also tolerate a successful probe whose class publication failed.
+     * The lifecycle mutex is held: do not wait for work that needs it. A
+     * failed probe still rolls back its own hardware before returning. */
+    void (*quiesce)(device_t *dev);
 } driver_t;
 
 /* ============================================================

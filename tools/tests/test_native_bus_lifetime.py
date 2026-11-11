@@ -64,6 +64,7 @@ int class_device_publish(device_t *dev) {
  if(hold_class&&!held)held=device_get(dev);
  return 0;
 }
+void class_device_mark_offline(device_t *d) { (void)d; }
 void class_device_unpublish(device_t *dev) {(void)dev;}
 static void init_core(void) {
  g_device_cap=256;g_devices=kcalloc(g_device_cap,sizeof(*g_devices));

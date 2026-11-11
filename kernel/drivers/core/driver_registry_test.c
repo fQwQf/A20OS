@@ -100,9 +100,11 @@ static int test_device_registry(void)
     int failed = 0;
     int pass = 1;
     int base_count, base_capacity, count, capacity;
+    int drivers;
 
     driver_registry_test_snapshot(DRIVER_REGISTRY_TEST_DEVICE,
                                   &base_count, &base_capacity);
+    driver_registry_test_snapshot(DRIVER_REGISTRY_TEST_DRIVER, &drivers, NULL);
 
     driver_registry_test_fail_next(DRIVER_REGISTRY_TEST_DEVICE);
     for (int i = 0; i < REGISTRY_TEST_LIMIT; i++) {
@@ -128,8 +130,11 @@ static int test_device_registry(void)
                 capacity != base_capacity || old_duplicate != -EEXIST ||
                 retry != 0 || new_duplicate != -EEXIST ||
                 !failed_device_unchanged ||
+                /* Successful registration attempts matching against existing
+                 * drivers. An unmatched device must not keep a stale match;
+                 * only the failed insertion above preserves the sentinel. */
                 (retry == 0 && (entries[i].state != DEV_STATE_UNINIT ||
-                                entries[i].matched_id != &sentinel_id ||
+                                entries[i].matched_id != (drivers ? NULL : &sentinel_id) ||
                                 entries[i].class_dev))) {
                 kerr("[DRIVER-REGISTRY-TEST] device old/fail/retry state mismatch\n");
                 pass = 0;

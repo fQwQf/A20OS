@@ -41,6 +41,9 @@ typedef struct class_device {
 } class_device_t;
 
 int class_device_publish(struct device *dev);
+/* Stop new calls and notify the offline observer, without waiting for old
+ * calls. Lifecycle owner then quiesces hardware before unpublish drains. */
+void class_device_mark_offline(struct device *dev);
 void class_device_unpublish(struct device *dev);
 class_device_t *class_device_get_by_name(const char *name);
 class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index);

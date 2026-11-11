@@ -190,7 +190,7 @@ int class_device_publish(struct device *dev)
     return 0;
 }
 
-void class_device_unpublish(struct device *dev)
+void class_device_mark_offline(struct device *dev)
 {
     class_device_t *cdev = dev ? dev->class_dev : NULL;
     if (!cdev)
@@ -202,6 +202,17 @@ void class_device_unpublish(struct device *dev)
     void *offline_data = cdev->offline_data;
     cdev->offline = NULL; cdev->offline_data = NULL;
     spin_unlock_irqrestore(&cdev->state_lock, state_flags);
+
+    if (offline)
+        offline(cdev, offline_data);
+}
+
+void class_device_unpublish(struct device *dev)
+{
+    class_device_t *cdev = dev ? dev->class_dev : NULL;
+    if (!cdev)
+        return;
+    class_device_mark_offline(dev);
     uint64_t flags = spin_lock_irqsave(&g_class_lock);
     for (unsigned i = 0; i < g_class_count; i++) {
         if (g_class_devices[i] == cdev) {
@@ -211,8 +222,6 @@ void class_device_unpublish(struct device *dev)
     }
     dev->class_dev = NULL;
     spin_unlock_irqrestore(&g_class_lock, flags);
-
-    if (offline) offline(cdev, offline_data);
 
     while (__atomic_load_n(&cdev->active_calls, __ATOMIC_ACQUIRE) != 0)
         __asm__ volatile("" ::: "memory");
