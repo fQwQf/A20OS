@@ -8,10 +8,10 @@
  * kernel/proc/exit_reparent.rs.
  *
  * Rust owns the reaper election, the group-dead reap decision, the pdeathsig
- * claim, the force-kill capture, the reparent target and the waiter wake
+ * claim, the reparent target and the waiter wake
  * selection.  C keeps the tasklist and park locks, the task references, the
  * group-dead walk, the reparent/unlink primitives, the detach, the destroy and
- * the deferred wake/force-exit/signal calls.
+ * the deferred wake/signal calls.
  */
 
 #define EXIT_REPARENT_MAX 64
@@ -20,6 +20,7 @@ typedef struct exit_reparent_lists {
     struct task_t *to_destroy[EXIT_REPARENT_MAX];
     int32_t pdeathsig_pids[EXIT_REPARENT_MAX];
     int32_t pdeathsig_signals[EXIT_REPARENT_MAX];
+    /* Reserved legacy ABI storage; no automatic descendant termination. */
     int32_t force_kill_pids[EXIT_REPARENT_MAX];
 } exit_reparent_lists_t;
 
@@ -27,7 +28,7 @@ typedef struct exit_reparent_result {
     struct task_t *wake_for;
     size_t destroy_count;
     size_t pdeathsig_count;
-    size_t force_kill_count;
+    size_t force_kill_count; /* always zero; ignored by the C adapter */
 } exit_reparent_result_t;
 
 void a20_ex_reparent_children(struct task_t *dead, struct task_t *reaper,
