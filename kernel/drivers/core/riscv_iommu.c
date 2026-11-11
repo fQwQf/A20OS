@@ -69,6 +69,7 @@
 #define IOMMU_QUEUE_ACTIVE  (1u << 16)
 #define IOMMU_QUEUE_BUSY    (1u << 17)
 #define IOMMU_QUEUE_ERROR    ((1u << 8) | (1u << 9) | (1u << 10))
+#define IOMMU_FQ_ERROR       ((1u << 8) | (1u << 9))
 
 #define IOMMU_CAP_SV39      (1ull << 9)
 #define IOMMU_CAP_MSI_FLAT  (1ull << 22)
@@ -132,6 +133,10 @@ typedef struct iommu_user_domain {
     int active;
     int blocked;
     int claim_failed;
+    device_t *native_device; /* pinned by its managed DMA domain */
+    int isolation_error;
+    bool isolated;
+    uint32_t fault_queue_error;
     pfn_t root_pfn;
     pfn_t l1_pfn;
     pfn_t l0_pfn;
@@ -530,7 +535,8 @@ static int riscv_iommu_probe(device_t *dev)
 
 static int domain_claim(uint16_t devid, int owner_pid)
 {
-    if (!g_iommu_ready || !owner_pid || !iommu_dc(devid))
+    if (!g_iommu_ready || !owner_pid || !iommu_dc(devid) ||
+        (iommu_read32(IOMMU_REG_FQCSR) & IOMMU_FQ_ERROR))
         return -1;
 
 retry:
@@ -804,19 +810,44 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
         head = (head + 1) & IOMMU_FQ_MASK;
     }
     iommu_write32(IOMMU_REG_FQH, head);
+    uint32_t queue_error = iommu_read32(IOMMU_REG_FQCSR) & IOMMU_FQ_ERROR;
+    if (queue_error) {
+        for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
+            iommu_user_domain_t *owner = &g_user_domains[i];
+            if (owner->active != 1)
+                continue;
+            owner->fault_queue_error |= queue_error;
+            if (!owner->blocked) g_iommu_stats.blocked_events++;
+            owner->blocked = 1; /* Records may be missing: isolate every owner. */
+        }
+    }
+    /* Keep ownership stable through hardware enforcement. Releasing the lock
+     * first could apply an old fault to a newly claimed requester. Retry any
+     * failed isolation even when this poll consumed no new FQ records. */
+    for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
+        iommu_user_domain_t *owner = &g_user_domains[i];
+        if (owner->active != 1 || (!owner->fault_count && !owner->fault_queue_error) ||
+            !owner->blocked || owner->isolated)
+            continue;
+        int disabled;
+        if (owner->native_device) {
+            uint16_t command = pci_cfg_read16(owner->native_device, 4);
+            pci_cfg_write16(owner->native_device, 4, command & ~4U);
+            disabled = (pci_cfg_read16(owner->native_device, 4) & 4) ? -1 : 0;
+        } else {
+            disabled = pci_user_device_bus_master(owner->devid, 0);
+        }
+        int invalidated = iommu_context_block(owner->devid);
+        owner->isolation_error = disabled || invalidated ? -EIO : 0;
+        owner->isolated = owner->isolation_error == 0;
+    }
     if (count) *count = d->fault_count;
     if (cause) *cause = d->last_cause;
     if (iova) *iova = d->last_iova;
     if (blocked) *blocked = d->blocked;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
-    /* Block the device at fault time, not on the caller's next poll:
-     * invalidating the device context alone still leaves bus mastering
-     * enabled, so the device could keep issuing DMA. */
     for (unsigned i = 0; i < n_events; i++) {
-        extern int pci_user_device_bus_master(uint16_t devid, int enable);
-        pci_user_device_bus_master(events[i].devid, 0);
-        (void)iommu_context_block(events[i].devid);
         kinfo("[IOMMU] DMA fault blocked did=%u cause=%u iova=0x%lx\n",
               events[i].devid, events[i].cause,
               (unsigned long)events[i].iova);
@@ -948,7 +979,15 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
         kfree(context);
         return ret;
     }
-    if (domain_claim(devid, owner)) {
+    int claimed = domain_claim(devid, owner);
+    flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    iommu_user_domain_t *hardware = iommu_domain_for(devid, owner);
+    if (hardware) {
+        hardware->native_device = device;
+        hardware->isolated = false;
+    }
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    if (claimed) {
         /* Even a failed claim can leave hardware referencing page tables.
          * Preserve a closed managed handle if cleanup cannot be confirmed. */
         if (driver_dma_domain_shutdown(domain))
@@ -959,6 +998,45 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
     }
     *out = domain;
     return 0;
+}
+
+int riscv_iommu_dma_fault_poll(device_t *device, struct riscv_iommu_dma_fault *out)
+{
+    if (!out)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    if (!device)
+        return -EINVAL;
+    if (!g_iommu_ready)
+        return -ENODEV;
+    unsigned bus, slot, function;
+    int ret = pci_device_location(device, &bus, &slot, &function);
+    if (ret)
+        return ret;
+    if (bus > 255 || slot > 31 || function > 7)
+        return -EINVAL;
+    uint16_t devid = (bus << 8) | (slot << 3) | function;
+    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    iommu_user_domain_t *hardware = iommu_domain_by_devid(devid);
+    int owner = hardware && hardware->native_device == device ? hardware->owner_pid : 0;
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    if (owner >= 0)
+        return -ENODEV;
+    if (riscv_iommu_domain_fault(devid, owner, NULL, NULL, NULL, NULL))
+        return -ENODEV;
+    flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    hardware = iommu_domain_for(devid, owner);
+    if (hardware && hardware->native_device == device) {
+        *out = (struct riscv_iommu_dma_fault){
+            hardware->fault_count, hardware->last_iova, hardware->last_cause, hardware->fault_queue_error,
+            hardware->isolation_error, hardware->blocked != 0, hardware->isolated,
+        };
+        ret = 0;
+    } else {
+        ret = -ENODEV;
+    }
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    return ret;
 }
 
 static uint64_t native_test_translation(uint16_t devid, uint64_t address, bool read)

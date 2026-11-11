@@ -1,4 +1,4 @@
-"""Exercise production IOMMU CQ publication with delayed fake hardware."""
+"""Exercise production IOMMU queues, native domains and fault isolation."""
 from pathlib import Path
 import subprocess
 import tempfile

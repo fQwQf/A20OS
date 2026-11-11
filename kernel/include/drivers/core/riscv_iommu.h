@@ -16,6 +16,25 @@ struct driver_dma_domain;
 int riscv_iommu_dma_domain_create(struct device *device,
                                   struct driver_dma_domain **out);
 
+struct riscv_iommu_dma_fault {
+    uint64_t count, address;
+    uint32_t cause, queue_error;
+    int isolation_error;
+    bool blocked, isolated;
+};
+/* Task-context poll; caller holds device reference and serializes with binding
+ * changes. Drains the shared FQ for ALL owners, rejects further maps on each
+ * faulted domain, disables BME and invalidates contexts. Failed enforcement is
+ * retried on later polls. Snapshot is cumulative and never clears the latch.
+ * isolated confirms BME-disable/context-invalidation commands, NOT DMA engine
+ * completion or safe RAM reuse. Stop hardware before unmap/shutdown regardless.
+ * Returns 0 with a snapshot (including isolation_error), -ENODEV without this
+ * device object's native domain. No IRQ delivery or automatic fence signaling. */
+/* queue_error latches FQCSR memory-fault/overflow bits. Such errors isolate
+ * all live owners, reject new claims and do not invent missing fault records.
+ * count is then only a lower bound. Hardware queue recovery is separate. */
+int riscv_iommu_dma_fault_poll(struct device *device, struct riscv_iommu_dma_fault *out);
+
 /* One device, one translation domain.  These calls fail closed when the
  * RISC-V IOMMU is absent; callers must never fall back to physical DMA for a
  * device that requested isolation. */
