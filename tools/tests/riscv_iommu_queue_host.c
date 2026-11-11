@@ -11,12 +11,23 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned bar)
 { (void)dev; (void)bar; assert(0); return NULL; }
 void *pci_map_bar(device_t *dev, unsigned bar)
 { (void)dev; (void)bar; assert(0); return NULL; }
-pfn_t pfa_alloc_page(void) { assert(0); return PFN_NONE; }
+static unsigned refs[256];
+static unsigned char ram[156 * PAGE_SIZE] __attribute__((aligned(4096)));
+pfn_t pfa_alloc_page(void)
+{
+    for (pfn_t p = 100; p < 110; p++)
+        if (!refs[p]) { refs[p] = 1; return p; }
+    return PFN_NONE;
+}
+void frame_get(pfn_t p) { assert(pfn_valid(p) && refs[p]); refs[p]++; }
+void frame_put(pfn_t p) { assert(pfn_valid(p) && refs[p]); refs[p]--; }
+void pfa_free_page(pfn_t p) { frame_put(p); }
 
 static uint32_t registers[0x300 / 4];
 static uint64_t commands[(IOMMU_CQ_MASK + 1) * 2];
 static unsigned publications, failures;
 static int complete, error_on_publish;
+static unsigned fail_publish_at;
 
 void host_log(const char *format, ...) { (void)format; failures++; }
 uint32_t host_read32(const volatile void *address)
@@ -33,7 +44,8 @@ void host_write32(uint32_t value, volatile void *address)
     registers[offset / 4] = value;
     publications++;
     if (complete) registers[IOMMU_REG_CQH / 4] = value;
-    if (error_on_publish) registers[IOMMU_REG_CQCSR / 4] |= IOMMU_QUEUE_ERROR;
+    if (error_on_publish || publications == fail_publish_at)
+        registers[IOMMU_REG_CQCSR / 4] |= IOMMU_QUEUE_ERROR;
 }
 static void setup(void)
 {
@@ -44,6 +56,73 @@ static void setup(void)
     g_iommu_cq_tail = 0;
     publications = failures = 0;
     complete = error_on_publish = 0;
+    fail_publish_at = 0;
+    memset(refs, 0, sizeof(refs));
+    memset(&pfa, 0, sizeof(pfa));
+    pfa.nr_ranges = 1;
+    pfa.ranges[0] = (pfa_range_t){(uintptr_t)ram - PAGE_OFFSET,
+        (uintptr_t)ram - PAGE_OFFSET + sizeof(ram), 100, 256};
+    memset(g_user_domains, 0, sizeof(g_user_domains));
+    memset(&g_iommu_stats, 0, sizeof(g_iommu_stats));
+}
+
+static void domain_lifetimes(void)
+{
+    static uint64_t contexts[512];
+    for (unsigned fail_claim = 0; fail_claim < 2; fail_claim++) {
+        setup(); complete = 1;
+        memset(contexts, 0, sizeof(contexts));
+        g_iommu_ddt = (uint8_t *)contexts;
+        g_iommu_dc_stride = 32;
+        g_iommu_ready = 1;
+        if (fail_claim) {
+            /* Fail after the translating context became visible. */
+            fail_publish_at = 6;
+            assert(riscv_iommu_domain_claim(8, 42) < 0);
+            assert(refs[100] == 1 && refs[101] == 1 && refs[102] == 1);
+            assert(g_user_domains[0].claim_failed && g_user_domains[0].blocked);
+            assert(riscv_iommu_domain_claim(8, 42) < 0);
+            assert(refs[103] == 0);
+            registers[IOMMU_REG_CQCSR / 4] = 0;
+            fail_publish_at = 0;
+            /* Retry must first safely dispose of quarantined page tables. */
+        }
+        assert(!riscv_iommu_domain_claim(8, 42));
+        refs[255] = 1;
+        uint64_t invalid = 99;
+        unsigned before = publications;
+        assert(riscv_iommu_domain_map(8, 42, pfn_to_phys(255), 2, &invalid) < 0);
+        assert(!invalid && refs[255] == 1 && publications == before);
+        assert(riscv_iommu_domain_map(8, 42, 0, 1, &invalid) < 0 && !invalid);
+        refs[110] = refs[111] = 1;
+        uint64_t iova = 99;
+        if (!fail_claim) complete = 0;
+        int ret = riscv_iommu_domain_map(8, 42, pfn_to_phys(110), 2, &iova);
+        assert(refs[110] == 2 && refs[111] == 2);
+        if (!fail_claim) {
+            assert(ret < 0 && !iova && g_user_domains[0].blocked);
+            assert(g_user_domains[0].mapped_pages == 3);
+            /* Destroying the original VMO cannot reclaim quarantined RAM. */
+            frame_put(110); frame_put(111);
+            assert(refs[110] == 1 && refs[111] == 1);
+            assert(riscv_iommu_domain_claim(8, 42) < 0);
+            assert(riscv_iommu_domain_release(8, 42) < 0);
+            assert(refs[100] == 1 && refs[110] == 1);
+            complete = 1;
+        } else {
+            assert(!ret && iova == IOMMU_USER_IOVA);
+            complete = 0;
+            assert(riscv_iommu_domain_unmap(8, 42, iova, 2) < 0);
+            assert(refs[110] == 2 && g_user_domains[0].mapped_pages == 3);
+            complete = 1;
+            assert(!riscv_iommu_domain_unmap(8, 42, iova, 2));
+            assert(refs[110] == 1 && refs[111] == 1);
+        }
+        assert(!riscv_iommu_domain_release(8, 42));
+        assert(!refs[100] && !refs[101] && !refs[102]);
+        assert(refs[110] == (fail_claim ? 1U : 0U));
+        assert(!g_iommu_stats.mapped_pages && !g_user_domains[0].active);
+    }
 }
 int main(void)
 {
@@ -95,9 +174,11 @@ int main(void)
     assert(riscv_iommu_domain_unmap(8, 42, IOMMU_USER_IOVA + PAGE_SIZE*63, 2) < 0);
     assert(!publications && l0[0] == 0xbeef && domain->mapped_pages == 1);
     domain->mapped_pages = 1ull << 63; l0[63] = 0xbeef;
+    domain->pinned[63] = 100; refs[100] = 1;
     g_iommu_stats.mapped_pages = 1;
     assert(!riscv_iommu_domain_unmap(8, 42, IOMMU_USER_IOVA + PAGE_SIZE*63, 1));
     assert(!l0[63] && !domain->mapped_pages && !g_iommu_stats.mapped_pages);
-    puts("RISC-V IOMMU CQ: timeout ownership, late completion, full/wrap/error PASS");
+    domain_lifetimes();
+    puts("RISC-V IOMMU: CQ retries, bounds, data/table pins and recovery PASS");
     return 0;
 }
