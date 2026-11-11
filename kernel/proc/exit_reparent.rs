@@ -6,17 +6,17 @@
 //! thread-group reaper, choosing the actual reaper (the live group member, the
 //! caller's reaper, or the idle task), deciding which group-dead zombies are
 //! detached and destroyed, claiming `PR_SET_PDEATHSIG` signals exactly once,
-//! capturing the force-kill list for an abnormal exit, moving each survivor
+//! moving each surviving child
 //! under the reaper, and recording the first reaper whose zombie child needs a
 //! waiter wake.
 //!
 //! C keeps every mechanical operation: the `tasklist_lock` and per-task
 //! `park_lock`, the task references, the group-dead walk, the reparent and
 //! unlink primitives, the zombie detach, the destruction and the deferred
-//! signal/wake/force-exit calls.
+//! signal/wake calls.
 //!
 //! The decision is deliberately split from the deferred calls: the C adapter
-//! runs the wake, the destroy-and-put, the force-exit and the signal sends
+//! runs the wake, the destroy-and-put and the signal sends
 //! only after the list lock has been dropped, in that order.
 
 #[cfg(test)]
@@ -25,6 +25,7 @@ extern crate std;
 pub const PROC_UNUSED: i32 = 0;
 pub const PROC_ZOMBIE: i32 = 5;
 const SIGCHLD: i32 = 17;
+#[cfg(test)]
 const SIGSTOP: i32 = 19;
 const CLONE_THREAD: u64 = 0x0001_0000;
 const MAX_LIST: usize = 64;
@@ -36,6 +37,7 @@ pub struct ReparentLists {
     pub to_destroy: [*mut core::ffi::c_void; MAX_LIST],
     pub pdeathsig_pids: [i32; MAX_LIST],
     pub pdeathsig_signals: [i32; MAX_LIST],
+    // Reserved C/Rust ABI storage; automatic descendant killing is disabled.
     pub force_kill_pids: [i32; MAX_LIST],
 }
 
@@ -44,6 +46,7 @@ pub struct ReparentResult {
     pub wake_for: *mut core::ffi::c_void,
     pub destroy_count: usize,
     pub pdeathsig_count: usize,
+    // Always zero. Only explicit pdeathsig requests propagate parent death.
     pub force_kill_count: usize,
 }
 
@@ -52,7 +55,6 @@ extern "C" {
     fn a20_tl_tasklist_unlock(flags: u64);
     fn a20_tasklist_reparent_locked(parent: *mut core::ffi::c_void,
                                     child: *mut core::ffi::c_void);
-    fn a20_ex_exit_code(t: *const core::ffi::c_void) -> i32;
     fn a20_ex_pid(t: *const core::ffi::c_void) -> i32;
     fn a20_ex_tgid(t: *const core::ffi::c_void) -> i32;
     fn a20_ex_tg_leader(t: *const core::ffi::c_void) -> *mut core::ffi::c_void;
@@ -183,10 +185,10 @@ pub unsafe extern "C" fn a20_ex_reparent_children(
         return;
     }
 
-    let exit_code = unsafe { a20_ex_exit_code(dead) };
-    let force_kill_children =
-        exit_code < 0 && exit_code != -SIGCHLD && exit_code != -SIGSTOP;
-
+    // Parent termination never implicitly kills surviving descendants.
+    // D-Bus deliberately SIGKILLs its spawn helper after activation; the
+    // service must survive that helper. Explicit PR_SET_PDEATHSIG is handled
+    // below, independently of the parent's exit status.
     let flags = unsafe { a20_tl_tasklist_lock() };
     let mut thread_reaper = unsafe { find_live_thread_reaper(dead) };
     let mut actual_reaper = if thread_reaper.is_null() {
@@ -247,12 +249,6 @@ pub unsafe extern "C" fn a20_ex_reparent_children(
         }
 
         cstate = unsafe { a20_ex_state(child) };
-        if force_kill_children && cstate != PROC_ZOMBIE {
-            if out.force_kill_count < MAX_LIST {
-                lists.force_kill_pids[out.force_kill_count] = unsafe { a20_ex_pid(child) };
-                out.force_kill_count += 1;
-            }
-        }
 
         unsafe { a20_tasklist_reparent_locked(actual_reaper, child) };
         if cstate == PROC_ZOMBIE && out.wake_for.is_null() {
@@ -590,30 +586,23 @@ mod tests {
     }
 
     #[test]
-    fn an_abnormal_exit_captures_live_children_for_force_kill() {
+    fn parent_exit_reparents_without_implicitly_killing_live_children() {
         let _g = reset();
-        unsafe {
-            TASKS[0].children = t(1);
-            TASKS[1].sibling_next = t(2);
-            TASKS[1].pid = 101;
-            TASKS[2].pid = 102;
-            TASKS[2].state = PROC_ZOMBIE;
-            TASKS[0].exit_code = -9;
-        }
-        let (lists, out) = run(t(0), t(5));
-        assert_eq!(out.force_kill_count, 1);
-        assert_eq!(lists.force_kill_pids[0], 101);
-
-        // SIGCHLD and SIGSTOP exits are not abnormal.
-        for code in [-SIGCHLD, -SIGSTOP, 0, 7] {
+        for code in [-9, -15, -6, -SIGCHLD, -SIGSTOP, 0, 7] {
             reset_state();
             unsafe {
                 TASKS[0].children = t(1);
+                TASKS[1].sibling_next = t(2);
                 TASKS[1].pid = 101;
+                TASKS[2].pid = 102;
+                TASKS[2].state = PROC_ZOMBIE;
                 TASKS[0].exit_code = code;
             }
             let (_, out) = run(t(0), t(5));
-            assert_eq!(out.force_kill_count, 0, "exit code {code}");
+            assert_eq!(out.force_kill_count, 0, "parent exit code {code}");
+            assert_eq!(out.pdeathsig_count, 0);
+            assert!(log().iter().any(|entry| entry == "reparent 105<-101"));
+            unsafe { assert_ne!(TASKS[1].state, PROC_ZOMBIE); }
         }
     }
 

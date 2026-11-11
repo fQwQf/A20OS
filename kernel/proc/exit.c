@@ -375,7 +375,7 @@ task_t *a20_ex_get(task_t *t) { return proc_get(t); }
 
 /*
  * Move the children of @dead under a reaper.  The decision (reaper election,
- * group-dead reaping, pdeathsig claims, force-kill list, reparent target) is
+ * group-dead reaping, pdeathsig claims, reparent target) is
  * Rust's; this adapter performs the deferred calls after the list lock is
  * dropped, in the same order the C implementation used.
  */
@@ -391,13 +391,6 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     for (size_t i = 0; i < res.destroy_count; i++) {
         proc_destroy_task(lists.to_destroy[i]);
         proc_put(lists.to_destroy[i]);
-    }
-
-    for (size_t i = 0; i < res.force_kill_count; i++) {
-        task_t *child = proc_find_get(lists.force_kill_pids[i]);
-        if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
-            proc_force_exit(child, dead->exit_code);
-        proc_put(child);
     }
 
     for (size_t i = 0; i < res.pdeathsig_count; i++) {
