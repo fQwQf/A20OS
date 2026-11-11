@@ -789,6 +789,19 @@ static int segtab_entry_name(mm_segtab_t *st, int i, uint8_t slot)
 }
 
 
+/* Check publication capacity before segtab_slot() acquires a segment
+ * reference. A full entry must not leave an unnamed slot owning the VMA's
+ * vfile until address-space teardown. Existing names remain idempotent. */
+static int segtab_entry_can_name(const mm_segtab_t *st, int i, mm_seg_t *seg)
+{
+    for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+        uint8_t slot = segtab_slot_get(st, i, k);
+        if (!slot || (st->arr && st->arr->seg[slot - 1] == seg))
+            return 1;
+    }
+    return 0;
+}
+
 /* True if entry `i` already names `slot`. */
 static int segtab_entry_names(const mm_segtab_t *st, int i, uint8_t slot)
 {
@@ -1352,9 +1365,10 @@ static int seg_annotate_rec(pte_t *table, int level, vaddr_t start,
             continue;                       /* absent leaf or a real leaf */
         if (!st)
             st = segtab_attach_locked(pm);
-        uint8_t slot = st ? segtab_slot(st, seg) : 0;
+        int entry_full = st && !segtab_entry_can_name(st, i, seg);
+        uint8_t slot = st && !entry_full ? segtab_slot(st, seg) : 0;
         if (!slot) {
-            mm_seg_annot_lost[0]++;
+            mm_seg_annot_lost[entry_full ? 1 : 0]++;
             if (level < 8)
                 mm_seg_full_lvl[level]++;
         }

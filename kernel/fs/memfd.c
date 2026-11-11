@@ -133,11 +133,17 @@ static long memfd_file_lseek(vfile_t *vf, long offset, int whence)
 
 static int memfd_file_close(vfile_t *vf)
 {
-    /* The vnode can outlive the last descriptor (the page cache holds
-     * references while pages remain), so its backing store is freed in
-     * memfd_file_release, not here. */
-    if (vf)
+    /* This is the final open-file-description release, not each close(fd).
+     * VMAs, fork/dup and SCM_RIGHTS retain the vfile, so no user can still
+     * fault or modify this anonymous file. Drop its dirty cache ownership
+     * while the vfile still holds a vnode reference: waiting for ->release
+     * would make cache -> vnode -> cache a permanent reference cycle.
+     * A concurrent writeback pin may survive this discard; it keeps the
+     * backing store alive and becomes clean/reclaimable when writeback ends. */
+    if (vf) {
+        page_cache_discard_unlinked(vf->vnode);
         vf->priv = NULL;
+    }
     return 0;
 }
 
@@ -234,9 +240,7 @@ static void memfd_file_release(vnode_t *vn)
                 kfree(mf->pages);
             kfree(mf);
         }
-        /* mmap faults cached the file's pages against this vnode; nothing
-         * else drops them, so a shm pool would leak its whole mapping. */
-        page_cache_truncate(vn, 0);
+        /* Cache references have already been dropped or evicted. */
         vfs_drop_time_meta(vn);
         kfree(vn);
     }
