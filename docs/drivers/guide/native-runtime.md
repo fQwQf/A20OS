@@ -58,7 +58,7 @@ managed domain 的 `driver_dma_domain_shutdown()` 在任务上下文永久关闭
 
 同一个 managed domain 的 map、unmap 和 shutdown 回调由每 domain mutex 串行化，回调可睡眠，但不得递归调用同一 domain 的这些接口，也不能在持有回调需要的锁时调用。shutdown 关闭提交后，已有 mapping 的清理仍可进行；没有强制释放或后台自动 detach。不同 domain 之间没有这把锁，旧 provider 保持独立映射并发契约。其他类的 domain 调用 shutdown 返回 `-EOPNOTSUPP`。
 
-probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。旧 provider 的 `release` 仍是不可失败的软件 context 销毁；managed provider 将可失败 detach 放入 `deactivate`，`release` 只在确认完成后销毁软件 context。本接口没有自动隔离区或后台恢复 worker，也没有把 RISC-V 用户态 IOMMU 直接包装为原生 provider：其 map 失败时虽已保留页面并阻止新映射，但尚未通过 managed 回调交接失败页清理与硬件 detach，不能直接包装成旧 map callback。AMD-Vi 后端也尚未提供。
+probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。旧 provider 的 `release` 仍是不可失败的软件 context 销毁；managed provider 将可失败 detach 放入 `deactivate`，`release` 只在确认完成后销毁软件 context。本接口没有自动隔离区或后台恢复 worker，已提供显式的 RISC-V PCI managed provider，将失败页清理与硬件 detach 交给通用生命周期，而非包装成旧 map callback。AMD-Vi 后端也尚未提供。
 
 provider context、ops 所在模块及硬件资源的生命周期由 provider/驱动协调，直到最后一个 domain 引用释放。domain 引用只保持 device 对象和 context 的软件生命周期，不保持驱动绑定或硬件在线。创建/映射/提交必须与设备撤销串行化，解除绑定前停止 DMA 并销毁 mapping。
 
@@ -69,6 +69,12 @@ RISC-V IOMMU 命令队列的 tail 在写入 CQT 发布命令之前推进，表�
 RISC-V 用户态 domain 映射还独立保留每个 RAM 页的 frame 引用。map 只接受调用者持有引用的已分配 order-0 RAM，先验证整个物理区间、pin 页面并保留 IOVA，再发布 PTE。失效命令失败时清除 PTE、保留 IOVA/页引用并将 domain 标为 blocked，拒绝后续 map；即使上层因返回错误而销毁 VMO，这些页也不会提前回收。unmap 失败仍保留引用，只有成功失效或安全 block/release 后才能释放；`mapped_pages` 统计包含隔离保留的页面。软件 blocked 不表示硬件 DMA 已停止。
 
 设备 context 安装失败同样先尝试安全 block，无法确认时保留三层页表及 owner。原 owner 再次 claim 会先重试释放失败 claim 的页表，成功后才建立新 claim；已经成功 claim 后进入 blocked 状态的 domain 必须显式 release。release 调用者先停止 DMA/bus mastering；失败仍保留全部资源。当前没有后台回收器，硬件持续故障时这些有界资源可能一直保留，不能以回收内存为由绕过确认。
+
+`riscv_iommu_dma_domain_create(device, &domain)` 接收已发布的 PCI device，从实际 BDF 计算 requester ID，创建 managed domain。构造和 shutdown 时要求 bus mastering 已关闭；调用者还必须停止 DMA，并与驱动绑定/用户所有权变更串行化。创建不启用 bus mastering，驱动确认初始化成功后自行启用。user_owned 设备、已有 requester claim 和不受当前 DDT 覆盖的 requester 均拒绝，不回退物理地址。原生 owner 使用单调负 token，与正 PID 的用户态 owner 隔离；token 用尽返回错误，不循环重用。device 对象由 managed domain 保留。
+
+创建失败通常置空输出，但 context 安装后失效失败且无法安全清理时，输出非空的已关闭 domain：调用者须保留，重试 shutdown 后再 put。map 通过 needs_unmap 交接当前失败页地址；unmap 和 deactivate 复用实际 IOMMU 失效路径，失败返回 `-EIO` 并保留引用。构造/关闭时 BME 未清除返回 `-EBUSY`。后端仍限 8 个 domain、每 domain 64 页和一层 DDT；没有 AMD-Vi、多 segment、ATS、页大小协商或每 native domain 的故障事件派发。TO_DEVICE 页使用只读 PTE；FROM_DEVICE/BIDIRECTIONAL 使用读写 PTE（SV39 不允许只写叶 PTE）。cache sync 仍由通用 mapping 层执行。
+
+显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，响应校验只能比较旧编码保留的地址字段，不能证明完整物理页号。它不执行 EDU DMA 数据传输，不代表实体硬件恢复或端到端用户态 DMA 已验证。
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
@@ -147,6 +153,7 @@ make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
 tools/a20 test smoke-driver-runtime-x86_64
 tools/a20 test smoke-driver-runtime-smp2-x86_64
+tools/a20 test smoke-driver-iommu-native-riscv64
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only -j4
 ```
 
@@ -157,7 +164,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 通用 IOMMU domain 接口及 x86 AMD-Vi 后端，逐步统一内核和用户态驱动的地址契约。
+2. 扩展 IOMMU 能力/地址空间管理与 x86 AMD-Vi 后端，补原生 fault 事件、EDU 实际 DMA 及故障恢复验证。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -178,3 +185,5 @@ RISC-V IOMMU 队列与解除映射边界提交：`e985ff07f`。新增主机测�
 页所有权转换提交：`a6f0d385b`；IOMMU 数据/页表保留提交：`51d0c7f48`。PFA 生产函数提取测试验证独占块转换、共享/错误 order 拒绝、引用保留和最终 buddy 合并；17 项 VMO Rust 主机测试通过。独立导出的提交/待提交树中 9 项驱动主机回归通过，IOMMU 测试注入 context 发布后的命令错误、map/unmap/release 超时，模拟原始数据引用被销毁，检查数据与页表保留及恢复重试。最终 RISC-V 内核构建与直接 QEMU 启动通过，观察到翻译验证、未映射地址故障和运行时 PASS。该启动沿用显式 `driver.runtime_test=1`；没有执行用户态 DMA 分配 syscall，也未注入实际硬件超时，不能代替端到端用户态 DMA 或实体硬件恢复验证。标准用户态门禁仍受前述日志符号问题影响。
 
 managed DMA domain 提交：`5b2cc3f31`。10 项驱动主机回归在独立导出的待提交树上通过，包含 pthread map/shutdown 竞争验证、当前失败页的清理句柄保留、无残留映射失败、busy 关闭提交、detach 超时/正数错误规范化及幂等重试。provider 的内部引用在 owner put 后仍保留 context，成功 shutdown 后才允许最终释放。x86_64 与 AArch64 embedded 构建通过。该轮没有增加 QEMU 硬件适配或执行真实 IOMMU detach；这是通用生命周期机制，RISC-V requester 所有权、managed map/unmap/deactivate 适配及端到端硬件验证仍待实现。
+
+原生 provider 提交：`12cb41f67`；启动自检提交：`a7a9ce7ec`。独立导出的 provider 待提交树中 10 项主机回归通过，原生集成测试同时编译实际 `riscv_iommu.c` 与 `dma_mapping.c`，覆盖正 PID/原生 token 互斥、重复 native claim、BME 拒绝、unsupported requester、失败页双层 pin 保留及创建失败清理句柄。RISC-V、x86_64、AArch64 embedded 构建通过，`make check-manifests` 包含新实例并通过。以当前 RISC-V kernel.bin 直接启动 QEMU，附加 `riscv-iommu-pci`、`edu` 和两个自检参数，得到 `DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1` 及完整运行时 PASS。没有重跑依赖完整用户态构建的 `tools/a20 test` 门禁，不能将直接内核启动记录成完整门禁通过。
