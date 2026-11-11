@@ -90,6 +90,18 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
+## AMD-Vi 的 IVRS 发现入口
+
+`firmware/ivrs.h` 与 `kernel/firmware/acpi/ivrs.c` 提供分配无关的 IVRS 读取接口。格式依据 [AMD IOMMU Specification 3.10 第 5 章（AMD 原文镜像）](https://kib.kiev.ua/x86docs/AMD/IOMMU/48882-3.10.pdf)，并对照 [ACPICA 表定义](https://raw.githubusercontent.com/acpica/acpica/master/source/include/actbl2.h)；实现使用字节读取，没有导入 Linux/ACPICA 驱动代码。
+
+`acpi_ivrs_begin()` 在暴露首个条目前校验整张不可变表，包括签名、长度、校验和、revision 1/2、block/device 边界、已知范围配对和内存区间溢出。支持 10h、11h、40h IVHD，以及 20h–22h IVMD；HID 设备条目的可变 UID 长度单独处理，不按固定长度跳过。未知但有界的 block/fixed entry 保留原始类型，无法确定长度的 variable entry 返回 `ACPI_IVRS_UNSUPPORTED`。校验失败清空 iterator，不把前面合法的条目交给调用者。
+
+iterator 和 typed hardware/memory/device accessor 返回借用的表视图，使用结束后才可释放 ACPI mapping；alias、extended、HID 的原始字节和 IVMD 顺序保留，尚不执行 alias 展开、requester ownership 判定或保留区策略。格式合法不等于驱动支持其安全策略，不能据此启用 DMA。不同 IVHD 格式可以描述同一单元，记录数也不能作为唯一硬件单元数。
+
+x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再记录 IVHD 的类型、segment/requester、寄存器地址及 capability offset，并释放表映射。它不读写 IOMMU 寄存器，不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 只表示 A20OS 没有启用 AMD-Vi 驱动，不表示固件此前未开启硬件。当前还没有 AMD-Vi domain provider；设备作用域、alias/IVMD 策略、PCI capability/MMIO 验证与硬件初始化是后续接入要求。
+
+`tools/a20 test smoke-amdvi-discovery-x86_64` 使用 QEMU q35 与 amd-iommu，要求发现 10h IVHD 和两条原始硬件记录，并完成已有运行时自检。该门禁验证固件发现与启动集成，不验证 AMD-Vi DMA 隔离或实体机器 GPU。
+
 ## 原生异步 fence
 
 头文件：`kernel/include/drivers/core/fence.h`；实现：`kernel/drivers/core/fence.c`。
@@ -205,3 +217,5 @@ EDU 实际 DMA 往返提交：`419e268dc`。独立导出的待提交树中 10 �
 原生 fault 轮询提交：`724eb73ff`；实际 DMA fault 自检提交：`7f99c8f9e`。独立导出的接口待提交树中 10 项主机回归通过。主机测试覆盖两 native owner 的共享队列归属、同 BDF 不同对象拒绝、BME 清除失败、CQ 超时后无新记录重试、FQ overflow/memory error 对所有 owner 的隔离、记录下界与 claim 拒绝。RISC-V/x86_64 构建、实例清单及文档引用检查通过。直接 QEMU 运行当前 RISC-V 内核得到包含 `fault=1` 的完整原生 IOMMU PASS：EDU 在 unmap 后发起真实 DMA 写、FQ tail 前进，poll 返回 store page fault、blocked/isolated，后续 map 拒绝，保留引用的原 RAM 哨兵不变。硬件故障成功隔离不等于故障恢复；测试未注入真实 BME/CQ/FQ 硬件失效，也未覆盖 IRQ/worker 自动通知、自动 fence 完成或完整用户态门禁。
 
 后台 fault watch 提交：`22462dbd0`；worker → fence 自检提交：`b37442442`。独立导出的监测器待提交树中 11 项主机回归通过，新增测试使用真实生产 workqueue 和 pthread worker，验证健康静默、隔离状态变化通知、旧 token 终止、新 owner 不受旧 watcher 影响、自停止拒绝、停止超时保留及重试、三阶段分配失败回收和 device 引用。后端测试另验证 expected-owner 不匹配时连共享 FQ 错误也不会触碰新 owner。RISC-V/x86_64 构建、清单及文档引用检查通过；直接 QEMU 运行当前内核得到包含 `fault=1 watch=1` 的完整原生 IOMMU PASS，真实 EDU fault 由 worker 隔离，回调 signal 测试 fence，主线程 stop 排空后再检查/释放上下文。该测试 fence 表示通知完成，不代表 GPU 请求成功；没有验证真实 IRQ、共享 worker 池、完整用户态门禁或硬件恢复。
+
+IVRS parser 提交：`a18f21214`；x86 发现与门禁提交：`49baceb1c`。独立导出的 parser 待提交树中 13 项主机回归通过，覆盖新的非对齐/畸形 IVRS fixture 和既有驱动基础设施。x86_64 构建、清单和引用检查通过；正式 `tools/a20 test smoke-amdvi-discovery-x86_64` 通过，发现同一 requester/base 的 10h、11h 两条记录，日志明确 `driver_enabled=0`。门禁初始预期误写为一条记录，已按 QEMU 实际的双格式描述修正；解析器保留原始记录，没有重复启动硬件单元。该验证没有启用 AMD-Vi，没有执行 AMD DMA 隔离或裸机 GPU 测试。
