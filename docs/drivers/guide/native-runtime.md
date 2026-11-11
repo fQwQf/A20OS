@@ -74,7 +74,7 @@ RISC-V 用户态 domain 映射还独立保留每个 RAM 页的 frame 引用。ma
 
 创建失败通常置空输出，但 context 安装后失效失败且无法安全清理时，输出非空的已关闭 domain：调用者须保留，重试 shutdown 后再 put。map 通过 needs_unmap 交接当前失败页地址；unmap 和 deactivate 复用实际 IOMMU 失效路径，失败返回 `-EIO` 并保留引用。构造/关闭时 BME 未清除返回 `-EBUSY`。后端仍限 8 个 domain、每 domain 64 页和一层 DDT；没有 AMD-Vi、多 segment、ATS、页大小协商或每 native domain 的故障事件派发。TO_DEVICE 页使用只读 PTE；FROM_DEVICE/BIDIRECTIONAL 使用读写 PTE（SV39 不允许只写叶 PTE）。cache sync 仍由通用 mapping 层执行。
 
-显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，响应校验只能比较旧编码保留的地址字段，不能证明完整物理页号。它不执行 EDU DMA 数据传输，不代表实体硬件恢复或端到端用户态 DMA 已验证。
+显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。进一步的 EDU 往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
@@ -164,7 +164,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 扩展 IOMMU 能力/地址空间管理与 x86 AMD-Vi 后端，补原生 fault 事件、EDU 实际 DMA 及故障恢复验证。
+2. 扩展 IOMMU 能力/地址空间管理与 x86 AMD-Vi 后端，补原生 fault 事件、用户态端到端 DMA 及硬件故障恢复验证。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -187,3 +187,5 @@ RISC-V IOMMU 队列与解除映射边界提交：`e985ff07f`。新增主机测�
 managed DMA domain 提交：`5b2cc3f31`。10 项驱动主机回归在独立导出的待提交树上通过，包含 pthread map/shutdown 竞争验证、当前失败页的清理句柄保留、无残留映射失败、busy 关闭提交、detach 超时/正数错误规范化及幂等重试。provider 的内部引用在 owner put 后仍保留 context，成功 shutdown 后才允许最终释放。x86_64 与 AArch64 embedded 构建通过。该轮没有增加 QEMU 硬件适配或执行真实 IOMMU detach；这是通用生命周期机制，RISC-V requester 所有权、managed map/unmap/deactivate 适配及端到端硬件验证仍待实现。
 
 原生 provider 提交：`12cb41f67`；启动自检提交：`a7a9ce7ec`。独立导出的 provider 待提交树中 10 项主机回归通过，原生集成测试同时编译实际 `riscv_iommu.c` 与 `dma_mapping.c`，覆盖正 PID/原生 token 互斥、重复 native claim、BME 拒绝、unsupported requester、失败页双层 pin 保留及创建失败清理句柄。RISC-V、x86_64、AArch64 embedded 构建通过，`make check-manifests` 包含新实例并通过。以当前 RISC-V kernel.bin 直接启动 QEMU，附加 `riscv-iommu-pci`、`edu` 和两个自检参数，得到 `DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1` 及完整运行时 PASS。没有重跑依赖完整用户态构建的 `tools/a20 test` 门禁，不能将直接内核启动记录成完整门禁通过。
+
+EDU 实际 DMA 往返提交：`419e268dc`。独立导出的待提交树中 10 项主机回归通过，RISC-V 内核构建、`make check-manifests` 和文档引用检查通过。直接 QEMU 启动当前内核并附加 IOMMU、EDU 及两个自检参数，获得完整 `DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1` 和运行时 PASS，随后正常关机。这里验证了原生 PCI → managed domain → 两页 IOVA → EDU 内部缓冲 → RAM 的数据路径，实际 RAM 页不物理连续，原始 owner 引用在传输前已释放。未执行用户态 syscall 路径，未运行完整用户态门禁，也未测试硬件超时、IRQ 完成或故障恢复；这些仍需后续验证。
