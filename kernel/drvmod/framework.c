@@ -337,6 +337,8 @@ const struct drv_export drv_export_table[] = {
      * their module until domain disposal / final fence signal has returned. */
     { "driver_dma_domain_create", driver_dma_domain_create },
     { "driver_dma_domain_create_checked", driver_dma_domain_create_checked },
+    { "driver_dma_domain_create_managed", driver_dma_domain_create_managed },
+    { "driver_dma_domain_shutdown", driver_dma_domain_shutdown },
     { "driver_dma_domain_create_direct", driver_dma_domain_create_direct },
     { "driver_dma_domain_get", driver_dma_domain_get },
     { "driver_dma_domain_put", driver_dma_domain_put },

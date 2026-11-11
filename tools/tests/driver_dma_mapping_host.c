@@ -32,6 +32,8 @@ struct provider {
     unsigned attempts, count, releases, fail_at, bad_at;
     unsigned unmap_attempts, unmap_fail_at;
     int failure;
+    int pending_error, detach_error;
+    unsigned detaches;
 };
 static int map(void *opaque, uint64_t physical,
                  enum driver_dma_direction direction, uint64_t *address)
@@ -65,6 +67,25 @@ static int checked_unmap(void *opaque, uint64_t address,
     return 0;
 }
 static const struct driver_dma_checked_ops checked_ops = {map, checked_unmap, release};
+static int managed_map(void *opaque, uint64_t physical,
+                         enum driver_dma_direction direction, uint64_t *address,
+                         bool *needs_unmap)
+{
+    struct provider *p = opaque;
+    int ret = map(opaque, physical, direction, address);
+    *needs_unmap = ret == 0;
+    return ret ? ret : (p->attempts == 3 ? p->pending_error : 0);
+}
+static int deactivate(void *opaque)
+{
+    struct provider *p = opaque;
+    assert(!p->count);
+    p->detaches++;
+    return p->detach_error;
+}
+static const struct driver_dma_managed_ops managed_ops = {
+    managed_map, checked_unmap, deactivate, release,
+};
 
 static void setup(void)
 {
@@ -225,9 +246,64 @@ static void fallible_cleanup(void)
     }
 }
 
+static void managed_lifetime(void)
+{
+    for (unsigned pending = 0; pending < 2; pending++) {
+        setup();
+        device_t d = {.references=1};
+        struct provider p = {.offset=0x200000, .unmap_fail_at=1,
+                             .pending_error=pending ? -ETIMEDOUT : 0};
+        struct driver_dma_domain *domain;
+        struct driver_dma_mapping *mapping, *rejected = (void *)1;
+        pfn_t pages[] = {100, 102, 110};
+        assert(!driver_dma_domain_create_managed(&d, &managed_ops, &p, &domain));
+        int ret = driver_dma_map_pages(domain, pages, 3, DRIVER_DMA_FROM_DEVICE, &mapping);
+        assert(ret == (pending ? -ETIMEDOUT : 0));
+        assert(mapping && driver_dma_mapping_count(mapping) == 3);
+        for (unsigned i = 0; i < 3; i++) assert(refs[pages[i]] == 2);
+        assert(driver_dma_domain_shutdown(domain) == -EBUSY && !p.detaches);
+        assert(driver_dma_map_pages(domain, pages, 3, DRIVER_DMA_FROM_DEVICE,
+                                     &rejected) == -ESHUTDOWN && !rejected);
+        if (!pending)
+            assert(driver_dma_try_unmap_pages(&mapping) == -ETIMEDOUT);
+        assert(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+        assert(cpu_syncs == (pending ? 0U : 3U));
+        for (unsigned i = 0; i < 3; i++) assert(refs[pages[i]] == 1);
+        /* Owner put alone must never dispose hardware/provider resources. */
+        driver_dma_domain_put(domain);
+        assert(!p.releases && allocations == 1 && d.references == 2);
+        /* Test knows the internal provider reference is still live. */
+        driver_dma_domain_get(domain);
+        p.detach_error = -ETIMEDOUT;
+        assert(driver_dma_domain_shutdown(domain) == -ETIMEDOUT);
+        assert(!p.releases && allocations == 1 && p.detaches == 1);
+        p.detach_error = 1;
+        assert(driver_dma_domain_shutdown(domain) == -EIO && p.detaches == 2);
+        p.detach_error = 0;
+        assert(!driver_dma_domain_shutdown(domain) && p.detaches == 3);
+        assert(!driver_dma_domain_shutdown(domain) && p.detaches == 3);
+        assert(!p.releases); /* Shutdown doesn't consume the caller's ref. */
+        driver_dma_domain_put(domain);
+        assert(p.releases == 1 && !allocations && d.references == 1);
+    }
+    setup();
+    device_t d = {.references=1};
+    struct provider p = {.fail_at=1, .failure=-ENOMEM};
+    struct driver_dma_domain *domain;
+    struct driver_dma_mapping *mapping;
+    pfn_t page = 100;
+    assert(!driver_dma_domain_create_managed(&d, &managed_ops, &p, &domain));
+    assert(driver_dma_map_pages(domain, &page, 1, DRIVER_DMA_TO_DEVICE, &mapping) == -ENOMEM);
+    assert(!mapping && refs[100] == 1 && !p.count);
+    assert(!driver_dma_domain_shutdown(domain));
+    driver_dma_domain_put(domain);
+    assert(!allocations && p.releases == 1 && d.references == 1);
+}
+
 int main(void)
 {
     direct_and_lifetime(); translated(); rollback(); failures();
     fallible_cleanup();
+    managed_lifetime();
     puts("native DMA mappings: PASS"); return 0;
 }
