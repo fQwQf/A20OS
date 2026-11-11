@@ -153,26 +153,29 @@ static void exercise_firmware(void)
     driver_firmware_put(image);
 }
 
-void driver_runtime_selftest_boot(void)
+static bool boot_flag(const char *args, const char *key)
 {
-    const char *args = bootargs_get();
-    const char *key = "driver.runtime_test=1";
     const char *at = args;
-    bool requested = false;
     while (at && (at = strstr(at, key))) {
         char next = at[strlen(key)];
         if ((at == args || at[-1] == ' ' || at[-1] == '\t') &&
-            (!next || next == ' ' || next == '\t')) {
-            requested = true;
-            break;
-        }
+            (!next || next == ' ' || next == '\t'))
+            return true;
         at++;
     }
-    if (!requested)
+    return false;
+}
+
+void driver_runtime_selftest_boot(void)
+{
+    const char *args = bootargs_get();
+    if (!boot_flag(args, "driver.runtime_test=1"))
         return;
     kinfo("DRIVER_RUNTIME: START\n");
     exercise();
     exercise_firmware();
+    if (boot_flag(args, "driver.iommu_native_test=1"))
+        driver_iommu_native_selftest();
     kinfo("DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n");
     if (current_board && current_board->poweroff)
         current_board->poweroff();

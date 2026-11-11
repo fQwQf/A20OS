@@ -27,6 +27,8 @@
 #include "drivers/core/dma_mapping.h"
 #include "core/errno.h"
 #include "mm/slab.h"
+#include "core/panic.h"
+#include "drivers/core/runtime_test.h"
 #include "mm/frame.h"
 #include "core/defs.h"
 #include "core/klog.h"
@@ -957,6 +959,60 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
     }
     *out = domain;
     return 0;
+}
+
+static uint64_t native_test_translation(uint16_t devid, uint64_t address, bool read)
+{
+    iommu_write64(IOMMU_REG_TR_REQ_IOVA, address);
+    /* DID is [63:40]. Publish the high half before the low GO doorbell. */
+    iommu_write32(IOMMU_REG_TR_REQ_CTL + 4, (uint32_t)devid << 8);
+    iommu_write32(IOMMU_REG_TR_REQ_CTL, IOMMU_TR_CTL_GO | (read ? IOMMU_TR_CTL_NW : 0));
+    for (unsigned i = 0; i < 1000000; i++)
+        if (!(iommu_read32(IOMMU_REG_TR_REQ_CTL) & IOMMU_TR_CTL_GO))
+            return iommu_read64(IOMMU_REG_TR_RESPONSE);
+    panic("DRIVER_IOMMU_NATIVE: translation timeout");
+}
+
+void driver_iommu_native_selftest(void)
+{
+#define IOMMU_CHECK(test) do { if (!(test)) \
+    panic("DRIVER_IOMMU_NATIVE: FAIL line=%d: %s", __LINE__, #test); } while (0)
+    pci_user_device_info_t info;
+    IOMMU_CHECK(!pci_user_device_find(0x1234, 0x11e8, &info));
+    device_t *device = device_find_get_by_mmio(info.bar0_phys);
+    IOMMU_CHECK(device && !device->drv && !device->user_owned);
+    uint16_t command = pci_cfg_read16(device, 4);
+    pci_cfg_write16(device, 4, command & ~4U);
+    struct driver_dma_domain *domain;
+    IOMMU_CHECK(!riscv_iommu_dma_domain_create(device, &domain));
+    pfn_t pages[2] = {pfa_alloc_page(), pfa_alloc_page()};
+    IOMMU_CHECK(pages[0] != PFN_NONE && pages[1] != PFN_NONE);
+    uint64_t physical[2] = {pfn_to_phys(pages[0]), pfn_to_phys(pages[1])};
+    struct driver_dma_mapping *mapping;
+    IOMMU_CHECK(!driver_dma_map_pages(domain, pages, 2, DRIVER_DMA_TO_DEVICE, &mapping));
+    frame_put(pages[0]); frame_put(pages[1]);
+    uint64_t address = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        IOMMU_CHECK(!driver_dma_page_address(mapping, i, &address));
+        IOMMU_CHECK(address != physical[i]);
+        uint64_t response = native_test_translation(info.devid, address, true);
+        uint64_t ppn = response & IOMMU_TR_RESP_PPN;
+        bool matches = ppn == ((physical[i] >> 2) & IOMMU_TR_RESP_PPN);
+#ifdef CONFIG_IOMMU_TRRESP_LEGACY_PPN
+        matches |= ppn == ((physical[i] >> 12) & IOMMU_TR_RESP_PPN);
+#endif
+        IOMMU_CHECK(!(response & IOMMU_TR_RESP_FAULT) && matches);
+        IOMMU_CHECK(native_test_translation(info.devid, address, false) & IOMMU_TR_RESP_FAULT);
+    }
+    IOMMU_CHECK(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+    IOMMU_CHECK(native_test_translation(info.devid, address, true) & IOMMU_TR_RESP_FAULT);
+    IOMMU_CHECK(!driver_dma_domain_shutdown(domain));
+    IOMMU_CHECK(native_test_translation(info.devid, address, true) & IOMMU_TR_RESP_FAULT);
+    driver_dma_domain_put(domain);
+    pci_cfg_write16(device, 4, command);
+    device_put(device);
+    kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1\n");
+#undef IOMMU_CHECK
 }
 
 static int riscv_iommu_remove(device_t *dev)
