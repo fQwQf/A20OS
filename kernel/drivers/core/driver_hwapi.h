@@ -202,6 +202,12 @@ int   request_irq(uint32_t irq, irq_handler_t handler,
 /* priv is an ownership token and must exactly match request_irq().  free_irq()
  * masks the line and waits for an in-progress handler before returning. */
 void  free_irq(uint32_t irq, void *priv);
+/* Task context, outside all locks needed by the handler. Wait for complete
+ * dispatches (including controller EOI/rearm) without unregistering. Stop
+ * the device's interrupt source first: this is not a barrier against future
+ * interrupts and does not cancel deferred work. Never call from this IRQ's
+ * own handler. Returns -EINVAL for a line outside the IRQ registry. */
+int   synchronize_irq(uint32_t irq);
 void  irq_enable(uint32_t irq);
 void  irq_disable(uint32_t irq);
 void  driver_irq_dispatch(uint32_t irq);
