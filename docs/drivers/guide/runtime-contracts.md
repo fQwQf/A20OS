@@ -151,3 +151,5 @@ spin_unlock_irqrestore(&priv->lock, flags);
 RISC-V 原生 PCI 驱动可显式使用 `riscv_iommu_dma_domain_create()`。创建前和 shutdown 前均需停止 DMA、关闭 bus mastering，并与绑定/用户所有权变更串行化。创建错误若仍输出 domain，必须保留这个清理句柄，重试 shutdown 后再 put；不能回退恒等 DMA。当前 requester 范围、页数限制与自检范围见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
 
 原生 RISC-V 驱动使用 `riscv_iommu_dma_fault_poll()` 取得并处理共享 FQ 故障。`blocked`、`isolated` 和 `isolation_error` 必须分开检查：软件停发与隔离命令完成都不证明设备请求已停止，不能直接回收 DMA 页。`queue_error` 非零表示 fault 记录可能丢失，应将已知 count 当作下界并进入恢复流程。接口是任务上下文轮询，不自动完成 fence，不自动恢复硬件。
+
+需要后台监测时使用 `riscv_iommu_dma_watch_start()`。回调固定创建时的 owner token，快照有效期仅到回调返回；可 signal 驱动持有的 fence，但不自动停止硬件。quiesce 中先 `watch_stop()` 排空，再销毁 domain/context。停止超时保留句柄和回调资源，必须重试；回调内自停止返回 `-EDEADLK`。watch 不保持绑定有效，也不自动固定回调所在模块。
