@@ -24,6 +24,9 @@ typedef struct {
     int fail_probe;
     int probe_count;
     int remove_count;
+    int quiesce_count;
+    int quiesce_error;
+    class_device_t *inflight;
 } lifecycle_plat_t;
 
 static int lifecycle_match(device_t *dev, const driver_t *drv)
@@ -62,11 +65,34 @@ static int lifecycle_driver_match(device_t *dev)
     return plat && plat->should_driver_match;
 }
 
+static void lifecycle_quiesce(device_t *dev)
+{
+    lifecycle_plat_t *plat = dev->drv_priv;
+    if (!plat)
+        return;
+    plat->quiesce_count++;
+    if (dev->class_dev) {
+        int rc = class_device_call_begin(dev->class_dev);
+        if (rc != -ENODEV) {
+            plat->quiesce_error = 1;
+            if (!rc)
+                class_device_call_end(dev->class_dev);
+        }
+    }
+    if (plat->inflight) {
+        class_device_call_end(plat->inflight);
+        plat->inflight = NULL;
+    }
+}
+
 static int lifecycle_remove(device_t *dev)
 {
     lifecycle_plat_t *plat = (lifecycle_plat_t *)dev->drv_priv;
-    if (plat)
+    if (plat) {
+        if (plat->quiesce_count != plat->remove_count + 1 || plat->inflight)
+            plat->quiesce_error = 1;
         plat->remove_count++;
+    }
     dev->drv_priv = NULL;
     kinfo("[DRIVER-LIFECYCLE] remove called for '%s'\n",
           dev->name ? dev->name : "?");
@@ -105,6 +131,7 @@ static driver_t g_lifecycle_driver = {
     .remove     = lifecycle_remove,
     .class_ops  = &lifecycle_char_ops,
     .class_type = DEV_CLASS_CHAR,
+    .quiesce    = lifecycle_quiesce,
 };
 
 int driver_lifecycle_test_run(void)
@@ -239,6 +266,14 @@ int driver_lifecycle_test_run(void)
     }
     class_device_t *stale = dev_ok.class_dev;
     class_device_get(stale);
+    /* Keep one synthetic request active: unregister can drain it only after
+     * the driver's quiesce callback has cancelled/finished the request. */
+    if (class_device_call_begin(stale) != 0) {
+        class_device_put(stale);
+        pass = 0;
+        goto out;
+    }
+    plat_ok.inflight = stale;
 
     /* 7. Unregister the driver; remove must be called on bound devices. */
     if (driver_unregister(&g_lifecycle_driver) != 0) {
@@ -295,6 +330,12 @@ int driver_lifecycle_test_run(void)
     }
     if (plat_ok.remove_count != 2) {
         kerr("[DRIVER-LIFECYCLE] remove callback not invoked during device_unregister\n");
+        pass = 0;
+        goto out;
+    }
+    if (plat_ok.quiesce_count != 2 || plat_ok.quiesce_error ||
+        plat_fail.quiesce_error) {
+        kerr("[DRIVER-LIFECYCLE] quiesce did not precede active-call drain\n");
         pass = 0;
         goto out;
     }

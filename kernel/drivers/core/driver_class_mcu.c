@@ -20,6 +20,11 @@ void class_device_unpublish(struct device *dev)
     (void)dev;
 }
 
+void class_device_mark_offline(struct device *dev)
+{
+    (void)dev;
+}
+
 class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index)
 {
     (void)class_type;
