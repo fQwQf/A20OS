@@ -4,6 +4,7 @@
 #ifdef CONFIG_ACPI
 #include "firmware/acpi.h"
 #include "firmware/ivrs.h"
+#include "drivers/core/amd_iommu.h"
 extern void acpi_os_start_worker(void);
 #endif
 #include "core/bootargs.h"
@@ -212,6 +213,9 @@ void kernel_main(void) {
     }
     if (current_board && current_board->enumerate_buses)
         current_board->enumerate_buses();
+#if defined(CONFIG_X86_64) && defined(CONFIG_ACPI)
+    (void)amd_iommu_pci_report(arch_acpi_context());
+#endif
     if (current_board && current_board->configure_devices)
         current_board->configure_devices();
     if (boot_framebuffer_enumerate() < 0)
