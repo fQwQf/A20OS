@@ -166,6 +166,11 @@ static bool boot_flag(const char *args, const char *key)
     return false;
 }
 
+static int resource_test_match(device_t *dev, const driver_t *driver) {
+    (void)dev;
+    (void)driver;
+    return 0;
+}
 static void exercise_resources(void) {
     /* Metadata-only claims outside usable device/RAM addresses. No MMIO map,
      * port access or hardware reservation is performed by this test. */
@@ -195,6 +200,26 @@ static void exercise_resources(void) {
     CHECK(!driver_resource_request(&b, &range, &first));
     driver_resource_release(first);
     CHECK(b.references == 1);
+    bus_type_t bus = {.name = "resource-selftest",
+                      .match = resource_test_match};
+    a.bus = b.bus = &bus;
+    b.res = &range;
+    b.res_count = 1;
+    CHECK(!bus_register(&bus) && !device_register(&a) && !device_register(&b));
+    CHECK(!a.drv && !b.drv);
+    CHECK(driver_resource_request_checked(&a, &range, &conflict) == -EBUSY &&
+          !conflict);
+    device_unregister(&b);
+    CHECK(!driver_resource_request_checked(&a, &range, &first));
+    CHECK(device_register(&b) == -EBUSY && b.references == 1);
+    device_unregister(&a);
+    CHECK(device_register(&b) ==
+          -EBUSY); /* Checked lease outlives registration. */
+    driver_resource_release(first);
+    CHECK(!device_register(&b));
+    device_unregister(&b);
+    bus_unregister(&bus);
+    CHECK(a.references == 1 && b.references == 1);
     device_put(&a);
     device_put(&b);
 }
@@ -213,7 +238,7 @@ void driver_runtime_selftest_boot(void)
     /* Keep both witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1\n"
+    kinfo("DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n");
     if (current_board && current_board->poweroff)
         current_board->poweroff();
