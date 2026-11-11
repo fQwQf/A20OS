@@ -72,15 +72,21 @@ RISC-V 用户态 domain 映射还独立保留每个 RAM 页的 frame 引用。ma
 
 `riscv_iommu_dma_domain_create(device, &domain)` 接收已发布的 PCI device，从实际 BDF 计算 requester ID，创建 managed domain。构造和 shutdown 时要求 bus mastering 已关闭；调用者还必须停止 DMA，并与驱动绑定/用户所有权变更串行化。创建不启用 bus mastering，驱动确认初始化成功后自行启用。user_owned 设备、已有 requester claim 和不受当前 DDT 覆盖的 requester 均拒绝，不回退物理地址。原生 owner 使用单调负 token，与正 PID 的用户态 owner 隔离；token 用尽返回错误，不循环重用。device 对象由 managed domain 保留。
 
-创建失败通常置空输出，但 context 安装后失效失败且无法安全清理时，输出非空的已关闭 domain：调用者须保留，重试 shutdown 后再 put。map 通过 needs_unmap 交接当前失败页地址；unmap 和 deactivate 复用实际 IOMMU 失效路径，失败返回 `-EIO` 并保留引用。构造/关闭时 BME 未清除返回 `-EBUSY`。后端仍限 8 个 domain、每 domain 64 页和一层 DDT；没有 AMD-Vi、多 segment、ATS、页大小协商或原生故障 IRQ/worker 派发；已提供下述 per-device 轮询。TO_DEVICE 页使用只读 PTE；FROM_DEVICE/BIDIRECTIONAL 使用读写 PTE（SV39 不允许只写叶 PTE）。cache sync 仍由通用 mapping 层执行。
+创建失败通常置空输出，但 context 安装后失效失败且无法安全清理时，输出非空的已关闭 domain：调用者须保留，重试 shutdown 后再 put。map 通过 needs_unmap 交接当前失败页地址；unmap 和 deactivate 复用实际 IOMMU 失效路径，失败返回 `-EIO` 并保留引用。构造/关闭时 BME 未清除返回 `-EBUSY`。后端仍限 8 个 domain、每 domain 64 页和一层 DDT；没有 AMD-Vi、多 segment、ATS、页大小协商或原生故障 IRQ 派发；已提供下述 per-device 轮询和后台 watch。TO_DEVICE 页使用只读 PTE；FROM_DEVICE/BIDIRECTIONAL 使用读写 PTE（SV39 不允许只写叶 PTE）。cache sync 仍由通用 mapping 层执行。
 
 `riscv_iommu_dma_fault_poll(device, &snapshot)` 是任务上下文的轮询接口。它验证该 device 对象确实持有当前 native requester，拒绝同 BDF 的其他软件对象，返回累计 `count`、最后 `cause/address`、`blocked`、`isolated`、`isolation_error` 和 `queue_error`。轮询会排空共享 FQ 并处理所有 owner，不只处理调用者。故障记录归属和 BME 清除/context 失效在同一 IOMMU domain 锁下串行完成，避免在旧事件处理前 release/reclaim requester。隔离命令失败时，后续轮询即使没有新记录也会重试；已成功的动作不重复执行。
 
 `blocked` 表示软件拒绝后续 map；`isolated` 只表示 BME-disable 与 context-invalidation 命令曾完成，不证明 DMA engine/in-flight 请求已经停止，也不允许自动释放页面。调用者仍需停止/复位设备、处理未完成请求和 fence，再 unmap/shutdown。查询成功返回 0 也可能带 `isolation_error=-EIO`；没有本对象的 live native domain 或 IOMMU 已离线时返回 `-ENODEV` 并清空输出。故障 latch 不通过读取清除，恢复需销毁并重建 domain。
 
-FQCSR 的 memory-fault/overflow 位会累计到 `queue_error`：记录可能缺失，所有活跃 domain 均进入 blocked 并尝试隔离，新 claim 拒绝，`count` 仅代表已知记录的下界。接口不清除硬件队列错误或虚构缺失地址，队列恢复/重初始化仍待开发。这是同步轮询，还没有 IRQ/worker 自动派发或自动 signal fence；驱动需安排轮询并检查所有字段。
+FQCSR 的 memory-fault/overflow 位会累计到 `queue_error`：记录可能缺失，所有活跃 domain 均进入 blocked 并尝试隔离，新 claim 拒绝，`count` 仅代表已知记录的下界。接口不清除硬件队列错误或虚构缺失地址，队列恢复/重初始化仍待开发。基础查询是同步轮询；可使用下述 watch 建立后台轮询。没有 IRQ 派发或自动 signal fence，驱动仍需检查所有字段并定义请求完成策略。
 
-显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。进一步的 EDU 往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录、store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
+`riscv_iommu_dma_watch_start(device, period, callback, context, &watch)` 在调度器启动后建立独立 worker，保留 device 引用并固定当前 native owner token。period 是两次轮询之间的非零 native ticks，包含轮询/回调执行耗时后再计时，不是硬实时 IRQ 延迟保证。健康且未变化的快照不通知；count、地址、cause、queue/isolation 错误或状态变化才调用 callback。terminal poll 错误只通知一次并停止重排；旧 owner 被替换后返回 `-ENODEV`，不会跟随或隔离新 owner。回调拿到的快照只在调用期间有效，需要保留时复制。
+
+callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence，但框架不替驱动选择请求错误、停止引擎或 reset。启动自检的 fence 只表示通知路径成功，不表示 DMA 请求成功；真实驱动须先确认引擎停止，再按任务状态结束请求。callback 可能在 start 返回前运行，context 必须预先初始化，模块/代码/context 必须保留到 stop 成功。不得在回调中等待当前绑定锁或直接发起需要该锁的绑定操作；设备生命周期回调仍可能持有该锁。
+
+`riscv_iommu_dma_watch_stop(&watch, deadline)` 永久关闭重排并等待在途回调返回，成功释放对象、device 引用并置空指针。deadline 是绝对 ticks，0 表示无截止；超时或中断保留整个对象和 context，应在同一 owner 上串行重试。回调内自停止返回 `-EDEADLK` 且不释放。start 的部分失败也可能交出非空清理句柄，须 stop 后再丢弃。监测器不固定硬件 domain 或驱动绑定，应在 quiesce 中先 stop，再 shutdown domain/释放设备上下文。目前采用每 watch 一个 worker，没有 IRQ 触发或共享线程池。
+
+显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。进一步的 EDU 往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录，由后台 watch 完成隔离并通过回调 signal fence；主线程等待 fence、stop 排空回调后，再检查 store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
@@ -154,7 +160,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue -v
+python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
 tools/a20 test smoke-driver-runtime-x86_64
@@ -170,7 +176,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 扩展 IOMMU 能力/地址空间管理与 x86 AMD-Vi 后端，补故障 IRQ/worker 派发、用户态端到端 DMA 及硬件故障恢复验证。
+2. 扩展 IOMMU 能力/地址空间管理与 x86 AMD-Vi 后端，补故障 IRQ 派发/共享 worker 策略、用户态端到端 DMA 及硬件故障恢复验证。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -197,3 +203,5 @@ managed DMA domain 提交：`5b2cc3f31`。10 项驱动主机回归在独立导�
 EDU 实际 DMA 往返提交：`419e268dc`。独立导出的待提交树中 10 项主机回归通过，RISC-V 内核构建、`make check-manifests` 和文档引用检查通过。直接 QEMU 启动当前内核并附加 IOMMU、EDU 及两个自检参数，获得完整 `DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1` 和运行时 PASS，随后正常关机。这里验证了原生 PCI → managed domain → 两页 IOVA → EDU 内部缓冲 → RAM 的数据路径，实际 RAM 页不物理连续，原始 owner 引用在传输前已释放。未执行用户态 syscall 路径，未运行完整用户态门禁，也未测试硬件超时、IRQ 完成或故障恢复；这些仍需后续验证。
 
 原生 fault 轮询提交：`724eb73ff`；实际 DMA fault 自检提交：`7f99c8f9e`。独立导出的接口待提交树中 10 项主机回归通过。主机测试覆盖两 native owner 的共享队列归属、同 BDF 不同对象拒绝、BME 清除失败、CQ 超时后无新记录重试、FQ overflow/memory error 对所有 owner 的隔离、记录下界与 claim 拒绝。RISC-V/x86_64 构建、实例清单及文档引用检查通过。直接 QEMU 运行当前 RISC-V 内核得到包含 `fault=1` 的完整原生 IOMMU PASS：EDU 在 unmap 后发起真实 DMA 写、FQ tail 前进，poll 返回 store page fault、blocked/isolated，后续 map 拒绝，保留引用的原 RAM 哨兵不变。硬件故障成功隔离不等于故障恢复；测试未注入真实 BME/CQ/FQ 硬件失效，也未覆盖 IRQ/worker 自动通知、自动 fence 完成或完整用户态门禁。
+
+后台 fault watch 提交：`22462dbd0`；worker → fence 自检提交：`b37442442`。独立导出的监测器待提交树中 11 项主机回归通过，新增测试使用真实生产 workqueue 和 pthread worker，验证健康静默、隔离状态变化通知、旧 token 终止、新 owner 不受旧 watcher 影响、自停止拒绝、停止超时保留及重试、三阶段分配失败回收和 device 引用。后端测试另验证 expected-owner 不匹配时连共享 FQ 错误也不会触碰新 owner。RISC-V/x86_64 构建、清单及文档引用检查通过；直接 QEMU 运行当前内核得到包含 `fault=1 watch=1` 的完整原生 IOMMU PASS，真实 EDU fault 由 worker 隔离，回调 signal 测试 fence，主线程 stop 排空后再检查/释放上下文。该测试 fence 表示通知完成，不代表 GPU 请求成功；没有验证真实 IRQ、共享 worker 池、完整用户态门禁或硬件恢复。
