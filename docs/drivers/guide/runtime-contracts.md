@@ -1,5 +1,7 @@
 # 驱动运行时契约
 
+原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和 remove；页级 DMA mapping 与原生 fence 已提供独立接口，硬件 GPU 驱动仍待实现。
+
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
 ## MMIO
@@ -67,13 +69,13 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 4. `dma_alloc_*_coherent(NULL, ...)` 表示「没有可约束的设备」，走完整 64 位窗口。普通设备驱动应传入已枚举的 `device_t`，以应用该设备的 DMA mask。
 5. 驱动自己分配的 ring/context（例如 kmalloc 出来的 xHCI controller 结构）不经过分配器，必须在把地址写进设备前用 `dma_addr_ok()` / `dma_range_ok()` 校验，否则返回失败。
 
-当前限制：帧分配器没有「给我 4 GiB 以下的内存」这类分区接口，收窄 mask 只能靠有界重试。在 RAM 全部位于 32 位窗口之上的机器上，声明 32-bit mask 的设备会 probe 失败；这比让它在运行中 DMA 到解不了的地址更接近真实行为，但确实是一个失败而不是成功。IOMMU/IOVA 仍然没有实现，因此 mask 只是窗口检查，不是地址翻译。
+当前限制：帧分配器没有「给我 4 GiB 以下的内存」这类分区接口，收窄 mask 只能靠有界重试。在 RAM 全部位于 32 位窗口之上的机器上，声明 32-bit mask 的设备会 probe 失败；这比让它在运行中 DMA 到解不了的地址更接近真实行为，但确实是一个失败而不是成功。旧 coherent 分配路径中的 mask 只是窗口检查，不是地址翻译。新增页级 DMA domain/mapping 已定义 provider 翻译接口和回滚契约，但没有为旧分配器自动接入 IOMMU；现有 RISC-V 用户态隔离路径也尚未统一为该 provider 后端。
 
 `dma_sync_for_device()` / `dma_sync_for_cpu()` 仍然只是把请求委托给架构 cache hook，mask 不改变同步语义。
 
 ## 静态 ring 与 `va_to_pa()`
 
-静态 ring/buffer 使用 `va_to_pa()` 生成 DMA 地址，并必须在各架构线性映射范围内，且落在设备的 DMA 窗口内。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
+既有静态 ring/buffer 仅在平台确认恒等 DMA 时使用 `va_to_pa()` 生成设备地址，并必须在各架构线性映射范围及设备 DMA 窗口内。新原生驱动的页数组应通过 `driver_dma_map_pages()` 获取设备地址，不能假定物理地址就是 IOVA。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
 
 > 不要把栈上变量或临时结构传给 DMA，即使命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
 
@@ -111,7 +113,7 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 避免“检查为空 -> IRQ 到来 -> 登记 waiter -> 永久睡眠”的丢唤醒。基本循环是：持锁检查条件；在同一锁下登记 waiter/队列；解锁；调度；醒来后重新检查。多个读者必须使用 wait queue，不能只放单个 `task_t *waiter`。
 
-remove 必须先禁止新等待，再唤醒所有等待者并让其返回 `-ENODEV`。中断 handler 只唤醒，不在锁下执行使用者逻辑。
+异步驱动在 quiesce 中禁止新提交，停止或复位硬件后结束并唤醒未完成请求；核心随后排空在途调用，再执行 remove。不得等到 remove 才唤醒阻塞的 class 调用。中断 handler 可以 signal 原生 fence，但不在 fence/设备自旋锁下运行等待者逻辑。等待超时不表示硬件已经停止，不能据此释放 DMA 缓冲。
 
 ## 错误、超时和日志
 
