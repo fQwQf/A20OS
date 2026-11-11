@@ -107,9 +107,25 @@ iterator 和 typed hardware/memory/device accessor 返回借用的表视图，�
 
 没有匹配返回 `ACPI_NOT_FOUND`，格式错误返回 `ACPI_INVALID`。查询失败清空输出；超过 64 个单元或 1024 个 block 返回 unsupported。输出借用不可变表映射，调用者不得释放映射后继续使用 `hardware.entries`。这些是路由候选接口：没有建立 alias 隔离组、合并共享 DTE 属性或落实 IVMD 权限，不授予启用 IOMMU/DMA 的条件。
 
-x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再记录 IVHD 的类型、segment/requester、寄存器地址及 capability offset，并释放表映射。该报告仍使用原始记录，不自动执行上述路由查询。它不读写 IOMMU 寄存器，不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 只表示 A20OS 没有启用 AMD-Vi 驱动，不表示固件此前未开启硬件。当前还没有 AMD-Vi domain provider；PCI capability/MMIO 验证、alias 隔离组、IVMD 策略执行与硬件初始化是后续接入要求。
+x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再记录 IVHD 的类型、segment/requester、寄存器地址及 capability offset，并释放表映射。该报告仍使用原始记录，不自动执行上述路由查询，也不读写 IOMMU 寄存器。`acpi_ivrs_unit_count()` / `acpi_ivrs_unit_get()` 则按单元首次出现的顺序枚举去重后的候选描述，复用路由查询的全表结构与条目策略检查。输出视图借用表映射；出错清空 count/view。单元枚举不代替对具体 requester 的作用域和 alias 查询。
 
-`tools/a20 test smoke-amdvi-discovery-x86_64` 使用 QEMU q35 与 amd-iommu，要求发现 10h IVHD 和两条原始硬件记录，并完成已有运行时自检。该门禁验证固件发现与启动集成，不验证 AMD-Vi DMA 隔离或实体机器 GPU。
+### PCI 与 MMIO 只读探测
+
+`drivers/core/amd_iommu.h` 与 `kernel/drivers/core/amd_iommu_probe.c` 提供 `amd_iommu_probe_unit()`。调用者提供已校验的 IVHD 和只读 transport，返回不含借用指针的 `amd_iommu_snapshot_t`。transport 的 PCI dword 读取须支持指定 segment/requester；MMIO callback 只对已开启 decoder 的单元执行 uncached、对齐的 64-bit 读取，offset 限于 control（18h）和 EFR（30h）。callback 返回负 errno，正数失败规范化为 `-EIO`；调用者负责设备、固件和映射的生命周期及串行化。
+
+探测检查 PCI vendor 是否有效、class `08:06:00`、type-0 header、完整 capability 链以及 IVHD 指定的精确偏移。链表越界、未对齐、循环、匹配项后的损坏链尾和指向目标 capability payload 的其他 header 均拒绝；不能只取第一个 ID 为 `0Fh` 的 capability。目标须为 Secure Device/type 3、interface revision 1，并有完整的 20-byte 或 CapExt 24-byte 空间。PCI base 须与 IVHD 一致，地址宽度须为当前支持的 PA 40/48/52、VA 32/40/48/64。Range register 只描述同一 bus 的 integrated device/root port 范围，不能直接用它判断下游 requester 是否覆盖。
+
+[QEMU 10.0 的 capability 定义](https://raw.githubusercontent.com/qemu/qemu/v10.0.0/hw/i386/amd_iommu.h) 未设置 CapRev，实际报告 revision 0。实现仅为 PCI `1022:1419` 且 subsystem `1af4:1100` 的组合接受这一差异，在 snapshot 和启动日志标记 `revision_quirk=1`；其他 revision 0 或未知 revision 仍拒绝。这不证明物理 revision-0 IOMMU 的接口可用。
+
+`mmio_enabled` 是 PCI capability 的 MMIO decoder Enable 位，不是 IOMMU translation enable。decoder 未开启时不映射、不访问 MMIO，`registers_read=false`，此时 control/efr 的零值不表示硬件实际为零。已开启时才读取 control，且仅在 EFRSup 为 1 时读 EFR。PCSup 决定 16-KiB 或 512-KiB aperture 和相应对齐；11h/40h IVHD 的 PCSup 与读到的 EFR 矛盾则拒绝。10h IVHD 没有 EFR image，若 decoder 关闭且支持 EFR，完整 aperture 尚未知，`register_size=0`，不猜测为 16 KiB。其他情况下按固件描述或读取结果返回 aperture 大小。
+
+没有对应函数/capability 返回 `-ENODEV`；不支持的 class/header/interface/address width 返回 `-EOPNOTSUPP`；畸形链或 aperture 返回 `-EINVAL`；base 或 PCSup 矛盾返回 `-EIO`；transport 错误原样传播。错误清空整个 snapshot。探测成功不等于资源已独占或设备已接管，也不保证后续时刻的硬件状态；硬件初始化时必须重新验证。
+
+PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。完整 aperture 与其他资源的冲突检查、PCI 下游作用域核对、alias 隔离组、IVMD 权限落实、独占所有权和 DMA domain provider 仍待实现。
+
+两类报告都不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 只表示 A20OS 没有启用 AMD-Vi 驱动，不表示固件此前未开启硬件。
+
+`tools/a20 test smoke-amdvi-discovery-x86_64` 使用 QEMU q35 与 amd-iommu，要求发现 10h IVHD 和两条原始硬件记录，按 11h 格式探测一个去重单元成功，并完成已有运行时自检。该门禁验证固件/PCI 发现与启动集成；MMIO 已开启分支另由主机 fixture 验证，不表示 AMD-Vi DMA 隔离或实体机器 GPU 已可用。
 
 ## 原生异步 fence
 
@@ -230,3 +246,7 @@ EDU 实际 DMA 往返提交：`419e268dc`。独立导出的待提交树中 10 �
 IVRS parser 提交：`a18f21214`；x86 发现与门禁提交：`49baceb1c`。独立导出的 parser 待提交树中 13 项主机回归通过，覆盖新的非对齐/畸形 IVRS fixture 和既有驱动基础设施。x86_64 构建、清单和引用检查通过；正式 `tools/a20 test smoke-amdvi-discovery-x86_64` 通过，发现同一 requester/base 的 10h、11h 两条记录，日志明确 `driver_enabled=0`。门禁初始预期误写为一条记录，已按 QEMU 实际的双格式描述修正；解析器保留原始记录，没有重复启动硬件单元。该验证没有启用 AMD-Vi，没有执行 AMD DMA 隔离或裸机 GPU 测试。
 
 IVRS 路由候选提交：`3d23c9e86`。独立导出的待提交树中 14 项驱动主机回归通过；新增生产 policy 测试启用 ASan/UBSan，覆盖三种 IVHD 的全部排列、未选中格式重复、范围边界、alias 缺失/链/循环/跨单元、原始与 alias requester 的 IVMD、其他单元约束排除、MMIO 完全/部分重叠与相邻窗口、未知策略和数量上限。x86_64 构建及引用检查通过。正式 AMD-Vi 发现门禁通过；首次运行因可用磁盘略低于默认 8192 MiB 预检门槛而等待，终止后使用 `A20_MIN_DISK_MB=7168 A20_WAIT_TIMEOUT=120 tools/a20 test smoke-amdvi-discovery-x86_64` 完成。QEMU 门禁验证当前内核的发现和运行时回归，启动报告没有调用新增路由查询；候选策略由主机 fixture 验证。本轮没有执行 AMD-Vi 硬件启用、IVMD 权限落实或 GPU 加速。
+
+IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603`。独立导出的待提交树中 15 项驱动主机回归通过；新增测试启用 ASan/UBSan，覆盖精确 capability 偏移、完整链尾/循环、payload 边界、QEMU revision-0 身份限制、decoder 关闭时零 MMIO 访问、启用时 control/EFR 读取、地址宽度、aperture 对齐与 transport 失败清空输出。x86_64 bringup/dev 与 AArch64 embedded 内核构建通过，110 个实例清单及文档引用检查通过。
+
+本轮正式 `tools/a20 test smoke-amdvi-discovery-x86_64` 在 `ufsd-x86_64` 链接处因既有日志改动的 `klog_write_ex` 未定义而失败，不能记为完整门禁通过。最新 dev 内核改用 `timeout 60s qemu-system-x86_64 -machine q35 -m 1G -smp 1 -nic none -device amd-iommu -kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-6d99d92e3642d9cf/kernel.bin -nographic -monitor none -append 'driver.runtime_test=1'` 直接启动，正常关机，匹配实例全部五条预期标记。日志为两条 IVHD、一个去重 11h 单元、`verified=1 failed=0 driver_enabled=0`，并有完整的 `DRIVER_RUNTIME: PASS ... firmware=1`。该 QEMU 10.0.13 单元实际报告 `revision_quirk=1 pa_bits=40 va_bits=48 mmio_enabled=0 registers_read=0`；这验证了实际 PCI capability 读取和关闭 decoder 的路径，没有读取实际 MMIO。已启用 MMIO、counter aperture 及失败注入分支由主机 fixture 验证；没有启用 AMD-Vi、执行 AMD DMA 隔离或 GPU 加速。
