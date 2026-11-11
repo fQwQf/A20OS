@@ -244,7 +244,7 @@ def main() -> int:
     conversions = "\n".join(extract_function(header, name) for name in header_funcs)
     funcs = ["pfa_buddy_pfn", "fl_push_clean",
              "pfa_seed_range", "pfa_alloc_from_buddy", "pfa_free",
-             "frame_put_locked"]
+             "frame_put_locked", "pfa_split_allocated"]
     candidate_funcs = "\n".join(extract_function(src, name) for name in funcs)
 
     old_seed = (
@@ -437,7 +437,28 @@ static int run_old_negative_control(void) {
            (unsigned long long)pa);
     return 0;
 }
+static void test_split_owned(void) {
+    reset(); add_range(0x00100000, 16384); seed_all();
+    pfn_t p = pfa_alloc_from_buddy(3);
+    pfn_t free_before = pfa.free_frames;
+    pfa.meta[p].refcount++;
+    assert(pfa_split_allocated(p, 3) < 0 && pfa.meta[p].order == 3);
+    pfa.meta[p].refcount--;
+    assert(pfa_split_allocated(p, 2) < 0);
+    assert(!pfa_split_allocated(p, 3));
+    assert(pfa.free_frames == free_before);
+    for (pfn_t i = 0; i < 8; i++) {
+        assert(pfa.meta[p+i].order == 0 && pfa.meta[p+i].refcount == 1);
+        /* Model independent DMA pin, VMO put and final DMA put. */
+        pfa.meta[p+i].refcount++;
+        frame_put_locked(p+i);
+        assert(pfa.meta[p+i].refcount == 1);
+        frame_put_locked(p+i);
+    }
+    verify_lists(); assert(pfa.free_frames == pfa.total_frames);
+}
 int main(void) {
+    test_split_owned();
     test_seed_layouts();
     test_multirange_orders();
     test_every_order_and_free_paths();

@@ -310,6 +310,16 @@ int64_t sys_a20_device_alloc_dma(const a20_syscall_args_t *args)
         return -A20_ERR_NO_MEMORY;
     }
 
+    /* VMO slots and IOMMU pins own individual pages, including allocation
+     * tails. Transfer block ownership before publishing any page pointers. */
+    if (pfa_split_allocated(pfn, (int)order) < 0) {
+        vmo_release(vmo);
+        pfa_free(pfn, (int)order);
+        return -A20_ERR_NO_MEMORY;
+    }
+    for (uint32_t i = npages; i < (1u << order); i++)
+        frame_put(pfn + i);
+
     /* Pre-materialize with the contiguous block; frames are zeroed so
      * the device never reads stale kernel data. */
     memset(pfn_to_virt(pfn), 0, (uint64_t)npages * PAGE_SIZE);
