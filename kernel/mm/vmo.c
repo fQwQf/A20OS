@@ -328,7 +328,7 @@ pfn_t a20_vmo_page_alloc(void)
 
 void a20_vmo_page_free(pfn_t pfn)
 {
-    pfa_free_page(pfn);
+    frame_put(pfn);
 }
 
 void a20_vmo_page_zero(pfn_t pfn)
@@ -443,7 +443,7 @@ void a20_vmo_resize_release_page(struct vmo *vmo, uint32_t index)
     if (vmo->phys_size < PAGE_SIZE)
         panic("vmo_resize: vmo %p phys_size underflow at page %u",
               (void *)vmo, index);
-    pfa_free_page(pfn);
+    frame_put(pfn);
     vmo->pages[index] = PFN_NONE;
     vmo->phys_size -= PAGE_SIZE;
     a20_objstat_add(&g_a20_objstats.vmo_pages, -1);
@@ -511,7 +511,7 @@ void a20_vmo_destroy_release_page(struct vmo *vmo, uint32_t index, pfn_t pfn)
               "pfn %llu (pages array corrupted?)",
               (void *)vmo, index, vmo->page_count,
               (unsigned long long)pfn);
-    pfa_free_page(pfn);
+    frame_put(pfn);
 }
 
 void a20_vmo_destroy_uncharge(struct vmo *vmo, uint64_t pages)

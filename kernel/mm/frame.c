@@ -889,6 +889,34 @@ static void frame_get_locked(pfn_t pfn) {
     pfa.meta[pfn].refcount++;
 }
 
+int pfa_split_allocated(pfn_t head, int order)
+{
+    if (order < 0 || order > MAX_ORDER)
+        return -1;
+    const pfa_range_t *range = pfa_range_for_pfn(head);
+    pfn_t count = 1u << order;
+    if (!range || count > range->end_pfn - head)
+        return -1;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    if (pfa.meta[head].order != order || pfa.meta[head].refcount != 1) {
+        spin_unlock_irqrestore(&pfa.lock, flags);
+        return -1;
+    }
+    for (pfn_t i = 0; i < count; i++) {
+        if (pfa.meta[head + i].flags != FRAME_F_ALLOC ||
+            (i && pfa.meta[head + i].refcount)) {
+            spin_unlock_irqrestore(&pfa.lock, flags);
+            return -1;
+        }
+    }
+    for (pfn_t i = 0; i < count; i++) {
+        pfa.meta[head + i].order = 0;
+        pfa.meta[head + i].refcount = 1;
+    }
+    spin_unlock_irqrestore(&pfa.lock, flags);
+    return 0;
+}
+
 void frame_get(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
