@@ -55,6 +55,8 @@ probe/解除绑定的错误路径同样要保留清理句柄、provider context�
 
 provider context、ops 所在模块及硬件资源的生命周期由 provider/驱动协调，直到最后一个 domain 引用释放。domain 引用只保持 device 对象和 context 的软件生命周期，不保持驱动绑定或硬件在线。创建/映射/提交必须与设备撤销串行化，解除绑定前停止 DMA 并销毁 mapping。
 
+RISC-V IOMMU 命令队列的 tail 在写入 CQT 发布命令之前推进，表示槽位已经交给硬件；等待超时不会撤销所有权或让下一次提交覆盖该槽位。后续提交仍依靠 CQH 的队列满检查，CQCSR 有错误时不再发布；恢复 CQ 错误或超时后的完整设备重置仍由后续工作完成。解除映射入口在构造位图和缩小索引之前检查 64 位 IOVA 范围和页数，防止越界、移位未定义行为或高位截断造成槽位别名。这些修正不代表 map 失败后的页面隔离已完成。
+
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
 ## 原生异步 fence
@@ -127,7 +129,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware -v
+python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
 tools/a20 test smoke-driver-runtime-x86_64
@@ -157,3 +159,5 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 固件读取实现提交：`bf402c953`；真实 VFS 自检提交：`68c3e9aee`。新增固件主机测试与前置 7 项回归在独立导出的待提交树上通过（共 8 项）；覆盖字节副本、短读、提前 EOF、长度增长、错误/分配失败回滚、目录引用、特殊文件拒绝与关机 admission 释放。QEMU 单核、双核均输出包含 `firmware=1` 的完整 PASS 标记，验证关闭目录 fd 后加载、拒绝符号链接、超限失败，以及释放 source/删除文件后 image 仍保留字节。AArch64 embedded 构建通过。固件测试使用人工字节，没有加载厂商 GPU 固件或执行硬件上传。
 
 DMA 可失败失效提交：`67fccfdf1`。主机测试执行生产 mapping 代码，注入解除映射超时、部分成功后重试、映射失败回滚超时和返回地址非法后的清理超时，检查全部 pin/domain 保留、成功页不重复解除、清理状态拒绝地址/sync 及 CPU 同步时机。该测试与前置 7 项回归在独立导出的待提交树上通过，x86_64 与 AArch64 embedded 构建通过。这里的失效由测试 provider 模拟，不表示硬件 IOMMU 超时恢复已验证。
+
+RISC-V IOMMU 队列与解除映射边界提交：`e985ff07f`。新增主机测试使用生产 `riscv_iommu.c` 的命令函数和解除映射函数，以假 MMIO 模拟超时后的延迟消费、满队列、回绕与 CQ 错误，同时验证超大页数、高位 IOVA 截断和最后一个合法页槽位。独立导出的待提交树上共 9 项主机回归通过，启用 ASan/UBSan。标准 `tools/a20 test smoke-iommu-discovery` 在 `ufsd-rv` 用户态链接处因既有 `klog_write_ex` 未定义而失败；不能声称此门禁通过。该构建生成的当前 RISC-V 内核直接用 QEMU `virt`、`riscv-iommu-pci` 和 `driver.runtime_test=1` 启动，观察到 `translation domain verified`、未映射 IOVA 故障及包含 `firmware=1` 的运行时 PASS 标记并关机。启动中其他模块也有同一日志符号的加载失败，因此该验证只覆盖 IOMMU 初始化/翻译和驱动运行时，不覆盖完整用户态或所有模块。实际硬件队列超时恢复尚未验证。
