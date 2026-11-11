@@ -264,6 +264,27 @@ void bus_unregister(bus_type_t *bus);
 int  bus_probe_device(device_t *dev);
 
 resource_t *device_get_resource(device_t *dev, enum resource_type type, int index);
+typedef struct driver_resource_claim driver_resource_claim_t;
+/* Process-context cooperative ownership of inclusive MMIO or I/O-port ranges.
+ * Copies type/start/end; owner must carry a live reference and remains pinned
+ * until release. Different owners cannot overlap within the same namespace;
+ * one owner may hold overlapping claims, each with its own lifetime. I/O ports
+ * are limited to 0..ffffh. Request clears out on error; release(NULL) is a no-op.
+ * Manual claims survive unbind and must be released explicitly, exactly once.
+ * The owner pin protects storage, not a live binding: callers must serialize
+ * admission with their device's stopping/removal state.
+ * This is not a RAM reservation, address allocator or CPU access revocation;
+ * raw architecture mapping/port access does not participate automatically. */
+int driver_resource_request(device_t *owner, const resource_t *,
+                              driver_resource_claim_t **out);
+void driver_resource_release(driver_resource_claim_t *);
+/* Managed claims/maps are for serialized probe/lifecycle context, like other
+ * devres operations. Resource must be an element of dev->res. Explicit claim
+ * is also useful for port I/O; it is released on probe failure or after remove.
+ * Checked map clears out on error and retains its own claim until unmap ends.
+ * Existing pointer-returning MMIO helpers use this same exclusive path. */
+int device_claim_resource(device_t *dev, const resource_t *);
+int device_map_resource_exclusive(device_t *dev, const resource_t *, void **out);
 /* MMIO resources always carry physical addresses. Mapping is architecture-owned. */
 void *device_map_mmio(device_t *dev, int index);
 void *device_map_resource(device_t *dev, const resource_t *resource);

@@ -269,27 +269,141 @@ void device_release_resources(device_t *dev) {
         kfree(action);
     }
 }
-struct device_mmio_mapping { void *address; size_t size; };
+struct driver_resource_claim {
+    device_t *owner;
+    enum resource_type type;
+    uint64_t start, end;
+    struct driver_resource_claim *next;
+};
+/* Protected by the registry spinlock. Allocation, owner finalizers and MMIO
+ * callbacks stay outside that lock. Claims track active users, not every
+ * firmware declaration or an enclosing host-bridge aperture. */
+static driver_resource_claim_t *resource_claims;
+
+int driver_resource_request(device_t *owner, const resource_t *res,
+                            driver_resource_claim_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!owner || !res || (res->type != RES_MMIO && res->type != RES_IOPORT) ||
+        res->end < res->start || (res->type == RES_IOPORT && res->end > 0xffff))
+        return -EINVAL;
+    driver_resource_claim_t *claim = kmalloc(sizeof(*claim));
+    if (!claim)
+        return -ENOMEM;
+    if (!device_get(owner)) {
+        kfree(claim);
+        return -ENODEV;
+    }
+    *claim =
+        (driver_resource_claim_t){owner, res->type, res->start, res->end, NULL};
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
+        if (at->owner != owner && at->type == claim->type &&
+            at->start <= claim->end && claim->start <= at->end) {
+            spin_unlock_irqrestore(&g_driver_core_lock, flags);
+            device_put(owner);
+            kfree(claim);
+            return -EBUSY;
+        }
+    }
+    claim->next = resource_claims;
+    resource_claims = claim;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    *out = claim;
+    return 0;
+}
+
+void driver_resource_release(driver_resource_claim_t *claim) {
+    if (!claim)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    driver_resource_claim_t **at = &resource_claims;
+    while (*at && *at != claim)
+        at = &(*at)->next;
+    if (!*at) {
+        spin_unlock_irqrestore(&g_driver_core_lock, flags);
+        panic("releasing an unowned driver resource claim");
+    }
+    *at = claim->next;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    device_t *owner = claim->owner;
+    kfree(claim);
+    device_put(owner);
+}
+
+static bool resource_belongs(device_t *dev, const resource_t *res) {
+    if (!dev || !res || !dev->res)
+        return false;
+    for (int i = 0; i < dev->res_count; i++)
+        if (&dev->res[i] == res)
+            return true;
+    return false;
+}
+static void release_claim(void *data) {
+    driver_resource_release(data);
+}
+int device_claim_resource(device_t *dev, const resource_t *res) {
+    if (!resource_belongs(dev, res))
+        return -EINVAL;
+    driver_resource_claim_t *claim;
+    int ret = driver_resource_request(dev, res, &claim);
+    if (ret)
+        return ret;
+    ret = device_add_resource_action(dev, release_claim, claim);
+    if (ret)
+        driver_resource_release(claim);
+    return ret;
+}
+
+struct device_mmio_mapping {
+    void *address;
+    size_t size;
+    driver_resource_claim_t *claim;
+};
 static void release_mmio(void *data) {
     struct device_mmio_mapping *map = data;
     arch_device_unmap_mmio(map->address, map->size);
+    driver_resource_release(map->claim);
     kfree(map);
 }
-void *device_map_resource(device_t *dev, const resource_t *res) {
-    int belongs = 0;
-    if (!dev || !res || res->type != RES_MMIO) return NULL;
-    for (int i = 0; i < dev->res_count; i++) if (&dev->res[i] == res) belongs = 1;
-    if (!belongs || res->end < res->start || res->end - res->start >= SIZE_MAX) return NULL;
+int device_map_resource_exclusive(device_t *dev, const resource_t *res,
+                                  void **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!resource_belongs(dev, res) || res->type != RES_MMIO ||
+        res->end < res->start)
+        return -EINVAL;
+    if (res->end - res->start >= SIZE_MAX)
+        return -EOVERFLOW;
     size_t size = (size_t)(res->end - res->start + 1);
     struct device_mmio_mapping *map = kmalloc(sizeof(*map));
-    if (!map) return NULL;
+    if (!map)
+        return -ENOMEM;
+    int ret = driver_resource_request(dev, res, &map->claim);
+    if (ret) {
+        kfree(map);
+        return ret;
+    }
     map->address = arch_device_map_mmio(res->start, size, res->flags);
     map->size = size;
-    if (!map->address) { kfree(map); return NULL; }
-    if (device_add_resource_action(dev, release_mmio, map)) {
-        release_mmio(map); return NULL;
+    if (!map->address) {
+        driver_resource_release(map->claim);
+        kfree(map);
+        return -ENOMEM;
     }
-    return map->address;
+    ret = device_add_resource_action(dev, release_mmio, map);
+    if (ret) {
+        release_mmio(map);
+        return ret;
+    }
+    *out = map->address;
+    return 0;
+}
+void *device_map_resource(device_t *dev, const resource_t *res) {
+    void *address;
+    return device_map_resource_exclusive(dev, res, &address) ? NULL : address;
 }
 void *device_map_mmio(device_t *dev, int index) {
     return device_map_resource(dev, device_get_resource(dev, RES_MMIO, index));
