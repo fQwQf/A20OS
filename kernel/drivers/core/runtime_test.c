@@ -197,8 +197,6 @@ static void exercise_resources(void) {
     CHECK(b.references == 1);
     device_put(&a);
     device_put(&b);
-    kinfo(
-        "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1\n");
 }
 
 void driver_runtime_selftest_boot(void)
@@ -212,7 +210,11 @@ void driver_runtime_selftest_boot(void)
     exercise_firmware();
     if (boot_flag(args, "driver.iommu_native_test=1"))
         driver_iommu_native_selftest();
-    kinfo("DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n");
+    /* Keep both witnesses in one end-of-test console record. A best-effort
+     * SMP console must not show overall PASS while dropping only the resource
+     * result printed during concurrent background-thread startup. */
+    kinfo("DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1\n"
+          "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n");
     if (current_board && current_board->poweroff)
         current_board->poweroff();
     panic("DRIVER_RUNTIME: poweroff returned");
