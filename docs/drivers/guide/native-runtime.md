@@ -38,6 +38,7 @@
 
 - `driver_dma_domain_create(dev, ops, context, &domain)`：建立显式地址转换 domain，复制 provider ops，保留 device 引用和 DMA mask 快照。成功接管 context 的一份所有权；失败不调用 provider release。
 - `driver_dma_domain_create_checked()`：接收独立的 `driver_dma_checked_ops`，允许解除映射返回错误，保留原有 provider 结构与模块 ABI。
+- `driver_dma_domain_create_managed()`：接收 `driver_dma_managed_ops`，把未完成的当前页清理及可失败的硬件 detach 纳入生命周期。
 - `driver_dma_domain_create_direct()`：仅在总线/平台已确认采用恒等 DMA 时显式使用。它不提供隔离，不能作为 IOMMU 失败时的降级，也不探测 AMD-Vi。
 - `driver_dma_map_pages()`：映射调用者已持有的 order-0 RAM 页数组。页面可以物理不连续；每页获得独立的设备 DMA 地址。
 - `driver_dma_page_address()`：读取设备地址，不根据 PFN 或 CPU 地址推算。地址 0 可以合法，错误由返回值区分。
@@ -51,7 +52,13 @@ provider 的 `map_page` 每次映射一整页，失败不得留下该页翻译�
 
 解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留引用的页面数量。失败时全部 frame 引用保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
 
-probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。`release` 仍是不可失败的软件 context 销毁，硬件 domain detach 必须在 provider 的更高层完成协调。本接口没有自动隔离区或后台恢复 worker，也没有把 RISC-V 用户态 IOMMU 直接包装为原生 provider：其 map 失败时虽已保留页面并阻止新映射，但尚不能保证完成失效，不满足原生 map callback 的无残留契约。AMD-Vi 后端也尚未提供。
+managed provider 的 `map_page` 显式返回 `needs_unmap`：只要当前页已安装翻译或保留 IOVA，就设置 true，并交出可供 unmap 的地址，包含返回负 errno 的情况。核心将当前页也纳入回滚；失效再次失败时，清理句柄保留当前页及前序页面引用。返回成功却没有设置 needs_unmap 是 provider 契约错误，转为 `-EIO`；失败且 false 仍要求当前页没有硬件残留。旧 infallible/checked provider 的接口及回滚语义保持原样。
+
+managed domain 的 `driver_dma_domain_shutdown()` 在任务上下文永久关闭新 map。有 mapping 或清理句柄时返回 `-EBUSY`；驱动先停止 DMA、解除这些 mapping，再重试 shutdown。没有剩余 mapping 后调用可失败的 `deactivate`，成功才解除内部 provider 引用。失败保留完整 context 供重试；正数错误转为 `-EIO`。shutdown 成功可重复调用，不消费调用者引用，最后再 put。遗漏 shutdown 而只 put owner 会保留内部引用，产生安全但需要恢复的资源泄漏，不能据此卸载 provider 模块或释放其硬件资源。
+
+同一个 managed domain 的 map、unmap 和 shutdown 回调由每 domain mutex 串行化，回调可睡眠，但不得递归调用同一 domain 的这些接口，也不能在持有回调需要的锁时调用。shutdown 关闭提交后，已有 mapping 的清理仍可进行；没有强制释放或后台自动 detach。不同 domain 之间没有这把锁，旧 provider 保持独立映射并发契约。其他类的 domain 调用 shutdown 返回 `-EOPNOTSUPP`。
+
+probe/解除绑定的错误路径同样要保留清理句柄、provider context、硬件资源和模块代码；不能返回失败后让 devres 释放失效命令仍需访问的资源。旧 provider 的 `release` 仍是不可失败的软件 context 销毁；managed provider 将可失败 detach 放入 `deactivate`，`release` 只在确认完成后销毁软件 context。本接口没有自动隔离区或后台恢复 worker，也没有把 RISC-V 用户态 IOMMU 直接包装为原生 provider：其 map 失败时虽已保留页面并阻止新映射，但尚未通过 managed 回调交接失败页清理与硬件 detach，不能直接包装成旧 map callback。AMD-Vi 后端也尚未提供。
 
 provider context、ops 所在模块及硬件资源的生命周期由 provider/驱动协调，直到最后一个 domain 引用释放。domain 引用只保持 device 对象和 context 的软件生命周期，不保持驱动绑定或硬件在线。创建/映射/提交必须与设备撤销串行化，解除绑定前停止 DMA 并销毁 mapping。
 
@@ -169,3 +176,5 @@ DMA 可失败失效提交：`67fccfdf1`。主机测试执行生产 mapping 代�
 RISC-V IOMMU 队列与解除映射边界提交：`e985ff07f`。新增主机测试使用生产 `riscv_iommu.c` 的命令函数和解除映射函数，以假 MMIO 模拟超时后的延迟消费、满队列、回绕与 CQ 错误，同时验证超大页数、高位 IOVA 截断和最后一个合法页槽位。独立导出的待提交树上共 9 项主机回归通过，启用 ASan/UBSan。标准 `tools/a20 test smoke-iommu-discovery` 在 `ufsd-rv` 用户态链接处因既有 `klog_write_ex` 未定义而失败；不能声称此门禁通过。该构建生成的当前 RISC-V 内核直接用 QEMU `virt`、`riscv-iommu-pci` 和 `driver.runtime_test=1` 启动，观察到 `translation domain verified`、未映射 IOVA 故障及包含 `firmware=1` 的运行时 PASS 标记并关机。启动中其他模块也有同一日志符号的加载失败，因此该验证只覆盖 IOMMU 初始化/翻译和驱动运行时，不覆盖完整用户态或所有模块。实际硬件队列超时恢复尚未验证。
 
 页所有权转换提交：`a6f0d385b`；IOMMU 数据/页表保留提交：`51d0c7f48`。PFA 生产函数提取测试验证独占块转换、共享/错误 order 拒绝、引用保留和最终 buddy 合并；17 项 VMO Rust 主机测试通过。独立导出的提交/待提交树中 9 项驱动主机回归通过，IOMMU 测试注入 context 发布后的命令错误、map/unmap/release 超时，模拟原始数据引用被销毁，检查数据与页表保留及恢复重试。最终 RISC-V 内核构建与直接 QEMU 启动通过，观察到翻译验证、未映射地址故障和运行时 PASS。该启动沿用显式 `driver.runtime_test=1`；没有执行用户态 DMA 分配 syscall，也未注入实际硬件超时，不能代替端到端用户态 DMA 或实体硬件恢复验证。标准用户态门禁仍受前述日志符号问题影响。
+
+managed DMA domain 提交：`5b2cc3f31`。10 项驱动主机回归在独立导出的待提交树上通过，包含 pthread map/shutdown 竞争验证、当前失败页的清理句柄保留、无残留映射失败、busy 关闭提交、detach 超时/正数错误规范化及幂等重试。provider 的内部引用在 owner put 后仍保留 context，成功 shutdown 后才允许最终释放。x86_64 与 AArch64 embedded 构建通过。该轮没有增加 QEMU 硬件适配或执行真实 IOMMU detach；这是通用生命周期机制，RISC-V requester 所有权、managed map/unmap/deactivate 适配及端到端硬件验证仍待实现。

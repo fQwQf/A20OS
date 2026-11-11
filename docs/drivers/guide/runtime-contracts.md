@@ -143,3 +143,7 @@ spin_unlock_irqrestore(&priv->lock, flags);
 使用 `drivers/core/firmware.h`，在可睡眠的任务上下文从显式 source 加载。VFS source 接收可信启动配置已经打开的目录并独立持有引用，后续读取不依赖调用线程的 cwd/chroot，也不占用其 fd。名称必须是规范相对路径；只支持实际普通文件，不跟随 symlink、不进入子挂载、不自动解压或搜索其他来源。目录及其写入者必须可信，内核读取不套用当前用户的 DAC 权限。
 
 驱动应给每类固件设置合理的非零 `max_size`，同时受 64 MiB 硬上限限制；短读可继续，提前 EOF、长度增长、空文件或超限均失败并释放部分资源。只有成功返回的 image 才可交给格式解析器。image 是独立的不可变 CPU 字节副本，持有引用期间有效；它不提供 DMA 地址、签名认证或设备初始化。读取过程不排斥并发修改，应部署不可变固件。详细的 provider、VFS 生命周期和错误语义见 [原生驱动运行时](native-runtime.md#固件数据与显式来源)。
+
+## 硬件 DMA domain 关闭
+
+需要交接失败页及重试硬件 detach 的 provider 使用 `driver_dma_managed_ops`。map 的 `needs_unmap` 必须明确指出当前页是否仍需清理，即使返回错误也不能丢失已安装翻译的地址。驱动停止硬件后调用 `driver_dma_domain_shutdown()` 关闭提交，排空/解除所有 mapping 和清理句柄，再重试 shutdown，成功后才 put owner。仅 put 不会强制拆除硬件 domain，省略 shutdown 会保留内部引用。回调在每 domain mutex 下串行执行，不能递归操作同一 domain。详细错误语义见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
