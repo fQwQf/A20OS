@@ -12,6 +12,10 @@
 
 port I/O 可先调用 `device_claim_resource()` 申请 `dev->res` 中的 `RES_IOPORT`，范围限 0..ffffh。显式 `driver_resource_request()` 句柄需要独立释放，且会跨 unbind 保留占用；其 device 引用只保护对象存储，不保证绑定仍在线。受管申请及 devres 链操作限已经串行化的 probe/lifecycle 上下文。raw `arch_device_map_mmio()`、`drv_map_mmio()` 和直接 port I/O 访问不自动参与占用登记，不能据此宣称所有硬件访问都已隔离。
 
+`driver_resource_request_checked()` 在相同生命周期锁中核对当前已发布资源并建立申请；未绑定设备的声明也会阻止冲突申请，`RES_MEM` 与 MMIO 按同一物理地址空间处理。该句柄还阻止后续冲突设备注册。所有资源声明更新都必须与生命周期事务协调；查询本身不能保护未串行化的直接写入。
+
+PCI 资源更新在 discovery 事务中运行。新 MMIO 地址使用 `driver_resource_check_range()`，已有 BAR 使用 `driver_resource_check_claims()`；前者包含声明和占用，后者只包含 active claims，避免把重复/包含关系的固件声明误当作活动使用者。BAR 重建路径在 sizing 期间关闭地址解码和 BME；所有 BAR 规划成功后才写新地址、发布资源并恢复/设置 command。规划失败返回时，原 BAR、command 和资源元数据保持不变，单调分配游标可能推进。调用者必须在进入 API 前 quiesce：清除 BME 不等于排空在途 DMA，也没有可失败 PCI config 写入的通用回滚。
+
 使用 `readb/readw/readl/readq` 和 `writeb/writew/writel/writeq`。这些操作保留 volatile 访问并带读/写屏障。`*_relaxed` 不带屏障，只能在协议明确允许、且外层已有正确屏障的紧密循环中使用。
 
 寄存器访问必须按硬件规定宽度，不能把 8 位 W1C 寄存器用 32 位 read-modify-write。W1C/W0C、读清除、写入触发等副作用要在寄存器定义旁说明。轮询循环必须同时具备硬件条件和超时：
