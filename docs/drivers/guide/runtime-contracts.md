@@ -134,6 +134,10 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing-gates.md)。
 
+## 可失败的 DMA 失效
+
+可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
+
 ## 固件读取
 
 使用 `drivers/core/firmware.h`，在可睡眠的任务上下文从显式 source 加载。VFS source 接收可信启动配置已经打开的目录并独立持有引用，后续读取不依赖调用线程的 cwd/chroot，也不占用其 fd。名称必须是规范相对路径；只支持实际普通文件，不跟随 symlink、不进入子挂载、不自动解压或搜索其他来源。目录及其写入者必须可信，内核读取不套用当前用户的 DAC 权限。
