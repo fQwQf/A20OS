@@ -68,6 +68,10 @@ uint64_t size = res->end - res->start + 1;
 
 先验证 `end >= start`，再计算长度。通过 `device_get_resource(dev, type, index)` 按类型取资源；PCI 的物理 BAR 编号必须用 `pci_get_bar_resource(dev, bar)`，因为 64 位 BAR 会让资源数组压缩，不能假定 BAR2 等于 `RES_MMIO` 索引 2。
 
+受管 MMIO 映射现在同时申请设备独占的地址区间；`device_map_mmio()`、`device_map_resource()` 和 `pci_map_bar()` 使用同一路径。不同设备的重叠申请失败，同一设备可重复申请，各自保留独立生命周期。需要区分冲突与分配错误时用 `device_map_resource_exclusive(dev, res, &mapping)`，失败清空输出；资源必须属于 `dev->res`。映射回收先执行 architecture unmap，再释放区间占用。
+
+`device_claim_resource(dev, res)` 可仅申请受管 MMIO/port I/O 占用；`driver_resource_request()` / `driver_resource_release()` 则提供显式句柄，适合需要跨 unbind 保留资源的恢复路径。显式句柄保留设备引用但不保留绑定，须由调用者管理 stopping 状态和释放时机。占用登记只覆盖使用这些 API 的访问者，未自动导入所有固件/RAM/PCI window 预留；完整契约见 [原生驱动运行时](native-runtime.md)。
+
 ### `driver_t`
 
 platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
