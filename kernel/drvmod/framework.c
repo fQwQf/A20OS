@@ -24,6 +24,7 @@
 #include "drivers/core/dma_mapping.h"
 #include "drivers/core/fence.h"
 #include "drivers/core/workqueue.h"
+#include "drivers/core/firmware.h"
 #include "drvmod/drvmod.h"
 
 #include "core/bootargs.h"
@@ -359,6 +360,16 @@ const struct drv_export drv_export_table[] = {
     { "driver_work_cancel_sync", driver_work_cancel_sync },
     { "driver_workqueue_flush", driver_workqueue_flush },
     { "driver_workqueue_destroy", driver_workqueue_destroy },
+    { "driver_firmware_source_create", driver_firmware_source_create },
+    { "driver_firmware_source_create_vfs", driver_firmware_source_create_vfs },
+    { "driver_firmware_source_get", driver_firmware_source_get },
+    { "driver_firmware_source_put", driver_firmware_source_put },
+    { "driver_firmware_load", driver_firmware_load },
+    { "driver_firmware_from_memory", driver_firmware_from_memory },
+    { "driver_firmware_get", driver_firmware_get },
+    { "driver_firmware_put", driver_firmware_put },
+    { "driver_firmware_data", driver_firmware_data },
+    { "driver_firmware_size", driver_firmware_size },
     { "drv_map_mmio",        drv_map_mmio },
     { "device_map_mmio",     device_map_mmio },
     { "arch_device_map_mmio", arch_device_map_mmio },
