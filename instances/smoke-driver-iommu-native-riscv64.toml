@@ -1,0 +1,16 @@
+name = "smoke-driver-iommu-native-riscv64"
+description = "Native managed DMA domain with QEMU RISC-V IOMMU translation checks"
+arch = "riscv64"
+abi = "both"
+
+[machine]
+memory = "1G"
+smp = 1
+extra_qemu = ["-device", "riscv-iommu-pci,bus=pcie.0", "-device", "edu", "-append", "driver.runtime_test=1 driver.iommu_native_test=1"]
+
+[test]
+expect = ["DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1", "DRIVER_RUNTIME: PASS"]
+timeout = "60s"
+
+[net]
+stack = "bsd"
