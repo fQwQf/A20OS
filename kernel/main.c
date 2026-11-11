@@ -3,6 +3,7 @@
 #include "firmware/device.h"
 #ifdef CONFIG_ACPI
 #include "firmware/acpi.h"
+#include "firmware/ivrs.h"
 extern void acpi_os_start_worker(void);
 #endif
 #include "core/bootargs.h"
@@ -196,6 +197,9 @@ void kernel_main(void) {
             boot_context_set_hardware_root(&acpi_root) < 0)
             panic("boot: cannot publish ACPI hardware root");
     }
+#endif
+#if defined(CONFIG_X86_64) && defined(CONFIG_ACPI)
+    (void)amd_iommu_firmware_report(arch_acpi_context());
 #endif
     const fw_node_t *hardware = &boot_context_get()->hardware_root;
     if (fw_node_valid(hardware)) {
