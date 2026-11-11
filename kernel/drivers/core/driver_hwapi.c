@@ -30,6 +30,7 @@ static spinlock_t irq_table_lock = SPINLOCK_INIT;
 typedef struct irq_shared_node {
     irq_handler_t handler;
     void *priv;
+    unsigned long flags;
     struct irq_shared_node *next;
 } irq_shared_node_t;
 
@@ -153,6 +154,7 @@ int request_irq(uint32_t irq, irq_handler_t handler,
         }
         node->handler = handler;
         node->priv    = priv;
+        node->flags   = flags;
         node->next    = NULL;
         irq_shared_node_t **tail = &irq_shared_chain[irq];
         while (*tail)
@@ -177,6 +179,15 @@ int request_irq(uint32_t irq, irq_handler_t handler,
     return 0;
 }
 
+int synchronize_irq(uint32_t irq)
+{
+    if (irq >= 256)
+        return -EINVAL;
+    while (__atomic_load_n(&irq_active[irq], __ATOMIC_ACQUIRE) != 0)
+        __asm__ volatile("" ::: "memory");
+    return 0;
+}
+
 void free_irq(uint32_t irq, void *priv) {
     if (irq >= 256)
         return;
@@ -195,7 +206,7 @@ void free_irq(uint32_t irq, void *priv) {
             irq_shared_chain[irq] = head->next;
             irq_handlers[irq] = head->handler;
             irq_priv[irq]     = head->priv;
-            irq_flags[irq]    = IRQF_SHARED;
+            irq_flags[irq]    = head->flags;
             irq_enable(irq);
             dead = head;
         }
@@ -218,8 +229,13 @@ void free_irq(uint32_t irq, void *priv) {
     /* A handler that took its snapshot before the table entry was cleared may
      * still be running on another CPU.  Driver remove cannot release its
      * private state until that invocation has returned. */
-    while (__atomic_load_n(&irq_active[irq], __ATOMIC_ACQUIRE) != 0)
-        __asm__ volatile("" ::: "memory");
+    synchronize_irq(irq);
+    /* An older level dispatch may have rearmed before its EOI completed.
+     * Leave an empty line masked after that dispatch has fully drained. */
+    lock_flags = spin_lock_irqsave(&irq_table_lock);
+    if (!irq_handlers[irq])
+        irq_disable(irq);
+    spin_unlock_irqrestore(&irq_table_lock, lock_flags);
     if (dead)
         kfree(dead);
 }
@@ -263,7 +279,7 @@ void driver_irq_dispatch(uint32_t irq) {
             current_board->irqchip->eoi(irq);
         return;
     }
-    irq_active[irq]++;
+    __atomic_add_fetch(&irq_active[irq], 1, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&irq_table_lock, lock_flags);
 
     if (current_board && current_board->irqchip &&
@@ -279,11 +295,11 @@ void driver_irq_dispatch(uint32_t irq) {
         shared->handler((int)irq, shared->priv);
         shared = next;
     }
-    __atomic_sub_fetch(&irq_active[irq], 1, __ATOMIC_RELEASE);
 
     if (current_board && current_board->irqchip &&
         current_board->irqchip->eoi)
         current_board->irqchip->eoi(irq);
+    __atomic_sub_fetch(&irq_active[irq], 1, __ATOMIC_RELEASE);
 }
 
 /* DRIVER_DMA_MASK_MODEL (implementation side): a mask is a run of low-order

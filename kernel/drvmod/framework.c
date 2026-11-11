@@ -539,6 +539,7 @@ const struct drv_export drv_export_table[] = {
     { "dma_free_coherent",   (void *)dma_free_coherent },
     { "request_irq",         (void *)request_irq },
     { "free_irq",            (void *)free_irq },
+    { "synchronize_irq",     (void *)synchronize_irq },
     { "irq_enable",          (void *)irq_enable },
     { "irq_disable",         (void *)irq_disable },
     /* frame allocator passthroughs (virtio-gpu framebuffer pages) */
