@@ -147,3 +147,5 @@ spin_unlock_irqrestore(&priv->lock, flags);
 ## 硬件 DMA domain 关闭
 
 需要交接失败页及重试硬件 detach 的 provider 使用 `driver_dma_managed_ops`。map 的 `needs_unmap` 必须明确指出当前页是否仍需清理，即使返回错误也不能丢失已安装翻译的地址。驱动停止硬件后调用 `driver_dma_domain_shutdown()` 关闭提交，排空/解除所有 mapping 和清理句柄，再重试 shutdown，成功后才 put owner。仅 put 不会强制拆除硬件 domain，省略 shutdown 会保留内部引用。回调在每 domain mutex 下串行执行，不能递归操作同一 domain。详细错误语义见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
+
+RISC-V 原生 PCI 驱动可显式使用 `riscv_iommu_dma_domain_create()`。创建前和 shutdown 前均需停止 DMA、关闭 bus mastering，并与绑定/用户所有权变更串行化。创建错误若仍输出 domain，必须保留这个清理句柄，重试 shutdown 后再 put；不能回退恒等 DMA。当前 requester 范围、页数限制与自检范围见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
