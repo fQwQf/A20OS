@@ -227,6 +227,7 @@ static void native_faults(void)
     struct driver_dma_domain *a_domain, *b_domain;
     assert(!riscv_iommu_dma_domain_create(&a, &a_domain));
     assert(!riscv_iommu_dma_domain_create(&b, &b_domain));
+    int stale_owner = g_user_domains[0].owner_pid;
     struct riscv_iommu_dma_fault info;
     device_t impostor = a;
     assert(riscv_iommu_dma_fault_poll(&impostor, &info) == -ENODEV && !info.count);
@@ -267,6 +268,8 @@ static void native_faults(void)
     assert(!riscv_iommu_dma_domain_create(&b, &b_domain));
     a_bdf.command = b_bdf.command = 4;
     registers[IOMMU_REG_FQCSR / 4] = 1u << 8;
+    assert(riscv_iommu_fault_poll_owned(&a, stale_owner, &info) == -ENODEV);
+    assert(a_bdf.command == 4 && b_bdf.command == 4 && !g_user_domains[0].blocked);
     assert(!riscv_iommu_dma_fault_poll(&a, &info));
     assert(!info.count && info.queue_error == (1u << 8) && info.blocked && info.isolated);
     assert(!riscv_iommu_dma_fault_poll(&b, &info));
