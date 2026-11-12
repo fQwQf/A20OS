@@ -702,14 +702,28 @@ static void pcache_get_fill_unlock(void *ctx,uint64_t page_no)
 {bcache_t *bc=ctx;mutex_unlock(&bc->fill_locks[pcache_hash_key(page_no)&(PCACHE_FILL_LOCKS-1)]);}
 static void pcache_get_writeback_lock(void *ctx,uint64_t unused){(void)unused;rw_mutex_write_lock(&((bcache_t *)ctx)->writeback_lock);}
 static void pcache_get_writeback_unlock(void *ctx,uint64_t unused){(void)unused;rw_mutex_write_unlock(&((bcache_t *)ctx)->writeback_lock);}
-static int pcache_get_flush_victim(void *ctx, pcache_entry_t *e) { return pcache_flush_run(ctx,e); }
+static void pcache_failure(const char *stage, uint64_t page, int result)
+{
+    static unsigned reports;
+    if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 16)
+        printf("[BCACHE] page fill failed stage=%s page=%llu rc=%d free_frames=%llu\n",
+               stage, (unsigned long long)page, result,
+               (unsigned long long)__atomic_load_n(&pfa.free_frames, __ATOMIC_RELAXED));
+}
+static int pcache_get_flush_victim(void *ctx, pcache_entry_t *e) {
+    int r = pcache_flush_run(ctx,e);
+    if (r < 0) pcache_failure("victim-write", e->page_no, r);
+    return r;
+}
 static int pcache_get_read(void *ctx, uint64_t page_no, uint8_t *data)
 {
     bcache_t *bc=ctx;
     if (!bc->dev) { memset(data,0,PCACHE_PAGE_SIZE); return 0; }
     uint64_t lba=page_no*PCACHE_PAGE_SIZE/BCACHE_BLOCK_SIZE;
     int r=bc->dev->read_sector(bc->dev,lba,(char *)data,PCACHE_PAGE_SIZE/BCACHE_BLOCK_SIZE);
-    bcache_account_device_io(bc->dev,r,0); return r;
+    bcache_account_device_io(bc->dev,r,0);
+    if (r < 0) pcache_failure("device-read", page_no, r);
+    return r;
 }
 static void pcache_get_perf(void *ctx, int event) { (void)ctx; if(event==0) a20_perf_count(A20_PERF_PCACHE_FILL_MISSES); else if(event==3) a20_perf_count(A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS); }
 static void pcache_get_diagnostic(void *ctx, uint64_t page_no)
@@ -727,10 +741,13 @@ static uint8_t *pcache_get_alloc_page(void *ctx)
 {
     (void)ctx;
     pfn_t pfn = pfa_alloc_flags(0, 0);
-    if (pfn == PFN_NONE)
+    if (pfn == PFN_NONE) {
+        pcache_failure("allocate-frame", 0, -ENOMEM);
         return NULL;
+    }
     void *page = pfn_to_virt(pfn);
     if (!page) {
+        pcache_failure("unmapped-frame", pfn, -EIO);
         frame_put(pfn);
         return NULL;
     }

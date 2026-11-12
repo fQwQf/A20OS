@@ -478,6 +478,12 @@ int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) {
     uint64_t off = it * sb->block_size + (uint64_t)i * sb->inode_size;
     memset(out, 0, sizeof(*out));
     int r = bcache_read_bytes(sb->bc, off, out, EXT4_INODE_SIZE_STATIC);
+    if (r < 0) {
+        static unsigned reports;
+        if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 16)
+            printf("[EXT4] inode read failed ino=%u group=%u table=%llu offset=%llu rc=%d\n",
+                   ino, g, (unsigned long long)it, (unsigned long long)off, r);
+    }
     return r < 0 ? -EIO : 0;
 }
 
