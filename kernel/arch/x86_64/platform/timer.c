@@ -31,7 +31,12 @@ static uintptr_t hpet_base;
 static unsigned use_hpet;
 static unsigned hpet_counter_64;
 static uint64_t hpet_extended_counter;
-static unsigned hpet_counter_lock;
+struct cpu_clock_anchor {
+    uint64_t cycle, ticks, rate;
+    unsigned ready, verified;
+} __attribute__((aligned(64)));
+static struct cpu_clock_anchor cpu_clock[CONFIG_NR_CPUS];
+static uint64_t hpet_clock_highwater;
 static unsigned baytrail_tsc_known;
 /*
  * Per-CPU high-water mark. Each CPU owns a distinct cache line so its
@@ -182,24 +187,21 @@ static void hpet_write(uint32_t reg, uint64_t value) {
 static uint64_t read_hpet_clock(void) {
     if (hpet_counter_64)
         return hpet_read(HPET_COUNTER);
-    /* Read while locked: publishing a stale preemption-delayed sample after
-     * another CPU's newer one would look like a false 32-bit wrap. */
-    /* Generic spinlock contention diagnostics call timer_get_ticks(). The
-     * clock's own lock must stay below that instrumentation or simultaneous
-     * readers recursively acquire it until their kernel stack overflows. */
-    int restore_irqs = arch_irqs_enabled();
-    arch_local_irq_disable();
-    while (__atomic_exchange_n(&hpet_counter_lock, 1, __ATOMIC_ACQUIRE))
-        cpu_relax();
+    /* Never serialize slow MMIO behind an IRQ-disabled global spinlock:
+     * simultaneous timer IRQs otherwise spend their time waiting on it.
+     * Publish one sample optimistically. A competing publisher wins; its
+     * newer value is a valid sample for this call too, so no retry is needed.
+     * Maintenance deadlines below guarantee a sample each half-wrap. */
+    uint64_t previous = __atomic_load_n(&hpet_extended_counter, __ATOMIC_ACQUIRE);
     uint32_t low = (uint32_t)hpet_read(HPET_COUNTER);
-    uint64_t next = (hpet_extended_counter & ~0xffffffffULL) | low;
-    if (low < (uint32_t)hpet_extended_counter)
-        next += 1ULL << 32;
-    hpet_extended_counter = next;
-    __atomic_store_n(&hpet_counter_lock, 0, __ATOMIC_RELEASE);
-    if (restore_irqs)
-        arch_local_irq_enable();
-    return next;
+    uint32_t delta = low - (uint32_t)previous;
+    if (delta > 0x7fffffffU)
+        return __atomic_load_n(&hpet_extended_counter, __ATOMIC_ACQUIRE);
+    uint64_t next = previous + delta;
+    if (__atomic_compare_exchange_n(&hpet_extended_counter, &previous, next, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return next;
+    return previous;
 }
 
 static uint64_t clock_maintenance_interval(uint64_t ticks) {
@@ -237,6 +239,97 @@ static int has_invariant_tsc(void) {
         return 0;
     cpuid(0x80000007U, 0, &max_ext, &ebx, &ecx, &edx);
     return !!(edx & (1U << 8));
+}
+
+/* TSC epochs may differ even with invariant frequency. Each CPU correlates
+ * its own counter with the common HPET domain, never another CPU's TSC. The
+ * local IRQ mask prevents migration or an anchor update between CPU lookup,
+ * RDTSC and the anchor snapshot. No global lock or MMIO is on the fast path. */
+static uint64_t read_reference_clock(void) {
+    int restore_irqs = arch_irqs_enabled();
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    uint64_t ticks;
+    struct cpu_clock_anchor *anchor = &cpu_clock[cpu];
+    uint64_t cycle = read_tsc();
+    if (anchor->ready && anchor->verified && cycle >= anchor->cycle &&
+        cycle - anchor->cycle <= anchor->rate * 2) {
+        ticks = anchor->ticks + scale_ticks(cycle - anchor->cycle,
+                                           anchor->rate, ARCH_TIMER_FREQ);
+    } else {
+        ticks = scale_ticks_reduced(read_hpet_clock());
+    }
+    if (restore_irqs)
+        arch_local_irq_enable();
+    return ticks;
+}
+
+static void refresh_cpu_clock(int initialize) {
+    unsigned cpu = cpu_current_id();
+    struct cpu_clock_anchor *anchor = &cpu_clock[cpu];
+    if (!initialize && !anchor->ready)
+        return;
+    uint64_t cycle = read_tsc();
+    if (!initialize && cycle >= anchor->cycle &&
+        cycle - anchor->cycle < anchor->rate)
+        return;
+
+    uint64_t best_span = ~0ULL, best_cycle = 0, best_ticks = 0;
+    for (unsigned i = 0; i < 5; i++) {
+        uint64_t before = read_tsc();
+        uint64_t reference = scale_ticks_reduced(read_hpet_clock());
+        uint64_t after = read_tsc();
+        if (after >= before && after - before < best_span) {
+            best_span = after - before;
+            best_cycle = before + best_span / 2;
+            best_ticks = reference;
+        }
+    }
+    /* A preempted vCPU or an SMI is not a useful calibration sample. */
+    if (best_span > tsc_freq / 1000)
+        return;
+    uint64_t rate = tsc_freq;
+    if (!initialize) {
+        uint64_t predicted = best_cycle >= anchor->cycle
+            ? anchor->ticks + scale_ticks(best_cycle - anchor->cycle,
+                                          anchor->rate, ARCH_TIMER_FREQ) : 0;
+        uint64_t error = predicted > best_ticks ? predicted - best_ticks
+                                               : best_ticks - predicted;
+        uint64_t elapsed = best_ticks > anchor->ticks ? best_ticks - anchor->ticks : 0;
+        uint64_t tolerance = MS_TO_TICKS(5) + elapsed / (anchor->verified ? 2000 : 200) +
+            scale_ticks(best_span, tsc_freq, ARCH_TIMER_FREQ);
+        if (error > tolerance) {
+            anchor->ready = 0;
+            klog_record_only(KLOG_WARN,
+                "[TIME] cpu=%u invariant TSC validation failed error_ticks=%llu; HPET fallback\n",
+                cpu, (unsigned long long)error);
+            return;
+        }
+        /* Refine the PIT/CPUID frequency estimate against the reference over
+         * a full second. This corrects small source-rate calibration errors,
+         * not epoch jumps; those were rejected above. */
+        rate = anchor->rate;
+        if (best_ticks > anchor->ticks && best_cycle >= anchor->cycle) {
+            uint64_t measured = scale_ticks(best_cycle - anchor->cycle,
+                                            best_ticks - anchor->ticks,
+                                            ARCH_TIMER_FREQ);
+            uint64_t difference = measured > rate ? measured - rate : rate - measured;
+            if (difference <= rate / 200)
+                rate = measured;
+        }
+    }
+    anchor->cycle = best_cycle;
+    anchor->ticks = best_ticks;
+    anchor->rate = rate;
+    anchor->ready = 1;
+    if (initialize) {
+        anchor->verified = 0;
+    } else if (!anchor->verified) {
+        anchor->verified = 1;
+        klog_record_only(KLOG_INFO,
+            "[TIME] cpu=%u normalized TSC=1 rate=%llu; HPET reference verified\n",
+            cpu, (unsigned long long)rate);
+    }
 }
 
 /* Invariant rate does not imply a common epoch on different CPUs. Until
@@ -380,6 +473,11 @@ void timer_init(void) {
               use_hpet && !hpet_counter_64 ? 32U : 64U,
               has_invariant_tsc(), use_hpet ? "user TSC vDSO disabled" : "TSC counter selected");
     calibrate_lapic();
+    if (use_hpet && has_invariant_tsc()) {
+        refresh_cpu_clock(1);
+        kinfo("[TIME] cpu=%u TSC anchor initialized=%u; verification pending; user TSC vDSO disabled\n",
+              arch_current_cpu_id(), cpu_clock[arch_current_cpu_id()].ready);
+    }
     lapic_write(LAPIC_TIMER_DIV, 0x3);
     lapic_write(LAPIC_LVT_TIMER, IRQ_VECTOR_TIMER | LAPIC_LVT_MASKED);
     timer_set_interval(TICKS_PER_SEC / 100);
@@ -421,12 +519,13 @@ uint64_t timer_get_ticks(void) {
         return __atomic_load_n(&shared_clock_ticks, __ATOMIC_ACQUIRE);
 #endif
     ensure_tsc_freq();
-    uint64_t ticks = scale_ticks_reduced(use_hpet ? read_hpet_clock()
-                                                  : read_tsc());
+    uint64_t ticks = use_hpet ? read_reference_clock()
+                             : scale_ticks_reduced(read_tsc());
 #ifdef CONFIG_QEMU_SHARED_SMP
     volatile uint64_t *last = &shared_clock_ticks;
 #else
-    volatile uint64_t *last = &last_ticks[cpu_current_id()].ticks;
+    volatile uint64_t *last = use_hpet ? &hpet_clock_highwater
+                                     : &last_ticks[cpu_current_id()].ticks;
 #endif
 
     uint64_t previous = __atomic_load_n(last, __ATOMIC_RELAXED);
@@ -437,7 +536,10 @@ uint64_t timer_get_ticks(void) {
     return ticks > previous ? ticks : previous;
 }
 
-void timer_irq_tick(void) {}
+void timer_irq_tick(void) {
+    if (use_hpet)
+        refresh_cpu_clock(0);
+}
 
 void timer_enable(void) {
     lapic_write(LAPIC_LVT_TIMER,

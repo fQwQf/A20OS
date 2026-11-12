@@ -41,6 +41,11 @@ static inline void arch_cpu_relax(void) {
 #define X86_CPU_ID_SELECTOR 0x38U
 #define X86_CPU_ID_LIMIT_TAG 0xa2000U
 
+static inline unsigned x86_cpu_id_from_gdt_limit(unsigned limit, unsigned valid) {
+    unsigned id = limit ^ X86_CPU_ID_LIMIT_TAG;
+    return valid && id < CONFIG_NR_CPUS ? id : CONFIG_NR_CPUS;
+}
+
 static inline unsigned arch_current_cpu_id(void) {
 #if CONFIG_NR_CPUS == 1
     /* Single-CPU builds need no descriptor lookup or boot fallback.
@@ -52,8 +57,9 @@ static inline unsigned arch_current_cpu_id(void) {
     __asm__ __volatile__("lsl %w2, %0; setz %1"
                          : "=r"(limit), "=qm"(valid)
                          : "r"(X86_CPU_ID_SELECTOR) : "cc");
-    if (valid && (limit & ~7U) == X86_CPU_ID_LIMIT_TAG)
-        return limit ^ X86_CPU_ID_LIMIT_TAG;
+    unsigned id = x86_cpu_id_from_gdt_limit(limit, valid);
+    if (id < CONFIG_NR_CPUS)
+        return id;
     /* Use CPUID leaf 1 initial APIC ID.  Reading x2APIC MSR 0x802 only works
      * when the CPU is in x2APIC mode, which the kernel does not enable. */
     uint32_t eax, ebx, ecx, edx;
