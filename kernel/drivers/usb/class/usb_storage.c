@@ -183,6 +183,13 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
     else if (st->csw.status == 1)
         result = -EIO;          /* command failed (see REQUEST SENSE) */
 
+    if (result < 0) {
+        static unsigned reports;
+        if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 16)
+            kwarn("[USB-STORAGE] command failed opcode=%02x tag=%u signature=%08x csw_tag=%u status=%u residue=%u length=%u\n",
+                  cdb[0], tag, st->csw.signature, st->csw.tag,
+                  st->csw.status, st->csw.residue, datalen);
+    }
     mutex_unlock(&st->lock);
     return result;
 }
