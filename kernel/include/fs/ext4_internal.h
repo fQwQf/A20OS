@@ -104,7 +104,9 @@ uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
                                        uint32_t lblk) ;
 /* Returns a caller-owned vnode reference on a cache hit. */
 vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) ;
-void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) ;
+/* Return the canonical vnode with the caller's reference (possibly a racing
+ * winner), or NULL if publication capacity is exhausted. */
+vnode_t *ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn);
 vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) ;
 /* The only writer for ext4 metadata.  Journalled when the filesystem has a
  * log, plain buffered otherwise; file data does not use it. */
