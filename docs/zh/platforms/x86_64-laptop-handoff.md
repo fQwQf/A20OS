@@ -7,6 +7,49 @@
 摄像头端口只重置一次，内置 ESP 保存了完整的启动记录。第 6 次启动
 进一步验证了带源码构建 fastfetch 的镜像和正常重启。
 
+## 第 14 次启动与第 15 轮交付（2026-11-12）
+
+实机确认WHU-WLAN、永久MAC、关机/重启和触控板可用；静置CPU约50%、Firefox冷启动约30秒、
+网页/关机约60秒、锁定灯仍不亮。1540条连续内核记录无晚期跨核时间倒退，触控板约7978次输入，
+错误/恢复/丢弃为0。
+
+修复HPET32全局锁竞争并验证每CPU TSC共同时间域，修正CPU8以上GDT CPU ID解码，
+去掉BSD调度观察的伪RX和自唤醒，保留真实IRQ及100 Hz轮询。电源重试不再反复sync，
+生产关机的全内存/页表审计改为调试开关。Linux syslog READ_ALL编号也已修正。
+
+实际桌面重复测试抓到ext4 orphan初次所有权读取失败，尚未修改元数据就poison整个JBD2事务。
+现在此类失败保留持久orphan并延后回收，显式finalize报错保留所有权供重试；开始修改后的
+失败仍poison。专用EFI精确注入一次该失败，后续写入、GUI S5与关机后fsck均通过，orphan链清空。
+底层单次读取失败的原因尚未定论，已补充分层cache/inode/USB CSW记录。block cache状态机和
+extent策略已使用Rust；200000步C→Rust差分和Rust单元测试通过，本次修复采用C事务边界小改动。
+
+最终交付EFI `0667017a96161678e5b55153a1c8b89d82f49409548cf2e39bb351650b96b838`
+不含故障注入，使用修复后的真实桌面数据通过16 CPU/8 GiB、HPET32真实回绕两组完整门控：
+
+| 场景 | 客体静置CPU | clock syscall | Firefox冷/热到DOM | 电源退出 |
+|---|---:|---:|---:|---:|
+| USB + GUI S5 | 0.246% | 742 ns | 25.05 / 5.22 s | 2.00 s |
+| NVMe + restart | 0.333% | 717 ns | 12.37 / 4.51 s | 1.25 s |
+
+包含XKB/Rime锁定状态、4 worker/640轮orphan压力，浏览器每轮独立PID且全部任务正常退出。
+两次退出后的完整root只读fsck=0，state=1、无RECOVER、last_orphan=0。
+这些是虚拟机结果，实机性能待下一轮确认；不能用宿主QEMU halt polling占用代替客体CPU。
+旧Firefox夹具只等主PID且可能调用模板内旧助手，旧热启动测量只作历史参考。
+旧关机EIO与断点INT3实验仍保留为失败记录，不计入完整门控。
+
+用户已完成实际USB root的7块/28 KiB修复，整个4 GiB回读SHA为80df4e8752e6…，只读fsck通过。
+新EFI与manifest已写入指定测试USB，旧版备份为`EFI/A20OS/BOOT14.EFI`和`BOOT14.MANIFEST`。
+卸载/只读重挂后完整回读、22个原文件及计数0000000e核对；三个分区均已卸载。
+内部SSD及宿主ESP未改写。原4 GiB只读备份保留，磁盘释放约4 GiB；可重建测试镜像移到RAM，
+重启后用证据目录restore-factory.py恢复，所有RAM测试overlay压缩归档并核对解压SHA。
+
+Debian灯光报文只在USB路径有效，A20编码与实测一致，但ACK不能证明物理灯点亮。
+最终镜像加入各64条上限的Caps/Num源事件与LED请求PID/设备记录，不记录普通按键。
+物理灯仍未验收，不宣称已经修复。version.h的0.19/release20.0.19与v0.19一致。
+证据与全部哈希：`build/evidence/lenovo-83eg-2026-11-12/boot-14/README.md`，
+最终门控见native-acceptance.json，物理修复见desktop-repair-readback.json，交付见usb-readback.json。
+第15轮采集脚本在相邻boot-15/目录。
+
 ## 从实机与规范得到的结论
 
 | 证据 | 判读与修改 |
