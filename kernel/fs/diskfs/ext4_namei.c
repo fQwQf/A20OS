@@ -417,6 +417,9 @@ static int ext4_orphan_truncate_unlinked_inode(void *ctx, uint32_t ino)
     if (inode.i_links_count != 0) return -EIO;
     ret = ext4_block_truncate_checked(sb, ino, &inode);
     if (ret < 0) {
+        printf("[EXT4] orphan truncate failed ino=%u rc=%d mode=%x flags=%x size=%llu blocks=%u\n",
+               ino, ret, inode.i_mode, inode.i_flags,
+               (unsigned long long)ext4_inode_size(&inode), inode.i_blocks_lo);
         if (sb->journal) (void)ext4_journal_poison(sb);
         return ret;
     }

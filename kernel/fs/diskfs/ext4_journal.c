@@ -1148,6 +1148,8 @@ int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
 #endif
         }
     } else {
+        printf("[EXT4/JBD2] metadata write failed offset=%llu length=%llu rc=%d; transaction poisoned\n",
+               (unsigned long long)byte_off, (unsigned long long)len, ret);
         /* A failed metadata mutation may have left earlier blocks from the
          * same filesystem operation dirty. Do not let a later commit claim a
          * partial transaction complete. */
@@ -1167,6 +1169,9 @@ int ext4_journal_poison(ext4_sb_info_t *fs)
     if (!ej || !ej->enabled)
         return -EOPNOTSUPP;
     mutex_lock(&ej->lock);
+    if (jbd2_txn_phase(ej) != JBD2_TXN_FAULTED)
+        printf("[EXT4/JBD2] poison caller=%p phase=%u blocks=%u\n",
+               __builtin_return_address(0), jbd2_txn_phase(ej), jbd2_txn_count(ej));
 #ifdef CONFIG_UFSD_RUST_JBD2_TXN
     int ret = a20_jbd2_txn_poison(ej->txn);
 #else
