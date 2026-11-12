@@ -16,6 +16,7 @@
 #include "mm/vm.h"
 #include "proc/proc.h"
 #include "core/timer.h"
+#include "core/klog.h"
 
 _Static_assert(FS_TYPE_RAMFS == 1 && FS_TYPE_EXT4 == 3 && FS_TYPE_PROCFS == 4 &&
                FS_TYPE_DEVFS == 5 && FS_TYPE_CGROUP == 6 && FS_TYPE_SYSFS == 7 &&
@@ -107,8 +108,22 @@ static int vfs_read_file_impl(vfile_t *vf, char *buf, size_t count)
     return -EBADF;
 }
 
+/* Anonymous IPC/character-device I/O does not access mount data. Holding the
+ * namespace transaction counter while a desktop service waits for a pipe or
+ * tty byte makes orderly shutdown permanently EBUSY. Block-device and all
+ * vnode filesystem operations (including named FIFOs) remain gated. */
+static int vfs_rw_needs_mount_gate(vfile_t *vf)
+{
+    if (!vf || !vf->vnode)
+        return 0;
+    unsigned type = vf->vnode->mode & S_IFMT;
+    return type != S_IFCHR;
+}
+
 int vfs_read_file(vfile_t *vf, char *buf, size_t count)
 {
+    if (!vfs_rw_needs_mount_gate(vf))
+        return vfs_read_file_impl(vf, buf, count);
     int ret = mntns_fileop_enter();
     if (ret < 0)
         return ret;
@@ -191,6 +206,8 @@ static int vfs_write_file_impl(vfile_t *vf, const char *buf, size_t count)
 
 int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
 {
+    if (!vfs_rw_needs_mount_gate(vf))
+        return vfs_write_file_impl(vf, buf, count);
     int ret = mntns_fileop_enter();
     if (ret < 0)
         return ret;
@@ -430,6 +447,7 @@ static int vfs_shutdown_begin_cb(void *context)
         return ret;
     ret = vfile_shutdown_snapshot_begin();
     if (ret < 0) {
+        kinfo("[SHUTDOWN] open-file snapshot refused: %d\n", ret);
         mntns_shutdown_abort();
         return ret;
     }
@@ -438,6 +456,7 @@ static int vfs_shutdown_begin_cb(void *context)
     g_shutdown_mm_generation = 0;
     ret = mm_shared_write_shutdown_begin(&g_shutdown_mm_generation);
     if (ret < 0) {
+        kinfo("[SHUTDOWN] shared-write admission refused: %d\n", ret);
         vfile_shutdown_snapshot_end();
         g_shutdown_vfile_snapshot = 0;
         mntns_shutdown_abort();
@@ -503,12 +522,16 @@ static int vfs_shutdown_sync_cb(void *context)
     if (ret < 0)
         return ret;
     ret = mm_shared_write_shutdown_revoke(generation);
-    if (ret < 0)
+    if (ret < 0) {
+        kinfo("[SHUTDOWN] shared mapping revoke failed: %d\n", ret);
         return ret;
+    }
 
     ret = page_cache_writeback_all(NULL, NULL);
-    if (ret < 0)
+    if (ret < 0) {
+        kinfo("[SHUTDOWN] file-page writeback failed: %d\n", ret);
         return ret;
+    }
     int ns_count = mntns_shutdown_namespace_count();
     for (int n = 0; n < ns_count; n++) {
         mnt_namespace_t *ns = mntns_shutdown_namespace_at(n);
@@ -522,8 +545,10 @@ static int vfs_shutdown_sync_cb(void *context)
             bcache_t *bc = shutdown_mount_cache(mnt);
             if (bc) {
                 ret = bcache_sync_checked(bc);
-                if (ret < 0)
+                if (ret < 0) {
+                    kinfo("[SHUTDOWN] block-cache sync failed type=%d rc=%d\n", (int)mnt->type, ret);
                     return ret;
+                }
             } else if (mnt->type == FS_TYPE_UXFS && mnt->root &&
                        mnt->root->ops && mnt->root->ops->sync_vnode) {
                 ret = mnt->root->ops->sync_vnode(mnt->root);
@@ -548,7 +573,10 @@ static int vfs_shutdown_commit_cb(void *context)
          * failure is retried in place and never resumes ordinary operations. */
         g_shutdown_mm_prepared = 2;
     }
-    return vfile_shutdown_close_mounted();
+    int result = vfile_shutdown_close_mounted();
+    if (result < 0)
+        kinfo("[SHUTDOWN] backend close failed: %d\n", result);
+    return result;
 }
 
 static int vfs_shutdown_teardown_cb(void *context)
@@ -621,6 +649,8 @@ static int vfs_shutdown_teardown_cb(void *context)
             ret = 0;
             if (mnt->type == FS_TYPE_EXT4) {
                 ret = ext4_shutdown_clean(mnt->root);
+                if (ret < 0)
+                    kinfo("[SHUTDOWN] ext4 clean shutdown failed: %d\n", ret);
             } else if (mnt->type == FS_TYPE_UXFS) {
                 extern int uxfs_unmount(struct vnode *root);
                 ret = uxfs_unmount(mnt->root);

@@ -12,9 +12,7 @@
 #include "core/lock_counters.h"
 #include "core/sync.h"
 #include "core/string.h"
-#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
 #include "core/klog.h"
-#endif
 #include "mm/objcache.h"
 #include "ipc/objstats.h"
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
@@ -227,6 +225,16 @@ void vfile_finalize_done(void)
     spin_unlock_irqrestore(&g_vfile_registry_lock, flags);
 }
 
+static int vfile_shutdown_needs_snapshot(const vfile_t *vf)
+{
+    /* Device reads may still be asleep: shutdown does not destroy mounts or
+     * devices while firmware poweroff is pending. Their file-private state
+     * must remain alive too; only the final reference may close it normally.
+     * Regular and block-device descriptions still need checked backend CLOSE. */
+    return vf->mount_open_counted && refcount_read(&vf->ref_count) != 0 &&
+           (!vf->vnode || (vf->vnode->mode & S_IFMT) != S_IFCHR);
+}
+
 int vfile_shutdown_snapshot_begin(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_vfile_registry_lock);
@@ -240,7 +248,7 @@ int vfile_shutdown_snapshot_begin(void)
     }
     int count = 0;
     for (vfile_t *vf = g_vfile_registry; vf; vf = vf->shutdown_next) {
-        if (!vf->mount_open_counted || refcount_read(&vf->ref_count) == 0)
+        if (!vfile_shutdown_needs_snapshot(vf))
             continue;
         if (count == VFILE_SHUTDOWN_MAX) {
             spin_unlock_irqrestore(&g_vfile_registry_lock, flags);
@@ -250,7 +258,7 @@ int vfile_shutdown_snapshot_begin(void)
     }
     count = 0;
     for (vfile_t *vf = g_vfile_registry; vf; vf = vf->shutdown_next) {
-        if (!vf->mount_open_counted || refcount_read(&vf->ref_count) == 0)
+        if (!vfile_shutdown_needs_snapshot(vf))
             continue;
         refcount_inc(&vf->ref_count);
         g_vfile_shutdown_snapshot[count++] = vf;
@@ -374,6 +382,10 @@ int vfile_shutdown_close_mounted(void)
             continue;
         int ret = vfile_backend_close(vf);
         if (ret < 0) {
+            kinfo("[SHUTDOWN] CLOSE failed file=%llu inode=%llu mode=%x rc=%d\n",
+                  (unsigned long long)vf->identity,
+                  (unsigned long long)(vf->vnode ? vf->vnode->ino : 0),
+                  vf->vnode ? (unsigned)vf->vnode->mode : 0, ret);
             vf->shutdown_deferred_close = 1;
             return ret;
         }
