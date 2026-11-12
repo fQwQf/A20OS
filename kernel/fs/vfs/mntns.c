@@ -9,6 +9,7 @@
 #include "core/lock.h"
 #include "core/lock_counters.h"
 #include "core/stdio.h"
+#include "core/klog.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "mm/slab.h"
@@ -67,7 +68,13 @@ int mntns_shutdown_begin(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
     int r = a20_mntns_shutdown_begin(&g_mntns_life, NULL, mntns_scan_and_pin);
+    uint32_t fileops = g_mntns_life.fileops_inflight;
+    uint32_t mutations = g_mntns_life.mutations_inflight;
+    uint32_t creations = g_mntns_life.create_inflight;
     spin_unlock_irqrestore(&g_mntns_lock, flags);
+    if (r < 0)
+        kinfo("[SHUTDOWN] namespace admission rc=%d fileops=%u mutations=%u creations=%u\n",
+              r, fileops, mutations, creations);
     return r;
 }
 
