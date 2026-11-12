@@ -387,15 +387,17 @@ vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) {
     return NULL;
 }
 
-void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
+vnode_t *ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
     uint64_t flags = spin_lock_irqsave(&g_ext4_vcache_lock);
     ext4_vcache_init_locked();
     uint32_t hash = ext4_vcache_hash_key(sb, ino);
     for (int i = g_ext4_vcache_hash[hash]; i >= 0;
          i = g_ext4_vcache[i].hash_next) {
         if (g_ext4_vcache[i].sb == sb && g_ext4_vcache[i].ino == ino) {
+            vnode_t *existing = g_ext4_vcache[i].vn;
+            vnode_get(existing);
             spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
-            return;
+            return existing;
         }
     }
     int slot = g_ext4_vcache_free_list;
@@ -409,10 +411,11 @@ void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) {
         ext4_vcache_link_hash_locked(slot, hash);
         a20_perf_count(A20_PERF_EXT4_VCACHE_INSERTS);
         spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
-        return;
+        return vn;
     }
     a20_perf_count(A20_PERF_EXT4_VCACHE_FULL);
     spin_unlock_irqrestore(&g_ext4_vcache_lock, flags);
+    return NULL;
 }
 
 vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) {
@@ -2955,8 +2958,14 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     fp->open_count = 0;
     vn->fs_data   = fp;
 
-    ext4_vnode_cache_insert(sb, ino, vn);
-    return vn;
+    /* Lookup holds the metadata lock in read mode: another cold lookup can
+     * publish this inode between our initial miss and allocation. Use the
+     * cache's canonical winner, never an uncached alias with independent
+     * open_count/unlinked state. A full cache must fail rather than alias. */
+    vnode_t *canonical = ext4_vnode_cache_insert(sb, ino, vn);
+    if (canonical != vn)
+        vnode_put(vn);
+    return canonical;
 }
 
 /* ================================================================
