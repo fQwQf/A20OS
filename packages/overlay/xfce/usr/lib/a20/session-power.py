@@ -67,7 +67,9 @@ def power_action(cmd):
 
     libc = ctypes.CDLL(None, use_errno=True)
     for attempt in range(20):
-        os.sync()
+        # The kernel's checked shutdown transaction flushes filesystem data.
+        # A global sync before every EBUSY retry repeats expensive USB writes
+        # while admission is still open and other applications keep writing.
         libc.reboot(cmd)
         err = ctypes.get_errno()
         if err in (errno.EBUSY, errno.ETIMEDOUT) and attempt < 19:
@@ -75,9 +77,20 @@ def power_action(cmd):
             continue
         log("reboot(0x%x) failed: %s" % (cmd, os.strerror(err)))
         break
-    # Returning would leave the session alive after the menu said it was
-    # leaving; nothing else can perform the request.
-    os._exit(1)
+    # A refused shutdown has not completed. Keep the D-Bus provider alive so
+    # the next request can retry, and show the reason instead of a silent no-op.
+    try:
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+        dialog = Gtk.MessageDialog(
+            message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+            text="无法完成关机或重启")
+        dialog.format_secondary_text("内核返回：%s。桌面仍在运行，可以稍后重试。" % os.strerror(err))
+        dialog.connect("response", lambda widget, response: widget.destroy())
+        dialog.show_all()
+    except Exception as error:
+        log("cannot display power error: " + type(error).__name__)
+    return GLib.SOURCE_REMOVE
 
 
 def logout():
@@ -97,9 +110,11 @@ class Manager:
         elif method.startswith("Can"):
             invocation.return_value(GLib.Variant("(b)", (False,)))
         elif method == "Shutdown":
+            log("shutdown requested")
             invocation.return_value(None)
             GLib.idle_add(power_action, LINUX_REBOOT_CMD_POWER_OFF)
         elif method == "Restart":
+            log("restart requested")
             invocation.return_value(None)
             GLib.idle_add(power_action, LINUX_REBOOT_CMD_RESTART)
         elif method == "Logout":
