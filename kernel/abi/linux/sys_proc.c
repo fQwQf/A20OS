@@ -1131,9 +1131,11 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   shutdown_ret);
             return shutdown_ret;
         }
+        kinfo("[SD] POWER_OFF entry\n");
+#if defined(CONFIG_DEBUG_SHUTDOWN_AUDIT) && CONFIG_DEBUG_SHUTDOWN_AUDIT
+        /* Full allocator/page-table audits belong to diagnostic builds. */
         /* TEMP-DIAG: audit buddy free-list integrity before poweroff, for the
          * shmring poweroff corruption investigation */
-        kinfo("[SD] POWER_OFF entry");
         int audit = pfa_audit_lists();
         kinfo("[SD] audit errors=%d", audit);
 #if !defined(CONFIG_NOMMU) && defined(ARCH_HAS_PGTABLE_OPS)
@@ -1219,6 +1221,7 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                       (unsigned long)rep.seg_kind_bad);
         }
 #endif
+#endif /* CONFIG_DEBUG_SHUTDOWN_AUDIT */
         firmware_shutdown();
     } else {
         return -EINVAL;
