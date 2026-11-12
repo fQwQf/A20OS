@@ -503,9 +503,8 @@ static void attach_interfaces(void)
 static void receive_progress(unsigned budget)
 {
     __atomic_store_n(&progress_budget, budget ? budget : BSD_RX_BUDGET, __ATOMIC_RELEASE);
-    for (unsigned i = 0; i < BSD_MAX_NICS; ++i)
-        if (nics[i].context) __atomic_store_n(&nics[i].rx_pending, 1, __ATOMIC_RELEASE);
-    a20_bsd_executor_notify();
+    /* Scheduler polling is not an RX event. IRQs, explicit producers and the
+     * 100 Hz clock wake the executor; that clock also polls IRQ-less NICs. */
 }
 
 static void device_interrupt(const struct device *device)
@@ -519,7 +518,8 @@ static void device_interrupt(const struct device *device)
 static void protocol_progress(unsigned budget)
 {
     (void)budget;
-    a20_bsd_executor_notify();
+    /* The serialized protocol worker owns progress. Waking it on every
+     * schedule (including its own park) creates a permanent self-wake loop. */
 }
 
 static void timer_tick(void)
@@ -536,9 +536,8 @@ static void timer_tick(void)
 
 static int work_pending(void)
 {
-    if (__atomic_load_n(&clock_due, __ATOMIC_ACQUIRE)) return 1;
-    for (unsigned i = 0; i < BSD_MAX_NICS; ++i)
-        if (__atomic_load_n(&nics[i].rx_pending, __ATOMIC_ACQUIRE)) return 1;
+    /* These events already made the executor runnable. They are not work
+     * another idle CPU can drain, and must not prevent all CPUs from HLT. */
     return 0;
 }
 

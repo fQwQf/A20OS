@@ -48,18 +48,17 @@ class Clocksource(unittest.TestCase):
 #define ARCH_TIMER_FREQ 1000000000ULL
 static unsigned hpet_counter_64,use_hpet=1;
 static uint64_t hpet_extended_counter,hpet_freq=100000000,raw;
-static unsigned hpet_counter_lock,increment;
-static __thread int irq=1;
-static int arch_irqs_enabled(void){return irq;}
-static void arch_local_irq_disable(void){irq=0;}
-static void arch_local_irq_enable(void){irq=1;}
-static void cpu_relax(void){}
-static uint64_t hpet_read(unsigned r){assert(r==HPET_COUNTER);assert(hpet_counter_64||(!irq&&hpet_counter_lock));if(increment)raw=(uint32_t)(raw+1);return raw;}
+static unsigned increment,race;
+static uint64_t hpet_read(unsigned r){assert(r==HPET_COUNTER);
+ uint64_t value=increment?__atomic_add_fetch(&raw,1,__ATOMIC_RELAXED):raw;
+ if(race){__atomic_store_n(&hpet_extended_counter,0x300000020ULL,__ATOMIC_RELEASE);race=0;}
+ return hpet_counter_64?value:(uint32_t)value;
+}
 int main(void);
 """
   main=r"""
 static void *reader(void *arg){(void)arg;uint64_t prev=0;
- for(unsigned i=0;i<10000;i++){uint64_t now=read_hpet_clock();assert(now>prev&&irq);prev=now;}
+ for(unsigned i=0;i<10000;i++){uint64_t now=read_hpet_clock();assert(now>=prev);prev=now;}
  return 0;
 }
 int main(void){
@@ -75,12 +74,81 @@ int main(void){
  pthread_t threads[8];
  for(unsigned i=0;i<8;i++)assert(!pthread_create(&threads[i],0,reader,0));
  for(unsigned i=0;i<8;i++)pthread_join(threads[i],0);
- assert(hpet_extended_counter==0xffff0000ULL+80000&&hpet_counter_lock==0&&irq);
+ increment=0;assert(read_hpet_clock()==0xffff0000ULL+80000);
+ /* A sample delayed past a racing publication must return that winner,
+  * rather than misinterpreting its old low bits as an extra wrap. */
+ hpet_extended_counter=0x2fffffff0ULL;raw=0x10;race=1;
+ assert(read_hpet_clock()==0x300000020ULL);
+ assert(hpet_extended_counter==0x300000020ULL);
+ /* A preempted reader spanning more than half a period uses maintenance's
+  * current epoch rather than its obsolete preemption-time snapshot. */
+ hpet_extended_counter=0x100000010ULL;raw=0x90000020;race=1;
+ assert(read_hpet_clock()==0x300000020ULL);
  return 0;
 }
 """
   with tempfile.TemporaryDirectory() as d:
    path=Path(d)/'wrap.c';exe=path.with_suffix('');path.write_text(model+code+main)
    subprocess.run(['cc','-std=gnu11','-pthread','-Wall','-Wextra','-Werror','-fsanitize=undefined',str(path),'-o',str(exe)],check=True,capture_output=True)
+   subprocess.run([str(exe)],check=True,capture_output=True)
+ def test_normalized_cpu_epochs_and_reference_fallback(self):
+  s=(ROOT/'kernel/arch/x86_64/platform/timer.c').read_text()
+  model=r"""
+#include <assert.h>
+#include <stdint.h>
+#define CONFIG_NR_CPUS 2
+#define ARCH_TIMER_FREQ 1000000000ULL
+#define MS_TO_TICKS(x) ((uint64_t)(x)*1000000ULL)
+#define KLOG_WARN 1
+#define KLOG_INFO 0
+#define klog_record_only(...) ((void)0)
+struct cpu_clock_anchor {uint64_t cycle,ticks,rate;unsigned ready,verified;};
+static struct cpu_clock_anchor cpu_clock[2];
+static uint64_t tsc_freq=3800000000ULL,hpet_clock_highwater,cycles[2],reference;
+static struct {uint64_t ticks;} last_ticks[2];
+static unsigned cpu,irq=1,reads,use_hpet=1;
+static unsigned cpu_current_id(void){return cpu;}
+static int arch_irqs_enabled(void){return irq;}
+static void arch_local_irq_disable(void){irq=0;}
+static void arch_local_irq_enable(void){irq=1;}
+static uint64_t read_tsc(void){return cycles[cpu];}
+static uint64_t read_hpet_clock(void){reads++;return reference;}
+static uint64_t scale_ticks_reduced(uint64_t t){return t;}
+static void ensure_tsc_freq(void){}
+"""
+  code='\n'.join(function(s,n) for n in ('scale_ticks','read_reference_clock','refresh_cpu_clock','timer_get_ticks'))
+  main=r"""
+int main(void){
+ cycles[0]=50000000000ULL;cycles[1]=1000000;reference=100000000ULL;
+ for(cpu=0;cpu<2;cpu++){irq=0;refresh_cpu_clock(1);assert(cpu_clock[cpu].ready);irq=1;}
+ cpu=0;unsigned before=reads;assert(read_reference_clock()==reference&&reads==before+1);
+ for(cpu=0;cpu<2;cpu++)cycles[cpu]+=tsc_freq;
+ reference+=1000000000ULL;
+ for(cpu=0;cpu<2;cpu++){irq=0;refresh_cpu_clock(0);assert(cpu_clock[cpu].verified);irq=1;}
+ before=reads;
+ for(unsigned i=0;i<100;i++)for(cpu=0;cpu<2;cpu++){
+  cycles[cpu]+=tsc_freq/1000;
+  assert(read_reference_clock()==1100000000ULL+(i+1)*1000000ULL);assert(irq);
+ }
+ assert(reads==before); /* No HPET MMIO or global lock on fast reads. */
+ /* Simulate small opposite correlation errors, then migrate the caller. */
+ cpu_clock[0].ticks+=1000;cpu_clock[1].ticks-=1000;
+ cpu=0;uint64_t first=timer_get_ticks();cpu=1;assert(timer_get_ticks()>=first);
+ for(cpu=0;cpu<2;cpu++){cycles[cpu]+=tsc_freq;}
+ reference=2200000000ULL;
+ for(cpu=0;cpu<2;cpu++){irq=0;refresh_cpu_clock(0);assert(cpu_clock[cpu].ready);irq=1;}
+ /* An unexpected epoch jump bypasses interpolation and is rejected by the
+  * next reference check, without ever publishing the jumped value. */
+ cpu=0;cycles[0]+=3*tsc_freq;before=reads;
+ assert(read_reference_clock()==reference&&reads==before+1);
+ irq=0;refresh_cpu_clock(0);assert(!cpu_clock[0].ready);irq=1;
+ assert(read_reference_clock()==reference);
+ irq=0;assert(read_reference_clock()==reference&&!irq);
+ return 0;
+}
+"""
+  with tempfile.TemporaryDirectory() as d:
+   path=Path(d)/'epoch.c';exe=path.with_suffix('');path.write_text(model+code+main)
+   subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-fsanitize=undefined',str(path),'-o',str(exe)],check=True,capture_output=True)
    subprocess.run([str(exe)],check=True,capture_output=True)
 if __name__=='__main__':unittest.main()
