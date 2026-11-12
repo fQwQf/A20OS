@@ -3,6 +3,9 @@
 #include "core/defs.h"
 #include "core/cpu.h"
 #include "core/timer.h"
+#include "core/klog.h"
+#include "core/bootargs.h"
+#include "core/string.h"
 #include "cpu.h"
 #include "platform.h"
 #include "firmware.h"
@@ -26,6 +29,9 @@ static volatile unsigned tsc_freq_state;
 static uint64_t hpet_freq;
 static uintptr_t hpet_base;
 static unsigned use_hpet;
+static unsigned hpet_counter_64;
+static uint64_t hpet_extended_counter;
+static unsigned hpet_counter_lock;
 static unsigned baytrail_tsc_known;
 /*
  * Per-CPU high-water mark. Each CPU owns a distinct cache line so its
@@ -173,6 +179,39 @@ static void hpet_write(uint32_t reg, uint64_t value) {
     *(volatile uint64_t *)(hpet_base + reg) = value;
 }
 
+static uint64_t read_hpet_clock(void) {
+    if (hpet_counter_64)
+        return hpet_read(HPET_COUNTER);
+    /* Read while locked: publishing a stale preemption-delayed sample after
+     * another CPU's newer one would look like a false 32-bit wrap. */
+    /* Generic spinlock contention diagnostics call timer_get_ticks(). The
+     * clock's own lock must stay below that instrumentation or simultaneous
+     * readers recursively acquire it until their kernel stack overflows. */
+    int restore_irqs = arch_irqs_enabled();
+    arch_local_irq_disable();
+    while (__atomic_exchange_n(&hpet_counter_lock, 1, __ATOMIC_ACQUIRE))
+        cpu_relax();
+    uint32_t low = (uint32_t)hpet_read(HPET_COUNTER);
+    uint64_t next = (hpet_extended_counter & ~0xffffffffULL) | low;
+    if (low < (uint32_t)hpet_extended_counter)
+        next += 1ULL << 32;
+    hpet_extended_counter = next;
+    __atomic_store_n(&hpet_counter_lock, 0, __ATOMIC_RELEASE);
+    if (restore_irqs)
+        arch_local_irq_enable();
+    return next;
+}
+
+static uint64_t clock_maintenance_interval(uint64_t ticks) {
+    if (use_hpet && !hpet_counter_64 && hpet_freq) {
+        /* Sample at least twice per wrap even in tickless idle. */
+        uint64_t budget = ((uint64_t)ARCH_TIMER_FREQ << 31) / hpet_freq;
+        if (ticks > budget)
+            ticks = budget;
+    }
+    return ticks;
+}
+
 static int enable_hpet(void) {
     hpet_base = firmware_acpi_hpet_address();
     if (!hpet_base)
@@ -184,6 +223,8 @@ static int enable_hpet(void) {
     hpet_freq = 1000000000000000ULL / period_fs;
     if (!hpet_freq)
         return 0;
+    hpet_counter_64 = !!(capabilities & (1ULL << 13));
+    hpet_extended_counter = (uint32_t)hpet_read(HPET_COUNTER);
     hpet_write(HPET_CONFIGURATION,
                hpet_read(HPET_CONFIGURATION) | 1ULL);
     return 1;
@@ -198,18 +239,9 @@ static int has_invariant_tsc(void) {
     return !!(edx & (1U << 8));
 }
 
-/*
- * KVM keeps the guest TSC stable even when it does not advertise the
- * invariant-TSC bit (CPUID 0x80000007:EDX[8]) for the virtual CPU model.
- * Skipping the HPET there avoids the slow MMIO read and the frequency
- * rounding error that made the x86_64 clock run measurably behind real time.
- */
-static int running_under_kvm(void) {
-    uint32_t max, ebx, ecx, edx;
-    cpuid(0x40000000U, 0, &max, &ebx, &ecx, &edx);
-    return max >= 0x40000000U && ebx == 0x4b4d564bU;
-}
-
+/* Invariant rate does not imply a common epoch on different CPUs. Until
+ * synchronization or a real pvclock implementation validates that epoch,
+ * SMP uses the shared HPET where available, including under KVM. */
 static uint64_t calibrate_tsc_with_pit(void) {
     uint8_t speaker = inb(0x61);
     outb(0x61, speaker & ~3U);
@@ -288,8 +320,8 @@ static void ensure_tsc_freq(void) {
     if (__atomic_compare_exchange_n(&tsc_freq_state, &expected, 1, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         tsc_freq = discover_tsc_freq();
-        if (!baytrail_tsc_known && !has_invariant_tsc() &&
-            !running_under_kvm() && enable_hpet())
+        if (!baytrail_tsc_known &&
+            (CONFIG_NR_CPUS > 1 || !has_invariant_tsc()) && enable_hpet())
             use_hpet = 1;
         timer_update_clk_scale();
         __atomic_store_n(&tsc_freq_state, 2, __ATOMIC_RELEASE);
@@ -304,7 +336,7 @@ static uint64_t calibration_ticks(void) {
     /* AP calibration precedes online publication, while the boot CPU may
      * wait with IRQs disabled. Measure this local device with its own TSC;
      * this counter must never escape into shared scheduler deadlines. */
-    return scale_ticks_reduced(read_tsc());
+    return scale_ticks(read_tsc(), tsc_freq, ARCH_TIMER_FREQ);
 #else
     return timer_get_ticks();
 #endif
@@ -330,6 +362,23 @@ static void calibrate_lapic(void) {
 
 void timer_init(void) {
     ensure_tsc_freq();
+    if (arch_current_cpu_id() == 0 && use_hpet && hpet_counter_64) {
+        /* Exercise real wrap handling on 64-bit emulators too. Preserve the
+         * hardware epoch so this diagnostic option never rewinds early time. */
+        const char *args = bootargs_get();
+        const char *force = args ? strstr(args, "a20.hpet32=1") : NULL;
+        if (force && (force == args || force[-1] == ' ') &&
+            (!force[12] || force[12] == ' ')) {
+            hpet_extended_counter = hpet_read(HPET_COUNTER);
+            hpet_counter_64 = 0;
+        }
+    }
+    if (arch_current_cpu_id() == 0)
+        kinfo("[TIME] clocksource=%s frequency=%llu counter_bits=%u TSC-invariant=%d; %s\n",
+              use_hpet ? "HPET" : "TSC",
+              (unsigned long long)(use_hpet ? hpet_freq : tsc_freq),
+              use_hpet && !hpet_counter_64 ? 32U : 64U,
+              has_invariant_tsc(), use_hpet ? "user TSC vDSO disabled" : "TSC counter selected");
     calibrate_lapic();
     lapic_write(LAPIC_TIMER_DIV, 0x3);
     lapic_write(LAPIC_LVT_TIMER, IRQ_VECTOR_TIMER | LAPIC_LVT_MASKED);
@@ -338,6 +387,7 @@ void timer_init(void) {
 }
 
 void timer_set_interval(uint64_t ticks) {
+    ticks = clock_maintenance_interval(ticks);
 #ifdef CONFIG_QEMU_SHARED_SMP
     /* Each unmodified QEMU owns its LAPIC. Poll shared IPI intents even when
      * this kernel CPU is idle; default platform keeps its tickless path. */
@@ -354,6 +404,7 @@ void timer_set_interval(uint64_t ticks) {
 /* Bound a hypervisor activation even when tickless idle left a long or
  * exhausted one-shot. Preserve an earlier deadline across frequent exits. */
 void x86_64_timer_ensure_deadline(uint64_t ticks) {
+    ticks = clock_maintenance_interval(ticks);
     uint64_t count = scale_ticks(ticks, ARCH_TIMER_FREQ,
                                 lapic_freq[arch_current_cpu_id()]);
     if (!count) count = 1;
@@ -370,7 +421,7 @@ uint64_t timer_get_ticks(void) {
         return __atomic_load_n(&shared_clock_ticks, __ATOMIC_ACQUIRE);
 #endif
     ensure_tsc_freq();
-    uint64_t ticks = scale_ticks_reduced(use_hpet ? hpet_read(HPET_COUNTER)
+    uint64_t ticks = scale_ticks_reduced(use_hpet ? read_hpet_clock()
                                                   : read_tsc());
 #ifdef CONFIG_QEMU_SHARED_SMP
     volatile uint64_t *last = &shared_clock_ticks;

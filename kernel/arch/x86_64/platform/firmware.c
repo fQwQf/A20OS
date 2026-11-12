@@ -280,7 +280,49 @@ __attribute__((section(".data"))) char g_bootargs[256];
 extern __attribute__((section(".data"))) volatile uint32_t g_mb_magic;
 extern __attribute__((section(".data"))) volatile uint32_t g_mb_info;
 
+static int firmware_bootcount_only(const char *args) {
+    while (*args == ' ' || *args == '\t') args++;
+    if (strncmp(args, "a20.bootcount=", 14)) return 0;
+    args += 14;
+    if (*args < '0' || *args > '9') return 0;
+    while (*args >= '0' && *args <= '9') args++;
+    while (*args == ' ' || *args == '\t') args++;
+    return !*args;
+}
+
+static int fw_cfg_is_qemu(void) {
+    uint32_t a, b, c, d;
+    __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(0x40000000U), "c"(0));
+    char vendor[12];
+    memcpy(vendor, &b, 4); memcpy(vendor + 4, &c, 4); memcpy(vendor + 8, &d, 4);
+    return !memcmp(vendor, "KVMKVMKVM", 9) || !memcmp(vendor, "TCGTCGTCGTCG", 12);
+}
+
+static void fw_cfg_append_loader_options(void) {
+    /* The EFI loader always appends its boot counter. Metadata alone must
+     * not hide an explicit emulator command line. Genuine EFI LoadOptions
+     * retain precedence; never probe this I/O device on a physical machine. */
+    if (!firmware_bootcount_only(g_bootargs) || !fw_cfg_is_qemu())
+        return;
+    char extra[sizeof(g_bootargs)];
+    outw(FW_CFG_SELECTOR_PORT, FW_CFG_SIGNATURE);
+    if (fw_cfg_read32() != 0x51454d55U ||
+        fw_cfg_read_file(FW_CFG_CMDLINE_FILE, extra, sizeof(extra)))
+        return;
+    size_t before = strlen(g_bootargs), addition = strlen(extra);
+    if (addition && before + addition + 2 <= sizeof(g_bootargs)) {
+        g_bootargs[before++] = ' ';
+        memcpy(g_bootargs + before, extra, addition + 1);
+    }
+}
+
 const char *firmware_bootargs(void) {
+    static int loader_options_probed;
+    if (!loader_options_probed) {
+        loader_options_probed = 1;
+        fw_cfg_append_loader_options();
+    }
     static int mb_probed;
     if (!mb_probed) {
         mb_probed = 1;
