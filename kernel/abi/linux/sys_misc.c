@@ -125,29 +125,23 @@ int64_t sys_umask(int newmask) {
     return old;
 }
 
-/* syslog(2) actions, uapi/linux/klog.h.  Only the values A20OS can honour
- * against its klog ring are listed; SYSLOG_ACTION_OPEN/CLOSE (the historic
- * console switch) and SYSLOG_ACTION_SIZE_UNCLEARED have no counterpart. */
-#define LINUX_SYSLOG_ACTION_SIZE_BUFFER   2
-#define LINUX_SYSLOG_ACTION_CLEAR         3
-#define LINUX_SYSLOG_ACTION_READ_ALL      4
-#define LINUX_SYSLOG_ACTION_READ_CLEAR    5
-#define LINUX_SYSLOG_ACTION_CLEAR_BOOT    6
+/* Linux syslog(2) action numbers. In particular READ_ALL is 3, never CLEAR.
+ * Streaming READ/SIZE_UNREAD need a distinct global reader cursor and are
+ * explicitly unsupported rather than returning a fake byte count. */
+#define LINUX_SYSLOG_ACTION_READ          2
+#define LINUX_SYSLOG_ACTION_READ_ALL      3
+#define LINUX_SYSLOG_ACTION_READ_CLEAR    4
+#define LINUX_SYSLOG_ACTION_CLEAR         5
+#define LINUX_SYSLOG_ACTION_CONSOLE_OFF   6
+#define LINUX_SYSLOG_ACTION_CONSOLE_ON    7
 #define LINUX_SYSLOG_ACTION_CONSOLE_LEVEL 8
-#define LINUX_SYSLOG_ACTION_CONSOLE_OFF   9
+#define LINUX_SYSLOG_ACTION_SIZE_UNREAD   9
+#define LINUX_SYSLOG_ACTION_SIZE_BUFFER  10
 
-/*
- * syslog(2) over the kernel klog ring (kernel/core/klog.c).  The ring is the
- * same buffer /dev/kmsg serves, so SYSLOG_ACTION_READ_ALL returns the buffered
- * messages from offset 0 each call and returns 0 once drained — Linux's
- * contract for a non-blocking ring read.
- *
- * Boundary: A20OS keeps no per-uid ownership on the ring, so the
- * read/is-this-my-kernel-buffer distinction Linux makes with -EPERM does not
- * exist here; every process reads the same messages.  There is no separate
- * console vs. ring severity split, so the CONSOLE_* actions only move the
- * single global klog_level.
- */
+static int syslog_saved_console_level = KLOG_INFO;
+
+/* READ_ALL copies the retained ring without consuming it. A20OS still uses
+ * one global severity threshold for console and ring writers. */
 static int64_t syslog_read_ring(char *buf, int len, int clear_after)
 {
     /* klog_read() fills a kernel buffer, so the payload is staged and handed
@@ -174,6 +168,12 @@ static int64_t syslog_read_ring(char *buf, int len, int clear_after)
 
 int64_t sys_syslog(int type, char *buf, int len) {
     switch (type) {
+    case 0: /* CLOSE */
+    case 1: /* OPEN */
+        return 0;
+    case LINUX_SYSLOG_ACTION_READ:
+    case LINUX_SYSLOG_ACTION_SIZE_UNREAD:
+        return -EOPNOTSUPP;
     case LINUX_SYSLOG_ACTION_SIZE_BUFFER:
         /* Linux returns the buffer capacity, not the bytes currently held. */
         return (int64_t)KLOG_BUF_SIZE;
@@ -190,20 +190,20 @@ int64_t sys_syslog(int type, char *buf, int len) {
     case LINUX_SYSLOG_ACTION_CONSOLE_OFF:
         /* klog_level is a lower bound: nothing is emitted at all once it
          * sits above KLOG_ERR. */
+        if (klog_level <= KLOG_ERR)
+            syslog_saved_console_level = klog_level;
         klog_level = KLOG_ERR + 1;
         return 0;
+    case LINUX_SYSLOG_ACTION_CONSOLE_ON:
+        klog_level = syslog_saved_console_level;
+        return 0;
     case LINUX_SYSLOG_ACTION_CONSOLE_LEVEL: {
-        /* A20OS's klog_level is inverted with respect to Linux's
-         * console_loglevel (higher klog_level = quieter), so the Linux level
-         * is mirrored.  Only the KLOG_* severities the ring actually uses are
-         * accepted; wider values are refused rather than silently clamped. */
-        if (len < 0 || len > KLOG_ERR) return -EINVAL;
-        klog_level = KLOG_ERR - len;
+        if (len < 0 || len > 8) return -EINVAL;
+        klog_level = len == 0 ? KLOG_ERR + 1 :
+                     len <= 4 ? KLOG_ERR : len <= 6 ? KLOG_WARN :
+                     len == 7 ? KLOG_INFO : KLOG_DEBUG;
         return 0;
     }
-    case LINUX_SYSLOG_ACTION_CLEAR_BOOT:
-        /* The ring has no boot-time boundary to preserve. */
-        return -EOPNOTSUPP;
     default:
         return -EINVAL;
     }
