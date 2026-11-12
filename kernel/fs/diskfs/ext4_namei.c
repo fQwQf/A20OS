@@ -809,6 +809,22 @@ static int ext4_reclaim_removed_directory(ext4_sb_info_t *sb, uint32_t ino)
 }
 
 
+/* An ownership preflight has not modified metadata. A failed read leaves the
+ * durable orphan entry for shutdown/recovery; it cannot poison other writers'
+ * pending transaction. Mutation failures inside reap still abort as before. */
+static int ext4_orphan_read_vnode_owner(ext4_sb_info_t *sb, uint32_t ino,
+                                       ext4_inode_t *inode)
+{
+#ifdef CONFIG_EXT4_TEST_ORPHAN_READ_FAIL_ONCE
+    static unsigned injected;
+    if (!__atomic_exchange_n(&injected, 1, __ATOMIC_RELAXED)) {
+        printf("[EXT4/TEST] injected orphan preflight read failure ino=%u\n", ino);
+        return -EIO;
+    }
+#endif
+    return ext4_read_inode(sb, ino, inode);
+}
+
 void ext4_release_vn(vnode_t *vn) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     if (p && p->unlinked) {
@@ -818,7 +834,7 @@ void ext4_release_vn(vnode_t *vn) {
         p->unlinked = 0;
         rw_mutex_write_lock(&sb->metadata_lock);
         ext4_inode_t cur;
-        int read_ok = ext4_read_inode(sb, p->inode_num, &cur) == 0;
+        int read_ok = ext4_orphan_read_vnode_owner(sb, p->inode_num, &cur) == 0;
         /* Reaping by inode number alone is wrong once the entry is gone or the
          * number has been reused: the reap would fail noisily (and poison a
          * healthy journal) or free another file's inode. */
@@ -828,9 +844,16 @@ void ext4_release_vn(vnode_t *vn) {
         int ret = !read_ok ? -EIO : (owned ? ext4_orphan_reap(sb, p->inode_num)
                                            : 0);
         if (ret < 0) {
-            if (sb->journal) (void)ext4_journal_poison(sb);
-            printf("[EXT4] deferred orphan cleanup failed ino=%u err=%d; "
-                   "orphan retained for recovery\n", p->inode_num, ret);
+            if (read_ok && sb->journal) (void)ext4_journal_poison(sb);
+            if (read_ok)
+                printf("[EXT4] deferred orphan cleanup failed ino=%u err=%d; "
+                       "orphan retained for recovery\n", p->inode_num, ret);
+            else {
+                static unsigned reports;
+                if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 16)
+                    printf("[EXT4] orphan preflight read deferred ino=%u err=%d; "
+                           "unchanged orphan retained for shutdown/recovery\n", p->inode_num, ret);
+            }
         } else {
             vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         }
@@ -885,7 +908,7 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
     }
     int ret;
     ext4_inode_t cur;
-    int read_ok = ext4_read_inode(sb, p->inode_num, &cur) == 0;
+    int read_ok = ext4_orphan_read_vnode_owner(sb, p->inode_num, &cur) == 0;
     int owned = read_ok && cur.i_links_count == 0 &&
                 cur.i_dtime == __atomic_load_n(&p->orphan_next,
                                                __ATOMIC_ACQUIRE);
@@ -897,7 +920,7 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
         ret = ext4_orphan_reap(sb, p->inode_num);
     }
     if (ret < 0) {
-        if (sb->journal) (void)ext4_journal_poison(sb);
+        if (read_ok && sb->journal) (void)ext4_journal_poison(sb);
     } else {
         __atomic_store_n(&p->unlinked, 0, __ATOMIC_RELEASE);
         vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
