@@ -329,7 +329,11 @@ USB scan/enumerate/unregister 要求同一任务所有者协调；poll 的原子
 
 `g_driver_core_ops` 仍是 lifecycle mutex，`g_driver_core_lock` 仅在数组/claim 变更时持有；quiesce/remove/class drain 与 bus 通知不持 registry spinlock。驱动退出和设备递归移除的意图栈只在 lifecycle mutex 下读写，不分配公开生命周期对象。正在退出的驱动拒绝新匹配，正在移除的 provider/parent 链拒绝新消费关系；递归退出同一对象返回 `-EBUSY`。
 
-quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止；错误保留离线绑定、匹配身份、依赖和资源，并释放 lifecycle mutex 让调用者修复后显式重试。重试只调用 remove。回调不能等待必须取得 lifecycle mutex 的工作；consumer 失败时 provider 不提前停止。完整错误/重试契约见 [原生运行时](native-runtime.md#可失败的解绑与显式重试)。
+quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止；错误保留离线绑定、匹配身份、依赖和资源，并释放 lifecycle mutex 让调用者修复后显式重试。重试只调用 remove。回调不能等待必须取得 lifecycle mutex 的工作；未选择 prepare 的 provider 不提前停止；显式选择者可先冻结硬件，但保留 consumer 的清理存储和所需接口。完整错误/重试契约见 [原生运行时](native-runtime.md#可失败的解绑与显式重试)。
+
+### 提前退出准备
+
+`device_add_remove_prepare()` 的私有记录在当前 probe 分配，并要求先选择可失败 probe 清理；退出本身不分配记录。核心在自己的 removal 帧内 offline class、设置 PREPARING，再依次执行尚未完成的准备。回调失败时还没有递归解除 consumer，成功记录保留到最终 devres 释放；不能等待需要 lifecycle mutex 的工作。xHCI 在控制器自旋锁下封闭提交后释放锁，再 free_irq、检查 active transfer、等待硬件状态和访问 PCI；新的准备路径不在设备自旋锁下调用 PCI/discovery API。通用 USB 并发扫描/注销及旧 timeout 路径仍需独立审查。详见 [原生运行时](native-runtime.md#在-consumer-解绑前准备退出)。
 
 ### PC I²C 与独立无线服务
 

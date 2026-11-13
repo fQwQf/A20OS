@@ -10,7 +10,7 @@
 |---|---|
 | AMD-Vi 接管前资源完整性 | 已有被动 PCI 唯一绑定、IVRS 保留、完整 aperture checked claim，以及 probe 失败/解绑/重绑的主机与 QEMU 证据。已通过独立存储保留对象导入受管 RAM 与 ACPI 表页。已有 PCI 桥路径/AMD Range 查询，以及组合 IVRS requester/alias、PCI 路径和控制器上下文租约的保留路由对象。已有完整固件声明集合查询、逐成员发布/路径/归属/BME 检查与原子占用，成员失效后继续保留。仍须补齐 PFA 以外 RAM、其他固件/DT 保留来源，通过各所属驱动停止全部 alias peer 并协调归属变更，落实实际 AMD domain 的硬件权限/Unity/Exclusion 及停止/失败保留（已有覆盖全部声明成员的独立 IVMD 约束和通用映射入口检查），并补物理平台证据；被动绑定和只读快照均不授予硬件启用权限 |
 | AMD-Vi 翻译与故障处理 | 已有 IVMD → 独立 policy 与 managed 映射入口预检；仍需为实际 requester/alias 在硬件中落实权限、Unity 和排除范围，验证页表、失效完成、真实 DMA 读写与非法 IOVA fault；停止/失效超时继续保留硬件可访问页面与上下文，并有可重试关闭证据。现有 RISC-V 测试不能关闭此项 |
-| 失败后的硬件回收 | 核心已在成功 probe 后的 remove/发布清理失败时保留绑定和 devres，已接入 PCI、已发布 USB 端口和已知部分 slot 的枚举/发布失败；HCD 自身 start/probe 与未知 slot 结果仍需停止协议；仍需厂商驱动真实停止/失效失败证据、旧驱动接入已有显式失败 probe 保留协议，以及可失败 关机/kexec shutdown。不能以回调返回 0 或 metadata 离线替代硬件停止证明 |
+| 失败后的硬件回收 | 核心已在成功 probe 后的 remove/发布清理失败时保留绑定和 devres，已接入 PCI、已发布 USB 端口和已知部分 slot 的枚举/发布失败；xHCI 自身 start/probe 已接入 consumer 解绑前的可失败准备；仍需 interface 独立退出、Configure Endpoint ring、bulk 调用者缓冲区、并发 poll/scan/unregister 与其他 HCD 的协议；仍需厂商驱动真实停止/失效失败证据、旧驱动接入已有显式失败 probe 保留协议，以及可失败 关机/kexec shutdown。不能以回调返回 0 或 metadata 离线替代硬件停止证明 |
 | GPU 内存与请求模型 | 建立每设备 BO、GPUVM、context、提交与 fence 引用，验证进程退出、并发提交、超时/复位时请求完成和资源生命周期；现有通用 fence 不等于 DRM 同步 UAPI 已接通 |
 | Phoenix 原生执行与呈现 | 固定上游/固件版本后，依次取得真实 SDMA copy/fill 回读、Mesa 离屏渲染及显示接管证据；分别记录平台、设备身份与失败行为，不以 GOP、virtio-gpu 或软件渲染结果替代 |
 
