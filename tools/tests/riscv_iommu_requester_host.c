@@ -79,13 +79,79 @@ static void *host_compete(void *opaque) {
  else pci_requester_release(lease);
  return NULL;
 }
+/* A partially initialized native consumer delegates rollback to remove. */
+static struct driver_dma_domain *probe_domain;
+static device_t *probe_child;
+static unsigned probe_quiesces, probe_removes, probe_releases;
+static int probe_child_error;
+static void probe_release(void *context) {
+ (void)context;assert(!probe_domain);probe_releases++;
+}
+static int native_probe(device_t *device) {
+ assert(!device_probe_use_remove(device));
+ assert(!device_add_resource_action(device,probe_release,NULL));
+ int ret=riscv_iommu_dma_domain_create(device,&probe_domain);
+ device->drv_priv=probe_domain;
+ if(ret)return ret;
+ if(probe_child)assert(!device_register(probe_child));
+ return -EIO;
+}
+static void native_probe_quiesce(device_t *device) {(void)device;probe_quiesces++;}
+static int native_probe_remove(device_t *device) {
+ probe_removes++;
+ int ret=probe_domain?driver_dma_domain_shutdown(probe_domain):0;
+ if(ret)return ret;
+ driver_dma_domain_put(probe_domain);probe_domain=NULL;device->drv_priv=NULL;return 0;
+}
+static int native_child_probe(device_t *device) {(void)device;return 0;}
+static int native_child_remove(device_t *device) {(void)device;return probe_child_error;}
+static int native_child_match(device_t *device,const driver_t *driver) {(void)device;(void)driver;return 1;}
+static void native_probe_cleanup_case(device_t *device,device_t *external,bool child_pending) {
+ bus_type_t bus={.name="native-probe-child",.match=native_child_match};
+ driver_t child_driver={.name="native-probe-child",.bus=&bus,.probe=native_child_probe,.remove=native_child_remove};
+ device_t child={.name="native-probe-child",.bus=&bus,.parent=device,.references=1};
+ static const device_id_t ids[]={{.vendor=0x1234,.device=0x5678},{0}};
+ driver_t driver={.name="native-probe",.id_table=ids,.bus=&pci_bus,.probe=native_probe,
+  .quiesce=native_probe_quiesce,.remove=native_probe_remove};
+ if(child_pending) {
+  assert(!bus_register(&bus)&&!driver_register(&child_driver));
+  probe_child=&child;probe_child_error=-ETIMEDOUT;
+ } else fail_commands_after=3;
+ assert(!driver_register(&driver));
+ assert(device->drv==&driver&&device->drv_priv==probe_domain&&probe_domain);
+ assert(device->probe_error==-EIO&&device_is_stopping(device)&&!probe_releases);
+ busy(external);assert(live_frames()==3);
+ if(child_pending) {
+  assert(device->state==DEV_STATE_PROBE_CLEANUP&&!probe_quiesces&&!probe_removes);
+  pfn_t page=host_alloc_page();unsigned before=commands;
+  struct driver_dma_mapping *mapping=(void *)1;
+  assert(driver_dma_map_pages(probe_domain,&page,1,DRIVER_DMA_BIDIRECTIONAL,&mapping)==-ENODEV&&!mapping);
+  assert(host_refs[page]==1&&commands==before);host_frame_put(page);
+  struct driver_dma_domain *other=(void *)1;
+  assert(riscv_iommu_dma_domain_create(device,&other)==-ENODEV&&!other);
+  probe_child_error=0;
+ } else {
+  assert(device->state==DEV_STATE_REMOVING&&probe_quiesces==1&&probe_removes==1);
+  assert(driver_unregister(&driver)==-EIO&&probe_quiesces==1&&probe_removes==2&&!probe_releases);
+  assert(device->probe_error==-EIO);fail_commands_after=0;
+ }
+ assert(!device_unregister(device));
+ assert(probe_quiesces==1&&probe_releases==1&&!probe_domain);
+ assert(!live_frames());vacant(external);assert(!driver_unregister(&driver));
+ if(child_pending) {
+  assert(!device_unregister(&child));device_put(&child);
+  assert(!driver_unregister(&child_driver));bus_unregister(&bus);
+ }
+}
 static void requester_iommu_case(const char *name) {
  pci_insert();device_t *device=device_get(pci_current());assert(device);
  device_t external={.name="external",.references=1};assert(!device_register(&external));
  g_iommu_base=(uintptr_t)regs;g_iommu_ddt=ddt;g_iommu_dc_stride=32;
  g_iommu_cq=command_queue;g_iommu_fq=fault_queue;g_iommu_ready=1;
  struct driver_dma_domain *domain=NULL;uint16_t rid=0;
- if(!strcmp(name,"external")) {
+ if(!strcmp(name,"probe-cleanup")||!strcmp(name,"probe-child")) {
+  native_probe_cleanup_case(device,&external,!strcmp(name,"probe-child"));
+ } else if(!strcmp(name,"external")) {
   pci_requester_reservation_t *lease=NULL;
   assert(!pci_requester_reserve(&external,0,&rid,1,&lease));
   assert(riscv_iommu_dma_domain_create(device,&domain)==-EBUSY&&!domain);

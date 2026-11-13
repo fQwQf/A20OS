@@ -20,7 +20,16 @@ class DriverRemove(unittest.TestCase):
             path.write_text(content)
         prelude = (ROOT / 'tools/tests/driver_quiesce_host.c').read_text().split('static unsigned quiesced,')[0]
         fixture = work / 'fixture.c'
-        fixture.write_text(prelude + (ROOT / 'tools/tests/driver_remove_host.c').read_text())
+        prelude = prelude.replace('void *kmalloc(size_t n) { return malloc(n); }',
+                                  'static int probe_allocations_blocked;\nvoid *kmalloc(size_t n) { return probe_allocations_blocked ? NULL : malloc(n); }')
+        prelude = prelude.replace('return calloc(n, size);', 'return probe_allocations_blocked ? NULL : calloc(n, size);')
+        prelude = prelude.replace('return realloc(p, n);', 'return probe_allocations_blocked ? NULL : realloc(p, n);')
+        cases = (ROOT / 'tools/tests/driver_remove_host.c').read_text()
+        marker = 'int main(int argc,char **argv) {'
+        cases = cases.replace(marker, (ROOT / 'tools/tests/driver_probe_cleanup_host.c').read_text() + '\n' + marker)
+        cases = cases.replace('if(!strcmp(argv[1],"arguments"))',
+                              'if(!strncmp(argv[1],"probe-",6))probe_cleanup_case(argv[1]+6);\n else if(!strcmp(argv[1],"arguments"))')
+        fixture.write_text(prelude + cases)
         wrapper = work / 'registry.rs'
         wrapper.write_text('#![no_std]\n#![allow(unused_attributes)]\n#[path = ' + repr(str(ROOT / 'kernel/drivers/core/registry_state.rs')).replace("'", '"') + '] mod registry;\n'
                            '#[panic_handler] fn panic(_: &core::panic::PanicInfo)->! { unsafe extern "C" {fn abort()->!;} unsafe{abort()} }\n')
@@ -73,6 +82,28 @@ class DriverRemove(unittest.TestCase):
 
     def test_withdrawal_suppresses_new_bindings_and_rejects_recursive_teardown(self):
         self.run_cases('withdrawal', 'parent-publication')
+
+
+    def test_probe_error_uses_explicit_partial_cleanup(self):
+        self.run_cases('probe-early', 'probe-positive', 'probe-deferred')
+
+    def test_probe_error_retains_context_and_original_error_until_retry(self):
+        self.run_cases('probe-held', 'probe-deferred-held')
+
+    def test_probe_cleanup_waits_for_failed_child_before_quiescing_parent(self):
+        self.run_cases('probe-child-held')
+
+    def test_probe_cleanup_is_allocation_free_and_success_is_unchanged(self):
+        self.run_cases('probe-success')
+
+    def test_nested_probe_restores_cleanup_ownership(self):
+        self.run_cases('probe-nested')
+
+    def test_probe_cleanup_rejects_missing_remove_and_unpublished_devices(self):
+        self.run_cases('probe-missing-remove', 'probe-unpublished')
+
+    def test_legacy_failed_probe_keeps_its_original_rollback_contract(self):
+        self.run_cases('probe-legacy')
 
 
 if __name__ == '__main__':

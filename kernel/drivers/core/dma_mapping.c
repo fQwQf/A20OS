@@ -49,7 +49,7 @@ static int create_domain(device_t *device,
     *out = NULL;
     if (!device || !ops || (!ops->map_page && !managed) || (!ops->unmap_page && !legacy_unmap))
         return -EINVAL;
-    if (device->state == DEV_STATE_REMOVING || device->state == DEV_STATE_REMOVED)
+    if (device_is_stopping(device) || device->state == DEV_STATE_REMOVED)
         return -ENODEV;
     if (arch_device_dma_ready && !arch_device_dma_ready())
         return -EOPNOTSUPP;
@@ -294,7 +294,7 @@ static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
         return -EOVERFLOW;
     if (arch_device_dma_ready && !arch_device_dma_ready())
         return -EOPNOTSUPP;
-    if (domain->device->state == DEV_STATE_REMOVING ||
+    if (device_is_stopping(domain->device) ||
         domain->device->state == DEV_STATE_REMOVED)
         return -ENODEV;
     for (size_t i = 0; i < count; i++) {

@@ -45,6 +45,9 @@ class RiscvIommuRequester(unittest.TestCase):
             with self.subTest(case=name):
                 subprocess.run([str(self.binary), 'iommu-' + name], check=True, timeout=15)
 
+    def test_failed_probe_retains_real_domain_frames_and_lease_until_safe_cleanup(self):
+        self.run_cases('probe-cleanup', 'probe-child')
+
     def test_native_and_user_claims_conflict_with_external_leases(self):
         self.run_cases('external', 'user')
 
