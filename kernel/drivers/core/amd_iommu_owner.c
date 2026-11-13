@@ -238,18 +238,46 @@ int amd_iommu_owner_selftest(void) {
     int ret = acpi_table_find(acpi, "IVRS", 0, &table);
     if (ret)
         return firmware_error(ret);
-    acpi_ivrs_hardware_t hardware;
-    ret = acpi_ivrs_unit_get(&table, 0, &hardware);
+    /* The IVRS policy reader bounds units to 64. Pin the controllers which
+     * were actually bound, so the test never probes unrelated failed devices
+     * (a global probe_all could reinitialize storage/network hardware). */
+    device_t *devices[64] = {0};
+    size_t total = 0, count = 0;
+    driver_discovery_begin();
+    ret = acpi_ivrs_unit_count(&table, &total);
+    if (ret || total > ARRAY_SIZE(devices)) {
+        ret = ret ? firmware_error(ret) : -EOVERFLOW;
+        goto release_table;
+    }
+    for (size_t i = 0; i < total; i++) {
+        acpi_ivrs_hardware_t hardware;
+        ret = acpi_ivrs_unit_get(&table, i, &hardware);
+        if (ret) {
+            ret = firmware_error(ret);
+            goto release_table;
+        }
+        device_t *found = NULL;
+        ret = pci_device_find_get(hardware.segment, hardware.device_id, &found);
+        if (ret == -ENODEV || ret == -EOPNOTSUPP)
+            continue;
+        if (ret)
+            goto release_table;
+        bool duplicate = found->drv != &amdvi_driver;
+        for (size_t j = 0; j < count; j++)
+            duplicate |= devices[j] == found;
+        if (duplicate)
+            device_put(found);
+        else
+            devices[count++] = found;
+    }
+    ret = count ? 0 : -ENODEV;
+release_table:
     acpi_table_release(acpi, &table);
     if (ret)
-        return firmware_error(ret);
-    device_t *device = NULL;
-    driver_discovery_begin();
-    ret = pci_device_find_get(hardware.segment, hardware.device_id, &device);
-    if (ret)
         goto done;
+    device_t *device = devices[0];
     struct amdvi_owner *owner = device->drv_priv;
-    if (device->drv != &amdvi_driver || !owner || !owner->count) {
+    if (!owner || !owner->count) {
         ret = -ENODEV;
         goto done;
     }
@@ -268,16 +296,21 @@ int amd_iommu_owner_selftest(void) {
     ret = driver_resource_request(&peer, &range, &claim);
     driver_resource_release(claim);
     int rebound = driver_register(&amdvi_driver);
-    /* Restore every passive controller, including other PCI functions. The
-     * outer transaction suppresses register()'s automatic probing. */
-    if (!rebound)
-        driver_probe_all();
+    /* Restore only previous AMD-Vi owners. The outer transaction suppresses
+     * register()'s automatic probing of every unbound device. */
+    if (!rebound) {
+        for (size_t i = 0; i < count; i++)
+            if (bus_probe_device(devices[i]) ||
+                devices[i]->drv != &amdvi_driver)
+                rebound = -EIO;
+    }
     if (ret || rebound || device->drv != &amdvi_driver)
         ret = -EIO;
     else
         ret = driver_resource_check_claims(&peer, &range) == -EBUSY ? 0 : -EIO;
 done:
-    device_put(device);
+    for (size_t i = 0; i < count; i++)
+        device_put(devices[i]);
     driver_discovery_end();
     return ret;
 }
