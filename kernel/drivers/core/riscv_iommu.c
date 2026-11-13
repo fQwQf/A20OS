@@ -136,6 +136,8 @@ typedef struct iommu_user_domain {
     int blocked;
     int claim_failed;
     device_t *native_device; /* pinned by its managed DMA domain */
+    device_t *requester_device; /* pinned by reservation, for every owner */
+    pci_requester_reservation_t *reservation;
     int isolation_error;
     bool isolated;
     uint32_t fault_queue_error;
@@ -535,31 +537,38 @@ static int riscv_iommu_probe(device_t *dev)
     return 0;
 }
 
-static int domain_claim(uint16_t devid, int owner_pid)
+/* Caller holds discovery through admission, hardware publication and rollback.
+ * No allocation or requester lease operation runs under the domain spinlock. */
+static int domain_claim_locked(uint16_t devid, int owner_pid, device_t *device)
 {
-    if (!g_iommu_ready || !owner_pid || !iommu_dc(devid) ||
-        (iommu_read32(IOMMU_REG_FQCSR) & IOMMU_FQ_ERROR))
-        return -1;
+    if (!g_iommu_ready) return -ENODEV;
+    if (!owner_pid) return -EINVAL;
+    if (!iommu_dc(devid)) return -EOPNOTSUPP;
+    if (iommu_read32(IOMMU_REG_FQCSR) & IOMMU_FQ_ERROR) return -EIO;
 
 retry:
     ; /* a label precedes a statement in C99 */
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
     iommu_user_domain_t *existing = iommu_domain_for(devid, owner_pid);
     if (existing) {
+        if (existing->requester_device != device) {
+            spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+            return -ESTALE; /* Re-enumeration never refreshes an old claim. */
+        }
         int failed = existing->claim_failed;
         int blocked = existing->blocked;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         if (failed) {
             if (riscv_iommu_domain_release(devid, owner_pid) < 0)
-                return -1;
+                return -EIO;
             goto retry;
         }
-        return blocked ? -1 : 0; /* only healthy claims are idempotent */
+        return blocked ? -EIO : 0; /* only healthy claims are idempotent */
     }
     for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
         if (g_user_domains[i].active != 0 && g_user_domains[i].devid == devid) {
             spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-            return -1;                  /* already owned by someone else */
+            return -EBUSY;               /* already owned by someone else */
         }
     }
     iommu_user_domain_t *d = NULL;
@@ -571,13 +580,40 @@ retry:
     }
     if (!d) {
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-        return -1;
+        return -ENOSPC;
     }
     d->active = -1;                     /* reserved; not usable until DC is live */
     d->devid = devid;
     d->owner_pid = owner_pid;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
+    pci_requester_reservation_t *reservation = NULL;
+    int ret = pci_requester_reserve(device, 0, &devid, 1, &reservation);
+    if (ret) {
+        flags = spin_lock_irqsave(&g_iommu_domain_lock);
+        memset(d, 0, sizeof(*d));
+        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+        return ret;
+    }
+    /* The user path used to clear BME before checking shared ownership.
+     * Admit the requester first so a rejected claim cannot stop another owner. */
+    if (owner_pid > 0) {
+        uint32_t command = pci_cfg_read32(device, 4);
+        if (command == ~(uint32_t)0) ret = -EIO;
+        else {
+            pci_cfg_write16(device, 4, command & ~4U);
+            if (pci_cfg_read16(device, 4) & 4) ret = -EIO;
+        }
+        if (ret) {
+            flags = spin_lock_irqsave(&g_iommu_domain_lock);
+            memset(d, 0, sizeof(*d));
+            spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+            pci_requester_release(reservation);
+            return ret;
+        }
+    }
+    d->reservation = reservation;
+    d->requester_device = device;
     pfn_t root_pfn = pfa_alloc_page();
     pfn_t l1_pfn = pfa_alloc_page();
     pfn_t l0_pfn = pfa_alloc_page();
@@ -588,7 +624,8 @@ retry:
         flags = spin_lock_irqsave(&g_iommu_domain_lock);
         memset(d, 0, sizeof(*d));
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-        return -1;
+        pci_requester_release(reservation);
+        return -ENOMEM;
     }
 
     uint64_t *root = pfn_to_virt(root_pfn);
@@ -628,8 +665,9 @@ retry:
             pfa_free_page(root_pfn);
             pfa_free_page(l1_pfn);
             pfa_free_page(l0_pfn);
+            pci_requester_release(reservation);
         }
-        return -1;
+        return -EIO;
     }
 
     flags = spin_lock_irqsave(&g_iommu_domain_lock);
@@ -641,9 +679,20 @@ retry:
     return 0;
 }
 
+static int domain_claim(uint16_t devid, int owner_pid)
+{
+    driver_discovery_begin();
+    device_t *device = NULL;
+    int ret = pci_device_find_get(0, devid, &device);
+    if (!ret) ret = domain_claim_locked(devid, owner_pid, device);
+    device_put(device);
+    driver_discovery_end();
+    return ret;
+}
+
 int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
 {
-    return owner_pid > 0 ? domain_claim(devid, owner_pid) : -1;
+    return owner_pid > 0 && !domain_claim(devid, owner_pid) ? 0 : -1;
 }
 
 static int domain_map(uint16_t devid, int owner_pid, uint64_t phys,
@@ -857,7 +906,11 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
     return 0;
 }
 
-int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
+/* Native shutdown transfers the lease to its managed context: final release
+ * runs outside the mapper mutex, avoiding discovery <-> domain lock inversion.
+ * User teardown holds discovery and releases the lease here. */
+static int domain_detach(uint16_t devid, int owner_pid,
+                            pci_requester_reservation_t **retained)
 {
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
     iommu_user_domain_t *d = iommu_domain_for(devid, owner_pid);
@@ -870,6 +923,7 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
     pfn_t l1_pfn = d->l1_pfn;
     pfn_t l0_pfn = d->l0_pfn;
     uint64_t mapped = d->mapped_pages;
+    pci_requester_reservation_t *reservation = d->reservation;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
     if (iommu_context_block(devid) < 0) {
@@ -891,15 +945,27 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
                                  ? g_iommu_stats.mapped_pages - mapped : 0;
     memset(d, 0, sizeof(*d));
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+    if (retained) *retained = reservation;
+    else pci_requester_release(reservation); /* Confirmed invalidation. */
     kinfo("[IOMMU] user domain released did=%u owner=%d\n",
           devid, owner_pid);
     return 0;
+}
+
+int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
+{
+    if (owner_pid <= 0) return -1; /* Native ownership belongs to its handle. */
+    driver_discovery_begin();
+    int ret = domain_detach(devid, owner_pid, NULL);
+    driver_discovery_end();
+    return ret;
 }
 
 struct native_iommu_context {
     device_t *device; /* retained by the managed domain */
     uint16_t devid;
     int owner;
+    pci_requester_reservation_t *reservation; /* after successful deactivate */
 };
 
 static int native_map(void *opaque, uint64_t physical,
@@ -930,15 +996,17 @@ static int native_deactivate(void *opaque)
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     if (!present)
         return 0; /* A failed claim may have left no hardware resources. */
-    return riscv_iommu_domain_release(context->devid, context->owner) ? -EIO : 0;
+    return domain_detach(context->devid, context->owner, &context->reservation) ? -EIO : 0;
 }
 
 static void native_release(void *opaque)
 {
-    kfree(opaque);
+    struct native_iommu_context *context = opaque;
+    pci_requester_release(context->reservation);
+    kfree(context);
 }
 
-int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **out)
+static int native_create(device_t *device, struct driver_dma_domain **out)
 {
     if (!out)
         return -EINVAL;
@@ -956,8 +1024,12 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
     if (bus > 255 || slot > 31 || function > 7)
         return -EINVAL;
     uint16_t devid = (bus << 8) | (slot << 3) | function;
-    if (!iommu_dc(devid))
-        return -EOPNOTSUPP;
+    if (!iommu_dc(devid)) return -EOPNOTSUPP;
+    device_t *published = NULL;
+    ret = pci_device_find_get(0, devid, &published);
+    if (!ret && published != device) ret = -ESTALE;
+    device_put(published);
+    if (ret) return ret;
     if (pci_cfg_read16(device, 0x04) & 4)
         return -EBUSY;
     struct native_iommu_context *context = kmalloc(sizeof(*context));
@@ -971,7 +1043,7 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
     }
     int owner = -(int)++g_native_owner_serial;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-    *context = (struct native_iommu_context){device, devid, owner};
+    *context = (struct native_iommu_context){.device=device, .devid=devid, .owner=owner};
     const struct driver_dma_managed_ops ops = {
         native_map, native_unmap, native_deactivate, native_release,
     };
@@ -996,10 +1068,18 @@ int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **o
             *out = domain;
         else
             driver_dma_domain_put(domain);
-        return -EIO;
+        return claimed;
     }
     *out = domain;
     return 0;
+}
+
+int riscv_iommu_dma_domain_create(device_t *device, struct driver_dma_domain **out)
+{
+    driver_discovery_begin();
+    int ret = native_create(device, out);
+    driver_discovery_end();
+    return ret;
 }
 
 int riscv_iommu_native_identity(device_t *device, uint16_t *devid, int *owner)
@@ -1199,8 +1279,17 @@ void driver_iommu_native_selftest(void)
     IOMMU_CHECK(device && !device->drv && !device->user_owned);
     uint16_t command = pci_cfg_read16(device, 4);
     pci_cfg_write16(device, 4, command & ~4U);
-    struct driver_dma_domain *domain;
+    struct driver_dma_domain *domain = NULL;
+    pci_requester_reservation_t *reservation = NULL;
+    uint64_t before_context = iommu_dc(info.devid)[0];
+    IOMMU_CHECK(!pci_requester_reserve(device, 0, &info.devid, 1, &reservation));
+    IOMMU_CHECK(riscv_iommu_dma_domain_create(device, &domain) == -EBUSY && !domain);
+    IOMMU_CHECK(riscv_iommu_domain_claim(info.devid, 0x10000) < 0);
+    IOMMU_CHECK(iommu_dc(info.devid)[0] == before_context);
+    pci_requester_release(reservation);
     IOMMU_CHECK(!riscv_iommu_dma_domain_create(device, &domain));
+    IOMMU_CHECK(pci_requester_reserve(device, 0, &info.devid, 1, &reservation) == -EBUSY);
+    IOMMU_CHECK(!reservation && riscv_iommu_domain_claim(info.devid, 0x10000) < 0);
     pfn_t pages[2] = {pfa_alloc_page(), pfa_alloc_page()};
     IOMMU_CHECK(pages[0] != PFN_NONE && pages[1] != PFN_NONE);
     uint64_t physical[2] = {pfn_to_phys(pages[0]), pfn_to_phys(pages[1])};
@@ -1225,9 +1314,19 @@ void driver_iommu_native_selftest(void)
     native_test_edu_roundtrip(device, domain);
     IOMMU_CHECK(!driver_dma_domain_shutdown(domain));
     IOMMU_CHECK(native_test_translation(info.devid, address, true) & IOMMU_TR_RESP_FAULT);
+    IOMMU_CHECK(pci_requester_reserve(device, 0, &info.devid, 1, &reservation) == -EBUSY);
     driver_dma_domain_put(domain);
+    IOMMU_CHECK(!pci_requester_reserve(device, 0, &info.devid, 1, &reservation));
+    pci_requester_release(reservation);
+    IOMMU_CHECK(!riscv_iommu_domain_claim(info.devid, 0x10000));
+    IOMMU_CHECK(!riscv_iommu_domain_claim(info.devid, 0x10000));
+    IOMMU_CHECK(pci_requester_reserve(device, 0, &info.devid, 1, &reservation) == -EBUSY);
+    IOMMU_CHECK(!reservation && !riscv_iommu_domain_release(info.devid, 0x10000));
+    IOMMU_CHECK(!pci_requester_reserve(device, 0, &info.devid, 1, &reservation));
+    pci_requester_release(reservation);
     pci_cfg_write16(device, 4, command);
     device_put(device);
+    kinfo("DRIVER_IOMMU_REQUESTER: PASS native=1 user=1 conflict=1 release=1\n");
     kinfo("DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1 fault=1 watch=1\n");
 #undef IOMMU_CHECK
 }
