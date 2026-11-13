@@ -807,14 +807,23 @@ static int pci_user_device_find_index_locked(uint16_t vendor, uint16_t device,
             continue;
         if (seen++ != index)
             continue;
-        if (pci_assign_bars(&g_pci_devs[i], 0) != 0 ||
+        device_t *native = &g_pci_devs[i];
+        /* A lookup must not resize BARs, rewrite resources or clear BME on a
+         * live kernel/user binding. Unowned devices retain the legacy setup
+         * path until their service explicitly takes ownership. */
+        bool owned = native->drv || native->user_owned;
+        if ((!owned && pci_assign_bars(native, 0) != 0) ||
             !info->bar[0] || !info->bar_size[0])
             return -1;
         out->vendor = vendor;
         out->device = device;
         out->devid = ((uint16_t)info->bus << 8) |
                      ((uint16_t)info->dev << 3) | info->func;
-        int irq = pci_intx_irq(&g_pci_devs[i]);
+        int irq = -1;
+        if (owned) {
+            for (int r = 0; r < native->res_count; r++)
+                if (native->res[r].type == RES_IRQ) { irq = (int)native->res[r].start; break; }
+        } else irq = pci_intx_irq(native);
         out->irq = irq < 0 ? 0xffffu : (uint16_t)irq;
         out->bar0_phys = info->bar[0];
         out->bar0_size = info->bar_size[0];

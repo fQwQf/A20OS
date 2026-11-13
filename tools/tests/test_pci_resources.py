@@ -21,7 +21,7 @@ static struct function hardware[NBUSES][32][8];
 static uint64_t window_base=0x10000000, window_size=0x1000000, reachable_limit=~(uint64_t)0;
 static int window_status, added, removed, depth, transactions, premature_probe, retried, host_calls;
 static uintptr_t host_base;
-static unsigned nonbar_writes, status_clears;
+static unsigned nonbar_writes, status_clears,config_writes;
 int fixture_routed_irq=-1, fixture_route_calls;
 int klog_level=10;
 void klog_write(const char *fmt, ...) {(void)fmt;}
@@ -58,7 +58,7 @@ uint32_t arch_pci_config_read32(int b,int d,int f,uint32_t reg) {
  return h->cfg[reg/4];
 }
 void arch_pci_config_write32(int b,int d,int f,uint32_t reg,uint32_t value) {
- struct function *h=hw(b,d,f);assert(h&&reg<256);reg&=~3U;
+ struct function *h=hw(b,d,f);assert(h&&reg<256);reg&=~3U;config_writes++;
  unsigned header=(h->cfg[3]>>16)&0x7f,bars=header==0?6:header==1?2:0;
  if(reg>=0x10&&reg<0x10+bars*4) {
   unsigned bar=(reg-0x10)/4;
@@ -258,9 +258,23 @@ static void check_virtio_capabilities(unsigned optional_type,int malformed) {
  assert(transport_storage.isr==window_base+0x2000&&transport_storage.config==window_base+0x3000);
  assert(transport_storage.notify_multiplier==4);
 }
+static void check_owned_query(unsigned kind) {
+ struct function *h=function_at(0,0,0);bar(h,0,window_base,0x1000,0);h->cfg[0x3c/4]=0x10b;
+ fixture_routed_irq=0x4b;scan();device_t *d=device_at(0,0);
+ driver_t binding={.name="live",.read_only_probe=kind==1};
+ if(kind<2)d->drv=&binding;else d->user_owned=1;
+ h->cfg[1]|=7;uint32_t before[64];memcpy(before,h->cfg,sizeof(before));
+ resource_t resources[7];memcpy(resources,d->res,sizeof(resources));int count=d->res_count;
+ unsigned writes=config_writes;int routes=fixture_route_calls;
+ pci_user_device_info_t info;assert(!pci_user_device_find(0x1234,0x5678,&info));
+ assert(info.bar0_phys==window_base&&info.bar0_size==0x1000&&info.irq==0x4b);
+ assert(config_writes==writes&&fixture_route_calls==routes&&!memcmp(before,h->cfg,sizeof(before)));
+ assert(count==d->res_count&&!memcmp(resources,d->res,sizeof(resources))&&(h->cfg[1]&4));
+}
 int main(int argc,char **argv) {
  assert(argc==2);
- if(!strcmp(argv[1],"window"))check_allocation_windows();
+ if(!strncmp(argv[1],"owned-query",11))check_owned_query((unsigned)(argv[1][11]-'0'));
+ else if(!strcmp(argv[1],"window"))check_allocation_windows();
  else if(!strcmp(argv[1],"limits"))check_allocation_limits();
  else if(!strcmp(argv[1],"unknown"))check_unknown_device_reservation();
  else if(!strcmp(argv[1],"all-reservations"))check_all_published_reservations();
@@ -305,6 +319,9 @@ class PciResourcesTests(unittest.TestCase):
  def run_case(self,name):
   result=subprocess.run([str(self.exe),name],capture_output=True,text=True)
   self.assertEqual(result.returncode,0,result.stderr)
+ def test_owned_device_query_preserves_dma_bars_resources_and_irq_routing(self):
+  for kind in range(3):
+   with self.subTest(kind=kind):self.run_case('owned-query'+str(kind))
  def test_host_owned_window(self):self.run_case('window')
  def test_window_overflow_exhaustion_and_32bit_limit(self):self.run_case('limits')
  def test_unknown_device_reserves_assigned_bar(self):self.run_case('unknown')
