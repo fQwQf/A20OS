@@ -16,8 +16,10 @@ MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检
 
 ```sh
 git diff --check
-make check-driver-core-model
-make check-doc-drift
+make check-firmware-model
+make check-component-registry
+# 修改PC输入/网络/桌面驱动时也运行：
+make check-pc-drivers
 make smoke-driver-lifecycle
 make smoke-platform-irq-fallback
 make smoke-hda
@@ -26,7 +28,7 @@ make PYTHON=python3 smoke-virtio-sound
 make smoke-pci-portability
 ```
 
-这些命令不全是静态检查：`check-driver-core-model` 依赖 `smoke-driver-lifecycle`，其余 `smoke-*` 也会构建并启动 QEMU。按改动范围和宿主能力执行，并在提交证据中明确未运行项。
+`check-firmware-model`、`check-pc-drivers` 在宿主编译和执行生产路径测试；`smoke-*` 会构建并启动 QEMU。按改动范围和宿主能力执行，并在提交证据中明确未运行项。
 
 `smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
 
@@ -112,8 +114,8 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 | 失败门禁 | 先检查什么 | 下一步 |
 |---|---|---|
 | `git diff --check` 报错 | 行尾空格、tab 混用、文件尾空行 | 修复并重新 `git diff --check` |
-| `make check-driver-core-model` | driver core 头文件、ID 表、class ops 是否匹配规范 | 对照 [drivers/core-model.md](../guide/core-model.md) 和 `kernel/include/drivers/` 修正 |
-| `make check-doc-drift` | 文档与代码中同名常量、命令或矩阵不一致 | 同步文档和实现，确保命令矩阵和真实 Makefile 目标一致 |
+| `make check-firmware-model` | driver core 头文件、ID 表、class ops 是否匹配规范 | 对照 [drivers/core-model.md](../guide/core-model.md) 和 `kernel/include/drivers/` 修正 |
+| `make check-component-registry` | 文档与代码中注册表、生成清单与真实模块构建规则不一致 | 同步文档和实现，确保命令矩阵和真实 Makefile 目标一致 |
 | `make smoke-driver-lifecycle` 失败 | 合成 bus/device 注册、probe 失败清理、unregister 路径 | 加 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 日志，确认失败点是否释放资源 |
 | `make smoke-platform-irq-fallback` 失败 | `platform_device_irq()` 的四种返回、`request_irq`/`free_irq` 往返、`a20.dw-sdio.poll=1` 解析 | 加 `CONFIG_PLATFORM_IRQ_TEST=y` 日志，看是哪个断言行打印了 FAIL |
 | 构建矩阵中某一架构失败 | 是否用了 `#ifdef CONFIG_BOARD_` 或架构私有头 | 把板级常量移到 platform，把可跨架构代码改成通用 PCI/MMIO |

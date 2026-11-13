@@ -17,7 +17,15 @@ Early DriverStore 是解除“模块在根盘上、根盘驱动又是模块”�
 
 启动生命周期已经分为两个实际入口：`driver_manager_early_init()` 在 `vfs_init()` 之后、`mount_block_devices()` 之前仅扫描 `/boot/drivers` 并只激活内核模块；`driver_manager_init()` 在 `proc_init()` 后注册 runtime board device 并扫描 `/bin/lib/drivers`，此时才允许生成用户服务。这样 early 包无法错误地在进程子系统尚未初始化时启动用户态代码。
 
-generic 只把驱动核心、总线与 `GENERIC_KERNEL_SERVICE_SRCS` 的九个显式服务源码链接进镜像：`loop`、`udisk`、`pty`、`uart`、`framebuffer`、`gpu_core`、`audio_core`、`input_mux` 和 `usb_core`。设备包由 `tools/mk/driver-modules.mk` 按架构列出，不能把 `EMBEDDED_DEVICE_DRIVER_SRCS` 自动等同于 generic 包集合。Early 集合也按架构不同；Runtime DriverStore 只接收该架构模块清单扣除 Early 集合后的包，以及构建规则列出的 user-service 包。当前 StarFive/LS2K GMAC 没有 generic 包，虽在 embedded 静态账本中，但 generic 板级构建不会获得它们。新增内核服务、embedded 驱动或 generic 包都必须分别进入对应显式账本并说明启动依赖。
+generic 只链接驱动核心、总线与 `GENERIC_KERNEL_SERVICE_SRCS` 的显式内核服务：
+I²C注册表、固件GPIO输入适配、loop/udisk/tun、pty/uart/fbcon、framebuffer/simplefb/
+lsdc-boot/gpu_core/DRM、audio_core/ALSA、input_mux和USB core。simplefb及lsdc-boot是
+保留固件scanout的启动例外，不是把所有显示硬件驱动静态链接的许可。
+设备包由 `components/drivers.toml` 和 `tools/mk/driver-modules.mk` 按架构列出，不能把
+`EMBEDDED_DEVICE_DRIVER_SRCS` 自动等同于generic包集合。Early集合按架构不同；Runtime
+只接收该架构模块清单扣除Early集合后的包。StarFive/LS2K GMAC、DesignWare I²C与I²C-HID
+目前没有generic包；RTW broker的构建开关当前限定x86 embedded。新增服务、embedded设备或
+generic包必须分别进入对应账本，说明启动依赖和资源所有权。
 
 板级设备通过 `platform_bus` 注册并携带 `hardware_id`，驱动按 platform id 匹配；驱动核心不再允许无总线设备被任意总线无关驱动抢占，无总线驱动必须提供显式 `match()` 才能绑定（UART 串口服务即按设备名匹配）。不得为了移动源文件而在模块中复制 transport、IRQ、DMA 或 class 服务实现。
 
@@ -25,7 +33,7 @@ IOMMU 属于内核 DMA 隔离基础设施：RISC-V provider 与 x86_64 + ACPI �
 
 ## embedded
 
-full profile 的 `DRIVER_DEPLOYMENT=embedded` 将 `EMBEDDED_DEVICE_DRIVER_SRCS` 与内核服务静态链接到内核，过滤掉 `driver_manager.c`，不构建 `.a20drv` 包，也不填充或扫描 DriverStore。该静态账本不是 generic 包的并集：RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 和 vinput-probe 等 module-only 实现当前不会出现在 embedded 镜像。
+full profile 的 `DRIVER_DEPLOYMENT=embedded` 将 `EMBEDDED_DEVICE_DRIVER_SRCS` 与内核服务静态链接到内核，过滤掉 `driver_manager.c`，不构建 `.a20drv` 包，也不填充或扫描 DriverStore。该静态账本不是 generic 包的并集：RTC、PC speaker、TPM、HDA、vinput 和 vinput-probe 等 module-only 实现当前不会出现在 embedded 镜像。NVMe在x86_64/loongarch64、PS/2在x86_64由embedded显式选择对应的共享实现；DesignWare I²C、I²C-HID与R8169也在静态账本中。
 
 MCU profile 是构建图例外：`armv7m` 强制 `PROFILE=mcu`，直接通配 `BOARD_DRIVER_DIR`（当前为 `kernel/arch/armv7m/boards/stm32f103/drivers/*.c`）和板级平台源码，不消费 full profile 的 `DRIVER_KERNEL_SRCS`。`armv7m` 和尚无 drvmod 工具链的 `ppc64le` 当前都默认标记为 embedded，但二者的实际源码选择分别由 MCU 分支和 full-profile embedded 分支决定。其他架构可显式选择 embedded，但必须按实际构建分支核对所需能力。
 

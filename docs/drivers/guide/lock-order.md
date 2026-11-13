@@ -276,9 +276,9 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 
 ### USB HID
 
-每接口 `usb_hid_dev_t.lock` 保护 event ring、previous report 和 pending URB 的完成/重提交流程；`usb_hid_complete()` 现在自己取该锁，因此不论 completion 来自 IRQ handler、`usb_core_poll()` 还是别的 endpoint 的 event wait，锁覆盖都是一致的。
+每接口 `usb_hid_dev_t.lock` 保护 event ring 和 previous report；URB 的重提交在锁外进行；`usb_hid_complete()` 现在自己取该锁，因此不论 completion 来自 IRQ handler、`usb_core_poll()` 还是别的 endpoint 的 event wait，锁覆盖都是一致的。
 
-局部顺序记为 **`h->lock -> xhci->lock`（单向）**：解析 report 在 `h->lock` 下，重提 URB 走 `usb_submit_interrupt()` 进入 HCD。HCD 不回调 class，所以反向不存在。
+解析 report 在 `h->lock` 下，随后释放锁再通知 input mux、发送控制台字符及重提 URB。HCD completion 也在 controller 锁外执行；不能在 HID spinlock 内调度唤醒或同步控制传输。
 
 配套的两条写法也是规范的一部分：
 
@@ -316,3 +316,10 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 - `kernel/drivers/net/starfive_gmac.c`：per-instance lock 串行化 descriptor ring。
 - `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
 - `kernel/arch/riscv64/boards/visionfive2/board.c`、`kernel/arch/loongarch64/boards/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。
+
+### PC I²C 与独立无线服务
+
+- I²C 注册表 spinlock 只保护 adapter/owner/refcount；transfer 始终在锁外。控制器 remove 必须传播引用仍在时的 `-EBUSY`。
+- I²C-HID 的 `io_lock` 串行报告、恢复与停止；`event_lock` 只保护事件 ring。workqueue 的 cancel/destroy 在 `io_lock` 外等待，退出失败保留 context、work 和 adapter。每设备独立 work，回调不持注册表锁。
+- RTW broker 的顺序是 `wifi_open_lock -> wifi.control -> packets_lock`；最后一把只保护固定容量队列，不做用户拷贝、映射或分配。probe/open/remove/close 通过外层 mutex 串行化；存活 owner 或隔离 DMA 阻止新实例覆盖传输状态。
+- R8169 的 ring/counter 锁是每设备对象；remove 先停止新 I/O、屏蔽并归还 IRQ，再确认 TX/RX 停止，随后释放 DMA 和实例。停止超时保留 ring，不能以释放内存冒充清理成功。

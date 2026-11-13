@@ -14,6 +14,7 @@
 | [可安装内核驱动](guide/kernel-modules.md) | 可加载内核模块（drvmod）、框架导出 API、DriverStore 与迁移状态 |
 | [驱动部署 Profile](guide/deployment-profiles.md) | generic 架构模块清单、embedded 静态账本、Early/Runtime DriverStore |
 | [启动与硬件发现](../dev/boot-model.md) | 交接阶段、DT/ACPI/静态 provider、设备图、资源和依赖 |
+| [x86 实机驱动复用](guide/x86-hardware-reuse.md) | 代码归属、硬件匹配、上游服务边界与移植验证 |
 | [核心设备与驱动模型](guide/core-model.md) | `device_t`、`driver_t`、`bus_type_t` 与 probe/remove 生命周期 |
 | [热插拔与即插即用](guide/hotplug-and-pnp.md) | USB/PCI 运行期发现、ADD/REMOVE 生命周期与驱动编写要求 |
 | [设备类接口](guide/device-classes.md) | 各类操作、单位、返回值和阻塞语义 |
