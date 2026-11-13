@@ -33,6 +33,9 @@ static int checked_reserve(amd_iommu_route_t *route) {
 static int checked_policy_create(amd_iommu_route_t *route,struct driver_dma_policy **out) {
  unsigned n=scope_writes;int ret=amd_iommu_route_policy_create(route,out);assert(scope_writes==n);return ret;
 }
+static int checked_requesters(amd_iommu_route_t *route,uint16_t *ids,size_t capacity,size_t *count) {
+ unsigned n=scope_writes;int ret=amd_iommu_route_requesters(route,ids,capacity,count);assert(scope_writes==n);return ret;
+}
 static void checked_release(amd_iommu_route_t *route) {
  unsigned n=scope_writes;amd_iommu_route_release(route);assert(scope_writes==n);
 }
@@ -122,6 +125,9 @@ static void route_policy_check(struct driver_dma_policy *p,uint64_t address,
 }
 static void route_case(const char *name) {
  int alias=strstr(name,"alias")!=NULL,valid=strstr(name,"range")!=NULL;
+ int peer_case=!strncmp(name,"peers-",6);
+ unsigned peer_requester=0x228;
+ struct scope_function *peer_hw=NULL;
  struct scope_function *root=scope_bridge(0,1,1,2);
  scope_bridge(1,2,2,2);scope_add(2,3,2,0);
  if(alias)scope_add(2,4,0,0);
@@ -158,11 +164,15 @@ static void route_case(const char *name) {
   route_put(route_ivrs,at+8,0xfed80000,8);route_length+=24;route_select(0x21a,0x13);
   route_ivmd(0x21a,0x100800,2);expected_memory_count=2;
  }
- if(!strcmp(name,"reserve-alias-sibling")) {
-  scope_add(2,5,0,0);memmove(route_ivrs+108,route_ivrs+100,route_length-100);
+ if(!strcmp(name,"reserve-alias-sibling")||peer_case) {
+  if(strstr(name,"range-outside")) {
+   scope_bridge(0,4,3,3);peer_requester=0x328;peer_hw=scope_add(3,5,0,0);
+  } else peer_hw=scope_add(2,5,0,0);
+  memmove(route_ivrs+108,route_ivrs+100,route_length-100);
   memset(route_ivrs+100,0,8);route_ivrs[100]=0x42;
-  route_put(route_ivrs,101,0x228,2);route_put(route_ivrs,105,0x220,2);
+  route_put(route_ivrs,101,peer_requester,2);route_put(route_ivrs,105,0x220,2);
   route_length+=8;route_put(route_ivrs,50,60,2);
+  if(peer_case)route_ivmd(peer_requester,0x300000,strstr(name,"exclusion")?8:0);
  }
  if(!strcmp(name,"alias-range-outside")) {
   scope_hw[2][4][0].present=0;scope_add(0,4,0,0);
@@ -194,6 +204,9 @@ static void route_case(const char *name) {
   acpi_ivrs_memory_t m;memset(&m,0xa5,sizeof(m));
   assert(amd_iommu_route_memory(NULL,0,&m)==-EINVAL&&!m.start);
   assert(amd_iommu_route_memory(NULL,0,NULL)==-EINVAL);amd_iommu_route_release(NULL);
+  size_t n=999;uint16_t ids[2]={0xa5a5,0xa5a5};
+  assert(amd_iommu_route_requesters(NULL,ids,2,&n)==-EINVAL&&!n&&ids[0]==0xa5a5);
+  assert(amd_iommu_route_requesters(NULL,ids,2,NULL)==-EINVAL);
  } else if(!strcmp(name,"allocation")) {
   fail_at=allocations+1;route_acquire_error(client,-ENOMEM);fail_at=0;
   assert(client->references==client_refs&&allocated==before&&route_tables==1);
@@ -218,7 +231,78 @@ static void route_case(const char *name) {
   assert(!amd_iommu_route_memory(route,0,&memory)&&memory.start==0x100000&&memory.flags==first_flags);
   if(alias)assert(!amd_iommu_route_memory(route,1,&memory)&&memory.start==second_start&&memory.flags==second_flags);
   assert(amd_iommu_route_memory(route,info.memory_count,&memory)==-ENODEV&&!memory.start);
-  if(!strncmp(name,"policy-",7)) {
+  if(peer_case) {
+   size_t count=0;uint16_t ids[ACPI_IVRS_REQUESTER_MAX];
+   for(unsigned i=0;i<ACPI_IVRS_REQUESTER_MAX;i++)ids[i]=0xa5a5;
+   assert(amd_iommu_route_requesters(route,NULL,0,&count)==-ENOSPC&&count==3);
+   assert(amd_iommu_route_requesters(route,ids,2,&count)==-ENOSPC&&count==3&&ids[0]==0xa5a5);
+   assert(amd_iommu_route_requesters(route,NULL,3,&count)==-EINVAL&&!count);
+   assert(!amd_iommu_route_requesters(route,ids,ACPI_IVRS_REQUESTER_MAX,&count)&&count==3);
+   assert(ids[0]==0x21a&&ids[1]==0x220&&ids[2]==peer_requester&&ids[3]==0xa5a5);
+   device_t *member=scope_device(peer_requester);
+   if(strstr(name,"policy")) {
+    if(strstr(name,"exclusion"))route_policy_error(route,-EOPNOTSUPP);
+    else {
+     struct driver_dma_policy *p=NULL;assert(!amd_iommu_route_policy_create(route,&p));
+     route_policy_check(p,0x300000,DRIVER_DMA_TO_DEVICE,-EACCES,false);
+     route_policy_check(p,0x100000,DRIVER_DMA_TO_DEVICE,0,true);driver_dma_policy_put(p);
+    }
+   } else {
+    int before=allocated;unsigned refs=member->references;
+    if(strstr(name,"missing")) {
+     peer_hw->present=0;pci_rescan();assert(amd_iommu_route_reserve(route)==-ENODEV);
+     peer_hw->present=1;pci_rescan();device_put(member);member=scope_device(peer_requester);
+    } else if(strstr(name,"range-outside")) {
+     assert(amd_iommu_route_reserve(route)==-ENODEV);goto peer_done;
+    } else if(strstr(name,"user-before")) {
+     member->user_owned=1;assert(amd_iommu_route_reserve(route)==-EBUSY);member->user_owned=0;
+    } else if(strstr(name,"bme")) {
+     peer_hw->config[1]|=4;assert(amd_iommu_route_reserve(route)==-EBUSY);peer_hw->config[1]&=~4U;
+    } else if(strstr(name,"read")) {
+     peer_hw->config[1]=0xffffffff;assert(amd_iommu_route_reserve(route)==-EIO);peer_hw->config[1]=0;
+    } else if(strstr(name,"allocation")) {
+     for(unsigned i=1;i<=2;i++) {
+      fail_at=allocations+i;assert(amd_iommu_route_reserve(route)==-ENOMEM);fail_at=0;
+      assert(allocated==before&&member->references==refs);
+     }
+    } else if(strstr(name,"conflict")) {
+     pci_requester_reservation_t *block=NULL,*vacant=NULL;
+     uint16_t key=peer_requester,original=0x21a;
+     assert(!pci_requester_reserve(provider,0,&key,1,&block));
+     assert(amd_iommu_route_reserve(route)==-EBUSY);
+     assert(!pci_requester_reserve(provider,0,&original,1,&vacant));
+     pci_requester_release(vacant);pci_requester_release(block);
+    }
+    assert(allocated==before);
+    assert(!amd_iommu_route_reserve(route)&&route->peer_count==3);
+    assert(member->references>=refs+1); /* Peer pins are independent of this test's pin. */
+    pci_requester_reservation_t *other=(void *)1;uint16_t key=peer_requester;
+    assert(pci_requester_reserve(provider,0,&key,1,&other)==-EBUSY&&!other);
+    if(strstr(name,"replaced")) {
+     peer_hw->config[0]=0x99991234;pci_rescan();route_error(route,-ESTALE);
+     device_t *newmember=scope_device(peer_requester);assert(newmember!=member);
+     amd_iommu_route_t *fresh=NULL;assert(!amd_iommu_route_acquire(newmember,&fresh));device_put(newmember);
+     assert(amd_iommu_route_reserve(fresh)==-EBUSY);
+     amd_iommu_route_release(route);route=fresh;assert(!amd_iommu_route_reserve(route));
+    } else if(strstr(name,"gone")) {
+     peer_hw->present=0;pci_rescan();route_error(route,-ENODEV);
+     assert(pci_requester_reserve(provider,0,&key,1,&other)==-EBUSY&&!other);
+    } else if(strstr(name,"user-after")) {
+     member->user_owned=1;route_error(route,-EBUSY);member->user_owned=0;
+     assert(!amd_iommu_route_validate(route,&info));
+    } else if(strstr(name,"detached")) {
+     assert(!driver_unregister(&amdvi_driver));route_error(route,-ESHUTDOWN);
+     assert(!amd_iommu_route_requesters(route,ids,3,&count)&&count==3);
+     driver_discovery_begin();assert(!driver_register(&amdvi_driver));driver_discovery_end();
+     assert(!bus_probe_device(provider));
+     amd_iommu_route_t *fresh=NULL;assert(!amd_iommu_route_acquire(client,&fresh));
+     assert(amd_iommu_route_reserve(fresh)==-EBUSY);
+     amd_iommu_route_release(route);route=fresh;assert(!amd_iommu_route_reserve(route));
+    }
+   }
+peer_done:
+   device_put(member);
+  } else if(!strncmp(name,"policy-",7)) {
    if(!strcmp(name,"policy-exclusion")||!strcmp(name,"policy-reserved"))route_policy_error(route,-EOPNOTSUPP);
    else if(!strcmp(name,"policy-invalid-unity"))route_policy_error(route,-EINVAL);
    else if(!strcmp(name,"policy-stale")) {
@@ -372,7 +456,7 @@ class AmdIommuRouteTests(unittest.TestCase):
         source = source.replace(old, 'static void *route_map(uint64_t,size_t,uint32_t);\nstatic void route_unmap(void *,size_t);\nvoid *arch_device_map_mmio(uint64_t pa,size_t n,uint32_t f){return route_map(pa,n,f);}\nvoid arch_device_unmap_mmio(void *p,size_t n){route_unmap(p,n);}')
         marker = 'int main(int argc,char **argv) {'
         cases = CASES
-        for suffix in ('acquire', 'validate', 'memory', 'release', 'reserve', 'policy_create'):
+        for suffix in ('acquire', 'validate', 'memory', 'release', 'reserve', 'policy_create', 'requesters'):
             cases = cases.replace('amd_iommu_route_' + suffix + '(', 'checked_' + suffix + '(')
         source = source.replace(marker, SCOPE_CASES.split('static void scope_expect(')[0] + WRAPPERS + cases + '\n' + marker)
         source = source.replace('if(!strcmp(argv[1],"pci-retired"))', 'if(!strncmp(argv[1],"route-",6))route_case(argv[1]+6);\n else if(!strcmp(argv[1],"pci-retired"))')
@@ -450,6 +534,21 @@ class AmdIommuRouteTests(unittest.TestCase):
 
     def test_policy_copy_failures_liveness_and_independent_storage(self):
         self.run_cases('policy-allocation', 'policy-stale', 'policy-detach')
+
+    def test_complete_peer_query_and_retained_metadata(self):
+        self.run_cases('peers-alias-query', 'peers-alias-detached')
+
+    def test_every_peer_must_be_published_stopped_owned_and_covered(self):
+        self.run_cases('peers-alias-missing', 'peers-alias-bme', 'peers-alias-user-before', 'peers-alias-read', 'peers-alias-range-outside')
+
+    def test_reserved_peer_identities_survive_removal_and_replacement(self):
+        self.run_cases('peers-alias-replaced', 'peers-alias-gone', 'peers-alias-user-after')
+
+    def test_peer_set_reservation_is_atomic_and_failure_safe(self):
+        self.run_cases('peers-alias-conflict', 'peers-alias-allocation')
+
+    def test_policy_contains_sibling_peer_constraints(self):
+        self.run_cases('peers-alias-policy', 'peers-alias-policy-exclusion')
 
 
 if __name__ == '__main__':

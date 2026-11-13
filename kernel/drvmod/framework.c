@@ -483,6 +483,7 @@ const struct drv_export drv_export_table[] = {
     { "amd_iommu_route_acquire", (void *)amd_iommu_route_acquire },
     { "amd_iommu_route_validate", (void *)amd_iommu_route_validate },
     { "amd_iommu_route_reserve", (void *)amd_iommu_route_reserve },
+    { "amd_iommu_route_requesters", (void *)amd_iommu_route_requesters },
     { "amd_iommu_route_memory", (void *)amd_iommu_route_memory },
     { "amd_iommu_route_policy_create", (void *)amd_iommu_route_policy_create },
     { "amd_iommu_route_release", (void *)amd_iommu_route_release },

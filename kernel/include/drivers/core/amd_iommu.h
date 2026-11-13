@@ -74,13 +74,22 @@ int amd_iommu_route_acquire(struct device *client, amd_iommu_route_t **out);
  * -> -ESTALE. Does not freeze hardware: serialize validation AND subsequent
  * use with an outer discovery transaction. A route never grants activation. */
 int amd_iommu_route_validate(amd_iommu_route_t *, amd_iommu_route_info_t *info);
-/* Reserve this route's original AND DMA requester in the PCI namespace.
- * Task context; caller has stopped DMA. Revalidates the route, requires both
- * functions kernel-owned with BME disabled, then atomically reserves both IDs.
+/* Copy the complete firmware-declared requester set, including sibling aliases.
+ * Metadata remains readable after unbind; no PCI references/pointers escape.
+ * Success copies all IDs and sets count. Insufficient capacity -> -ENOSPC with
+ * required count (NULL IDs/capacity zero is a size query). Other errors clear
+ * count; the buffer is unchanged on all errors. This is not live admission. */
+int amd_iommu_route_requesters(amd_iommu_route_t *, uint16_t *ids,
+                                size_t capacity, size_t *count);
+/* Reserve ALL firmware-declared requesters sharing this DMA requester.
+ * Task context; caller has stopped every peer's DMA via its owning driver.
+ * Revalidates the route, requires every peer published, kernel-owned and BME
+ * disabled, then atomically reserves all IDs and retains each identity/scope.
+ * Missing peer -> -ENODEV; no partial reservation or automatic peer unbind.
  * Duplicate on the same live handle -> -EALREADY; any overlapping reservation
  * -> -EBUSY, including aliases, old device identities and detached bindings.
  * Success changes software ownership only; it neither drains DMA nor proves
- * ACS/peer isolation, alias-peer quiescence, IVMD enforcement or activation.
+ * ACS/peer isolation, in-flight DMA drain, IVMD hardware enforcement or activation.
  * The route owns this reservation until release; retain it on uncertain stop.
  * A failed reservation leaves the original observation handle owned by caller. */
 int amd_iommu_route_reserve(amd_iommu_route_t *);
@@ -89,8 +98,9 @@ int amd_iommu_route_reserve(amd_iommu_route_t *);
  * immutable policy remains readable after controller unbind. */
 int amd_iommu_route_memory(amd_iommu_route_t *, size_t index,
                             acpi_ivrs_memory_t *out);
-/* Build an independent immutable DMA policy from this live route's matching
- * IVMDs (original AND aliased requester, all retained IVHD alternatives).
+/* Build an independent immutable DMA policy from this live route's COMPLETE
+ * firmware requester set and all retained IVHD alternatives. Each matching
+ * IVMD record is included once, even when it covers several peers.
  * IR/IW become device READ/WRITE restrictions; Unity requires identity.
  * Reserved flags or related ExclusionRange -> -EOPNOTSUPP; Unity with neither
  * IR nor IW -> -EINVAL. Never silently ignore unsupported hardware policy.

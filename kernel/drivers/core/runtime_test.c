@@ -283,6 +283,13 @@ static void exercise_amdvi_route(bool reserve, bool policy_test) {
     CHECK(!amd_iommu_route_validate(route, &info));
     CHECK(info.requester == 0x100 && info.dma_requester == 0x100 && !info.alias);
     CHECK(info.unit.register_size && info.unit.base);
+    if (reserve) {
+        uint16_t ids[2] = {0xffff, 0xffff};
+        size_t count = 0;
+        CHECK(amd_iommu_route_requesters(route, NULL, 0, &count) == -ENOSPC && count == 1);
+        CHECK(!amd_iommu_route_requesters(route, ids, 2, &count));
+        CHECK(count == 1 && ids[0] == 0x100 && ids[1] == 0xffff);
+    }
     struct driver_dma_policy *policy = NULL;
     if (policy_test) {
         CHECK(!info.memory_count); /* QEMU fixture has no IVMD blocks. */
@@ -312,6 +319,8 @@ static void exercise_amdvi_route(bool reserve, bool policy_test) {
     kinfo("AMDVI_ROUTE: PASS route=1 policy=1 scope=1\n");
     if (reserve)
         kinfo("AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1\n");
+    if (reserve)
+        kinfo("AMDVI_PEERS: PASS query=1\n");
     if (policy_test)
         kinfo("AMDVI_POLICY: PASS create=1 retained=1\n");
 }
