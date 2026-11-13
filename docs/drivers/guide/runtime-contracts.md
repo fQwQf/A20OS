@@ -69,9 +69,13 @@ int      dma_addr_ok(const struct device *dev, uint64_t addr);
 int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 ```
 
-`dma_alloc_coherent` 返回清零的 CPU 地址，并在 `dma_handle` 返回设备使用的物理/DMA 地址。释放时必须传回同一地址、大小和 handle；释放不查 mask，所以 free 系列不带 `dev`。`dma_alloc_coherent_aligned` 是页分配对齐版本（物理连续 + 指定对齐）。
+`dma_alloc_coherent` 返回清零的 CPU 地址，并在 `dma_handle` 返回设备使用的物理/DMA 地址。释放时必须传回同一地址、大小和 handle；释放不查 mask，所以 free 系列不带 `dev`。`dma_alloc_coherent_aligned` 是页分配版本，对齐须为非零二次幂且不超过 PAGE_SIZE；更强对齐应使用独立 DMA buffer 对象。
 
 `dma_alloc_coherent()` 可能返回两种来源的内存：kmalloc 快路径的块，或（块落在 mask 窗口外时）帧分配器的物理连续页块。因此 `dma_free_coherent()` 不能一律 `kfree()`——把帧分配器页块交给 `kfree()` 会命中 `panic("kfree: invalid pointer")`。释放端用 `kmalloc_owns()` 判定来源（slab 页头 magic / big-alloc 头，与 `kfree()` 内部的判断同序同条件）：kmalloc 的块走 `kfree()`，帧分配器页块走 `pfa_free()`（`dma_free_coherent_aligned()` 的路径）。不要用「页对齐」或 `dma_handle == 0` 代替这个判定——kmalloc 的大块分配同样页对齐。分配与释放仍然必须成对：`dma_alloc_coherent()` ↔ `dma_free_coherent()`，`dma_alloc_coherent_aligned()` ↔ `dma_free_coherent_aligned()`。
+
+### 原生 buffer 对象
+
+`driver_dma_buffer_create(dev, size, alignment, &buffer)` 保存实际页阶数和设备引用，支持请求大小独立于强对齐，按捕获的 mask 分配和校验。用 `driver_dma_buffer_get/put` 独立交还引用，`data/address/size` 观察 CPU alias、CPU PA 和请求长度；地址不是自动生成的 IOVA。创建不等待生命周期锁，最终 put 在任务上下文执行，不能把 put 当作硬件停止或映射失效。unbind 不自动释放对象。完整错误码、限制和 xHCI 首个使用者见 [DMA buffer 所有权](native-runtime.md#独立-dma-buffer-所有权)。
 
 ### DMA mask
 
@@ -80,7 +84,7 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 规则：
 
 1. probe 中读到硬件能力后、第一次分配 DMA 之前调用 `dma_set_mask()`。mask 必须是低位连续 1，否则返回 `-EINVAL`，不会被静默取整。
-2. 分配器按 mask 校验并在不满足时另选内存：`dma_alloc_coherent()` 先走 kmalloc 快路径，块落在窗口外时归还并改从帧分配器取物理连续页；`dma_alloc_coherent_aligned()` 向帧分配器重试固定次数（`DMA_MASK_ALLOC_ATTEMPTS`）。
+2. 分配器按 mask 校验并在不满足时另选内存：`dma_alloc_coherent()` 先走 kmalloc 快路径，块落在窗口外时归还并改从帧分配器取物理连续页；`dma_alloc_coherent_aligned()` 在 mask 受限时通过 `pfa_alloc_max(order, mask)` 选取物理连续块，完整 64 位窗口则使用普通 PFA。
 3. 无法满足时返回 `NULL`。`NULL` 是 probe 失败的信号，没有 bounce 路径，也不会截断 handle。**不得**为了让它成功而改用一个设备解不了的地址。
 4. `dma_alloc_*_coherent(NULL, ...)` 表示「没有可约束的设备」，走完整 64 位窗口。普通设备驱动应传入已枚举的 `device_t`，以应用该设备的 DMA mask。
 5. 驱动自己分配的 ring/context（例如 kmalloc 出来的 xHCI controller 结构）不经过分配器，必须在把地址写进设备前用 `dma_addr_ok()` / `dma_range_ok()` 校验，否则返回失败。
