@@ -8,6 +8,7 @@
 #include "drivers/core/firmware.h"
 #include "drivers/core/amd_iommu.h"
 #include "drivers/core/memory.h"
+#include "drivers/bus/pci_bus.h"
 #include "mm/frame.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
@@ -247,6 +248,23 @@ static void exercise_resources(void) {
     device_put(&b);
 }
 
+static void exercise_pci_scope(void) {
+    /* Explicit QEMU gate: one EDU endpoint on bus 1 behind a root port.
+     * Only query identity and topology; never enable/assign its BAR or DMA. */
+    driver_discovery_begin();
+    device_t *client = NULL, *anchor = NULL;
+    CHECK(!pci_device_find_get(0, 0x100, &client));
+    CHECK(pci_device_id(client) == 0x123411e8);
+    CHECK(!pci_device_scope_get(client, 0, 0, 255, &anchor));
+    CHECK(anchor != client && (pci_class_code(anchor) >> 8) == 0x0604);
+    device_put(anchor);
+    CHECK(!pci_device_scope_get(client, 1, 0, 0, &anchor) && anchor == client);
+    device_put(anchor);
+    CHECK(pci_device_scope_get(client, 1, 1, 255, &anchor) == -ENODEV && !anchor);
+    device_put(client);
+    driver_discovery_end();
+}
+
 void driver_runtime_selftest_boot(void)
 {
     const char *args = bootargs_get();
@@ -261,12 +279,16 @@ void driver_runtime_selftest_boot(void)
     bool amdvi_owner = boot_flag(args, "driver.amdvi_owner_test=1");
     if (amdvi_owner)
         CHECK(!amd_iommu_owner_selftest());
+    bool pci_scope = boot_flag(args, "driver.pci_scope_test=1");
+    if (pci_scope)
+        exercise_pci_scope();
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1\n"
+    kinfo("%sDRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
-          amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "");
+          amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",
+          pci_scope ? " pci=1" : "");
     if (current_board && current_board->poweroff)
         current_board->poweroff();
     panic("DRIVER_RUNTIME: poweroff returned");

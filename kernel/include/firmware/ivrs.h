@@ -56,7 +56,8 @@ typedef struct {
  * within a unit; conflicting explicit matches
  * are ambiguous. Unknown policy in any alternative, undeclared alias targets
  * and alias chains are UNSUPPORTED. ALL plus an alias match is ambiguous.
- * An ALL-only result still needs hardware PCI coverage validation. All views
+ * An ALL-only result still needs PCI topology/ownership validation; an invalid
+ * hardware Range register cannot supply coverage evidence. All views
  * borrow the immutable table. Limits: 64 units, 1024 blocks. Errors clear out.
  * PCI capability coverage, shared alias groups, HID binding and actual IOMMU
  * capabilities must still be checked by the hardware driver. */

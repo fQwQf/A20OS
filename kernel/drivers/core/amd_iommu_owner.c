@@ -282,6 +282,14 @@ release_table:
         goto done;
     }
     resource_t range = owner->units[0].aperture;
+    if (!owner->units[0].snapshot.range_valid) {
+        device_t *anchor = (void *)1;
+        if (amd_iommu_scope_get(&owner->units[0].snapshot, device, &anchor) !=
+                -EOPNOTSUPP || anchor) {
+            ret = -EIO;
+            goto done;
+        }
+    }
     device_t peer = {.name = "amdvi-claim-test", .references = 1};
     driver_resource_claim_t *claim = NULL;
     ret = driver_resource_request(&peer, &range, &claim);
