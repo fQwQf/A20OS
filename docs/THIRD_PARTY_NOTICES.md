@@ -65,3 +65,7 @@ A20OS 文档或源码注释提到以下实现参考与研究对照。该分类�
 ---
 
 _本文件由 A20OS 维护；如有遗漏或错误，请提交 issue/PR。_
+
+## LLVM 编译器运行库
+
+选择 `TOOLCHAIN=llvm` 时，构建系统从官方校验归档编译 compiler-rt 19.1.7 builtins，替代 libgcc。源码及配套 CMake 模块保存在 `build/toolchains/sources/`，采用 Apache-2.0 WITH LLVM-exception（以各自源码 LICENSE.TXT 为准）。归档校验值、构建步骤和运行库 ABI 说明见 [LLVM 工具链](dev/llvm-toolchain.md)。默认 GCC 构建路径仍使用其对应运行库及许可。

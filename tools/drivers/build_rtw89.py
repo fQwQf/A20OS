@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the independent GPL rtw89 service against A20OS's static musl."""
 import argparse
+import os
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -121,7 +122,7 @@ def main():
     binary = out / "rtw89d"
     command = [*compiler, "-static", "-no-pie", "-nostdlib", "-Wl,--gc-sections",
                str(crt / "crt1.o"), str(crt / "crti.o"), *map(str, objects),
-               str(crt / "libc.a"), "-lgcc", str(crt / "crtn.o"), "-o", str(binary)]
+               str(crt / "libc.a"), *( [str(Path(os.environ.get("LLVM_RT_ROOT", ROOT / "build/toolchains/compiler-rt")) / "x86_64-user/builtins.a")] if os.environ.get("TOOLCHAIN") == "llvm" else ["-lgcc"] ), str(crt / "crtn.o"), "-o", str(binary)]
     subprocess.run(command, check=True)
     (out / "build.json").write_text(json.dumps({
         "upstream_commit": PIN, "firmware_sha256": FW_HASH,

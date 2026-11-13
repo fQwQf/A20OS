@@ -19,8 +19,8 @@ struct a20_ring_spsc {
     void    **buf;
     uint32_t  mask;       /* capacity - 1 (must be power-of-2) */
     uint32_t  _pad;
-    _Atomic uint32_t write_idx;
-    _Atomic uint32_t read_idx;
+    uint32_t write_idx;
+    uint32_t read_idx;
 };
 
 static inline void a20_ring_spsc_init(struct a20_ring_spsc *r,

@@ -48,6 +48,12 @@ XLATOR_PROBE     := $(USER_BUILD_DIR)/xlate_probe-$(XLATOR_GUEST)
 XLATOR_TRANSLATOR := $(USER_BUILD_DIR)/qemu-$(XLATOR_GUEST)
 
 $(XLATOR_PROBE): $(XLATOR_PROBE_SRC) tools/mk/targets-xlator.mk tools/xlator/xlator_fetch.py
+ifeq ($(TOOLCHAIN),llvm)
+	$(MAKE) -C user ARCH=$(XLATOR_GUEST) TOOLCHAIN=llvm all
+	@mkdir -p $(dir $@)
+	cp user/build/llvm-rt-$(XLATOR_GUEST)/xlate_probe $@
+	$(PYTHON) tools/xlator/xlator_fetch.py --check-guest --path $@ --guest $(XLATOR_GUEST)
+else
 	@mkdir -p $(dir $@)
 	@if [ -z "$(XLATOR_GUEST_CC)" ] || ! command -v $(XLATOR_GUEST_CC) >/dev/null 2>&1; then \
 		echo "xlate-probe: no $(XLATOR_GUEST) cross compiler (tried '$(XLATOR_GUEST_CC)')" >&2; \
@@ -57,6 +63,7 @@ $(XLATOR_PROBE): $(XLATOR_PROBE_SRC) tools/mk/targets-xlator.mk tools/xlator/xla
 	$(XLATOR_GUEST_CC) -static -O2 -Wall -Wextra -o $@ $<
 	@$(PYTHON) tools/xlator/xlator_fetch.py --check-guest --path $@ --guest $(XLATOR_GUEST)
 	@echo "xlate-probe: built $@ (verified $(XLATOR_GUEST))"
+endif
 
 $(XLATOR_TRANSLATOR): tools/xlator/xlator_fetch.py
 	$(PYTHON) tools/xlator/xlator_fetch.py \

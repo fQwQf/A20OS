@@ -239,3 +239,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 - `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
 - 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
 - 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。
+
+## 可选 Clang / LLVM 工具链
+
+默认保留 GCC。使用 `TOOLCHAIN=llvm` 选择 Clang；安装步骤、架构范围、compiler-rt 运行库准备和启动验证命令见 [Clang / LLVM 工具链](llvm-toolchain.md)。

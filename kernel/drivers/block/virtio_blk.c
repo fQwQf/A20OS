@@ -111,7 +111,7 @@ typedef struct {
      * and "delivered again, on the new CPU" after the destination was
      * rewritten is the only observation that tells a moved vector from a
      * moved vector that delivers. */
-    _Atomic uint32_t   msix_delivered_cpus;
+    uint32_t   msix_delivered_cpus;
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];

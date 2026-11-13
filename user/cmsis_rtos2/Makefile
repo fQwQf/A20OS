@@ -1,3 +1,5 @@
+ARCH ?= riscv32
+include ../../tools/mk/llvm.mk
 # A20OS CMSIS-RTOS2 personality.
 #
 #   make test                      host self-test (POSIX backend)
@@ -25,6 +27,11 @@ OUT   := build/test_cmsis
 NATIVE_TEST := build/test_cmsis_native
 
 CC_RISCV32 ?= riscv32-linux-gnu-gcc
+ifeq ($(TOOLCHAIN),llvm)
+CC := $(CLANG) $(LLVM_LINK)
+CC_RISCV32 := $(CLANG) --target=riscv32-unknown-elf
+endif
+
 RV32FLAGS  := -Os -march=rv32imc -mabi=ilp32 -ffreestanding \
               -ffunction-sections -fdata-sections \
               -Iinclude -Isrc -I../liba20rt -I../../kernel/include/uapi

@@ -31,6 +31,10 @@ DRVMOD_GCC := $(CCACHE_PREFIX)loongarch64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
                  -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
 endif
+ifeq ($(TOOLCHAIN),llvm)
+DRVMOD_GCC := $(LLVM_CC) $(LLVM_LINK)
+DRVMOD_CFLAGS += -Wno-typedef-redefinition
+endif
 DRVMOD_CFLAGS += -std=gnu99
 ifeq ($(ARCH),x86_64)
 DRVMOD_CFLAGS += -DCONFIG_NR_CPUS=$(NR_CPUS)

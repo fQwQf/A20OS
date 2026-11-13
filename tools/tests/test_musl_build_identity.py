@@ -1,16 +1,25 @@
 import importlib.util
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).parents[1] / "musl_build_identity.py"
+MODULE_PATH = Path(__file__).parents[1] / "packaging" / "musl_build_identity.py"
 SPEC = importlib.util.spec_from_file_location("musl_build_identity", MODULE_PATH)
 musl_build_identity = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(musl_build_identity)
 
 
 class MuslBuildIdentityTests(unittest.TestCase):
+    def test_compiler_arguments_are_preserved_without_shell_execution(self):
+        with patch.object(musl_build_identity.shutil, "which", return_value="/usr/bin/clang"), \
+             patch.object(musl_build_identity.subprocess, "run") as run:
+            run.return_value.stdout = "test\n"
+            result = musl_build_identity.compiler_identity("clang --target=riscv64-linux-gnu")
+            self.assertEqual(result["arguments"], ["--target=riscv64-linux-gnu"])
+            self.assertIn("--target=riscv64-linux-gnu", run.call_args.args[0])
+
     def test_generated_build_dirs_do_not_change_source_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "musl"

@@ -5,6 +5,7 @@ This is an out-of-tree port dependency probe, not a runnable backend. Successful
 compilation never suppresses undefined symbols or supplies fake runtime stubs.
 """
 import argparse
+import os
 import concurrent.futures
 import hashlib
 import json
@@ -317,10 +318,16 @@ def main():
     args = parser.parse_args()
     target = TARGETS[args.arch]
     if args.cc is None:
-        args.cc = target['triple'] + '-gcc'
+        args.cc = (os.environ.get('CLANG', os.environ.get('LLVM_PREFIX', '') + 'clang' + os.environ.get('LLVM_SUFFIX', '')) if os.environ.get('TOOLCHAIN') == 'llvm' else target['triple'] + '-gcc')
     if args.nr_cpus < 1:
         parser.error('--nr-cpus must be positive')
     cross = args.cross_prefix if args.cross_prefix is not None else target['triple'] + '-'
+    llvm = os.environ.get('TOOLCHAIN') == 'llvm'
+    def binary(name):
+        if llvm:
+            return os.environ.get('LLVM_PREFIX', '') + ('ld.lld' if name == 'ld' else 'llvm-' + name) + os.environ.get('LLVM_SUFFIX', '')
+        return cross + name
+
     compiler_version = subprocess.check_output([args.cc, '--version'], text=True)
     target_flags = (['--target=' + target['triple']] if 'clang' in compiler_version.lower() else [])
     target_flags += target['cflags']
@@ -411,22 +418,22 @@ def main():
         if result.returncode == 0:
             overrides = selection.get('object_symbol_overrides', {}).get(source, {})
             if overrides:
-                subprocess.run([cross + 'objcopy', *['--redefine-sym=' + old + '=' + new
+                subprocess.run([binary('objcopy'), *['--redefine-sym=' + old + '=' + new
                                             for old, new in overrides.items()], str(obj)], check=True)
                 row['object_symbol_overrides'] = overrides
-            row['undefined'] = subprocess.check_output([cross + 'nm', '-u', str(obj)], text=True).splitlines()
+            row['undefined'] = subprocess.check_output([binary('nm'), '-u', str(obj)], text=True).splitlines()
         return row
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         rows = list(pool.map(compile_one, [(s, 'upstream') for s in sources] + [(s, 'a20') for s in port_sources] + [(s, 'a20-bsd') for s in bsd_port_sources] + [('generated/linker_if.c', 'generated')]))
     linked = None
     if all(row['rc'] == 0 for row in rows):
         objects = [str(out/(row['source'].replace('/', '_') + '.o')) for row in rows]
-        result = subprocess.run([cross + 'ld', '-r', *objects, '-o', str(out/'bsd-core.o')],
+        result = subprocess.run([binary('ld'), '-r', *objects, '-o', str(out/'bsd-core.o')],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         (out/'partial-link.log').write_bytes(result.stdout)
         linked = dict(rc=result.returncode)
         if result.returncode == 0:
-            linked['undefined'] = subprocess.check_output([cross + 'nm', '-u', str(out/'bsd-core.o')], text=True).splitlines()
+            linked['undefined'] = subprocess.check_output([binary('nm'), '-u', str(out/'bsd-core.o')], text=True).splitlines()
             # BSD's malloc/free/printf and kernel globals must never bind to
             # similarly named A20OS symbols with different signatures. Prefix
             # both defined and unresolved symbols; only explicit host imports
@@ -457,12 +464,12 @@ def main():
             mapping = out/'host-imports.map'
             mapping.write_text(''.join(f'a20_bsd_{name} {target}\n' for name, target in bridge.items()))
             prefixed = out/'bsd-core-isolated.o'
-            subprocess.run([cross + 'objcopy', '--prefix-symbols=a20_bsd_',
+            subprocess.run([binary('objcopy'), '--prefix-symbols=a20_bsd_',
                             str(out/'bsd-core.o'), str(prefixed)], check=True)
-            subprocess.run([cross + 'objcopy', '--redefine-syms=' + str(mapping),
+            subprocess.run([binary('objcopy'), '--redefine-syms=' + str(mapping),
                             str(prefixed)], check=True)
             global_symbols = subprocess.check_output(
-                [cross + 'nm', '-g', '--format=posix', str(prefixed)], text=True)
+                [binary('nm'), '-g', '--format=posix', str(prefixed)], text=True)
             unexpected = [line.split()[0] for line in global_symbols.splitlines()
                           if line and not line.split()[0].startswith('a20_bsd_')
                           and line.split()[0] not in bridge.values()]
@@ -475,17 +482,17 @@ def main():
             linked['namespace_checked'] = True
             linked['host_imports'] = {k: v for k, v in bridge.items() if k != '_GLOBAL_OFFSET_TABLE_'}
             linked['isolated_undefined'] = subprocess.check_output(
-                [cross + 'nm', '-u', str(prefixed)], text=True).splitlines()
-            symbols = subprocess.check_output([cross + 'readelf', '-sW', str(prefixed)], text=True)
+                [binary('nm'), '-u', str(prefixed)], text=True).splitlines()
+            symbols = subprocess.check_output([binary('readelf'), '-sW', str(prefixed)], text=True)
             (out/'isolated-symbols.txt').write_text(symbols)
             linked['tls_symbols'] = [line.strip() for line in symbols.splitlines()
                                      if ' TLS ' in line]
-            relocations = subprocess.check_output([cross + 'readelf', '-rW', str(prefixed)], text=True)
+            relocations = subprocess.check_output([binary('readelf'), '-rW', str(prefixed)], text=True)
             (out/'isolated-relocations.txt').write_text(relocations)
             if args.emulated_tls:
                 if linked['tls_symbols'] or re.search(r'R_\w*(?:TLS|TPREL|TPOFF|DTP|GOTTPOFF)', relocations):
                     raise SystemExit('native TLS remains in emulated BSD core')
-                assembly = subprocess.check_output([cross + 'objdump', '-d', str(prefixed)], text=True)
+                assembly = subprocess.check_output([binary('objdump'), '-d', str(prefixed)], text=True)
                 if args.arch == 'x86_64' and re.search(r'%[fg]s:', assembly):
                     raise SystemExit('BSD core still accesses FS/GS')
                 linked['no_native_tls_checked'] = True
@@ -499,7 +506,7 @@ def main():
             linked['elf_target_checked'] = True
             linked['isolated_sha256'] = hashlib.sha256(elf).hexdigest()
             (out/'isolated-sections.txt').write_text(subprocess.check_output(
-                [cross + 'readelf', '-SW', str(prefixed)], text=True))
+                [binary('readelf'), '-SW', str(prefixed)], text=True))
     manifest = dict(arch=args.arch, net_profile=args.net_profile, router=args.router, emulated_tls=args.emulated_tls,
                     tls_lowering='explicit-accessors' if explicit_tls else 'compiler',
                     revision=pin['revision'], source_manifest_sha256=hashlib.sha256((port/'port-sources.toml').read_bytes()).hexdigest(), partial_link=linked, compiler=compiler_version, status='object-compilation-only-not-linked', sources=rows)

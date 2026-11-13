@@ -27,14 +27,14 @@
 #define A20_SHMRING_MAGIC   0x53524E47u /* "SRNG" */
 
 typedef struct a20_shmring {
-    _Atomic uint32_t magic;
+    uint32_t magic;
     uint32_t         cap;        /* data bytes, power of two */
-    _Atomic uint32_t tail;       /* producer cursor (monotonic) */
-    _Atomic uint32_t head;       /* consumer cursor (monotonic) */
-    _Atomic uint32_t c_sleep;    /* consumer doorbell (futex word) */
-    _Atomic uint32_t p_sleep;    /* producer doorbell (futex word) */
-    _Atomic uint32_t ready;      /* consumer attached (futex word) */
-    _Atomic uint32_t done;       /* consumer finished (futex word) */
+    uint32_t tail;       /* producer cursor (monotonic) */
+    uint32_t head;       /* consumer cursor (monotonic) */
+    uint32_t c_sleep;    /* consumer doorbell (futex word) */
+    uint32_t p_sleep;    /* producer doorbell (futex word) */
+    uint32_t ready;      /* consumer attached (futex word) */
+    uint32_t done;       /* consumer finished (futex word) */
     uint32_t         total_lo;   /* optional: total bytes expected */
     uint32_t         total_hi;
     uint32_t         _pad[6];    /* keep header 64 bytes */

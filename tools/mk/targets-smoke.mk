@@ -805,7 +805,7 @@ smoke-ufs-confirm-ack:
 	log="$(SMOKE_LOG_DIR)/ufs-confirm-ack-riscv64.log"; \
 	test -x "$$bin" || { echo "smoke-ufs-confirm-ack: missing $$bin"; exit 1; }; \
 	cp "$$bin" "$$bin.strip"; \
-	riscv64-linux-gnu-strip "$$bin.strip" 2>/dev/null || true; \
+	$(if $(filter llvm,$(TOOLCHAIN)),$(LLVM_PREFIX)llvm-strip$(LLVM_SUFFIX),riscv64-linux-gnu-strip) "$$bin.strip" 2>/dev/null || true; \
 	mcopy -o -i $(RV64_BOTH_DEV_DIR)/fat32.img "$$bin.strip" ::/ufsd-rv; \
 	status=0; \
 	$(TIMEOUT) --expect '# ' --send-line 'ufs_confirm_ack_test' \

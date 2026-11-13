@@ -1,7 +1,7 @@
 # Host-side unit tests for pure kernel format/helper logic.  These compile
 # shared headers with the host compiler and run on the build machine, so
 # format regressions are caught without booting the kernel.
-HOST_CC ?= gcc
+HOST_CC ?= $(if $(filter llvm,$(TOOLCHAIN)),$(CLANG) $(LLVM_LINK),gcc)
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 
 # Every tools/tests/*.c falls into exactly one of three sets, and only the

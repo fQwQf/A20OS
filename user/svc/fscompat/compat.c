@@ -145,13 +145,14 @@ void (*fscompat_log_sink)(const char *line);
 
 int klog_level = KLOG_DEBUG;
 
-static void emit(const char *fmt, va_list ap)
+static int emit(const char *fmt, va_list ap)
 {
     if (!fscompat_log_sink)
-        return;
+        return 0;
     char buf[256];
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    int len = vsnprintf(buf, sizeof(buf), fmt, ap);
     fscompat_log_sink(buf);
+    return len < 0 ? 0 : (len < (int)sizeof(buf) ? len : (int)sizeof(buf) - 1);
 }
 
 void klog_write(const char *fmt, ...)
@@ -160,6 +161,26 @@ void klog_write(const char *fmt, ...)
     va_start(ap, fmt);
     emit(fmt, ap);
     va_end(ap);
+}
+
+int klog_write_ex(int level, const char *fmt, ...)
+{
+    if (level < klog_level)
+        return 0;
+    va_list ap;
+    va_start(ap, fmt);
+    int len = emit(fmt, ap);
+    va_end(ap);
+    return len;
+}
+
+/* FIFO waitqueues belong to the kernel pipe service, not this disk backend.
+ * Refuse the open rather than interpreting a FIFO inode as an ordinary file. */
+vfile_t *fifo_open_vnode(vnode_t *vn, int flags)
+{
+    (void)vn;
+    (void)flags;
+    return NULL;
 }
 
 void panic(const char *fmt, ...)

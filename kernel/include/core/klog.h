@@ -21,7 +21,12 @@
  * verbose boot (the shell gate currently produces ~400 lines) with room for a
  * driver probe burst; the disk writer drains them every second. */
 #ifndef CONFIG_KLOG_REC_COUNT
+#ifdef CONFIG_MCU
+/* Keep the structured view inside the MCU SRAM budget as well as the byte ring. */
+#define CONFIG_KLOG_REC_COUNT 2
+#else
 #define CONFIG_KLOG_REC_COUNT 1024
+#endif
 #endif
 #define KLOG_REC_COUNT CONFIG_KLOG_REC_COUNT
 #define KLOG_REC_MSG_MAX  240

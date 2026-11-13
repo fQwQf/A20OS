@@ -229,6 +229,14 @@ void __ubsan_handle_alignment_assumption(void *data, void *ptr,
     ubsan_report("alignment-assumption", data);
 }
 
+/* Clang's -fsanitize=undefined also checks indirect function signatures. */
+void __ubsan_handle_function_type_mismatch(void *data, void *function)
+{
+    (void)function;
+    ubsan_report_type("function-type-mismatch", data,
+                      ((struct ubsan_overflow_data *)data)->type);
+}
+
 void __ubsan_handle_invalid_builtin(void *data)
 {
     ubsan_report("invalid-builtin", data);

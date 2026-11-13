@@ -78,13 +78,13 @@ typedef struct udisk_req {
     uint32_t      dir;          /* 0 = read, 1 = write */
     uint64_t      sector;
     uint32_t      sectors;
-    _Atomic uint32_t done;
-    _Atomic uint32_t result;
+    uint32_t done;
+    uint32_t result;
     uint64_t      data_pa;
 } udisk_req_t;
 
 typedef struct udisk_ring {
-    _Atomic uint32_t head;
+    uint32_t head;
     uint32_t        cap;
     udisk_req_t     reqs[UDISK_RING_REQS];
 } udisk_ring_t;

@@ -7,6 +7,7 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/arch.h"
 #include "core/timer.h"
 
 /*

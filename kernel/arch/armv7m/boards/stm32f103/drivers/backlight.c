@@ -13,7 +13,9 @@
 #define LCD_BACKLIGHT_MASK (1U << LCD_BACKLIGHT_PIN)
 
 static volatile int backlight_initialized;
+#ifdef CONFIG_STM32_XUANWU
 static volatile int backlight_pin_high = 1;
+#endif
 static volatile uint8_t backlight_percent = 100U;
 static volatile uint8_t backlight_accumulator;
 static volatile uint32_t backlight_updates;

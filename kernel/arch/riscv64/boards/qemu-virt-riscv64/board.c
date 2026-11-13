@@ -64,10 +64,10 @@ static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,
  * This replaces SBI REMOTE SFENCE.VMA, which is not reliably emulated by
  * QEMU TCG for remote harts.  The caller must not hold a spinlock with
  * interrupts disabled (remote-flush calls are deferred until after unlock). */
-static _Atomic uint32_t rv64_tlb_request[CONFIG_NR_CPUS];
-static _Atomic uint32_t rv64_tlb_ack[CONFIG_NR_CPUS];
-static _Atomic uint32_t rv64_tlb_ipi_serviced;
-static _Atomic uint32_t rv64_tlb_flush_calls;
+static uint32_t rv64_tlb_request[CONFIG_NR_CPUS];
+static uint32_t rv64_tlb_ack[CONFIG_NR_CPUS];
+static uint32_t rv64_tlb_ipi_serviced;
+static uint32_t rv64_tlb_flush_calls;
 
 uint32_t rv64_tlb_flush_stats(uint32_t *serviced)
 {
