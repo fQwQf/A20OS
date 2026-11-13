@@ -952,7 +952,7 @@ pub unsafe extern "C" fn a20_procfs_content_plan(
             fixed_len: 0,
             meta_len_zero: 1,
         }
-    } else if ty == PF_A20_PERF || ty == PF_A20_LOCK_CONTENTION {
+    } else if ty == PF_A20_PERF || ty == PF_A20_LOCK_CONTENTION || ty == PF_PID_ENVIRON {
         // stat/lookup must neither arm collection nor take a partial snapshot.
         // Open starts small; the C adapter grows only if the formatter fills it.
         ProcfsContentPlan {

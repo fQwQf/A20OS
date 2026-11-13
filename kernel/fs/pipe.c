@@ -23,6 +23,11 @@ typedef struct pipe_buf {
     int             writer_closed;
     int             reader_closed;
     int             ref;
+    vnode_t        *fifo_inode;     /* pinned while any open description exists */
+    struct pipe_buf *fifo_next;     /* protected by fifo_registry_lock */
+    unsigned        readers, writers;
+    uint64_t        reader_generation, writer_generation;
+    wait_queue_t    open_waiters;
     int             read_fd;        /* global fd of the read endpoint */
     int             write_fd;       /* global fd of the write endpoint */
     /* Protected by lock. Poll-source flags are sticky: once a readiness
@@ -34,6 +39,11 @@ typedef struct pipe_buf {
     wait_queue_t    read_waiters;
     wait_queue_t    write_waiters;
 } pipe_buf_t;
+
+static mutex_t fifo_registry_lock = MUTEX_INIT;
+static pipe_buf_t *fifo_registry;
+static vfile_ops_t g_fifo_ops;
+static vfile_ops_t g_fifo_path_ops;
 
 static void pipe_wake_readers(pipe_buf_t *pb, int queued)
 {
@@ -278,44 +288,38 @@ static int pipe_resize(pipe_buf_t *pb, size_t new_capacity)
     return (int)new_capacity;
 }
 
-static int pipe_read_close(vfile_t *vf)
+/* The closing description owns its pipe reference until after notifications.
+ * Concurrent closes cannot free the ring while a peer publishes its wakeup. */
+static int pipe_close(vfile_t *vf)
 {
-    pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
-    if (pb) {
-        spin_lock(&pb->lock);
-        int last_reader = vfile_ref_read(vf) == 0;
-        if (last_reader)
-            pb->reader_closed = 1;
-        int refs = --pb->ref;
-        spin_unlock(&pb->lock);
-
-        if (last_reader)
-            pipe_wake_writers(pb, 1);
+    pipe_buf_t *pb = vf->priv;
+    if (!pb) return 0;
+    int access = vf->flags & O_ACCMODE;
+    spin_lock(&pb->lock);
+    if (access != O_WRONLY) --pb->readers;
+    if (access != O_RDONLY) --pb->writers;
+    pb->reader_closed = !pb->readers;
+    pb->writer_closed = !pb->writers;
+    spin_unlock(&pb->lock);
+    pipe_wake_readers(pb, 1);
+    pipe_wake_writers(pb, 1);
+    if (pb->fifo_inode) mutex_lock(&fifo_registry_lock);
+    spin_lock(&pb->lock);
+    int refs = --pb->ref;
+    spin_unlock(&pb->lock);
+    vnode_t *anchor = pb->fifo_inode;
+    if (anchor) {
         if (!refs) {
-            if (pb->data) kfree(pb->data);
-            kfree(pb);
+            pipe_buf_t **link = &fifo_registry;
+            while (*link != pb) link = &(*link)->fifo_next;
+            *link = pb->fifo_next;
         }
+        mutex_unlock(&fifo_registry_lock);
     }
-    return 0;
-}
-
-static int pipe_write_close(vfile_t *vf)
-{
-    pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
-    if (pb) {
-        spin_lock(&pb->lock);
-        int last_writer = vfile_ref_read(vf) == 0;
-        if (last_writer)
-            pb->writer_closed = 1;
-        int refs = --pb->ref;
-        spin_unlock(&pb->lock);
-
-        if (last_writer)
-            pipe_wake_readers(pb, 1);
-        if (!refs) {
-            if (pb->data) kfree(pb->data);
-            kfree(pb);
-        }
+    if (!refs) {
+        vnode_put(anchor);
+        kfree(pb->data);
+        kfree(pb);
     }
     return 0;
 }
@@ -326,31 +330,30 @@ static vfile_ops_t g_pipe_write_ops;
 static size_t pipe_poll_sources(vfile_t *vf, short events,
                                 readiness_source_t *sources, size_t max)
 {
-    (void)events;
     pipe_buf_t *pb = vf ? vf->priv : NULL;
-    if (!pb || !sources || max == 0)
-        return 0;
+    if (!pb || !sources || !max) return 0;
+    size_t n = 0;
+    int access = vf->flags & O_ACCMODE;
     spin_lock(&pb->lock);
-    if (vf->ops == &g_pipe_read_ops) {
+    if (access != O_WRONLY && ((events & POLLIN) || access == O_RDONLY)) {
         pb->polled_readers = 1;
-        sources[0].queue = &pb->read_waiters;
-    } else {
+        sources[n++] = (readiness_source_t){ .queue = &pb->read_waiters };
+    }
+    if (access != O_RDONLY && n < max) {
         pb->polled_writers = 1;
-        sources[0].queue = &pb->write_waiters;
+        sources[n++] = (readiness_source_t){ .queue = &pb->write_waiters };
     }
     spin_unlock(&pb->lock);
-    sources[0].key = 0;
-    sources[0].deadline = 0;
-    return 1;
+    return n;
 }
 
 static vfile_ops_t g_pipe_read_ops  = {
     .read = pipe_read, .write = pipe_null_write, .poll = pipe_poll_events,
-    .poll_sources = pipe_poll_sources, .close = pipe_read_close
+    .poll_sources = pipe_poll_sources, .close = pipe_close
 };
 static vfile_ops_t g_pipe_write_ops = {
     .read = pipe_null_read, .write = pipe_write, .poll = pipe_poll_events,
-    .poll_sources = pipe_poll_sources, .close = pipe_write_close
+    .poll_sources = pipe_poll_sources, .close = pipe_close
 };
 
 /* Peek up to count bytes from a pipe without consuming them.  Blocks while
@@ -395,7 +398,7 @@ int pipe_peek(vfile_t *vf, char *buf, size_t count)
 
 int pipe_vfile_is(vfile_t *vf)
 {
-    return vf && (vf->ops == &g_pipe_read_ops || vf->ops == &g_pipe_write_ops);
+    return vf && (vf->ops == &g_pipe_read_ops || vf->ops == &g_pipe_write_ops || vf->ops == &g_fifo_ops);
 }
 
 int pipe_poll_events(vfile_t *vf, short events)
@@ -405,12 +408,15 @@ int pipe_poll_events(vfile_t *vf, short events)
     if (!pb) return POLLNVAL;
     short revents = 0;
     spin_lock(&pb->lock);
-    if (vf->ops == &g_pipe_read_ops) {
+    int access = vf->flags & O_ACCMODE;
+    if (access != O_WRONLY) {
         if ((events & POLLIN) && pb->used > 0)
             revents |= POLLIN;
-        if (pb->writer_closed)
+        if (pb->writer_closed && (!pb->fifo_inode ||
+            pb->writer_generation != vf->offset))
             revents |= POLLHUP;
-    } else {
+    }
+    if (access != O_RDONLY) {
         if ((events & POLLOUT) && pb->used < pb->capacity && !pb->reader_closed)
             revents |= POLLOUT;
         if (pb->reader_closed)
@@ -460,6 +466,7 @@ int pipe_create_vfiles(vfile_t **read_end, vfile_t **write_end, int flags)
     wait_queue_init(&pb->read_waiters);
     wait_queue_init(&pb->write_waiters);
     pb->ref = 2;
+    pb->readers = pb->writers = 1;
     pb->logical_size = PIPE_DEFAULT_SIZE;
     pb->capacity = pb->logical_size;
     pb->data = (char *)kmalloc(pb->capacity);
@@ -516,4 +523,122 @@ int pipe_create(int pipefd[2])
     pb->read_fd = fdrd;
     pb->write_fd = fdwr;
     return 0;
+}
+
+/* Filesystems persist only S_IFIFO and directory metadata. All live FIFO
+ * contents and endpoints use the same bounded ring/atomic writes as pipe(2).
+ * Keys are mount+inode, so hard links and distinct vnode lookups communicate;
+ * a pinned inode prevents reuse until the last open description is closed. */
+static vfile_ops_t g_fifo_ops = {
+    .read = pipe_read, .write = pipe_write, .poll = pipe_poll_events,
+    .poll_sources = pipe_poll_sources, .close = pipe_close,
+};
+
+vfile_t *fifo_open_vnode(vnode_t *vn, int flags)
+{
+    task_t *task = proc_current();
+    int error = -ENOMEM;
+    vfile_t *vf = vfile_alloc();
+    if (!vf) goto fail;
+    if (flags & O_PATH) {
+        vf->ops = &g_fifo_path_ops;
+        vf->flags = flags;
+        vf->vnode = vn;
+        vnode_get(vn);
+        vfile_ref_init(vf, 1);
+        return vf;
+    }
+    int access = flags & O_ACCMODE;
+    mutex_lock(&fifo_registry_lock);
+    pipe_buf_t *pb;
+    for (pb = fifo_registry; pb; pb = pb->fifo_next)
+        if (pb->fifo_inode->mnt == vn->mnt && pb->fifo_inode->ino == vn->ino)
+            break;
+    if (!pb) {
+        pb = kmalloc(sizeof(*pb));
+        if (!pb) goto fail_locked;
+        memset(pb, 0, sizeof(*pb));
+        pb->data = kmalloc(PIPE_DEFAULT_SIZE);
+        if (!pb->data) { kfree(pb); goto fail_locked; }
+        spin_init(&pb->lock);
+        wait_queue_init(&pb->read_waiters);
+        wait_queue_init(&pb->write_waiters);
+        wait_queue_init(&pb->open_waiters);
+        pb->capacity = pb->logical_size = PIPE_DEFAULT_SIZE;
+        pb->read_fd = pb->write_fd = -1;
+        pb->reader_closed = pb->writer_closed = 1;
+        pb->fifo_inode = vn;
+        vnode_get(vn);
+        pb->fifo_next = fifo_registry;
+        fifo_registry = pb;
+    }
+    spin_lock(&pb->lock);
+    if (access == O_WRONLY && (flags & O_NONBLOCK) && !pb->readers) {
+        spin_unlock(&pb->lock);
+        if (!pb->ref) {
+            fifo_registry = pb->fifo_next; /* new, empty entry is always head */
+            vnode_put(pb->fifo_inode);
+            kfree(pb->data);
+            kfree(pb);
+        }
+        error = -ENXIO;
+        goto fail_locked;
+    }
+    ++pb->ref;
+    /* Save the peer generation before publishing this endpoint. A peer
+     * opening and closing before finish_open still satisfies rendezvous. */
+    vf->offset = access == O_WRONLY ?
+        pb->reader_generation - (pb->readers != 0) :
+        pb->writer_generation - (pb->writers != 0);
+    if (access != O_WRONLY) { ++pb->readers; ++pb->reader_generation; }
+    if (access != O_RDONLY) { ++pb->writers; ++pb->writer_generation; }
+    pb->reader_closed = !pb->readers;
+    pb->writer_closed = !pb->writers;
+    spin_unlock(&pb->lock);
+    mutex_unlock(&fifo_registry_lock);
+    vf->ops = &g_fifo_ops;
+    vf->priv = pb;
+    vf->flags = flags;
+    vf->vnode = vn;
+    vnode_get(vn);
+    vfile_ref_init(vf, 1);
+    wait_queue_wake_all(&pb->open_waiters, 0, PROC_WAKE_EVENT);
+    pipe_wake_readers(pb, 1);
+    pipe_wake_writers(pb, 1);
+    return vf;
+fail_locked:
+    mutex_unlock(&fifo_registry_lock);
+    vfile_free(vf);
+fail:
+    if (task) task->vfs_open_errno = error;
+    return NULL;
+}
+
+int fifo_finish_open(vfile_t *vf)
+{
+    if (!vf || vf->ops != &g_fifo_ops || (vf->flags & O_NONBLOCK)) return 0;
+    int access = vf->flags & O_ACCMODE;
+    if (access == O_RDWR) return 0;
+    pipe_buf_t *pb = vf->priv;
+    task_t *task = proc_current();
+    for (;;) {
+        proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+        spin_lock(&pb->lock);
+        bool ready = access == O_RDONLY ?
+            (pb->writers || pb->writer_generation != vf->offset) :
+            (pb->readers || pb->reader_generation != vf->offset);
+        bool interrupted = task && signal_task_has_unblocked(task);
+        wait_queue_entry_t entry = {0};
+        bool linked = !ready && !interrupted && token.task &&
+            wait_queue_link(&pb->open_waiters, &entry, token, 0);
+        spin_unlock(&pb->lock);
+        proc_wake_reason_t reason = PROC_WAKE_CANCEL;
+        if (linked) reason = proc_park_commit(token);
+        else (void)proc_park_cancel(token);
+        wait_queue_unlink(&pb->open_waiters, &entry);
+        proc_park_finish(token);
+        if (ready) return 0;
+        if (interrupted || proc_wake_reason_is_task_interrupt(reason)) return -ERESTARTSYS;
+        if (!token.task) proc_yield();
+    }
 }

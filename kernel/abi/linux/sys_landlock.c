@@ -30,11 +30,12 @@ int64_t sys_landlock_create_ruleset(const void *attr, size_t size,
     }
     if (!handled)
         return -ENOMSG;
-    /* Only open's READ_FILE/WRITE_FILE checks are wired into the VFS.
-     * Accepting EXECUTE, directory mutation or ioctl bits would promise
-     * enforcement that those entry points do not provide. */
+    /* Open mediates READ_FILE/WRITE_FILE; mknod mediates MAKE_FIFO on its
+     * canonical pinned parent. Other mutation/execute/ioctl rights remain
+     * unsupported rather than promising enforcement they do not have. */
     if (handled & ~(LANDLOCK_ACCESS_FS_READ_FILE |
-                    LANDLOCK_ACCESS_FS_WRITE_FILE))
+                    LANDLOCK_ACCESS_FS_WRITE_FILE |
+                    LANDLOCK_ACCESS_FS_MAKE_FIFO))
         return -EOPNOTSUPP;
     return landlock_create_ruleset(handled);
 }

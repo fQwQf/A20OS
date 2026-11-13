@@ -679,15 +679,25 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                           , void **nommu_allocs, const size_t *nommu_alloc_sizes,
                           const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
-                          , int defer_ready) {
+                          , int create_flags) {
+    if (create_flags & ~(PROC_USER_IMAGE_DEFER_READY | PROC_USER_IMAGE_BOOT_INIT))
+        return -EINVAL;
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
-    t->pid = proc_pid_alloc();
+    int boot_init = (create_flags & PROC_USER_IMAGE_BOOT_INIT) != 0;
+    t->pid = boot_init ? proc_pid_claim_init() : proc_pid_alloc();
     if (t->pid < 0) {
         proc_destroy_task(t);
         return -EAGAIN;
     }
     proc_task_init_common(t, proc_current(), 0);
+    if (boot_init) {
+        /* Inherit the bootstrap's console, credentials and root, but init has
+         * no userspace parent and is its own session/process-group leader. */
+        t->parent = proc_idle_task();
+        t->ppid = 0;
+        t->pgid = t->sid = 1;
+    }
     t->entry = entry;
     t->pgdir = pgdir;
     proc_set_name(t, "user");
@@ -787,7 +797,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx trap_sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp, (unsigned long)TRAP_CTX_SP(trap));
 
-    if (!defer_ready)
+    if (!(create_flags & PROC_USER_IMAGE_DEFER_READY))
         proc_make_ready(t);
     return t->pid;
 }

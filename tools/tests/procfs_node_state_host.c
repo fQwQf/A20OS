@@ -447,7 +447,7 @@ static void ref_content_plan(int type, uint32_t nr_cpus, uint64_t page_size,
         p->generator = A20_PROCFS_GEN_FDINFO;
         p->capacity = 4096;
         p->meta_len_zero = 1;
-    } else if (type == PF_A20_PERF || type == PF_A20_LOCK_CONTENTION) {
+    } else if (type == PF_A20_PERF || type == PF_A20_LOCK_CONTENTION || type == PF_PID_ENVIRON) {
         p->generator = A20_PROCFS_GEN_GROW_CONTENT;
         p->capacity = 4096;
         p->meta_len_zero = 1;

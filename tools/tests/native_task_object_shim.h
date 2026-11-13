@@ -11,6 +11,8 @@
 #include "core/refcount.h"
 #include "core/errno.h"
 #include "../../user/liba20rt/a20_types.h"
+#define _PANIC_H
+__attribute__((noreturn)) void panic(const char *, ...);
 #define _PROC_H
 #define _PROC_INTERNAL_H
 #define _PROC_LIFETIME_H

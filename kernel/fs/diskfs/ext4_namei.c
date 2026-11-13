@@ -755,6 +755,7 @@ int ext4_lookup_unlocked(vnode_t *dir, const char *name, vnode_t **out) {
     int type = VFS_FT_REGULAR;
     if (ft == EXT4_FT_DIR) type = VFS_FT_DIR;
     else if (ft == EXT4_FT_SYMLINK) type = VFS_FT_SYMLINK;
+    else if (ft == EXT4_FT_FIFO) type = VFS_FT_FIFO;
     *out = ext4_make_vnode(p->sb, child_ino, ext4_inode_size(&ci), type, dir);
     if (!*out) return -ENOMEM;
     /* parent ref_count bumped in make_vnode */
@@ -787,6 +788,8 @@ int ext4_stat(vnode_t *vn, kstat_t *st) {
         vtype_mode = S_IFDIR;
     else if (vn->type == VFS_FT_SYMLINK)
         vtype_mode = S_IFLNK;
+    else if (vn->type == VFS_FT_FIFO)
+        vtype_mode = S_IFIFO;
     if ((st->st_mode & S_IFMT) != vtype_mode)
         st->st_mode = (st->st_mode & ~S_IFMT) | vtype_mode;
     st->st_uid = dinode.i_uid;
@@ -964,7 +967,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
     ext4_inode_t ni;
     memset(&ni, 0, sizeof(ni));
     task_t *cur = proc_current();
-    ni.i_mode = S_IFREG | (mode & 07777);
+    ni.i_mode = ((mode & S_IFMT) == S_IFIFO ? S_IFIFO : S_IFREG) | (mode & 07777);
     ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
     ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_links_count = 1;
@@ -973,6 +976,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
      * tree header the writer falls back to i_block[] holding raw block
      * numbers, and e2fsck then reports the file's block map as unrecognised
      * (magic 0x50d9). */
+    if ((ni.i_mode & S_IFMT) == S_IFREG) {
     ni.i_flags |= EXT4_EXTENTS_FL;
     {
         uint8_t *raw = (uint8_t *)&ni + offsetof(ext4_inode_t, i_block);
@@ -984,6 +988,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
         hdr.eh_generation = 0;
         memcpy(raw, &hdr, sizeof(hdr));
     }
+    }
     if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
         ext4_free_inode(p->sb, new_ino);
         return -EIO;
@@ -991,7 +996,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
 
     /* Add dir entry */
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_REG_FILE);
+    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, (ni.i_mode & S_IFMT) == S_IFIFO ? EXT4_FT_FIFO : EXT4_FT_REG_FILE);
     if (r < 0) {
         ext4_free_inode(p->sb, new_ino);
         return r;
@@ -1005,7 +1010,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
     }
 
     if (out) {
-        *out = ext4_make_vnode(p->sb, new_ino, 0, VFS_FT_REGULAR, dir);
+        *out = ext4_make_vnode(p->sb, new_ino, 0, (ni.i_mode & S_IFMT) == S_IFIFO ? VFS_FT_FIFO : VFS_FT_REGULAR, dir);
         if (!*out) return -ENOMEM;
     }
     return 0;
@@ -1163,7 +1168,7 @@ int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
     if (ext4_write_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
 
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, tp->inode_num, EXT4_FT_REG_FILE);
+    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, tp->inode_num, (target->mode & S_IFMT) == S_IFIFO ? EXT4_FT_FIFO : EXT4_FT_REG_FILE);
     if (r < 0) {
         /* Roll back the link count on failure. */
         inode.i_links_count--;

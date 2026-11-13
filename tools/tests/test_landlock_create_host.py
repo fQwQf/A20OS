@@ -13,6 +13,7 @@ PRELUDE = r'''
 #define PAGE_SIZE 4096
 #define LANDLOCK_ACCESS_FS_WRITE_FILE 2ULL
 #define LANDLOCK_ACCESS_FS_READ_FILE 4ULL
+#define LANDLOCK_ACCESS_FS_MAKE_FIFO (1ULL << 10)
 static int allocations, copies;
 static size_t readable;
 static const void *user_base;
@@ -24,7 +25,7 @@ static int copy_from_user(void *dst, const void *src, size_t n) {
     return 0;
 }
 static int landlock_create_ruleset(uint64_t handled) {
-    if (handled != 4) return -99;
+    if (handled != 4 && handled != LANDLOCK_ACCESS_FS_MAKE_FIFO) return -99;
     allocations++;
     return 17;
 }
@@ -54,10 +55,12 @@ int main(void) {
     attr[0] = 0;
     if (!check(attr, 8, 0, -ENOMSG)) return 9;
     for (unsigned i = 0; i < 64; i++) {
-        if (i == 1 || i == 2) continue;
+        if (i == 1 || i == 2 || i == 10) continue;
         attr[0] = 1ULL << i;
         if (!check(attr, 8, 0, -EOPNOTSUPP)) return 10;
     }
+    attr[0] = LANDLOCK_ACCESS_FS_MAKE_FIFO;
+    if (!check(attr, 8, 0, 17)) return 12;
     attr[0] = 4;
     return check(attr, 8, 0, 17) ? 0 : 11;
 }

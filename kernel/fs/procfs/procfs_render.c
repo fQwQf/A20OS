@@ -1,3 +1,4 @@
+#include "mm/process_vm.h"
 #include "proc/resource_ns.h"
 #include "fs/procfs.h"
 #include "fs/vfs/mount.h"
@@ -1069,6 +1070,22 @@ _Static_assert(sizeof(g_procfs_gen) / sizeof(void *) == 58,
 
 int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz)
 {
+    if (type == PF_PID_ENVIRON) {
+        task_t *task = proc_find_get(pid);
+        if (!task) return -ESRCH;
+        if (!proc_task_may_access(proc_current(), task)) {
+            proc_put(task); return -EACCES;
+        }
+        mm_struct_t *mm = proc_task_get_mm(task);
+        proc_put(task);
+        if (!mm) return 0;
+        size_t length = mm->env_end >= mm->env_start ? mm->env_end - mm->env_start : 0;
+        if (length >= bufsz) length = bufsz ? bufsz - 1 : 0;
+        long result = length ? process_vm_read_mm_kernel(mm,
+            (const void *)(uintptr_t)mm->env_start, buf, length) : 0;
+        mm_destroy(mm);
+        return (int)result;
+    }
     return a20_procfs_generate(&g_procfs_gen, (int)type, pid, buf, bufsz);
 }
 

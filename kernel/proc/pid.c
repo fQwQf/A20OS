@@ -3,6 +3,7 @@
 #include "proc/lifetime.h"
 #include "proc/task_object.h"
 #include "core/lock.h"
+#include "core/panic.h"
 #include "core/string.h"
 
 #ifdef CONFIG_MCU
@@ -133,6 +134,8 @@ static int pid_alloc_locked(void) {
 
 static spinlock_t pid_lock = SPINLOCK_INIT;
 static task_t *pid_hash[PID_HASH_SIZE];
+/* PID 1 belongs to the first userspace init, never an early device worker. */
+static int boot_init_claimed;
 
 static unsigned pid_hash_index(int pid) {
     return (((unsigned)pid) * 2654435761U) >> (32 - PID_HASH_BITS);
@@ -140,6 +143,8 @@ static unsigned pid_hash_index(int pid) {
 
 /* Return one id to the id space.  The caller holds pid_lock. */
 static void proc_pid_release_id(int pid) {
+    if (pid == 1)
+        return; /* permanent reservation, including failed init construction */
 #ifdef CONFIG_PID_RUST
     a20_pid_release(pid);
 #else
@@ -157,6 +162,23 @@ void proc_pid_init(void) {
     next_pid = 1;
     pid_max = PID_MAX_LIMIT < 32768 ? PID_MAX_LIMIT : 32768;
 #endif
+#ifdef CONFIG_PID_RUST
+    int reserved = a20_pid_alloc();
+#else
+    int reserved = pid_alloc_locked();
+#endif
+    if (reserved != 1)
+        panic("pid allocator could not reserve boot init");
+    boot_init_claimed = 0;
+}
+
+int proc_pid_claim_init(void)
+{
+    uint64_t flags = spin_lock_irqsave(&pid_lock);
+    int pid = boot_init_claimed ? -EEXIST : 1;
+    boot_init_claimed = 1;
+    spin_unlock_irqrestore(&pid_lock, flags);
+    return pid;
 }
 
 int proc_pid_alloc(void) {

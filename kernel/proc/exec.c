@@ -1089,6 +1089,19 @@ static int32_t exec_cb_alloc_mm(void *opaque, uint64_t *out)
     m->mmap_base = mm_aslr_mmap_base();
     m->stack_top = c->info->stack_top;
     m->stack_bottom = c->info->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+    if (!c->info->is_native_abi && c->bprm->envc) {
+        uintptr_t vector = c->sp + (c->bprm->argc + 2) * sizeof(uintptr_t);
+        for (int i = 0; i < c->bprm->envc; ++i) {
+            paddr_t pa = pt_translate(c->info->pgdir, vector + i * sizeof(uintptr_t));
+            /* The stack writer produced aligned pointers in mapped pages. */
+            if (!pa) { kfree(m); return -EFAULT; }
+            uintptr_t address;
+            memcpy(&address, (const void *)((uintptr_t)pa + PAGE_OFFSET), sizeof(address));
+            uintptr_t end = address + strlen(c->bprm->envs[i]) + 1;
+            if (!m->env_start || address < m->env_start) m->env_start = address;
+            if (end > m->env_end) m->env_end = end;
+        }
+    }
     mm_rss_set(m, 0);
     spin_init(&m->lock); spin_set_debug(&m->lock, "mm", m);
     mutex_init(&m->tlb_lock); m->tlb_holds = NULL;

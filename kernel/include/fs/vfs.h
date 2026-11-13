@@ -18,6 +18,7 @@
 #define VFS_FT_REGULAR   1
 #define VFS_FT_DIR       2
 #define VFS_FT_SYMLINK   3
+#define VFS_FT_FIFO      4
 
 /* Symlink loop limit (Linux MAX_SYMLINKS) */
 #define MAX_SYMLINKS 40
@@ -564,6 +565,7 @@ int      vfs_umount(const char *path);
 
 /* Pipe */
 int      vfs_pipe(int pipefd[2]);
+int      vfs_mknod(const char *path, int mode);
 
 /* fd resolution goes through the calling task's files_struct (fs/fdtable.c);
  * the fd get/put helpers are declared in fs/file.h. */

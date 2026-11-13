@@ -123,6 +123,7 @@ pt_root_t *proc_kernel_pgdir_shared(void);
 
 void proc_pid_init(void);
 int proc_pid_alloc(void);
+int proc_pid_claim_init(void);
 void proc_pid_register(task_t *t);
 void proc_pid_unregister(task_t *t);
 int proc_pid_next_value(void);

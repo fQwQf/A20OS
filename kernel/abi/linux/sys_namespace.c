@@ -72,9 +72,13 @@ int64_t sys_mknod(const char *path, int mode, unsigned dev)
 int64_t sys_mknodat(int dirfd, const char *path, int mode, unsigned dev)
 {
     (void)dev;
-    if ((mode & S_IFMT) == S_IFDIR) return sys_mkdirat(dirfd, path, mode & 07777);
-    int64_t fd = sys_openat(dirfd, path, O_CREAT | O_EXCL | O_RDWR, mode);
-    if (fd < 0) return fd;
-    sys_close((int)fd);
-    return 0;
+    unsigned type = mode & S_IFMT;
+    if (!type) mode |= S_IFREG;
+    else if (type != S_IFREG && type != S_IFIFO) return -EINVAL;
+    char kpath[MAX_PATH_LEN], full[MAX_PATH_LEN];
+    long copied = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (copied < 0) return copied;
+    if (!kpath[0]) return -ENOENT;
+    int ret = syscall_path_at(dirfd, kpath, full, sizeof(full));
+    return ret < 0 ? ret : vfs_mknod(full, mode);
 }

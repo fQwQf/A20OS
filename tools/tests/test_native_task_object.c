@@ -145,7 +145,7 @@ static void *race(void *arg) {
 }
 int main(void) {
     proc_pid_init();
-    assert(proc_set_pid_max(1) == 0);
+    assert(proc_set_pid_max(2) == 0);
     task_t *task = new_task();
     fail_alloc = 1;
     assert(a20_handle_install_task(&table, task, A20_OBJ_TASK,
@@ -199,10 +199,10 @@ int main(void) {
     destroy(task);
     assert(proc_pid_alloc() ==
            -EAGAIN); /* a PID-based operation still pins old task */
-    assert(!proc_find_get(1));
+    assert(!proc_find_get(2));
     proc_put(pin);
     task_t *replacement = new_task();
-    assert(replacement->pid == 1);
+    assert(replacement->pid == 2);
     int64_t replacement_handle = a20_handle_install_task(
         &table, replacement, A20_OBJ_TASK, A20_RIGHT_WAIT);
     assert(replacement_handle >= 0 &&
@@ -255,3 +255,6 @@ int main(void) {
     puts("PASS Native task identity: PID reuse, debug alias, transfer "
          "ownership, failures, self-cycle, races");
 }
+
+__attribute__((noreturn)) void panic(const char *fmt, ...)
+{ (void)fmt; abort(); }

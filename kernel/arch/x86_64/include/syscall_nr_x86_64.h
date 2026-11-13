@@ -825,6 +825,7 @@ static inline int x86_syscall_rewrite_args(uint32_t x86_nr,
         case X86_SYS_chown:
         case X86_SYS_lchown:
         case X86_SYS_mkdir:
+        case X86_SYS_mknod:
         case X86_SYS_rmdir:
         case X86_SYS_unlink:
         case X86_SYS_readlink:

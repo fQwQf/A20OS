@@ -86,7 +86,7 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, int64_t
              * that false success as a usable shared ring, which could trap
              * QEMU in its SIGSEGV/TCG signal path instead of falling back to
              * the poll backend.  Linux reports ENODEV for such fds. */
-            if (!vf->vnode) {
+            if (!vf->vnode || (vf->vnode->mode & S_IFMT) == S_IFIFO) {
                 vfs_put_file_ref(gfd, vf);
                 return -ENODEV;
             }

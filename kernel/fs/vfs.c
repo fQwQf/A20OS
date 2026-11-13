@@ -233,7 +233,7 @@ static int vfs_proc_fd_open(const char *path, int flags)
         vnode_put(vn);
         return -EISDIR;
     }
-    if ((flags & O_TRUNC) && vn->type == VFS_FT_REGULAR &&
+    if ((flags & O_TRUNC) && (vn->mode & S_IFMT) == S_IFREG &&
         vn->ops && vn->ops->truncate) {
         int r = vn->ops->truncate(vn, 0);
         if (r < 0) {
@@ -281,8 +281,11 @@ static int vfs_open_vnode_impl(struct vnode *vn, int flags)
     }
     vfile_t *opened = vn->ops->open(vn, flags);
     if (!opened) {
+        task_t *cur = proc_current();
+        int error = cur ? cur->vfs_open_errno : 0;
+        if (cur) cur->vfs_open_errno = 0;
         vnode_put(vn);
-        return -ENOMEM;
+        return error ? error : -ENOMEM;
     }
     strncpy(opened->path, "handle", MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
@@ -301,6 +304,20 @@ static int vfs_open_vnode_impl(struct vnode *vn, int flags)
     return ofd;
 }
 
+/* No namespace mutation or filesystem I/O gate may be held across a FIFO
+ * peer rendezvous. The descriptor owns the inode; this reference owns the
+ * pipe while a signal or concurrent close resolves the pending open. */
+static int vfs_finish_open(int fd)
+{
+    if (fd < 0) return fd;
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
+    if (!vf) return -EBADF;
+    int ret = fifo_finish_open(vf);
+    vfs_put_file(vf);
+    if (ret < 0) { fdtable_close_current(fd); return ret; }
+    return fd;
+}
+
 int vfs_open_vnode(struct vnode *vn, int flags)
 {
     int ret = mntns_mutation_enter();
@@ -310,7 +327,7 @@ int vfs_open_vnode(struct vnode *vn, int flags)
     }
     ret = vfs_open_vnode_impl(vn, flags);
     mntns_mutation_leave();
-    return ret;
+    return vfs_finish_open(ret);
 }
 
 static int vfs_open_impl(const char *path, int flags, int mode) {    /* Resolve cwd from current process */
@@ -450,7 +467,7 @@ static int vfs_open_impl(const char *path, int flags, int mode) {    /* Resolve 
         }
     }
 
-    if ((flags & O_TRUNC) && vn->type == VFS_FT_REGULAR && vn->ops && vn->ops->truncate) {
+    if ((flags & O_TRUNC) && (vn->mode & S_IFMT) == S_IFREG && vn->ops && vn->ops->truncate) {
         int tr = vn->ops->truncate(vn, 0);
         if (tr == 0) {
             page_cache_truncate(vn, 0);
@@ -494,7 +511,7 @@ int vfs_open(const char *path, int flags, int mode)
         return ret;
     ret = vfs_open_impl(path, flags, mode);
     mntns_mutation_leave();
-    return ret;
+    return vfs_finish_open(ret);
 }
 
 int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
@@ -526,7 +543,7 @@ int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
     return 0;
 }
 
-int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resolve) {
+static int vfs_openat2_impl(int dirfd, const char *path, int flags, int mode, uint64_t resolve) {
     if (!path) return -EFAULT;
     task_t *cur = proc_current();
     if (cur)
@@ -672,7 +689,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
         return -EISDIR;
     }
 
-    if ((flags & O_TRUNC) && vn->type == VFS_FT_REGULAR && vn->ops && vn->ops->truncate) {
+    if ((flags & O_TRUNC) && (vn->mode & S_IFMT) == S_IFREG && vn->ops && vn->ops->truncate) {
         int tr = vn->ops->truncate(vn, 0);
         if (tr == 0) page_cache_truncate(vn, 0);
     }
@@ -701,6 +718,67 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     }
     vnode_put(vn);
     return ofd;
+}
+
+int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resolve)
+{
+    int ret = mntns_mutation_enter();
+    if (ret < 0) return ret;
+    ret = vfs_openat2_impl(dirfd, path, flags, mode, resolve);
+    mntns_mutation_leave();
+    return vfs_finish_open(ret);
+}
+
+/* mknod creates directory metadata without opening an endpoint. In
+ * particular mkfifo must neither rendezvous nor acquire read/write access. */
+int vfs_mknod(const char *path, int mode)
+{
+    int ret = mntns_mutation_enter();
+    if (ret < 0) return ret;
+    vnode_t *parent = NULL, *vn = NULL;
+    task_t *task = proc_current();
+    char resolved[MAX_PATH_LEN], parent_path[MAX_PATH_LEN], name[MAX_NAME_LEN];
+    ret = vfs_path_join(task ? task->fs.cwd : "/", path, resolved, sizeof(resolved));
+    if (ret < 0) goto out;
+    ret = vfs_path_split_parent_name(resolved, parent_path, sizeof(parent_path), name, sizeof(name));
+    if (ret < 0) goto out;
+    const char *root = task && task->fs.root_path[0] ? task->fs.root_path : "/";
+    char canonical[MAX_PATH_LEN];
+    int lookup_error = 0;
+    parent = vnode_lookup_path_openat2(parent_path, root, root, 0,
+                                       canonical, sizeof(canonical), &lookup_error);
+    if (!parent) { ret = lookup_error ? lookup_error : -ENOENT; goto out; }
+    if (parent->type != VFS_FT_DIR) { ret = -ENOTDIR; goto out; }
+    ret = vfs_path_join(canonical, name, resolved, sizeof(resolved));
+    if (ret < 0) goto out;
+    if (parent->mnt && (parent->mnt->flags & VFS_MOUNT_RDONLY)) { ret = -EROFS; goto out; }
+    if ((mode & S_IFMT) == S_IFIFO && (!parent->mnt ||
+        (parent->mnt->type != FS_TYPE_RAMFS && parent->mnt->type != FS_TYPE_EXT4))) {
+        ret = -EOPNOTSUPP; goto out;
+    }
+    ret = vfs_vnode_permission(parent, W_OK | X_OK);
+    if (ret < 0) goto out;
+    ret = landlock_check_path(resolved, (mode & S_IFMT) == S_IFIFO ?
+        LANDLOCK_ACCESS_FS_MAKE_FIFO : LANDLOCK_ACCESS_FS_MAKE_REG);
+    if (ret < 0) goto out;
+    if (!parent->ops || !parent->ops->create) { ret = -EOPNOTSUPP; goto out; }
+    if (task && quota_check_inode_mnt(parent->mnt, task->cred.euid, task->cred.egid) < 0) {
+        ret = -EDQUOT; goto out;
+    }
+    mode = (mode & S_IFMT) | ((mode & 07777) & ~(task ? task->fs.umask : 022));
+    ret = parent->ops->create(parent, name, mode, &vn);
+    if (!ret) {
+        vfs_dcache_invalidate(parent, name);
+        vfs_dcache_insert(parent, name, vn);
+        quota_account_inode_create(vn);
+        inotify_vnode_event(parent, name, IN_CREATE);
+        a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
+    }
+out:
+    vnode_put(vn);
+    vnode_put(parent);
+    mntns_mutation_leave();
+    return ret;
 }
 
 /* Runs when the last reference to an open file goes away: fire EventQ

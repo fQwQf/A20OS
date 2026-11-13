@@ -358,6 +358,9 @@ typedef struct mm_struct {
     vaddr_t    mmap_base;
     vaddr_t    stack_top;
     vaddr_t    stack_bottom;
+    /* Initial exec environment range; fork copies the addresses, exec replaces
+     * the MM. procfs reads the actual user pages, as Linux environ does. */
+    vaddr_t    env_start, env_end;
     size_t     total_vm;
     /* Resident set size in pages.  Atomic: the OOM victim selector reads it
      * under the victim task's park_lock (kernel/mm/cg_mem.c) while

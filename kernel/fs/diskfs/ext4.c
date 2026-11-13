@@ -2527,6 +2527,12 @@ int ext4_block_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
     if (!sb || !inode)
         return -EOPNOTSUPP;
     if (ext4_is_inconsistent(sb)) return -117;
+    /* FIFOs have no on-disk payload or extent tree. Their live bytes belong
+     * to the VFS pipe ring; final unlink only reclaims inode metadata. */
+    if ((inode->i_mode & S_IFMT) == S_IFIFO &&
+        !(inode->i_flags & EXT4_EXTENTS_FL) &&
+        ext4_inode_size(inode) == 0 && inode->i_blocks_lo == 0)
+        return 0;
     /* Fast symlinks store their target in i_block, not an extent header.
      * Firefox's profile lock is one such inode. There are no data blocks to
      * reclaim; interpreting its target as a tree stranded it on the orphan
