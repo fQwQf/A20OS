@@ -83,6 +83,7 @@ hosted 启动在 PFA 和 `driver_core_init()` 完成后、发布设备前调用 
 - `driver_dma_domain_create(dev, ops, context, &domain)`：建立显式地址转换 domain，复制 provider ops，保留 device 引用和 DMA mask 快照。成功接管 context 的一份所有权；失败不调用 provider release。
 - `driver_dma_domain_create_checked()`：接收独立的 `driver_dma_checked_ops`，允许解除映射返回错误，保留原有 provider 结构与模块 ABI。
 - `driver_dma_domain_create_managed()`：接收 `driver_dma_managed_ops`，把未完成的当前页清理及可失败的硬件 detach 纳入生命周期。
+- `driver_dma_domain_create_managed_policy()`：在相同生命周期中独立保留不可变物理约束，整批预检权限，并核对 provider 返回的 Unity/IOVA 要求；详见下文。
 - `driver_dma_domain_create_direct()`：仅在总线/平台已确认采用恒等 DMA 时显式使用。它不提供隔离，不能作为 IOMMU 失败时的降级，也不探测 AMD-Vi。
 - `driver_dma_map_pages()`：映射调用者已持有的 order-0 RAM 页数组。页面可以物理不连续；每页获得独立的设备 DMA 地址。
 - `driver_dma_page_address()`：读取设备地址，不根据 PFN 或 CPU 地址推算。地址 0 可以合法，错误由返回值区分。
@@ -134,6 +135,18 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
 
+### 不可变物理约束与映射入口检查
+
+`driver_dma_policy_create(rules, count, &policy)` 在任务上下文复制并按起点排序至多 1024 个 `driver_dma_rule`，不借用固件、设备或输入数组。规则使用 inclusive **CPU 物理字节区间**，不是 compact PFN、CPU 虚拟地址或 GPUVA；末端可以是 0xffffffffffffffff。`access` 的 READ/WRITE 从设备角度定义，0 表示禁止任何 DMA；`flags` 的 IDENTITY 要求设备 DMA 地址（IOVA）等于物理地址。重叠规则取权限交集、合并 identity 要求；无规则的区间和空 policy 没有额外限制。约束不授予内存所有权、占用或 DMA 启用权限。
+
+`driver_dma_policy_check(policy, physical, length, direction, &identity)` 检查整个字节 span：TO_DEVICE 要求设备 READ，FROM_DEVICE 要求 WRITE，双向要求两者。任何相交部分不满足即 `-EACCES`；任一相交规则要求 identity，则整个被查询 span 要求 identity。长度为 0、溢出、方向/参数非法返回 `-EINVAL`，所有错误清空 identity。create 的未知 access/flags 或反向区间返回 `-EINVAL`，过多输入返回 `-E2BIG`，分配失败 `-ENOMEM`，失败清空输出。输入在 create 返回前保持不变；返回后可释放或改写原数组。`get/put` 保留/释放独立引用，最终 put 在任务上下文执行；对象没有可变规则更新接口。
+
+`driver_dma_domain_create_managed_policy(dev, ops, context, policy, &domain)` 成功后接管 context 的一份所有权，并独立保留 policy 引用；失败不消费二者。调用者可立即 put 原 policy 引用。domain 在 provider `release(context)` 返回之后才 put 自己的 policy，因此 provider 清理阶段仍可查询它；失败的映射清理或 shutdown 继续保留 domain 时也保留 policy。原有 ops 结构、构造器和模块 ABI 不变；旧 domain 不自动获得约束，需要约束的 provider 应显式选择新入口。
+
+`driver_dma_map_pages()` 在 pin 任何 frame、分配 mapping 或调用 provider 前，先对全部输入页执行物理地址转换与整页权限检查。一个受限字节也约束整个 DMA 页；后面的页被拒绝不会使前面的页先进入 provider。成功返回的 IOVA 继续检查页对齐、完整 mask 和 identity；违反地址要求返回 `-ERANGE` 并进入既有可失败回滚。失效失败仍交出不可提交的清理句柄，保留所有页、domain 和 policy，try_unmap/shutdown 的关闭、重试与 CPU 同步时序不变。
+
+provider 必须在发布翻译前落实方向权限和 identity 地址分配，可在 context 中查询同一 policy；核心检查不读取硬件 PTE，也不能撤销回调返回前已经发生的错误 DMA。对象不自动建立 Unity 映射、Unity 存储保留、排除旁路或 IOMMU 页表。它仅提供可执行的映射入口约束，不替代 provider 的 requester、硬件状态与停止协议。
+
 ## AMD-Vi 的 IVRS 发现与路由候选
 
 `firmware/ivrs.h` 与 `kernel/firmware/acpi/ivrs.c` 提供分配无关的 IVRS 读取接口。格式依据 [AMD IOMMU Specification 3.10 第 5 章（AMD 原文镜像）](https://kib.kiev.ua/x86docs/AMD/IOMMU/48882-3.10.pdf)，并对照 [ACPICA 表定义](https://raw.githubusercontent.com/acpica/acpica/master/source/include/actbl2.h)；实现使用字节读取，没有导入 Linux/ACPICA 驱动代码。
@@ -165,7 +178,7 @@ x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再�
 
 没有对应函数/capability 返回 `-ENODEV`；不支持的 class/header/interface/address width 返回 `-EOPNOTSUPP`；畸形链或 aperture 返回 `-EINVAL`；base 或 PCSup 矛盾返回 `-EIO`；transport 错误原样传播。错误清空整个 snapshot。探测成功不等于资源已独占或设备已接管，也不保证后续时刻的硬件状态；硬件初始化时必须重新验证。
 
-PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；下文已提供 PCI 桥路径、有效 Range 补充查询，以及结合 IVRS/绑定生命周期的保留路由对象；下述显式 reserve 已接入 PCI 集合占用；全部 alias peer 的停止/归属协调、IVMD 权限落实及 DMA domain provider 仍待实现。
+PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture。PCI 路径/Range、IVRS/绑定路由及 requester 集合占用已提供，IVMD 可转换为独立约束并用于通用映射检查。全部 alias peer 的停止/归属协调、硬件 PTE/Unity/Exclusion 和 DMA domain provider 仍待实现。
 
 两类报告都不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 表示这条发现路径没有启用 AMD-Vi 翻译；它不表示固件此前未开启硬件，也不表示下述软件驱动没有绑定。
 
@@ -220,6 +233,16 @@ PCI 另提供 `pci_device_find_get(segment, requester, &device)`：在 discovery
 `tools/a20 test smoke-amdvi-route-x86_64` 在 q35 root port 下提供 EDU，并显式设置 `driver.amdvi_route_test=1` 与运行时自检参数。测试获取路由后先释放原始 client 引用，再验证 requester、单元和 IVMD 枚举，释放句柄并输出 `AMDVI_ROUTE: PASS route=1 policy=1 scope=1`。普通启动不执行；该实例不提交 DMA。解绑后的保留、重绑、alias 与有效 Range 分支另由主机后端验证。
 
 新增实例 `tools/a20 test smoke-amdvi-requester-x86_64` 再显式指定 `driver.amdvi_requester_test=1`：两个独立观察句柄竞争同一 EDU requester，验证重复 reserve、冲突与持有占用的句柄释放后的重试，输出 `AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1`。不启用 BME 或提交 DMA；正常启动不执行。
+
+### 从 IVMD 构造独立 DMA policy
+
+`amd_iommu_route_policy_create(route, &policy)` 在 discovery 事务中重新验证活跃路由，再复制原 requester、实际 DMA requester 以及全部保留 IVHD 替代格式下的匹配 IVMD。按 [AMD IOMMU 3.10 表 110–111（303–304 页）](https://kib.kiev.ua/x86docs/AMD/IOMMU/48882-3.10.pdf)，IR/IW 转为设备 READ/WRITE，Unity 转为 IOVA identity；不同记录的限制由通用 policy 交集处理，不能只取选中 IVHD 的记录或忽略 alias 目标。
+
+相关 ExclusionRange 或非零高四位返回 `-EOPNOTSUPP`，不把硬件旁路降格为普通规则或无约束 domain；非排除记录的 Unity=1 且 IR=IW=0 返回 `-EINVAL`。其他路由错误原样传播，失败清空输出并回收部分规则，原 route 仍由调用者持有。没有匹配 IVMD 时返回空 policy；这表示没有额外内存限制，不证明设备可启用。
+
+policy 是不含借用指针的值快照，其引用不保留 route、设备或控制器；关闭路由、解绑控制器并释放固件映射后仍可检查旧约束。创建新 policy 仍要求活跃路由，旧快照不因重绑而刷新。创建 policy 不自动 reserve requester，也不初始化硬件。未来 AMD provider 仍需协调全部 alias peer、完整控制器策略与活跃状态，选择带 policy 的 managed 构造器，并在硬件中落实权限和必需 Unity 映射。只检查本路由匹配的记录，不能推导其他 requester 没有 ExclusionRange。
+
+`tools/a20 test smoke-amdvi-policy-x86_64` 显式增加 `driver.amdvi_policy_test=1`，在路由释放后检查独立 policy，输出 `AMDVI_POLICY: PASS create=1 retained=1`。QEMU fixture 没有 IVMD；它只验证空 policy 的启动集成和引用，不验证有效 IVMD 或实际硬件映射。权限、Unity、跨 alias/替代格式的交集、错误、源表释放后的独立存储与分配回滚由主机后端验证。
 
 ## 原生异步 fence
 
@@ -301,6 +324,7 @@ tools/a20 test smoke-amdvi-owner-x86_64
 tools/a20 test smoke-pci-scope-x86_64
 tools/a20 test smoke-amdvi-route-x86_64
 tools/a20 test smoke-amdvi-requester-x86_64
+tools/a20 test smoke-amdvi-policy-x86_64
 tools/a20 test smoke-driver-iommu-native-riscv64
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only -j4
 ```
@@ -312,7 +336,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，基于显式 PCI 集合占用补齐全部 alias peer 的停止/归属协调与 IVMD 权限，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
+2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，基于显式 PCI 集合占用和 IVMD 约束补齐全部 alias peer 的停止/归属协调、硬件 PTE/Unity/Exclusion 策略，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -389,3 +413,11 @@ IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603
 保留其他工作的工作区中，x86_64 双核 embedded 与 AArch64 bringup embedded 内核构建成功，按新实例直接启动 embedded QEMU 获得全部标记并以 0 退出。完整 `tools/a20 test smoke-amdvi-requester-x86_64` 首次已越过此前的 `ufsd` 编译缺口，但因内核参数被拆成多个 argv 失败；修正参数传递后重跑，generic 内核、开发镜像构建与客户机测试均通过，退出码 0，7 个预期标记全部匹配，包括 `AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1`。客户机确认 `2/2 configured CPUs online`。本次完整门禁使用共享工作区中其他工作的 fscompat 适配改动，这些文件未纳入上述提交；隔离提交树的驱动主机测试不依赖这些改动。
 
 QEMU 验证同一个 EDU requester 的软件占用、冲突和释放后重试，没有执行 EDU DMA、AMD-Vi 翻译或 GPU 加速。alias 竞争及解绑后的持续占用由主机模型验证；原有 RISC-V provider 和 raw 配置写入未统一接入新 namespace。全部 alias peer 的停止/归属协调、IVMD 权限与硬件翻译/故障恢复仍待实现。文档行号引用检查通过，导航仍有其他工作的 7 个未索引页面，本轮未新增链接/导航错误。本地日志位于 `.kernel-build/pci-requester-review/`。
+
+2026-11-14 不可变 DMA policy：通用接口与 managed 映射入口提交 `7d5d736ae`，其独立提交树 129 项回归通过。新 harness 使用独立的逐字节 oracle 检查重叠权限/identity，覆盖 access/flags 变化、空规则、1024 条倒序输入、UINT64 末端、输入复制和边界错误；生产映射代码另验证 compact PFN 转物理地址、部分页/后续页拒绝时零 provider 调用和零 pin、方向权限、identity 成功/失败、回滚超时及 detach 重试保留，provider release 期间仍可访问 policy。profile 和映射代码配合 ASan/UBSan，硬件翻译与 frame/调度器后端为替代实现。
+
+AMD 转换提交 `54959a1ba`，最终隔离树 132 项主机回归通过。新用例覆盖 IR/IW/Unity 合法组合、禁止映射、原/alias 与交叠记录、替代 IVHD 记录保留、ExclusionRange/保留 flags/非法 Unity 拒绝、两阶段分配失败、快照变化，以及源表解除映射/复用后 policy 仍独立。省略整批预检、省略 identity 返回地址核对、忽略 ExclusionRange 三个负控均触发行为断言，未以编译失败代替负控；路由转换的配置写入计数不变。
+
+保留其他工作的工作区中，x86_64 双核 embedded、AArch64 bringup embedded 内核构建通过；完整 `tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核与开发镜像构建、QEMU 测试，退出码 0，8 个预期标记全部匹配，包含 `AMDVI_POLICY: PASS create=1 retained=1`，客户机确认 `2/2 configured CPUs online`。115 个实例与 32 个驱动组件清单检查通过。工作区同时包含并行 LLVM 构建支持等改动，本轮提交未打包其他工作的未提交变更。
+
+QEMU IVRS 没有 IVMD，本轮启动验证只证明空 policy 的构造、保留和集成，不证明有效 IVMD 的硬件执行；没有提交 EDU DMA，没有启用 AMD-Vi 翻译或 GPU 加速。带 policy 的通用 mapper 已检查请求权限/返回地址，但实际 PTE 权限、必需 Unity 映射、完整控制器 Exclusion/alias peer 协调仍须由硬件 provider 实现。旧 domain 不自动获得新 policy。文档行号引用检查通过，导航仍有其他工作的 7 个未索引页面，本轮无新增链接/导航错误。验证日志在本地 `.kernel-build/dma-policy-review/`。
