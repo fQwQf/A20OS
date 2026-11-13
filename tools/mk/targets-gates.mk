@@ -123,7 +123,7 @@ check-pc-drivers: check-component-registry
 	$(PYTHON) -m unittest tools.tests.test_i2c_transport_lifetime \
 	  tools.tests.test_firmware_gpio_input tools.tests.test_pc_network_lifetime \
 	  tools.tests.test_pc_module_boundary \
-	  tools.tests.test_xhci_endpoint_types \
+	  tools.tests.test_xhci_endpoint_types tools.tests.test_xhci_remove \
 	  tools.tests.test_xhci_event_owner_race tools.tests.test_xhci_firmware_policy \
 	  tools.tests.test_usb_enumeration_cleanup tools.tests.test_smoke_qmp \
 	  tools.tests.test_usb_hid_protocol tools.tests.test_usb_hid_readiness \
@@ -143,7 +143,7 @@ check-firmware-model:
 	  tools.tests.test_e1000_interrupt_setup tools.tests.test_ahci_pci_policy \
 	  tools.tests.test_xhci_firmware_policy tools.tests.test_usb_enumeration_cleanup \
 	  tools.tests.test_usb_hid_readiness \
-	  tools.tests.test_xhci_endpoint_types \
+	  tools.tests.test_xhci_endpoint_types tools.tests.test_xhci_remove \
 	  tools.tests.test_alsa_lib_protocol \
 	  tools.tests.test_hda_pcm_readiness \
 	  tools.tests.test_arch_layout tools.tests.test_arch_mmio \

@@ -201,6 +201,8 @@ typedef struct xhci_controller {
     uint8_t command_cycle;
     uint16_t command_enqueue;
     uint8_t running;
+    uint8_t hardware_owned;     /* Firmware handoff succeeded. */
+    uint8_t halted;             /* Verified terminal stop; never restart. */
     uint64_t command_ring_pa;
     uint64_t crcr_start;
     uint32_t hcs2_value;
@@ -297,7 +299,9 @@ static inline void xhci_write64(uintptr_t base, uint32_t offset, uint64_t value)
 static int xhci_wait32(uintptr_t base, uint32_t offset, uint32_t mask,
                        uint32_t expected) {
     for (uint32_t i = 0; i < XHCI_WAIT_LOOPS; i++) {
-        if ((xhci_read32(base, offset) & mask) == expected)
+        uint32_t value = xhci_read32(base, offset);
+        if (value == 0xffffffffU) return -EIO;
+        if ((value & mask) == expected)
             return 0;
         arch_cpu_relax();
     }
@@ -465,6 +469,10 @@ static int xhci_xfer_acquire(xhci_controller_t *xhci, unsigned budget_ms) {
     uint64_t deadline = timer_get_ticks() + MS_TO_TICKS(XHCI_BULK_HOLD_BUDGET_MS);
     for (uint32_t i = 0;; i++) {
         uint64_t flags = spin_lock_irqsave(&xhci->lock);
+        if (xhci->fatal) {
+            spin_unlock_irqrestore(&xhci->lock, flags);
+            return -ESHUTDOWN;
+        }
         if (!xhci->xfer_busy) {
             xhci->xfer_busy = 1;
             xhci->xfer_deadline = timer_get_ticks() + MS_TO_TICKS(budget_ms);
@@ -571,6 +579,53 @@ static int xhci_quiesce_failed(xhci_controller_t *xhci)
     }
     spin_unlock_irqrestore(&xhci->lock, flags);
     return xhci_wait32(xhci->op, XHCI_USBSTS, XHCI_STS_HALTED, XHCI_STS_HALTED);
+}
+
+/* Called by the core before any child unbind, with the lifecycle mutex.
+ * The fatal gate is terminal admission, not a DMA-stop proof. */
+static int xhci_prepare_remove(void *context) {
+    device_t *dev = context;
+    xhci_controller_t *xhci = dev->drv_priv;
+    if (!xhci) return 0; /* Early probe failure has published no own DMA. */
+    uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    xhci->fatal = 1;
+    xhci->running = 0;
+    if (xhci->hardware_owned) {
+        xhci_write32(xhci->runtime + XHCI_INTERRUPTER_OFFSET, 0x00U, 0);
+        (void)xhci_read32(xhci->runtime + XHCI_INTERRUPTER_OFFSET, 0x00U);
+    }
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    /* Includes callbacks already executing outside the controller lock. */
+    if (xhci->irq_registered) {
+        free_irq((uint32_t)xhci->irq, xhci);
+        xhci->irq_registered = 0;
+    }
+    flags = spin_lock_irqsave(&xhci->lock);
+    bool busy = xhci->xfer_busy;
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    if (busy) return -EBUSY; /* Never wait on a consumer needing lifecycle. */
+    if (!xhci->hardware_owned || xhci->halted) return 0;
+    uint32_t command = xhci_read32(xhci->op, XHCI_USBCMD);
+    if (command == 0xffffffffU) return -EIO;
+    xhci_write32(xhci->op, XHCI_USBCMD, command & ~(XHCI_CMD_RUN | XHCI_CMD_INTE));
+    command = xhci_read32(xhci->op, XHCI_USBCMD);
+    if (command == 0xffffffffU || (command & (XHCI_CMD_RUN | XHCI_CMD_INTE)))
+        return -EIO;
+    int ret = xhci_wait32(xhci->op, XHCI_USBCMD, XHCI_CMD_RESET, 0);
+    if (!ret) ret = xhci_wait32(xhci->op, XHCI_USBSTS, XHCI_STS_HALTED, XHCI_STS_HALTED);
+    if (!ret) ret = xhci_wait32(xhci->op, XHCI_USBSTS, XHCI_STS_CNR, 0);
+    if (ret) return ret;
+    /* No device lock around PCI/discovery helpers. Both hardware observations
+     * are required; an inaccessible function is not a successful stop. */
+    uint16_t pci = pci_cfg_read16(dev, 4);
+    if (pci == 0xffffU) return -EIO;
+    pci_cfg_write16(dev, 4, pci & ~4U);
+    pci = pci_cfg_read16(dev, 4);
+    if (pci == 0xffffU || (pci & 4U)) return -EIO;
+    flags = spin_lock_irqsave(&xhci->lock);
+    xhci->halted = 1;
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    return 0;
 }
 
 static int xhci_wait_event(xhci_controller_t *xhci, uint8_t wanted_type,
@@ -1228,6 +1283,10 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
     if (!urb || !urb->ep)
         return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    if (xhci->fatal) {
+        spin_unlock_irqrestore(&xhci->lock, flags);
+        return -ESHUTDOWN;
+    }
     uint8_t addr = urb->ep->addr;
     uint8_t number = addr & 0x0fU;
     uint8_t dci = (uint8_t)((addr & USB_DIR_IN) ? number * 2U + 1U : number * 2U);
@@ -1332,7 +1391,14 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
     if (!slot || slot > xhci->max_slots)
         return -EINVAL;
 
-    int held = -EBUSY;
+    uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    bool software_only = xhci->fatal && xhci->halted;
+    bool unavailable = xhci->fatal && !xhci->halted;
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    if (unavailable) return -ESHUTDOWN;
+    /* Once the entire controller is verifiably halted, there is no command
+     * consumer. Release known slots in software without ringing a doorbell. */
+    int held = software_only ? 0 : -EBUSY;
     for (int attempt = 0; attempt < 8 && held < 0; attempt++) {
         held = xhci_xfer_acquire(xhci, XHCI_XFER_HOLD_BUDGET_MS);
         if (held < 0)
@@ -1344,10 +1410,10 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
         return held;
     }
 
-    int r = xhci_command_locked(xhci, 0, 0,
+    int r = software_only ? 0 : xhci_command_locked(xhci, 0, 0,
                                 XHCI_TRB_TYPE(XHCI_TRB_DISABLE_SLOT) |
                                 ((uint32_t)slot << 24), NULL);
-    uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    flags = spin_lock_irqsave(&xhci->lock);
     /* A Disable Slot that failed leaves the device context in place; clearing
      * DCBAA anyway would let the controller fetch a zeroed context. */
     if (r == 0) {
@@ -1356,10 +1422,10 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
         arch_dma_sync_for_device(xhci->dcbaa, sizeof(xhci->dcbaa));
     }
     spin_unlock_irqrestore(&xhci->lock, flags);
-    xhci_xfer_release(xhci);
-    if (r < 0) {
+    if (!software_only) xhci_xfer_release(xhci);
+    if (r) {
         kerr("[XHCI] slot %u: Disable Slot failed: %d\n", slot, r);
-        return r;
+        return r < 0 ? r : -EIO;
     }
 
     xhci_ep_t *dead = NULL;
@@ -1397,7 +1463,7 @@ static int xhci_op_poll(usb_hcd_t *hcd) {
     if (xhci->fatal)
         return 0;
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
-    if (xhci->xfer_busy) {
+    if (xhci->fatal || xhci->xfer_busy) {
         spin_unlock_irqrestore(&xhci->lock, flags);
         return 0;
     }
@@ -1517,6 +1583,7 @@ static int xhci_op_start(usb_hcd_t *hcd) {
     int owner = xhci_take_ownership(xhci->cap, xhci->mmio_size);
     if (owner)
         return owner;
+    xhci->hardware_owned = 1;
 
     xhci_write32(xhci->op, XHCI_USBCMD,
                  xhci_read32(xhci->op, XHCI_USBCMD) & ~XHCI_CMD_RUN);
@@ -1818,6 +1885,9 @@ static int xhci_baytrail_route_ports(device_t *dev)
 
 static int xhci_probe(device_t *dev)
 {
+    int prepare = device_probe_use_remove(dev);
+    if (!prepare) prepare = device_add_remove_prepare(dev, xhci_prepare_remove, dev);
+    if (prepare) return prepare;
     if (pci_enable_and_assign_bars(dev) != 0)
         return -ENODEV;
     resource_t *bar = pci_get_bar_resource(dev, 0);
@@ -1911,11 +1981,7 @@ static int xhci_probe(device_t *dev)
     int result = usb_core_register_hcd(&xhci->hcd);
     if (result) {
         kerr("[XHCI] controller start failed: %d\n", result);
-        if (xhci->irq_registered)
-            free_irq((uint32_t)xhci->irq, xhci);
-        kfree(xhci->alloc_ptr);
-        dev->drv_priv = NULL;
-        return result;
+        return result; /* Core prepare/remove retains uncertain hardware state. */
     }
 
     if (xhci_baytrail_route_ports(dev))
@@ -1933,21 +1999,10 @@ static int xhci_remove(device_t *dev)
     xhci_controller_t *xhci = (xhci_controller_t *)dev->drv_priv;
     if (!xhci)
         return 0;
+    if ((xhci->hardware_owned && !xhci->halted) || xhci->irq_registered)
+        return -EBUSY;
     int ret = usb_core_unregister_hcd(&xhci->hcd);
     if (ret) return ret;
-    /* Mask the controller's interrupts before releasing the handler: a
-     * completion racing the teardown must not find a freed ring.  Masking
-     * under the same lock the handler takes is what makes "running = 0" and
-     * "the line is quiet" one step rather than two. */
-    uint64_t flags = spin_lock_irqsave(&xhci->lock);
-    xhci->running = 0;
-    xhci_write32(xhci->runtime + XHCI_INTERRUPTER_OFFSET, 0x00U, 0);
-    spin_unlock_irqrestore(&xhci->lock, flags);
-    if (xhci->irq_registered)
-        free_irq((uint32_t)xhci->irq, xhci);
-    xhci_write32(xhci->op, XHCI_USBCMD,
-                 xhci_read32(xhci->op, XHCI_USBCMD) &
-                 ~(XHCI_CMD_RUN | XHCI_CMD_INTE));
     dev->drv_priv = NULL;
     kfree(xhci->alloc_ptr);
     return 0;

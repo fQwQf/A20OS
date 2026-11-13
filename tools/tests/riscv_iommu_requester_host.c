@@ -149,7 +149,16 @@ static void requester_iommu_case(const char *name) {
  g_iommu_base=(uintptr_t)regs;g_iommu_ddt=ddt;g_iommu_dc_stride=32;
  g_iommu_cq=command_queue;g_iommu_fq=fault_queue;g_iommu_ready=1;
  struct driver_dma_domain *domain=NULL;uint16_t rid=0;
- if(!strcmp(name,"probe-cleanup")||!strcmp(name,"probe-child")) {
+ if(!strcmp(name,"preparing")) {
+  assert(!riscv_iommu_dma_domain_create(device,&domain));
+  device->state=DEV_STATE_PREPARING;unsigned before=commands;
+  pfn_t page=host_alloc_page();struct driver_dma_mapping *mapping=(void *)1;
+  assert(driver_dma_map_pages(domain,&page,1,DRIVER_DMA_BIDIRECTIONAL,&mapping)==-ENODEV&&!mapping);
+  assert(host_refs[page]==1&&commands==before);host_frame_put(page);
+  device_t *found=(void *)1;assert(pci_device_find_get(0,0,&found)==-ENODEV&&!found);
+  busy(&external);assert(!driver_dma_domain_shutdown(domain));busy(&external);
+  driver_dma_domain_put(domain);vacant(&external);device->state=DEV_STATE_PROBED;
+ } else if(!strcmp(name,"probe-cleanup")||!strcmp(name,"probe-child")) {
   native_probe_cleanup_case(device,&external,!strcmp(name,"probe-child"));
  } else if(!strcmp(name,"external")) {
   pci_requester_reservation_t *lease=NULL;

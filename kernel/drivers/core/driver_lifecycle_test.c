@@ -23,6 +23,7 @@ typedef struct {
     int should_driver_match;
     int fail_probe;
     int managed_probe_error;
+    int prepare_count;
     int probe_count;
     int remove_count;
     int remove_error;
@@ -47,6 +48,13 @@ static void lifecycle_release_resource(void *context) {
     plat->resources_released++;
 }
 
+static int lifecycle_prepare(void *context) {
+    lifecycle_plat_t *plat = context;
+    if (plat->quiesce_count || plat->remove_count) return -EIO;
+    plat->prepare_count++;
+    return 0;
+}
+
 static int lifecycle_probe(device_t *dev)
 {
     lifecycle_plat_t *plat = (lifecycle_plat_t *)dev->plat_data;
@@ -56,6 +64,7 @@ static int lifecycle_probe(device_t *dev)
     plat->probe_count++;
     if (plat->managed_probe_error) {
         int ret = device_probe_use_remove(dev);
+        if (!ret) ret = device_add_remove_prepare(dev, lifecycle_prepare, plat);
         if (ret) return ret;
     }
     if (plat->fail_probe) {
@@ -271,13 +280,15 @@ int driver_lifecycle_test_run(void)
         dev_partial.class_dev || dev_partial.probe_error != -EIO ||
         dev_partial.state != DEV_STATE_UNINIT || plat_partial.probe_count != 1 ||
         plat_partial.quiesce_count != 1 || plat_partial.remove_count != 1 ||
-        plat_partial.resources_released != 1 || plat_partial.quiesce_error ||
+        plat_partial.resources_released != 1 || plat_partial.prepare_count != 1 ||
+        plat_partial.quiesce_error ||
         device_unregister(&dev_partial)) {
         kerr("[DRIVER-LIFECYCLE] managed failed probe did not safely roll back\n");
         pass = 0;
         goto out;
     }
     kinfo("DRIVER_PROBE_CLEANUP: PASS managed=1 rollback=1\n");
+    kinfo("DRIVER_REMOVE_PREPARE: PASS partial=1 before_remove=1\n");
 
     /* 6. Register a matching device whose probe succeeds. */
     if (device_register(&dev_ok) != 0) {

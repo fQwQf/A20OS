@@ -26,9 +26,9 @@ class DriverRemove(unittest.TestCase):
         prelude = prelude.replace('return realloc(p, n);', 'return probe_allocations_blocked ? NULL : realloc(p, n);')
         cases = (ROOT / 'tools/tests/driver_remove_host.c').read_text()
         marker = 'int main(int argc,char **argv) {'
-        cases = cases.replace(marker, (ROOT / 'tools/tests/driver_probe_cleanup_host.c').read_text() + '\n' + marker)
+        cases = cases.replace(marker, (ROOT / 'tools/tests/driver_probe_cleanup_host.c').read_text() + '\n' + (ROOT / 'tools/tests/driver_remove_prepare_host.c').read_text() + '\n' + marker)
         cases = cases.replace('if(!strcmp(argv[1],"arguments"))',
-                              'if(!strncmp(argv[1],"probe-",6))probe_cleanup_case(argv[1]+6);\n else if(!strcmp(argv[1],"arguments"))')
+                              'if(!strncmp(argv[1],"probe-",6))probe_cleanup_case(argv[1]+6);\n else if(!strncmp(argv[1],"prepare-",8))prepare_case(argv[1]+8);\n else if(!strcmp(argv[1],"arguments"))')
         fixture.write_text(prelude + cases)
         wrapper = work / 'registry.rs'
         wrapper.write_text('#![no_std]\n#![allow(unused_attributes)]\n#[path = ' + repr(str(ROOT / 'kernel/drivers/core/registry_state.rs')).replace("'", '"') + '] mod registry;\n'
@@ -83,6 +83,15 @@ class DriverRemove(unittest.TestCase):
     def test_withdrawal_suppresses_new_bindings_and_rejects_recursive_teardown(self):
         self.run_cases('withdrawal', 'parent-publication')
 
+
+    def test_prepare_checkpoints_precede_children_and_survive_each_later_failure(self):
+        self.run_cases('prepare-order')
+
+    def test_prepare_failure_during_probe_preserves_original_error_and_graph(self):
+        self.run_cases('prepare-probe-error', 'prepare-early')
+
+    def test_prepare_oom_uses_partial_remove_without_arming_an_action(self):
+        self.run_cases('prepare-oom')
 
     def test_probe_error_uses_explicit_partial_cleanup(self):
         self.run_cases('probe-early', 'probe-positive', 'probe-deferred')

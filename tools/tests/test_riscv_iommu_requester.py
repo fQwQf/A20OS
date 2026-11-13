@@ -45,6 +45,9 @@ class RiscvIommuRequester(unittest.TestCase):
             with self.subTest(case=name):
                 subprocess.run([str(self.binary), 'iommu-' + name], check=True, timeout=15)
 
+    def test_prepare_state_denies_new_dma_and_lookup_but_allows_safe_detach(self):
+        self.run_cases('preparing')
+
     def test_failed_probe_retains_real_domain_frames_and_lease_until_safe_cleanup(self):
         self.run_cases('probe-cleanup', 'probe-child')
 
