@@ -343,7 +343,7 @@ typedef struct vfile {
  * mountinfo parent ids), and the path is the authority for "which mount does
  * this absolute path resolve in".
  *
- * VFS_MOUNT_DETACHED marks a mount that pivot_root has cut out of the tree.
+ * detached marks a mount that pivot_root has cut out of the tree.
  * It stays in the table so mountinfo can still report it, but no path
  * resolves through it any more -- which is exactly Linux's post-pivot
  * property: the old root is unreachable by path and reachable only through
@@ -391,10 +391,12 @@ typedef struct mount {
     /* Stable identity within the namespace, reported as the mount id by
      * /proc/self/mountinfo and statmount(2). */
     uint32_t        mnt_id;
+    /* Namespace lifetime state is separate from Linux MS_* flags. In
+     * particular MS_NOSUID == 2 must never hide a live mount from lookup. */
+    unsigned int    detached;
 } mount_t;
 
 #define VFS_MOUNT_RDONLY  0x1
-#define VFS_MOUNT_DETACHED 0x2
 
 /* ---- Open file table (global) ---- */
 #define VFS_MAX_OPEN   8192

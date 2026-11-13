@@ -494,7 +494,7 @@ static int gen_mount_at(int index, struct a20_mount_ent *out)
     snprintf(out->opts, sizeof(out->opts), "%s", m->opts[0] ? m->opts : "rw");
     out->mnt_id = (uint32_t)m->mnt_id;
     out->parent_id = (uint32_t)vfs_mount_parent_id(m);
-    out->detached = (m->flags & VFS_MOUNT_DETACHED) ? 1 : 0;
+    out->detached = m->detached;
     return 1;
 }
 
