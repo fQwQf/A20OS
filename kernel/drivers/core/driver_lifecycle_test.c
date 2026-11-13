@@ -24,6 +24,8 @@ typedef struct {
     int fail_probe;
     int probe_count;
     int remove_count;
+    int remove_error;
+    int resources_released;
     int quiesce_count;
     int quiesce_error;
     class_device_t *inflight;
@@ -37,6 +39,11 @@ static int lifecycle_match(device_t *dev, const driver_t *drv)
         return 0;
     lifecycle_plat_t *plat = (lifecycle_plat_t *)dev->plat_data;
     return plat && plat->should_match;
+}
+
+static void lifecycle_release_resource(void *context) {
+    lifecycle_plat_t *plat = context;
+    plat->resources_released++;
 }
 
 static int lifecycle_probe(device_t *dev)
@@ -54,6 +61,8 @@ static int lifecycle_probe(device_t *dev)
     }
 
     dev->drv_priv = plat;
+    int ret = device_add_resource_action(dev, lifecycle_release_resource, plat);
+    if (ret) { dev->drv_priv = NULL; return ret; }
     kinfo("[DRIVER-LIFECYCLE] probe succeeded for '%s'\n",
           dev->name ? dev->name : "?");
     return 0;
@@ -91,6 +100,7 @@ static int lifecycle_remove(device_t *dev)
     if (plat) {
         if (plat->quiesce_count != plat->remove_count + 1 || plat->inflight)
             plat->quiesce_error = 1;
+        if (plat->remove_error) return plat->remove_error;
         plat->remove_count++;
     }
     dev->drv_priv = NULL;
@@ -321,8 +331,23 @@ int driver_lifecycle_test_run(void)
         goto out;
     }
 
-    /* 9. Remove the device explicitly. */
-    device_unregister(&dev_ok);
+    /* 9. Failed removal keeps code, private state and devres for retry. */
+    plat_ok.remove_error = -ETIMEDOUT;
+    if (driver_unregister(&g_lifecycle_driver) != -ETIMEDOUT ||
+        !device_is_registered(&dev_ok) || dev_ok.drv != &g_lifecycle_driver ||
+        dev_ok.drv_priv != &plat_ok || dev_ok.state != DEV_STATE_REMOVING ||
+        dev_ok.class_dev || plat_ok.resources_released != 1 ||
+        plat_ok.quiesce_count != 2 || plat_ok.remove_count != 1) {
+        kerr("[DRIVER-LIFECYCLE] failed removal did not retain binding/resources\n");
+        pass = 0;
+        goto out;
+    }
+    plat_ok.remove_error = 0;
+    if (device_unregister(&dev_ok) || plat_ok.resources_released != 2) {
+        pass = 0;
+        goto out;
+    }
+    kinfo("DRIVER_REMOVE: PASS retained=1 retry=1 devres=1\n");
     if (dev_ok.drv != NULL || dev_ok.state != DEV_STATE_REMOVED) {
         kerr("[DRIVER-LIFECYCLE] device_unregister did not unbind device\n");
         pass = 0;
@@ -341,6 +366,8 @@ int driver_lifecycle_test_run(void)
     }
 
 out:
+    plat_ok.remove_error = 0;
+    plat_fail.remove_error = 0;
     /* These objects live on this stack frame.  Always remove them from the
      * global registries, including after an assertion failure, so later boot
      * code cannot observe dangling device or platform-data pointers. */

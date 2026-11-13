@@ -257,7 +257,9 @@ typedef struct usb_hcd_ops {
     int  (*submit_interrupt)(struct usb_hcd *hcd, usb_urb_t *urb);
     /* Submit a bulk transfer; completion calls urb->complete(). */
     int  (*submit_bulk)(struct usb_hcd *hcd, usb_urb_t *urb);
-    /* Tear down a slot on removal. */
+    /* 0 confirms slot/endpoint callbacks are stopped. Failure leaves their
+     * contexts/storage valid for retry. Core retains the published port and
+     * address, and does not free interfaces/endpoints until this succeeds. */
     int  (*abort_slot)(struct usb_hcd *hcd, uint8_t slot);
     /* Publish hub topology to the host controller before addressing children. */
     int  (*configure_hub)(struct usb_hcd *hcd, struct usb_device *dev,
@@ -283,7 +285,9 @@ typedef struct usb_hcd {
 void usb_core_init(void);
 
 int usb_core_register_hcd(usb_hcd_t *hcd);
-void usb_core_unregister_hcd(usb_hcd_t *hcd);
+/* Task context. Failure retains registration, ports/interfaces/endpoints and
+ * address ownership for retry; already removed interfaces stay removed. */
+int usb_core_unregister_hcd(usb_hcd_t *hcd);
 
 /* Address reservations for controllers that assign addresses in software. */
 int usb_core_alloc_address(void);

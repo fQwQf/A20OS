@@ -461,6 +461,7 @@ const struct drv_export drv_export_table[] = {
      * handed one by a bus scan) has to publish it, or device_find_get_by_class()
      * cannot see it and mount_setup_block_device() finds no disk. */
     { "device_register",     (void *)device_register },
+    { "device_unregister",   (void *)device_unregister },
     { "platform_bus",        &platform_bus },
     /* PCI class-driver accessors (device_t-based; modules bind through
      * drv_driver_register with bus = &pci_bus) */

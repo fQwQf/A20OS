@@ -173,6 +173,9 @@ typedef struct driver {
 
     /* lifecycle */
     int  (*probe)(device_t *dev);
+    /* After quiesce/class drain. 0 commits teardown; failure retains binding,
+     * drv_priv, devres and dependencies offline in REMOVING. Must retain all
+     * hardware-accessible storage on error and support explicit retry. */
     int  (*remove)(device_t *dev);
     int  (*suspend)(device_t *dev);   /* optional */
     int  (*resume)(device_t *dev);    /* optional */
@@ -195,9 +198,12 @@ typedef struct driver {
     /* Optional task-context stop phase, after class calls have been disabled
      * but BEFORE the core waits for active calls. Cancel/wake requests and
      * stop DMA/IRQ/work producers here; retain storage until remove(). This
+     * does not permit freeing memory after an unconfirmed hardware stop:
+     * record that failure privately and report it from remove(). It
      * must also tolerate a successful probe whose class publication failed.
      * The lifecycle mutex is held: do not wait for work that needs it. A
-     * failed probe still rolls back its own hardware before returning. */
+     * failed probe still rolls back its own hardware before returning.
+     * Runs once per teardown; failed remove retries do not repeat quiesce. */
     void (*quiesce)(device_t *dev);
 } driver_t;
 
@@ -251,9 +257,16 @@ int a20_driver_registry_remove(void **slots, int *count, void *item);
 int  driver_core_list_drivers(char *buf, size_t sz);
 int  driver_core_list_devices(char *buf, size_t sz);
 int  driver_register(driver_t *drv);
+/* Failure retains driver registration/code ownership and remaining bindings.
+ * Suppresses new matching bindings during withdrawal; recursive teardown is
+ * -EBUSY. Already stopped devices are not automatically rebound on failure. */
 int  driver_unregister(driver_t *drv);
 int  device_register(device_t *dev);
-void device_unregister(device_t *dev);
+/* Synchronous, task context. Commit unregister only after successful remove.
+ * Failure keeps the registry pin/binding/resources for retry; some consumers
+ * may already have stopped. No automatic rollback/re-probe or forced free.
+ * NULL -> -EINVAL; not registered -> -ENOENT; positive remove -> -EIO. */
+int device_unregister(device_t *dev);
 /* Publish a bus add/remove event through the normal device lifecycle.  Bus
  * callbacks observe ADD after probe and REMOVE after remove has completed. */
 int  device_hotplug(device_t *dev, int event);

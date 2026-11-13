@@ -337,9 +337,10 @@ static int usb_hub_remove(device_t *dev)
 {
     usb_hub_t *hub = dev->drv_priv;
     if (hub) {
-        dev->drv_priv = NULL;
         /* The core aborts the upstream slot before removing its interfaces. */
-        usb_core_unregister_hcd(&hub->hcd);
+        int ret = usb_core_unregister_hcd(&hub->hcd);
+        if (ret) return ret;
+        dev->drv_priv = NULL;
         kfree(hub);
     }
     return 0;

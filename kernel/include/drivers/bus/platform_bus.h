@@ -10,7 +10,7 @@ typedef struct platform_device {
 } platform_device_t;
 
 int platform_device_register(platform_device_t *pdev);
-void platform_device_unregister(platform_device_t *pdev);
+int platform_device_unregister(platform_device_t *pdev);
 
 /*
  * Read the first resolved IRQ resource. @dev must be on platform_bus.
