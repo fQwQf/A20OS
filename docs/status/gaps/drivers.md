@@ -8,8 +8,8 @@
 
 | 待完成范围 | 关闭条件 |
 |---|---|
-| AMD-Vi 接管前资源完整性 | 已有被动 PCI 唯一绑定、IVRS 保留、完整 aperture checked claim，以及 probe 失败/解绑/重绑的主机与 QEMU 证据。已通过独立存储保留对象导入受管 RAM 与 ACPI 表页。已有 PCI 桥路径/AMD Range 查询，以及组合 IVRS requester/alias、PCI 路径和控制器上下文租约的保留路由对象。仍需补齐 PFA 以外 RAM、其他固件/DT 保留来源，在已有显式 PCI 集合占用与原/alias 键保留基础上，补齐全部 alias peer 的停止/归属协调、实际 DMA domain 的 IVMD 权限及硬件停止/失败保留，并补物理平台证据；被动绑定和只读快照均不授予硬件启用权限 |
-| AMD-Vi 翻译与故障处理 | 为实际 requester/alias 落实 IVMD 约束，验证页表、失效完成、真实 DMA 读写与非法 IOVA fault；停止/失效超时继续保留硬件可访问页面与上下文，并有可重试关闭证据。现有 RISC-V 测试不能关闭此项 |
+| AMD-Vi 接管前资源完整性 | 已有被动 PCI 唯一绑定、IVRS 保留、完整 aperture checked claim，以及 probe 失败/解绑/重绑的主机与 QEMU 证据。已通过独立存储保留对象导入受管 RAM 与 ACPI 表页。已有 PCI 桥路径/AMD Range 查询，以及组合 IVRS requester/alias、PCI 路径和控制器上下文租约的保留路由对象。仍需补齐 PFA 以外 RAM、其他固件/DT 保留来源，在已有显式 PCI 集合占用与原/alias 键保留基础上，补齐全部 alias peer 的停止/归属协调、实际 AMD domain 的硬件权限/Unity/Exclusion 及停止/失败保留（已有独立 IVMD 约束和通用映射入口检查），并补物理平台证据；被动绑定和只读快照均不授予硬件启用权限 |
+| AMD-Vi 翻译与故障处理 | 已有 IVMD → 独立 policy 与 managed 映射入口预检；仍需为实际 requester/alias 在硬件中落实权限、Unity 和排除范围，验证页表、失效完成、真实 DMA 读写与非法 IOVA fault；停止/失效超时继续保留硬件可访问页面与上下文，并有可重试关闭证据。现有 RISC-V 测试不能关闭此项 |
 | GPU 内存与请求模型 | 建立每设备 BO、GPUVM、context、提交与 fence 引用，验证进程退出、并发提交、超时/复位时请求完成和资源生命周期；现有通用 fence 不等于 DRM 同步 UAPI 已接通 |
 | Phoenix 原生执行与呈现 | 固定上游/固件版本后，依次取得真实 SDMA copy/fill 回读、Mesa 离屏渲染及显示接管证据；分别记录平台、设备身份与失败行为，不以 GOP、virtio-gpu 或软件渲染结果替代 |
 

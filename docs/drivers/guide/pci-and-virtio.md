@@ -37,6 +37,8 @@ static const device_id_t ids[] = {
 
 AMD-Vi 的 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期) 在上述观察接口之上组合 IVRS、原 requester/alias 路径与被动控制器绑定。它保留查询对象和资源租约，并在解绑后拒绝活跃路由校验；仅 acquire 不占用 requester；显式 reserve 接入上述集合占用，仍不证明硬件隔离或建立 DMA domain。
 
+`amd_iommu_route_policy_create()` 还可将匹配 IVMD 复制为独立 `driver_dma_policy`，供带约束的 managed domain 做整批权限预检及 Unity 地址核对。相关 ExclusionRange/未知 flags 拒绝，不降级为无约束映射。它不自动占用 requester、保持绑定或配置硬件，见 [IVMD policy](native-runtime.md#从-ivmd-构造独立-dma-policy)。
+
 ## BAR 处理
 
 probe 首先：
