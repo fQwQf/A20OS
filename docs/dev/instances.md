@@ -217,6 +217,8 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 
 `gui.enabled`、`test.commands`、`test.expect`、`test.require_clean_exit`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 
+`extra_qemu` 是 argv 数组，每个元素对应一个参数。例如 `extra_qemu = ["-append", "driver.runtime_test=1 driver.amdvi_requester_test=1"]` 将整段内核命令行作为一个参数传递。按 TOML 规则写字符串即可，无须额外添加 shell 引号；空格、引号和 `$` 均作为参数内容保留，不作为 shell/Make 表达式求值。
+
 `[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）只供 a20 控制台动作读取，不导出 make 变量。用 `a20 show` 查看串口、复位、命令与匹配条件，不能从 `show-vars` 的 make 变量列表推断它们是否配置。接线约束见 [实例解析参考](tooling-internals.md#instance-parsing)。
 
 `list` 的"可用动作"列不是分类标签，而是逐条镜像对应命令里已经存在的拒绝条件（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在 `boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令就要在这里补上它的条件，这正是这一列的用途。
