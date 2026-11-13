@@ -209,7 +209,7 @@ int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out) {
     for (unsigned i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
         const pci_dev_info_t *info = &g_pci_infos[i];
         device_t *dev = &g_pci_devs[i];
-        if (g_pci_in_use[i] && dev->state != DEV_STATE_REMOVING &&
+        if (g_pci_in_use[i] && !device_is_stopping(dev) &&
             ((unsigned)info->bus << 8 | (unsigned)info->dev << 3 | info->func) ==
                 requester && device_is_registered(dev)) {
             *out = device_get(dev);
@@ -237,7 +237,7 @@ int pci_device_scope_get(device_t *client, uint8_t scope_bus, uint8_t first,
     int ret = 0;
     driver_discovery_begin();
     for (unsigned i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
-        if (!g_pci_in_use[i] || g_pci_devs[i].state == DEV_STATE_REMOVING)
+        if (!g_pci_in_use[i] || device_is_stopping(&g_pci_devs[i]))
             continue;
         if (&g_pci_devs[i] == client && device_is_registered(client))
             client_info = &g_pci_infos[i];
@@ -254,7 +254,7 @@ int pci_device_scope_get(device_t *client, uint8_t scope_bus, uint8_t first,
         const pci_dev_info_t *info = &g_pci_infos[i];
         uint32_t id = pci_ecam_read(info->bus, info->dev, info->func, 0);
         if (!device_is_registered(&g_pci_devs[i]) ||
-            g_pci_devs[i].state == DEV_STATE_REMOVING ||
+            device_is_stopping(&g_pci_devs[i]) ||
             id != ((uint32_t)info->device << 16 | info->vendor)) {
             ret = -ENODEV;
             goto done;
@@ -801,7 +801,7 @@ static int pci_user_device_find_index_locked(uint16_t vendor, uint16_t device,
     unsigned seen = 0;
     for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
         pci_dev_info_t *info = &g_pci_infos[i];
-        if (!g_pci_in_use[i] || g_pci_devs[i].state == DEV_STATE_REMOVING ||
+        if (!g_pci_in_use[i] || device_is_stopping(&g_pci_devs[i]) ||
             !device_is_registered(&g_pci_devs[i]) || info->vendor != vendor ||
             info->device != device)
             continue;

@@ -557,7 +557,7 @@ void usb_core_scan(void)
 {
     for (int i = 0; i < g_hcd_count; i++) {
         usb_hcd_t *hcd = g_hcds[i];
-        if (hcd->hcd_dev && hcd->hcd_dev->state == DEV_STATE_REMOVING)
+        if (hcd->hcd_dev && device_is_stopping(hcd->hcd_dev))
             continue;
         if (hcd->ops->poll)
             hcd->ops->poll(hcd);

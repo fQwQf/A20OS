@@ -85,6 +85,8 @@ typedef struct resource {
 #define DEV_STATE_REMOVED   4
 #define DEV_STATE_REMOVING  5
 #define DEV_STATE_DEFERRED  6
+/* Explicitly managed failed probe; consumer cleanup may precede quiesce. */
+#define DEV_STATE_PROBE_CLEANUP 7
 
 typedef struct firmware_device_id {
     const char *id;
@@ -145,6 +147,14 @@ typedef struct device {
     int                probe_error; /* last probe result; -EPROBE_DEFER is retriable */
 } device_t;
 
+/* Lifecycle observation only; callers pin metadata and use a discovery
+ * transaction when this must agree with binding/config observations. */
+static inline bool device_is_stopping(const device_t *dev) {
+    if (!dev) return false;
+    int state = dev->state;
+    return state == DEV_STATE_REMOVING || state == DEV_STATE_PROBE_CLEANUP;
+}
+
 /* ============================================================
  * driver — represents a driver implementation
  *
@@ -171,7 +181,8 @@ typedef struct driver {
      * access device registers or allocate resources. */
     int  (*match)(device_t *dev);
 
-    /* lifecycle */
+    /* lifecycle. Failed probe normally owns hardware rollback. It can opt in
+     * to core quiesce/remove cleanup with device_probe_use_remove() first. */
     int  (*probe)(device_t *dev);
     /* After quiesce/class drain. 0 commits teardown; failure retains binding,
      * drv_priv, devres and dependencies offline in REMOVING. Must retain all
@@ -202,7 +213,9 @@ typedef struct driver {
      * record that failure privately and report it from remove(). It
      * must also tolerate a successful probe whose class publication failed.
      * The lifecycle mutex is held: do not wait for work that needs it. A
-     * failed probe still rolls back its own hardware before returning.
+     * legacy failed probe still rolls back its own hardware before returning.
+     * With device_probe_use_remove(), this and remove must tolerate partial
+     * initialization, including a NULL drv_priv.
      * Runs once per teardown; failed remove retries do not repeat quiesce. */
     void (*quiesce)(device_t *dev);
 } driver_t;
@@ -262,6 +275,15 @@ int  driver_register(driver_t *drv);
  * -EBUSY. Already stopped devices are not automatically rebound on failure. */
 int  driver_unregister(driver_t *drv);
 int  device_register(device_t *dev);
+/* Call from this device's probe BEFORE initializing hardware. Allocation-free,
+ * idempotent opt-in: on a nonzero probe result the core runs the normal
+ * fallible quiesce/remove pipeline, including any published consumers.
+ * Callbacks must handle partial initialization. Cleanup failure preserves
+ * binding/devres/dependencies and original probe_error; explicit unregister
+ * retries cleanup without re-probing. Successful probe is unchanged.
+ * 0 on acceptance; no remove -> -EOPNOTSUPP; not current probe -> -EINVAL;
+ * unpublished device -> -ENODEV. No state is armed on API failure. */
+int device_probe_use_remove(device_t *dev);
 /* Synchronous, task context. Commit unregister only after successful remove.
  * Failure keeps the registry pin/binding/resources for retry; some consumers
  * may already have stopped. No automatic rollback/re-probe or forced free.

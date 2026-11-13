@@ -22,6 +22,7 @@ typedef struct {
     int should_match;
     int should_driver_match;
     int fail_probe;
+    int managed_probe_error;
     int probe_count;
     int remove_count;
     int remove_error;
@@ -53,6 +54,10 @@ static int lifecycle_probe(device_t *dev)
         return -1;
 
     plat->probe_count++;
+    if (plat->managed_probe_error) {
+        int ret = device_probe_use_remove(dev);
+        if (ret) return ret;
+    }
     if (plat->fail_probe) {
         plat->fail_probe = 0;
         kinfo("[DRIVER-LIFECYCLE] probe failure forced for '%s'\n",
@@ -63,6 +68,7 @@ static int lifecycle_probe(device_t *dev)
     dev->drv_priv = plat;
     int ret = device_add_resource_action(dev, lifecycle_release_resource, plat);
     if (ret) { dev->drv_priv = NULL; return ret; }
+    if (plat->managed_probe_error) return plat->managed_probe_error;
     kinfo("[DRIVER-LIFECYCLE] probe succeeded for '%s'\n",
           dev->name ? dev->name : "?");
     return 0;
@@ -155,6 +161,13 @@ int driver_lifecycle_test_run(void)
     };
     lifecycle_plat_t plat_ok = {
         .should_match = 1, .should_driver_match = 1,
+    };
+
+    lifecycle_plat_t plat_partial = {
+        .should_match = 1, .should_driver_match = 1, .managed_probe_error = -EIO,
+    };
+    device_t dev_partial = {
+        .name = "lifecycle-partial", .bus = &g_lifecycle_bus, .plat_data = &plat_partial,
     };
 
     device_t dev_nomatch = {
@@ -252,6 +265,19 @@ int driver_lifecycle_test_run(void)
         goto out;
     }
     device_unregister(&dev_fail);
+
+    /* Explicit failed-probe ownership uses partial-init-safe quiesce/remove. */
+    if (device_register(&dev_partial) || dev_partial.drv || dev_partial.drv_priv ||
+        dev_partial.class_dev || dev_partial.probe_error != -EIO ||
+        dev_partial.state != DEV_STATE_UNINIT || plat_partial.probe_count != 1 ||
+        plat_partial.quiesce_count != 1 || plat_partial.remove_count != 1 ||
+        plat_partial.resources_released != 1 || plat_partial.quiesce_error ||
+        device_unregister(&dev_partial)) {
+        kerr("[DRIVER-LIFECYCLE] managed failed probe did not safely roll back\n");
+        pass = 0;
+        goto out;
+    }
+    kinfo("DRIVER_PROBE_CLEANUP: PASS managed=1 rollback=1\n");
 
     /* 6. Register a matching device whose probe succeeds. */
     if (device_register(&dev_ok) != 0) {
@@ -371,6 +397,7 @@ out:
     /* These objects live on this stack frame.  Always remove them from the
      * global registries, including after an assertion failure, so later boot
      * code cannot observe dangling device or platform-data pointers. */
+    device_unregister(&dev_partial);
     device_unregister(&dev_ok);
     device_unregister(&dev_fail);
     device_unregister(&dev_driver_nomatch);

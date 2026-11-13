@@ -119,6 +119,7 @@ static int class_allocate_index(uint32_t type, uint32_t *index)
 
 int class_device_publish(struct device *dev)
 {
+    if (device_is_stopping(dev)) return -ESHUTDOWN;
     if (!dev || !dev->drv || !dev->drv->class_ops ||
         dev->drv->class_type == DEV_CLASS_NONE ||
         dev->drv->class_type > DEV_CLASS_AUDIO)

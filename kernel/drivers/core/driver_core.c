@@ -217,6 +217,18 @@ struct driver_withdrawal { driver_t *driver; struct driver_withdrawal *previous;
 static struct driver_withdrawal *driver_withdrawals;
 struct device_removal { device_t *device; struct device_removal *previous; };
 static struct device_removal *device_removals;
+struct device_probe {
+    device_t *device;
+    driver_t *driver;
+    bool remove_on_error;
+    struct device_probe *previous;
+};
+static struct device_probe *device_probes;
+static bool device_probe_active(device_t *dev) {
+    for (struct device_probe *at = device_probes; at; at = at->previous)
+        if (at->device == dev) return true;
+    return false;
+}
 static bool device_removal_active(device_t *dev) {
     for (struct device_removal *at = device_removals; at; at = at->previous)
         if (at->device == dev) return true;
@@ -233,7 +245,7 @@ static int driver_matches_device(driver_t *drv, device_t *dev)
     int match = 0;
     dev->matched_id = NULL;
     dev->firmware_match = NULL;
-    if (driver_withdrawing(drv) || dev->state == DEV_STATE_REMOVING) return 0;
+    if (driver_withdrawing(drv) || device_is_stopping(dev)) return 0;
     if (dev->bus && dev->bus->match)
         match = dev->bus->match(dev, drv);
     else if (!dev->bus && !drv->bus)
@@ -579,6 +591,20 @@ bool device_is_registered(const device_t *dev) {
     return found;
 }
 
+int device_probe_use_remove(device_t *dev) {
+    if (!dev) return -EINVAL;
+    driver_ops_lock();
+    struct device_probe *probe = device_probes;
+    int ret = -EINVAL;
+    if (probe && probe->device == dev && probe->driver == dev->drv) {
+        ret = !device_is_registered(dev) ? -ENODEV :
+              !probe->driver->remove ? -EOPNOTSUPP : 0;
+        if (!ret) probe->remove_on_error = true;
+    }
+    driver_ops_unlock();
+    return ret;
+}
+
 int driver_resource_request_checked(device_t *owner, const resource_t *res,
                                     driver_resource_claim_t **out) {
     if (!out)
@@ -588,7 +614,7 @@ int driver_resource_request_checked(device_t *owner, const resource_t *res,
         return -EINVAL;
     driver_ops_lock();
     bool registered = device_is_registered(owner);
-    int ret = registered && owner->state != DEV_STATE_REMOVING
+    int ret = registered && !device_is_stopping(owner)
                   ? check_range(owner, res, NULL)
                   : -ENODEV;
     if (!ret)
@@ -729,7 +755,7 @@ static int depends_on(device_t *dev, device_t *target, unsigned depth) {
 int device_add_dependency(device_t *consumer, device_t *provider) {
     if (!consumer || !provider) return -EINVAL;
     driver_ops_lock();
-    if (provider->state == DEV_STATE_REMOVING || device_removal_active(provider)) {
+    if (device_is_stopping(provider) || device_removal_active(provider)) {
         driver_ops_unlock(); return -EPROBE_DEFER;
     }
     if (depends_on(provider, consumer, 0)) {
@@ -758,10 +784,12 @@ static void release_dependencies(device_t *dev) {
 /* Called with the lifecycle mutex held. Consumers are quiesced before any
  * provider resource is released; the acyclic link graph bounds recursion. */
 static int device_unbind(device_t *dev) {
-    if (device_removal_active(dev)) return -EBUSY;
+    if (device_removal_active(dev) || device_probe_active(dev)) return -EBUSY;
     struct device_removal removal = {dev, device_removals};
     device_removals = &removal;
     int result = 0;
+    if (dev->state == DEV_STATE_PROBE_CLEANUP)
+        class_device_mark_offline(dev);
     for (;;) {
         device_t *dependent = NULL;
         for (int i = 0; i < g_device_count && !dependent; i++) {
@@ -833,7 +861,21 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
         driver_progress_binding_changed();
         return 0;
     }
+    struct device_probe probe = {dev, drv, false, device_probes};
+    device_probes = &probe;
     int ret = drv->probe(dev);
+    device_probes = probe.previous;
+    if (ret && probe.remove_on_error) {
+        int original = ret < 0 ? ret : -EIO;
+        dev->probe_error = original;
+        dev->state = DEV_STATE_PROBE_CLEANUP;
+        int cleanup = device_unbind(dev);
+        dev->probe_error = original;
+        if (!cleanup)
+            dev->state = original == -EPROBE_DEFER ? DEV_STATE_DEFERRED : DEV_STATE_UNINIT;
+        driver_progress_binding_changed();
+        return cleanup ? cleanup : original;
+    }
     dev->probe_error = ret;
     if (ret == 0) {
         dev->state = DEV_STATE_PROBED;
@@ -1047,7 +1089,7 @@ int device_register(device_t *dev) {
         device_t *at = dev->parent;
         unsigned depth = 0;
         while (at && at != dev && depth++ <= (unsigned)g_device_count) {
-            if (at->state == DEV_STATE_REMOVING || device_removal_active(at)) {
+            if (device_is_stopping(at) || device_removal_active(at)) {
                 driver_ops_unlock(); return -EBUSY;
             }
             at = at->parent;
@@ -1283,7 +1325,7 @@ void bus_unregister(bus_type_t *bus) {
 int bus_probe_device(device_t *dev) {
     if (!dev) return -EINVAL;
     driver_ops_lock();
-    if (dev->drv || dev->state == DEV_STATE_REMOVING) {
+    if (dev->drv || device_is_stopping(dev)) {
         driver_ops_unlock();
         return -EBUSY;
     }

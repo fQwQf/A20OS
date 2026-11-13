@@ -312,7 +312,7 @@ static int route_observe(struct amdvi_owner *owner, size_t index,
         return -ESHUTDOWN;
     device_t *controller = owner->device;
     if (!device_is_registered(controller) || controller->drv != &amdvi_driver ||
-        controller->drv_priv != owner || controller->state == DEV_STATE_REMOVING)
+        controller->drv_priv != owner || device_is_stopping(controller))
         return -ENODEV;
     struct amdvi_unit *unit = &owner->units[index];
     struct amdvi_transport transport = {owner, unit};
