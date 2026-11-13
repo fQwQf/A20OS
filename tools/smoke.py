@@ -251,6 +251,19 @@ def split_command(cmd: str) -> list[str]:
     return shlex.split(cmd)
 
 
+def _qmp_command(rx, request: dict, request_id: str) -> dict:
+    """Wait for this command's reply, ignoring greeting and asynchronous events."""
+    rx.write((json.dumps({**request, "id": request_id}) + "\r\n").encode())
+    rx.flush()
+    while True:
+        line = rx.readline()
+        if not line:
+            raise ConnectionError("QMP disconnected before the command reply")
+        reply = json.loads(line.decode())
+        if reply.get("id") == request_id and ("return" in reply or "error" in reply):
+            return reply
+
+
 def qmp_connect(sock_path: str, deadline_s: float = 20.0):
     """Connect to a per-case QMP socket and negotiate capabilities.
 
@@ -266,26 +279,19 @@ def qmp_connect(sock_path: str, deadline_s: float = 20.0):
             sock.connect(sock_path)
             break
         except OSError:
+            if sock is not None:
+                sock.close()
             sock = None
             time.sleep(0.2)
     if sock is None:
         return None, None
     rx = sock.makefile("rwb")
 
-    def cmd(obj: dict) -> dict:
-        rx.write((json.dumps(obj) + "\r\n").encode())
-        rx.flush()
-        while True:
-            line = rx.readline()
-            if not line:
-                return {}
-            reply = json.loads(line.decode())
-            if "event" not in reply:
-                return reply
-
     try:
-        cmd({"execute": "qmp_capabilities"})
-    except (BrokenPipeError, ConnectionResetError):
+        reply = _qmp_command(rx, {"execute": "qmp_capabilities"}, "a20-capabilities")
+        if "error" in reply:
+            raise ConnectionError(f"QMP capabilities rejected: {reply['error']}")
+    except (OSError, ConnectionError, ValueError):
         rx.close()
         sock.close()
         return None, None
@@ -310,25 +316,18 @@ def qmp_action_pump(sock_path: str, actions: list[dict]) -> None:
         print(f"qmp: no connection to {sock_path}; hotplug actions not sent")
         return
     try:
-        for action in actions:
+        for index, action in enumerate(actions):
             delay = start + float(action.get("after", 0)) - time.time()
             if delay > 0:
                 time.sleep(delay)
             req = {"execute": action["execute"]}
             if action.get("arguments"):
                 req["arguments"] = action["arguments"]
-            rx.write((json.dumps(req) + "\r\n").encode())
-            rx.flush()
-            while True:
-                line = rx.readline()
-                if not line:
-                    break
-                reply = json.loads(line.decode())
-                if "event" not in reply:
-                    if "error" in reply:
-                        print(f"qmp: {action.get('execute')} failed: {reply['error']}")
-                    break
-    except (BrokenPipeError, ConnectionResetError):
+            reply = _qmp_command(rx, req, f"a20-action-{index}")
+            if "error" in reply:
+                print(f"qmp: {action.get('execute')} failed: {reply['error']}")
+                return
+    except (OSError, ConnectionError):
         pass
     finally:
         rx.close()
@@ -356,35 +355,18 @@ def qmp_key_pump(sock_path: str, keys: list[str], hold: float, gap: float,
     whatever the boot takes.
     """
     deadline = time.time() + duration
-    sock = None
-    while time.time() < deadline:
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect(sock_path)
-            break
-        except OSError:
-            sock = None
-            time.sleep(0.2)
+    sock, rx = qmp_connect(sock_path, max(0.0, deadline - time.time()))
     if sock is None:
         print(f"qmp: no connection to {sock_path}; keys not injected")
         return
-
-    rx = sock.makefile("rwb")
+    sequence = 0
 
     def cmd(obj: dict) -> dict:
-        rx.write((json.dumps(obj) + "\r\n").encode())
-        rx.flush()
-        while True:
-            line = rx.readline()
-            if not line:
-                return {}
-            reply = json.loads(line.decode())
-            if "event" not in reply:
-                return reply
+        nonlocal sequence
+        sequence += 1
+        return _qmp_command(rx, obj, f"a20-key-{sequence}")
 
     try:
-        cmd({"execute": "qmp_capabilities"})
         while time.time() < deadline:
             for k in keys:
                 cmd({"execute": "input-send-event", "arguments": {"events": [
@@ -396,7 +378,7 @@ def qmp_key_pump(sock_path: str, keys: list[str], hold: float, gap: float,
                     {"type": "key", "data": {"down": False,
                                              "key": {"type": "qcode", "data": k}}}]}})
             time.sleep(gap)
-    except (BrokenPipeError, ConnectionResetError):
+    except (OSError, ConnectionError):
         # A guest may power off before the injection duration expires.
         pass
     finally:
@@ -586,6 +568,8 @@ def _exit_status_missing(require_zero: bool, status: int) -> str | None:
 
 
 def report(name: str, case: dict, status: int) -> int:
+    if status == 75:  # No guest ran: an older log cannot certify this attempt.
+        return status
     log = Path(case["log"])
     text = log.read_text(encoding="utf-8", errors="replace")
     missing = [p for p in case["expect"] if not grep_matches(p, text)]
@@ -974,6 +958,8 @@ def main(argv: list[str] | None = None) -> int:
             "kernel": sha256_file(kernel), "image": sha256_file(image), "users": users,
         }
     status = run_qemu(case)
+    if status == 75:
+        return status
     if run_post(case):
         return 1
     if a.bind_dir and status != 0:

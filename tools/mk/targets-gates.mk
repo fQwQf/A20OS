@@ -125,7 +125,7 @@ check-pc-drivers: check-component-registry
 	  tools.tests.test_pc_module_boundary \
 	  tools.tests.test_xhci_endpoint_types \
 	  tools.tests.test_xhci_event_owner_race tools.tests.test_xhci_firmware_policy \
-	  tools.tests.test_usb_enumeration_cleanup \
+	  tools.tests.test_usb_enumeration_cleanup tools.tests.test_smoke_qmp \
 	  tools.tests.test_usb_hid_protocol tools.tests.test_usb_hid_readiness \
 	  tools.tests.test_usb_hid_console tools.tests.test_usb_keyboard_leds \
 	  tools.tests.test_input_mt_state tools.tests.test_evdev_mt_libevdev \

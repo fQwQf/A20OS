@@ -3102,6 +3102,8 @@ CASES: dict[str, dict] = {
         'forbid': ['\\[USB\\] port.*enumeration failed', '\\[XHCI\\].*Disable Slot failed',
                    '\\[XHCI\\] slot.*transfer owner did not clear',
                    'PANIC', 'KERNEL PAGE FAULT'],
+        'post': ['python3 tools/tests/check_usb_hotplug_log.py "$LOG"'],
+        'require_exit_zero': True,
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-hotplug-x86_64: PASS; log saved to $log',
     },
