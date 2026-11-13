@@ -44,6 +44,7 @@
 #define XHCI_EVENT_TRBS               256U
 #define XHCI_WAIT_LOOPS               10000000U
 #define XHCI_MAX_EPS                  32U
+#define XHCI_BULK_MAX_LENGTH          65536U
 #define XHCI_MAX_ROUTE_DEPTH          5U
 /* Completion callbacks are run in batches so the controller lock is dropped
  * between them; the batch bound keeps the interrupted section bounded. */
@@ -257,6 +258,7 @@ typedef struct xhci_controller {
     xhci_ring_t ep0_ring[XHCI_MAX_SLOTS + 1U];
     uint8_t control_buffer[USB_CONTROL_MAX_LENGTH] ALIGNED(PAGE_SIZE);
 
+    struct driver_dma_buffer *bulk_buffer;
     xhci_ep_t *eps;
     uint8_t ep_count;
     xhci_slot_path_t slot_path[XHCI_MAX_SLOTS + 1U];
@@ -1453,50 +1455,71 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
  * directly from the return value. */
 static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
     xhci_controller_t *xhci = hcd->priv;
-    if (xhci->fatal)
-        return -ENODEV;
-    if (!urb || !urb->ep)
+    if (!urb || !urb->dev || !urb->ep || !urb->dev->slot ||
+        urb->dev->slot > xhci->max_slots || !(urb->ep->addr & 15U) ||
+        (urb->len && !urb->buf))
         return -EINVAL;
-    /* Serialised like every other synchronous transfer: one owner of the event
-     * ring, and it stays released while the bounded wait runs. */
+    if (urb->len > XHCI_BULK_MAX_LENGTH) return -EMSGSIZE;
     int acquired = xhci_xfer_acquire(xhci, XHCI_BULK_HOLD_BUDGET_MS);
-    if (acquired)
-        return acquired;
+    if (acquired) return acquired;
     int result;
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
-    uint8_t addr = urb->ep->addr;
-    uint8_t number = addr & 0x0fU;
+    uint8_t slot = urb->dev->slot, addr = urb->ep->addr;
+    uint8_t number = addr & 15U;
     uint8_t dci = (uint8_t)((addr & USB_DIR_IN) ? number * 2U + 1U : number * 2U);
-    xhci_ep_t *ep = xhci_find_ep(xhci, urb->dev->slot, dci);
-    if (!ep) {
-        spin_unlock_irqrestore(&xhci->lock, flags);
+    xhci_ep_t *ep = xhci_find_ep(xhci, slot, dci);
+    if (xhci->fatal || !xhci->dcbaa[slot] || (ep && ep->closing)) {
+        result = -ESHUTDOWN;
+        goto unlock;
+    }
+    if (!ep || ep->pending) {
+        result = ep ? -EBUSY : -ENODEV;
+        goto unlock;
+    }
+    void *stage = driver_dma_buffer_data(xhci->bulk_buffer);
+    uint64_t address = driver_dma_buffer_address(xhci->bulk_buffer);
+    if (!stage || driver_dma_buffer_size(xhci->bulk_buffer) < urb->len) {
         result = -ENODEV;
-        goto out;
+        goto unlock;
     }
-    if (ep->closing || ep->pending) {
-        spin_unlock_irqrestore(&xhci->lock, flags);
-        result = ep->closing ? -ESHUTDOWN : -EBUSY;
-        goto out;
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    /* xfer_busy owns this retained buffer across copy, submit and wait. No
+     * transfer ever exposes a caller pointer to hardware, even on timeout. */
+    if (urb->len) {
+        if (addr & USB_DIR_IN) memset(stage, 0, urb->len);
+        else memcpy(stage, urb->buf, urb->len);
+        arch_dma_sync_for_device(stage, urb->len);
     }
-
-    arch_dma_sync_for_device(urb->buf, urb->len);
-    /* Direction is already encoded in this bulk endpoint's EP Type. */
-    uint64_t pointer = xhci_ring_enqueue(&ep->ring, va_to_pa(urb->buf),
+    flags = spin_lock_irqsave(&xhci->lock);
+    if (xhci->fatal || !xhci->dcbaa[slot] || ep->closing) {
+        result = -ESHUTDOWN;
+        goto unlock;
+    }
+    uint64_t pointer = xhci_ring_enqueue(&ep->ring, address,
                                          (uint32_t)urb->len,
                                          XHCI_TRB_TYPE(XHCI_TRB_NORMAL) |
                                          XHCI_TRB_ISP | XHCI_TRB_IOC, 0);
     wmb();
-    xhci_write32(xhci->doorbell, (uint32_t)urb->dev->slot * 4U, dci);
-    (void)xhci_read32(xhci->doorbell, (uint32_t)urb->dev->slot * 4U);
+    xhci_write32(xhci->doorbell, (uint32_t)slot * 4U, dci);
+    (void)xhci_read32(xhci->doorbell, (uint32_t)slot * 4U);
     spin_unlock_irqrestore(&xhci->lock, flags);
-
-    result = xhci_wait_event(xhci, XHCI_TRB_TRANSFER_EVENT, pointer, NULL, NULL);
-    if (result == 0)
-        arch_dma_sync_for_cpu(urb->buf, urb->len);
-    else
+    xhci_trb_t event = {0};
+    result = xhci_wait_event(xhci, XHCI_TRB_TRANSFER_EVENT, pointer, &event, NULL);
+    if (!result) {
+        uint32_t remaining = event.status & 0xffffffU;
+        if (remaining > urb->len) result = -EIO;
+        else if (remaining) result = -EMSGSIZE; /* Exact-length synchronous API. */
+    }
+    if (!result && urb->len && (addr & USB_DIR_IN)) {
+        arch_dma_sync_for_cpu(stage, urb->len);
+        memcpy(urb->buf, stage, urb->len);
+    }
+    if (result)
         kwarn("[XHCI] bulk slot=%u endpoint=%02x length=%u failed=%d trb=%llx\n",
-              urb->dev->slot, addr, (unsigned)urb->len, result,
-              (unsigned long long)pointer);
+              slot, addr, (unsigned)urb->len, result, (unsigned long long)pointer);
+    goto out;
+unlock:
+    spin_unlock_irqrestore(&xhci->lock, flags);
 out:
     xhci_xfer_release(xhci);
     return result;
@@ -2075,6 +2098,9 @@ static int xhci_probe(device_t *dev)
     xhci->hcd.max_ports = xhci->max_ports;
     xhci->hcd.priv = xhci;
     dev->drv_priv = xhci;
+    int buffer = driver_dma_buffer_create(dev, XHCI_BULK_MAX_LENGTH,
+                                           XHCI_BULK_MAX_LENGTH, &xhci->bulk_buffer);
+    if (buffer) return buffer;
 
     /* Firmware commonly leaves MSI/MSI-X enabled on the xHC after booting
      * from USB.  A20OS uses the controller's INTx line, so clear the stale
@@ -2146,6 +2172,7 @@ static int xhci_remove(device_t *dev)
     int ret = usb_core_unregister_hcd(&xhci->hcd);
     if (ret) return ret;
     dev->drv_priv = NULL;
+    driver_dma_buffer_put(xhci->bulk_buffer);
     kfree(xhci->alloc_ptr);
     return 0;
 }

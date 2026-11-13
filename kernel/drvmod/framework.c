@@ -563,6 +563,12 @@ const struct drv_export drv_export_table[] = {
      * a module that owns a device_t declares its window and then hands the
      * device to the allocator, so its handles are constrained the same way a
      * built-in driver's are. */
+    { "driver_dma_buffer_create", (void *)driver_dma_buffer_create },
+    { "driver_dma_buffer_get", (void *)driver_dma_buffer_get },
+    { "driver_dma_buffer_put", (void *)driver_dma_buffer_put },
+    { "driver_dma_buffer_data", (void *)driver_dma_buffer_data },
+    { "driver_dma_buffer_address", (void *)driver_dma_buffer_address },
+    { "driver_dma_buffer_size", (void *)driver_dma_buffer_size },
     { "dma_alloc_coherent_aligned", (void *)dma_alloc_coherent_aligned },
     { "dma_free_coherent_aligned",  (void *)dma_free_coherent_aligned },
     { "dma_set_mask",   (void *)dma_set_mask },

@@ -1146,6 +1146,9 @@ smoke-userns:
 # USB hub smoke
 # ================================================================
 # Exercise enumeration of a hub and its downstream keyboard and mouse.
+smoke-usb-bulk-x86_64:
+	$(PYTHON) tools/smoke.py smoke-usb-bulk-x86_64
+
 smoke-usb-hub-x86_64:
 	$(PYTHON) tools/smoke.py smoke-usb-hub-x86_64
 

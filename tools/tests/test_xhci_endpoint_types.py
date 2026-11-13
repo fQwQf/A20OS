@@ -41,6 +41,7 @@ MODEL = r'''
 #define XHCI_TRB_TRANSFER_EVENT 32U
 #define XHCI_TRB_ISP (1U<<2)
 #define XHCI_TRB_IOC (1U<<5)
+#define XHCI_BULK_MAX_LENGTH 65536U
 typedef struct{uint64_t parameter;uint32_t status,control;}xhci_trb_t;
 typedef struct{uint64_t setup,data;}xhci_control_trbs_t;
 typedef struct{xhci_trb_t trbs[64];uint16_t enqueue;uint8_t cycle;}xhci_ring_t;
@@ -53,7 +54,12 @@ typedef struct {
     uint32_t route;
     uint8_t root_port, depth, speed, tt_slot, tt_port;
 } xhci_slot_path_t;
+struct driver_dma_buffer {unsigned char data[65536];};
+static void *driver_dma_buffer_data(const struct driver_dma_buffer *b){return b?(void *)b->data:NULL;}
+static uint64_t driver_dma_buffer_address(const struct driver_dma_buffer *b){(void)b;return 0x12340000;}
+static size_t driver_dma_buffer_size(const struct driver_dma_buffer *b){return b?sizeof(b->data):0;}
 typedef struct {
+    struct driver_dma_buffer *bulk_buffer;
     uint32_t contexts[33][16];
     spinlock_t lock;
     uintptr_t doorbell;
@@ -93,7 +99,7 @@ static int xhci_wait_event(xhci_controller_t*x,uint8_t t,uint64_t p,
 MAIN = r'''
 int main(void){
  static const uint8_t expected[4][2]={{4,4},{1,5},{2,6},{3,7}};
- xhci_controller_t x={0};xhci_ring_t ring={.enqueue=17,.cycle=0};
+ static struct driver_dma_buffer buffer;xhci_controller_t x={.bulk_buffer=&buffer};xhci_ring_t ring={.enqueue=17,.cycle=0};
  for(unsigned type=0;type<4;type++)for(unsigned in=0;in<2;in++){
   uint8_t value=xhci_ep_type(type,in?0x81:1);assert(value==expected[type][in]);
   memset(x.contexts,0,sizeof(x.contexts));

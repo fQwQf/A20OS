@@ -262,7 +262,10 @@ typedef struct usb_hcd_ops {
                                uint16_t max_packet, uint8_t interval);
     /* Arm a periodic IN transfer; completion calls urb->complete(). */
     int  (*submit_interrupt)(struct usb_hcd *hcd, usb_urb_t *urb);
-    /* Submit a bulk transfer; completion calls urb->complete(). */
+    /* Exact-length synchronous bulk; no completion callback. 0 means all
+     * requested bytes transferred. On ANY return the HCD must no longer
+     * reference the caller's URB/buffer. Retain private staging on uncertain
+     * hardware stop. xHCI accepts at most 64 KiB; short -> -EMSGSIZE. */
     int  (*submit_bulk)(struct usb_hcd *hcd, usb_urb_t *urb);
     /* 0 confirms slot/endpoint callbacks are stopped. Failure leaves their
      * contexts/storage valid for retry. Core retains the partial/published port and

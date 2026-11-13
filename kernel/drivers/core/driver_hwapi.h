@@ -12,6 +12,7 @@
 
 #include "core/types.h"
 #include "core/defs.h"
+#include "drivers/core/dma_buffer.h"
 
 /* Platform policy for a shared device address space. Ordinary builds retain
  * the exact direct, inline accesses below. CPU-local APIC/timer accesses do

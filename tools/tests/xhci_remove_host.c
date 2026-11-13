@@ -18,9 +18,10 @@ typedef struct xhci_ep {struct xhci_ep *next;void *alloc_ptr;uint8_t slot,dci,cl
 typedef struct {
  void *alloc_ptr;usb_hcd_t hcd;uintptr_t op,runtime;spinlock_t lock;
  unsigned fatal,running,hardware_owned,halted,irq_registered,max_slots,xfer_busy,ep_count;
- unsigned callbacks_active,slot_callbacks[3];
+ unsigned callbacks_active,slot_callbacks[3];struct driver_dma_buffer *bulk_buffer;
  uint64_t xfer_deadline,dcbaa[3];xhci_slot_path_t slot_path[3];xhci_ep_t *eps;int irq;
 } xhci_controller_t;
+void driver_dma_buffer_put(struct driver_dma_buffer *buffer) {assert(!buffer);}
 static xhci_controller_t *stop_controller;
 static unsigned stop_command=5,stop_status=1,stop_pci=7;
 static unsigned register_reads,register_writes,pci_writes,irq_frees,controller_frees,endpoint_frees,child_removes,commands_issued;

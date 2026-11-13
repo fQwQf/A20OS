@@ -26,6 +26,10 @@ class DriverIrqSync(unittest.TestCase):
                 "drivers/core/driver_core.h": '''#pragma once
 #include "core/types.h"
 struct device { uint64_t dma_mask; };
+struct device *device_get(struct device *);
+void device_put(struct device *);
+bool device_is_registered(const struct device *);
+bool device_is_stopping(const struct device *);
 typedef struct { void (*enable_irq)(uint32_t); void (*disable_irq)(uint32_t);
  uint32_t (*ack)(void); void (*eoi)(uint32_t); } irqchip_ops_t;
 typedef struct { uint64_t (*read_ticks)(void); uint64_t (*ticks_per_sec)(void); } timer_ops_t;
