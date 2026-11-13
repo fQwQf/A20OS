@@ -2416,7 +2416,7 @@ pub unsafe extern "C" fn a20_procfs_generate(
             } else {
                 let _ = write!(
                     w,
-                    "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 {} {} {} {} {} 0 1 {} {} {} -1 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+                    "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 {} {} {} {} {} 0 1 0 {} {} {} -1 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
                     p.pid,
                     core::str::from_utf8(zero_terminated(&p.name)).unwrap_or(""),
                     p.state_char as char,
@@ -2458,7 +2458,7 @@ pub unsafe extern "C" fn a20_procfs_generate(
                 }
                 let _ = write!(
                     w,
-                    "Name:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nSid:\t{}\nTgid:\t{}\nNgid:\t0\nState:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}\nCapInh:\t{:016x}\nCapPrm:\t{:016x}\nCapEff:\t{:016x}\nCapBnd:\t{:016x}\nThreads:\t1\nRss:\t{} kB\nVmLck:\t{} kB\nVmData:\t{} kB\n",
+                    "Name:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nSid:\t{}\nTgid:\t{}\nNgid:\t0\nState:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}\nCapInh:\t{:016x}\nCapPrm:\t{:016x}\nCapEff:\t{:016x}\nCapBnd:\t{:016x}\nThreads:\t1\nVmRSS:\t{} kB\nVmLck:\t{} kB\nVmData:\t{} kB\n",
                     core::str::from_utf8(zero_terminated(&p.name)).unwrap_or(""),
                     p.pid,
                     p.ppid,
@@ -3511,7 +3511,7 @@ mod tests {
                 p.start_jiffies = 7;
                 p.vsize = b.pid_vsize;
                 p.rss_pages = 3;
-                p.processor = 0;
+                p.processor = 13;
                 p.uid = 0;
                 p.euid = 0;
                 p.suid = 0;
@@ -4191,8 +4191,22 @@ mod tests {
         cw_reset();
         let (_, st) = gen_text(PF_PID_STAT, 42, 512);
         assert!(st.starts_with("42 (init) R 1 42 42 "), "{}", st);
-        assert!(st.ends_with(" 0\n"), "{}", st);
-        assert!(st.contains(" 100 50 1 2 20 0 1 7 8192 3 -1"), "{}", st);
+        // Check Linux ABI field positions, rather than a substring that can
+        // preserve a shifted layout. Field 21 is obsolete but still present.
+        let (_, tail) = st.rsplit_once(") ").expect("stat comm terminator");
+        let fields: Vec<&str> = tail.split_whitespace().collect();
+        let field = |number: usize| fields[number - 3];
+        assert_eq!(fields.len() + 2, 39, "{}", st);
+        assert_eq!(field(14), "100"); // utime
+        assert_eq!(field(15), "50");  // stime
+        assert_eq!(field(18), "20");  // priority
+        assert_eq!(field(20), "1");   // num_threads
+        assert_eq!(field(21), "0");   // itrealvalue
+        assert_eq!(field(22), "7");   // starttime
+        assert_eq!(field(23), "8192"); // vsize bytes
+        assert_eq!(field(24), "3");   // rss pages, never the -1 rsslim
+        assert_eq!(field(25), "-1");  // rsslim
+        assert_eq!(field(39), "13");  // processor
         let (_, stm) = gen_text(PF_PID_STATM, 42, 64);
         assert_eq!(stm, "2 3 0 0 0 0 0\n"); /* vsize/PAGE_SIZE = 8192/4096 */
 
@@ -4211,7 +4225,7 @@ mod tests {
         assert!(s.contains("State:\tR (running)\n"), "{}", s);
         assert!(s.contains("Groups:\t0 4\n"), "{}", s);
         assert!(s.contains("CapEff:\t0000003fffffffff\n"), "{}", s);
-        assert!(s.contains("Rss:\t12 kB\n"), "{}", s);
+        assert!(s.contains("VmRSS:\t12 kB\n"), "{}", s);
         assert!(s.ends_with("VmLck:\t0 kB\nVmData:\t8 kB\n"), "{}", s);
 
         CW.with(|w| w.borrow_mut().pid_present = false);
