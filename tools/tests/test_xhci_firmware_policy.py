@@ -108,6 +108,62 @@ int main(int argc,char**argv) {
 }
 '''
 
+PORT_MODEL = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdint.h>
+#define XHCI_WAIT_LOOPS 4U
+#define kinfo(...) ((void)0)
+typedef struct {
+    uintptr_t op;
+    unsigned fatal, max_ports, port_power_control;
+} xhci_controller_t;
+typedef struct { void *priv; } usb_hcd_t;
+static uint32_t portsc;
+static unsigned writes;
+static uint32_t xhci_read32(uintptr_t base, uint32_t offset) {
+    assert(base == 0 && offset == 0x400);
+    return portsc;
+}
+static void xhci_write32(uintptr_t base, uint32_t offset, uint32_t value) {
+    assert(base == 0 && offset == 0x400);
+    writes++;
+    /* xHCI 1.2 table 5-27. Model write-one-to-clear separately from
+     * persistent fields, and complete a USB 2 reset immediately. */
+    const uint32_t persistent = (0xfU << 5) | (1U << 9) |
+                                (3U << 14) | (7U << 25);
+    const uint32_t clear = (1U << 1) | (0x7fU << 17);
+    portsc = (portsc & ~persistent) | (value & persistent);
+    portsc &= ~(value & clear);
+    if (value & (1U << 4))
+        portsc |= (1U << 21) | (1U << 1);
+}
+static void mdelay(unsigned ms) { assert(ms == 20); }
+static void arch_cpu_relax(void) {}
+'''
+
+PORT_MAIN = r'''
+int main(void) {
+    xhci_controller_t x = {.max_ports = 1, .port_power_control = 1};
+    usb_hcd_t hcd = {&x};
+    const uint32_t connected = 1U | (1U << 10) | (1U << 25);
+    uint8_t speed = 0;
+    portsc = connected | (1U << 1) | (1U << 17);
+    xhci_power_ports(&x);
+    assert(writes == 1 && portsc == (connected | (1U << 1) |
+                                    (1U << 9) | (1U << 17)));
+    assert(!xhci_op_reset_port(&hcd, 1, &speed));
+    assert(writes == 3 && speed == 1);
+    assert(portsc == (connected | (1U << 9) | (1U << 1)));
+    portsc = connected;
+    assert(!xhci_op_reset_port(&hcd, 1, &speed));
+    assert(writes == 6 && portsc == (connected | (1U << 9) | (1U << 1)));
+    assert(xhci_op_reset_port(&hcd, 0, &speed) == -ENODEV);
+    assert(xhci_op_reset_port(&hcd, 2, &speed) == -ENODEV);
+    return 0;
+}
+'''
+
 
 class XhciFirmwarePolicy(unittest.TestCase):
     def test_production_register_policy(self):
@@ -126,6 +182,49 @@ class XhciFirmwarePolicy(unittest.TestCase):
                 with self.subTest(case=case):
                     subprocess.run([str(exe), str(case)], check=True,
                                    capture_output=True, text=True)
+
+    def test_interrupt_and_port_power_policy(self):
+        source = (ROOT / "kernel/drivers/usb/host/xhci.c").read_text()
+        # xHCI 1.2 5.5.2.1: IMAN bit 0 is IP (RW1C), bit 1 is IE.  Reversing
+        # them makes the handler test IE instead of IP and leaves a real
+        # controller's level-triggered INTx line asserted.
+        self.assertIn("#define XHCI_INTR0_IP                 (1U << 0)", source)
+        self.assertIn("#define XHCI_INTR0_IE                 (1U << 1)", source)
+        start = function(source, "xhci_op_start")
+        self.assertIn("xhci_power_ports(xhci);", start)
+        # Linux's xhci_mem_init writes CONFIG, then DCBAAP, then CRCR.  The
+        # old code wrote CRCR before DCBAAP; keep the order asserted here so a
+        # future edit cannot reintroduce the controller-validates-CRCR path.
+        self.assertLess(start.index("XHCI_CONFIG"), start.index("XHCI_DCBAAP"))
+        self.assertLess(start.index("XHCI_DCBAAP"),
+                        start.index("xhci_program_crcr"))
+        crcr = function(source, "xhci_program_crcr")
+        self.assertIn("XHCI_CRCR", crcr)
+        self.assertIn("current & 0x3fU", crcr)
+        command = function(source, "xhci_command_locked")
+        self.assertIn("xhci_read32(xhci->doorbell, 0)", command)
+        self.assertIn("#define XHCI_CTRL_ALIGN PAGE_SIZE", source)
+        self.assertIn("XHCI_CTRL_ALIGN - 1UL", source)
+        power = function(source, "xhci_power_ports")
+        self.assertIn("XHCI_PORT_POWER", power)
+        reset = function(source, "xhci_op_reset_port")
+        self.assertIn("XHCI_PORT_POWER", reset)
+
+    def test_root_port_reset_preserves_enabled_state(self):
+        source = (ROOT / "kernel/drivers/usb/host/xhci.c").read_text()
+        definitions = re.findall(r"^#define XHCI_PORT.*$",
+                                 source.replace("\\\n", " "), re.M)
+        bodies = "\n".join(function(source, name) for name in (
+            "xhci_op_reset_port", "xhci_power_ports"))
+        with tempfile.TemporaryDirectory(prefix="a20-xhci-port-") as tmp:
+            path = Path(tmp) / "model.c"
+            exe = Path(tmp) / "model"
+            path.write_text(PORT_MODEL + "\n".join(definitions) + "\n" +
+                            bodies + PORT_MAIN)
+            subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=undefined", str(path), "-o", str(exe)],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([str(exe)], check=True, capture_output=True, text=True)
 
     def test_integration_order(self):
         source = (ROOT / "kernel/drivers/usb/host/xhci.c").read_text()

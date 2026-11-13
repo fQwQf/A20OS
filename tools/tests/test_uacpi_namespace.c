@@ -42,6 +42,17 @@ int main(int argc,char **argv) {
     assert(parent.ops->children_available(&parent)==1&&child.ops->available(&child)==1);
     fw_node_t actual_parent;assert(child.ops->parent(&child,&actual_parent)==0);
     assert(actual_parent.context==parent.context);
+    fw_node_t touchpad=find(root,"SYNA2BA6");assert(touchpad.ops);
+    assert(touchpad.ops->property(&touchpad,"acpi,i2c-address",&prop)==0);
+    assert(prop.size==4&&*(const uint32_t*)prop.data==0x2c);
+    assert(touchpad.ops->property(&touchpad,"acpi,i2c-speed",&prop)==0);
+    assert(prop.size==4&&*(const uint32_t*)prop.data==400000);
+    assert(touchpad.ops->property(&touchpad,"acpi,hid-descriptor-register",&prop)==0);
+    assert(prop.size==4&&*(const uint32_t*)prop.data==0x20);
+    fw_reference_t attention;
+    assert(touchpad.ops->reference(&touchpad,"acpi,gpio-attention","#gpio-cells",0,&attention)==0);
+    assert(attention.count==2 && attention.args[0]==9 && attention.args[1]==1);
+    assert(attention.node.ops->match_id(&attention.node,"AMDI0030")==1);
     fw_node_t pci;assert(acpi_pci_root(0,0,&pci)==0);
     uint32_t gsi;assert(acpi_pci_route(&pci,0,0,1,&gsi)==0&&gsi==21);
     assert(acpi_pci_route(&pci,1,0,1,&gsi)<0);

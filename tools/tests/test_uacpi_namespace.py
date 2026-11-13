@@ -23,8 +23,8 @@ def string(value):
 def name(n, value):
     return b"\x08" + n.encode() + value
 
-def method(n, value):
-    return package(b"\x14", n.encode() + b"\0\xa4" + value)
+def method(n, value, args=0):
+    return package(b"\x14", n.encode() + bytes([args, 0xa4]) + value)
 
 def fixture():
     # _HID and _STA are METHODS, not literal Name constants. _STA executes Or.
@@ -43,7 +43,19 @@ def fixture():
     child = package(b"\x5b\x82", b"CHD0" + method("_HID", string("A20C0003")))
     parent = package(b"\x5b\x82", b"PAR0" + method("_HID", string("A20P0001")) +
                      method("_STA", b"\x0a\x08") + child)
-    aml = package(b"\x10", b"\\_SB_" + dev + pci + tpm + parent)
+    i2c = bytes([2, 0, 1, 2, 0, 0, 1]) + struct.pack("<HIH", 6, 400000, 0x2c)
+    i2c += b"\\_SB.I2CA\0"
+    # GpioInt (Level, ActiveLow, ExclusiveAndWake, PullUp), pin 9.
+    gpio_int = bytes.fromhex("8c 20 00 01 00 01 00 12 00 01 00 00 00 00 "
+                            "17 00 00 19 00 23 00 00 00 09 00") + b"\\_SB.GPIO\0"
+    i2c = b"\x8e" + struct.pack("<H", len(i2c)) + i2c + gpio_int + b"\x79\0"
+    i2c_crs = package(b"\x11", bytes([0x0a, len(i2c)]) + i2c)
+    touchpad = package(b"\x5b\x82", b"TPDD" + name("_HID", string("SYNA2BA6")) +
+                       name("_CID", string("PNP0C50")) + name("_CRS", i2c_crs) +
+                       method("_DSM", b"\x0a\x20", args=4))
+    controller = package(b"\x5b\x82", b"I2CA" + name("_HID", string("AMDI0010")) + touchpad)
+    gpio = package(b"\x5b\x82", b"GPIO" + name("_HID", string("AMDI0030")))
+    aml = package(b"\x10", b"\\_SB_" + dev + pci + tpm + parent + controller + gpio)
     ram = bytearray(65536)
     def table(pa, sig, body):
         header = bytearray(36)
@@ -76,7 +88,7 @@ class UacpiNamespaceTests(unittest.TestCase):
                         ("tables.c", "topology.c", "uacpi_host.c")]
             sources += [ROOT / "tools/tests" / n for n in
                         ("uacpi_host_test_osl.c", "test_uacpi_namespace.c")]
-            subprocess.run(["cc", "-std=gnu99", "-O1", "-g", "-ffreestanding", "-DCONFIG_UACPI",
+            subprocess.run(["cc", "-std=gnu99", "-O1", "-g", "-ffreestanding", "-DCONFIG_UACPI", "-DCONFIG_NR_CPUS=1",
                             "-fsanitize=undefined", "-fno-sanitize-recover=all",
                             "-I" + str(ROOT / "kernel/include"),
                             "-I" + str(ROOT / "kernel/external/uacpi/include"),

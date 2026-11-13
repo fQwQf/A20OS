@@ -65,6 +65,7 @@ HOST_TESTS_SCRIPTED := \
     tools/tests/uacpi_host_test_osl.c \
     tools/tests/host_sunxi_mmc.c \
     tools/tests/block_cache_state_host.c \
+    tools/tests/rtw89_runtime_host.c \
     tools/tests/completion_state_host.c \
     tools/tests/envelope_policy_host.c \
     tools/tests/ext4_sync_c_scope_host.c \
@@ -116,6 +117,23 @@ HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
 # Production firmware/provider/driver graph fixtures, including the real AML
 # interpreter. Python owns their multi-source host compilation and UBSan runs.
+# Reusable PC driver contracts; no block-device writes or physical reset.
+.PHONY: check-pc-drivers
+check-pc-drivers: check-component-registry
+	$(PYTHON) -m unittest tools.tests.test_i2c_transport_lifetime \
+	  tools.tests.test_firmware_gpio_input tools.tests.test_pc_network_lifetime \
+	  tools.tests.test_pc_module_boundary \
+	  tools.tests.test_xhci_endpoint_types \
+	  tools.tests.test_xhci_event_owner_race tools.tests.test_xhci_firmware_policy \
+	  tools.tests.test_usb_hid_protocol tools.tests.test_usb_hid_readiness \
+	  tools.tests.test_usb_hid_console tools.tests.test_usb_keyboard_leds \
+	  tools.tests.test_input_mt_state tools.tests.test_evdev_mt_libevdev \
+	  tools.tests.test_wifi_broker tools.tests.test_wifi_gui \
+	  tools.tests.test_wifi_hardware_address tools.tests.test_wifi_connect_reuse \
+	  tools.tests.test_rtw89_runtime tools.tests.test_drm_console_owner \
+	  tools.tests.test_desktop_session_log tools.tests.test_session_power \
+	  tools.tests.test_laptop_recovery
+
 .PHONY: check-firmware-model
 check-firmware-model:
 	$(PYTHON) -m unittest tools.tests.test_firmware_model \

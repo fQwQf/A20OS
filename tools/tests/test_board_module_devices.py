@@ -26,9 +26,12 @@ class BoardModuleDevices(unittest.TestCase):
         stub.write_text('''#pragma once
 #include "core/types.h"
 #define IORESOURCE_MMIO_32BIT 4
-struct device { int user_owned; uint64_t physical; const char *id; int refs;
+typedef struct bus_type bus_type_t;
+struct bus_type { int unused; };
+struct device { int user_owned; uint64_t physical; const char *id; bus_type_t *bus; int refs;
                 int irq_count; uint32_t irq; const char *irq_provider; };
 typedef struct device device_t;
+extern bus_type_t platform_bus;
 device_t *device_find_get_by_mmio(uint64_t);
 device_t *device_find_get_by_firmware_id(const char *);
 void device_put(device_t *);
@@ -41,6 +44,8 @@ void device_put(device_t *);
 #include "drivers/core/driver_core.h"
 #include "firmware/device.h"
 #include "boot/context.h"
+bus_type_t platform_bus;
+int klog_level = 1;
 static device_t devices[16]; static int count, created, gui;
 static boot_context_t context;
 const boot_context_t *boot_context_get(void) { return &context; }
@@ -48,9 +53,12 @@ int fw_node_valid(const fw_node_t *node) { return node && node->ops; }
 void firmware_present(void) { static const fw_node_ops_t ops={0};context.hardware_root.ops=&ops; }
 void reset(void) { memset(devices, 0, sizeof(devices)); memset(&context,0,sizeof(context));count=created=gui=0; }
 void gui_mode(int enabled) { gui=enabled; }
-void existing(uint64_t physical, const char *id) {
- devices[count++] = (device_t){.physical=physical, .id=id};
+void existing_bus(uint64_t physical, const char *id, int on_platform) {
+ devices[count++] = (device_t){.physical=physical, .id=id,
+                               .bus=on_platform ? &platform_bus : NULL};
 }
+void existing(uint64_t physical, const char *id) { existing_bus(physical, id, 1); }
+void klog_write_ex(int level, const char *fmt, ...) { (void)level; (void)fmt; }
 device_t *device_find_get_by_mmio(uint64_t pa) {
  for(int i=0;i<count;i++) if(pa==devices[i].physical) { devices[i].refs++; return &devices[i]; }
  return NULL;
@@ -102,6 +110,7 @@ uint64_t physical(unsigned i) { return i<(unsigned)count ? devices[i].physical :
                 str(work/'host.c'),str(ROOT/'kernel/firmware/static.c'),
                 str(source),'-o',str(output)],check=True)
             lib=ctypes.CDLL(str(output));lib.existing.argtypes=[ctypes.c_uint64,ctypes.c_char_p]
+            lib.existing_bus.argtypes=[ctypes.c_uint64,ctypes.c_char_p,ctypes.c_int]
             lib.irq_provider.restype=ctypes.c_char_p
             lib.physical.restype=ctypes.c_uint64
             cls.libs[key]=lib
@@ -149,6 +158,16 @@ uint64_t physical(unsigned i) { return i<(unsigned)count ? devices[i].physical :
         for key in ['x86','pc']:
             lib=self.configure(key,[(0,b'PNP0303')]);self.assertEqual(lib.created_count(),0)
             lib=self.configure(key);self.assertEqual(lib.created_count(),1)
+
+    def test_x86_ps2_on_foreign_bus_gets_platform_fallback(self):
+        # ACPI can describe PNP0303 on a bus the platform-only ps2 driver
+        # never probes.  The board must still publish the i8042 platform
+        # fallback; the old check only asked whether any device existed.
+        for key in ['x86','pc']:
+            lib=self.libs[key];lib.reset();lib.existing_bus(0,b'PNP0303',0)
+            lib.board_configure_devices()
+            self.assertEqual(lib.created_count(),1)
+            self.assertEqual(lib.references(),0)
 
     def test_vf2_fallback_has_physical_resources_and_typed_plic_irq(self):
         lib=self.configure('vf2')

@@ -92,6 +92,6 @@ class Aarch64UefiLoaderTests(unittest.TestCase):
  def test_production_loader_transactions(self):
   with tempfile.TemporaryDirectory() as td:
    p=Path(td);(p/'test.c').write_text(C)
-   subprocess.run(['cc','-std=gnu99','-Wall','-Wextra','-Werror','-ffreestanding','-fno-builtin','-no-pie',f'-I{ROOT}/kernel',str(p/'test.c'),'-o',str(p/'test')],check=True)
+   subprocess.run(['cc','-std=gnu99','-Wall','-Wextra','-Werror','-ffreestanding','-fshort-wchar','-fno-builtin','-no-pie',f'-I{ROOT}/kernel',str(p/'test.c'),'-o',str(p/'test')],check=True)
    for case in ('options','none','too-long'):subprocess.run([str(p/'test'),case],check=True)
 if __name__=='__main__':unittest.main()

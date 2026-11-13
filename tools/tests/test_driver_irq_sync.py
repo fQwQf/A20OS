@@ -43,7 +43,7 @@ void arch_dma_sync_for_cpu(void *, size_t);
 #define MAX_ORDER 11
 #define PFN_NONE ((uint32_t)-1)
 typedef uint32_t pfn_t;
-pfn_t pfa_alloc(int); void pfa_free(pfn_t, int);
+pfn_t pfa_alloc(int); pfn_t pfa_alloc_max(int, uint64_t); void pfa_free(pfn_t, int);
 void *pfn_to_virt(pfn_t); uint64_t pfn_to_phys(pfn_t); pfn_t virt_to_pfn(const void *);
 ''',
             }

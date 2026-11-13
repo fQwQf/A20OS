@@ -50,7 +50,7 @@ static const void *reader(void *context,uint64_t physical,size_t bytes){
 }
 int decode(uint32_t magic,uint32_t physical,size_t capacity,const x86_boot_range_t *excluded,size_t excluded_count,uint64_t *out){
  x86_boot_range_t ranges[64];size_t count=0;enum x86_boot_memory_source source;
- int rc=x86_boot_memory_decode(magic,physical,reader,NULL,0x40000000,0x200000000ULL,
+ int rc=x86_boot_memory_decode(magic,physical,reader,NULL,0x40000000,64ULL << 30,
   excluded,excluded_count,ranges,capacity,&count,&source);
  out[0]=count;out[1]=source;
  if(!rc)for(size_t i=0;i<count;i++){out[2+i*2]=ranges[i].base;out[3+i*2]=ranges[i].end;}
@@ -150,7 +150,7 @@ int guarded(unsigned length){
 }
 ''')
         cls.so=work/'memory.so'
-        subprocess.run(['cc','-shared','-fPIC','-O2','-std=gnu11','-fno-builtin',
+        subprocess.run(['cc','-shared','-fPIC','-O2','-std=gnu11','-fno-builtin','-fshort-wchar',
             '-Wall','-Wextra','-Werror','-I',str(ROOT),'-I',str(ROOT/'kernel/include'),
             str(work/'wrapper.c'),str(ROOT/'kernel/arch/x86_64/platform/boot_memory.c'),
             '-o',str(cls.so)],check=True)
@@ -284,9 +284,13 @@ int guarded(unsigned length){
         self.assertEqual(self.decode(record(0,0x4000000),excluded=[(0x800000,0x801000)])[1],
                          [(0x100000,0x800000),(0x801000,0x4000000)])
 
-    def test_high_ram_maps_only_complete_chunks_without_reserved_holes(self):
-        data=record(0,0x8000000)+record(0x100000000,0x100000000)+record(0x180000000,4096,2)
-        self.assertEqual(self.decode(data)[1],[(0x100000,0x8000000),(0x100000000,0x180000000),(0x1c0000000,0x200000000)])
+    def test_laptop_ram_keeps_partial_gigabytes_and_reserved_holes(self):
+        data = (record(0, 0x8000000) + record(0x80004000, 0x9000) +
+                record(0x100000000, 0x93e300000) + record(0x180000000, 4096, 2))
+        self.assertEqual(self.decode(data)[1], [
+            (0x100000, 0x8000000), (0x80004000, 0x8000d000),
+            (0x100000000, 0x180000000), (0x180001000, 0xa3e300000),
+        ])
 
     def test_uefi_types_and_runtime_attribute(self):
         data=b''.join(descriptor(kind,0x1000000+kind*0x100000,4) for kind in range(1,11))

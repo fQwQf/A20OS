@@ -3,6 +3,7 @@
 The callbacks must reject absent/cacheable/wrong-PA aliases before a generic
 resource can become a driver pointer. CPU instructions are host stubs only.
 """
+import re
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +27,7 @@ int main(void) {
  return 0;
 }'''),
  'x86_64': (64, 512, '0', r'''
+uint64_t boot_pdpt_hh[512];
 static uint64_t l3[512] __attribute__((aligned(4096)));
 static uint64_t l2[512] __attribute__((aligned(4096)));
 int main(void) {
@@ -35,6 +37,7 @@ int main(void) {
  assert(!arch_device_map_mmio(0x20200000,4096,0)); /* WB alias */
  assert(!arch_device_map_mmio(0x20400000,4096,0)); /* absent */
  assert(!arch_device_map_mmio(0x201ff000,8192,0)); /* crosses to WB */
+ memset(g_mmio_cache,0,sizeof(g_mmio_cache));
  l2[256]=0x3000009b;
  assert(!arch_device_map_mmio(0x20001000,4096,0)); /* wrong PA */
  return 0;
@@ -82,12 +85,21 @@ class ArchMmioTests(unittest.TestCase):
    with self.subTest(arch=arch), tempfile.TemporaryDirectory() as temp:
     work=Path(temp)
     (work/'platform.h').write_text(f'#include "core/types.h"\n#define PAGE_OFFSET {offset}\n#define PHYS_MEMORY_BASE 0x80000000ULL\nextern uint{bits}_t boot_pgdir[{count}];\n')
-    (work/'cpu.h').write_text('#include "core/types.h"\nstatic inline uint64_t rdmsr(uint32_t n) {(void)n;return 0x0007040600070406ULL;}\n')
+    (work/'cpu.h').write_text('#include "core/types.h"\nstatic inline uint64_t rdmsr(uint32_t n) {(void)n;return 0x0007040600070406ULL;}\nstatic inline void wrmsr(uint32_t n,uint64_t v){(void)n;(void)v;}\n')
     (work/'drivers/core').mkdir(parents=True)
     (work/'drivers/core/driver_core.h').write_text('#include "core/types.h"\ntypedef struct {uint64_t ram_base;} board_stub_t;\nextern const board_stub_t *current_board;\n')
+    if arch == 'x86_64':
+     with (work/'platform.h').open('a') as f:f.write('#define X86_HIGH_RAM_MAP_END (64ULL<<30)\n')
+     (work/'core').mkdir()
+     (work/'core/lock.h').write_text('#include "core/types.h"\ntypedef int spinlock_t;\n#define SPINLOCK_INIT 0\nstatic inline uint64_t spin_lock_irqsave(spinlock_t*l){assert(!*l);*l=1;return 0;}\nstatic inline void spin_unlock_irqrestore(spinlock_t*l,uint64_t f){(void)f;assert(*l);*l=0;}\n')
+     (work/'mm').mkdir()
+     (work/'mm/frame.h').write_text('static struct {void *meta;} pfa;\nstatic inline void *frame_alloc_nr(void){return 0;}\n')
+     (work/'mm/mm.h').write_text('')
+     defines=re.findall(r'^#define PTE_(?:V|W|PS|DEVICE|PAT|NX)\s+.*$',(ROOT/'kernel/arch/x86_64/include/page_table.h').read_text(),re.M)
+     (work/'page_table.h').write_text('\n'.join(defines)+'\n')
     source=ROOT/f'kernel/arch/{arch}/platform/device_mmio.c'
     # Production source is included verbatim; synthetic descriptors are inputs.
-    (work/'test.c').write_text(f'#include <assert.h>\n#include "{source}"\nuint{bits}_t boot_pgdir[{count}];\n'+body)
+    (work/'test.c').write_text(f'#include <assert.h>\n#include <string.h>\n#include "{source}"\nuint{bits}_t boot_pgdir[{count}];\n'+body)
     exe=work/'check'
     result=subprocess.run(['cc','-std=gnu99','-Wall','-Wextra','-Werror',f'-I{work}',f'-I{ROOT}/kernel/include',f'-I{ROOT}/kernel',str(work/'test.c'),'-o',str(exe)],text=True,capture_output=True)
     self.assertEqual(result.returncode,0,result.stderr)

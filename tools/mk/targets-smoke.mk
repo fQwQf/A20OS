@@ -87,6 +87,34 @@ smoke-uefi-x86_64:
 smoke-uefi-x86_64-impl: $(VBOX_X86_64_EFI)
 	$(PYTHON) tools/qemu/check_uefi_boot.py --efi $(VBOX_X86_64_EFI)
 
+# Port gate for the UEFI-only laptop / no-COM1 shape: GOP text console, PS/2
+# console input, embedded RAM shell and NVMe (the image is booted as an NVMe
+# drive).  Builds the packaged disk first; the script owns the QEMU run.
+.PHONY: smoke-laptop-shell
+smoke-laptop-shell:
+	tools/a20 package x86_64-laptop-shell -- -j$(shell nproc)
+	$(PYTHON) tools/qemu/check_laptop_uefi.py \
+		--image build/x86_64-pc/a20os-laptop-shell.img
+
+# Prove the internal-ESP log fallback survives a power cut.  The copy has the
+# dedicated log partition renamed, so the kernel must use the emulated NVMe
+# disk's ESP; QEMU is killed without a shutdown afterwards.
+.PHONY: smoke-laptop-esp-log
+smoke-laptop-esp-log:
+	tools/a20 package x86_64-laptop-shell -- -j$(shell nproc)
+	$(PYTHON) tools/qemu/check_laptop_esp_log.py \
+		--image build/x86_64-pc/a20os-laptop-shell.img
+
+# Default bare-metal gate: XFCE Wayland desktop on the retained GOP scanout,
+# distro partition on the same USB stick, no COM1 and no internal install.
+# PREBUILT_WORLD=1 reuses build/images/xfce-x86_64.img instead of rebuilding
+# the apk world from the package mirror.
+.PHONY: smoke-laptop-gui
+smoke-laptop-gui:
+	tools/a20 package x86_64-laptop-uefi -- -j$(shell nproc) PREBUILT_WORLD=1
+	$(PYTHON) tools/qemu/check_laptop_gui.py \
+		--image build/x86_64-pc/a20os-laptop-uefi.img
+
 smoke-x86-fp-preserve:
 	$(PYTHON) tools/smoke.py smoke-x86-fp-preserve
 
@@ -1117,10 +1145,7 @@ smoke-userns:
 # ================================================================
 # USB hub smoke
 # ================================================================
-# The keyboard and mouse hang off a hub nested behind the xHCI root hub, so
-# nothing is reachable by the flat "enumerate the controller's own ports" walk:
-# the hub itself has to be enumerated, its class driver has to expose a second
-# tier of ports, and the devices behind it have to come up through that tier.
+# Exercise enumeration of a hub and its downstream keyboard and mouse.
 smoke-usb-hub-x86_64:
 	$(PYTHON) tools/smoke.py smoke-usb-hub-x86_64
 

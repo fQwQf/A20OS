@@ -243,7 +243,7 @@ def main() -> int:
                     "phys_to_pfn", "pfn_valid"]
     conversions = "\n".join(extract_function(header, name) for name in header_funcs)
     funcs = ["pfa_buddy_pfn", "fl_push_clean",
-             "pfa_seed_range", "pfa_alloc_from_buddy", "pfa_free",
+             "pfa_seed_range", "pfa_take_block", "pfa_alloc_from_buddy", "pfa_alloc_max", "pfa_free",
              "frame_put_locked", "pfa_split_allocated"]
     candidate_funcs = "\n".join(extract_function(src, name) for name in funcs)
 
@@ -457,7 +457,34 @@ static void test_split_owned(void) {
     }
     verify_lists(); assert(pfa.free_frames == pfa.total_frames);
 }
+
+static void test_dma_address_limit(void) {
+    reset(); add_range(0x01000000ULL, 8192); add_range(0xa00000000ULL, 8192); seed_all();
+    /* The unrestricted allocator's head is above 4 GiB. Free/retry repeats it. */
+    for (unsigned i=0;i<8;i++) {
+        pfn_t p=pfa_alloc_from_buddy(4); assert(pfn_to_phys(p)>UINT32_MAX); pfa_free(p,4);
+    }
+    pfn_t blocks[32];
+    for(unsigned i=0;i<32;i++) {
+        blocks[i]=pfa_alloc_max(4,UINT32_MAX); assert(blocks[i]!=PFN_NONE);
+        uint64_t pa=pfn_to_phys(blocks[i]); assert(pa+65535<=UINT32_MAX);
+    }
+    verify_lists();for(unsigned i=0;i<32;i++)pfa_free(blocks[i],4);
+    verify_lists();assert(pfa.free_frames==pfa.total_frames);
+    assert(pfa_alloc_max(-1,UINT64_MAX)==PFN_NONE);
+    assert(pfa_alloc_max(MAX_ORDER+1,UINT64_MAX)==PFN_NONE);
+    assert(pfa_alloc_max(0,4094)==PFN_NONE);
+    reset();add_range(0xa00000000ULL,8192);seed_all();
+    pfn_t before=pfa.free_frames;assert(pfa_alloc_max(0,UINT32_MAX)==PFN_NONE);
+    assert(pfa.free_frames==before);verify_lists();
+    reset();add_range(0xff800000ULL,4096);seed_all();
+    pfn_t p=pfa_alloc_max(MAX_ORDER,UINT32_MAX);assert(p!=PFN_NONE);
+    assert(pfn_to_phys(p)==0xff800000ULL);
+    assert(pfa_alloc_max(0,UINT32_MAX)==PFN_NONE);pfa_free(p,MAX_ORDER);verify_lists();
+    puts("pfa DMA address-limit selection: PASS");
+}
 int main(void) {
+    test_dma_address_limit();
     test_split_owned();
     test_seed_layouts();
     test_multirange_orders();

@@ -269,6 +269,7 @@ int fw_node_has_property(const fw_node_t *node,const char *name) {
 bus_type_t platform_bus;
 int klog_level=10;
 void klog_write(const char*fmt,...) {(void)fmt;}
+int klog_write_ex(int level,const char*fmt,...) {(void)level;(void)fmt;return 0;}
 void *kmalloc(size_t n) {if(failure==1)return NULL;allocated++;return malloc(n);}
 void kfree(void *p) {assert(p);freed++;free(p);}
 void mutex_init(mutex_t*m) {(void)m;}

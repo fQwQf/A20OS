@@ -33,7 +33,7 @@ int decode(uint32_t format,uint32_t pitch,uint32_t width,uint32_t height,
 }
 int missing_info(void){boot_framebuffer_t fb;return describe_gop(NULL,&fb);}
 ''')
-        subprocess.run(['cc', '-shared', '-fPIC', '-O1', '-I', str(ROOT),
+        subprocess.run(['cc', '-shared', '-fPIC', '-O1', '-fshort-wchar', '-I', str(ROOT),
                         '-I', str(ROOT / 'kernel/include'), str(work/'wrapper.c'),
                         str(ROOT/'kernel/boot/framebuffer.c'), '-o', str(work/'test.so')],
                        check=True, capture_output=True)
@@ -74,10 +74,15 @@ int missing_info(void){boot_framebuffer_t fb;return describe_gop(NULL,&fb);}
 
     def test_geometry_and_address_failures(self):
         for values in [dict(pitch=1023),dict(width=0),dict(height=0),dict(width=20000),
-                       dict(base=0),dict(base=0x80000001),dict(base=0xfffff000),
+                       dict(base=0),dict(base=0x80000001),dict(base=0xfffffffffffff000),
                        dict(base=0x2000000),dict(size=4096),dict(size=512*1024*1024)]:
             with self.subTest(values=values):
                 self.assertNotEqual(self.decode(**values)[0],0)
+
+    def test_framebuffer_above_4g_is_preserved_for_late_mapping(self):
+        rc, fb = self.decode(base=0x100000000)
+        self.assertEqual(rc, 0)
+        self.assertEqual(fb.physical, 0x100000000)
 
     def test_common_validator_rejects_corrupt_handoff(self):
         for field,value in [('magic',0),('version',2),('physical',1),('aperture',4096),

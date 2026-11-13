@@ -57,6 +57,7 @@ void *krealloc(void *old,size_t bytes) {
 }
 int klog_level=0;static unsigned capacity_errors;
 void klog_write(const char *fmt,...) {if(strstr(fmt,"slots exhausted"))capacity_errors++;}
+int klog_write_ex(int level,const char *fmt,...) {(void)level;klog_write(fmt);return 0;}
 void panic(const char *fmt,...) {(void)fmt;abort();}
 struct task_t *proc_current(void) {return NULL;}
 int firmware_device_prepare(device_t *dev) {(void)dev;return 0;}
@@ -214,6 +215,70 @@ static void check_usb(int fault,int registry_fault,int held_device) {
   assert(parent.references==1);
  }
 }
+static unsigned usb_resets, usb_config_length, usb_configuration_calls;
+static int usb_present;
+void mdelay(unsigned int ms) {(void)ms;}
+static int enum_connected(usb_hcd_t *h,unsigned port) {
+ (void)h;assert(port==1);return usb_present;
+}
+static int enum_reset(usb_hcd_t *h,unsigned port,uint8_t *speed) {
+ (void)h;assert(port==1);usb_resets++;*speed=USB_SPEED_HIGH;return 0;
+}
+static int enum_slot(usb_hcd_t *h,unsigned port,uint8_t speed,uint8_t hub,
+                     uint8_t address,usb_slot_t *slot) {
+ (void)h;assert(port==1&&speed==USB_SPEED_HIGH&&!hub&&address==1);
+ *slot=(usb_slot_t){.hcd=1,.address=address};return 0;
+}
+static int enum_mps(usb_hcd_t *h,uint8_t slot,uint16_t mps) {
+ (void)h;assert(slot==1&&mps==64);return 0;
+}
+static int enum_descriptor(usb_hcd_t *h,uint8_t slot,uint8_t type,uint16_t len,void *buf) {
+ (void)h;assert(slot==1);
+ if(type==USB_DT_DEVICE) {
+  const uint8_t device[18]={18,1,0,2,0,0,0,64,0xf2,4,0xb8,0xb7};
+  assert(len==8||len==sizeof(device));memcpy(buf,device,len);return 0;
+ }
+ assert(type==USB_DT_CONFIG);
+ uint8_t config[879]={
+  9,2,0x6f,3,2,1,0,0x80,50,
+  9,4,0,0,1,0x0e,1,1,0, 7,5,0x87,3,16,0,8,
+  9,4,1,1,1,0x0e,2,1,0, 7,5,0x81,1,64,0,1,
+  9,4,1,0,0,0x0e,2,1,0,
+ };
+ config[2]=(uint8_t)usb_config_length;config[3]=(uint8_t)(usb_config_length>>8);
+ for(unsigned i=50;i<sizeof(config);i+=255) {
+  unsigned remaining=sizeof(config)-i;
+  config[i]=remaining>=255?255:remaining;config[i+1]=0x24;
+ }
+ assert(len==9||len==sizeof(config));memcpy(buf,config,len);return 0;
+}
+static int enum_control(usb_hcd_t *h,uint8_t slot,const usb_setup_packet_t *setup,void *buf) {
+ (void)h;assert(slot==1&&!buf&&setup->request==USB_REQ_SET_CONFIGURATION&&setup->value==1);
+ usb_configuration_calls++;return 0;
+}
+static void check_usb_camera_enumeration(void) {
+ static device_t parent={.name="hcd",.references=1};
+ static const usb_hcd_ops_t ops={
+  .port_connected=enum_connected,.reset_port=enum_reset,.alloc_slot=enum_slot,
+  .update_ep0_mps=enum_mps,.get_descriptor=enum_descriptor,.control=enum_control,
+  .abort_slot=usb_abort,
+ };
+ usb_device_t *ports[1]={NULL};uint8_t state[1]={0};
+ usb_hcd_t h={.hcd_dev=&parent,.ops=&ops,.max_ports=1,.port_devices=ports,.port_state=state};
+ g_hcds[0]=&h;g_hcd_count=1;
+ usb_present=1;usb_config_length=USB_CONTROL_MAX_LENGTH+1;
+ for(unsigned i=0;i<12;i++)usb_core_scan();
+ assert(usb_resets==3&&aborts==3&&!ports[0]&&!usb_configuration_calls);
+ usb_present=0;usb_core_scan();assert(state[0]==0);
+ usb_present=1;usb_config_length=879;
+ for(unsigned i=0;i<12;i++)usb_core_scan();
+ assert(usb_resets==4&&aborts==3&&ports[0]&&usb_configuration_calls==1);
+ assert(ports[0]->iface_count==2&&ports[0]->ifaces[0].eps[0].addr==0x87);
+ assert(ports[0]->ifaces[1].interface_number==1&&ports[0]->ifaces[1].alt_setting==0);
+ assert(ports[0]->ifaces[1].ep_count==0);
+ usb_present=0;usb_core_scan();
+ assert(!ports[0]&&aborts==4&&parent.references==1);
+}
 int main(int argc,char **argv) {
  assert(argc==2);init_core();
  if(!strcmp(argv[1],"pci-retired"))check_pci_retired(0);
@@ -225,6 +290,7 @@ int main(int argc,char **argv) {
  else if(!strcmp(argv[1],"usb-held"))check_usb(0,0,1);
  else if(!strcmp(argv[1],"usb-success"))check_usb(0,0,0);
  else if(!strcmp(argv[1],"usb-register-fault"))check_usb(0,1,0);
+ else if(!strcmp(argv[1],"usb-camera"))check_usb_camera_enumeration();
  else if(argv[1][0]=='f')check_usb(argv[1][1]-'0',0,0);
  else assert(0);
  finish_core();return 0;
@@ -264,6 +330,9 @@ class NativeBusLifetimeTests(unittest.TestCase):
     def run_case(self, case):
         result = subprocess.run([str(self.exe), case], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_usb_large_config_and_failed_port_reconnect(self):
+        self.run_case('usb-camera')
 
     def test_pci_removed_slot_pinned_by_external_reference(self):
         self.run_case('pci-retired')
