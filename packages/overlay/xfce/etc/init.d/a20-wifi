@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+description="A20OS RTL8852BE wireless service"
+supervisor="supervise-daemon"
+respawn_delay=2
+respawn_max=5
+respawn_period=30
+command="/a20/rtw89d"
+pidfile="/run/a20-wifi.pid"
+output_log="/var/log/a20/wifi.log"
+error_log="/var/log/a20/wifi.log"
+retry="TERM/5/KILL/2"
+depend() { need a20-platform; before a20-desktop; }
+start() { [ -x "$command" ] || return 0; default_start; }
+stop() { [ -x "$command" ] || return 0; default_stop; }

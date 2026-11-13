@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
-"""org.xfce.SessionManager provider for the A20OS desktop.
+"""Expose XFCE power actions through the upstream OpenRC lifecycle.
 
-The XFCE actions plugin asks a session manager two things: whether it can
-shut down or restart, and then to perform it.  A20OS runs labwc without
-elogind/systemd, so nothing owns org.xfce.SessionManager; the plugin's
-fallback (`shutdown --poweroff`) does not exist either, which made every
-power entry a silent no-op.
-
-This service owns the name inside the session bus and maps the two actions
-onto the kernel's orderly reboot path (vfs_system_shutdown, then firmware
-power-off/reboot).  It must run before the panel starts so the capability
-queries at menu build time see a provider.
-
-Log Out terminates the compositor; init restarts the session, so the desktop
-comes back instead of leaving a kiosk with no userspace.
+The D-Bus adapter only translates desktop actions. OpenRC PID1 runs the
+shutdown level before its final process cleanup and checked power call.
 """
-import ctypes
 import os
-import signal
+import subprocess
 import sys
 
 import gi
@@ -29,8 +17,8 @@ BUS_NAME = "org.xfce.SessionManager"
 OBJECT_PATH = "/org/xfce/SessionManager"
 INTERFACE = "org.xfce.Session.Manager"
 
-LINUX_REBOOT_CMD_RESTART = 0x01234567
-LINUX_REBOOT_CMD_POWER_OFF = 0x4321FEDC
+INIT_RESTART = "reboot"
+INIT_POWER_OFF = "poweroff"
 
 XML = """<node>
   <interface name="org.xfce.Session.Manager">
@@ -53,39 +41,29 @@ def log(message):
     print("session-power: " + message, flush=True)
 
 
-def power_action(cmd):
-    """Take the orderly path: the kernel syncs and unmounts before poweroff.
-
-    libc's reboot() is the one-argument musl/glibc wrapper; it supplies the
-    Linux magic values itself.  The VFS shutdown transaction reports a
-    retryable EBUSY when a file operation was in flight when it tried to close
-    admission (see the shutdown state machine's RETRY_* contract), so a busy
-    desktop needs a bounded retry rather than a one-shot failure.
-    """
-    import errno
-    import time
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    for attempt in range(20):
-        # The kernel's checked shutdown transaction flushes filesystem data.
-        # A global sync before every EBUSY retry repeats expensive USB writes
-        # while admission is still open and other applications keep writing.
-        libc.reboot(cmd)
-        err = ctypes.get_errno()
-        if err in (errno.EBUSY, errno.ETIMEDOUT) and attempt < 19:
-            time.sleep(0.25)
-            continue
-        log("reboot(0x%x) failed: %s" % (cmd, os.strerror(err)))
-        break
-    # A refused shutdown has not completed. Keep the D-Bus provider alive so
-    # the next request can retry, and show the reason instead of a silent no-op.
+def power_action(action):
+    """Ask the upstream init to perform an orderly system transition."""
+    if action not in (INIT_RESTART, INIT_POWER_OFF):
+        raise ValueError("unsupported power action")
+    try:
+        result = subprocess.run(
+            ["/sbin/" + action],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=15, check=False)
+        if result.returncode == 0:
+            log("init accepted " + action)
+            return GLib.SOURCE_REMOVE
+        reason = (result.stdout or "").strip() or "exit status %d" % result.returncode
+    except (OSError, subprocess.TimeoutExpired) as error:
+        reason = str(error)
+    log("init power request failed: " + reason)
     try:
         gi.require_version("Gtk", "3.0")
         from gi.repository import Gtk
         dialog = Gtk.MessageDialog(
             message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
-            text="无法完成关机或重启")
-        dialog.format_secondary_text("内核返回：%s。桌面仍在运行，可以稍后重试。" % os.strerror(err))
+            text="无法提交关机或重启请求")
+        dialog.format_secondary_text(reason)
         dialog.connect("response", lambda widget, response: widget.destroy())
         dialog.show_all()
     except Exception as error:
@@ -95,8 +73,11 @@ def power_action(cmd):
 
 def logout():
     """Terminate the compositor; init restarts the session."""
-    log("logout requested, stopping the compositor")
-    os.kill(os.getppid(), signal.SIGTERM)
+    log("logout requested, restarting the desktop through OpenRC")
+    subprocess.Popen(["/sbin/rc-service", "a20-desktop", "restart"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.STDOUT, start_new_session=True)
+    return GLib.SOURCE_REMOVE
 
 
 class Manager:
@@ -112,11 +93,11 @@ class Manager:
         elif method == "Shutdown":
             log("shutdown requested")
             invocation.return_value(None)
-            GLib.idle_add(power_action, LINUX_REBOOT_CMD_POWER_OFF)
+            GLib.idle_add(power_action, INIT_POWER_OFF)
         elif method == "Restart":
             log("restart requested")
             invocation.return_value(None)
-            GLib.idle_add(power_action, LINUX_REBOOT_CMD_RESTART)
+            GLib.idle_add(power_action, INIT_RESTART)
         elif method == "Logout":
             invocation.return_value(None)
             GLib.idle_add(logout)

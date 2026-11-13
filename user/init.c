@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -165,6 +166,53 @@ static void reap_children(void)
  */
 static void do_shutdown(void);
 
+static int copy_wifi_tool(const char *name, mode_t mode)
+{
+    char source[128], destination[128];
+    snprintf(source, sizeof(source), "/bin/%s", name);
+    snprintf(destination, sizeof(destination), "/extra/a20/%s", name);
+    int input = open(source, O_RDONLY | O_CLOEXEC);
+    if (input < 0)
+        return -1;
+    int output = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (output < 0) {
+        close(input);
+        return -1;
+    }
+    char buffer[16384];
+    int result = 0;
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0) {
+            result = count < 0 ? -1 : 0;
+            break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset, count - offset);
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written <= 0) {
+                result = -1;
+                break;
+            }
+            offset += written;
+        }
+        if (result)
+            break;
+    }
+    int saved = errno;
+    if (close(output) < 0 && !result) {
+        saved = errno;
+        result = -1;
+    }
+    close(input);
+    errno = saved;
+    return result;
+}
+
 static int detect_distro_rootfs(void)
 {
     struct stat st;
@@ -178,17 +226,90 @@ static int detect_distro_rootfs(void)
 static void enter_distro_rootfs(void)
 {
     printf("[init] distro mode: entering rootfs at /extra\n");
+    int have_wifi = access("/bin/rtw89d", X_OK) == 0;
+    int managed_init = access("/extra/etc/a20-openrc", F_OK) == 0;
+    if (have_wifi) {
+        xmkdir("/extra/a20");
+        /* A20OS has no bind mount ABI yet. Keep these embedded tools in a
+         * private tmpfs rather than rewriting the distro partition. */
+        if (mount("tmpfs", "/extra/a20", "tmpfs", 0, NULL) < 0 ||
+            copy_wifi_tool("rtw89d", 0755) < 0 ||
+            copy_wifi_tool("wifi", 0755) < 0 ||
+            copy_wifi_tool("wifi-dhcp", 0755) < 0 ||
+            copy_wifi_tool("rtw89-notices", 0444) < 0 ||
+            copy_wifi_tool("wifi-gui", 0755) < 0 ||
+            copy_wifi_tool("wifi_backend.py", 0644) < 0 ||
+            copy_wifi_tool("wifi_portal.py", 0644) < 0 ||
+            copy_wifi_tool("input-probe.py", 0644) < 0 ||
+            copy_wifi_tool("session-log.py", 0644) < 0 ||
+            copy_wifi_tool("session-power.py", 0755) < 0 ||
+            copy_wifi_tool("90-a20-ibus.gschema.override", 0644) < 0 ||
+            copy_wifi_tool("90-libinput-fuzz-override.rules", 0644) < 0 ||
+            copy_wifi_tool("a20-wifi.desktop", 0755) < 0) {
+            perror("prepare embedded Wi-Fi tools");
+            have_wifi = 0;
+        } else {
+            /* Keep the command discoverable from the distro's usual PATH. */
+            (void)symlink("/a20/wifi", "/extra/usr/local/bin/wifi");
+            (void)symlink("/a20/wifi-gui", "/extra/usr/local/bin/wifi-gui");
+            (void)symlink("/a20/a20-wifi.desktop", "/extra/usr/share/applications/a20-wifi.desktop");
+            xmkdir("/extra/root/Desktop");
+            (void)symlink("/a20/a20-wifi.desktop", "/extra/root/Desktop/a20-wifi.desktop");
+            xmkdir("/extra/etc/udev");
+            xmkdir("/extra/etc/udev/rules.d");
+            (void)symlink("/a20/90-libinput-fuzz-override.rules",
+                          "/extra/etc/udev/rules.d/90-libinput-fuzz-override.rules");
+        }
+    }
     if (chdir("/extra") != 0 || chroot("/extra") != 0) {
         perror("chroot distro rootfs");
         do_shutdown();
     }
-    char *distro_argv[] = { "/sbin/init", NULL };
+    if (have_wifi && !managed_init) {
+        xmkdir("/var/log");
+        xmkdir("/var/log/a20");
+        pid_t pid = fork();
+        if (pid == 0) {
+            setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
+            (void)rename("/var/log/a20/wifi.log", "/var/log/a20/wifi-prev.log");
+            int log = open("/var/log/a20/wifi.log", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (log >= 0) {
+                dup2(log, STDOUT_FILENO);
+                dup2(log, STDERR_FILENO);
+                if (log > STDERR_FILENO)
+                    close(log);
+            }
+            execl("/a20/rtw89d", "rtw89d", (char *)NULL);
+            perror("start Wi-Fi service");
+            _exit(127);
+        }
+        if (pid < 0)
+            perror("fork Wi-Fi service");
+        pid_t probe_pid = fork();
+        if (probe_pid == 0) {
+            int log = open("/var/log/a20/touchpad.log", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (log >= 0) {
+                dup2(log, STDOUT_FILENO);
+                dup2(log, STDERR_FILENO);
+                if (log > STDERR_FILENO)
+                    close(log);
+            }
+            execl("/usr/bin/python3", "python3", "/a20/input-probe.py", (char *)NULL);
+            _exit(127);
+        }
+        if (probe_pid < 0)
+            perror("fork touchpad diagnostic");
+    }
+    /* The distro owns PID1. Its OpenRC instance also owns Wi-Fi and session
+     * services; the ramfs process only stages platform tools and execs it. */
+    char *distro_init = "/sbin/init";
+    char *distro_argv[] = { distro_init, NULL };
     char *distro_envp[] = {
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
         "HOME=/root", "SHELL=/bin/bash", "TERM=linux",
         "XDG_RUNTIME_DIR=/run/user/0", NULL
     };
-    execve("/sbin/init", distro_argv, distro_envp);
+    execve(distro_init, distro_argv, distro_envp);
     perror("execve /sbin/init");
     do_shutdown();
 }

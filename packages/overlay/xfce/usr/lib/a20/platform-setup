@@ -1,0 +1,83 @@
+#!/bin/sh
+# A20OS platform filesystem/session preparation, invoked by OpenRC.
+# PID1, service supervision and shutdown ordering belong to upstream OpenRC.
+
+export HOME=/root
+export SHELL=/bin/zsh
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export XDG_RUNTIME_DIR=/run/user/0
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_CACHE_HOME="$HOME/.cache"
+
+# Session files are on the distro root in LOG_MODE=esp. Mirror process errors
+# to /dev/kmsg as well, so an interrupted shutdown does not lose them before
+# root writeback; the kernel persists these records on the internal ESP.
+mkdir -p /run
+LOG_DIR=/var/log/a20
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+BOOT_ID=$(sed -n 's/^boot=//p' "$LOG_DIR/CURRENT" 2>/dev/null | head -n 1)
+SESSION_LOG="$LOG_DIR/session-${BOOT_ID:-$(date +%s)}.log"
+LOG_SESSION=$(sed -n 's/^session=//p' "$LOG_DIR/CONFIG" 2>/dev/null | head -n 1)
+if [ "${LOG_SESSION:-1}" = "0" ]; then
+    SESSION_LOG=/dev/null
+fi
+export SESSION_LOG
+# Keep the last few sessions; a compositor that logs in a loop must not fill the
+# 64 MiB log partition and starve the kernel's JSONL writer.
+OLD_SESSIONS=$(ls -1t "$LOG_DIR"/session-*.log 2>/dev/null | tail -n +4)
+[ -n "$OLD_SESSIONS" ] && rm -f $OLD_SESSIONS
+echo "a20: session log $SESSION_LOG"
+printf '%s\n' "$SESSION_LOG" > /run/a20-session-log
+
+# A20OS' devfs already populates /dev, so only mount devtmpfs when the
+# kernel did not do it for us.
+if [ ! -d /dev/input ] && [ ! -e /dev/console ]; then
+    mkdir -p /dev
+    mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+fi
+
+mkdir -p /dev/shm
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+mkdir -p /dev/pts 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mkdir -p /run
+
+mkdir -p /tmp/.X11-unix /tmp/.ICE-unix "$HOME/.config/dconf" \
+    "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml" \
+    "$HOME/.local/share" "$HOME/.cache" \
+    /run/dbus /var/lib/dbus /run/elogind /var/lib/elogind /run/systemd "$XDG_RUNTIME_DIR"
+chmod 01777 /tmp/.X11-unix
+chmod 0777 /tmp/.ICE-unix
+chmod 0700 "$XDG_RUNTIME_DIR"
+
+# Cache regeneration for packages whose triggers did not run during
+# image assembly.
+if [ ! -f /usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache ]; then
+    gdk-pixbuf-query-loaders --update-cache 2>/dev/null || true
+fi
+if [ ! -f /usr/share/mime/mime.cache ]; then
+    update-mime-database /usr/share/mime 2>/dev/null || true
+fi
+# The final overlay supplies the default IBus engines after apk's triggers.
+# Compile it before clients start; user dconf preferences still take priority.
+IBUS_SCHEMA_DIR=/usr/share/glib-2.0/schemas
+IBUS_OVERRIDE=/a20/90-a20-ibus.gschema.override
+if [ -f "$IBUS_OVERRIDE" ] && ! cmp -s "$IBUS_OVERRIDE" "$IBUS_SCHEMA_DIR/90-a20-ibus.gschema.override"; then
+    cp "$IBUS_OVERRIDE" "$IBUS_SCHEMA_DIR/90-a20-ibus.gschema.override"
+fi
+glib-compile-schemas "$IBUS_SCHEMA_DIR"
+if [ "$(GSETTINGS_BACKEND=memory gsettings get org.freedesktop.ibus.general use-system-keyboard-layout)" = true ]; then
+    echo "a20: IBus compositor layout default verified"
+else
+    echo "a20: IBus compositor layout default verification failed" >&2
+fi
+dbus-uuidgen --ensure 2>/dev/null || true
+
+
+# A fresh compositor session owns profile locks; no browser is running yet.
+rm -f /root/.config/mozilla/firefox/*/lock /root/.config/mozilla/firefox/*/.parentlock 2>/dev/null || true
+if [ -f /a20/session-power.py ] && ! cmp -s /a20/session-power.py /usr/lib/a20/session-power.py; then
+    cp /a20/session-power.py /usr/lib/a20/session-power.py || exit 1
+fi
+echo "a20: OpenRC platform preparation complete"

@@ -413,7 +413,13 @@ void init_kthread(void) {
     char distro_script[MAX_PATH_LEN];
     int is_distro_shebang = 0;
 
-    {
+    int distro_via_embedded_init = 0;
+#ifdef CONFIG_WIFI_RTW89
+    /* This image's embedded init stages and starts the independent radio
+     * service before handing off to the existing distro init. */
+    distro_via_embedded_init = 1;
+#endif
+    if (!distro_via_embedded_init) {
         int marker_fd = vfs_open("/extra/etc/a20-distro", O_RDONLY, 0);
         if (marker_fd >= 0) {
             vfs_close(marker_fd);
