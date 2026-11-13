@@ -25,7 +25,7 @@ bus detects remove
   -> final device_put invokes release
 ```
 
-`device_hotplug()` 位于 `kernel/drivers/core/driver_core.c`。ADD 成功后才调用可选的 `bus_type_t.hotplug(..., BUS_EVENT_ADD)`；REMOVE 则仅在驱动 `remove` 返回 0、资源回收与注销成功后通知总线；通知期间额外保留 device 引用。非零错误继续保留注册/绑定/资源，不通知完成，调用者必须处理并显式重试。因此 bus 回调只处理总线自己的记录或事件传播，不能取代驱动生命周期。
+`device_hotplug()` 位于 `kernel/drivers/core/driver_core.c`。ADD 成功后才调用可选的 `bus_type_t.hotplug(..., BUS_EVENT_ADD)`；失败 probe 只有事先选择 `device_probe_use_remove()` 才由核心调用部分初始化安全的 quiesce/remove；清理失败保留资源，显式注销重试。未选择的旧 probe 仍自行回滚。REMOVE 则仅在驱动 `remove` 返回 0、资源回收与注销成功后通知总线；通知期间额外保留 device 引用。非零错误继续保留注册/绑定/资源，不通知完成，调用者必须处理并显式重试。因此 bus 回调只处理总线自己的记录或事件传播，不能取代驱动生命周期。
 
 普通注册会同步尝试匹配和 `probe`；discovery 事务期间先发布完整设备集合，事务结束后由统一 probe/retry 路径绑定。注销会同步执行 `remove`。所以只能从可睡眠的进程、worker 或调度/idle 下半部调用，绝不能直接从硬件中断处理程序调用。
 

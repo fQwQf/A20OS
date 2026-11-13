@@ -109,6 +109,8 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 
 日志要包含构建命令、平台/VM 设备配置、成功 I/O，以及已知未验证能力。不要只附截图；串口文本更适合代码审查和回归比较。
 
+失败 probe 协议还须运行 `python3 -m unittest tools.tests.test_driver_remove tools.tests.test_riscv_iommu_requester -v`。新增用例覆盖无分配选择、部分初始化、原错误保留、清理超时、嵌套/递归构造、子设备阻塞、旧契约兼容及真实 RISC-V domain/页表/租约保留；生命周期启动门禁新增 `DRIVER_PROBE_CLEANUP: PASS managed=1 rollback=1`。
+
 修改退出路径还应运行 `python3 -m unittest tools.tests.test_driver_remove tools.tests.test_native_bus_remove tools.tests.test_i2c_transport_lifetime -v`。前者直接链接 C/Rust 两条生产注册表路径；bus 测试覆盖缺失/替换 PCI 身份、USB abort/remove 失败后的端点/address 保留与重试。检查失败期间无 devres 提前释放、无下一候选覆盖、无 REMOVE 完成通知；成功后再确认引用与占用回到基线。启动测试不替代真实设备停止超时与 DMA 可达性验证。
 
 ## 门禁失败时怎么办

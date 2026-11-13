@@ -1,6 +1,6 @@
 # 驱动运行时契约
 
-原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和可失败 remove；错误保留绑定/devres，显式重试不重复 quiesce；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
+原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：失败 probe 可在初始化前显式选择 `device_probe_use_remove()`，由同一退出路径处理部分实例，清理失败保留绑定与原 probe_error；子设备阻塞时保持 PROBE_CLEANUP 并拒绝新资源/DMA 使用。下线分为 offline、quiesce、在途调用排空和可失败 remove；错误保留绑定/devres，显式重试不重复 quiesce；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 

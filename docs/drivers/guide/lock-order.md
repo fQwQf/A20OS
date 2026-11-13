@@ -317,6 +317,10 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 - `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
 - `kernel/arch/riscv64/boards/visionfive2/board.c`、`kernel/arch/loongarch64/boards/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。
 
+### probe 清理的调用帧
+
+`device_probe_use_remove()` 的意图放在 lifecycle mutex 保护的私有栈帧，不分配内存、不增加公开字段。只允许当前帧的设备选择，嵌套 probe 返回后恢复前一帧；尚在构造的设备/祖先拒绝递归解绑。probe 返回后先弹帧，再进入既有可失败退出管线。PROBE_CLEANUP 的 class offline 位于私有 removal 帧内，防止 offline observer 递归销毁实例；consumer 阻塞时不提前标 REMOVING，否则重试会漏掉首次 quiesce。
+
 ### 可失败的驱动退出
 
 `g_driver_core_ops` 仍是 lifecycle mutex，`g_driver_core_lock` 仅在数组/claim 变更时持有；quiesce/remove/class drain 与 bus 通知不持 registry spinlock。驱动退出和设备递归移除的意图栈只在 lifecycle mutex 下读写，不分配公开生命周期对象。正在退出的驱动拒绝新匹配，正在移除的 provider/parent 链拒绝新消费关系；递归退出同一对象返回 `-EBUSY`。
