@@ -1,0 +1,4 @@
+#!/sbin/openrc-run
+description="Prepare A20OS runtime filesystems and desktop defaults"
+depend() { before a20-dbus a20-seatd a20-udev a20-wifi; }
+start() { ebegin "$description"; /usr/lib/a20/platform-setup; eend $?; }

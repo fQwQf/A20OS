@@ -10,6 +10,9 @@ a20-drivers
 # Alpine 基础
 musl
 busybox
+# Upstream PID1 and service lifecycle; no A20OS desktop init implementation.
+openrc=0.63-r1
+openrc-init=0.63-r1
 ca-certificates
 apk-tools
 alpine-keys
@@ -18,7 +21,7 @@ alpine-keys
 zsh
 fastfetch
 
-# 设备/登录/会话服务层（stage-2 init 依赖：dbus -> elogind -> seatd -> udevd）
+# 设备/登录/会话服务层（由 OpenRC 管理依赖与生命周期）
 dbus
 dbus-x11
 elogind

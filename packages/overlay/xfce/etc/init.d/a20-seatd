@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+description="Seat management"
+supervisor="supervise-daemon"
+respawn_delay=2
+respawn_max=5
+respawn_period=30
+command="/usr/bin/seatd"
+pidfile="/run/a20-seatd.pid"
+output_log="/var/log/a20/seatd-startup.log"
+error_log="/var/log/a20/seatd-startup.log"
+retry="TERM/5/KILL/2"
+export SEATD_VTBOUND=0
+depend() { need a20-platform; }

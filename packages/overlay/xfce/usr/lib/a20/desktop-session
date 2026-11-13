@@ -1,0 +1,8 @@
+#!/bin/sh
+export HOME=/root SHELL=/bin/zsh
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export XDG_RUNTIME_DIR=/run/user/0 XDG_CONFIG_HOME=/root/.config
+export XDG_DATA_HOME=/root/.local/share XDG_CACHE_HOME=/root/.cache
+SESSION_LOG=$(cat /run/a20-session-log)
+export SESSION_LOG
+exec python3 /usr/lib/a20/session-log.py "$SESSION_LOG" runuser -l root -c /usr/lib/a20/start-xfce4-session

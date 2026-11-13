@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+description="A20OS XFCE Wayland desktop"
+supervisor="supervise-daemon"
+respawn_delay=2
+respawn_max=5
+respawn_period=30
+command="/usr/lib/a20/desktop-session"
+pidfile="/run/a20-desktop.pid"
+output_log="/var/log/a20/desktop-startup.log"
+error_log="/var/log/a20/desktop-startup.log"
+retry="TERM/5/KILL/2"
+depend() { need a20-platform a20-dbus a20-seatd a20-udev; use a20-polkit a20-wifi; }

@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+description="Authorization service"
+supervisor="supervise-daemon"
+respawn_delay=2
+respawn_max=5
+respawn_period=30
+command="/usr/lib/polkit-1/polkitd"
+pidfile="/run/a20-polkit.pid"
+output_log="/var/log/a20/polkit-startup.log"
+error_log="/var/log/a20/polkit-startup.log"
+retry="TERM/5/KILL/2"
+depend() { need a20-dbus; }
