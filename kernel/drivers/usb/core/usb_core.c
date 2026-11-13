@@ -26,6 +26,19 @@
 
 #define USB_ENUM_MAX_ATTEMPTS 3U
 
+/* Serialized by the native lifecycle coordinator. Frames reject same-HCD
+ * callback reentry; nested operations on a different (e.g. hub) HCD are valid. */
+struct usb_operation { usb_hcd_t *hcd; struct usb_operation *previous; };
+static struct usb_operation *usb_operations;
+static bool usb_scanning;
+static bool usb_controller_has_pending(usb_hcd_t *hcd);
+static bool usb_hcd_stopping(usb_hcd_t *hcd);
+static bool usb_operation_active(usb_hcd_t *hcd) {
+    for (struct usb_operation *at = usb_operations; at; at = at->previous)
+        if (at->hcd == hcd) return true;
+    return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* usb bus                                                            */
 /* ------------------------------------------------------------------ */
@@ -270,18 +283,19 @@ static int usb_parse_config(usb_device_t *udev, const uint8_t *cfg,
     return 0;
 }
 
-int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
+static int usb_enumerate_port_locked(usb_hcd_t *hcd, unsigned port)
 {
     if (!hcd || !hcd->port_devices || !hcd->port_state ||
         port == 0 || port > hcd->max_ports || !hcd->ops ||
         !hcd->ops->reset_port || !hcd->ops->alloc_slot ||
         !hcd->ops->get_descriptor || !hcd->ops->control)
         return -EINVAL;
-    if (hcd->hcd_dev && device_is_stopping(hcd->hcd_dev))
+    if (usb_hcd_stopping(hcd))
         return -ENODEV;
     if (hcd->port_devices[port - 1] ||
         (hcd->port_state[port - 1] & USB_PORT_REMOVE_PENDING))
         return -EBUSY;
+    if (usb_controller_has_pending(hcd)) return -EAGAIN;
     /* Allocate the cleanup owner before the HCD can publish a slot. No
      * allocation may be required merely to retain a failed hardware setup. */
     usb_device_t *udev = kcalloc(1, sizeof(*udev));
@@ -297,6 +311,9 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     }
     mdelay(20);                 /* reset recovery */
 
+    /* Reset callbacks can change lifecycle or begin another retirement. */
+    if (usb_hcd_stopping(hcd)) { kfree(udev); return -ENODEV; }
+    if (usb_controller_has_pending(hcd)) { kfree(udev); return -EAGAIN; }
     /* Provide a reservation for HCDs that assign addresses in software. */
     int address = usb_core_alloc_address();
     if (address < 0) {
@@ -474,6 +491,7 @@ usb_interface_t *usb_find_interface(usb_device_t *dev, uint8_t num)
 #define USB_MAX_HCDS 32
 static usb_hcd_t *g_hcds[USB_MAX_HCDS];
 static int g_hcd_count;
+static unsigned usb_hcd_starting;
 
 /* ------------------------------------------------------------------ */
 /* Bus address pool                                                    */
@@ -481,15 +499,10 @@ static int g_hcd_count;
 
 /* Bit 0 is the USB default address and is never handed out. */
 static uint8_t g_usb_addresses[16];
-static spinlock_t g_usb_address_lock;
+static spinlock_t g_usb_address_lock = SPINLOCK_INIT;
 
 int usb_core_alloc_address(void)
 {
-    static int initialised;
-    if (!initialised) {
-        spin_init(&g_usb_address_lock);
-        initialised = 1;
-    }
     int address = -1;
     uint64_t flags = spin_lock_irqsave(&g_usb_address_lock);
     for (int i = 1; i < 128; i++) {
@@ -512,7 +525,7 @@ void usb_core_free_address(uint8_t address)
     spin_unlock_irqrestore(&g_usb_address_lock, flags);
 }
 
-int usb_core_register_hcd(usb_hcd_t *hcd)
+static int usb_register_hcd_locked(usb_hcd_t *hcd)
 {
     if (!hcd || !hcd->ops || !hcd->ops->start)
         return -EINVAL;
@@ -540,7 +553,7 @@ int usb_core_register_hcd(usb_hcd_t *hcd)
     return 0;
 }
 
-int usb_core_unregister_hcd(usb_hcd_t *hcd)
+static int usb_unregister_hcd_locked(usb_hcd_t *hcd)
 {
     if (!hcd) return -EINVAL;
     if (!hcd->port_devices) return 0;
@@ -548,6 +561,10 @@ int usb_core_unregister_hcd(usb_hcd_t *hcd)
         int ret = usb_disconnect_port(hcd, port);
         if (ret) return ret;
     }
+    /* A downstream bus owns its parent transport even if no published port
+     * currently points to it. Never leave a registered dangling parent. */
+    for (int i = 0; i < g_hcd_count; i++)
+        if (g_hcds[i]->parent_hcd == hcd) return -EBUSY;
     for (int i = 0; i < g_hcd_count; i++) {
         if (g_hcds[i] == hcd) {
             g_hcds[i] = g_hcds[--g_hcd_count];
@@ -563,18 +580,36 @@ int usb_core_unregister_hcd(usb_hcd_t *hcd)
 
 /*
  * Scan all registered host controllers for connected ports and enumerate
- * them.  Runs after driver_probe_all() so that interface device_register()
- * calls do not re-enter the driver-core registration mutex held during
- * probe.
+ * them under the native lifecycle coordinator. Nested scans are skipped;
+ * interface publication may synchronously probe and register downstream buses.
  */
-void usb_core_scan(void)
+static void usb_scan_locked(void)
 {
-    for (int i = 0; i < g_hcd_count; i++) {
-        usb_hcd_t *hcd = g_hcds[i];
-        if (hcd->hcd_dev && device_is_stopping(hcd->hcd_dev))
+    /* Callbacks may remove another HCD and compact the registry, or add a
+     * hub bus. Re-select from current membership; never keep stale slots.
+     * At most 32 distinct addresses per pass, no allocation or borrowed list. */
+    uintptr_t visited[USB_MAX_HCDS];
+    unsigned visited_count = 0;
+    while (visited_count < USB_MAX_HCDS) {
+        usb_hcd_t *hcd = NULL;
+        for (int i = 0; i < g_hcd_count && !hcd; i++) {
+            bool seen = false;
+            for (unsigned j = 0; j < visited_count; j++)
+                if (visited[j] == (uintptr_t)g_hcds[i]) { seen = true; break; }
+            if (!seen) hcd = g_hcds[i];
+        }
+        if (!hcd) break;
+        visited[visited_count++] = (uintptr_t)hcd;
+        if (usb_hcd_stopping(hcd))
             continue;
+        struct usb_operation operation = {hcd, usb_operations};
+        usb_operations = &operation;
         if (hcd->ops->poll)
             hcd->ops->poll(hcd);
+        if (usb_hcd_stopping(hcd)) {
+            usb_operations = operation.previous;
+            continue;
+        }
         for (unsigned port = 1; port <= hcd->max_ports; port++) {
             if ((hcd->port_state[port - 1] & USB_PORT_REMOVE_PENDING) && usb_disconnect_port(hcd, port))
                 continue;
@@ -589,7 +624,13 @@ void usb_core_scan(void)
             unsigned failures = *state & USB_PORT_ENUM_ATTEMPTS;
             if (hcd->port_devices[port - 1] || failures >= USB_ENUM_MAX_ATTEMPTS)
                 continue;
-            int r = usb_core_enumerate_port(hcd, port);
+            /* Disabled hardware slot IDs may be reused by Enable Slot. Keep
+             * allocation closed across this physical controller until every
+             * retiring port has drained callbacks/classes and released its
+             * protocol owner. This deferral is not an enumeration attempt. */
+            if (usb_controller_has_pending(hcd)) continue;
+            int r = usb_enumerate_port_locked(hcd, port);
+            if (r == -EAGAIN) continue; /* Reentrant retirement is deferral. */
             if (r) {
                 ++failures;
                 *state = (*state & ~USB_PORT_ENUM_ATTEMPTS) | failures;
@@ -598,7 +639,141 @@ void usb_core_scan(void)
                       failures == USB_ENUM_MAX_ATTEMPTS ? "; waiting for disconnect" : "");
             }
         }
+        usb_operations = operation.previous;
     }
+}
+
+static bool usb_hcd_registered(usb_hcd_t *hcd) {
+    for (int i = 0; i < g_hcd_count; i++) if (g_hcds[i] == hcd) return true;
+    return false;
+}
+
+/* Active descendants also borrow their upstream transport. In particular a
+ * child's start frame precedes its registry publication. */
+static bool usb_operation_uses_hcd(usb_hcd_t *hcd) {
+    for (struct usb_operation *at = usb_operations; at; at = at->previous) {
+        usb_hcd_t *bus = at->hcd;
+        for (unsigned depth = 0; bus && depth < USB_MAX_HCDS; depth++) {
+            if (bus == hcd) return true;
+            if (!bus->parent_hcd || !usb_hcd_registered(bus->parent_hcd)) break;
+            bus = bus->parent_hcd;
+        }
+    }
+    return false;
+}
+
+static usb_hcd_t *usb_root_hcd(usb_hcd_t *hcd) {
+    for (unsigned depth = 0; hcd && depth < USB_MAX_HCDS; depth++) {
+        if (!hcd->parent_hcd) return hcd;
+        if (!usb_hcd_registered(hcd->parent_hcd)) return NULL;
+        hcd = hcd->parent_hcd;
+    }
+    return NULL;
+}
+static bool usb_controller_has_pending(usb_hcd_t *hcd) {
+    usb_hcd_t *root = usb_root_hcd(hcd);
+    if (!root) return true;
+    for (int i = 0; i < g_hcd_count; i++) {
+        usb_hcd_t *peer = g_hcds[i];
+        if (usb_root_hcd(peer) != root) continue;
+        for (unsigned port = 0; port < peer->max_ports; port++)
+            if (peer->port_state[port] & USB_PORT_REMOVE_PENDING) return true;
+    }
+    return false;
+}
+static bool usb_hcd_stopping(usb_hcd_t *hcd) {
+    for (unsigned depth = 0; hcd && depth < USB_MAX_HCDS; depth++) {
+        if (hcd->hcd_dev && device_is_stopping(hcd->hcd_dev)) return true;
+        if (!hcd->parent_hcd) return false;
+        if (!usb_hcd_registered(hcd->parent_hcd)) return true;
+        hcd = hcd->parent_hcd;
+    }
+    return true;
+}
+
+int usb_core_register_hcd(usb_hcd_t *hcd) {
+    if (!hcd) return -EINVAL;
+    driver_lifecycle_begin();
+    int ret = -EBUSY;
+    if (!usb_operation_active(hcd)) {
+        struct usb_operation operation = {hcd, usb_operations};
+        usb_operations = &operation;
+        if (usb_hcd_registered(hcd)) ret = -EEXIST;
+        else if (!usb_root_hcd(hcd)) ret = -ENODEV;
+        else if (usb_hcd_stopping(hcd)) ret = -ENODEV;
+        else if ((unsigned)g_hcd_count + usb_hcd_starting >= USB_MAX_HCDS) ret = -ENOSPC;
+        else {
+            /* Reserve capacity before start can register a different HCD. */
+            usb_hcd_starting++;
+            ret = usb_register_hcd_locked(hcd);
+            usb_hcd_starting--;
+        }
+        usb_operations = operation.previous;
+    }
+    driver_lifecycle_end();
+    return ret;
+}
+
+int usb_core_unregister_hcd(usb_hcd_t *hcd) {
+    if (!hcd) return -EINVAL;
+    driver_lifecycle_begin();
+    int ret = -EBUSY;
+    if (!usb_operation_uses_hcd(hcd)) {
+        struct usb_operation operation = {hcd, usb_operations};
+        usb_operations = &operation;
+        ret = usb_unregister_hcd_locked(hcd);
+        usb_operations = operation.previous;
+    }
+    driver_lifecycle_end();
+    return ret;
+}
+
+int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port) {
+    if (!hcd) return -EINVAL;
+    driver_lifecycle_begin();
+    int ret = -EBUSY;
+    if (!usb_operation_active(hcd)) {
+        struct usb_operation operation = {hcd, usb_operations};
+        usb_operations = &operation;
+        ret = usb_hcd_registered(hcd) ? usb_enumerate_port_locked(hcd, port) : -ENODEV;
+        usb_operations = operation.previous;
+    }
+    driver_lifecycle_end();
+    return ret;
+}
+
+void usb_core_scan(void) {
+    driver_lifecycle_begin();
+    if (!usb_scanning && !usb_operations) {
+        usb_scanning = true;
+        usb_scan_locked();
+        usb_scanning = false;
+    }
+    driver_lifecycle_end();
+}
+
+int usb_device_poll(usb_device_t *dev) {
+    if (!dev || !dev->hcd) return -EINVAL;
+    int ret = driver_lifecycle_try_begin();
+    if (ret) return ret; /* Never wait on teardown holding an active class call. */
+    usb_hcd_t *hcd = dev->hcd;
+    ret = -ENODEV;
+    if (usb_hcd_registered(hcd) && !usb_hcd_stopping(hcd)) {
+        for (unsigned port = 0; port < hcd->max_ports; port++) {
+            if (hcd->port_devices[port] != dev ||
+                (hcd->port_state[port] & USB_PORT_REMOVE_PENDING)) continue;
+            ret = -EBUSY;
+            if (!usb_operation_active(hcd)) {
+                struct usb_operation operation = {hcd, usb_operations};
+                usb_operations = &operation;
+                ret = hcd->ops->poll ? hcd->ops->poll(hcd) : 0;
+                usb_operations = operation.previous;
+            }
+            break;
+        }
+    }
+    driver_lifecycle_end();
+    return ret;
 }
 
 void usb_core_poll(void)
@@ -609,6 +784,10 @@ void usb_core_poll(void)
      * enumeration and its per-port retry accounting single-owner. */
     if (__atomic_exchange_n(&polling, true, __ATOMIC_ACQUIRE))
         return;
+    if (driver_lifecycle_try_begin()) {
+        __atomic_store_n(&polling, false, __ATOMIC_RELEASE);
+        return;
+    }
     uint64_t now = timer_get_ticks();
     /* 50 Hz, not 4 Hz.  HID interrupt transfers fall back to this loop when a
      * platform does not route the xHCI line; at 4 Hz a boot keyboard drops
@@ -618,10 +797,13 @@ void usb_core_poll(void)
     uint64_t interval = clock_ticks_per_sec() / 50;
     if (!interval)
         interval = 1;
-    if (now - last_poll >= interval) {
+    if (now - last_poll >= interval && !usb_scanning && !usb_operations) {
         last_poll = now;
-        usb_core_scan();
+        usb_scanning = true;
+        usb_scan_locked();
+        usb_scanning = false;
     }
+    driver_lifecycle_end();
     __atomic_store_n(&polling, false, __ATOMIC_RELEASE);
 }
 

@@ -398,13 +398,11 @@ static int usb_hid_read(device_t *dev, void *buffer, size_t count)
     usb_hid_dev_t *h = (usb_hid_dev_t *)dev->drv_priv;
     if (!h || count < sizeof(struct input_event))
         return -EINVAL;
-    usb_hcd_t *hcd = h->iface->dev->hcd;
 
     /* Drain the controller with h->lock released.  The HCD runs completion
      * callbacks, which take h->lock themselves; calling it under that lock
      * would be the reverse of the documented h->lock -> xhci->lock order. */
-    if (hcd->ops->poll)
-        hcd->ops->poll(hcd);
+    (void)usb_device_poll(h->iface->dev);
     uint64_t flags = spin_lock_irqsave(&h->lock);
     size_t copied = 0;
     while (h->tail != h->head && copied + sizeof(struct input_event) <= count) {
@@ -422,9 +420,7 @@ static int usb_hid_poll(device_t *dev, short events)
     usb_hid_dev_t *h = (usb_hid_dev_t *)dev->drv_priv;
     if (!h)
         return 0;
-    usb_hcd_t *hcd = h->iface->dev->hcd;
-    if (hcd->ops->poll)
-        hcd->ops->poll(hcd);
+    (void)usb_device_poll(h->iface->dev);
     uint64_t flags = spin_lock_irqsave(&h->lock);
     int ready = h->tail != h->head;
     spin_unlock_irqrestore(&h->lock, flags);

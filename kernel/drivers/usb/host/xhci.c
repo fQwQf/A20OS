@@ -21,6 +21,7 @@
 #include "core/bootargs.h"
 #include "core/defs.h"
 #include "core/klog.h"
+#include "core/panic.h"
 #include "core/lock.h"
 #include "core/string.h"
 #include "core/timer.h"
@@ -220,6 +221,8 @@ typedef struct xhci_controller {
      * what tells the IRQ handler to acknowledge and step aside instead of
      * consuming the ring itself. */
     uint8_t xfer_busy;
+    unsigned callbacks_active;
+    unsigned slot_callbacks[XHCI_MAX_SLOTS + 1U];
     /* Wall-clock deadline the current xfer_busy holder is held to, published by
      * whoever took the flag.  A spinner reads it under the lock instead of
      * counting its own iterations, so the two sides cannot disagree about how
@@ -450,11 +453,25 @@ static void xhci_run_completions(usb_urb_t **ready, unsigned count,
                                  xhci_controller_t *xhci, uint64_t *flags) {
     if (!count)
         return;
+    if (count > XHCI_IRQ_BATCH) panic("xHCI completion batch overflow");
+    uint8_t slots[XHCI_IRQ_BATCH];
+    for (unsigned i = 0; i < count; i++) {
+        /* A completion may free its URB: keep only scalar slot identities
+         * across the callback. Slot reuse waits for these counters to drain. */
+        slots[i] = ready[i]->dev->slot;
+        if (!slots[i] || slots[i] > xhci->max_slots)
+            panic("xHCI completion has no owned slot");
+        xhci->slot_callbacks[slots[i]]++;
+    }
+    xhci->callbacks_active += count;
     spin_unlock_irqrestore(&xhci->lock, *flags);
     for (unsigned i = 0; i < count; i++)
         if (ready[i]->complete)
             ready[i]->complete(ready[i]);
     *flags = spin_lock_irqsave(&xhci->lock);
+    for (unsigned i = 0; i < count; i++)
+        xhci->slot_callbacks[slots[i]]--;
+    xhci->callbacks_active -= count;
 }
 
 /* Serialise one synchronous transfer.  The flag is polled under the controller
@@ -601,7 +618,7 @@ static int xhci_prepare_remove(void *context) {
         xhci->irq_registered = 0;
     }
     flags = spin_lock_irqsave(&xhci->lock);
-    bool busy = xhci->xfer_busy;
+    bool busy = xhci->xfer_busy || xhci->callbacks_active;
     spin_unlock_irqrestore(&xhci->lock, flags);
     if (busy) return -EBUSY; /* Never wait on a consumer needing lifecycle. */
     if (!xhci->hardware_owned || xhci->halted) return 0;
@@ -828,6 +845,13 @@ static int xhci_control(xhci_controller_t *xhci, uint8_t slot,
     int r = xhci_xfer_acquire(xhci, XHCI_XFER_HOLD_BUDGET_MS);
     if (r)
         return r;
+    uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    bool stopped = xhci->fatal || !xhci->dcbaa[slot];
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    if (stopped) {
+        xhci_xfer_release(xhci);
+        return -ESHUTDOWN;
+    }
     /* One bounce buffer per controller: the EP0 data stage has to be a DMA
      * buffer, and xfer_busy is what makes it single-writer.  Copying it here
      * rather than in the caller is what keeps the window between the copy and
@@ -1280,10 +1304,11 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
     xhci_controller_t *xhci = hcd->priv;
     if (xhci->fatal)
         return -ENODEV;
-    if (!urb || !urb->ep)
+    if (!urb || !urb->ep || !urb->dev || !urb->dev->slot ||
+        urb->dev->slot > xhci->max_slots)
         return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
-    if (xhci->fatal) {
+    if (xhci->fatal || !xhci->dcbaa[urb->dev->slot]) {
         spin_unlock_irqrestore(&xhci->lock, flags);
         return -ESHUTDOWN;
     }
@@ -1392,8 +1417,8 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
-    bool software_only = xhci->fatal && xhci->halted;
-    bool unavailable = xhci->fatal && !xhci->halted;
+    bool software_only = !xhci->dcbaa[slot] || (xhci->fatal && xhci->halted);
+    bool unavailable = xhci->fatal && !xhci->halted && !software_only;
     spin_unlock_irqrestore(&xhci->lock, flags);
     if (unavailable) return -ESHUTDOWN;
     /* Once the entire controller is verifiably halted, there is no command
@@ -1421,15 +1446,14 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
         xhci->slot_path[slot] = (xhci_slot_path_t){0};
         arch_dma_sync_for_device(xhci->dcbaa, sizeof(xhci->dcbaa));
     }
-    spin_unlock_irqrestore(&xhci->lock, flags);
-    if (!software_only) xhci_xfer_release(xhci);
     if (r) {
+        spin_unlock_irqrestore(&xhci->lock, flags);
+        if (!software_only) xhci_xfer_release(xhci);
         kerr("[XHCI] slot %u: Disable Slot failed: %d\n", slot, r);
         return r < 0 ? r : -EIO;
     }
 
     xhci_ep_t *dead = NULL;
-    flags = spin_lock_irqsave(&xhci->lock);
     xhci_ep_t **pp = &xhci->eps;
     while (*pp) {
         xhci_ep_t *e = *pp;
@@ -1444,13 +1468,18 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
             pp = &e->next;
         }
     }
+    bool callbacks = xhci->slot_callbacks[slot] != 0;
     spin_unlock_irqrestore(&xhci->lock, flags);
+    if (!software_only) xhci_xfer_release(xhci);
     while (dead) {
         xhci_ep_t *e = dead;
         dead = e->next;
         kfree(e->alloc_ptr);
     }
-    return 0;
+    /* Endpoint rings are stopped/unlinked, but a previously collected URB
+     * callback may still be outside the lock. Keep its class storage alive.
+     * Retry sees DCBAA=0 and never repeats the hardware command. */
+    return callbacks ? -EBUSY : 0;
 }
 
 /* Polling fallback.  With the interrupt line registered this still runs (the
