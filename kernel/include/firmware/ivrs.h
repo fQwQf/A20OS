@@ -68,6 +68,28 @@ int acpi_ivrs_route(const acpi_table_t *, uint16_t segment, uint16_t requester,
  * deduplicate, merge or enact permissions/unity/exclusion ranges. */
 int acpi_ivrs_route_memory(const acpi_table_t *, uint16_t segment, uint16_t requester,
                              size_t index, acpi_ivrs_memory_t *out);
+/* Complete firmware-declared set sharing one DMA requester, under the SAME
+ * selected-IVHD routing policy. Includes the original/target and every alias
+ * select/range in this segment, resolving each source to detect ambiguity or
+ * cross-unit aliases. Sorted unique IDs; excessive sets are UNSUPPORTED.
+ * This is a borrowed immutable view, not an isolation group or device claim.
+ * Keep both table descriptor and mapping alive; do not modify the view. */
+#define ACPI_IVRS_REQUESTER_MAX 128
+typedef struct {
+    const acpi_table_t *table;
+    acpi_ivrs_hardware_t hardware;
+    uint16_t requester, dma_requester;
+    size_t count, memory_count;
+    uint16_t ids[ACPI_IVRS_REQUESTER_MAX];
+} acpi_ivrs_requesters_t;
+/* Whole-table validation; error clears the ENTIRE view, never a partial set. */
+int acpi_ivrs_requesters(const acpi_table_t *, uint16_t segment, uint16_t requester,
+                           acpi_ivrs_requesters_t *out);
+/* Matching IVMDs for ANY member, once per firmware record, in firmware order
+ * across all alternatives of this unit. Requires the unmodified view above.
+ * Preserves raw constraints; index outside memory_count -> NOT_FOUND. */
+int acpi_ivrs_requester_memory(const acpi_ivrs_requesters_t *, size_t index,
+                                 acpi_ivrs_memory_t *out);
 /* Enumerate selected, unique unit candidates with the SAME whole-table policy
  * checks as route(). Order follows first appearance of a unit in firmware.
  * These are not initialized units. Errors clear the count/view. */

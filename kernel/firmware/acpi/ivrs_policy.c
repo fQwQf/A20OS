@@ -260,8 +260,9 @@ static int find(const acpi_table_t *t, const struct units *units,
     return found ? 0 : ACPI_NOT_FOUND;
 }
 
-static size_t memory(const acpi_table_t *t, const acpi_ivrs_route_t *route,
-                     size_t wanted, acpi_ivrs_memory_t *out) {
+static size_t memory_set(const acpi_table_t *t, const acpi_ivrs_hardware_t *unit,
+                         const uint16_t *ids, size_t size,
+                         size_t wanted, acpi_ivrs_memory_t *out) {
     acpi_ivrs_iterator_t it = {t, 48};
     acpi_ivrs_block_t b;
     acpi_ivrs_hardware_t parent = {0};
@@ -272,17 +273,21 @@ static size_t memory(const acpi_table_t *t, const acpi_ivrs_route_t *route,
             parent = h;
             continue;
         }
-        if (!same_unit(&parent, &route->hardware))
+        if (!same_unit(&parent, unit))
             continue;
         acpi_ivrs_memory_t m;
         if (acpi_ivrs_memory(&b, &m))
             continue;
         bool applies = m.type == 0x20;
         uint16_t end = m.type == 0x22 ? m.auxiliary : m.device_id;
-        applies |=
-            (route->requester >= m.device_id && route->requester <= end) ||
-            (route->dma_requester >= m.device_id &&
-             route->dma_requester <= end);
+        /* IDs are sorted. Count a record once even if several members match. */
+        size_t lo = 0, hi = size;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (ids[mid] < m.device_id) lo = mid + 1;
+            else hi = mid;
+        }
+        applies |= lo < size && ids[lo] <= end;
         if (applies) {
             if (count == wanted && out)
                 *out = m;
@@ -292,24 +297,26 @@ static size_t memory(const acpi_table_t *t, const acpi_ivrs_route_t *route,
     return count;
 }
 
-int acpi_ivrs_route(const acpi_table_t *t, uint16_t segment, uint16_t rid,
-                    acpi_ivrs_route_t *out) {
-    if (!out)
-        return ACPI_INVALID;
-    *out = (acpi_ivrs_route_t){0};
-    struct units units;
-    int ret = collect(t, &units);
-    if (ret)
-        return ret;
+static size_t memory(const acpi_table_t *t, const acpi_ivrs_route_t *route,
+                     size_t wanted, acpi_ivrs_memory_t *out) {
+    uint16_t ids[] = {route->requester, route->dma_requester};
+    if (ids[0] > ids[1]) {
+        uint16_t swap = ids[0]; ids[0] = ids[1]; ids[1] = swap;
+    }
+    return memory_set(t, &route->hardware, ids, 2, wanted, out);
+}
+
+static int resolve(const acpi_table_t *t, const struct units *units,
+                    uint16_t segment, uint16_t rid, acpi_ivrs_route_t *out) {
     acpi_ivrs_hardware_t hardware;
     struct match m;
-    ret = find(t, &units, segment, rid, &hardware, &m);
+    int ret = find(t, units, segment, rid, &hardware, &m);
     if (ret)
         return ret;
     if (m.alias && m.dma != rid) {
         acpi_ivrs_hardware_t target;
         struct match target_match;
-        ret = find(t, &units, segment, m.dma, &target, &target_match);
+        ret = find(t, units, segment, m.dma, &target, &target_match);
         if (ret == ACPI_NOT_FOUND)
             return ACPI_IVRS_UNSUPPORTED;
         if (ret)
@@ -321,9 +328,114 @@ int acpi_ivrs_route(const acpi_table_t *t, uint16_t segment, uint16_t rid,
     }
     acpi_ivrs_route_t route = {hardware,   rid,     m.dma,     m.settings,
                                m.extended, m.alias, m.non_pci, 0};
-    route.memory_count = memory(t, &route, SIZE_MAX, NULL);
     *out = route;
     return 0;
+}
+
+int acpi_ivrs_route(const acpi_table_t *t, uint16_t segment, uint16_t rid,
+                    acpi_ivrs_route_t *out) {
+    if (!out)
+        return ACPI_INVALID;
+    *out = (acpi_ivrs_route_t){0};
+    struct units units;
+    int ret = collect(t, &units);
+    if (!ret) ret = resolve(t, &units, segment, rid, out);
+    if (!ret) out->memory_count = memory(t, out, SIZE_MAX, NULL);
+    return ret;
+}
+
+static int add_requester(acpi_ivrs_requesters_t *view, uint16_t rid) {
+    size_t at = 0;
+    while (at < view->count && view->ids[at] < rid) at++;
+    if (at < view->count && view->ids[at] == rid) return 0;
+    if (view->count == ACPI_IVRS_REQUESTER_MAX) return ACPI_IVRS_UNSUPPORTED;
+    for (size_t i = view->count; i > at; i--) view->ids[i] = view->ids[i - 1];
+    view->ids[at] = rid;
+    view->count++;
+    return 0;
+}
+
+static int add_alias(const acpi_table_t *t, const struct units *units,
+                      acpi_ivrs_requesters_t *view, uint16_t rid) {
+    acpi_ivrs_route_t route;
+    int ret = resolve(t, units, view->hardware.segment, rid, &route);
+    if (ret) return ret == ACPI_NOT_FOUND ? ACPI_IVRS_UNSUPPORTED : ret;
+    if (!same_unit(&route.hardware, &view->hardware) ||
+        route.dma_requester != view->dma_requester)
+        return ACPI_IVRS_AMBIGUOUS;
+    return add_requester(view, rid);
+}
+
+static bool has_requester(const acpi_ivrs_requesters_t *view, uint16_t rid) {
+    for (size_t i = 0; i < view->count; i++)
+        if (view->ids[i] == rid) return true;
+    return false;
+}
+
+int acpi_ivrs_requesters(const acpi_table_t *t, uint16_t segment, uint16_t rid,
+                           acpi_ivrs_requesters_t *out) {
+    if (!out) return ACPI_INVALID;
+    *out = (acpi_ivrs_requesters_t){0};
+    struct units units;
+    int ret = collect(t, &units);
+    if (ret) return ret;
+    acpi_ivrs_route_t route;
+    ret = resolve(t, &units, segment, rid, &route);
+    if (ret) return ret;
+    acpi_ivrs_requesters_t view = {.table = t, .hardware = route.hardware,
+        .requester = rid, .dma_requester = route.dma_requester};
+    ret = add_requester(&view, rid);
+    if (!ret) ret = add_requester(&view, route.dma_requester);
+    if (ret) return ret;
+    /* First collect direct aliases. Then reject incoming chains even when
+     * their records preceded the direct alias which joins this set. */
+    for (unsigned pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < units.count; i++) {
+            acpi_ivrs_hardware_t hardware = at(t, units.offsets[i]);
+            if (hardware.segment != segment) continue;
+            acpi_ivrs_device_t entry, start = {0};
+            size_t offset = 0;
+            while (acpi_ivrs_device_next(&hardware, &offset, &entry) > 0) {
+                if (pass) {
+                    if (entry.type == 0x42 || entry.type == 0x43) {
+                        uint16_t target = acpi_le16(entry.data + 5);
+                        if (target != view.dma_requester && has_requester(&view, target))
+                            return ACPI_IVRS_UNSUPPORTED;
+                    }
+                    continue;
+                }
+                if (entry.type == 0x43) start = entry;
+                if (entry.type == 0x42 && acpi_le16(entry.data + 5) == view.dma_requester) {
+                    ret = add_alias(t, &units, &view, entry.device_id);
+                    if (ret) return ret;
+                }
+                if (entry.type == 4 && start.type == 0x43 &&
+                    acpi_le16(start.data + 5) == view.dma_requester) {
+                    if ((unsigned)entry.device_id - start.device_id + 1 > ACPI_IVRS_REQUESTER_MAX)
+                        return ACPI_IVRS_UNSUPPORTED;
+                    for (unsigned id = start.device_id; id <= entry.device_id; id++) {
+                        ret = add_alias(t, &units, &view, id);
+                        if (ret) return ret;
+                    }
+                }
+                if (entry.type == 4) start = (acpi_ivrs_device_t){0};
+            }
+        }
+    }
+    view.memory_count = memory_set(t, &view.hardware, view.ids, view.count, SIZE_MAX, NULL);
+    *out = view;
+    return 0;
+}
+
+int acpi_ivrs_requester_memory(const acpi_ivrs_requesters_t *view, size_t index,
+                                 acpi_ivrs_memory_t *out) {
+    if (!out) return ACPI_INVALID;
+    *out = (acpi_ivrs_memory_t){0};
+    if (!view || !view->table || !view->count || view->count > ACPI_IVRS_REQUESTER_MAX)
+        return ACPI_INVALID;
+    if (index >= view->memory_count) return ACPI_NOT_FOUND;
+    size_t total = memory_set(view->table, &view->hardware, view->ids, view->count, index, out);
+    return index < total ? 0 : ACPI_NOT_FOUND;
 }
 
 int acpi_ivrs_route_memory(const acpi_table_t *t, uint16_t segment,

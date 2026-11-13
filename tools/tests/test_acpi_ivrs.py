@@ -29,6 +29,9 @@ class AcpiIvrs(unittest.TestCase):
     def test_routing_candidates_and_memory_constraints(self):
         self.run_fixture("acpi_ivrs_policy_host")
 
+    def test_complete_requester_sets_and_shared_constraints(self):
+        self.run_fixture("acpi_ivrs_requesters_host")
+
 
 if __name__ == "__main__":
     unittest.main()
