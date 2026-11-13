@@ -317,6 +317,12 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 - `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
 - `kernel/arch/riscv64/boards/visionfive2/board.c`、`kernel/arch/loongarch64/boards/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。
 
+### 可失败的驱动退出
+
+`g_driver_core_ops` 仍是 lifecycle mutex，`g_driver_core_lock` 仅在数组/claim 变更时持有；quiesce/remove/class drain 与 bus 通知不持 registry spinlock。驱动退出和设备递归移除的意图栈只在 lifecycle mutex 下读写，不分配公开生命周期对象。正在退出的驱动拒绝新匹配，正在移除的 provider/parent 链拒绝新消费关系；递归退出同一对象返回 `-EBUSY`。
+
+quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止；错误保留离线绑定、匹配身份、依赖和资源，并释放 lifecycle mutex 让调用者修复后显式重试。重试只调用 remove。回调不能等待必须取得 lifecycle mutex 的工作；consumer 失败时 provider 不提前停止。完整错误/重试契约见 [原生运行时](native-runtime.md#可失败的解绑与显式重试)。
+
 ### PC I²C 与独立无线服务
 
 - I²C 注册表 spinlock 只保护 adapter/owner/refcount；transfer 始终在锁外。控制器 remove 必须传播引用仍在时的 `-EBUSY`。
