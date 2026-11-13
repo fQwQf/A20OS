@@ -55,6 +55,24 @@ int pci_device_location(const device_t *dev, unsigned *bus,
  * Serialize lookup AND subsequent binding/config use with a discovery
  * transaction when they must describe the same lifecycle observation. */
 int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out);
+/* Native software ownership of an explicit requester set. No group number,
+ * inferred aliases or isolation guarantee. IDs need not be published; the
+ * caller supplies the complete set from its verified hardware/firmware policy.
+ * This lease does not block raw config writes or nonparticipating providers. */
+#define PCI_REQUESTER_SET_MAX 128
+typedef struct pci_requester_reservation pci_requester_reservation_t;
+/* Task context, caller holds a registered owner reference. Copies, sorts and
+ * deduplicates 1..MAX IDs, then reserves the whole set atomically. Overlap is
+ * -EBUSY even for the same owner. Nonzero segment -> -EOPNOTSUPP; too many
+ * input IDs -> -E2BIG. Failure clears out. Pins owner, not its binding; the
+ * reservation survives unregister, BDF replacement and controller rebind. */
+int pci_requester_reserve(device_t *owner, uint16_t segment,
+                            const uint16_t *requesters, size_t count,
+                            pci_requester_reservation_t **out);
+/* Task context, exclusive release. DMA/context invalidation must already be
+ * confirmed by the provider; preserve this handle on uncertain hardware stop.
+ * No automatic release on device teardown and no hardware access here. */
+void pci_requester_release(pci_requester_reservation_t *);
 /* Task-context topology observation. Finds the client itself or an ancestor
  * bridge on scope_bus whose devfn lies in [first,last], returning a reference
  * released by device_put(). Validates the whole published bridge path:

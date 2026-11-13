@@ -76,6 +76,102 @@ static char g_pci_names[PCI_MAX_PUBLISHED_DEVICES][32];
 static device_t g_pci_devs[PCI_MAX_PUBLISHED_DEVICES];
 static uint8_t g_pci_in_use[PCI_MAX_PUBLISHED_DEVICES];
 
+struct pci_requester_reservation {
+    struct pci_requester_reservation *next;
+    device_t *owner;
+    uint16_t segment;
+    size_t count;
+    uint16_t requesters[];
+};
+/* Protected by the discovery/lifecycle transaction. Reservations are address
+ * namespace leases, deliberately independent of the published-device slots. */
+static struct pci_requester_reservation *pci_requester_reservations;
+
+int pci_requester_reserve(device_t *owner, uint16_t segment,
+                            const uint16_t *requesters, size_t count,
+                            pci_requester_reservation_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!owner || !requesters || !count)
+        return -EINVAL;
+    if (count > PCI_REQUESTER_SET_MAX)
+        return -E2BIG;
+    if (segment)
+        return -EOPNOTSUPP;
+    driver_discovery_begin();
+    int ret = -ENODEV;
+    if (!device_is_registered(owner))
+        goto done;
+    struct pci_requester_reservation *claim =
+        kmalloc(sizeof(*claim) + count * sizeof(*requesters));
+    ret = -ENOMEM;
+    if (!claim)
+        goto done;
+    /* A bounded insertion sort keeps the retained representation compact.
+     * Duplicate input IDs are one key, never independent grants. */
+    claim->count = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint16_t id = requesters[i];
+        size_t at = 0;
+        while (at < claim->count && claim->requesters[at] < id)
+            at++;
+        if (at < claim->count && claim->requesters[at] == id)
+            continue;
+        for (size_t j = claim->count; j > at; j--)
+            claim->requesters[j] = claim->requesters[j - 1];
+        claim->requesters[at] = id;
+        claim->count++;
+    }
+    for (struct pci_requester_reservation *other = pci_requester_reservations;
+         other; other = other->next) {
+        if (other->segment != segment)
+            continue;
+        size_t a = 0, b = 0;
+        while (a < claim->count && b < other->count) {
+            if (claim->requesters[a] == other->requesters[b]) {
+                ret = -EBUSY;
+                goto discard;
+            }
+            if (claim->requesters[a] < other->requesters[b])
+                a++;
+            else
+                b++;
+        }
+    }
+    claim->owner = device_get(owner);
+    if (!claim->owner) {
+        ret = -ENODEV;
+        goto discard;
+    }
+    claim->segment = segment;
+    claim->next = pci_requester_reservations;
+    pci_requester_reservations = claim;
+    *out = claim;
+    ret = 0;
+    goto done;
+discard:
+    kfree(claim);
+done:
+    driver_discovery_end();
+    return ret;
+}
+
+void pci_requester_release(pci_requester_reservation_t *claim) {
+    if (!claim)
+        return;
+    driver_discovery_begin();
+    struct pci_requester_reservation **at = &pci_requester_reservations;
+    while (*at && *at != claim)
+        at = &(*at)->next;
+    if (*at) {
+        *at = claim->next;
+        device_put(claim->owner);
+        kfree(claim);
+    }
+    driver_discovery_end();
+}
+
 /* Keep the generic PCI layer useful to class drivers without making its
  * private enumeration record part of every driver ABI. */
 uint32_t pci_class_code(const device_t *dev) {
