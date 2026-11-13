@@ -46,7 +46,7 @@ A20OS 现在同时支持三种驱动路径：
 - 延时/时间：`drv_udelay`、`drv_mdelay`、`drv_clock_ticks`。
 - 中断：`drv_register_isr`、`drv_unregister_isr`（桥接 hwapi `request_irq`，向量在注册时校验范围，arch IRQ 分发真实投递）。
 - 板级 IRQ 资源与内核参数：`platform_device_irq`、`bootargs_get`。前者是模块驱动读自己 IRQ 线号的唯一入口，返回 `>= 0` 表示可用线号、`-ENODEV` 表示板级没发布 `RES_IRQ`（应当轮询，不是错误）；后者读 `a20.*` 内核参数串，配合导出表里已有的 `memcmp` 手工切 token，避免为一次参数解析再引入 `strncmp` 依赖。
-- 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
+- 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
 - 内核熵池（硬件 RNG 模块）：`random_reseed`。内核已有 `kernel/core/random.c`（xoshiro 状态 + `random_u64`/`random_fill`，消费方是 `sys_getrandom()`、ASLR 与栈保护），硬件熵设备应当把读到的字节折进这个池而不是另起一套。该符号只能从进程上下文调用：`arch_entropy_sample()` 会取 `proc_current()` 与 `frame_free_count()`，在 ISR 里调它等于在中断里读调度器状态。

@@ -92,7 +92,7 @@ DMA 内存约束使用独立的 `driver_dma_policy` 不可变对象，不借用 
 
 ### `driver_t`
 
-platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。新驱动可在硬件初始化前显式 `device_probe_use_remove()`，让失败 probe 使用可失败 remove 管线；部分初始化回调、保留/重试与 PROBE_CLEANUP 状态见 [原生运行时](native-runtime.md#显式选择失败-probe-的清理所有权)。remove 失败必须保留实例和硬件可达存储；`device_unregister()`/`driver_unregister()` 返回错误，不能忽略后继续释放设备或模块。quiesce 每次退出只执行一次，之后仅重试 remove。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
+platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。新驱动可在硬件初始化前显式 `device_probe_use_remove()`，让失败 probe 使用可失败 remove 管线；部分初始化回调、保留/重试与 PROBE_CLEANUP 状态见 [原生运行时](native-runtime.md#显式选择失败-probe-的清理所有权)。remove 失败必须保留实例和硬件可达存储；`device_unregister()`/`driver_unregister()` 返回错误，不能忽略后继续释放设备或模块。quiesce 每次退出只执行一次，之后仅重试 remove。需要先冻结控制器再释放 child 存储的驱动可显式登记 `device_add_remove_prepare()`；PREPARING 保留图和资源，成功的准备动作会被记住，详见 [提前准备协议](native-runtime.md#在-consumer-解绑前准备退出)。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
 
 匹配分两阶段完成：总线 `bus_type_t.match(dev, drv)` 先按 transport identity 匹配并设置 `dev->matched_id`；可选的 `driver_t.match(dev)` 再按协议字段缩小范围。例如 HDA 检查 `04:03:00`，NVMe 检查 `01:08:02`。第二阶段只能读取已经枚举的身份信息，不得访问设备寄存器、分配 BAR/DMA 或改变硬件；拒绝时核心清除 `matched_id`，不会调用 probe。
 

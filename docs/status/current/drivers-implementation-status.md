@@ -36,7 +36,8 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | 固件设备模型 | 已实现 | DT、ACPI/uACPI、静态 provider 共用节点/物理资源/IRQ domain/依赖接口；未知设备独立保留，失败事务回滚，probe 可延后。交接、保留区和架构边界见 [启动模型](../../dev/boot-model.md)；不代表任意板卡已完成实机验证。 |
 | PCI bus | 已扩展 | ECAM、ID/subsystem match、零值未分配 BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id`。BAR 规划在 discovery 事务内核对资源声明/占用，全部通过后提交新地址与资源；规划失败保留原 BAR/command/资源，调用者仍须先 quiesce |
 | 显式失败 probe 清理 | 基础可用 | `device_probe_use_remove` 在初始化前无分配选择既有部分实例退出管线；清理失败保留绑定/devres/依赖和原 probe_error，子设备阻塞状态拒绝新使用。公开布局/ABI 9 不变，旧驱动需逐一迁移；不代表实体 GPU 停止已验证 |
-| USB 部分初始化清理 | 基础可用 | 预分配端口 owner，非零 alloc_slot 结果仍可交还已知 token；枚举/部分发布失败先停 slot 再解绑，错误保留地址/协议图/HCD，扫描和注销可重试，保留三次连接预算。公开布局/ABI 9 不变；HCD 自身 start/probe 与未知 slot 状态仍需安全停止协议 |
+| USB 部分初始化清理 | 基础可用 | 预分配端口 owner，非零 alloc_slot 结果仍可交还已知 token；枚举/部分发布失败先停 slot 再解绑，错误保留地址/协议图/HCD，扫描和注销可重试，保留三次连接预算。公开布局/ABI 9 不变；xHCI 整机退出另有已确认停机协议；其他 HCD 和未知 slot 的单独恢复仍待实现 |
+| 提前退出准备 | 基础可用 | 当前 probe 显式登记可失败 prepare，先于 consumer unbind；LIFO/逐项完成记录，错误保留 PREPARING/绑定/图/资源。xHCI 已接入失败 probe 和已确认停机后的软件 slot 清理，公开布局/ABI 9 不变。接口独立退出、额外 DMA 错误路径及并发扫描仍需完善 |
 | 可失败解绑 | 基础可用 | remove 非零保留离线绑定/匹配/devres/依赖和注册引用，device/platform/driver unregister 传播错误并支持显式重试；仅执行一次 quiesce，注销期间拒绝新绑定/消费关系与递归退出。发布失败清理同样保留；PCI 槽、已发布 USB 端口/slot/address 保留已接入。C/Rust 主机失败注入与合成 QEMU 门禁通过；实际硬件停止、失败 probe、关机/kexec shutdown 仍由 provider 负责 |
 | 原生异步驱动运行时 | 基础可用 | ABI 9 `quiesce`、页级 DMA domain/mapping、fence、可取消工作队列、IRQ 全分发排空、有界固件来源/image。失败保留与回收契约及 hosted 限制见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；尚未接入实体 GPU |
 | 资源占用与清单核对 | 基础可用 | owner-pinned MMIO/port claim、受管映射先 unmap 后释放占用；checked claim 核对未绑定设备声明并阻止后续冲突发布。已导入受管 RAM 与 ACPI 表页；PFA 之外的 RAM/其他固件保留区尚不完整，也不拦截 raw MMIO/PIO；主机竞争/失败注入与 QEMU 元数据自检记录见运行时文档 |

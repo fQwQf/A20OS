@@ -115,6 +115,8 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 
 USB 初始化/回滚变更还须运行 `python3 -m unittest tools.tests.test_usb_enumeration_cleanup tools.tests.test_native_bus_lifetime tools.tests.test_native_bus_remove tools.tests.test_xhci_firmware_policy -v`。新用例使用生产 core/USB 路径验证部分 slot、描述符/配置/分配失败、地址保留、停止失败后的重试预算、部分发布及 remove 失败；xHCI 用生产 alloc_slot 回调和替代命令后端验证 Address Device 失败的 token 交还。两个相关常规门禁是 `make check-pc-drivers` 和 `make check-firmware-model`。正常硬件路径运行 `make smoke-usb-hotplug-x86_64`、`make smoke-usb-hub-x86_64`；这些是 legacy make smoke 名称，没有对应 `tools/a20 test` instance，不应将实例查找失败写作构建/启动失败。 热插拔门禁的 post-check 排除 BOOT REPORT 重放，要求首次 keyboard ready、拔出释放、再次 address=1 分配与第二次 ready 按顺序出现。QMP pump 按请求 ID 等待匹配回包，不能把 greeting/event/其他响应当作本命令完成。共享槽位忙（75）表示未启动，必须保留失败状态，不能用旧日志认证通过。工具变更须运行 `python3 -m unittest tools.tests.test_smoke_qmp tools.tests.test_smoke_ordered_expect tools.tests.test_smoke_build_paths tools.tests.test_smoke_log_dir -v`。
 
+提前退出协议运行 `python3 -m unittest tools.tests.test_driver_remove tools.tests.test_xhci_remove tools.tests.test_riscv_iommu_requester -v`。核心用 C/Rust 注册表验证准备动作的顺序、逐项完成记录、失败保留与后续阶段重试；xHCI 使用生产 prepare/remove/slot 回收与真实核心/USB 图，注入停止/PCI 读写失败和 active transfer。生命周期门禁新增 `DRIVER_REMOVE_PREPARE: PASS partial=1 before_remove=1`。`make smoke-usb-hub-x86_64` 的 embedded fixture 现在显式传入 `driver.runtime_test=1 driver.xhci_remove_test=1`，在 hub/键鼠就绪后注销整个 xHCI 驱动、检查旧 child 句柄离线及 BME 清零、重新绑定并再次枚举，要求 `DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1`；普通启动不执行此动作。这些正常 QEMU 状态不等于实体设备超时失败证据。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

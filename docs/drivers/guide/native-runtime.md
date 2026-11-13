@@ -18,27 +18,28 @@
 
 成功绑定的设备按以下顺序解除绑定：
 
-1. 先解除 consumer/child，再处理 provider/parent。
-2. 状态变为 `REMOVING`，`class_device_mark_offline()` 拒绝新类调用，并执行一次 offline observer。
-3. 调用可选 `driver_t.quiesce(dev)`。此时既有 class 调用可能尚未返回，`drv_priv`、IRQ、DMA 和受管资源仍然有效。
-4. `class_device_unpublish()` 撤销 registry publication，等待在途 class 调用结束。
-5. 调用 `remove()`；只有返回 0，核心才逆序释放受管资源及依赖并清空绑定。
+1. 若 probe 已显式注册 remove prepare，先 offline provider class 并执行准备动作；失败即返回，尚不解绑 consumer。
+2. 准备成功（或未选择准备）后，先解除 consumer/child，再处理 provider/parent。
+3. 状态变为 `REMOVING`，`class_device_mark_offline()` 拒绝新类调用，并执行一次 offline observer。
+4. 调用可选 `driver_t.quiesce(dev)`。此时既有 class 调用可能尚未返回，`drv_priv`、IRQ、DMA 和受管资源仍然有效。
+5. `class_device_unpublish()` 撤销 registry publication，等待在途 class 调用结束。
+6. 调用 `remove()`；只有返回 0，核心才逆序释放受管资源及依赖并清空绑定。
 
 `quiesce` 必须先禁止新的硬件提交并停止软件生产者，唤醒未完成请求使其成功结束或以错误结束，并尝试排空/停止硬件。无法确认停止时，记录私有失败状态并由 remove 继续确认或返回错误；软件请求以错误结束不授予 DMA 页回收权限。驱动负责同步中断和取消其后台工作；`remove` 只有确认安全后才释放请求队列、DMA mapping 和实例存储。驱动私有入口也必须检查自己的 stopping 状态，class offline 不会自动保护绕过 class adapter 的调用。
 
 不能依赖 `remove()` 唤醒所有在途请求：核心在进入 `remove` 前已经等待这些调用。没有异步操作的现有驱动可以保持 `quiesce=NULL`。
 
-成功 probe 后 class 发布失败也会执行 `quiesce -> drain -> remove`，只有 remove 成功才进入 devres 回收。失败的 probe 仍自行撤销已经启动的硬件，再返回错误；核心只回收它已登记的资源，不能判断哪些硬件阶段成功。
+成功 probe 后 class 发布失败也会执行 `quiesce -> drain -> remove`，只有 remove 成功才进入 devres 回收。未选择失败清理的旧 probe 仍自行撤销已经启动的硬件，再返回错误；选择了 `device_probe_use_remove()` 的实例使用下述可失败管线，核心不推测硬件阶段。
 
 ### 可失败的解绑与显式重试
 
 `driver_t.remove()` 已有 int 返回值，现在由核心执行：非零结果阻止资源回收，负 errno 原样返回，正数按 `-EIO` 处理。驱动必须在失败时保留有效的 `drv_priv`、硬件可达存储和恢复所需寄存器/代码；不能先释放后报错。`device_unregister()`、`platform_device_unregister()` 和 `device_hotplug(REMOVE)` 返回错误，保留设备注册表引用、绑定、devres、匹配身份及尚未释放的依赖。自己的 remove 已执行失败时，设备保持 `REMOVING`，class 已 offline/撤销 publication；不会重新开放旧句柄。调用者保留对象并在条件修复后重试同一接口，核心只重试 remove，不重复 quiesce/offline observer。正常 unregister 完成前 `device_is_registered()` 仍可为真，不能把成员关系当作在线许可。
 
-先处理 consumer/child；它们停止失败时 provider/parent 尚不 quiesce 或释放，继续供旧 consumer 清理使用。部分 consumer 可能已解除绑定并进入 deferred；失败不是事务回滚，不自动重建原图。移除意图与递归栈由 lifecycle mutex 下的私有栈帧保护：正在退出的驱动不能接收新匹配绑定，递归退出同一对象返回 `-EBUSY`；正在移除的 provider 拒绝新 dependency（`-EPROBE_DEFER`），其 parent 链拒绝新 child 发布（`-EBUSY`），即使它仍处于等待 consumer 停止的阶段。未新增公开 group/上下文标识或布局字段。
+未选择 remove prepare 时先处理 consumer/child，它们停止失败时 provider/parent 尚不 quiesce 或释放。选择 prepare 的 provider 可以先冻结硬件，但必须保留 consumer 清理仍需的接口和存储；不能把这个显式协议推广到所有 provider。部分 consumer 可能已解除绑定并进入 deferred；失败不是事务回滚，不自动重建原图。移除意图与递归栈由 lifecycle mutex 下的私有栈帧保护：正在退出的驱动不能接收新匹配绑定，递归退出同一对象返回 `-EBUSY`；正在移除的 provider 拒绝新 dependency（`-EPROBE_DEFER`），其 parent 链拒绝新 child 发布（`-EBUSY`），即使它仍处于等待 consumer 停止的阶段。未新增公开 group/上下文标识或布局字段。
 
 `driver_unregister()` 只有在剩余绑定全部成功解绑后才移除驱动登记；失败保留登记与代码所有权，调用者不能释放模块/driver 对象。已完成解绑的设备保持已完成状态，调用者显式重试处理余下绑定。成功 probe 后 class 发布失败且 remove 也失败时，同样保留绑定/资源；`probe_error` 保存原 publication 错误，不允许下一候选驱动覆盖它。未选择受管失败清理的旧 probe 仍须自行安全回滚；核心无法从普通错误码推断未停止的硬件。
 
-REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。USB 枚举的部分 slot 和接口图现在也交给同一端口清理路径，见下文；HCD 自身 start/probe 的停止失败仍需单独接入。
+REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。USB 枚举的部分 slot 和接口图现在也交给同一端口清理路径，见下文；xHCI 的 start/probe 已接入下述退出准备，其余 HCD 和错误阶段仍须各自确认。
 
 公开 `device_t`/`driver_t` 布局及驱动 ABI 9 未改变；新增模块导出 `device_unregister`，源码调用方须检查上述 int 返回值。关机/kexec 的 `shutdown`、失败 probe 的硬件回滚、实际 stop/失效完成仍需要各 provider 的明确协议；核心不把超时转换成可释放证明。
 
@@ -64,6 +65,25 @@ static int gpu_probe(device_t *dev) {
 子设备/consumer 停止失败可能阻止父设备执行 quiesce。此时失败 probe 保持 `DEV_STATE_PROBE_CLEANUP`，其 class 先 offline，恢复后重试仍须执行首次 quiesce；进入自己的 remove 后才变为 REMOVING，后续仅重试 remove。`device_is_stopping()` 同时观察两种状态；checked resource、PCI 查找/范围观察、managed DMA 创建/新映射及 class 发布均拒绝它们。旧引用和旧资源保留供停止，不授予新使用权限。该 helper 只观察元数据，调用者仍须持有引用并按需使用 discovery 事务协调绑定/配置。
 
 probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（仍为 9）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
+
+### 在 consumer 解绑前准备退出
+
+控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，ABI 仍为 9。
+
+```c
+int ret = device_probe_use_remove(dev);
+if (!ret) ret = device_add_remove_prepare(dev, controller_prepare, dev);
+if (ret) return ret;
+/* Initialize drv_priv, then activate hardware. Prepare handles NULL too. */
+```
+
+准备动作按登记的逆序执行，先于任何 consumer/child unbind；只返回 0 才记为完成。正数错误按 `-EIO` 处理，失败保留绑定、匹配身份、依赖、devres、上下文和未动的消费图；之前成功动作的硬件副作用不回滚。显式注销重试从未完成的动作继续，已成功的动作不会因之后的 consumer 或 remove 失败而重复。普通退出停在 `DEV_STATE_PREPARING`；失败 probe 保持 `PROBE_CLEANUP` 及原 `probe_error`。`device_is_stopping()` 包含新状态，阻止新 class 发布、checked claim、PCI lookup/scope 与 DMA 创建/映射，已有映射仍可关闭回收。准备完成后才进入原来的 consumer-first、quiesce、class drain、remove、devres 流程；未选择者保持旧顺序。
+
+prepare 必须容忍部分初始化，冻结新提交并排空可能访问 consumer 存储的回调/硬件；可以撤销 IRQ，但不能释放 consumer/remove 仍需的存储。callback/context 有效至最终回收，context 的销毁另行安排；完成的准备是单向退出，不能恢复硬件后期待核心重复它。回调在 lifecycle mutex 下、不持 registry spinlock；不能等待需要该锁的 consumer，也不能递归移除自己。未结束的传输可返回 `-EBUSY` 让核心释放锁、保留图后显式重试。准备不是通用并发隔离或超时后的强制释放授权。
+
+xHCI 在 probe 最前选择失败清理并登记准备动作。准备先封闭提交/轮询、撤销并排空 IRQ；同步传输仍持有 event ring 时返回 `-EBUSY`，不在 lifecycle mutex 下等待它。已取得固件控制权的实例还须确认 RUN/INTE 写回清零、RESET 完成、HCHalted、CNR 清零，以及 PCI BME 清除读回；全 1 读取或超时均保留控制器和所有尚未解绑的子节点。尚未取得控制权的早期失败未发布自己的 DMA 上下文，不执行控制器停机。成功证明在私有上下文中单向保留；之后已知 slot 用软件清理，不再向已停止的命令环提交 Disable Slot。remove 只在确认后释放控制器，start 失败也不再自行释放不确定的 ring 存储。
+
+这里只覆盖受协调的控制器退出及所列所有权。USB interface 驱动的独立退出、Configure Endpoint 失败的独立 ring、同步 bulk 的调用者缓冲区保留，以及并发 poll/scan/unregister 仍需完善；现有单一任务所有者契约没有被这个 hook 自动替换。关机/kexec 的 shutdown 也未改为可失败协议。
 
 ### 部分 USB 枚举的所有权交还
 
@@ -542,3 +562,18 @@ xHCI 另增 1 项方法、9 个命令场景，执行生产 alloc_slot 回调，�
 `check-firmware-model` 通过 402 项及单独 1 项 sleep ABI 检查，最终 `check-pc-drivers` 通过 58 项；115 个 instance、32 个 driver component、193 个 smoke case 审计通过。AArch64 embedded 共享驱动构建通过；一次并行 QEMU 被共享槽位阻止，旧解释器错误地用旧日志显示 PASS，该次不计启动。串行重跑实际启动并匹配所有生命周期标记；解释器现在对状态 75 直接返回，不执行 post-check 或旧日志认证。这不代表 AArch64 USB 设备、generic 用户态或实体 GPU 已运行验证。
 
 公开结构布局/ABI 9 保持不变。未知 Enable Slot 结果、HCD 自身 start/probe、fatal 控制器恢复、scan/unregister 的通用并发协调及厂商 GPU 停止/失效仍有后续工作；已交还的端口对象不会以普通错误码为由提前释放。文档引用检查通过 540 条，导航仍是工作区既有 7 个未索引页面。实际 `docs/zh` 迁移和其他源码修改保留；本地日志位于 `.kernel-build/usb-enumeration-review/`。
+
+
+### 提前退出准备验证（2026-11-14）
+
+代码提交 `6a53f5b55`。隔离导出树中 196 项不同的主机测试方法通过。核心新增 3 项方法、4 个场景逐一执行生产 C/Rust 注册表和 core/class：检查显式选择/阶段拒绝、登记 OOM、部分初始化、失败 probe 原错误保留、准备动作 LIFO、前一动作失败时不调用后一动作、正数错误规范化、逐项成功记录、准备失败期间的 class 离线/在途调用保留、claim/child/dependency 拒绝，以及后续 consumer/remove 失败时不重复成功准备。quiesce 与 remove 仍按原阶段执行，成功后引用、存储和资源回到基线。RISC-V 另增 1 项方法，运行生产 mapper/provider/PCI，检查 PREPARING 拒绝新 DMA pin/命令和 PCI lookup，旧 domain 可安全 shutdown，requester 租约在最终 put 前仍保留。
+
+xHCI 新增 6 项方法、12 个场景，执行生产 wait、xfer admission、prepare、remove 和 abort_slot，配合真实 core/USB 图；HCD 初始化、MMIO、PCI、IRQ 排空与分配器由 host 替代。注入 command/status 全 1、RUN 写回失败、HALT/RESET/CNR 不完成、PCI 读取和 BME 清除失败、active transfer，以及模拟 start 返回错误/未取得控制权；检查 prepare 失败前不解绑 child、不释放 ring/controller，IRQ 撤销只一次，修复后继续；child 后续失败时不重复硬件准备，已确认停止后不发送新的 Disable Slot。此处的失败初始化由替代 start 构造，不是对每个真实固件/启动错误阶段的硬件注入。ASan/UBSan 和分配存活计数启用。
+
+跳过准备、重做成功准备、漏掉 PREPARING admission、接受正数准备结果、跳过 HALT、跳过 BME 读回、忽略 active transfer、向停止的控制器继续提交 slot 命令的 8 个负控均触发运行时断言；编译失败不计为负控。恢复后执行完整隔离回归，并逐一核对 14 个导出源码路径与提交一致。
+
+`make check-firmware-model` 通过 411 项及单独 1 项 sleep ABI 检查，`make check-pc-drivers` 通过 64 项；115 个 instance、32 个 driver component 和 193 个 smoke case 审计通过。x86_64 Rust 注册表、AArch64/RISC-V C 注册表 embedded 生命周期 QEMU 均实际启动，以 0 退出并匹配新增 `DRIVER_REMOVE_PREPARE: PASS partial=1 before_remove=1`。没有把共享槽位忙或旧日志当作启动通过。
+
+强化的 `make smoke-usb-hub-x86_64` 使用 embedded、单核、显式 `driver.runtime_test=1 driver.xhci_remove_test=1`。真实 xHCI/hub/键鼠初次枚举后，核心注销整个控制器驱动，确认 BME 清零及旧 child/class 句柄已离线，再重新登记静态驱动、重置控制器并枚举新 child；`DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1` 与原 hub/键鼠、资源和运行时标记全部匹配。旧 child metadata 和 class 引用保留到检查完成，未以相同地址的新对象冒充旧引用恢复。`make smoke-usb-hotplug-x86_64` 的 generic 内核/模块/开发镜像和严格 live unplug/replug 检查也通过，验证新增模块导出与正常拔插兼容。
+
+这些证据覆盖核心显式契约、主机失败模型和单核 QEMU 控制器退出/重新绑定。没有验证实体 stop 超时、任意跨 CPU poll/scan/unregister、接口单独退出、Configure Endpoint 的独立 ring 错误回收或同步 bulk 调用者缓冲区保留；也未将关机/kexec shutdown 变成可失败接口。公开布局/ABI 9 保持不变。文档行号检查通过 540 条；导航仍为工作区既有 7 个未索引页面，实际 `docs/zh` 迁移和其他改动保留。本地日志在 `.kernel-build/remove-prepare-review/`。
