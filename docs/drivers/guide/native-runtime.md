@@ -217,6 +217,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
+python3 -m unittest tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs -v
 python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
@@ -233,7 +234,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 扩展 IOMMU 能力/地址空间管理与 x86 AMD-Vi 后端，补故障 IRQ 派发/共享 worker 策略、用户态端到端 DMA 及硬件故障恢复验证。
+2. 在 IVRS/PCI 只读发现与 checked claim 基础上建立 AMD-Vi 控制器绑定和完整 aperture 所有权，再实现翻译、失效完成、requester/alias 与 IVMD 约束；扩展 IOMMU 地址空间能力、故障 IRQ 派发/共享 worker 策略及硬件故障恢复验证。只读报告尚未持有资源句柄，不能直接转为硬件启用入口。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 

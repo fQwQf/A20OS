@@ -20,6 +20,7 @@
 | [总线与平台](guide/bus-and-platform.md) | platform device、板级资源、MMIO/IRQ |
 | [PCI 与 VirtIO](guide/pci-and-virtio.md) | PCI ID、BAR、ECAM、VirtIO transport |
 | [运行时契约](guide/runtime-contracts.md) | MMIO、IRQ、DMA、锁、超时 |
+| [原生驱动运行时](guide/native-runtime.md) | quiesce、资源占用、页级 DMA、fence、工作队列、固件及验证边界 |
 | [驱动锁顺序契约](guide/lock-order.md) | 锁的嵌套规则 |
 
 ### 二、设备类专章（按硬件类）
@@ -30,6 +31,7 @@
 | [Virtio-console 内存配置](classes/virtio-console.md) | 吞吐/小内存预设、队列和缓冲区配置、DMA 内存预算 |
 | [Display/Framebuffer](classes/display.md) | framebuffer 与 GPU 驱动 |
 | [3D 图形加速栈](../graphics/3d-graphics.md) | virtio-gpu virgl 3D：原理、接口、实现与用户态对接 |
+| [真机 GPU 开发](../graphics/real-hardware-gpu.md) | Phoenix 首个目标、原生基础设施、上游复用与分阶段验收 |
 | [音频子系统](classes/audio.md) | 音频类、UAPI 与 Intel HDA PCM |
 | [USB 子系统设计](classes/usb-design.md) | USB 协议栈与 HID/存储类 |
 | [用户接口与 devfs](classes/userspace-and-devfs.md) | 从 class 到 `/dev` 的桥接 |
