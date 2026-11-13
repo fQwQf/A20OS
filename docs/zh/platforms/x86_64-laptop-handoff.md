@@ -7,6 +7,33 @@
 摄像头端口只重置一次，内置 ESP 保存了完整的启动记录。第 6 次启动
 进一步验证了带源码构建 fastfetch 的镜像和正常重启。
 
+
+## 第 16 轮实机与第 17 轮 OpenRC 交付（2026-11-13）
+
+第16轮重启“资源忙”的日志已读：1911条连续记录，20次准入因1–2个文件操作返回EBUSY，
+没有本轮JBD2 poison。另有明确记录 `busybox -> PID1 i2c-hid, SIGTERM`，证明内核把PID1分给了
+早期触控板线程。现在为首个用户态init保留PID1，引导线程退出；桌面使用未修改的Alpine
+OpenRC init 0.63及supervise-daemon，平台配置不再实现PID1循环。键盘灯按用户决定停止排查。
+
+内核补齐x86 mknod转换、ramfs/tmpfs/ext4 FIFO、procfs初始环境真实用户页读取，修正kill(-1)
+逐线程重复广播，补上FIFO创建的路径权限边界与普通open的类型位屏蔽。旧原型的FIFO回收poison、
+环境空占位及一次IBus退出SIGSEGV均留有失败日志，没有放宽验收以通过。广播修复有负对照，
+不把它表述为已证明那次用户态崩溃的唯一根因。
+
+最终同一镜像通过16 CPU/8 GiB三组完整桌面与原版服务监督测试：USB普通reboot约9.37 s、
+USB图形S5约9.43 s、NVMe图形重启约9.32 s；每组退出后fsck=0、clean、RECOVER=0、last_orphan=0。
+这些仍是QEMU结果，新版实机电源动作待第17轮。原版六个OpenRC程序与签名包payload一致，fastfetch保留。
+
+已完成实际USB 7417块/约28.97 MiB更新，写前完整备份核对、写后清缓存完整4 GiB回读、只读fsck均通过。
+EFI `530b416363faccb7…` 已安装并在只读重挂后核验；root `a8006c080489d2eb…`。
+保留BOOT16及整ESP备份、原shell与其他26个文件，计数00000010未改，三个分区均已卸载。
+旧桌面EFI必须与旧root配对，独立shell仍可使用。
+
+详细证据与重建方法：`build/evidence/lenovo-83eg-2026-11-13/boot-16-analysis/README.md`。
+内核提交8a9569092，OpenRC配置b6f07c72b；原暂存submodule记录保留。实际构建源由candidate-source.json固定，
+未把此前所有驱动移植或文档迁移一并提交。下一轮采集脚本在同日boot-17目录。
+
+
 ## 第 15 次实机：RSS、重启与锁定灯（2026-11-13）
 
 用户确认运行比第14轮明显改善，但Caps/Num物理灯始终不亮，按钮重启报I/O error，命令行
