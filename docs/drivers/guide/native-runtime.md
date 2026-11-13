@@ -1,6 +1,6 @@
 # 原生驱动运行时：GPU 开发的第一阶段基础
 
-本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、资源占用申请、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。DMA/fence/workqueue/firmware 和本页运行时自检面向 hosted 内核；资源占用接口随完整 driver core 编入，相应 MCU 配置不包含 hosted 异步运行时。
+本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、资源占用与物理存储保留、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。DMA/fence/workqueue/firmware 和本页运行时自检面向 hosted 内核；资源占用接口随完整 driver core 编入，相应 MCU 配置不包含 hosted 异步运行时。
 
 ## 分层与边界
 
@@ -36,7 +36,7 @@
 
 `kernel/drivers/core/driver_core.h` / `driver_core.c` 提供 owner 绑定的地址区间申请，并通过模块导出表供 `.a20drv` 使用，没有修改 `device_t` / `driver_t` 布局。
 
-- `driver_resource_request(owner, resource, &claim)`：复制 inclusive type/start/end，保留一份 device 引用，返回显式句柄。同一 namespace 中不同 owner 的区间重叠返回 `-EBUSY`；同一 owner 可持有重叠的独立句柄。支持 `RES_MMIO` 和 16-bit `RES_IOPORT`，二者使用独立 namespace；其他类型或反向区间返回 `-EINVAL`。申请失败清空输出，分配失败返回 `-ENOMEM`，无法保留 owner 引用返回 `-ENODEV`。
+- `driver_resource_request(owner, resource, &claim)`：复制 inclusive type/start/end，保留一份 device 引用，返回显式句柄。同一 namespace 中不同 owner 的区间重叠返回 `-EBUSY`；同一 owner 可持有重叠的独立句柄。MMIO 还必须避开物理存储保留区，该限制没有同 owner 豁免。支持 `RES_MMIO` 和 16-bit `RES_IOPORT`，二者使用独立 namespace；其他类型或反向区间返回 `-EINVAL`。申请失败清空输出，分配失败返回 `-ENOMEM`，无法保留 owner 引用返回 `-ENODEV`。
 - `driver_resource_request_checked(owner, resource, &claim)`：owner 必须已注册。在生命周期 mutex 内核对其他已发布设备的地址声明及 active claims，再建立占用，避免检查与设备发布之间的空隙。MMIO 同时核对 `RES_MEM` 物理区间，port I/O 保持独立；未绑定设备也参与检查，畸形清单返回 `-EINVAL`，未注册/正在移除的 owner 返回 `-ENODEV`。同 owner 的声明不构成冲突，parent/window 则没有隐式豁免。句柄存续期间，冲突的新设备注册返回 `-EBUSY`；owner 注销不会自动撤销保留句柄。
 - `driver_resource_release(claim)`：移除占用并释放 owner 引用；NULL 无操作，非空句柄必须准确释放一次。显式句柄不会在 unbind 时自动释放，适合在硬件清理失败时继续保留 aperture。申请时调用者须持有 owner 的有效引用，成功后由 claim 保留设备存储；调用者继续持有有效 claim 句柄，并自行协调 stopping 状态。device pin 不等于有效绑定或模块代码保留。
 - `device_claim_resource(dev, resource)`：只申请占用并登记 devres 回收，resource 必须是 `dev->res` 的元素，适用于 MMIO 或 port I/O。登记动作分配失败会立即撤销申请。
@@ -44,13 +44,29 @@
 
 现有 `device_map_resource()`、`device_map_mmio()` 及 `pci_map_bar()` 已接入相同申请路径；它们仍以 NULL 表示失败，不会在冲突时绕开登记重新映射。显式 claim 和同 owner 的受管映射拥有各自的引用，提前释放其中一份不会解除其余占用。正常 unbind 在 quiesce、class drain、remove 之后逆序回收受管映射；probe 失败也会回收。受管申请及 devres 链更新须处于串行化的 probe/lifecycle 上下文，不能与同设备的 devres 回收并发修改链表。显式句柄的全局冲突检查/释放使用 registry spinlock；分配、owner finalizer 和 MMIO 回调在该锁之外执行。
 
-基础 claim 列表仍是参与者之间的占用登记；普通申请/受管映射不自动将未绑定设备的声明变成 busy，checked 申请才额外核对当前已发布资源。未实现完整 RAM 预留导入、PCI host window 树或 page cache 属性仲裁，也不读取未发布的所有 ACPI/DT 内存保留区。raw architecture 映射、旧 `drv_map_mmio()` 和直接 port I/O 仍不自动登记。x86 architecture unmap 的共享永久映射契约仍然有效，claim 释放不撤销旧指针。AMD-Vi 的只读报告本身不持有 claim；独立的被动 PCI 驱动已通过 checked 接口保留完整 aperture，见下文。未发布预留区核对及 AMD-Vi DMA 隔离仍待完成。
+基础 claim 列表仍是参与者之间的占用登记；普通申请/受管映射不自动将未绑定设备的声明变成 busy，checked 申请才额外核对当前已发布资源。启动已导入 PFA 受管 RAM 与 ACPI 表所在页作为独立存储保留区；未覆盖未纳入 PFA 的 RAM、全部 DT/其他固件保留区，也未实现 PCI host window 树或 page cache 属性仲裁。raw architecture 映射、旧 `drv_map_mmio()` 和直接 port I/O 仍不自动登记。x86 architecture unmap 的共享永久映射契约仍然有效，claim 释放不撤销旧指针。AMD-Vi 的只读报告本身不持有 claim；独立的被动 PCI 驱动已通过 checked 接口保留完整 aperture，见下文。其他未导入区间的核对及 AMD-Vi DMA 隔离仍待完成。
 
-`driver_resource_check_range(owner, resource, &busy_end)` 是观察接口，核对当前已发布声明和 active claims；owner 为 NULL 时不忽略任何设备。`driver_resource_check_claims()` 仅核对 active claims，供保留既有固件 BAR 等场景使用。`RES_MEM` 声明按物理 MMIO namespace 核对；busy_end 仅在 `-EBUSY` 时给出最大冲突 inclusive end，其他返回清零，端点 0 仍可合法。查询不建立 lease。总线必须在 `driver_discovery_begin/end` 事务中完成查询、硬件变更与清单更新；checked 申请使用相同 lifecycle mutex。绕开事务修改 `dev->res` 或直接重编程硬件不受这项保证保护。
+`driver_resource_check_range(owner, resource, &busy_end)` 是观察接口，核对当前已发布声明、active claims 和物理存储保留区；owner 为 NULL 时不忽略任何设备。`driver_resource_check_claims()` 核对 active claims 与物理存储保留区，供处理已有固件 BAR 等场景使用；两者均不忽略存储保留区。`RES_MEM` 声明按物理 MMIO namespace 核对；busy_end 仅在 `-EBUSY` 时给出最大冲突 inclusive end，其他返回清零，端点 0 仍可合法。查询不建立 lease。总线必须在 `driver_discovery_begin/end` 事务中完成查询、硬件变更与清单更新；checked 申请使用相同 lifecycle mutex。绕开事务修改 `dev->res` 或直接重编程硬件不受这项保证保护。
 
-PCI 分配新 MMIO 地址时先避开已有 PCI BAR，再按 busy_end 跳过其他资源声明/占用，窗口耗尽或迭代上限返回错误。BAR 重建和用户态驱动设备查询均与 discovery 串行化。已有 BAR 检查 active claims；不把可能存在包含/别名关系的全部固件声明一律当作 active user。实现先在栈上规划全部 BAR/资源并验证，再提交地址及元数据；规划失败时没有已移动的前序 BAR，旧 command 和资源表保持不变，单调分配游标可以消耗空间。重建路径的 sizing 期间关闭 decode/BME，不能代替调用者先停止硬件，亦不声称解决不可报告的 PCI 写失败、热拔出或在途 DMA 排空。
+PCI 分配新 MMIO 地址时先避开已有 PCI BAR，再按 busy_end 跳过其他资源声明/占用，窗口耗尽或迭代上限返回错误。BAR 重建和用户态驱动设备查询均与 discovery 串行化。任何已有非零 BAR 都先核对 active claims 与物理存储，再调用可能建立 CPU 映射的 reachability hook；不把可能存在包含/别名关系的全部固件声明一律当作 active user。新地址也先查冲突、后调用 hook。实现先在栈上规划全部 BAR/资源并验证，再提交地址及元数据；规划失败时没有已移动的前序 BAR，旧 command 和资源表保持不变，单调分配游标可以消耗空间。重建路径的 sizing 期间关闭 decode/BME，不能代替调用者先停止硬件，亦不声称解决不可报告的 PCI 写失败、热拔出或在途 DMA 排空。
 
-显式 `driver.runtime_test=1` 会在生产内核执行 metadata-only 的资源自检，输出 `DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1`。该自检不访问测试区间的物理地址，验证重复句柄、冲突、引用、受管申请回收，以及未绑定声明/后续发布与 checked 申请的互斥。并发申请、阻塞 unmap 和失败注入另由主机 fixture 验证。资源和运行时 PASS 标记在测试末尾同一条日志中输出，避免 best-effort SMP 控制台只丢失早期资源标记。
+显式 `driver.runtime_test=1` 会在生产内核执行 metadata-only 的资源自检，输出 `DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1`。该自检不访问测试区间的物理地址，验证重复句柄、冲突、引用、受管申请回收，以及未绑定声明/后续发布与 checked 申请的互斥、存储保留与 MMIO/发布冲突、`RES_MEM` 描述允许共存和实际受管 RAM 申请拒绝。并发申请、阻塞 unmap 和失败注入另由主机 fixture 验证。资源和运行时 PASS 标记在测试末尾同一条日志中输出，避免 best-effort SMP 控制台只丢失早期资源标记。
+
+## 物理存储保留对象
+
+头文件：`kernel/include/drivers/core/memory.h`；保留对象与 claim 共用 `driver_core.c` 的 registry 锁，启动导入位于 `kernel/drivers/core/memory_boot.c`。这是原生 CPU 物理存储清单，独立于 device/binding；RAM 无须伪装成设备，驱动结构布局和 ABI 9 保持不变。reserve/release 已进入模块导出表，启动导入函数只供内核启动路径使用。
+
+`driver_memory_reserve(ranges, count, &reservation)` 在任务上下文复制非空数组，每项为 inclusive `start/end`。地址 0 和 `UINT64_MAX` 均有效，反向区间返回 `-EINVAL`，分配尺寸溢出返回 `-EOVERFLOW`，分配失败返回 `-ENOMEM`。输入只需在函数返回前保持有效且不可变，输出不保留借用指针。副本在锁外排序并合并相邻/重叠区间，锁内使用二分查询；不建立 Linux resource tree 或推断父窗口共享。
+
+发布前，在 lifecycle mutex 内核对当前所有 `RES_MMIO` 声明，再在 registry 锁内核对 active MMIO claims；冲突返回 `-EBUSY`。原批次任何一项失败都不发布部分保护。`RES_MEM` 可以描述同一存储，port I/O 使用独立地址空间。多个存储保留对象可以重叠，独立释放其中一个不会撤销另一个的保护。畸形的已发布资源表返回 `-EINVAL`。
+
+对象存续时，基本/checked claim、受管 MMIO 映射、PCI 的两类范围查询和新的 MMIO 设备发布都不能覆盖该存储；同 owner 的 claim 例外不适用。保留发布与基本 claim 共享 registry 锁，与设备发布共享 lifecycle 协调，所以并发竞争只能一方成功。已经持有 claim 的映射即使正在 unmap，也会阻止新存储保留；仍须先完成 unmap，再释放 claim。
+
+调用者持有成功句柄，恰好调用一次 `driver_memory_release()`；NULL 无操作。释放在 registry 锁内撤销保护，在锁外回收副本。对象没有 device 引用、自动 devres 回收或物理页所有权；它不会为 PFA 预留/分配页面，也不冻结 raw 映射、物理硬件或 DMA。它只约束请求的物理区间，不能替代架构实际映射粒度、缓存属性和永久别名的审查。
+
+hosted 启动在 PFA 和 `driver_core_init()` 完成后、发布设备前调用 `driver_memory_protect_boot()`。它复制不可变的 PFA RAM 几何，并通过 `acpi_reserve_tables()` 导入 RSDP、根表、各 SDT 和 FADT 引用的 DSDT/FACS；ACPI 表的边界向外取整到物理页。先计数与校验，再填入副本，最后一次性发布；两遍不一致或任意表读取/校验失败均不留下部分保护，启动路径会停止设备初始化。没有 ACPI context 的平台仍保护受管 RAM；没有有效 RAM 清单则拒绝初始化。成功后保留对象存续至内核结束，重复调用返回 `-EALREADY`。
+
+`DRIVER_MEMORY: protected ram_ranges=... firmware_ranges=...` 报告导入前的区间/表回调数量，内部可以合并。该导入不等于完整固件内存图：PFA 范围之外的 RAM、其他启动数据、全部 DT reserved-memory 和运行时热增内存仍需各自的可信来源；不能把所有固件 reserved 类型都误当成不可用 MMIO，也不能从“未发现冲突”推导硬件启用许可。
 
 ## 原生 DMA domain 与页映射
 
@@ -141,7 +157,7 @@ x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再�
 
 没有对应函数/capability 返回 `-ENODEV`；不支持的 class/header/interface/address width 返回 `-EOPNOTSUPP`；畸形链或 aperture 返回 `-EINVAL`；base 或 PCSup 矛盾返回 `-EIO`；transport 错误原样传播。错误清空整个 snapshot。探测成功不等于资源已独占或设备已接管，也不保证后续时刻的硬件状态；硬件初始化时必须重新验证。
 
-PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；PCI 下游作用域核对、alias 隔离组、IVMD 权限落实和 DMA domain provider 仍待实现。
+PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；PCI 下游作用域核对、alias 隔离组、IVMD 权限落实和 DMA domain provider 仍待实现。
 
 两类报告都不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 表示这条发现路径没有启用 AMD-Vi 翻译；它不表示固件此前未开启硬件，也不表示下述软件驱动没有绑定。
 
@@ -155,7 +171,7 @@ PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上
 
 失败与 remove 均按相反顺序先 unmap、再释放各 claim，最后释放 IVRS 映射和上下文；部分成功时同样回收。claim 保留 device 引用，绑定本身由核心串行化。当前没有硬件写入、DMA、IRQ 或后台生产者，因此无需主动停止阶段；未来增加翻译/队列前必须重新验证硬件状态，并补上停止失败时保留资源的协议，不能沿用当前无条件释放路径。
 
-`AMDVI_OWNER: bound ... writes=0 translation=0` 只证明被动软件绑定成功。已发布资源之外的 RAM/固件预留仍未完整导入；raw MMIO/PIO 不受 claim 拦截，物理热拔插也不被 lifecycle mutex 冻结。该绑定不授予启用翻译、重置控制器或改变固件既有 DMA 路由的权限。
+`AMDVI_OWNER: bound ... writes=0 translation=0` 只证明被动软件绑定成功。已有受管 RAM 与 ACPI 表页保护，但 PFA 以外的 RAM/其他固件预留仍未完整导入；raw MMIO/PIO 不受 claim 拦截，物理热拔插也不被 lifecycle mutex 冻结。该绑定不授予启用翻译、重置控制器或改变固件既有 DMA 路由的权限。
 
 PCI 另提供 `pci_device_find_get(segment, requester, &device)`：在 discovery 事务内查找已发布的 function，并返回需由调用者 `device_put()` 的引用。失败清空输出；非零 segment 返回 `-EOPNOTSUPP`，不存在返回 `-ENODEV`。设备未绑定时仍可查询；旧引用跨设备替换保留原元数据，不被新身份覆盖。引用不固定绑定或物理设备，若 lookup 和后续 config/绑定观察必须协调，调用者须用外层 `driver_discovery_begin/end` 覆盖完整操作。
 
@@ -231,7 +247,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner -v
+python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner -v
 python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
@@ -249,7 +265,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐未发布预留区核对、下游 requester/alias 作用域和 IVMD 约束，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
+2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源、下游 requester/alias 作用域和 IVMD 约束，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -300,3 +316,9 @@ IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603
 `make ARCH=x86_64 ABI=linux BRINGUP=0 DRIVER_DEPLOYMENT=embedded NR_CPUS=2 kernel-only -j4` 与 AArch64 QEMU virt 的 `ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded` 内核构建通过，111 个实例清单检查通过。x86 双核内核直接以 QEMU q35、`-smp 2 -nic none -device amd-iommu` 和上述双自检参数启动，退出码 0，匹配 owner 实例全部预期标记；日志确认 `2/2 configured CPUs online`、首次绑定与重新绑定，以及 owner/resource/runtime 三项 PASS。QEMU 的 MMIO decoder 关闭，decoder 已启用的 MMIO 分支仅由主机 fixture 验证，没有启用 AMD-Vi 翻译或 GPU 加速。
 
 本次 generic `kernel-only` 在工作区现有的 virtio-scsi 模块编译处因 `CONFIG_NR_CPUS` 未定义失败；未修订无关模块代码，未把 embedded 构建及直接 QEMU 验证记作完整 generic/用户态 `tools/a20 test` 门禁通过。验证日志保存在本地 `.kernel-build/amdvi-owner-review/`，可清理的构建日志不作为长期接口契约。
+
+2026-11-13 物理存储保留提交：`9e1da2462`。隔离待提交树上 97 项主机回归通过；新增 8 项存储测试运行生产 driver core、class 与 ACPI 表读取代码，以 ASan/UBSan 和 pthread 验证副本/归并/边界、重叠保留独立释放、失败批次无部分保护、mapper 拒绝、保留与基本 claim/设备发布的竞争、受管 RAM 与 ACPI 页导入，以及失败后的重试。另扩展生产 PCI/core 集成与 AMD-Vi 用例：PCI 跳过存储、变动 BAR 在 reachability 前拒绝、只读 AMD-Vi 诊断和被动绑定在 map 前拒绝。移除 PCI/诊断前置检查的两个负控均触发新断言；硬件与任务同步仍是主机替代后端。
+
+内核构建与 QEMU 使用保留既有改动的当前工作区，主机回归另以隔离待提交树复验。x86_64 `ABI=linux BRINGUP=0 DRIVER_DEPLOYMENT=embedded NR_CPUS=2` 与 AArch64 QEMU virt `ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded` 内核构建通过，111 个实例清单检查通过。直接 QEMU q35、双 CPU、`-nic none -device amd-iommu`、`driver.runtime_test=1 driver.amdvi_owner_test=1` 启动正常关机，匹配更新后 owner 实例全部标记；日志为 `ram_ranges=1 firmware_ranges=10`、`2/2 configured CPUs online`、owner 重绑 PASS、资源 `inventory=1 memory=1` 和完整运行时 PASS。固件记录数是本次 QEMU 的观察值，不作为其他机器的固定预期。
+
+本轮未启用 AMD-Vi 翻译或 GPU DMA，也未重跑完整 generic/用户态门禁；上一阶段记录的模块构建问题未纳入这次修改。新增保护不拦截 raw MMIO/PIO，不替代 IOMMU、PFA 页所有权或实际映射缓存属性检查，未验证实体硬件热插拔和 DMA 故障恢复。

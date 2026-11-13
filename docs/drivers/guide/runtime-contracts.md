@@ -14,7 +14,9 @@ port I/O 可先调用 `device_claim_resource()` 申请 `dev->res` 中的 `RES_IO
 
 `driver_resource_request_checked()` 在相同生命周期锁中核对当前已发布资源并建立申请；未绑定设备的声明也会阻止冲突申请，`RES_MEM` 与 MMIO 按同一物理地址空间处理。该句柄还阻止后续冲突设备注册。所有资源声明更新都必须与生命周期事务协调；查询本身不能保护未串行化的直接写入。
 
-PCI 资源更新在 discovery 事务中运行。新 MMIO 地址使用 `driver_resource_check_range()`，已有 BAR 使用 `driver_resource_check_claims()`；前者包含声明和占用，后者只包含 active claims，避免把重复/包含关系的固件声明误当作活动使用者。BAR 重建路径在 sizing 期间关闭地址解码和 BME；所有 BAR 规划成功后才写新地址、发布资源并恢复/设置 command。规划失败返回时，原 BAR、command 和资源元数据保持不变，单调分配游标可能推进。调用者必须在进入 API 前 quiesce：清除 BME 不等于排空在途 DMA，也没有可失败 PCI config 写入的通用回滚。
+hosted 启动用 `driver_memory_protect_boot()` 原子导入受管 RAM 和 ACPI 表所在页。独立 `driver_memory_reserve()` 对象也可保护其他可信物理存储；MMIO 申请、映射与发布均受约束，`RES_MEM` 存储描述可以共存。这不是物理页分配、DMA 隔离或 raw 映射撤销。完整契约见 [物理存储保留对象](native-runtime.md#物理存储保留对象)。
+
+PCI 资源更新在 discovery 事务中运行。新 MMIO 地址使用 `driver_resource_check_range()`，已有 BAR 使用 `driver_resource_check_claims()`；前者包含声明和占用，后者包含 active claims 与受保护存储，避免把重复/包含关系的固件声明误当作活动使用者。已有非零 BAR 在 reachability hook 前先检查冲突，避免平台提前建立落入受保护存储的 CPU 别名。BAR 重建路径在 sizing 期间关闭地址解码和 BME；所有 BAR 规划成功后才写新地址、发布资源并恢复/设置 command。规划失败返回时，原 BAR、command 和资源元数据保持不变，单调分配游标可能推进。调用者必须在进入 API 前 quiesce：清除 BME 不等于排空在途 DMA，也没有可失败 PCI config 写入的通用回滚。
 
 使用 `readb/readw/readl/readq` 和 `writeb/writew/writel/writeq`。这些操作保留 volatile 访问并带读/写屏障。`*_relaxed` 不带屏障，只能在协议明确允许、且外层已有正确屏障的紧密循环中使用。
 
