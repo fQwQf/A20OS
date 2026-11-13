@@ -33,6 +33,8 @@ static const device_id_t ids[] = {
 
 `pci_device_scope_get(client, scope_bus, first_devfn, last_devfn, &anchor)` 可查询 client 或上游 bridge 是否位于指定 bus/devfn 范围，成功返回需配对 `device_put()` 的引用。它检查核心注册状态、live 身份、唯一父桥、完整窗口包含关系、循环与重叠路由；不会以更宽的 subordinate 区间猜测缺失桥。范围包含 function 位，查询不重扫或写配置，也不自动建立 parent/dependency。引用不保证物理存在或 DMA 隔离；错误与 AMD Range 辅助查询见 [桥路径与作用域](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
 
+AMD-Vi 的 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期) 在上述观察接口之上组合 IVRS、原 requester/alias 路径与被动控制器绑定。它保留查询对象和资源租约，并在解绑后拒绝继续使用；不是 PCI 通用 group、requester 独占或 DMA domain。
+
 ## BAR 处理
 
 probe 首先：

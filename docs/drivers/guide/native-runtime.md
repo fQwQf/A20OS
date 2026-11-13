@@ -157,7 +157,7 @@ x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再�
 
 没有对应函数/capability 返回 `-ENODEV`；不支持的 class/header/interface/address width 返回 `-EOPNOTSUPP`；畸形链或 aperture 返回 `-EINVAL`；base 或 PCSup 矛盾返回 `-EIO`；transport 错误原样传播。错误清空整个 snapshot。探测成功不等于资源已独占或设备已接管，也不保证后续时刻的硬件状态；硬件初始化时必须重新验证。
 
-PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；下文已提供 PCI 桥路径与有效 Range 的补充查询；将这些证据与 IVRS requester/alias 归属、控制器生命周期及 IVMD 权限组合成 DMA domain provider 仍待实现。
+PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；下文已提供 PCI 桥路径、有效 Range 补充查询，以及结合 IVRS/绑定生命周期的保留路由对象；requester/alias 独占、IVMD 权限落实及 DMA domain provider 仍待实现。
 
 两类报告都不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 表示这条发现路径没有启用 AMD-Vi 翻译；它不表示固件此前未开启硬件，也不表示下述软件驱动没有绑定。
 
@@ -187,13 +187,25 @@ PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上
 
 每个 PCI function 拥有独立上下文，保留 ACPI mapper/context 的副本和 IVRS 映射；各 capability 的借用视图只在该表存续时使用。probe 成功前不发布 `drv_priv`。首先按固件已知的 16/512-KiB 大小申请 checked claim，再按需映射首个 16 KiB 并只读 control/EFR。旧 10h 描述若通过已开启 MMIO 才确定 512-KiB 大小，则在持有最小窗口占用期间申请完整窗口，成功后才释放旧 claim；decoder 关闭且完整大小未知返回 `-EOPNOTSUPP`，不猜测。完整窗口还要核对同一 function 的其他 capability，不能依赖允许同 owner 重叠的通用 claim。
 
-失败与 remove 均按相反顺序先 unmap、再释放各 claim，最后释放 IVRS 映射和上下文；部分成功时同样回收。claim 保留 device 引用，绑定本身由核心串行化。当前没有硬件写入、DMA、IRQ 或后台生产者，因此无需主动停止阶段；未来增加翻译/队列前必须重新验证硬件状态，并补上停止失败时保留资源的协议，不能沿用当前无条件释放路径。
+probe 失败按相反顺序先 unmap、再释放各 claim，最后释放 IVRS 映射和上下文；部分成功时同样回收。remove 先将上下文标为 detached 并从活跃绑定索引摘除：没有路由句柄时立即回收，否则保留全部映射、claims 和 IVRS，直到最后一个句柄释放。claim 保留 device 引用，绑定本身由核心串行化。当前没有硬件写入、DMA、IRQ 或后台生产者；未来增加翻译/队列时，还须落实停止、失效失败时继续保留硬件可达页面和上下文的协议。被动路由句柄不能替代硬件停止。
 
 `AMDVI_OWNER: bound ... writes=0 translation=0` 只证明被动软件绑定成功。已有受管 RAM 与 ACPI 表页保护，但 PFA 以外的 RAM/其他固件预留仍未完整导入；raw MMIO/PIO 不受 claim 拦截，物理热拔插也不被 lifecycle mutex 冻结。该绑定不授予启用翻译、重置控制器或改变固件既有 DMA 路由的权限。
 
 PCI 另提供 `pci_device_find_get(segment, requester, &device)`：在 discovery 事务内查找已发布的 function，并返回需由调用者 `device_put()` 的引用。失败清空输出；非零 segment 返回 `-EOPNOTSUPP`，不存在返回 `-ENODEV`。设备未绑定时仍可查询；旧引用跨设备替换保留原元数据，不被新身份覆盖。引用不固定绑定或物理设备，若 lookup 和后续 config/绑定观察必须协调，调用者须用外层 `driver_discovery_begin/end` 覆盖完整操作。
 
 显式自检须同时指定 `driver.runtime_test=1 driver.amdvi_owner_test=1`。它在启动客户端前检查竞争 owner 被拒绝，注销整个被动驱动后确认占用可重新申请，再注册并仅恢复此前绑定的控制器、确认占用恢复；不会重试其他未绑定设备。测试无硬件写入，成功输出 `AMDVI_OWNER: PASS claim=1 rebind=1 writes=0` 后随运行时自检关机；普通启动不会执行注销/重绑。实例入口为 `tools/a20 test smoke-amdvi-owner-x86_64`。
+
+### 保留路由对象与控制器生命周期
+
+`amd_iommu_route_acquire(client, &route)` 是任务上下文中的显式对象接口。它在 discovery 事务中，从当前被动绑定保留的 IVRS 解析原 requester 与实际 DMA requester，选择唯一匹配的 controller/capability，重新探测该单元，并核对绑定时的 ID、capability、Range、地址宽度、完整 aperture、MMIO 开关、control/EFR。有效 Range 是额外覆盖约束；无效 Range 采用 IVRS 路由并核对实际 PCI 路径，不将未定义字段解释成全覆盖。原 requester 与 alias 目标都必须是已发布、身份有效且路径无歧义的 PCI function；alias 目标未发布时拒绝，不猜测其存在。多个匹配控制器或固件歧义返回 `-EBUSY`，缺少绑定/路由/目标返回 `-ENODEV`，其余固件、探测和桥查询错误按既有规则传播；失败清空输出。
+
+成功句柄独立保留 client、实际 DMA function 和两条查询的 anchor 引用，并持有控制器上下文的一份租约。它不建立 parent/dependency、不接管 client、不独占 requester/alias，也不启用 BME、翻译、队列或 DMA。原始 settings/extended、non-PCI 标记与 IVMD 都是后续 provider 必须处理的策略，不能当成已落实权限。
+
+`amd_iommu_route_validate(route, &info)` 重新核对当前绑定、硬件快照与两条 PCI 路径，成功返回不含借用指针的值副本。binding 解绑/移除后返回 `-ESHUTDOWN`，即使同一 function 已重新绑定也不会使旧句柄重新有效；单元快照或所保留 alias/anchor 身份变化返回 `-ESTALE`，消失/注销等错误由 PCI 查询传播。所有失败清空 info。查询不冻结硬件；如验证后要继续观察绑定/配置，调用者须用外层 discovery 事务覆盖操作。硬件启用仍需完整 provider 协议。
+
+`amd_iommu_route_memory(route, index, &memory)` 按固件顺序复制原 requester 与 alias 的相关 IVMD，不归并或执行 unity/exclusion/读写权限，越界返回 `-ENODEV` 并清空输出。保留的不可变固件策略在解绑后仍可读取。`amd_iommu_route_release(route)` 在任务上下文独占释放句柄，禁止与同一句柄的查询并发；最后一份路由释放后，detached 控制器才按先 unmap、再释放 claim、最后释放 IVRS 的顺序回收。控制器是内建实现；句柄不提供通用模块绑定保活契约。
+
+`tools/a20 test smoke-amdvi-route-x86_64` 在 q35 root port 下提供 EDU，并显式设置 `driver.amdvi_route_test=1` 与运行时自检参数。测试获取路由后先释放原始 client 引用，再验证 requester、单元和 IVMD 枚举，释放句柄并输出 `AMDVI_ROUTE: PASS route=1 policy=1 scope=1`。普通启动不执行；该实例不提交 DMA。解绑后的保留、重绑、alias 与有效 Range 分支另由主机后端验证。
 
 ## 原生异步 fence
 
@@ -265,7 +277,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner tools.tests.test_pci_scope -v
+python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner tools.tests.test_pci_scope tools.tests.test_amd_iommu_route -v
 python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
@@ -273,6 +285,7 @@ tools/a20 test smoke-driver-runtime-x86_64
 tools/a20 test smoke-driver-runtime-smp2-x86_64
 tools/a20 test smoke-amdvi-owner-x86_64
 tools/a20 test smoke-pci-scope-x86_64
+tools/a20 test smoke-amdvi-route-x86_64
 tools/a20 test smoke-driver-iommu-native-riscv64
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only -j4
 ```
@@ -284,7 +297,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，将 PCI 桥路径/Range 证据与 IVRS requester/alias、控制器绑定及 IVMD 约束组合验证，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
+2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，在保留路由对象基础上落实 requester/alias 独占与 IVMD 权限，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -347,3 +360,9 @@ IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603
 保留既有改动的工作区中，x86_64 dev 双核 embedded、x86_64 generic 以及 AArch64 bringup embedded 内核构建通过，112 个实例清单检查通过。分别按新增实例的 q35/root-port/EDU/amd-iommu 参数直接启动 x86 双核 embedded/generic 内核，退出码 0，匹配全部门禁标记；日志确认 EDU 位于 `01:00.0`、`2/2 configured CPUs online`、owner 重绑以及 `memory=1 pci=1`。QEMU 的 AMD Range 没有 RngValid，验证的是拒绝使用无效字段；AMD 有效 Range 与 root-port capability 的组合由主机模型验证，不能写成真实 AMD DMA 路由已验证。没有给 EDU 提交 DMA，也没有启用 AMD-Vi 翻译或 GPU 加速。
 
 `tools/a20 test smoke-pci-scope-x86_64` 已尝试，但完整门禁在 Native `ufsd` 构建阶段被 fscompat 时钟适配缺失（`TICKS_PER_SEC` 展开依赖未定义的 `ARCH_TIMER_FREQ`）阻塞；局部时钟适配诊断还暴露 `fifo_open_vnode`/`klog_write_ex` 缺失，诊断改动已撤回。上述直接启动结果不记为完整 CLI/用户态门禁通过。本地验证日志位于 `.kernel-build/pci-scope-review/`；硬件热插拔、AMD 实机翻译与 DMA 故障恢复仍待验证。
+
+2026-11-14 保留路由对象提交：`67d67cc70`。独立导出的待提交树中 115 项主机回归通过；新增 9 项测试方法、20 个场景以生产 core/PCI、AMD owner/probe/scope 与 IVRS 代码配合 ASan/UBSan，验证固件路径与有效 Range、原/alias 两条路径及各自 IVMD、分配失败、固件歧义、快照变化、核心注销、client/alias/anchor 替换、控制器移除和两份句柄跨解绑/重绑的最后释放。检查每个路由操作均无配置写入、不添加依赖、最终元数据引用和分配回到基线。提前销毁 detached 上下文的负控触发 ASan use-after-free，省略 alias 路径校验的负控触发覆盖范围断言。
+
+保留其他工作的工作区中，x86_64 双核 embedded 与 generic、AArch64 bringup embedded 内核构建通过；113 个实例与 32 个驱动组件清单检查通过。按新实例参数直接启动双核 x86_64 embedded/generic 内核，退出码 0，匹配全部预期标记，包括 `AMDVI_ROUTE: PASS route=1 policy=1 scope=1` 和 `2/2 configured CPUs online`。这里验证 QEMU 的 IVRS → 保留路由对象 → PCI 路径与只读绑定快照，RngValid=0 的固件路径；有效 Range、alias 和解绑后的资源保留由主机模型验证。没有提交 EDU DMA，没有启用 AMD-Vi 翻译或 GPU 加速。
+
+完整 `tools/a20 test smoke-amdvi-route-x86_64` 已重试，仍在 Native `ufsd` 编译处因 `ARCH_TIMER_FREQ` 未定义退出，不能将直接启动结果记为完整 CLI/用户态门禁通过。文档行号引用检查通过；导航检查仍报告其他工作中的 7 个未索引页面（包括新增 LLVM 文档），本轮六份文档未增加导航/链接错误。日志保存在本地 `.kernel-build/amdvi-route-review/`，不作为长期接口契约或实机翻译证据。

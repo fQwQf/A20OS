@@ -80,6 +80,8 @@ uint64_t size = res->end - res->start + 1;
 
 PCI 作用域通过 `pci_device_scope_get()` 返回带引用的 client/上游桥观察结果，不另建 Linux group 或隐式修改设备 parent。身份替换、窗口重叠、缺失桥和循环不会被当成有效路径；device 引用不固定硬件或绑定。详见 [PCI 桥路径与 AMD Range 补充查询](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
 
+AMD-Vi 保留路由通过 `amd_iommu_route_acquire/validate/memory/release` 显式组合固件策略、PCI 路径与控制器上下文租约。解绑立即使旧路由失效，资源保留到最后一个句柄释放；它不改变 parent/dependency，也不授予 DMA 或 alias 独占。详见 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期)。
+
 总线修改地址前，须在 `driver_discovery_begin/end` 事务内查询资源并完成硬件和元数据更新。PCI BAR 分配已接入该事务：分配新地址跳过声明和占用区间，已有 BAR 在 reachability/mapping hook 前检查 active claims 与受保护存储；全部 BAR 规划通过后才写入新地址。调用者仍须先停止设备，配置写入失败/硬件消失的恢复不由此接口保证。
 
 ### `driver_t`
