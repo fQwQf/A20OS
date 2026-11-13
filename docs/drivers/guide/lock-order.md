@@ -272,7 +272,7 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`irq_events`/`poll_events` 由 process-context 的 `xhci_op_poll()` 快照后打印成 `[XHCI] completions: irq=N poll=M`。
 
-已收集的锁外 completion 用全局/每 slot 计数保留存储；prepare 或 abort 发现相关回调在途返回 `-EBUSY`，不在生命周期锁下等待。标量 slot 快照避免回调自行释放 URB 后再解引用。双 CPU 的控制器退出/重绑与 host 线程交错已验证，interface 驱动独立退出和其他 DMA 错误阶段仍需各自协议。
+已收集的锁外 completion 用全局/每 slot 计数保留存储；prepare 或 abort 发现相关回调在途返回 `-EBUSY`，不在生命周期锁下等待。标量 slot 快照和计数保留的 endpoint 记录避免回调自行释放 URB 后再解引用；slot abort 同样等相关回调归零后才释放记录。双 CPU 的控制器和 HID/hub 独立退出/重绑与 host 线程交错已验证；storage 及其他 DMA 错误阶段仍需各自协议。
 
 ### USB 部分枚举清理
 
@@ -287,7 +287,7 @@ USB register/scan/enumerate/unregister 使用原生生命周期协调器串行�
 配套的两条写法也是规范的一部分：
 
 - `usb_hid_read()`/`usb_hid_poll()` 在取 `h->lock` **之前**调用 `usb_device_poll()`；该入口尝试生命周期协调，忙时直接返回，不阻塞 teardown 排空当前 class 调用。成功后验证注册表、端口归属和全部祖先仍可使用，再在协调域内调用 HCD poll。class 活动调用另保留接口存储。
-- 端口退出先确认 slot 停止且相关锁外回调计数归零，再解绑 HID；同一物理控制器的 pending 端口在彻底清理前阻止新 slot 分配，避免编号提前复用。`usb_hid_remove()` 清回调字段本身不提供排空保证，interface 驱动独立注销仍需补齐取消协议。
+- 端口退出先确认 slot 停止且相关锁外回调计数归零，再解绑 HID；同一物理控制器的 pending 端口在彻底清理前阻止新 slot 分配，避免编号提前复用。HID/hub 独立 remove 使用 `usb_interface_release_endpoints()`，后端单向关闭收集/提交，相关回调仍在途则返回 `-EBUSY`；不能清空回调字段后直接释放 URB。失败保留绑定/存储，重试不重复已确认的停止阶段，其他 endpoint 继续运行。
 
 ### USB storage
 

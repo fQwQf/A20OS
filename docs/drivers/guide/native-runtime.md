@@ -12,7 +12,7 @@
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
 
-内置驱动与 `.a20drv` 使用同一 `driver_t`。本阶段增加 `driver_t.quiesce`，驱动 ABI 更新为 **9**，旧模块必须重建。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
+内置驱动与 `.a20drv` 使用同一 `driver_t`。ABI 9 增加了 `driver_t.quiesce`；当前 ABI 为 **10**，扩展 `usb_hcd_ops_t.release_endpoint`，所有旧模块必须重建。后文带日期的验证保留当时 ABI，不表示当前接受旧模块。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
 
 ## 下线与资源生命周期
 
@@ -41,7 +41,7 @@
 
 REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。USB 枚举的部分 slot 和接口图现在也交给同一端口清理路径，见下文；xHCI 的 start/probe 已接入下述退出准备，其余 HCD 和错误阶段仍须各自确认。
 
-公开 `device_t`/`driver_t` 布局及驱动 ABI 9 未改变；新增模块导出 `device_unregister`，源码调用方须检查上述 int 返回值。关机/kexec 的 `shutdown`、失败 probe 的硬件回滚、实际 stop/失效完成仍需要各 provider 的明确协议；核心不把超时转换成可释放证明。
+公开 `device_t`/`driver_t` 布局未因这项返回值变更而改变；新增模块导出 `device_unregister`，源码调用方须检查上述 int 返回值。关机/kexec 的 `shutdown`、失败 probe 的硬件回滚、实际 stop/失效完成仍需要各 provider 的明确协议；核心不把超时转换成可释放证明。
 
 当前生命周期回调仍持有全局 lifecycle mutex，禁止等待需要该锁的工作或递归注销自己。quiesce 没有通用超时后强制释放内存的语义：如果不能证实 DMA 已停止，驱动不能继续释放硬件仍可能访问的存储。按设备并发的生命周期协调与通用恢复策略仍需后续开发。
 
@@ -64,11 +64,11 @@ static int gpu_probe(device_t *dev) {
 
 子设备/consumer 停止失败可能阻止父设备执行 quiesce。此时失败 probe 保持 `DEV_STATE_PROBE_CLEANUP`，其 class 先 offline，恢复后重试仍须执行首次 quiesce；进入自己的 remove 后才变为 REMOVING，后续仅重试 remove。`device_is_stopping()` 同时观察两种状态；checked resource、PCI 查找/范围观察、managed DMA 创建/新映射及 class 发布均拒绝它们。旧引用和旧资源保留供停止，不授予新使用权限。该 helper 只观察元数据，调用者仍须持有引用并按需使用 discovery 事务协调绑定/配置。
 
-probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（仍为 9）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
+probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（当前为 10）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
 
 ### 在 consumer 解绑前准备退出
 
-控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，ABI 仍为 9。
+控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，ABI 当前为 10。
 
 ```c
 int ret = device_probe_use_remove(dev);
@@ -83,13 +83,13 @@ prepare 必须容忍部分初始化，冻结新提交并排空可能访问 consu
 
 xHCI 在 probe 最前选择失败清理并登记准备动作。准备先封闭提交/轮询、撤销并排空 IRQ；同步传输仍持有 event ring 时返回 `-EBUSY`，不在 lifecycle mutex 下等待它。已取得固件控制权的实例还须确认 RUN/INTE 写回清零、RESET 完成、HCHalted、CNR 清零，以及 PCI BME 清除读回；全 1 读取或超时均保留控制器和所有尚未解绑的子节点。尚未取得控制权的早期失败未发布自己的 DMA 上下文，不执行控制器停机。成功证明在私有上下文中单向保留；之后已知 slot 用软件清理，不再向已停止的命令环提交 Disable Slot。remove 只在确认后释放控制器，start 失败也不再自行释放不确定的 ring 存储。
 
-USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 prepare hook 推导。USB interface 驱动的独立退出、Configure Endpoint 失败的独立 ring、同步 bulk 的调用者缓冲区保留仍需完善。关机/kexec 的 shutdown 也未改为可失败协议。
+USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 prepare hook 推导。HID/hub 的独立退出和 Configure Endpoint ring 的错误保留已按下述协议接入；其他 class 迁移和同步 bulk 的调用者缓冲区保留仍需完善。关机/kexec 的 shutdown 也未改为可失败协议。
 
 ### 总线拓扑的原生生命周期协调
 
 `driver_lifecycle_begin/end()` 复用核心现有的生命周期 mutex，供任务上下文把总线私有拓扑、注册和绑定操作放入同一个协调域。阻塞入口可在所属任务或启动上下文嵌套；它不增加 discovery 深度，不压制同步 probe。需要批量发现后再 probe 的总线仍使用 `driver_discovery_begin/end()`，不能用它代替普通进度协调。两组 API 均不固定设备、绑定或模块代码，调用者另持有效引用。
 
-`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，公开布局/ABI 9 不变。
+`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，公开布局/ABI 10 不变。
 
 USB register/enumerate/scan/unregister 全程使用这个协调域，保护 HCD 注册表、端口状态和协议所有权。`usb_core_poll()` 忙时清除防重入标记并跳过，不推进轮询时间；class 持有协议存储期间通过 `usb_device_poll()` 尝试进度。后者忙返回 `-EAGAIN`，端口不再归属该设备、待移除或任一上游 HCD 正在退出返回 `-ENODEV`，均不进入 HCD。HID read/poll 在自身 spinlock 外使用此入口；不能阻塞等候 teardown 所持的生命周期锁。
 
@@ -97,11 +97,27 @@ USB register/enumerate/scan/unregister 全程使用这个协调域，保护 HCD 
 
 ### xHCI 锁外回调与端口退役
 
-xHCI 在 controller 锁下收集 completion，并在解锁前增加全局及每 slot 在途计数；回调结束重新取锁后递减。只跨回调保存标量 slot ID，回调可释放自己的 URB，退役过程不会再次读取该 URB。controller prepare 发现同步传输或任何回调在途时返回 `-EBUSY`，保留图和存储，不能持生命周期锁等待这些回调。
+xHCI 在 controller 锁下收集 completion，并在解锁前增加 controller、slot 和 endpoint 在途计数；回调结束重新取锁后递减。跨回调只保存标量 slot ID 与计数保留的私有 endpoint 记录，回调可释放自己的 URB，退役过程不会再次读取该 URB。controller prepare 发现同步传输或任何回调在途时返回 `-EBUSY`，保留图和存储，不能持生命周期锁等待这些回调。
 
-端口 abort 在成功 Disable Slot 后，于同一锁内清 DCBAA 并摘除 endpoint 链；对应 slot 回调未结束时仍返回 `-EBUSY`。重试利用 DCBAA=0 的停止记录，不重复 Disable Slot；其他 slot 的回调不阻止该端口清理。EP0 control 和 interrupt submit 在锁下拒绝已停 slot，interrupt 拒绝发生在清 DMA buffer 和敲 doorbell 之前。
+端口 abort 在成功 Disable Slot 后，于同一锁内清 DCBAA、封闭 endpoint 并清 pending；对应 slot 回调未结束时返回 `-EBUSY`，保留其借用的 endpoint 记录和 ring，归零后才摘链释放。重试利用 DCBAA=0 的停止记录，不重复 Disable Slot；其他 slot 的回调不阻止该端口清理。EP0 control 和 interrupt submit 在锁下拒绝已停 slot，interrupt 拒绝发生在清 DMA buffer 和敲 doorbell 之前。
 
-硬件可立即复用 Disable Slot 释放的编号，因此仅记住停止还不够。USB core 在同一物理控制器任一 root/hub 端口仍有 REMOVE_PENDING 时，暂停新的端口枚举，显式入口返回 `-EAGAIN`，scan 跳过且不扣枚举尝试次数；reset 回调后再检查停止和退役状态。直到回调、class 和协议所有者全部交还，才重新开放分配。已有设备的完成处理及其他物理控制器继续运行。该策略保持现有 slot token 和 HCD vtable，不增加另一套公开 generation/所有者模型。
+硬件可立即复用 Disable Slot 释放的编号，因此仅记住停止还不够。USB core 在同一物理控制器任一 root/hub 端口仍有 REMOVE_PENDING 时，暂停新的端口枚举，显式入口返回 `-EAGAIN`，scan 跳过且不扣枚举尝试次数；reset 回调后再检查停止和退役状态。直到回调、class 和协议所有者全部交还，才重新开放分配。已有设备的完成处理及其他物理控制器继续运行。该策略保持现有 slot token，不增加另一套公开 generation/所有者模型。
+
+### 接口独立退出与 endpoint 释放
+
+`usb_interface_release_endpoints(iface)` 从当前接口的 remove 回调调用，先由核心 quiesce/offline 并排空 class 调用。接口/协议存储由调用者保留；helper 在生命周期协调域内核对 stopping owner、plat_data 和端口归属，再逐个调用 `release_endpoint(hcd, dev, addr)`。在线或错误 owner 返回 `-EINVAL`，协议不再属于已登记 HCD 返回 `-ENODEV`，非空 endpoint 清单缺少回调返回 `-EOPNOTSUPP`；正数后端错误规范化为 `-EIO`。已证明整个 slot 停止时无需再次向硬件发 endpoint 命令。
+
+HCD 回调返回 0 才证明该非 EP0 endpoint 不再 DMA/回调访问 URB 和 buffer，并释放其 controller 侧记录；之后同地址的再次释放无操作。失败保留仍存续的全部所有权，已释放的前序 endpoint 不回滚，重试只清理剩余项。此操作永久关闭当前 endpoint，不是单 URB 的取消/恢复 API；其他 endpoint 和 EP0 保持可用。vtable 新增字段要求 ABI 10，loader 和 drvctl 拒绝 ABI 9 及其他不匹配版本，不能通过强制读取短 vtable 兼容旧模块。
+
+xHCI 在锁下设置单向 closing，阻止新提交和 completion 收集。该 endpoint 回调或同步传输仍在途时返回 `-EBUSY`，不持生命周期锁等待。Running 用 Stop Endpoint，Halted 用 Reset Endpoint，Error 用 Set TR Dequeue Pointer 转为 Stopped；已有 Stopped 不重发停止命令。只有输出 context 读回 Stopped 才登记停止，再用 Configure Endpoint 的 Drop Context 移除该 endpoint，保留 Slot/EP0 和其他 endpoint 的 Context Entries；Disabled 读回确认后才摘链释放。停止成功、Drop 失败会记住进度。fatal 软件标志不等于硬件停止，只有已确认 controller halt 或 slot 停止才允许软件回收。规则参照 [Intel xHCI 1.2b](https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf) 的 4.6.6、4.6.8–4.6.10。
+
+HID/hub probe 在创建新的 host context 前发送标准 `SET_INTERFACE` 选择当前 altsetting，将设备侧 endpoint toggle/sequence 与新 context 对齐；该控制请求失败也进入可失败清理，不继续投递 URB；未实现对拒绝 SET_INTERFACE 的设备的安全恢复策略。设备侧规则参照 [USB 2.0 9.4.10](https://e2e.ti.com/cfs-file/__key/communityserver-discussions-components-files/138/usb_5F00_20.pdf)。
+
+Configure Endpoint 在硬件可能读 ring 之前，将 closing 记录交给 controller 链；失败不会释放可能仍被访问的 ring，重复配置同 slot/DCI 返回 `-EBUSY`。HID/hub probe 显式选择可失败 remove，保存部分实例；HID quiesce 封闭重提交意图，remove 只有 endpoint 释放成功才释放 URB/buffer。hub 先停下游 bus，再释放自己的 status endpoint，任一步失败保留上下文并显式重试。它们可在根控制器继续运行时独立注销并重新绑定。USB storage 的静态实例及同步 bulk 错误缓冲区仍需另外迁移；此接口不替它们自动建立调用者存储保留。
+
+### 已持有 PCI function 的查询
+
+`pci_user_device_find/index()` 对已有内核绑定（包括只读 probe）或 `user_owned` function 读取已发布 BAR/IRQ 清单，不再 sizing BAR、重写资源、重新路由 IRQ 或清 BME。未知/停止设备仍被排除，BAR0 不可用仍返回错误。尚未被持有的 function 保留原有受 discovery 协调的 BAR 准备路径；这不是所有查询均无副作用的承诺。显式 BAR 重建和 BME 修改仍由拥有者先协调硬件停止，不能借元数据查询夺取运行中设备的控制权。
 
 ### 部分 USB 枚举的所有权交还
 
@@ -113,7 +129,7 @@ EP0 MPS、descriptor/configuration、解析/分配或部分 interface 发布失�
 
 扫描总在新枚举前重试 pending 清理；HCD 注销也可重试。slot 已停止但 interface remove 失败时保留该阶段，之后不重复 abort。普通重新连接也必须等待旧清理完成。清理重试不增加枚举次数，也不清零失败预算；扫描对同一次连接最多尝试三次枚举，只有观察到物理断开才重新计数。`port_state` 的计数/阶段位是核心私有实现，HCD 不解释它。
 
-这些变更保持公开结构布局和 ABI 9。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
+这些变更保持公开结构布局和 ABI 10。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
 
 ## 资源占用与受管映射
 
@@ -145,7 +161,7 @@ PCI 分配新 MMIO 地址时先避开已有 PCI BAR，再按 busy_end 跳过其�
 
 ## 物理存储保留对象
 
-头文件：`kernel/include/drivers/core/memory.h`；保留对象与 claim 共用 `driver_core.c` 的 registry 锁，启动导入位于 `kernel/drivers/core/memory_boot.c`。这是原生 CPU 物理存储清单，独立于 device/binding；RAM 无须伪装成设备，驱动结构布局和 ABI 9 保持不变。reserve/release 已进入模块导出表，启动导入函数只供内核启动路径使用。
+头文件：`kernel/include/drivers/core/memory.h`；保留对象与 claim 共用 `driver_core.c` 的 registry 锁，启动导入位于 `kernel/drivers/core/memory_boot.c`。这是原生 CPU 物理存储清单，独立于 device/binding；RAM 无须伪装成设备，驱动结构布局和 ABI 10 保持不变。reserve/release 已进入模块导出表，启动导入函数只供内核启动路径使用。
 
 `driver_memory_reserve(ranges, count, &reservation)` 在任务上下文复制非空数组，每项为 inclusive `start/end`。地址 0 和 `UINT64_MAX` 均有效，反向区间返回 `-EINVAL`，分配尺寸溢出返回 `-EOVERFLOW`，分配失败返回 `-ENOMEM`。输入只需在函数返回前保持有效且不可变，输出不保留借用指针。副本在锁外排序并合并相邻/重叠区间，锁内使用二分查询；不建立 Linux resource tree 或推断父窗口共享。
 
@@ -606,3 +622,14 @@ xHCI 新增 6 项方法、12 个场景，执行生产 wait、xfer admission、pr
 `make check-firmware-model` 通过 424 项及单独 1 项 sleep ABI，`make check-pc-drivers` 通过 77 项；115 个 instance、32 个 driver component、193 个 smoke case 审计通过。`make smoke-driver-lifecycle DRIVER_DEPLOYMENT=embedded` 实际启动 RISC-V64 并匹配生命周期/失败退出标记。`python3 tools/smoke.py smoke-usb-hub-x86_64 --nr-cpus 2` 在真实 guest 确认 2/2 CPU online，并两次通过 hub/键鼠、旧句柄离线、BME 停止检查与 `DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1`。generic 的 `make smoke-usb-hotplug-x86_64` 通过严格 live 拔出/重插/地址复用检查；`make smoke-usb-x86_64` 通过 HID 中断和实际按键输入检查，覆盖新增模块导出及 class 进度入口。
 
 这些证据覆盖受协调的拓扑变更和所列线程交错，不等于任意 SMP 压力或实体硬件停止超时验证。interface 驱动独立退出、Configure Endpoint 的独立 ring 错误、同步 bulk 调用者缓冲区和可失败 shutdown 仍待完善。公开结构布局与 ABI 9 不变。文档引用检查通过 540 条；导航仍有工作区既有的 7 个未索引页面，没有新增链接/锚点错误。实际 `docs/zh` 迁移及其他改动保留，本轮本地证据位于 `.kernel-build/usb-concurrency-review/`。
+
+
+### 接口 endpoint 交还与 ABI 10 验证（2026-11-14）
+
+PCI 修复提交 `9e65e222d`，USB/ABI 实现提交 `be7bca2ec`。新增 9 项 endpoint 主机测试方法、14 个命名场景，运行真实 driver core/USB、HID probe/quiesce/remove、hub remove、xHCI 配置/释放/收集/提交及锁外回调；调度、硬件命令和寄存器是替代后端，启用 ASan/UBSan。覆盖部分配置错误和模糊结果保留、首次 submit/SET_INTERFACE 失败、独立退出失败后的 URB/模块所有权、重新绑定、回调仍在途、其他 endpoint 保持运行、Halted/Error 转移、Stop/Drop 分段读回与重试、重复配置、在线/失主/缺少 callback 拒绝，以及下游 HCD 已注销后的 hub remove 重试。PCI 新增 1 项方法、内核绑定/只读绑定/user_owned 三种所有者，确认查询前后配置空间、BME、BAR、资源和 IRQ 路由均未改变。真实 drvctl parser 接受 ABI 10、拒绝 ABI 9 与其他不匹配 descriptor。
+
+13 个负控撤销 SET_INTERFACE 失败检查、已持有 PCI 查询保护、endpoint/slot 回调保留、completion/submit 关闭、Stop/Disabled 读回、停止重试记录、Configure Endpoint 错误所有权、HID probe 显式清理和 HID/hub remove 错误保留，均触发运行时断言或 ASan；编译失败不计入。恢复后隔离导出树通过 219 个不同方法，再通过 12 项 endpoint/encoding 定向回归，19 个导出源码路径逐一与提交核对。
+
+最终 `check-firmware-model` 通过 434 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 86 项；115 个 instance、32 个 driver component、193 个 smoke case 审计通过。双 CPU 的 embedded hub guest 确认 2/2 CPU online，匹配 `DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1` 和 `DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1`：在根控制器保持绑定时单独注销/重绑 HID，然后 hub，再执行整个控制器退出。旧 class/child 引用保留用于离线检查，新接口重新选择 altsetting、配置 endpoint 并提交 URB。此处没有注入重绑后的真实按键或对实体 USB 包序列做分析。
+
+ABI 10 generic 内核、模块和镜像由严格 USB 热插拔与 HID 实际输入门禁构建/运行；RISC-V64 embedded 生命周期实际启动并匹配失败退出/注册表标记。这些正常 QEMU 路径不等于实体停止超时或任意 SMP 压力证据。storage 静态实例、同步 bulk 超时后调用者缓冲区、拒绝 SET_INTERFACE 设备的安全恢复、可失败 shutdown 和厂商 GPU 硬件恢复仍待推进。文档行号检查通过 540 条，导航仍是既有 7 个未索引页面；实际 `docs/zh` 迁移及其他改动保留。本地证据位于 `.kernel-build/usb-endpoint-review/`。

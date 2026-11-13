@@ -337,6 +337,10 @@ VirtIO-MMIO 的固件 bridge 在 probe 中建立子设备，并用 devres 在 br
 
 模块自行创建设备时同样使用导出的注册与引用 API，并在 remove 或失败清理中撤销发布。类消费者可缓存受生命周期管理的适配器；解绑后，适配器返回 `-ENODEV`，不得转向另一设备。
 
+## 查询已持有的 function
+
+`pci_user_device_find/index()` 对已绑定（包括只读 probe）或 `user_owned` 的 function 只读取现有 BAR/IRQ 清单，保持配置空间、BME、资源声明和 IRQ 路由。尚未被持有的 function 仍可走受 discovery 协调的 BAR 准备。查询不能重编程运行中设备；显式 BAR/BME 改动仍需要拥有者先停止硬件。相关测试见 `test_pci_resources`，行为边界见 [原生运行时](native-runtime.md#已持有-pci-function-的查询)。
+
 ## 失败定位
 
 没有 probe 日志时先找 `[BUS] pci ... id=vendor:device`；没有设备说明 ECAM/固件问题。有设备但未绑定，检查 ID 表和 `.driver_init`。BAR setup 失败检查 BAR size/地址窗口。`incomplete capabilities` 是 VirtualBox 控制器模式或 capability 解析问题。feature rejected 是驱动写了设备不接受的位。queue timeout 时同时检查 DMA 地址是否为物理地址、cache sync、descriptor writable 顺序、queue notify offset 和设备 status。

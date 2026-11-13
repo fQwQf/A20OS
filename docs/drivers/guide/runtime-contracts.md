@@ -4,6 +4,8 @@
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
+当前模块 ABI 10 增加 HCD 的可失败 endpoint 释放；HID/hub 独立退出在 class drain 后调用 `usb_interface_release_endpoints()`，成功才交还 URB、buffer 和回调代码所有权。失败保留绑定并重试，不得清空回调指针后直接释放。Configure Endpoint 失败的 ring 由 controller 保留到可证明停止。详见 [接口独立退出](native-runtime.md#接口独立退出与-endpoint-释放)。
+
 ## 总线拓扑与进度
 
 总线任务可用 `driver_lifecycle_begin/end()` 协调私有拓扑和核心绑定，所属上下文允许嵌套且不压制 probe。`driver_lifecycle_try_begin()` 只接受最外层入口，忙或同上下文重入均返回 `-EAGAIN`；成功后才 end。持 active class 调用时不能阻塞等待正在排空自己的 teardown，USB HID 使用 `usb_device_poll()` 尝试进度。这些 API 不用于 IRQ、不固定存储或模块代码，成功进入后的硬件操作仍可能等待。完整规则见 [原生拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。
