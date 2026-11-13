@@ -121,6 +121,10 @@ USB 拓扑/回调变更运行 `python3 -m unittest tools.tests.test_usb_concurre
 
 endpoint 生命周期变更运行 `python3 -m unittest tools.tests.test_usb_endpoint_release tools.tests.test_xhci_callback_lifetime tools.tests.test_xhci_remove tools.tests.test_pci_resources tools.tests.test_drvctl_descriptor_host -v`。新增测试执行真实 USB/core、HID probe/quiesce/remove 和 xHCI Configure/Stop/Drop/回调计数路径，替代硬件后端注入错误并启用 ASan/UBSan；PCI 用生产总线检查已持有查询的无配置写入。两组主门禁已纳入新 endpoint 测试。双 CPU hub fixture 另要求 `DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1`，先单独注销/重绑 HID，再 hub，最后整个控制器，旧 class 句柄保持离线。ABI 10 的包由 generic 热插拔门禁构建/装载，旧 ABI descriptor 由真实 drvctl parser 拒绝。
 
+DMA buffer/bulk 变更运行 `python3 -m unittest tools.tests.test_driver_dma_buffer tools.tests.test_xhci_bulk_lifetime tools.tests.test_driver_irq_sync -v`。生产 allocator/引用/registry 配合 PFA 故障后端验证强对齐小对象、原始 PFN/阶数回收、mask 与状态变化、跨注销/并发引用和生命周期忙时分配；真实 bulk/prepare/remove 验证私有 DMA 地址、IN/OUT/零长/64 KiB、超时后调用者释放与迟到 DMA、停止失败保留、短包和提交前退出。两组主门禁纳入新测试；整 HAL IRQ fixture 同时保留新原生函数的声明完整性检查。
+
+`make smoke-usb-bulk-x86_64` 构建双 CPU embedded RAMFS 内核，创建专用 8 MiB 空白 USB 镜像；显式 `driver.usb_bulk_test=1` 只在 QEMU 控制器和 USB disk 身份/尺寸、待写范围初值均匹配时执行读写、比对并恢复，要求 `DRIVER_USB_BULK: PASS read=1 write=1 verify=1 restore=1`。通用 runtime 另执行真实 PFA 的 33 字节/64 KiB 对齐对象跨 owner 注销验证，在末尾同一条日志输出 `DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1`；hub 门禁同时要求该标记。它们不证明实体 stop 超时或任意 IOMMU/缓存后端正确。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

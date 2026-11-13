@@ -289,6 +289,10 @@ USB register/scan/enumerate/unregister 使用原生生命周期协调器串行�
 - `usb_hid_read()`/`usb_hid_poll()` 在取 `h->lock` **之前**调用 `usb_device_poll()`；该入口尝试生命周期协调，忙时直接返回，不阻塞 teardown 排空当前 class 调用。成功后验证注册表、端口归属和全部祖先仍可使用，再在协调域内调用 HCD poll。class 活动调用另保留接口存储。
 - 端口退出先确认 slot 停止且相关锁外回调计数归零，再解绑 HID；同一物理控制器的 pending 端口在彻底清理前阻止新 slot 分配，避免编号提前复用。HID/hub 独立 remove 使用 `usb_interface_release_endpoints()`，后端单向关闭收集/提交，相关回调仍在途则返回 `-EBUSY`；不能清空回调字段后直接释放 URB。失败保留绑定/存储，重试不重复已确认的停止阶段，其他 endpoint 继续运行。
 
+### DMA buffer 与同步 bulk
+
+buffer 分配不取核心 lifecycle mutex，只用既有设备引用/registry 查询和 PFA 锁；这允许 active class 调用分配，不会阻塞正在持生命周期锁排空自己的退出。状态核对不是提交 lease，驱动仍须协调 mask/请求。最后 put 限任务上下文，使用保存的 PFN/order，不从请求尺寸推导实际回收阶数。xHCI 在 probe 预分配并持有暂存对象；同步 bulk 用 xfer_busy 独占 copy/wait，复制和 DMA sync 在 controller spinlock 外，提交前重新查退出状态。失败保留私有暂存区，成功的 controller remove 才交还它，不会向硬件提交调用者地址。
+
 ### USB storage
 
 每实例 `usb_storage_dev_t.lock` 是 sleepable `mutex_t`，保护 BOT tag、CBW/CSW 和共享 4 KiB data buffer。局部顺序 **`st->lock -> xhci->lock`（单向）**。

@@ -83,7 +83,7 @@ prepare 必须容忍部分初始化，冻结新提交并排空可能访问 consu
 
 xHCI 在 probe 最前选择失败清理并登记准备动作。准备先封闭提交/轮询、撤销并排空 IRQ；同步传输仍持有 event ring 时返回 `-EBUSY`，不在 lifecycle mutex 下等待它。已取得固件控制权的实例还须确认 RUN/INTE 写回清零、RESET 完成、HCHalted、CNR 清零，以及 PCI BME 清除读回；全 1 读取或超时均保留控制器和所有尚未解绑的子节点。尚未取得控制权的早期失败未发布自己的 DMA 上下文，不执行控制器停机。成功证明在私有上下文中单向保留；之后已知 slot 用软件清理，不再向已停止的命令环提交 Disable Slot。remove 只在确认后释放控制器，start 失败也不再自行释放不确定的 ring 存储。
 
-USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 prepare hook 推导。HID/hub 的独立退出和 Configure Endpoint ring 的错误保留已按下述协议接入；其他 class 迁移和同步 bulk 的调用者缓冲区保留仍需完善。关机/kexec 的 shutdown 也未改为可失败协议。
+USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 prepare hook 推导。HID/hub 的独立退出和 Configure Endpoint ring 的错误保留已按下述协议接入；其他 class 迁移仍需完善；xHCI 同步 bulk 已通过下述独立 DMA buffer 保留暂存数据，不再把调用者缓冲区交给硬件。关机/kexec 的 shutdown 也未改为可失败协议。
 
 ### 总线拓扑的原生生命周期协调
 
@@ -113,7 +113,7 @@ xHCI 在锁下设置单向 closing，阻止新提交和 completion 收集。该 
 
 HID/hub probe 在创建新的 host context 前发送标准 `SET_INTERFACE` 选择当前 altsetting，将设备侧 endpoint toggle/sequence 与新 context 对齐；该控制请求失败也进入可失败清理，不继续投递 URB；未实现对拒绝 SET_INTERFACE 的设备的安全恢复策略。设备侧规则参照 [USB 2.0 9.4.10](https://e2e.ti.com/cfs-file/__key/communityserver-discussions-components-files/138/usb_5F00_20.pdf)。
 
-Configure Endpoint 在硬件可能读 ring 之前，将 closing 记录交给 controller 链；失败不会释放可能仍被访问的 ring，重复配置同 slot/DCI 返回 `-EBUSY`。HID/hub probe 显式选择可失败 remove，保存部分实例；HID quiesce 封闭重提交意图，remove 只有 endpoint 释放成功才释放 URB/buffer。hub 先停下游 bus，再释放自己的 status endpoint，任一步失败保留上下文并显式重试。它们可在根控制器继续运行时独立注销并重新绑定。USB storage 的静态实例及同步 bulk 错误缓冲区仍需另外迁移；此接口不替它们自动建立调用者存储保留。
+Configure Endpoint 在硬件可能读 ring 之前，将 closing 记录交给 controller 链；失败不会释放可能仍被访问的 ring，重复配置同 slot/DCI 返回 `-EBUSY`。HID/hub probe 显式选择可失败 remove，保存部分实例；HID quiesce 封闭重提交意图，remove 只有 endpoint 释放成功才释放 URB/buffer。hub 先停下游 bus，再释放自己的 status endpoint，任一步失败保留上下文并显式重试。它们可在根控制器继续运行时独立注销并重新绑定。USB storage 的静态实例、独立退出和 BOT 复位仍需另外迁移；xHCI 同步 bulk 的调用者缓冲区已由下述暂存协议保护，不依赖这个 class 的静态数组继续存活。
 
 ### 已持有 PCI function 的查询
 
@@ -174,6 +174,26 @@ PCI 分配新 MMIO 地址时先避开已有 PCI BAR，再按 busy_end 跳过其�
 hosted 启动在 PFA 和 `driver_core_init()` 完成后、发布设备前调用 `driver_memory_protect_boot()`。它复制不可变的 PFA RAM 几何，并通过 `acpi_reserve_tables()` 导入 RSDP、根表、各 SDT 和 FADT 引用的 DSDT/FACS；ACPI 表的边界向外取整到物理页。先计数与校验，再填入副本，最后一次性发布；两遍不一致或任意表读取/校验失败均不留下部分保护，启动路径会停止设备初始化。没有 ACPI context 的平台仍保护受管 RAM；没有有效 RAM 清单则拒绝初始化。成功后保留对象存续至内核结束，重复调用返回 `-EALREADY`。
 
 `DRIVER_MEMORY: protected ram_ranges=... firmware_ranges=...` 报告导入前的区间/表回调数量，内部可以合并。该导入不等于完整固件内存图：PFA 范围之外的 RAM、其他启动数据、全部 DT reserved-memory 和运行时热增内存仍需各自的可信来源；不能把所有固件 reserved 类型都误当成不可用 MMIO，也不能从“未发现冲突”推导硬件启用许可。
+
+## 独立 DMA buffer 所有权
+
+头文件：`kernel/include/drivers/core/dma_buffer.h`，由 `driver_hwapi.h` 引入。`driver_dma_buffer_create(device, size, alignment, &buffer)` 在任务上下文分配清零、物理连续的 RAM，保存实际 compact PFN 和分配阶数；size 和 DMA 地址对齐要求可以独立，33 字节、64 KiB 对齐也会按实际高阶块回收。对齐须为非零二次幂，size/alignment 上限为 `PAGE_SIZE << MAX_ORDER`（当前 8 MiB）。旧 raw aligned helper 仍限制对齐不超过 PAGE_SIZE，释放协议保持不变。
+
+对象捕获设备 DMA mask，通过受限 PFA 选择块，并核对整个分配块的物理窗口和请求对齐。失败清空输出：参数/mask 错误 `-EINVAL`，超上限 `-E2BIG`，架构未就绪 `-EOPNOTSUPP`，owner 不可用 `-ENODEV`，元数据/页分配失败 `-ENOMEM`，不可用 allocator 地址 `-ERANGE`，分配期间 mask 改变 `-EAGAIN`。分配后 owner 停止或已注销也会撤销分配。注册/stopping 检查只是快照，不是绑定租约；调用者另持 device 引用并协调 mask、请求提交和退出。
+
+create 返回一份引用，`driver_dma_buffer_get/put()` 显式交接所有权。对象保留 device 元数据引用，独立于 devres/绑定；unbind/unregister 不自动释放 buffer。最后 put 用记录的 PFN/order 回收，并交还设备引用。get 可用于 IRQ，最终 put 限任务上下文；都须已有有效引用，不能从悬空指针复活对象。put 不停 DMA、不排空请求、不撤销映射，驱动必须保留引用直到相应停止/失效证明完成，也须自己保留回调/module 代码。
+
+`driver_dma_buffer_data/address/size()` 在持引用期间返回 CPU alias、CPU 物理地址及请求字节数；size 不暴露向上取整的分配尺寸。地址 0 也可能有效，不能用它判定对象不存在。物理地址只有在显式 identity-DMA 平台上可直接作为总线地址；该对象不创建 IOVA、隔离、MMIO claim、BO 或 GPUVM，不自动接入目前只接收 order-0 页的 managed mapping。CPU/设备可见性仍须经过既有 DMA sync/barrier。
+
+分配不取得 lifecycle mutex，可从 active class 调用使用，避免与持该锁排空 class 的退出互相等待。它只构造存储所有者，不批准硬件提交。这些函数均导出给模块，公开 device/driver/HCD 布局及 ABI 10 不变。
+
+### xHCI 同步 bulk 暂存
+
+xHCI probe 在启动自己硬件前预分配一份 64 KiB、64 KiB 对齐的 DMA buffer，每控制器一份，HID-only 控制器也承担这项固定占用。`xfer_busy` 串行保护整个 copy/submit/wait；OUT 先拷入，IN 先清零暂存区并同步给设备。Normal TRB 只引用该物理地址，不引用 URB 或调用者存储，调用者内存无需满足设备地址窗口及 64 KiB 边界。copy 后重新检查 fatal、slot 停止和 endpoint closing，拒绝期间发生的退出。
+
+bulk 是精确长度同步接口，不运行 complete 回调：0 表示完整长度完成；超过 64 KiB 或短包返回 `-EMSGSIZE`，残余计数超过请求返回 `-EIO`。只有完整成功的 IN 才同步并拷回调用者，所有失败均不发布部分输入。当前接口不提供变长 bulk 的 actual_length，也不做多 TRB 链；调用方按已知长度分块。边界及 Transfer Event residue 依据 [Intel xHCI 1.2b](https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf) 的 6.4.1、6.4.2.1。
+
+超时后即使 HALT 未被证明，硬件仍只能访问 controller 持有的暂存区；fatal gate 阻止复用。controller prepare 失败继续保留这份引用，remove 只有确认 controller 停止且 USB 图清理成功后才 put；外部额外引用仍能继续保留存储。临时 URB 和调用者缓冲区在任意返回后都可结束自己的生命周期。这不代表 class 静态实例已迁移，也不把软件 fatal 标志当作 DMA 停止证明。
 
 ## 原生 DMA domain 与页映射
 
@@ -633,3 +653,18 @@ PCI 修复提交 `9e65e222d`，USB/ABI 实现提交 `be7bca2ec`。新增 9 项 e
 最终 `check-firmware-model` 通过 434 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 86 项；115 个 instance、32 个 driver component、193 个 smoke case 审计通过。双 CPU 的 embedded hub guest 确认 2/2 CPU online，匹配 `DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1` 和 `DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1`：在根控制器保持绑定时单独注销/重绑 HID，然后 hub，再执行整个控制器退出。旧 class/child 引用保留用于离线检查，新接口重新选择 altsetting、配置 endpoint 并提交 URB。此处没有注入重绑后的真实按键或对实体 USB 包序列做分析。
 
 ABI 10 generic 内核、模块和镜像由严格 USB 热插拔与 HID 实际输入门禁构建/运行；RISC-V64 embedded 生命周期实际启动并匹配失败退出/注册表标记。这些正常 QEMU 路径不等于实体停止超时或任意 SMP 压力证据。storage 静态实例、同步 bulk 超时后调用者缓冲区、拒绝 SET_INTERFACE 设备的安全恢复、可失败 shutdown 和厂商 GPU 硬件恢复仍待推进。文档行号检查通过 540 条，导航仍是既有 7 个未索引页面；实际 `docs/zh` 迁移及其他改动保留。本地证据位于 `.kernel-build/usb-endpoint-review/`。
+
+
+### 独立 DMA buffer 与 bulk 暂存验证（2026-11-14）
+
+代码提交 `07b735bc7`。新增 DMA buffer 的 7 项测试方法、8 个命名场景，运行生产 core/registry/refcount/allocator 代码与 ASan/UBSan；PFA、CPU alias 和架构就绪由主机后端替代。覆盖小请求/强对齐、8 MiB 上限、物理地址 0、整个分配块的 mask 检查、compact PFN 与真实分配阶数回收、参数和元数据/页 OOM、不可用 alias/对齐、分配期间停止/注销/mask 改变、跨 owner 注销的最后引用，以及 8 个真实线程各 10000 次引用交接。另一个线程在 lifecycle 已被持有时完成分配，验证 active class 不会因隐式获取该锁而阻塞退出。
+
+新增 bulk 的 7 项主机方法使用真实 xHCI 提交、ring、prepare/abort/remove、USB/core 与上述 buffer 实现，验证 IN/OUT/零长/64 KiB 私有地址、完整成功才拷回、短包/非法 residue/错误不发布输入、无效/关闭/忙状态拒绝，以及复制期间退出后的提交前复查。事件等待、MMIO/PCI/IRQ 和 DMA 由故障后端替代：超时后立即释放调用者缓冲区，再模拟迟到 DMA 写入仍保留的暂存对象；真实 unregister 的 prepare 在 HALT 无法确认时失败，原对象和引用数不变，重试成功只交还 controller 引用，最后外部 put 才释放。没有在实体控制器注入停止超时。
+
+15 个负控分别破坏实际阶数回收、compact PFN 换算、owner pin、对齐、整个块的 mask、架构就绪、buffer get、分配后 owner 检查、无 lifecycle 等待、私有 DMA 地址、复制后退出检查、prepare 失败保留、remove 最后释放、错误不拷回和短包拒绝，全部触发运行时断言/ASan；编译失败不计入。恢复后隔离导出树通过 233 个不同测试方法，工作区再通过 18 项 buffer/bulk/IRQ/endpoint encoding 定向检查。提交前逐一核对 17 个导出源码路径；最后仅移动 smoke case 的说明注释，门禁表审计仍通过。
+
+`make check-firmware-model` 通过 448 项及单独 1 项 sleep ABI，`make check-pc-drivers` 通过 100 项；115 个 instance、32 个 driver component、194 个 smoke case 审计通过。双 CPU embedded hub guest 通过独立 HID/hub 与整体 controller 的退出/重新绑定；新增 `make smoke-usb-bulk-x86_64` 确认 2/2 CPU online，在专用 8 MiB 空白盘读写、比对、恢复，并匹配 `DRIVER_USB_BULK: PASS read=1 write=1 verify=1 restore=1`。两者均匹配真实 PFA 的 `DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1`。generic 的严格热插拔与 HID 实际输入门禁通过，覆盖新 API 的模块导出/加载。
+
+AArch64 的 `ARCH=aarch64 ABI=linux BRINGUP=0 DRIVER_DEPLOYMENT=embedded RAMFS_USER=1 kernel-only` 构建成功；QEMU virt/cortex-a57 从该构建的 raw `kernel.bin` 启动，传入 `-append driver.runtime_test=1`，实际匹配 DMA buffer、资源和 runtime PASS 并正常关机。完整 dev-build 仍受既有 `user/external/sbase/id.c` 缺失阻断，不计为成功；先前用 ELF 启动未运行到该 runtime，亦不计入证据。raw 启动的单 CPU 结果不代表跨架构 USB 或任意 SMP 压力已验证。
+
+这些改动提供显式存储所有者及首个硬件使用者，不提供 GPU BO/驻留、GPUVM、IOMMU 高阶映射或停止证明。每 controller 的预分配占用为 64 KiB；storage 实例/独立退出、BOT 恢复、变长 bulk/多 TRB、拒绝 SET_INTERFACE 设备的恢复和可失败 shutdown 仍待推进。公开布局与 ABI 10 保持不变。文档行号检查通过 540 条；导航仍有迁移工作区既有 7 个未索引页面。实际 `docs/zh` 迁移及其他改动保留；本地证据位于 `.kernel-build/dma-buffer-review/`。
