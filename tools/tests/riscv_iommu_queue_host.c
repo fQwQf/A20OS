@@ -8,6 +8,29 @@
 pfa_t pfa;
 bus_type_t pci_bus;
 struct test_bdf { unsigned bus, slot, function; uint16_t command; };
+/* This queue-focused fixture substitutes publication/leases; the requester
+ * integration fixture separately runs the production PCI ledger and core. */
+static device_t *published[128];
+static struct test_bdf fallback_bdf={0,1,0,0};
+static device_t fallback_device={.bus=&pci_bus,.plat_data=&fallback_bdf,.references=1};
+struct pci_requester_reservation { device_t *device; uint16_t rid; };
+static struct pci_requester_reservation leases[8];
+void driver_discovery_begin(void) {}
+void driver_discovery_end(void) {}
+int pci_device_find_get(uint16_t segment,uint16_t rid,device_t **out) {
+ *out=NULL;if(segment||rid>=128||!published[rid])return -ENODEV;
+ *out=device_get(published[rid]);return 0;
+}
+int pci_requester_reserve(device_t *device,uint16_t segment,const uint16_t *ids,size_t count,pci_requester_reservation_t **out) {
+ assert(!segment&&count==1);*out=NULL;
+ for(unsigned i=0;i<8;i++)if(leases[i].device&&leases[i].rid==ids[0])return -EBUSY;
+ for(unsigned i=0;i<8;i++)if(!leases[i].device){leases[i]=(struct pci_requester_reservation){device_get(device),ids[0]};*out=&leases[i];return 0;}
+ return -ENOSPC;
+}
+void pci_requester_release(pci_requester_reservation_t *lease) {
+ if(!lease)return;
+ device_put(lease->device);memset(lease,0,sizeof(*lease));
+}
 static unsigned allocations;
 void *kmalloc(size_t size) { void *p = malloc(size); assert(p); allocations++; return p; }
 void kfree(void *p) { if (p) { assert(allocations); allocations--; free(p); } }
@@ -24,6 +47,7 @@ int pci_device_location(const device_t *d, unsigned *bus, unsigned *slot, unsign
 }
 uint16_t pci_cfg_read16(const device_t *d, uint32_t reg)
 { assert(reg == 4); return ((struct test_bdf *)d->plat_data)->command; }
+uint32_t pci_cfg_read32(const device_t *d,uint32_t reg) {return pci_cfg_read16(d,reg);}
 static int reject_bme_clear;
 void pci_cfg_write16(const device_t *d, uint32_t reg, uint16_t value)
 {
@@ -89,6 +113,8 @@ static void setup(void)
     pfa.nr_ranges = 1;
     pfa.ranges[0] = (pfa_range_t){(uintptr_t)ram - PAGE_OFFSET,
         (uintptr_t)ram - PAGE_OFFSET + sizeof(ram), 100, 256};
+    memset(published,0,sizeof(published));published[8]=&fallback_device;
+    for(unsigned i=0;i<8;i++)assert(!leases[i].device);
     memset(g_user_domains, 0, sizeof(g_user_domains));
     memset(&g_iommu_stats, 0, sizeof(g_iommu_stats));
 }
@@ -161,7 +187,7 @@ static void native_domains(void)
         g_iommu_ddt = (uint8_t *)contexts;
         g_iommu_dc_stride = 32; g_iommu_ready = 1;
         struct test_bdf bdf = {0, 1, 0, 0};
-        device_t d = {.bus=&pci_bus, .plat_data=&bdf, .references=1};
+        device_t d = {.bus=&pci_bus, .plat_data=&bdf, .references=1};published[8]=&d;
         struct driver_dma_domain *domain, *other;
         d.user_owned = 1;
         assert(riscv_iommu_dma_domain_create(&d, &domain) == -EBUSY && !domain);
@@ -175,7 +201,7 @@ static void native_domains(void)
         assert(!riscv_iommu_domain_release(8, 42) && !allocations);
         if (failure == 2) fail_publish_at = publications + 6;
         int ret = riscv_iommu_dma_domain_create(&d, &domain);
-        assert(domain && d.references == 2 && g_user_domains[0].owner_pid < 0);
+        assert(domain && d.references == 3 && g_user_domains[0].owner_pid < 0);
         if (failure == 2) {
             assert(ret < 0);
             assert(driver_dma_domain_shutdown(domain) < 0 && allocations == 2);
@@ -223,7 +249,7 @@ static void native_faults(void)
     g_iommu_fq = faults; g_iommu_ready = 1;
     struct test_bdf a_bdf = {0, 1, 0, 0}, b_bdf = {0, 2, 0, 0};
     device_t a = {.bus=&pci_bus, .plat_data=&a_bdf, .references=1};
-    device_t b = {.bus=&pci_bus, .plat_data=&b_bdf, .references=1};
+    device_t b = {.bus=&pci_bus, .plat_data=&b_bdf, .references=1};published[8]=&a;published[16]=&b;
     struct driver_dma_domain *a_domain, *b_domain;
     assert(!riscv_iommu_dma_domain_create(&a, &a_domain));
     assert(!riscv_iommu_dma_domain_create(&b, &b_domain));

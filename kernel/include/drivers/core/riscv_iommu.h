@@ -9,6 +9,12 @@ struct driver_dma_domain;
  * driver binding/user ownership. DMA stopped and PCI bus mastering disabled
  * before create and shutdown. No physical-DMA fallback. Native owners use
  * distinct negative tokens, never PID identities. No BME enable is performed.
+ * Requires the current published device identity. Claims the explicit RID in
+ * the shared PCI requester ledger before any DC/page-table publication; overlap
+ * -> -EBUSY. No alias inference. Creation is serialized with discovery.
+ * Uncertain invalidation retains this lease and device identity with tables.
+ * Shutdown transfers a confirmed-detached lease to the managed context; final
+ * domain put releases it outside the mapping mutex. Keep failed cleanup handles.
  * On creation error, non-NULL *out is a closed cleanup handle: retry shutdown,
  * then put. Never discard it or release provider hardware/module resources.
  * Hardware currently provides 8 domains, 64 pages/domain and a one-level DDT;
@@ -57,7 +63,14 @@ int riscv_iommu_dma_watch_stop(struct riscv_iommu_dma_watch **, uint64_t deadlin
 
 /* One device, one translation domain.  These calls fail closed when the
  * RISC-V IOMMU is absent; callers must never fall back to physical DMA for a
- * device that requested isolation. */
+ * device that requested isolation. Positive PID API returns 0/-1, requires a
+ * published PCI function, and participates in the SAME requester ledger as
+ * native domains. Healthy idempotence requires the same device identity;
+ * re-enumeration does not refresh an old claim. Claim/release are task-context
+ * discovery transactions. After acquiring the lease, a new user claim disables
+ * BME and verifies readback before DC publication; rejected overlaps do not
+ * write config or contexts. Healthy idempotence does not change BME. Caller
+ * coordinates binding/DMA engine stop; BME clear alone does not drain DMA. */
 int riscv_iommu_domain_claim(uint16_t devid, int owner_pid);
 /* Map only caller-owned, allocated order-0 RAM; hold those references until
  * return. The backend pins every page independently before publishing PTEs.
@@ -72,7 +85,10 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
                             uint64_t *count, uint32_t *cause,
                             uint64_t *iova, int *blocked);
 /* Caller stops the DMA engine/bus mastering first. Failure retains tables,
- * pins and ownership for retry. Failed claim can also retain page tables;
+ * pins and the shared requester lease/device reference for retry. User leases
+ * are released only after confirmed context invalidation; native ownership can
+ * only be released through its managed handle, not a negative PID here.
+ * Failed claim can also retain page tables;
  * the same owner's next claim first retries safe disposal of those tables.
  * A blocked successful claim must be released, not treated as idempotent. */
 int riscv_iommu_domain_release(uint16_t devid, int owner_pid);

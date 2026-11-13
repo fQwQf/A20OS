@@ -295,9 +295,9 @@ static int udriver_claim_device(int di, int pid)
     uint16_t devid = g_edu[di].devid;
     spin_unlock_irqrestore(&g_udr_lock, flags);
 
+    driver_discovery_begin();
     int r = -1;
-    if (pci_user_device_bus_master(devid, 0) == 0 &&
-        riscv_iommu_domain_claim(devid, pid) == 0) {
+    if (riscv_iommu_domain_claim(devid, pid) == 0) {
         if (pci_user_device_bus_master(devid, 1) == 0)
             r = 0;
         else
@@ -310,6 +310,7 @@ static int udriver_claim_device(int di, int pid)
         g_active_device_pid = pid;
     }
     spin_unlock_irqrestore(&g_udr_lock, flags);
+    driver_discovery_end();
     return r;
 }
 
@@ -347,9 +348,13 @@ int udriver_release(uint64_t phys, int pid)
         uint16_t devid = g_edu[di].devid;
         spin_unlock_irqrestore(&g_udr_lock, flags);
 
+        driver_discovery_begin();
         pci_user_device_bus_master(devid, 0);
-        if (riscv_iommu_domain_release(devid, pid) < 0)
+        if (riscv_iommu_domain_release(devid, pid) < 0) {
+            driver_discovery_end();
             return -1;
+        }
+        driver_discovery_end();
         /* Mappings belonging to this device are dropped with the process's
          * entries; another device owned by the same process keeps its own. */
         udriver_dma_drop_all(pid);
