@@ -289,27 +289,35 @@ typedef struct usb_hcd {
 
 void usb_core_init(void);
 
+/* Task-context topology APIs use the native lifecycle coordinator, without
+ * suppressing probes. Same-HCD reentry -> -EBUSY; duplicate -> -EEXIST;
+ * invalid/stopping ancestor -> -ENODEV. Caller keeps HCD storage valid. */
 int usb_core_register_hcd(usb_hcd_t *hcd);
-/* Task context. Failure retains registration, ports/interfaces/endpoints and
- * address ownership for retry; already removed interfaces stay removed. */
+/* Failure retains registration and remaining ownership for retry; already
+ * removed interfaces stay removed. Active descendants or registered child
+ * HCDs keep their upstream transport alive (-EBUSY). */
 int usb_core_unregister_hcd(usb_hcd_t *hcd);
 
 /* Address reservations for controllers that assign addresses in software. */
 int usb_core_alloc_address(void);
 void usb_core_free_address(uint8_t address);
 
-/* Enumerate connected ports of all registered HCDs.  Called after
- * driver_probe_all() so interface device_register() does not re-enter the
- * driver-core registration mutex. */
+/* Enumerate under lifecycle coordination. Nested scans are skipped;
+ * callbacks can publish/probe downstream buses in the same pass. */
 void usb_core_scan(void);
 
 /* Process-context hotplug poll.  It is rate-limited internally and must not
  * be called from an interrupt handler because add/remove invokes drivers. */
 void usb_core_poll(void);
+/* Caller pins interface/protocol storage (e.g. an active class call).
+ * Nonblocking topology entry: -EAGAIN when lifecycle is busy, -ENODEV for
+ * stale/stopping/pending-removal devices; no callback then. Not an IRQ API. */
+int usb_device_poll(usb_device_t *dev);
 
-/* Task context, single-owner with scan/unregister. A partial setup is retained
- * on cleanup failure, including slot/address; scan/unregister retry it before
- * any new reset. Occupied/pending port -> -EBUSY; stopping HCD -> -ENODEV. */
+/* Task context, lifecycle-serialized. Cleanup failure retains slot/address
+ * for scan/unregister retry. Occupied/pending port -> -EBUSY; stopping HCD
+ * or ancestor -> -ENODEV. Another retiring port on the same physical
+ * controller defers allocation with -EAGAIN, without charging scan retries. */
 int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port);
 
 /* Generic control transfer on a device's EP0. */

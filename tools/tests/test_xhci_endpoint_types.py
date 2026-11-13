@@ -58,6 +58,7 @@ typedef struct {
     spinlock_t lock;
     uintptr_t doorbell;
     xhci_ep_t *eps;
+    uint64_t dcbaa[33];
     uint8_t fatal, max_ports, max_slots;
     xhci_slot_path_t slot_path[33];
 } xhci_controller_t;
@@ -110,7 +111,7 @@ int main(void){
  xhci_slot_add_context(slot,3);assert((slot[0]>>27)==4);
  xhci_slot_add_context(slot,7);assert((slot[0]>>27)==7);
  assert((slot[0]&0x07ffffffU)==0x005abcdeU);
- xhci_ep_t bulk={.slot=1,.dci=3};x.eps=&bulk;
+ xhci_ep_t bulk={.slot=1,.dci=3};x.eps=&bulk;x.max_slots=32;x.dcbaa[1]=1;
  usb_device_t dev={.slot=1};usb_endpoint_t in={.addr=0x81};uint8_t data[64]={0};
  usb_urb_t urb={.ep=&in,.dev=&dev,.buf=data,.len=8};usb_hcd_t hcd={&x};
  /* READ CAPACITY(10) data and a CSW both use a bulk IN Normal TRB. */
@@ -120,6 +121,9 @@ int main(void){
  /* HID's asynchronous path also leaves the reserved direction bit clear. */
  assert(!xhci_op_submit_interrupt(&hcd,&urb)&&bulk.pending==&urb);
  assert(bells==3&&waits==2);
+ x.dcbaa[1]=0;bulk.pending=NULL;memset(data,0x6b,sizeof(data));
+ assert(xhci_op_submit_interrupt(&hcd,&urb)==-ESHUTDOWN&&bells==3&&data[0]==0x6b);
+ x.dcbaa[1]=1;
 
  /* Lenovo's high-speed disk is on port 3 of a high-speed hub at root 2.
   * A full-speed device on that port instead needs the hub's TT. */

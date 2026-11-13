@@ -1457,6 +1457,19 @@ device_t *device_find_get_by_mmio(uint64_t physical) {
     return found;
 }
 int driver_device_count(void) { return g_device_count; }
+void driver_lifecycle_begin(void) { driver_ops_lock(); }
+void driver_lifecycle_end(void) { driver_ops_unlock(); }
+int driver_lifecycle_try_begin(void) {
+    bool boot = !proc_current();
+    unsigned cpu = cpu_current_id();
+    /* Progress must not re-enter its own partially mutated boot graph. Task
+     * mutex_trylock is likewise non-recursive, unlike blocking mutex_lock. */
+    if ((boot && boot_ops_depth[cpu]) || !mutex_trylock(&g_driver_core_ops))
+        return -EAGAIN;
+    if (boot) boot_ops_depth[cpu] = 1;
+    return 0;
+}
+
 void driver_discovery_begin(void) {
     driver_ops_lock();
     discovery_depth++;

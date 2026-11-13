@@ -18,6 +18,7 @@ typedef struct xhci_ep {struct xhci_ep *next;void *alloc_ptr;uint8_t slot;usb_ur
 typedef struct {
  void *alloc_ptr;usb_hcd_t hcd;uintptr_t op,runtime;spinlock_t lock;
  unsigned fatal,running,hardware_owned,halted,irq_registered,max_slots,xfer_busy,ep_count;
+ unsigned callbacks_active,slot_callbacks[3];
  uint64_t xfer_deadline,dcbaa[3];xhci_slot_path_t slot_path[3];xhci_ep_t *eps;int irq;
 } xhci_controller_t;
 static xhci_controller_t *stop_controller;

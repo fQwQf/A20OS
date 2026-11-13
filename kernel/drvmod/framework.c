@@ -465,6 +465,9 @@ const struct drv_export drv_export_table[] = {
     { "device_unregister",   (void *)device_unregister },
     { "device_probe_use_remove", (void *)device_probe_use_remove },
     { "device_add_remove_prepare", (void *)device_add_remove_prepare },
+    { "driver_lifecycle_begin", (void *)driver_lifecycle_begin },
+    { "driver_lifecycle_try_begin", (void *)driver_lifecycle_try_begin },
+    { "driver_lifecycle_end", (void *)driver_lifecycle_end },
     { "platform_bus",        &platform_bus },
     /* PCI class-driver accessors (device_t-based; modules bind through
      * drv_driver_register with bus = &pci_bus) */
@@ -635,6 +638,7 @@ const struct drv_export drv_export_table[] = {
     { "usb_core_free_address",   (void *)usb_core_free_address },
     { "usb_control_msg",         (void *)usb_control_msg },
     { "usb_submit_urb",          (void *)usb_submit_urb },
+    { "usb_device_poll",         (void *)usb_device_poll },
     /* Backend-neutral in-kernel network bridge. Loadable NICs never acquire a
      * protocol-private lock or enter FreeBSD/lwIP from their IRQ context. */
     { "net_stack_receive_progress",  (void *)net_stack_receive_progress },

@@ -379,6 +379,14 @@ device_t *device_find_get_by_firmware_id(const char *id);
 device_t *device_find_get_by_mmio(uint64_t physical);
 void *arch_device_map_mmio(uint64_t physical, size_t size, uint32_t flags);
 void arch_device_unmap_mmio(void *address, size_t size);
+/* Task-context topology/binding coordination; does not suppress probes.
+ * begin/end may nest in the owning task/boot context. try_begin returns 0
+ * only for a new outer entry, -EAGAIN if busy (including this owner); pair
+ * end only with successful entry. Not an IRQ/spinlock API or an object pin.
+ * A successful try can still invoke sleeping/bounded driver operations. */
+void driver_lifecycle_begin(void);
+int driver_lifecycle_try_begin(void);
+void driver_lifecycle_end(void);
 /* Serialize discovery and suppress probes until its paired end. */
 void driver_discovery_begin(void);
 void driver_discovery_end(void);
