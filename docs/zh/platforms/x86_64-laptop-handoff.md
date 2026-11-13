@@ -8,6 +8,43 @@
 进一步验证了带源码构建 fastfetch 的镜像和正常重启。
 
 
+## 第17轮验收与关机优化（2026-11-13）
+
+实机已确认新版 OpenRC 桌面、网络等使用正常，但本轮图形重启请求至最终 reboot 系统调用
+入口约101.27 s。1490条内核记录连续、state clean，U盘根分区只读fsck=0。服务退出约9 s，
+之后约92 s仍在最终信号/同步段，尚未进入固件复位；不能直接归因于ACPI超时。
+
+排查发现 `VFS_MOUNT_DETACHED=2` 与 Linux `MS_NOSUID=2` 冲突：OpenRC 更新 `/run`
+属性后，路径查找绕过tmpfs，把运行时文件及socket标记落到ext4。重用本轮实际根分区测试时
+D-Bus因此Address in use。内核已将detached改为独立状态，remount保留namespace ownership；
+生产C adapter/Rust matcher及旧位判断负对照、200000步C/Rust差分通过。
+
+同时合并连续JBD2 payload写入，128 KiB封顶；187个连续4 KiB块由187次写变为6次。
+不删除任何flush屏障，错误仍阻止后续提交；补充sync/JBD2分阶段耗时。图形工作区在DRM真正
+交还显示时恢复文本控制台，关闭render/probe文件不会抢占其他输出客户端。
+
+| 最终候选验证（16 CPU / 8 GiB） | 正常电源动作耗时 | 退出后检查 |
+|---|---:|---|
+| USB桌面，图形S5 | 9.876 s | fsck=0，clean，RECOVER=0，last_orphan=0 |
+| USB桌面，普通reboot | 9.920 s | 同上 |
+| NVMe桌面，图形restart | 9.659 s | 同上 |
+
+三轮均使用实际第17轮根分区的只读副本及同一EFI，确认 `/run` 仍在RAM、服务正常监督，
+留下64个文件/16 MiB待同步数据再退出，并保存恢复后的文本控制台截图。
+这些是QEMU结果，尚不能保证这台机器的U盘实测关机时间。新镜像可由永久压缩档案在RAM中
+完整重建，已经重建并核对整个镜像SHA256。
+
+证据：`build/evidence/lenovo-83eg-2026-11-13/boot-17-analysis/README.md`、
+`native-acceptance.json`、`candidate-source.json`。本轮核心提交 `cb144381f`（挂载状态）及
+`be1188cfd`（日志批量写与同步诊断）；显示控制台改动仍属于未统一提交的实机图形移植工作区，
+完整候选源文件哈希已锁定，不把这些提交当成整个实机镜像的独立干净构建来源。
+
+交付仅更新测试U盘EFI及manifest，桌面分区不写入、不修复，保留本轮真实数据。
+实际安装与只读重挂校验以 `usb-readback.json` 和 `physical-root-readback.json` 为准。
+旧EFI/manifest保存为 `EFI/A20OS/BOOT17.EFI`、`BOOT17.MANIFEST`，独立shell保留。
+下一轮使用同日 `boot-18/collect-logs.py` 收集实机分阶段耗时；当前已有管理员操作授权，
+无需用户再次手动复制日志。继续不排查键盘灯，不重启Debian宿主，不改内置SSD分区。
+
 ## 第 16 轮实机与第 17 轮 OpenRC 交付（2026-11-13）
 
 第16轮重启“资源忙”的日志已读：1911条连续记录，20次准入因1–2个文件操作返回EBUSY，
