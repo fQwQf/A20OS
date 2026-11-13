@@ -115,9 +115,15 @@ RISC-V 用户态 domain 映射还独立保留每个 RAM 页的 frame 引用。ma
 
 设备 context 安装失败同样先尝试安全 block，无法确认时保留三层页表及 owner。原 owner 再次 claim 会先重试释放失败 claim 的页表，成功后才建立新 claim；已经成功 claim 后进入 blocked 状态的 domain 必须显式 release。release 调用者先停止 DMA/bus mastering；失败仍保留全部资源。当前没有后台回收器，硬件持续故障时这些有界资源可能一直保留，不能以回收内存为由绕过确认。
 
-`riscv_iommu_dma_domain_create(device, &domain)` 接收已发布的 PCI device，从实际 BDF 计算 requester ID，创建 managed domain。构造和 shutdown 时要求 bus mastering 已关闭；调用者还必须停止 DMA，并与驱动绑定/用户所有权变更串行化。创建不启用 bus mastering，驱动确认初始化成功后自行启用。user_owned 设备、已有 requester claim 和不受当前 DDT 覆盖的 requester 均拒绝，不回退物理地址。原生 owner 使用单调负 token，与正 PID 的用户态 owner 隔离；token 用尽返回错误，不循环重用。device 对象由 managed domain 保留。
+`riscv_iommu_dma_domain_create(device, &domain)` 接收已发布的 PCI device，从实际 BDF 计算 requester ID，创建 managed domain。构造和 shutdown 时要求 bus mastering 已关闭；调用者还必须停止 DMA，并与驱动绑定/用户所有权变更串行化。创建不启用 bus mastering，驱动确认初始化成功后自行启用。user_owned 设备、已有 requester claim 和不受当前 DDT 覆盖的 requester 均拒绝，不回退物理地址。原生 owner 使用单调负 token，与正 PID 的用户态 owner 隔离；token 用尽返回错误，不循环重用。device 对象由 managed domain 保留。构造在 discovery 事务中核对当次发布身份；旧引用不会自动指向同 BDF 的新设备。
 
 创建失败通常置空输出，但 context 安装后失效失败且无法安全清理时，输出非空的已关闭 domain：调用者须保留，重试 shutdown 后再 put。map 通过 needs_unmap 交接当前失败页地址；unmap 和 deactivate 复用实际 IOMMU 失效路径，失败返回 `-EIO` 并保留引用。构造/关闭时 BME 未清除返回 `-EBUSY`。后端仍限 8 个 domain、每 domain 64 页和一层 DDT；没有 AMD-Vi、多 segment、ATS、页大小协商或原生故障 IRQ 派发；已提供下述 per-device 轮询和后台 watch。TO_DEVICE 页使用只读 PTE；FROM_DEVICE/BIDIRECTIONAL 使用读写 PTE（SV39 不允许只写叶 PTE）。cache sync 仍由通用 mapping 层执行。
+
+原生与正 PID 用户 domain 现在共同使用 `pci_requester_reserve()` 的登记：发布 DC/页表前占用当前 PCI function 的显式 requester，任一其他登记冲突都拒绝，原生接口报告 `-EBUSY`。它只占用一个已知 RID，不推断 alias、ACS 或物理隔离组。健康的用户 claim 只有原设备身份仍相同时才幂等，重枚举不刷新旧 claim；设备移除/替换不自动释放原占用。
+
+用户 `riscv_iommu_domain_claim()`/`release()` 保持正 PID、0/-1 接口，在任务上下文与 discovery 串行化。新用户 claim 先取得共享占用，再关闭 BME 并验证读回，失败回收临时占用且不发布 DC；拒绝重叠占用不会修改 PCI 配置或 IOMMU context，健康幂等调用不改变 BME。`udriver` 的首次 claim 将硬件接管和随后 BME enable 放在同一外层事务中，release 将 BME disable/context detach 放在同一事务中。BME clear 不排空 engine/in-flight DMA，停止与同一 owner 的调用串行化仍由调用者负责。
+
+页表安装/失效失败时，占用和设备引用随页表保留；用户原 owner 可在身份未替换时重试失败 claim 的安全清理，成功 release 才释放登记。原生 shutdown 在确认 detach 后将占用转交 managed context，直到最后一次 `driver_dma_domain_put()` 才释放；shutdown 成功而旧 domain 引用尚在时，新重叠 claim 仍被拒绝。这个额外保留期使硬件 detach 回调无需在 mapper mutex 下等待 discovery，最终释放在映射锁之外执行，避免与解绑路径反向等待。负 token 的原生 domain 只能通过 managed handle 关闭，不能用用户 release 绕过生命周期。配置写入和未参与登记的其他 provider 仍不被这套占用强制拦截。
 
 `riscv_iommu_dma_fault_poll(device, &snapshot)` 是任务上下文的轮询接口。它验证该 device 对象确实持有当前 native requester，拒绝同 BDF 的其他软件对象，返回累计 `count`、最后 `cause/address`、`blocked`、`isolated`、`isolation_error` 和 `queue_error`。轮询会排空共享 FQ 并处理所有 owner，不只处理调用者。故障记录归属和 BME 清除/context 失效在同一 IOMMU domain 锁下串行完成，避免在旧事件处理前 release/reclaim requester。隔离命令失败时，后续轮询即使没有新记录也会重试；已成功的动作不重复执行。
 
@@ -133,7 +139,9 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 
 显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。进一步的 EDU 往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录，由后台 watch 完成隔离并通过回调 signal fence；主线程等待 fence、stop 排空回调后，再检查 store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
 
-限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 及用户态驱动路径保持既有行为。
+同一 `smoke-driver-iommu-native-riscv64` 实例还验证通用占用与原生/用户 domain 的双向冲突、拒绝时 DC 不变、shutdown 后最后 put 前继续占用，以及用户正常幂等/release 后重试，新增 `DRIVER_IOMMU_REQUESTER: PASS native=1 user=1 conflict=1 release=1` 标记；普通启动不运行。失败保留与锁顺序另由主机后端验证。
+
+限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 不自动加入 managed 页映射；用户态映射继续使用既有接口，共享 requester 接管与失败保留按上述协议执行。
 
 ### 不可变物理约束与映射入口检查
 
@@ -443,3 +451,13 @@ QEMU IVRS 没有 IVMD，本轮启动验证只证明空 policy 的构造、保留
 保留其他工作的工作区中，x86_64 双核 embedded、AArch64 bringup embedded 内核构建通过；完整 `tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核/开发镜像构建及 QEMU 启动，退出码 0，9 个标记全部匹配，包括 `AMDVI_PEERS: PASS query=1`，客户机确认 `2/2 configured CPUs online`。115 个实例与 32 个驱动组件清单检查通过，文档行号引用检查通过。导航仍有其他工作的 7 个未索引页面，本轮无新增页面或导航条目。
 
 QEMU 只验证单个 EDU requester 的集合查询/预留和空 policy 集成；多 alias、有效 Range 与带约束 IVMD 由主机模型验证。没有提交 EDU DMA、启用 AMD-Vi 翻译或 GPU 加速。已实现固件声明集合的接管前检查与持续身份占用；跨驱动停止协议、归属变更协调、全部物理 alias/ACS 证明、共享 DTE 属性兼容、实际硬件权限/Unity/Exclusion 与故障恢复仍须实际 provider 完成。验证日志位于本地 `.kernel-build/amdvi-peers-review/`。
+
+2026-11-14 RISC-V requester 登记接入：代码提交 `a7e1149b0`。隔离提交树中 146 项主机回归通过；新增 8 项测试方法、15 个场景使用生产 core/PCI、RISC-V provider、managed mapper 与 policy，以 ASan/UBSan 验证双向冲突、用户幂等、设备替换/移除、原生三阶段分配和三个页表分配失败、BME 读取/清除失败、上下文安装/失效失败的设备/页表/页面/占用保留、最后 put 后重试。硬件寄存器、队列完成、frame 与调度器由主机后端替代；其中 64 轮真实线程竞争验证用户 domain 与通用 lease 只有一个获胜。另一个线程测试在主线程持有 discovery 时完成 native shutdown，检查回调不等待该锁。
+
+跳过共享登记、失效失败时丢弃 lease、成功 detach 时提前释放、deactivate 中等待 discovery、登记前清除 BME 的五个负控均触发运行时行为断言；导出源码随后恢复并与代码提交核对一致。旧队列 fixture 已补充其发布/lease 替代后端，真实 PCI 登记的集成由新增 fixture 验证；没有以 stub 的返回值代替共享登记测试。既有 `test_udriver_mmio_rollback_host.py` 脚本通过。x86_64 双核 embedded、AArch64 bringup embedded 与 RISC-V `ABI=both` embedded 内核最终构建通过。
+
+最终 `tools/a20 test smoke-driver-iommu-native-riscv64` 完成 generic 内核/开发镜像与 QEMU 启动，退出码 0，3 个标记全部匹配，包括新增 `DRIVER_IOMMU_REQUESTER` 和既有真实跨页 EDU DMA、unmap 后 fault、隔离/watch 的 PASS。这证明 QEMU RISC-V 后端的实际 DMA 路径与共享软件占用集成；失败保留/锁顺序来自主机模型，不表示物理热插拔、控制器重绑、实体 GPU 或 AMD-Vi 翻译已验证。
+
+`make smoke-iommu-multidevice` 也完成开发镜像构建与双 EDU 用户态测试并以 0 退出，7 个预期标记全部匹配：两个 domain 已 claim、dev0 fault、dev1 unaffected、domains released、UEDUD PASS、IOMMU enabled 与正常 power-off，未出现禁止标记 `UEDUD: dev1 affected`。这覆盖实际 `udriver` 首次 claim/BME enable、故障与 release 协议，不能代替实体平台或任意用户并发/归属变更验证。
+
+115 个实例与 32 个组件清单、文档行号引用检查通过；导航仍有其他工作的 7 个未索引页面，本轮未新增文档页面。隔离导出仅包含本轮代码，构建/启动使用保留其他改动的共享工作区；`udriver.c` 中既有文档迁移链接未混入代码提交，实际 `docs/zh` 迁移保留，文档提交仍按现有 canonical 路径记录本轮差异。原生和用户后端均未获得自动停止 engine、原子用户归属转移或跨 alias 协调；这些仍由调用者/provider 协议承担。验证日志位于本地 `.kernel-build/iommu-requester-review/`。
