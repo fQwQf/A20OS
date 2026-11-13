@@ -124,6 +124,117 @@ int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out) {
     return *out ? 0 : -ENODEV;
 }
 
+int pci_device_scope_get(device_t *client, uint8_t scope_bus, uint8_t first,
+                         uint8_t last, device_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!client || first > last)
+        return -EINVAL;
+    struct bridge_view {
+        device_t *device;
+        uint8_t primary, secondary, subordinate;
+        bool path;
+    } bridges[PCI_MAX_PUBLISHED_DEVICES];
+    size_t count = 0;
+    const pci_dev_info_t *client_info = NULL;
+    int ret = 0;
+    driver_discovery_begin();
+    for (unsigned i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+        if (!g_pci_in_use[i] || g_pci_devs[i].state == DEV_STATE_REMOVING)
+            continue;
+        if (&g_pci_devs[i] == client)
+            client_info = &g_pci_infos[i];
+    }
+    if (!client_info) {
+        ret = -ENODEV;
+        goto done;
+    }
+    /* Do not silently omit a disappeared/replaced bridge from the route.
+     * A different function with the same BDF needs normal bus reconciliation. */
+    for (unsigned i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+        if (!g_pci_in_use[i])
+            continue;
+        const pci_dev_info_t *info = &g_pci_infos[i];
+        uint32_t id = pci_ecam_read(info->bus, info->dev, info->func, 0);
+        if (g_pci_devs[i].state == DEV_STATE_REMOVING ||
+            id != ((uint32_t)info->device << 16 | info->vendor)) {
+            ret = -ENODEV;
+            goto done;
+        }
+        uint32_t header = pci_ecam_read(info->bus, info->dev, info->func, 0x0c);
+        if (header == ~(uint32_t)0) {
+            ret = -EIO;
+            goto done;
+        }
+        if (((header >> 16) & 0x7f) != 1)
+            continue;
+        if ((pci_class_code(&g_pci_devs[i]) >> 8) != 0x0604) {
+            ret = -EOPNOTSUPP;
+            goto done;
+        }
+        uint32_t window = pci_ecam_read(info->bus, info->dev, info->func, 0x18);
+        unsigned primary = window & 0xff, secondary = (window >> 8) & 0xff;
+        unsigned subordinate = (window >> 16) & 0xff;
+        if (!secondary && !subordinate)
+            continue; /* Unconfigured bridge, not a route to any bus. */
+        if (!secondary || subordinate < secondary || primary != info->bus) {
+            ret = -EINVAL;
+            goto done;
+        }
+        bridges[count++] = (struct bridge_view){&g_pci_devs[i], primary,
+                                                secondary, subordinate, false};
+    }
+    device_t *anchor = NULL, *current = client;
+    uint8_t visited[PCI_MAX_BUS] = {0};
+    unsigned bus = client_info->bus;
+    for (;;) {
+        if (visited[bus]) {
+            ret = -ELOOP;
+            goto done;
+        }
+        visited[bus] = 1;
+        const pci_dev_info_t *info = current->plat_data;
+        unsigned devfn = (unsigned)info->dev << 3 | info->func;
+        if (bus == scope_bus && devfn >= first && devfn <= last)
+            anchor = current;
+        struct bridge_view *parent = NULL;
+        for (size_t i = 0; i < count; i++) {
+            if (bridges[i].secondary != bus)
+                continue;
+            if (parent) {
+                ret = -EBUSY;
+                goto done;
+            }
+            parent = &bridges[i];
+        }
+        if (!parent)
+            break;
+        if (client_info->bus < parent->secondary ||
+            client_info->bus > parent->subordinate) {
+            ret = -EINVAL;
+            goto done;
+        }
+        parent->path = true;
+        current = parent->device;
+        bus = parent->primary;
+    }
+    /* Every bridge which decodes the client bus must belong to this path.
+     * A wider overlapping sibling is not an alternative valid parent. */
+    for (size_t i = 0; i < count; i++)
+        if (!bridges[i].path && client_info->bus >= bridges[i].secondary &&
+            client_info->bus <= bridges[i].subordinate) {
+            ret = -EBUSY;
+            goto done;
+        }
+    if (anchor)
+        *out = device_get(anchor);
+    if (!*out)
+        ret = -ENODEV;
+done:
+    driver_discovery_end();
+    return ret;
+}
 /* Resolve the INTx interrupt line for an enumerated PCI function through the
  * platform routing hook (arch_pci_intx_irq).  Returns -1 when the function
  * has no interrupt pin or the platform provides no routing for it; callers

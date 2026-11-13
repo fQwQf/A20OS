@@ -23,6 +23,7 @@
 #include "drvmod/export.h"
 #include "drivers/core/dma_mapping.h"
 #include "drivers/core/riscv_iommu.h"
+#include "drivers/core/amd_iommu.h"
 #include "drivers/core/fence.h"
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
@@ -465,6 +466,8 @@ const struct drv_export drv_export_table[] = {
     { "pci_cfg_read16",      (void *)pci_cfg_read16 },
     { "pci_cfg_read32",      (void *)pci_cfg_read32 },
     { "pci_device_find_get", (void *)pci_device_find_get },
+    { "pci_device_scope_get", (void *)pci_device_scope_get },
+    { "amd_iommu_scope_get", (void *)amd_iommu_scope_get },
     { "pci_cfg_write16",     (void *)pci_cfg_write16 },
     { "pci_cfg_write32",     (void *)pci_cfg_write32 },
     /* message-signalled interrupts: capability parse, table programming and

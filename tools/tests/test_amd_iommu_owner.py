@@ -218,6 +218,7 @@ class AmdIommuOwnerTests(unittest.TestCase):
             '-I' + str(ROOT / 'kernel/arch/x86_64/include'),
             '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'kernel'),
             str(path), str(ROOT / 'kernel/drivers/core/amd_iommu_probe.c'),
+            str(ROOT / 'kernel/drivers/core/amd_iommu_scope.c'),
             str(ROOT / 'kernel/firmware/acpi/tables.c'),
             str(ROOT / 'kernel/firmware/acpi/ivrs.c'),
             str(ROOT / 'kernel/firmware/acpi/ivrs_policy.c'),

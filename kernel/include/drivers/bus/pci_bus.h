@@ -55,6 +55,17 @@ int pci_device_location(const device_t *dev, unsigned *bus,
  * Serialize lookup AND subsequent binding/config use with a discovery
  * transaction when they must describe the same lifecycle observation. */
 int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out);
+/* Task-context topology observation. Finds the client itself or an ancestor
+ * bridge on scope_bus whose devfn lies in [first,last], returning a reference
+ * released by device_put(). Validates the whole published bridge path:
+ * missing scope/client -> -ENODEV, overlapping routes -> -EBUSY, malformed
+ * bridge windows -> -EINVAL, cycles -> -ELOOP. Identity changes fail closed.
+ * Clears out on error. No enumeration, BAR/config writes or inferred device
+ * dependencies. This does not prove ACS/alias isolation or freeze hardware.
+ * Caller holds a client reference; use an outer discovery transaction across
+ * this query AND subsequent binding/config observations when needed. */
+int pci_device_scope_get(device_t *client, uint8_t scope_bus, uint8_t first,
+                           uint8_t last, device_t **out);
 /* Return the MMIO or I/O-port resource for a physical PCI BAR number.
  * Resources are compacted in device->res, so display drivers must not assume
  * that BAR2 is the second resource when BAR0 is a 64-bit BAR. */

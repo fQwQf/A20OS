@@ -38,6 +38,17 @@ typedef struct {
  * later ownership/activation must revalidate hardware state. */
 int amd_iommu_probe_unit(const acpi_ivrs_hardware_t *,
                          const amd_iommu_probe_ops_t *, amd_iommu_snapshot_t *);
+/* Supplemental Range-register scope observation for a validated snapshot.
+ * Returns a referenced integrated client/root-port ancestor (device_put by
+ * caller). Downstream scope requires a verified PCIe root port; malformed
+ * capability chains fail closed. RngValid=0 returns -EOPNOTSUPP: use firmware
+ * topology instead, never assume universal coverage. Error clears out.
+ * This is not IVRS policy, an alias/ACS isolation group, binding ownership or
+ * permission to activate DMA. It neither pins the controller nor freezes its
+ * snapshot; callers serialize/revalidate before hardware use. */
+struct device;
+int amd_iommu_scope_get(const amd_iommu_snapshot_t *, struct device *client,
+                          struct device **out);
 /* x86 segment-0 boot diagnostic after PCI host initialization. Does not claim
  * the device, enable MMIO, write registers or change DMA routing. */
 int amd_iommu_pci_report(const acpi_context_t *);
