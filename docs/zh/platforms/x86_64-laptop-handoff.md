@@ -39,8 +39,10 @@ Firefox冷/热DOM约28.94/6.02 s与13.59/5.24 s；均为虚拟机测量。
 
 实际USB原始备份压缩后约1.43 GiB，完整4 GiB解压SHA已核验，旧备份仍保留。
 RAM副本只需4个块/16 KiB修复；原始SHA15691082dce5…，修复SHA93e9b43a83ef…。
-修复脚本验证完整分区、补丁、可恢复重复执行与意外改动拒绝。当前等待用户执行物理修复，
-尚未切换旧0667017a… EFI。交付时将保留BOOT15.EFI/manifest、计数0000000f及23个旧文件。
+修复脚本验证完整分区、补丁、可恢复重复执行与意外改动拒绝。用户已完成4块/16 KiB实际修复，
+整个4 GiB回读93e9b43a83ef…，只读fsck=0。默认EFI已更新到上述dfe70d20…，旧版保留
+EFI/A20OS/BOOT15.EFI与BOOT15.MANIFEST；卸载/只读重挂完整核对EFI、manifest、回退副本、
+计数0000000f及23个原文件，三个USB分区均已卸载。第16轮实机重启、RSS界面和灯光待验收。
 
 证据：`build/evidence/lenovo-83eg-2026-11-13/boot-15-analysis/README.md`；实际安装状态以
 usb-readback.json为准。RSS提交9e02617f6、ext4提交cffea8293，原暂存.gitmodules/rtw89保留。
