@@ -87,6 +87,9 @@ static void pci_find_tests(void) {
  assert(pci_device_id(d)==0x12345678&&d->state==DEV_STATE_REMOVED);
  device_put(replacement);device_put(d);pci_remove();
 }
+static int bystander_probes;
+static int bystander_probe(device_t *dev) {(void)dev;bystander_probes++;return -ENODEV;}
+static int bystander_match(device_t *dev,const driver_t *drv) {(void)dev;(void)drv;return 1;}
 static void amd_case(const char *name) {
  tables_begin();int legacy=strstr(name,"legacy")!=NULL;
  unit_add(legacy?0x10:0x11,0x40,0xfed80000,strstr(name,"counters")?1ULL<<9:0);
@@ -119,6 +122,11 @@ static void amd_case(const char *name) {
  }
  present=1;pci_enumerate(0,0,1);device_t *dev=pci_current();assert(dev);
  dev->user_owned=strstr(name,"user-owned")!=NULL;
+ bus_type_t bystander_bus={.name="bystander",.match=bystander_match};
+ driver_t bystander_driver={.name="failed-bystander",.bus=&bystander_bus,.probe=bystander_probe};
+ device_t bystander={.name="bystander",.bus=&bystander_bus,.references=1};
+ assert(!bus_register(&bystander_bus)&&!driver_register(&bystander_driver));
+ assert(!device_register(&bystander)&&bystander_probes==1);
  int before=allocated;unsigned refs=dev->references;
  protect_writes=1;config_writes=0;
  driver_discovery_begin();assert(!driver_register(&amdvi_driver));
@@ -152,6 +160,7 @@ static void amd_case(const char *name) {
   assert(device_register(&blocker)==-EBUSY);
   assert(!amd_iommu_owner_selftest());
   assert(dev->drv==&amdvi_driver&&dev->references==refs+unit_count);
+  assert(bystander_probes==1); /* Recovery must not probe unrelated devices. */
  }
  assert(!config_writes);
  assert(!driver_unregister(&amdvi_driver));
@@ -161,6 +170,8 @@ static void amd_case(const char *name) {
  assert(!table_views&&allocated==before&&mmio_maps==mmio_unmaps);
  protect_writes=0;pci_remove();
  if(blocked)device_unregister(&blocker);
+ assert(!driver_unregister(&bystander_driver));device_unregister(&bystander);bus_unregister(&bystander_bus);
+ assert(bystander.references==1);
  assert(blocker.references==1&&peer.references==1);
 }
 '''
