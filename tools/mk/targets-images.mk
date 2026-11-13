@@ -99,7 +99,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) $(GUEST_KERNEL_DEP) $(GU
 		--user-build-dir "$(USER_BUILD_DIR)" --tag "$(NATIVE_TAG)" --mkfs-fat "$(MKFS_FAT)" \
 		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
 		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
-		--libc "$(if $(wildcard user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so,)" \
+		--libc "$(if $(filter gcc,$(TOOLCHAIN)),$(if $(wildcard user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so,))" \
 		--libgcc "$(LIBGCC_S_ARCH)" \
 		--protocols "$(PROTOCOLS_LINES)" \
 		--guest-kernel "$(GUEST_KERNEL_ELF)" \
@@ -152,7 +152,7 @@ $(BUILD_DIR)/ext4-journal-legacy.img: $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 # littlefs gate image: formatted by the host mkfs_lfs tool (links the
 # vendored littlefs), carrying the fixed payload user/cmds/fs/lfs_test.c
 # verifies byte-for-byte.
-HOST_CC ?= gcc
+HOST_CC ?= $(if $(filter llvm,$(TOOLCHAIN)),$(CLANG) $(LLVM_LINK),gcc)
 
 $(BUILD_DIR)/mkfs_lfs: tools/fs/mkfs_lfs.c kernel/external/littlefs/lfs.c \
 		kernel/external/littlefs/lfs_util.c
@@ -235,6 +235,9 @@ endif
 x86_64-uefi-loader: $(VBOX_X86_64_EFI)
 
 $(VBOX_X86_64_EFI): kernel/include/boot/framebuffer.h kernel/include/core/types.h $(KERNEL_BIN) $(KERNEL_ELF) tools/elf_load_span.py kernel/arch/x86_64/boot/uefi/x86_64_loader.c kernel/arch/x86_64/include/kernel_load.h kernel/arch/x86_64/boot/uefi/x86_64_kernel_blob.S kernel/arch/x86_64/boot/uefi/x86_64_efi.lds
+ifeq ($(TOOLCHAIN),llvm)
+	$(PYTHON) tools/boot/build-uefi-llvm.py --arch x86_64 --kernel-bin $(KERNEL_BIN) --kernel-elf $(KERNEL_ELF) --load-address $(X86_KERNEL_LOAD_ADDRESS_CANONICAL) --log $(LOG_LOADER) --out $@
+else
 	@mkdir -p $(dir $@)
 	@memory_bytes="$$($(PYTHON) tools/elf_load_span.py $(KERNEL_ELF) --expected-base $(X86_KERNEL_LOAD_ADDRESS_CANONICAL))" && \
 	$(CC) -Ikernel/include -mabi=ms -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
@@ -254,8 +257,12 @@ $(VBOX_X86_64_EFI): kernel/include/boot/framebuffer.h kernel/include/core/types.
 		-j .rela -j .rela.* -j .rodata -j .dynsym -j .dynstr \
 		-O pei-x86-64 --subsystem efi-app \
 		$(BUILD_DIR)/x86-64-uefi-loader.so $@
+endif
 
 $(VBOX_AARCH64_EFI): $(KERNEL_BIN) $(KERNEL_ELF) tools/elf_load_span.py kernel/arch/aarch64/boot/uefi/aarch64_loader.c kernel/arch/aarch64/boot/uefi/handoff.h kernel/arch/aarch64/boot/uefi/loader_arch.h kernel/arch/aarch64/boot/uefi/aarch64_kernel_blob.S
+ifeq ($(TOOLCHAIN),llvm)
+	$(PYTHON) tools/boot/build-uefi-llvm.py --arch aarch64 --kernel-bin $(KERNEL_BIN) --kernel-elf $(KERNEL_ELF) --load-address $(VBOX_AARCH64_LOAD_ADDRESS) --log $(LOG_LOADER) --out $@
+else
 	@mkdir -p $(dir $@)
 	@memory_bytes="$$($(PYTHON) tools/elf_load_span.py $(KERNEL_ELF) --expected-base $(VBOX_AARCH64_LOAD_ADDRESS))" && \
 	$(CC) -march=armv8-a -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
@@ -276,6 +283,7 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) $(KERNEL_ELF) tools/elf_load_span.py kernel/a
 		-j .rela -j .rela.* -j .rodata -j .dynsym -j .dynstr \
 		-O pei-aarch64-little --subsystem efi-app \
 		$(BUILD_DIR)/uefi-loader.so $@
+endif
 
 # The user build stamp is intentionally refreshed by a recipe, so a user binary
 # can become newer than an already-created FAT image during the same checkout.
@@ -384,7 +392,7 @@ MCU_DEMO_SRC := \
     user/cmsis_rtos2/src/backend_native.c \
     user/cmsis_rtos2/src/native_platform_a20.c \
     user/liba20rt/a20_malloc.c
-MCU_DEMO_CC := $(RISCV_ELF_PREFIX)gcc
+MCU_DEMO_CC := $(if $(filter llvm,$(TOOLCHAIN)),$(LLVM_CC),$(RISCV_ELF_PREFIX)gcc)
 # OS_NATIVE_TICK_HZ is the CMSIS tick used for osDelay/timeouts; it must be
 # the kernel's ARCH_TIMER_FREQ or the personality reports the wrong frequency.
 MCU_TICK_HZ ?= 1000
@@ -450,7 +458,7 @@ $(BUILD_DIR)/external/littlefs/%.o: $(KERNEL_DIR)/external/littlefs/%.c $(BUILD_
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(if $(and $(filter llvm,$(TOOLCHAIN)),$(filter aarch64,$(ARCH))),$(filter-out -mgeneral-regs-only,$(CFLAGS)),$(CFLAGS)) -c $< -o $@
 
 clean:
 	$(MAKE) -C user clean

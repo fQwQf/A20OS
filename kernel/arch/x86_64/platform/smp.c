@@ -255,14 +255,14 @@ void x86_64_secondary_entry(unsigned cpu_id)
 #define TLB_FLUSH_TIMEOUT_MS 5000
 
 struct tlb_flush_slot {
-    _Atomic uint32_t gen;
-    _Atomic uint64_t addr;
-    _Atomic uint64_t size;
+    uint32_t gen;
+    uint64_t addr;
+    uint64_t size;
 };
 
 static struct tlb_flush_slot tlb_flush_slots[CONFIG_NR_CPUS][TLB_FLUSH_SLOTS];
-static _Atomic uint32_t tlb_flush_request[CONFIG_NR_CPUS];
-static _Atomic uint32_t tlb_flush_ack[CONFIG_NR_CPUS];
+static uint32_t tlb_flush_request[CONFIG_NR_CPUS];
+static uint32_t tlb_flush_ack[CONFIG_NR_CPUS];
 static spinlock_t tlb_flush_publish[CONFIG_NR_CPUS];
 
 void x86_64_ipi_tlb_flush_handler(void)
@@ -417,10 +417,10 @@ if (irqs_were_off)
  * and a bounded wait that lets interrupts be taken so two CPUs moving vectors
  * at each other cannot deadlock.
  */
-static _Atomic uint32_t msix_vector_request[CONFIG_NR_CPUS];
-static _Atomic uint32_t msix_vector_ack[CONFIG_NR_CPUS];
+static uint32_t msix_vector_request[CONFIG_NR_CPUS];
+static uint32_t msix_vector_ack[CONFIG_NR_CPUS];
 /* vector in bits 7:0, mask request in bit 31 -- the LVT write takes both. */
-static _Atomic uint32_t msix_vector_arg[CONFIG_NR_CPUS];
+static uint32_t msix_vector_arg[CONFIG_NR_CPUS];
 
 void x86_64_ipi_msix_vector_handler(void)
 {

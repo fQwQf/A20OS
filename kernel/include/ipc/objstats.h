@@ -12,21 +12,23 @@
 #include "core/arch.h"
 #endif
 
+/* Access these counters through __atomic builtins (or the UP IRQ guard).
+ * Plain storage is required by Clang's GNU __atomic interface. */
 typedef struct a20_objstats {
-    _Atomic uint64_t handles;      /* installed native handle entries */
-    _Atomic uint64_t channel_eps;
-    _Atomic uint64_t eventqs;
-    _Atomic uint64_t vmos;
-    _Atomic uint64_t vmo_pages;    /* materialized VMO frames */
-    _Atomic uint64_t irq_bindings;
-    _Atomic uint64_t vfiles;       /* live file objects (fdtable + fd-backed handles) */
+    uint64_t handles;      /* installed native handle entries */
+    uint64_t channel_eps;
+    uint64_t eventqs;
+    uint64_t vmos;
+    uint64_t vmo_pages;    /* materialized VMO frames */
+    uint64_t irq_bindings;
+    uint64_t vfiles;       /* live file objects (fdtable + fd-backed handles) */
     /* Cumulative (never decrease); not part of the leak baseline. */
-    _Atomic uint64_t vmo_dirty_frames; /* VMO pages whose fresh frame held stale data */
+    uint64_t vmo_dirty_frames; /* VMO pages whose fresh frame held stale data */
 } a20_objstats_t;
 
 extern a20_objstats_t g_a20_objstats;
 
-static inline void a20_objstat_add(_Atomic uint64_t *field, int64_t delta)
+static inline void a20_objstat_add(uint64_t *field, int64_t delta)
 {
 #ifdef CONFIG_UP_SOFT_ATOMICS
     /* A single core with no 64-bit atomics: IRQ masking makes the

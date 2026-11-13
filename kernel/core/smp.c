@@ -267,8 +267,8 @@ int smp_remote_tlb_flush_supported(void)
  * wait loop re-enables interrupts to service inbound IPIs (same constraint as
  * the remote TLB flush).
  */
-static _Atomic uint32_t mb_request[CONFIG_NR_CPUS];
-static _Atomic uint32_t mb_ack[CONFIG_NR_CPUS];
+static uint32_t mb_request[CONFIG_NR_CPUS];
+static uint32_t mb_ack[CONFIG_NR_CPUS];
 
 /* Called by the reschedule-IPI handler after it has executed the acquire
  * fence.  A membarrier barrier orders DATA, so the acknowledgment needs only

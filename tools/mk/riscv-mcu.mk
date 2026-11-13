@@ -17,6 +17,6 @@ CROSS_PREFIX := $(RISCV_ELF_PREFIX)
 # Only link a runtime that actually exists.  clang's -print-libgcc-file-name
 # prints a compiler-rt path even when the target's builtins archive was not
 # installed; the kernel already carries compiler-builtins through Rust.
-ARCH_LIBS := $(shell f=$$($(CROSS_PREFIX)gcc $(ARCH_CFLAGS) -print-libgcc-file-name 2>/dev/null); test -f "$$f" && echo "$$f")
+ARCH_LIBS := $(if $(filter gcc,$(TOOLCHAIN)),$(shell f=$$($(CROSS_PREFIX)gcc $(ARCH_CFLAGS) -print-libgcc-file-name 2>/dev/null); test -f "$$f" && echo "$$f"))
 ARCH_KERNEL_C_SRC := $(wildcard kernel/arch/riscv32/mcu/*.c)
 ARCH_KERNEL_ASM_SRC := $(wildcard kernel/arch/riscv32/mcu/*.S)

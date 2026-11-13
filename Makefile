@@ -86,6 +86,7 @@ print-ci-kernel-arches:
 include components/trim.mk
 
 ARCH ?= riscv64
+include tools/mk/llvm.mk
 
 # Instance-driven build selection.  The instance manifest is the single source
 # of truth for arch/board/ABI, protocol stack, lanes, resource tier and role:
@@ -1076,7 +1077,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch,)$(if $(filter 1,$(WIFI_RTW89)),-wifi,)$(if $(filter 1,$(RAMFS_DESKTOP_TOOLS)),-desktop-tools,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(if $(filter llvm,$(TOOLCHAIN)),llvm-rt-,)$(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch,)$(if $(filter 1,$(WIFI_RTW89)),-wifi,)$(if $(filter 1,$(RAMFS_DESKTOP_TOOLS)),-desktop-tools,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1330,7 +1331,7 @@ ISOFS_IMG = $(BUILD_DIR)/isofs.img
 USER_LIBC_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
 # Driver blobs contain inline CPU/MMIO helpers, so shared-domain modules must
 # never overwrite packages consumed by ordinary kernels.
-USER_VARIANT = $(USER_LIBC_VARIANT)$(if $(filter 1,$(QEMU_SHARED_SMP)),-shared-qemu,)
+USER_VARIANT = $(if $(filter llvm,$(TOOLCHAIN)),llvm-rt-,)$(USER_LIBC_VARIANT)$(if $(filter 1,$(QEMU_SHARED_SMP)),-shared-qemu,)
 USER_BUILD_DIR = user/build/$(USER_VARIANT)
 USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
@@ -1568,9 +1569,9 @@ PROTOCOLS_LINES = \
 # ================================================================
 
 RISCV_ELF_PREFIX ?= $(if $(shell command -v riscv64-unknown-elf-gcc 2>/dev/null),riscv64-unknown-elf-,$(if $(shell command -v riscv64-elf-gcc 2>/dev/null),riscv64-elf-,riscv64-unknown-elf-))
-RISCV_ELF_RV32_MULTIDIR := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
+RISCV_ELF_RV32_MULTIDIR := $(if $(filter gcc,$(TOOLCHAIN)),$(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
 	$(RISCV_ELF_PREFIX)gcc -march=rv32imafdc -mabi=ilp32d -print-multi-directory 2>/dev/null; \
-fi)
+fi))
 CROSS_PREFIX_riscv64     := $(RISCV_ELF_PREFIX)
 CROSS_PREFIX_loongarch64 := loongarch64-linux-gnu-
 CROSS_PREFIX_loongarch32 := $(if $(shell command -v loongarch32-linux-gnu-gcc 2>/dev/null),loongarch32-linux-gnu-,loongarch32-unknown-elf-)
@@ -1631,12 +1632,12 @@ ARCH_LDFLAGS_ppc64le     := -static -no-pie
 
 ARCH_LIBS_riscv64     :=
 ARCH_LIBS_loongarch64 :=
-ARCH_LIBS_loongarch32 := $(shell $(CROSS_PREFIX_loongarch32)gcc $(ARCH_CFLAGS_loongarch32) -print-libgcc-file-name 2>/dev/null)
+ARCH_LIBS_loongarch32 = $(shell $(CROSS_PREFIX_loongarch32)gcc $(ARCH_CFLAGS_loongarch32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_aarch64     :=
 ARCH_LIBS_x86_64      :=
-ARCH_LIBS_arm32       := $(shell $(CROSS_PREFIX_arm32)gcc $(ARCH_CFLAGS_arm32) -print-libgcc-file-name 2>/dev/null)
+ARCH_LIBS_arm32       = $(shell $(CROSS_PREFIX_arm32)gcc $(ARCH_CFLAGS_arm32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_armv7m      :=
-ARCH_LIBS_riscv32     := $(shell $(CROSS_PREFIX_riscv32)gcc $(ARCH_CFLAGS_riscv32) -print-libgcc-file-name 2>/dev/null)
+ARCH_LIBS_riscv32     = $(shell $(CROSS_PREFIX_riscv32)gcc $(ARCH_CFLAGS_riscv32) -print-libgcc-file-name 2>/dev/null)
 ARCH_LIBS_ppc64le     :=
 
 # ================================================================
@@ -1778,7 +1779,7 @@ CCACHE_PREFIX := $(if $(CCACHE),$(CCACHE) ,)
 CROSS_PREFIX := $(CROSS_PREFIX_$(ARCH))
 ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH)) $(ARCH_CONFIG_CFLAGS)
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH)) $(ARCH_CONFIG_LDFLAGS)
-ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
+ARCH_LIBS    := $(if $(filter gcc,$(TOOLCHAIN)),$(ARCH_LIBS_$(ARCH)))
 QEMU         := $(QEMU_$(ARCH))
 # The virgl 3D renderer runs on the HOST: QEMU dlopen()s libvirglrenderer and
 # feeds it the guest's command stream, so which libvirglrenderer the loader
@@ -1839,7 +1840,7 @@ ifeq ($(DISPLAY_MODE),gui)
 QEMU_FLAGS := $(filter-out -nographic,$(QEMU_FLAGS)) -display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) -serial stdio
 endif
 
-ifeq ($(ARCH),armv7m)
+ifeq ($(TOOLCHAIN):$(ARCH),gcc:armv7m)
 ifeq ($(CROSS_PREFIX),)
 CLANG_ARMV7M := $(or $(shell command -v clang-19 2>/dev/null),$(shell command -v clang 2>/dev/null))
 LLVM_OBJCOPY_ARMV7M := $(or $(shell command -v llvm-objcopy-19 2>/dev/null),$(shell command -v llvm-objcopy 2>/dev/null))
@@ -1861,10 +1862,21 @@ CC := $(CCACHE_PREFIX)$(CROSS_PREFIX)gcc
 OBJCOPY := $(CROSS_PREFIX)objcopy
 endif
 
+ifeq ($(TOOLCHAIN),llvm)
+CC := $(LLVM_CC)
+OBJCOPY := $(LLVM_PREFIX)llvm-objcopy$(LLVM_SUFFIX)
+ARCH_CFLAGS := $(filter-out -fno-store-merging -mstrict-align,$(ARCH_CFLAGS)) -fno-pic -fno-pie $(LLVM_KERNEL_WARNINGS)
+ARCH_LDFLAGS += -no-pie $(LLVM_LINK)
+ifeq ($(ARCH),loongarch64)
+ARCH_CFLAGS := $(filter-out -mcmodel=normal,$(ARCH_CFLAGS)) -mcmodel=medium
+endif
+ARCH_LIBS := $(LLVM_KERNEL_BUILTINS)
+endif
+
 # The handoff bundle reads the kernel's load address out of the ELF program
 # headers rather than repeating a per-board address, so it needs a readelf that
 # understands this architecture's objects.
-READELF := $(CROSS_PREFIX)readelf
+READELF := $(if $(filter llvm,$(TOOLCHAIN)),$(LLVM_PREFIX)llvm-readelf$(LLVM_SUFFIX),$(CROSS_PREFIX)readelf)
 
 ifeq ($(CC),)
 $(error Unsupported ARCH '$(ARCH)')
@@ -1872,7 +1884,7 @@ endif
 
 MKFS_FAT ?= $(or $(shell command -v mkfs.fat 2>/dev/null),$(wildcard /usr/sbin/mkfs.fat),$(wildcard /sbin/mkfs.fat),mkfs.fat)
 MKFS_EXT4 ?= $(or $(shell command -v mkfs.ext4 2>/dev/null),$(wildcard /opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4),$(wildcard /usr/local/opt/e2fsprogs/sbin/mkfs.ext4),$(wildcard /usr/sbin/mkfs.ext4),$(wildcard /sbin/mkfs.ext4),mkfs.ext4)
-LIBGCC_S_ARCH := $(shell $(CC) $(ARCH_CFLAGS) -print-file-name=libgcc_s.so.1 2>/dev/null)
+LIBGCC_S_ARCH := $(if $(filter gcc,$(TOOLCHAIN)),$(shell $(CC) $(ARCH_CFLAGS) -print-file-name=libgcc_s.so.1 2>/dev/null))
 ifeq ($(LIBGCC_S_ARCH),libgcc_s.so.1)
 LIBGCC_S_ARCH :=
 endif
@@ -2171,7 +2183,7 @@ ifeq ($(filter 1,$(CONFIG_UBSAN)),1)
 # Undefined Behavior Sanitizer: kernel/core/ubsan.c provides the handlers.
 # alignment/bounds-strict are excluded to match the packed-struct and
 # flexible-array idioms the kernel deliberately uses.
-CFLAGS += -fsanitize=undefined -fno-sanitize=alignment,bounds-strict \
+CFLAGS += -fsanitize=undefined -fno-sanitize=alignment $(if $(filter gcc,$(TOOLCHAIN)),-fno-sanitize=bounds-strict,) \
           -DCONFIG_UBSAN=1
 endif
 ifneq ($(strip $(WAIT_TIMER_HEAP_MAX)),)
@@ -2686,7 +2698,7 @@ BSD_CORE_OBJECT = $(BSD_CORE_DIR)/bsd-core-isolated.o
 FORCE_BSD_CORE:
 $(BSD_CORE_OBJECT): FORCE_BSD_CORE
 	@rm -rf $(BSD_CORE_DIR)
-	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(BSD_CLANG)' --arch $(ARCH) --cross-prefix '$(CROSS_PREFIX_$(ARCH))' --nr-cpus $(NR_CPUS) --emulated-tls --net-profile $(NET_PROFILE) $(if $(filter router,$(NET_ROLE)),--router) --out $(BSD_CORE_DIR)
+	$(PYTHON) tools/probes/probe-bsd-core.py --cc '$(if $(filter llvm,$(TOOLCHAIN)),$(CLANG),$(BSD_CLANG))' --arch $(ARCH) --cross-prefix '$(CROSS_PREFIX_$(ARCH))' --nr-cpus $(NR_CPUS) --emulated-tls --net-profile $(NET_PROFILE) $(if $(filter router,$(NET_ROLE)),--router) --out $(BSD_CORE_DIR)
 KERNEL_OBJ += $(BSD_CORE_OBJECT)
 CFLAGS += -DCONFIG_NET_STACK_BSD=1
 LDFLAGS += -Wl,-T,kernel/net/backends/bsd/sets.ld
@@ -3572,7 +3584,7 @@ VDSO_CC_loongarch64   ?= $(CCACHE_PREFIX)loongarch64-linux-gnu-gcc
 VDSO_CC_x86_64        ?= $(CCACHE_PREFIX)x86_64-linux-gnu-gcc
 VDSO_CC_aarch64       ?= $(CCACHE_PREFIX)aarch64-linux-gnu-gcc
 VDSO_CC_ppc64le       ?= $(CCACHE_PREFIX)powerpc64le-linux-gnu-gcc
-VDSO_CC               ?= $(VDSO_CC_$(ARCH))
+VDSO_CC               ?= $(if $(filter llvm,$(TOOLCHAIN)),$(LLVM_CC) $(LLVM_LINK),$(VDSO_CC_$(ARCH)))
 VDSO_OBJCOPY_riscv64     := -O elf64-littleriscv -B riscv:rv64
 VDSO_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
 VDSO_OBJCOPY_x86_64      := -O elf64-x86-64 -B i386:x86-64
@@ -3679,3 +3691,9 @@ NATIVE_BINS := $(NATIVE_OUTPUTS)
 # LS2K0300 RAM bring-up (vendor firmware is preserved).
 include tools/mk/ls2k0300.mk
 include tools/mk/esp32c3.mk
+
+ifeq ($(TOOLCHAIN),llvm)
+include tools/mk/llvm-runtime.mk
+$(KERNEL_NOSYMS_ELF) $(KERNEL_ELF) $(BUILD_DIR)/mcu-test-program.elf $(BUILD_DIR)/mcu-spawn-child.elf: $(LLVM_KERNEL_BUILTINS)
+$(NATIVE_BINS): $(LLVM_USER_BUILTINS)
+endif

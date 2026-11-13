@@ -96,8 +96,8 @@ static void la64_smp_send(const smp_cpu_desc_t *cpu,
  * release or reuse page-table-backed frames until every online CPU has
  * acknowledged a local invtlb.
  */
-static _Atomic uint32_t la64_tlb_request[CONFIG_NR_CPUS];
-static _Atomic uint32_t la64_tlb_ack[CONFIG_NR_CPUS];
+static uint32_t la64_tlb_request[CONFIG_NR_CPUS];
+static uint32_t la64_tlb_ack[CONFIG_NR_CPUS];
 
 static int la64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
                                      uint64_t size)

@@ -46,6 +46,10 @@ NATIVE_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mabi=elfv2 -fno-pic -mno-vsx -mn
 NATIVE_CFLAGS := $(NATIVE_CFLAGS_$(ARCH)) -std=gnu99
 NATIVE_LIBS_arm32 := -Wl,--start-group -lgcc -Wl,--end-group
 NATIVE_LIBS := $(if $(NATIVE_LIBS_$(ARCH)),$(NATIVE_LIBS_$(ARCH)),-lgcc)
+ifeq ($(TOOLCHAIN),llvm)
+NATIVE_CC := $(LLVM_CC) $(LLVM_LINK) -fno-pic -fno-pie -no-pie
+NATIVE_LIBS := $(LLVM_USER_BUILTINS)
+endif
 NATIVE_ARCH_SRC_arm32 := user/liba20rt/a20_arm_rt.c
 NATIVE_ARCH_SRC := $(NATIVE_ARCH_SRC_$(ARCH))
 NATIVE_CRT0_riscv64     := $(NATIVE_CRT0_RV)
@@ -205,7 +209,7 @@ $(1) -ffreestanding -nostdlib -static \
     $(NATIVE_SDK_SRC) \
     $(NATIVE_COMPILER_RT_SRC) \
     $(NATIVE_ARCH_SRC) \
-    user/tests/test_native_futex.c user/tests/native-memory-contract.h user/tests/native-domain-contract.h kernel/include/uapi/a20/execution_domain.h \
+    user/tests/test_native_futex.c    \
     $(NATIVE_LIBS) \
     -o $(4)
 endef

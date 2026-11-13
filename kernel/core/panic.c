@@ -54,7 +54,9 @@ NORETURN void panic(const char *fmt, ...) {
 
     /* If a compositor owns the scanout, take it back so the panic is visible
      * on a machine with no COM1. */
+#ifndef CONFIG_MCU
     fbcon_resume();
+#endif
     uart_puts("\n\n========== KERNEL PANIC ==========\n");
     vprintf(fmt, args);
     va_end(args);

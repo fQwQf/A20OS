@@ -10,19 +10,43 @@ MLIBC_FAST_TYPE_FLAGS := \
 	-D__INT_FAST8_TYPE__="signed char" -D__INT_FAST16_TYPE__=long -D__INT_FAST32_TYPE__=long \
 	-D__UINT_FAST8_TYPE__="unsigned char" -D__UINT_FAST16_TYPE__="unsigned long" -D__UINT_FAST32_TYPE__="unsigned long"
 
+MLIBC_ENV := $(if $(filter llvm,$(TOOLCHAIN)),env CC="$(CLANG)" CXX="$(CLANG) --driver-mode=g++",)
+MLIBC_SOURCE_DIR := $(MLIBC_DIR)
+MLIBC_CROSS_FILE := $(MLIBC_DIR)/ci/a20-riscv64.cross-file
+MLIBC_LIBRT := -lgcc
+MLIBC_CC := $(RISCV_ELF_PREFIX)gcc
+ifeq ($(TOOLCHAIN),llvm)
+MLIBC_BUILD := build/toolchains/mlibc-static
+MLIBC_SOURCE_DIR := build/toolchains/mlibc-source
+MLIBC_SOURCE_STAMP := $(MLIBC_SOURCE_DIR)/.prepared
+MLIBC_SYSROOT := user/build/mlibc-sysroot-llvm
+MLIBC_CROSS_FILE := build/toolchains/mlibc-llvm.cross-file
+MLIBC_LIBRT := $(LLVM_RT_ROOT)/riscv64-user/builtins.a
+MLIBC_CC := $(CLANG) --target=riscv64-linux-gnu $(LLVM_LINK)
+RISCV_GNU_CC := $(MLIBC_CC)
+$(MLIBC_CROSS_FILE): tools/toolchain/mlibc-cross.py
+	$(PYTHON) tools/toolchain/build-builtins.py --arch riscv64 --output $(MLIBC_LIBRT)
+	$(PYTHON) tools/toolchain/mlibc-cross.py $@
+endif
+
 # Let Ninja see generic libc/header changes too; depending only on the port
 # sources could silently keep an old installed archive after a common fix.
 MLIBC_SOURCE_DEPS := $(shell find $(MLIBC_DIR)/options $(MLIBC_DIR)/sysdeps/a20 $(MLIBC_DIR)/subprojects -type f 2>/dev/null) \
                      $(wildcard $(MLIBC_DIR)/meson*.build $(MLIBC_DIR)/meson*.txt $(MLIBC_DIR)/meson.options)
 MLIBC_NATIVE_HEADERS := $(wildcard user/liba20rt/*.h kernel/include/uapi/a20/*.h)
 
-$(MLIBC_SYSROOT)/lib/libc.a: $(MLIBC_SOURCE_DEPS) \
-	$(MLIBC_DIR)/ci/a20-riscv64.cross-file
-	@test -d "$(MLIBC_BUILD)" || meson setup $(MLIBC_BUILD) $(MLIBC_DIR) \
-		--cross-file $(MLIBC_DIR)/ci/a20-riscv64.cross-file \
-		-Ddefault_library=static -Dbuild_tests=false --prefix=$(abspath $(MLIBC_SYSROOT))
-	ninja -C $(MLIBC_BUILD)
-	meson install -C $(MLIBC_BUILD) --no-rebuild --quiet
+ifeq ($(TOOLCHAIN),llvm)
+$(MLIBC_SOURCE_STAMP): $(MLIBC_SOURCE_DEPS) tools/toolchain/prepare-mlibc.py
+	$(PYTHON) tools/toolchain/prepare-mlibc.py $(MLIBC_SOURCE_DIR)
+endif
+
+$(MLIBC_SYSROOT)/lib/libc.a: $(MLIBC_SOURCE_STAMP) $(MLIBC_SOURCE_DEPS) \
+	$(MLIBC_CROSS_FILE)
+	@test -d "$(MLIBC_BUILD)" || $(MLIBC_ENV) meson setup $(MLIBC_BUILD) $(MLIBC_SOURCE_DIR) \
+		--cross-file $(MLIBC_CROSS_FILE) \
+		$(if $(filter llvm,$(TOOLCHAIN)),-Dlibgcc_dependency=false,) -Ddefault_library=static -Dbuild_tests=false --prefix=$(abspath $(MLIBC_SYSROOT))
+	$(MLIBC_ENV) ninja -C $(MLIBC_BUILD)
+	$(MLIBC_ENV) meson install -C $(MLIBC_BUILD) --no-rebuild --quiet
 
 mlibc-sysroot: $(MLIBC_SYSROOT)/lib/libc.a
 
@@ -34,9 +58,9 @@ mlibc-sysroot: $(MLIBC_SYSROOT)/lib/libc.a
 # link: the C library itself is still the A20 sysdeps build, and every link
 # runs with -nostdlib so no host libc is involved.
 # ------------------------------------------------------------------
-MLIBC_SHARED_BUILD    := $(MLIBC_DIR)/build-a20-shared
-MLIBC_SHARED_SYSROOT  := user/build/mlibc-shared-sysroot
-MLIBC_SHARED_CROSS    := user/mlibc/a20-shared.cross-file
+MLIBC_SHARED_BUILD    := $(MLIBC_DIR)/build-a20-shared$(if $(filter llvm,$(TOOLCHAIN)),-llvm,)
+MLIBC_SHARED_SYSROOT  := user/build/mlibc-shared-sysroot$(if $(filter llvm,$(TOOLCHAIN)),-llvm,)
+MLIBC_SHARED_CROSS    := $(if $(filter llvm,$(TOOLCHAIN)),$(MLIBC_CROSS_FILE),user/mlibc/a20-shared.cross-file)
 MLIBC_SHARED_DEPS     := $(MLIBC_SOURCE_DEPS) \
                          $(wildcard $(MLIBC_DIR)/options/rtld/riscv64/*) \
                          $(MLIBC_DIR)/meson.build $(MLIBC_SHARED_CROSS)
@@ -46,14 +70,14 @@ MLIBC_DYNAMIC_CFLAGS  := -march=rv64gc -mabi=lp64d -mcmodel=medany -O2 \
 MLIBC_DYNAMIC_APP     := $(NATIVE_BUILD_DIR)/mlibc-dynamic-$(NATIVE_TAG)
 MLIBC_DYNAMIC_PLUGIN  := $(NATIVE_BUILD_DIR)/libmlibcplug.so
 
-$(MLIBC_SHARED_SYSROOT)/lib/libc.so: $(MLIBC_SHARED_DEPS)
-	@test -d "$(MLIBC_SHARED_BUILD)" || meson setup $(MLIBC_SHARED_BUILD) $(MLIBC_DIR) \
-		--cross-file $(MLIBC_DIR)/ci/a20-riscv64.cross-file \
+$(MLIBC_SHARED_SYSROOT)/lib/libc.so: $(MLIBC_SOURCE_STAMP) $(MLIBC_SHARED_DEPS)
+	@test -d "$(MLIBC_SHARED_BUILD)" || $(MLIBC_ENV) meson setup $(MLIBC_SHARED_BUILD) $(MLIBC_SOURCE_DIR) \
+		--cross-file $(MLIBC_CROSS_FILE) \
 		--cross-file $(MLIBC_SHARED_CROSS) \
-		-Ddefault_library=both -Dbuild_tests=false \
+		$(if $(filter llvm,$(TOOLCHAIN)),-Dlibgcc_dependency=false,) -Ddefault_library=both -Dbuild_tests=false \
 		--prefix=$(abspath $(MLIBC_SHARED_SYSROOT))
-	ninja -C $(MLIBC_SHARED_BUILD)
-	meson install -C $(MLIBC_SHARED_BUILD) --no-rebuild --quiet
+	$(MLIBC_ENV) ninja -C $(MLIBC_SHARED_BUILD)
+	$(MLIBC_ENV) meson install -C $(MLIBC_SHARED_BUILD) --no-rebuild --quiet
 
 mlibc-shared-sysroot: $(MLIBC_SHARED_SYSROOT)/lib/libc.so
 
@@ -71,7 +95,7 @@ $(MLIBC_DYNAMIC_APP): user/tests/test_mlibc_dynamic.c user/mlibc/a20-mlibc-dyn.l
 		-Wl,--allow-shlib-undefined -Wl,-dynamic-linker,/lib/ld.so \
 		-Wl,-rpath,'$$ORIGIN/lib' -T user/mlibc/a20-mlibc-dyn.ld \
 		$(MLIBC_SHARED_SYSROOT)/lib/crt1.o $@.o \
-		-L$(MLIBC_SHARED_SYSROOT)/lib -lc -lgcc -o $@
+		-L$(MLIBC_SHARED_SYSROOT)/lib -lc $(MLIBC_LIBRT) -o $@
 	@rm -f $@.o
 
 .PHONY: mlibc-dynamic mlibc-dynamic-rootfs
@@ -115,7 +139,7 @@ endif
 # when a sysroot built with --library both also contains shared libraries.
 define MLIBC_LINK_RECIPE
 @mkdir -p $(dir $(3))
-$(RISCV_ELF_PREFIX)gcc -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdlib \
+$(MLIBC_CC) -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdlib \
 	-Wl,-Bstatic \
 	-D_GNU_SOURCE $(MLIBC_FAST_TYPE_FLAGS) \
 	-isystem $(MLIBC_SYSROOT)/include \
@@ -123,7 +147,7 @@ $(RISCV_ELF_PREFIX)gcc -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdl
 	-Wl,-s \
 	$(MLIBC_SYSROOT)/lib/crt1.o $(MLIBC_SYSROOT)/lib/a20_thread_entry.o \
 	$(1) \
-	-L$(MLIBC_SYSROOT)/lib $(2) -lgcc \
+	-L$(MLIBC_SYSROOT)/lib $(2) $(MLIBC_LIBRT) \
 	-o $(3)
 endef
 
@@ -196,7 +220,7 @@ MLIBC_MKSH_CFLAGS  := -O2 -ffreestanding -std=gnu99 -D_GNU_SOURCE \
 MLIBC_MKSH_PORT_HEADERS := $(wildcard user/ports/mksh/*.h user/ports/mksh/*.gen user/ports/mksh/*.inc)
 $(MLIBC_MKSH_OBJDIR)/%.o: $(MLIBC_MKSH_DIR)/%.c $(MLIBC_MKSH_PORT_HEADERS) | $(MLIBC_SYSROOT)/lib/libc.a
 	@mkdir -p $(dir $@)
-	$(RISCV_ELF_PREFIX)gcc $(MLIBC_MKSH_CFLAGS) -c $< -o $@
+	$(MLIBC_CC) $(MLIBC_MKSH_CFLAGS) -c $< -o $@
 
 $(MLIBC_MKSH_BIN): $(MLIBC_MKSH_OBJS) $(MLIBC_SYSROOT)/lib/libc.a user/mlibc/a20-mlibc.ld
 	$(call MLIBC_LINK_RECIPE,$(MLIBC_MKSH_OBJS),-lc,$@)
@@ -241,7 +265,7 @@ MLIBC_SBASE_LIBUTIL_A  := $(MLIBC_SBASE_OBJDIR)/libutil.a
 # Generic object rule covers libutil/, libutf/ and the tool sources.
 $(MLIBC_SBASE_OBJDIR)/%.o: $(MLIBC_SBASE_DIR)/%.c | $(MLIBC_SYSROOT)/lib/libc.a
 	@mkdir -p $(dir $@)
-	$(RISCV_ELF_PREFIX)gcc $(MLIBC_SBASE_CFLAGS) -c $< -o $@
+	$(MLIBC_CC) $(MLIBC_SBASE_CFLAGS) -c $< -o $@
 
 $(MLIBC_SBASE_LIBUTF_A): $(MLIBC_SBASE_LIBUTF_OBJS)
 	$(RISCV_ELF_PREFIX)ar rcs $@ $^

@@ -50,7 +50,7 @@
  * A fixed small count of IRQs is the honest unit. */
 #define KERNEL_PROGRESS_FALLBACK_TICKS 8u
 
-static _Atomic uint32_t g_progress_pending;
+static uint32_t g_progress_pending;
 static uint64_t g_progress_fallback_ticks;
 
 void kernel_progress_note_pending(uint32_t bits) {

@@ -21,6 +21,9 @@ def run(*argv: str) -> str:
     # binutils localizes its own output (zh_CN prints `类型: REL (可重定位
     # 文件)`), which neither pattern below matches; pin the C locale so the
     # gate reads the same on every host.
+    if os.environ.get("TOOLCHAIN") == "llvm":
+        name = argv[0].removeprefix("x86_64-linux-gnu-")
+        argv = (os.environ.get("LLVM_PREFIX", "") + "llvm-" + name + os.environ.get("LLVM_SUFFIX", ""), *argv[1:])
     env = {**os.environ, "LC_ALL": "C"}
     return subprocess.check_output(argv, text=True, stderr=subprocess.STDOUT,
                                    env=env)

@@ -142,11 +142,15 @@
 #define R8169_PHY_10MBPS      0x04U
 
 /* ---- descriptor format (r8169_common.h) ---------------------------------- */
-typedef struct __attribute__((packed)) r8169_desc {
+/* DMA rings are aligned; expose that guarantee to both compilers so
+ * 32-bit atomic descriptor accesses stay inline rather than using libatomic. */
+typedef struct __attribute__((aligned(16))) r8169_desc {
     uint32_t opts1;
     uint32_t opts2;
     uint64_t addr;
 } r8169_desc_t;
+_Static_assert(sizeof(r8169_desc_t) == 16, "RTL8169 descriptor size");
+_Static_assert(__builtin_offsetof(r8169_desc_t, addr) == 8, "RTL8169 DMA address offset");
 
 #define R8169_DESC_OWN       0x80000000U /* set by the driver, cleared by NIC */
 #define R8169_DESC_RING_END  0x40000000U /* last entry of the ring */

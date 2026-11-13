@@ -111,8 +111,8 @@ static void vf2_smp_send_ipi(const smp_cpu_desc_t *cpu,
 /* IPI-based remote TLB flush, same contract as the QEMU virt RISC-V board:
  * the initiating CPU advances the target's request generation, sends an IPI,
  * and waits for the completed generation published after sfence.vma. */
-static _Atomic uint32_t vf2_tlb_request[CONFIG_NR_CPUS];
-static _Atomic uint32_t vf2_tlb_ack[CONFIG_NR_CPUS];
+static uint32_t vf2_tlb_request[CONFIG_NR_CPUS];
+static uint32_t vf2_tlb_ack[CONFIG_NR_CPUS];
 
 static int vf2_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
                                     uint64_t size) {

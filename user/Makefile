@@ -1,4 +1,5 @@
 ARCH ?= riscv64
+include ../tools/mk/llvm.mk
 OPT ?= -O3
 PROFILE ?= full
 ENVELOPE_ACQUIRE_RACE_TEST ?= 0
@@ -19,7 +20,7 @@ ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
 $(error Unsupported ARCH '$(ARCH)'; expected one of: $(SUPPORTED_ARCHES))
 endif
 
-MUSL_VARIANT := $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+MUSL_VARIANT := $(if $(filter llvm,$(TOOLCHAIN)),llvm-rt-,)$(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
 BUILD_DIR ?= build/$(MUSL_VARIANT)
 OBJ_DIR := $(BUILD_DIR)/obj
 MUSL_BASE := $(CURDIR)/external/musl
@@ -49,9 +50,9 @@ CROSS_COMPILE_loongarch64 := loongarch64-linux-gnu-
 CROSS_COMPILE_aarch64 := aarch64-linux-gnu-
 CROSS_COMPILE_x86_64 := x86_64-linux-gnu-
 CROSS_COMPILE_arm32 := $(if $(shell command -v arm-linux-gnueabihf-gcc 2>/dev/null),arm-linux-gnueabihf-,$(if $(shell command -v arm-none-eabi-gcc 2>/dev/null),arm-none-eabi-,arm-linux-gnueabihf-))
-RISCV_ELF_RV32_MULTIDIR := $(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
+RISCV_ELF_RV32_MULTIDIR := $(if $(filter gcc,$(TOOLCHAIN)),$(shell if command -v $(RISCV_ELF_PREFIX)gcc >/dev/null 2>&1; then \
 	$(RISCV_ELF_PREFIX)gcc -march=rv32imafdc -mabi=ilp32d -print-multi-directory 2>/dev/null; \
-fi)
+fi))
 CROSS_COMPILE_riscv32 := $(if $(filter-out .,$(RISCV_ELF_RV32_MULTIDIR)),$(RISCV_ELF_PREFIX),$(if $(shell command -v riscv32-linux-gnu-gcc 2>/dev/null),riscv32-linux-gnu-,$(RISCV_ELF_PREFIX)))
 CROSS_COMPILE_ppc64le := powerpc64le-linux-gnu-
 CROSS_COMPILE ?= $(CROSS_COMPILE_$(ARCH))
@@ -115,6 +116,16 @@ OBJCOPY := $(CROSS_COMPILE)objcopy
 AR := $(CROSS_COMPILE)ar
 RANLIB := $(CROSS_COMPILE)ranlib
 
+# LLVM uses LLD and a separately built compiler-rt archive; never host runtimes.
+ifeq ($(TOOLCHAIN),llvm)
+CC := $(LLVM_CC) $(LLVM_LINK) -Wno-unused-command-line-argument
+LD := $(LLVM_LD)
+AR := $(LLVM_PREFIX)llvm-ar$(LLVM_SUFFIX)
+RANLIB := $(LLVM_PREFIX)llvm-ranlib$(LLVM_SUFFIX)
+OBJCOPY := $(LLVM_PREFIX)llvm-objcopy$(LLVM_SUFFIX)
+ARCH_CFLAGS := $(filter-out -mstrict-align,$(ARCH_CFLAGS))
+endif
+
 MUSL_INC = -isystem $(MUSL_BUILD)/obj/include \
             -isystem $(MUSL_BASE)/include \
             -isystem $(MUSL_BASE)/arch/$(MUSL_ARCH) \
@@ -170,7 +181,22 @@ CFLAGS += -fPIE -Dfork=vfork
 MUSL_CONFIG_CFLAGS += -fPIE
 endif
 
-LIBGCC_DEFAULT := $(shell $(CC) $(CFLAGS) -print-libgcc-file-name 2>/dev/null)
+ifeq ($(TOOLCHAIN),llvm)
+CC := $(LLVM_CC) $(LLVM_LINK) -Wno-unused-command-line-argument
+LD := $(LLVM_LD)
+AR := $(LLVM_PREFIX)llvm-ar$(LLVM_SUFFIX)
+RANLIB := $(LLVM_PREFIX)llvm-ranlib$(LLVM_SUFFIX)
+OBJCOPY := $(LLVM_PREFIX)llvm-objcopy$(LLVM_SUFFIX)
+endif
+
+ifeq ($(TOOLCHAIN),llvm)
+# Kept as an internal variable name for existing link recipes only.
+LIBGCC := $(LLVM_USER_BUILTINS)
+MUSL_CONFIG_LDFLAGS := $(LLVM_LINK)
+llvm_comma := ,
+LDFLAGS := $(subst -Wl$(llvm_comma)-Ttext-segment=0x10000,-Wl$(llvm_comma)--image-base=0x10000,$(LDFLAGS))
+else
+LIBGCC_DEFAULT := $(shell $(CROSS_COMPILE)gcc $(ARCH_CFLAGS) -print-libgcc-file-name 2>/dev/null)
 ifeq ($(ARCH),riscv64)
 # Keep libgcc on the same ABI as ARCH_CFLAGS.  In particular, the current
 # riscv64 userspace is lp64d; forcing an lp64 archive makes the final link mix
@@ -198,6 +224,8 @@ LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS :=
 endif
 
+endif
+
 # Each user build gets an immutable musl output directory keyed by the source
 # identity and the complete target/compiler configuration. An explicit
 # MUSL_BUILD override is allowed for a pre-provisioned matching tree, but is
@@ -209,7 +237,7 @@ $(error Missing userland submodules: $(USERLAND_MISSING_INPUTS). Run git submodu
 endif
 
 MUSL_BUILD_KEY := $(shell $(PYTHON) ../tools/packaging/musl_build_identity.py \
-	--source "$(MUSL_BASE)" --target "$(MUSL_TARGET)" --compiler "$(CROSS_COMPILE)gcc" \
+	--source "$(MUSL_BASE)" --target "$(MUSL_TARGET)" --compiler "$(if $(filter llvm,$(TOOLCHAIN)),$(CLANG) --target=$(LLVM_TARGET_$(ARCH)),$(CROSS_COMPILE)gcc)" \
 	--cflags="$(MUSL_CONFIG_CFLAGS)" --ldflags="$(MUSL_CONFIG_LDFLAGS)" 2>/dev/null)
 ifeq ($(strip $(MUSL_BUILD_KEY)),)
 $(error Could not compute musl source/build identity)
@@ -241,7 +269,9 @@ LIBC := $(MUSL_CRT)/libc.a $(LIBGCC)
 # lse-init.o likewise pulls in __getauxval.  Allow circular resolution for
 # both ARM ABIs.
 ifneq ($(filter arm32 aarch64,$(ARCH)),)
+ifeq ($(TOOLCHAIN),gcc)
 LIBC := -Wl,--start-group $(MUSL_CRT)/libc.a $(LIBGCC) -Wl,--end-group
+endif
 endif
 
 MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
@@ -703,7 +733,7 @@ musl_prepare:
 			--prefix=/opt/musl-$(ARCH) \
 			--disable-shared \
 			--disable-wrapper \
-			'CC=$(CC)' 'CROSS_COMPILE=$(CROSS_COMPILE)' \
+			'CC=$(CC)' 'CROSS_COMPILE=$(CROSS_COMPILE)' 'AR=$(AR)' 'RANLIB=$(RANLIB)' $(if $(filter llvm,$(TOOLCHAIN)),'LIBCC=$(LIBGCC)',) \
 			CFLAGS='$(MUSL_CONFIG_CFLAGS)' \
 			LDFLAGS='$(MUSL_CONFIG_LDFLAGS)'); \
 		env -u ARCH $(MAKE) -C "$(MUSL_BUILD)" $(MUSL_MAKE_JOBS); \
@@ -729,7 +759,7 @@ $(BUILD_DIR)/rtw89d: $(wildcard wifi/*.c wifi/*.h wifi/compat/*/*.h wifi/compat/
 	$(PYTHON) ../tools/drivers/build_rtw89.py --cc "$(CC)" \
 		--musl-build "$(MUSL_BUILD)" --out "$(abspath $(BUILD_DIR))/rtw89-build" --jobs 8
 	cp $(BUILD_DIR)/rtw89-build/rtw89d $@
-	$(CROSS_COMPILE)strip --strip-debug $@
+	$(if $(filter llvm,$(TOOLCHAIN)),$(LLVM_PREFIX)llvm-strip$(LLVM_SUFFIX),$(CROSS_COMPILE)strip) --strip-debug $@
 
 $(BUILD_DIR)/wifi: wifi/wifi.c wifi/control.h | build_dir musl_prepare
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(CRT_START) wifi/wifi.c $(CRT_END) $(LIBC)
@@ -955,3 +985,8 @@ DEP_FILES := $(filter %.d,$(USER_INTERMEDIATE_TARGETS:%.o=%.d)) \
 # VM supervisor wire ABI and vport ioctl are shared source headers.
 $(OBJ_DIR)/cmds/core/a20-vmd.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/a20-vmd.o: cmds/core/hyp/vmd_protocol.h ../kernel/include/drivers/char/virtio_console.h
+
+ifeq ($(TOOLCHAIN),llvm)
+include ../tools/mk/llvm-runtime.mk
+musl_prepare: $(LLVM_USER_BUILTINS)
+endif

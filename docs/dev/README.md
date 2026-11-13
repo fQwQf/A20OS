@@ -9,6 +9,7 @@
 | 文档 | 说明 |
 |---|---|
 | [build.md](build.md) | 完整构建与运行指南（依赖安装、交叉编译器、QEMU 启动与故障排查） |
+| [llvm-toolchain.md](llvm-toolchain.md) | Clang/LLVM 安装、交叉编译、工具边界和启动验证 |
 | [instances.md](instances.md) | 实例化声明系统（`instances/*.toml` 与 `tools/a20` 统一入口） |
 | [debug.md](debug.md) | 内核调试实践指南（GDB 附加、断点设置与 QEMU 调试接口） |
 | [boot-model.md](boot-model.md) | 系统启动模型与硬件探测流程（Multiboot2、FDT/DTB、UEFI） |

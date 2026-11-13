@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 
@@ -21,8 +22,11 @@ import sys
 EXCLUDED_DIRS = {".git", ".hg", ".svn", "__pycache__"}
 
 
-def compiler_identity(command: str) -> dict[str, str]:
-    executable = shutil.which(command)
+def compiler_identity(command: str) -> dict[str, object]:
+    words = shlex.split(command)
+    if not words:
+        raise ValueError("empty compiler command")
+    executable = shutil.which(words[0])
     if executable is None:
         raise ValueError(f"compiler not found: {command}")
     real = str(Path(executable).resolve())
@@ -30,18 +34,21 @@ def compiler_identity(command: str) -> dict[str, str]:
     def capture(*args: str) -> str:
         try:
             result = subprocess.run(
-                [real, *args], check=True, stdout=subprocess.PIPE,
+                [real, *words[1:], *args], check=True, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, timeout=10,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ValueError(f"cannot identify compiler {real}: {exc}") from exc
         return result.stdout.strip()
 
-    return {
+    identity = {
         "path": real,
         "target": capture("-dumpmachine"),
         "version": capture("-dumpfullversion", "-dumpversion"),
     }
+    if words[1:]:
+        identity["arguments"] = words[1:]
+    return identity
 
 
 def source_digest(root: Path) -> tuple[str, int]:
