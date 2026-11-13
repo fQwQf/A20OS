@@ -31,6 +31,8 @@ static const device_id_t ids[] = {
 
 通过 `pci_device_find_get(segment, requester, &device)` 可查找已发布的 function，成功取得设备引用后须 `device_put()`；未绑定设备也可查询。当前仅支持 segment 0，非零返回 `-EOPNOTSUPP`，不存在返回 `-ENODEV`，失败清空输出。引用保留元数据，不能冻结物理热插拔或驱动绑定；需要一致的 lookup/config/lifecycle 观察时，用外层 discovery 事务覆盖完整操作。
 
+`pci_device_scope_get(client, scope_bus, first_devfn, last_devfn, &anchor)` 可查询 client 或上游 bridge 是否位于指定 bus/devfn 范围，成功返回需配对 `device_put()` 的引用。它检查核心注册状态、live 身份、唯一父桥、完整窗口包含关系、循环与重叠路由；不会以更宽的 subordinate 区间猜测缺失桥。范围包含 function 位，查询不重扫或写配置，也不自动建立 parent/dependency。引用不保证物理存在或 DMA 隔离；错误与 AMD Range 辅助查询见 [桥路径与作用域](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
+
 ## BAR 处理
 
 probe 首先：

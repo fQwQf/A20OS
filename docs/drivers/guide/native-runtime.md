@@ -136,7 +136,7 @@ iterator 和 typed hardware/memory/device accessor 返回借用的表视图，�
 
 `kernel/firmware/acpi/ivrs_policy.c` 在全表校验后提供两个只读查询：
 
-- `acpi_ivrs_route(table, segment, requester, out)`：返回硬件描述、实际 DMA requester、DTE settings、extended settings、alias/non-PCI 标记及相关 IVMD 数量。同一 `(segment, IOMMU DeviceID, capability offset)` 采用 A20OS 的 `40h > 11h > 10h` 选择顺序；这是一项显式软件策略，不表示规范要求所有平台使用相同顺序。同一格式重复、base/info 矛盾、不同单元的 16-KiB MMIO 窗口重叠或查询命中多个单元返回 `ACPI_IVRS_AMBIGUOUS`。ALL 是单元内的默认属性，具体 select/range 覆盖默认；ALL 与命中的 alias 并存则报歧义。ALL 结果仍须与实际 PCI capability 覆盖范围核对。
+- `acpi_ivrs_route(table, segment, requester, out)`：返回硬件描述、实际 DMA requester、DTE settings、extended settings、alias/non-PCI 标记及相关 IVMD 数量。同一 `(segment, IOMMU DeviceID, capability offset)` 采用 A20OS 的 `40h > 11h > 10h` 选择顺序；这是一项显式软件策略，不表示规范要求所有平台使用相同顺序。同一格式重复、base/info 矛盾、不同单元的 16-KiB MMIO 窗口重叠或查询命中多个单元返回 `ACPI_IVRS_AMBIGUOUS`。ALL 是单元内的默认属性，具体 select/range 覆盖默认；ALL 与命中的 alias 并存则报歧义。ALL 不能自动解释成任意设备均可启用；仍须核对实际 PCI 拓扑、对应单元与当次有效的硬件约束，不能使用无效 Range 字段推断覆盖。
 - `acpi_ivrs_route_memory(table, segment, requester, index, out)`：按固件顺序返回属于该单元、适用于原 requester 或 alias DMA requester 的 IVMD。所有替代 IVHD 下的约束都会保留，未命中的设备区间跳过；不去重、不合并权限、不建立 unity mapping，也不执行 exclusion。
 
 查询支持普通/extended select 与 inclusive range，以及单层 alias select/range。alias 目标须有描述且归属同一单元；缺失目标或 alias 链/循环返回 `ACPI_IVRS_UNSUPPORTED`，跨单元归属报歧义。查询匹配到 special/HID requester 时返回 unsupported；其他 requester 可以得到带 `non_pci_entries` 标记的候选，后续驱动仍须完成这类设备的绑定和策略。未选中的替代格式同样检查未知条目、保留字段和 range 邻接要求，不因选中了较新格式而静默跳过未知策略。
@@ -157,11 +157,29 @@ x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再�
 
 没有对应函数/capability 返回 `-ENODEV`；不支持的 class/header/interface/address width 返回 `-EOPNOTSUPP`；畸形链或 aperture 返回 `-EINVAL`；base 或 PCSup 矛盾返回 `-EIO`；transport 错误原样传播。错误清空整个 snapshot。探测成功不等于资源已独占或设备已接管，也不保证后续时刻的硬件状态；硬件初始化时必须重新验证。
 
-PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；PCI 下游作用域核对、alias 隔离组、IVMD 权限落实和 DMA domain provider 仍待实现。
+PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；下文已提供 PCI 桥路径与有效 Range 的补充查询；将这些证据与 IVRS requester/alias 归属、控制器生命周期及 IVMD 权限组合成 DMA domain provider 仍待实现。
 
 两类报告都不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 表示这条发现路径没有启用 AMD-Vi 翻译；它不表示固件此前未开启硬件，也不表示下述软件驱动没有绑定。
 
 `tools/a20 test smoke-amdvi-discovery-x86_64` 使用 QEMU q35 与 amd-iommu，要求发现 10h IVHD 和两条原始硬件记录，按 11h 格式探测一个去重单元成功，并完成已有运行时自检。该门禁验证固件/PCI 发现与启动集成；MMIO 已开启分支另由主机 fixture 验证，不表示 AMD-Vi DMA 隔离或实体机器 GPU 已可用。
+
+### PCI 桥路径与 AMD Range 补充查询
+
+`pci_device_scope_get(client, scope_bus, first_devfn, last_devfn, &anchor)` 在任务上下文检查已发布 PCI 拓扑，返回 client 本身或符合范围的上游 bridge 引用，由调用者 `device_put()`。`first/last` 包含 device 和 function 的完整 8-bit devfn，不能把它当作 slot 编号。输入 client 须有有效引用；输出失败清空。查询不重新枚举、不写配置/BAR、不建立 `device_t.parent` 或隐式依赖，也不创建新的 group 编号。
+
+`device_is_registered(dev)` 在 registry 锁下观察核心成员关系，不增加引用，与绑定/state 独立。PCI 查找与作用域查询均核对核心注册状态；即使私有 PCI 记录尚未更新，已注销但被引用保留的 client/bridge 也不能继续作为已发布节点使用。rescan 可重新发布该 function，外部引用仍保留旧元数据。
+
+实现于 `kernel/drivers/bus/pci_bus.c`。它在 discovery 事务中读取当前已发布 function 的身份与 type-1 bridge 的 primary/secondary/subordinate，按唯一 secondary 寻找上游路径；每一级窗口须包含原 client bus。所有能够解码该 client bus 的 bridge 都必须属于该路径，不能取范围最小或最宽的任意 bridge 来消解重叠。缺失中间桥不会只凭祖先 subordinate 范围猜测连接。
+
+没有 client/匹配 scope 返回 `-ENODEV`；重叠 sibling 或重复父桥返回 `-EBUSY`；反向范围、primary 不符及畸形窗口返回 `-EINVAL`；路径循环返回 `-ELOOP`。当前全局视图中任何已发布 function 的 live PCI ID 与元数据不一致都会拒绝查询，避免悄悄省略消失/替换的桥；应先通过正常 rescan 调和设备集。不可读 header 返回 `-EIO`，不支持的 bridge class 返回 `-EOPNOTSUPP`。未配置的零 secondary/subordinate 不作为路由。
+
+`kernel/drivers/core/amd_iommu_scope.c` 的 `amd_iommu_scope_get(snapshot, client, &anchor)` 消费已验证的只读 snapshot，仅提供 Range 寄存器的补充证据。按 [AMD IOMMU 3.10 的 Capability Offset 0Ch](https://kib.kiev.ua/x86docs/AMD/IOMMU/48882-3.10.pdf)，有效范围描述同一 bus 上的集成设备与 root port；下游 client 必须通过上述桥路径落到范围内的 PCIe root port。辅助查询检查完整 capability 链、唯一 PCIe capability、version 1/2、Root Port 类型及所需结构边界，链尾损坏、循环、重复或 payload 内的其他 header 均拒绝。PCIe 字段布局另对照 [QEMU 固定版本的 PCI 定义](https://github.com/qemu/qemu/blob/v10.0.0/include/standard-headers/linux/pci_regs.h)，未导入其实现代码。
+
+`RngValid=0` 时规范要求使用 I/O 固件拓扑；该辅助函数返回 `-EOPNOTSUPP`，不将未定义字段当作覆盖，也不表示 IOMMU 本身不受支持。真正的 provider 还需结合 IVRS 路由。非零 segment 仍拒绝；没有覆盖返回 `-ENODEV`，不是 root port/未知版本返回 `-EOPNOTSUPP`，畸形 capability 返回 `-EINVAL`。硬件无效范围的拒绝分支已加入被动 owner 的显式自检。
+
+两项函数均只返回带 device 引用的观察结果，已导出给模块。引用保留元数据，不冻结物理拓扑、配置寄存器、驱动绑定或控制器 snapshot。需要一致的 lookup/config/binding 观察时，调用者须用外层 discovery 事务覆盖操作，并在硬件启用前重新验证。结果不证明 ACS、peer-to-peer、共享 requester/alias 隔离，也不授予 DMA 或修改 DTE 的权限。
+
+`tools/a20 test smoke-pci-scope-x86_64` 提供 root port 下 bus 1 的 EDU，显式参数 `driver.runtime_test=1 driver.pci_scope_test=1` 执行身份与桥路径查询，通过后在资源 PASS 行追加 `pci=1`。实例同时运行被动 AMD-Vi owner 自检；普通启动不执行这项测试。查询不会给 EDU 分配 BAR 或发起 DMA；启动枚举本身仍遵循既有 PCI 资源流程。
 
 ### 被动 PCI 绑定与 aperture 所有权
 
@@ -247,13 +265,14 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner -v
+python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner tools.tests.test_pci_scope -v
 python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
 tools/a20 test smoke-driver-runtime-x86_64
 tools/a20 test smoke-driver-runtime-smp2-x86_64
 tools/a20 test smoke-amdvi-owner-x86_64
+tools/a20 test smoke-pci-scope-x86_64
 tools/a20 test smoke-driver-iommu-native-riscv64
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only -j4
 ```
@@ -265,7 +284,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源、下游 requester/alias 作用域和 IVMD 约束，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
+2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，将 PCI 桥路径/Range 证据与 IVRS requester/alias、控制器绑定及 IVMD 约束组合验证，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -322,3 +341,9 @@ IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603
 内核构建与 QEMU 使用保留既有改动的当前工作区，主机回归另以隔离待提交树复验。x86_64 `ABI=linux BRINGUP=0 DRIVER_DEPLOYMENT=embedded NR_CPUS=2` 与 AArch64 QEMU virt `ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded` 内核构建通过，111 个实例清单检查通过。直接 QEMU q35、双 CPU、`-nic none -device amd-iommu`、`driver.runtime_test=1 driver.amdvi_owner_test=1` 启动正常关机，匹配更新后 owner 实例全部标记；日志为 `ram_ranges=1 firmware_ranges=10`、`2/2 configured CPUs online`、owner 重绑 PASS、资源 `inventory=1 memory=1` 和完整运行时 PASS。固件记录数是本次 QEMU 的观察值，不作为其他机器的固定预期。
 
 本轮未启用 AMD-Vi 翻译或 GPU DMA，也未重跑完整 generic/用户态门禁；上一阶段记录的模块构建问题未纳入这次修改。新增保护不拦截 raw MMIO/PIO，不替代 IOMMU、PFA 页所有权或实际映射缓存属性检查，未验证实体硬件热插拔和 DMA 故障恢复。
+
+2026-11-14 PCI 作用域提交：`ce5912bcc`；核心注册状态修正：`388197124`。在更新后的共享基线与隔离待提交树中，106 项主机回归通过，新增 8 项用例以生产 PCI/core 和 AMD scope 代码配合 ASan/UBSan 覆盖：多级/直接路径、function 位边界、输出引用、身份替换、直接核心注销与 rescan 后的新身份、重叠 sibling/重复 secondary、缺失桥、非法 primary/window/class、循环、PCIe capability 损坏链尾/重复/越界/payload 交叠/错误类型或版本，以及无效 Range 拒绝。去掉重叠检查、忽略 root-port 校验的两个负控均触发断言；查询前后配置写入计数不变。硬件与同步由主机后端替代。
+
+保留既有改动的工作区中，x86_64 dev 双核 embedded、x86_64 generic 以及 AArch64 bringup embedded 内核构建通过，112 个实例清单检查通过。分别按新增实例的 q35/root-port/EDU/amd-iommu 参数直接启动 x86 双核 embedded/generic 内核，退出码 0，匹配全部门禁标记；日志确认 EDU 位于 `01:00.0`、`2/2 configured CPUs online`、owner 重绑以及 `memory=1 pci=1`。QEMU 的 AMD Range 没有 RngValid，验证的是拒绝使用无效字段；AMD 有效 Range 与 root-port capability 的组合由主机模型验证，不能写成真实 AMD DMA 路由已验证。没有给 EDU 提交 DMA，也没有启用 AMD-Vi 翻译或 GPU 加速。
+
+`tools/a20 test smoke-pci-scope-x86_64` 已尝试，但完整门禁在 Native `ufsd` 构建阶段被 fscompat 时钟适配缺失（`TICKS_PER_SEC` 展开依赖未定义的 `ARCH_TIMER_FREQ`）阻塞；局部时钟适配诊断还暴露 `fifo_open_vnode`/`klog_write_ex` 缺失，诊断改动已撤回。上述直接启动结果不记为完整 CLI/用户态门禁通过。本地验证日志位于 `.kernel-build/pci-scope-review/`；硬件热插拔、AMD 实机翻译与 DMA 故障恢复仍待验证。
