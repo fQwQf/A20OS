@@ -82,7 +82,7 @@ PCI 作用域通过 `pci_device_scope_get()` 返回带引用的 client/上游桥
 
 PCI 的 `pci_requester_reserve/release` 显式复制并原子占用 requester 集合，同 owner 无共享例外；owner 注销或 BDF 替换后仍保留，直至显式释放。它不推断 alias 或证明隔离，见 [requester 集合占用](native-runtime.md#pci-requester-集合占用)。
 
-AMD-Vi 保留路由通过 `amd_iommu_route_acquire/validate/reserve/memory/release` 显式组合固件策略、PCI 路径与控制器上下文租约。仅 acquire 是观察，显式 reserve 才占用原 requester/alias 键。解绑使旧路由失效，占用随 reserve 的句柄保留，控制器资源保留到最后一份路由释放。它不改变 parent/dependency，也不授予 DMA。详见 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期)。
+AMD-Vi 保留路由通过 `amd_iommu_route_acquire/validate/requesters/reserve/memory/release` 显式组合固件策略、PCI 路径与控制器上下文租约。仅 acquire 是观察，显式 requesters 查询完整固件声明集合，reserve 才在全部成员已发布、路径有效、内核所有且 BME 关闭后原子占用，并保留各成员身份/anchor。成员失效不自动释放占用；各驱动停止 DMA 仍由调用者协调。解绑使旧路由失效，占用随 reserve 的句柄保留，控制器资源保留到最后一份路由释放。它不改变 parent/dependency，也不授予 DMA。详见 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期)。
 
 DMA 内存约束使用独立的 `driver_dma_policy` 不可变对象，不借用 IVRS 或设备上下文。带 policy 的 managed domain 在整批 frame pin/provider 调用前检查物理权限，并将 Unity 地址违规纳入可失败回滚；引用随清理和 shutdown 保留。AMD 的 route policy 转换不授予硬件启用权限。见 [物理约束](native-runtime.md#不可变物理约束与映射入口检查)。
 
