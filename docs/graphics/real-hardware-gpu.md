@@ -11,7 +11,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 - 原生异步 fence 可以从 IRQ 完成任务，支持错误、等待和超时；尚未接入 DRM syncobj/sync_file。
 - 可取消工作队列、IRQ 排空和有界不可变固件读取已经实现；固件目录部署、厂商格式校验、上传和启动协议仍需完成。
 - MMIO/port I/O 已有 owner 引用与受管占用；checked claim 核对已发布设备声明，并阻止后续冲突发布。PCI BAR 已采用全部规划通过后再提交地址与资源的事务。
-- 原生 RISC-V IOMMU provider 已有 QEMU EDU 实际 DMA、fault 隔离及 worker 通知 fence 的验证；x86 AMD-Vi 目前只有 IVRS 策略解析和 PCI/MMIO 只读探测。RISC-V 的结果不代表本机 AMD GPU 已有 DMA 隔离。
+- 原生 RISC-V IOMMU provider 已有 QEMU EDU 实际 DMA、fault 隔离及 worker 通知 fence 的验证；x86 AMD-Vi 已有 IVRS 策略解析、PCI/MMIO 只读探测和保留完整 aperture 的被动 PCI 绑定，尚无翻译后端。RISC-V 的结果不代表本机 AMD GPU 已有 DMA 隔离。
 - 这些接口、限制与历史验证记录见 [原生驱动运行时](../drivers/guide/native-runtime.md)。它们是第一阶段基础，不代表已有 GPU 加速。
 - 当前没有 Phoenix/Radeon 780M 或 AD107/RTX 4060 原生驱动、通用 AMD-Vi 后端、GPUVM 或硬件任务调度器。
 
@@ -30,7 +30,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 
 ## 分阶段验收
 
-1. **运行时基础**：已有 DMA 地址/生命周期、quiesce、异步完成、工作队列、固件读取和资源占用接口。进入本机硬件初始化前，还需建立 AMD-Vi 控制器所有权、完整 aperture 占用、硬件翻译与故障处理，并验证停止失败时仍保留 DMA 页面和上下文。
+1. **运行时基础**：已有 DMA 地址/生命周期、quiesce、异步完成、工作队列、固件读取和资源占用接口。AMD-Vi 被动控制器绑定与完整 aperture 占用已接入 PCI 生命周期。进入本机硬件初始化前，还需补齐未发布预留区/作用域核对、硬件翻译与故障处理，并验证停止失败时仍保留 DMA 页面和上下文。
 2. **硬件初始化**：固定上游版本及固件，识别实际 IP，完成所需 PSP/SMU、内存控制与中断初始化。共享电源/内存模块的依赖不能随意省略。
 3. **GPU 确实执行任务**：提交 SDMA copy/fill，收到真实完成，CPU 回读逐字节比对。ioctl 成功或队列被接受不足以证明执行正确。
 4. **硬件渲染**：建立 BO、GPUVM、context、GFX 提交与同步，接入现有 Mesa，离屏三角形并回读。禁止静默回落软件渲染。

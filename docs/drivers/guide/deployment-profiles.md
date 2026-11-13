@@ -21,6 +21,8 @@ generic 只把驱动核心、总线与 `GENERIC_KERNEL_SERVICE_SRCS` 的九个�
 
 板级设备通过 `platform_bus` 注册并携带 `hardware_id`，驱动按 platform id 匹配；驱动核心不再允许无总线设备被任意总线无关驱动抢占，无总线驱动必须提供显式 `match()` 才能绑定（UART 串口服务即按设备名匹配）。不得为了移动源文件而在模块中复制 transport、IRQ、DMA 或 class 服务实现。
 
+IOMMU 属于内核 DMA 隔离基础设施：RISC-V provider 与 x86_64 + ACPI 的 `amdvi-owner` 随 `drivers/core/*.c` 编入。AMD-Vi 当前只做被动 PCI 绑定和 checked aperture 占用，不启用硬件翻译；保留底层所有权与未来 DMA 安全关闭的基础设施，不能按普通外设模块的回收规则提前释放。它使用统一 driver 生命周期，没有为 generic 另建初始化入口。该边界不改变 GPU 协议驱动按设备包部署的原则，也未新增 Linux 源码兼容依赖；具体契约见 [原生驱动运行时](native-runtime.md#被动-pci-绑定与-aperture-所有权)。
+
 ## embedded
 
 full profile 的 `DRIVER_DEPLOYMENT=embedded` 将 `EMBEDDED_DEVICE_DRIVER_SRCS` 与内核服务静态链接到内核，过滤掉 `driver_manager.c`，不构建 `.a20drv` 包，也不填充或扫描 DriverStore。该静态账本不是 generic 包的并集：RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 和 vinput-probe 等 module-only 实现当前不会出现在 embedded 镜像。
