@@ -7,6 +7,47 @@
 摄像头端口只重置一次，内置 ESP 保存了完整的启动记录。第 6 次启动
 进一步验证了带源码构建 fastfetch 的镜像和正常重启。
 
+## 第 15 次实机：RSS、重启与锁定灯（2026-11-13）
+
+用户确认运行比第14轮明显改善，但Caps/Num物理灯始终不亮，按钮重启报I/O error，命令行
+也不能重启，任务管理器各进程RSS显示16 EB。CURRENT为181d6cb4fa887971ecfab13a13e50bfd，
+bootcount15、state ready，1545条连续记录。
+
+RSS确定是procfs格式错误：stat漏掉第21字段itrealvalue占位，RSS工具将本应在第25字段
+的rsslim=-1当作第24字段实际RSS；status的非标准Rss同时改为VmRSS。旧输出负对照失败，
+修复后49项Rust单元测试通过，C/R节点路由差分200000步通过；真实客体8 MiB映射子进程
+的stat/statm/VmRSS读数一致（约27 MiB总RSS），不再呈现64位无符号上限。
+
+246.437 s首次JBD2 poison位于ext4_release_vn回收145002的reap错误分支；440.724 s重启
+在文件页回写返回-5，尚未调用固件复位。命令行与GUI共用vfs_system_shutdown，-f也不绕过
+内核检查。定位并确定性复现了未锁定文件回写与namespace/orphan更新之间的inode覆盖竞态，
+以及相同EOF下per-open旧inode快照覆盖新links/dtime。回写现持metadata_lock并刷新快照，
+chmod/chown同锁；C journal在poison后也于缓存变更前拒绝新元数据写入。负对照分别移除锁
+和快照刷新均复现覆盖，修复通过。日志未保存首次坏链节点，仍区分已复现竞态与实机根因推断；
+新内核补充链预检range/read/missing细节。
+
+实机锁定键与labwc PID96的LED请求正确切换，未出现松开即清零，USB ACK仍不代表灯点亮。
+候选显式设置ITE Report Protocol=1并GET_PROTOCOL读回；物理灯效果仍待第16轮，不能以
+QEMU普通USB键盘的软件状态代替本机ITE验收。
+
+候选EFI `dfe70d2009af8791df223580bb93ec69a27b96dab2728d0afb4731bcdc3b369e`
+使用第15轮实际桌面的修复副本通过两组16 CPU/8 GiB、HPET32真实回绕测试：
+USB GUI S5约2.40 s、NVMe命令行reboot -f约1.35 s。客体静置约0.30%/0.32%，
+Firefox冷/热DOM约28.94/6.02 s与13.59/5.24 s；均为虚拟机测量。
+每案例640轮原orphan压力，加48次并发unlink/576次fsync、unlink后fchmod和数据回读，
+最后退出后的fsck=0、state1、无RECOVER、last_orphan0。
+
+实际USB原始备份压缩后约1.43 GiB，完整4 GiB解压SHA已核验，旧备份仍保留。
+RAM副本只需4个块/16 KiB修复；原始SHA15691082dce5…，修复SHA93e9b43a83ef…。
+修复脚本验证完整分区、补丁、可恢复重复执行与意外改动拒绝。当前等待用户执行物理修复，
+尚未切换旧0667017a… EFI。交付时将保留BOOT15.EFI/manifest、计数0000000f及23个旧文件。
+
+证据：`build/evidence/lenovo-83eg-2026-11-13/boot-15-analysis/README.md`；实际安装状态以
+usb-readback.json为准。RSS提交9e02617f6、ext4提交cffea8293，原暂存.gitmodules/rtw89保留。
+USB初始化仍在既有ITE移植工作区中，候选源码哈希见candidate-source.json；不宣称HEAD包含
+全部此前移植。factory在RAM，宿主重启后用本轮restore-factory.py恢复；压缩备份与overlay归档
+保留在SSD。下一轮只读采集脚本位于同日boot-16目录。
+
 ## 第 14 次启动与第 15 轮交付（2026-11-12）
 
 实机确认WHU-WLAN、永久MAC、关机/重启和触控板可用；静置CPU约50%、Firefox冷启动约30秒、
