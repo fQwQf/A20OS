@@ -39,12 +39,19 @@ struct amdvi_owner {
 
 static struct amdvi_owner *amdvi_owners;
 
+struct amdvi_peer {
+    device_t *device, *scope;
+    uint16_t requester;
+};
+
 struct amd_iommu_route {
     struct amdvi_owner *owner;
     size_t unit;
     device_t *client, *dma_client, *scope, *dma_scope;
     uint16_t requester;
     pci_requester_reservation_t *reservation;
+    struct amdvi_peer *peers;
+    size_t peer_count;
 };
 
 struct amdvi_transport {
@@ -401,6 +408,31 @@ done:
     return ret;
 }
 
+static void peers_release(struct amdvi_peer *peers, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        device_put(peers[i].scope);
+        device_put(peers[i].device);
+    }
+    kfree(peers);
+}
+
+static int peers_validate(const amd_iommu_route_t *route,
+                            const amd_iommu_snapshot_t *snapshot) {
+    for (size_t i = 0; i < route->peer_count; i++) {
+        const struct amdvi_peer *peer = &route->peers[i];
+        device_t *device = NULL, *scope = NULL;
+        int ret = pci_device_find_get(snapshot->segment, peer->requester, &device);
+        if (!ret && device != peer->device) ret = -ESTALE;
+        if (!ret && device->user_owned) ret = -EBUSY;
+        if (!ret) ret = route_scope(snapshot, device, &scope);
+        if (!ret && scope != peer->scope) ret = -ESTALE;
+        device_put(scope);
+        device_put(device);
+        if (ret) return ret;
+    }
+    return 0;
+}
+
 int amd_iommu_route_validate(amd_iommu_route_t *route,
                               amd_iommu_route_info_t *out) {
     if (!out)
@@ -422,6 +454,7 @@ int amd_iommu_route_validate(amd_iommu_route_t *route,
         if (!ret && (view.dma_client != route->dma_client ||
                      view.scope != route->scope || view.dma_scope != route->dma_scope))
             ret = -ESTALE;
+        if (!ret) ret = peers_validate(route, &view.info.unit);
         if (!ret)
             *out = view.info;
     }
@@ -444,6 +477,24 @@ int amd_iommu_route_memory(amd_iommu_route_t *route, size_t index,
     return ret ? firmware_error(ret) : 0;
 }
 
+int amd_iommu_route_requesters(amd_iommu_route_t *route, uint16_t *ids,
+                                size_t capacity, size_t *count) {
+    if (!count) return -EINVAL;
+    *count = 0;
+    if (!route || (capacity && !ids)) return -EINVAL;
+    driver_discovery_begin();
+    acpi_ivrs_requesters_t view;
+    int ret = acpi_ivrs_requesters(&route->owner->table, 0, route->requester, &view);
+    if (ret) ret = firmware_error(ret);
+    else {
+        *count = view.count;
+        if (capacity < view.count) ret = -ENOSPC;
+        else for (size_t i = 0; i < view.count; i++) ids[i] = view.ids[i];
+    }
+    driver_discovery_end();
+    return ret;
+}
+
 int amd_iommu_route_reserve(amd_iommu_route_t *route) {
     if (!route)
         return -EINVAL;
@@ -456,23 +507,33 @@ int amd_iommu_route_reserve(amd_iommu_route_t *route) {
         ret = -EALREADY;
         goto done;
     }
-    if (route->client->user_owned || route->dma_client->user_owned) {
-        ret = -EBUSY;
+    acpi_ivrs_requesters_t view;
+    ret = acpi_ivrs_requesters(&route->owner->table, info.unit.segment,
+                                route->requester, &view);
+    if (ret) { ret = firmware_error(ret); goto done; }
+    if (view.count > PCI_REQUESTER_SET_MAX) { ret = -E2BIG; goto done; }
+    struct amdvi_peer *peers = kcalloc(view.count, sizeof(*peers));
+    if (!peers) { ret = -ENOMEM; goto done; }
+    for (size_t i = 0; i < view.count; i++) {
+        peers[i].requester = view.ids[i];
+        ret = pci_device_find_get(info.unit.segment, view.ids[i], &peers[i].device);
+        if (ret) goto discard;
+        if (peers[i].device->user_owned) { ret = -EBUSY; goto discard; }
+        ret = route_scope(&info.unit, peers[i].device, &peers[i].scope);
+        if (ret) goto discard;
+        uint32_t command = pci_cfg_read32(peers[i].device, 4);
+        if (command == ~(uint32_t)0) { ret = -EIO; goto discard; }
+        if (command & 4) { ret = -EBUSY; goto discard; }
+    }
+    ret = pci_requester_reserve(route->client, info.unit.segment, view.ids,
+                                view.count, &route->reservation);
+    if (!ret) {
+        route->peers = peers;
+        route->peer_count = view.count;
         goto done;
     }
-    uint32_t command = pci_cfg_read32(route->client, 4);
-    uint32_t dma_command = pci_cfg_read32(route->dma_client, 4);
-    if (command == ~(uint32_t)0 || dma_command == ~(uint32_t)0) {
-        ret = -EIO;
-        goto done;
-    }
-    if ((command | dma_command) & 4) {
-        ret = -EBUSY;
-        goto done;
-    }
-    uint16_t ids[] = {info.requester, info.dma_requester};
-    ret = pci_requester_reserve(route->client, info.unit.segment, ids,
-                                ARRAY_SIZE(ids), &route->reservation);
+discard:
+    peers_release(peers, view.count);
 done:
     driver_discovery_end();
     return ret;
@@ -490,23 +551,26 @@ int amd_iommu_route_policy_create(amd_iommu_route_t *route,
     int ret = amd_iommu_route_validate(route, &info);
     if (ret)
         goto done;
-    if (info.memory_count > DRIVER_DMA_POLICY_MAX_RULES) {
+    acpi_ivrs_requesters_t view;
+    ret = acpi_ivrs_requesters(&route->owner->table, info.unit.segment,
+                                route->requester, &view);
+    if (ret) { ret = firmware_error(ret); goto done; }
+    if (view.memory_count > DRIVER_DMA_POLICY_MAX_RULES) {
         ret = -E2BIG;
         goto done;
     }
     struct driver_dma_rule *rules = NULL;
-    if (info.memory_count) {
-        rules = kmalloc(info.memory_count * sizeof(*rules));
+    if (view.memory_count) {
+        rules = kmalloc(view.memory_count * sizeof(*rules));
         if (!rules) {
             ret = -ENOMEM;
             goto done;
         }
     }
-    for (size_t i = 0; i < info.memory_count; i++) {
+    for (size_t i = 0; i < view.memory_count; i++) {
         acpi_ivrs_memory_t memory;
-        ret = amd_iommu_route_memory(route, i, &memory);
-        if (ret)
-            goto discard;
+        ret = acpi_ivrs_requester_memory(&view, i, &memory);
+        if (ret) { ret = firmware_error(ret); goto discard; }
         /* AMD 48882 rev 3.10, table 111: upper bits are reserved;
          * exclusion ignores IR/IW/Unity and requires hardware-wide handling. */
         if (memory.flags & 0xf8) {
@@ -521,7 +585,7 @@ int amd_iommu_route_policy_create(amd_iommu_route_t *route,
             memory.start + memory.length - 1, (memory.flags >> 1) & 3,
             (memory.flags & 1) ? DRIVER_DMA_POLICY_IDENTITY : 0};
     }
-    ret = driver_dma_policy_create(rules, info.memory_count, out);
+    ret = driver_dma_policy_create(rules, view.memory_count, out);
 discard:
     kfree(rules);
 done:
@@ -535,6 +599,7 @@ void amd_iommu_route_release(amd_iommu_route_t *route) {
     driver_discovery_begin();
     struct amdvi_owner *owner = route->owner;
     pci_requester_release(route->reservation);
+    peers_release(route->peers, route->peer_count);
     device_put(route->dma_scope);
     device_put(route->scope);
     device_put(route->dma_client);
@@ -638,6 +703,13 @@ done:
     return ret;
 }
 #else
+int amd_iommu_route_requesters(amd_iommu_route_t *route, uint16_t *ids,
+                                size_t capacity, size_t *count) {
+    (void)route; (void)ids; (void)capacity;
+    if (!count) return -EINVAL;
+    *count = 0;
+    return -EOPNOTSUPP;
+}
 int amd_iommu_route_policy_create(amd_iommu_route_t *route,
                                     struct driver_dma_policy **out) {
     (void)route;
