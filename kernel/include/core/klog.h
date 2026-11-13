@@ -3,19 +3,123 @@
 
 #include "core/types.h"
 
-/* Kernel ring buffer log — readable by dmesg syscall */
+/* Kernel ring buffer log — readable by dmesg syscall.
+ *
+ * There are two views of the same stream:
+ *   - a byte ring for /dev/kmsg and dmesg, unchanged since before;
+ *   - a fixed-size structured ring (timestamp, level, facility, message) that
+ *     the persistent writer turns into JSONL on the "A20OS log" partition.
+ * Both are appended under the same lock, so their ordering cannot diverge.
+ */
 
 #ifndef CONFIG_KLOG_BUF_SIZE
 #define CONFIG_KLOG_BUF_SIZE (64 * 1024)
 #endif
 #define KLOG_BUF_SIZE CONFIG_KLOG_BUF_SIZE
 
+/* Structured records kept for the persistent writer.  1024 records cover a
+ * verbose boot (the shell gate currently produces ~400 lines) with room for a
+ * driver probe burst; the disk writer drains them every second. */
+#ifndef CONFIG_KLOG_REC_COUNT
+#define CONFIG_KLOG_REC_COUNT 1024
+#endif
+#define KLOG_REC_COUNT CONFIG_KLOG_REC_COUNT
+#define KLOG_REC_MSG_MAX  240
+#define KLOG_REC_FAC_MAX  16
+
+/* Build-time defaults, set from the instance [log] section by the Makefile.
+ * a20.log.* command-line arguments override the runtime subset. */
+#ifndef CONFIG_KLOG_ENABLED
+#define CONFIG_KLOG_ENABLED 1
+#endif
+#ifndef CONFIG_KLOG_DEFAULT_LEVEL
+#define CONFIG_KLOG_DEFAULT_LEVEL 1   /* KLOG_INFO */
+#endif
+#ifndef CONFIG_KLOG_CONSOLE
+#define CONFIG_KLOG_CONSOLE 1
+#endif
+#ifndef CONFIG_KLOG_SESSION
+#define CONFIG_KLOG_SESSION 1
+#endif
+#ifndef CONFIG_KLOG_MAX_BYTES
+#define CONFIG_KLOG_MAX_BYTES (8U * 1024U * 1024U)
+#endif
+#ifndef CONFIG_KLOG_MODE
+#define CONFIG_KLOG_MODE 0
+#endif
+#define KLOG_MODE_AUTO      0
+#define KLOG_MODE_PARTITION 1
+#define KLOG_MODE_ROOTFS    2
+#define KLOG_MODE_ESP       4
+#define KLOG_MODE_RAM       3
+
+typedef struct klog_record {
+    uint64_t mono_ns;
+    uint64_t realtime_s;
+    uint32_t seq;
+    uint8_t  level;
+    uint8_t  facility_len;
+    uint16_t msg_len;
+    char     facility[KLOG_REC_FAC_MAX];
+    char     msg[KLOG_REC_MSG_MAX];
+} klog_record_t;
+
 void klog_init(void);
 void klog_write(const char *fmt, ...);
+int  klog_write_ex(int level, const char *fmt, ...);
+/* Retain diagnostics in both rings/JSONL without repainting the console. */
+int  klog_record_only(int level, const char *fmt, ...);
 void klog_write_raw(const char *buf, size_t len);
 int  klog_read(char *buf, size_t size, size_t *pos);
 void klog_clear(void);
 size_t klog_len(void);
+
+/* Emit already-formatted bytes at @level.  printf() and klog_write_ex() both
+ * end here, so a line cannot appear on the console but be missing from the
+ * structured ring. */
+void klog_emit_text(int level, const char *msg, size_t len);
+
+/* Resolve a20.log.* command-line overrides once bootargs_init() has run. */
+void klog_configure(void);
+int klog_console_enabled(void);
+int klog_persistent_enabled(void);
+int klog_mode(void);
+uint64_t klog_max_bytes(void);
+
+/* Per-boot identity.  Unlike /proc/sys/kernel/boot_id (which is derived from
+ * the uptime counter), this is random and stable for the whole boot. */
+const char *klog_boot_id(void);
+
+/* Structured records.  klog_record_read() copies the record at *cursor and
+ * advances it; it returns 1 when a record was copied, 0 when the caller is
+ * current, and clamps a cursor that fell out of the ring to the oldest record
+ * instead of silently skipping. */
+int klog_record_read(uint32_t *cursor, klog_record_t *out);
+uint32_t klog_record_oldest(void);
+uint32_t klog_record_next(void);
+
+/* Write a bounded, self-contained diagnostic summary to the console.  Called
+ * once after the shell has started, so a machine with no readable early
+ * scrollback and no working input still leaves the important boot evidence
+ * on the final screen. */
+void klog_boot_report(void);
+int klog_has_fatal(void);
+
+/* Persistent writer (kernel/core/klog_disk.c).  The mount code calls attach()
+ * once the "A20OS log" partition is mounted; attach() is the only function
+ * that resolves a path, and it runs before chroot. */
+#ifndef CONFIG_KLOG_PERSISTENT
+#define CONFIG_KLOG_PERSISTENT 0
+#endif
+int  klog_disk_attach(const char *dir);
+int  klog_disk_ready(void);
+const char *klog_disk_dir(void);
+void klog_disk_sync(void);
+void klog_disk_poll(void);
+void klog_disk_panic(void);
+void klog_disk_mark_ready(void);
+void klog_disk_mark_clean(void);
+void klog_disk_thread(void);
 
 /* Log levels */
 #define KLOG_DEBUG  0
@@ -25,7 +129,7 @@ size_t klog_len(void);
 
 extern int klog_level;
 
-#define klog(lvl, ...) do { if ((lvl) >= klog_level) klog_write(__VA_ARGS__); } while(0)
+#define klog(lvl, ...) do { if ((lvl) >= klog_level) klog_write_ex((lvl), __VA_ARGS__); } while(0)
 #define kdebug(...)  klog(KLOG_DEBUG, __VA_ARGS__)
 #define kinfo(...)   klog(KLOG_INFO,  __VA_ARGS__)
 #define kwarn(...)   klog(KLOG_WARN,  "[WARN] " __VA_ARGS__)

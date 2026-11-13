@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""Read A20OS boot logs from a mounted log partition or a raw disk image.
+
+The kernel writes one JSON object per line to the "A20OS log" FAT32 partition;
+the UEFI loader now writes early-<bootcount>.jsonl there before the kernel
+starts, and still writes a plain-text breadcrumb to the ESP's
+/A20OS/boot.log.  This tool is the host-side reader: it never runs on the
+target, so it works even when the target cannot boot.
+
+Examples:
+    # The partition is mounted by the desktop (Linux/Windows/macOS).
+    tools/a20log list /media/$USER/A20OSLOG
+    tools/a20log show /media/$USER/A20OSLOG --level warn
+    tools/a20log summary /media/$USER/A20OSLOG
+
+    # Read a raw image without mounting it (requires mtools).
+    tools/a20log list --image build/x86_64-pc/a20os-laptop-uefi.img
+    tools/a20log show --boot loader --image build/x86_64-pc/a20os-laptop-uefi.img
+    tools/a20log bootlog --image build/x86_64-pc/a20os-laptop-uefi.img
+
+    # Read the loader breadcrumb from a mounted ESP.
+    tools/a20log bootlog /media/$USER/A20OS
+
+Exit status is 0 on success, 1 on an unreadable input, and 2 on usage errors.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import json
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import NoReturn
+
+LOG_PARTITION_NAME = "A20OS log"
+ESP_PARTITION_NAMES = ("ESP", "EFI System Partition")
+
+
+def die(message: str, code: int = 1) -> "NoReturn":
+    print(f"a20log: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def gpt_partition_offset(image: Path, names: tuple[str, ...]) -> int:
+    """Return the byte offset of the first GPT partition whose name matches."""
+    with image.open("rb") as f:
+        f.seek(512)
+        header = f.read(92)
+        if len(header) < 92 or header[:8] != b"EFI PART":
+            die(f"{image}: not a GPT disk")
+        entries_lba = struct.unpack_from("<Q", header, 72)[0]
+        entry_count = struct.unpack_from("<I", header, 80)[0]
+        entry_size = struct.unpack_from("<I", header, 84)[0]
+        if entry_size < 128 or entry_size > 4096 or entry_count > 16384:
+            die(f"{image}: implausible GPT entry geometry")
+        f.seek(entries_lba * 512)
+        for _ in range(entry_count):
+            entry = f.read(entry_size)
+            if len(entry) < entry_size:
+                break
+            if entry[:16] == b"\0" * 16:
+                continue
+            name = entry[56:128].decode("utf-16le", errors="replace").rstrip("\0")
+            if name in names:
+                first = struct.unpack_from("<Q", entry, 32)[0]
+                return first * 512
+    die(f"{image}: no partition named {names!r}")
+
+
+def extract_partition(image: Path, offset: int, names: tuple[str, ...]) -> Path:
+    """Extract the named files from a FAT32 partition using mtools."""
+    if shutil.which("mcopy") is None:
+        die("mcopy (mtools) is required for --image; install mtools or mount "
+            "the partition and pass its directory instead")
+    temp = Path(tempfile.mkdtemp(prefix="a20log-"))
+    atexit.register(shutil.rmtree, temp, ignore_errors=True)
+    spec = f"{image}@@{offset}"
+    for name in names:
+        subprocess.run(["mcopy", "-o", "-i", spec, f"::{name}", str(temp)],
+                       check=False, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    return temp
+
+
+def resolve_source(args) -> Path:
+    if args.dir:
+        path = Path(args.dir)
+        if not path.is_dir():
+            die(f"{path}: not a directory")
+        return path
+    if args.image:
+        image = Path(args.image)
+        if not image.is_file():
+            die(f"{image}: no such file")
+        offset = gpt_partition_offset(image, (LOG_PARTITION_NAME,))
+        return extract_partition(image, offset,
+                                 ("README.txt", "CONFIG", "CURRENT",
+                                  "boot-*.jsonl", "early-*.jsonl"))
+    die("give a mounted directory or --image")
+
+
+def read_config(root: Path) -> dict[str, str]:
+    path = root / "CONFIG"
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in path.read_text(errors="replace").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
+def boot_files(root: Path, preferred: str | None = None) -> list[Path]:
+    """Kernel boots first (newest first), then loader-only early logs.
+
+    CURRENT's boot id wins over filesystem mtimes.  Files extracted from a FAT
+    image by mtools can all carry the same timestamp, so mtime is only a
+    fallback for a mounted directory.
+    """
+    kernel = sorted(root.glob("boot-*.jsonl"), key=lambda p: p.name,
+                    reverse=True)
+    early = sorted(root.glob("early-*.jsonl"), key=lambda p: p.name,
+                   reverse=True)
+    files = kernel + early
+    if preferred:
+        for path in files:
+            if preferred in path.name:
+                files.remove(path)
+                files.insert(0, path)
+                break
+    return files
+
+
+def current_state(root: Path) -> dict[str, str]:
+    path = root / "CURRENT"
+    state: dict[str, str] = {}
+    if not path.exists():
+        return state
+    for line in path.read_text(errors="replace").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            state[key.strip()] = value.strip()
+    return state
+
+
+def read_records(path: Path):
+    """Yield records; a torn final line is reported and skipped."""
+    torn = 0
+    with path.open("r", errors="replace") as f:
+        for number, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                torn += 1
+                if torn <= 3:
+                    print(f"a20log: {path.name}:{number}: torn record skipped",
+                          file=sys.stderr)
+    if torn > 3:
+        print(f"a20log: {path.name}: {torn} torn records skipped in total",
+              file=sys.stderr)
+
+
+def level_rank(level: str) -> int:
+    return {"debug": 0, "info": 1, "warn": 2, "err": 3}.get(level, 1)
+
+
+def format_record(rec: dict) -> str:
+    mono = rec.get("mono_ns", 0)
+    seconds = mono / 1_000_000_000 if isinstance(mono, (int, float)) else 0.0
+    rt = rec.get("rt", 0)
+    stamp = f"{seconds:9.6f}"
+    wall = ""
+    if isinstance(rt, (int, float)) and rt:
+        import datetime
+        wall = datetime.datetime.fromtimestamp(rt).strftime("%H:%M:%S ")
+    lvl = str(rec.get("lvl", "info")).upper()
+    src = str(rec.get("src", "kernel"))
+    msg = str(rec.get("msg", "")).rstrip("\n")
+    return f"[{stamp}] {wall}{lvl:5} {src:10} {msg}"
+
+
+def cmd_list(args) -> int:
+    root = resolve_source(args)
+    latest = current_state(root)
+    files = boot_files(root, latest.get("boot"))
+    if not files:
+        print(f"a20log: no boot-*.jsonl or early-*.jsonl under {root}",
+              file=sys.stderr)
+        return 1
+    for path in files:
+        state = ""
+        if latest.get("boot") and latest["boot"] in path.name:
+            state = f"  state={latest.get('state', '?')} " \
+                    f"last_seq={latest.get('seq', '?')}"
+        print(f"{path.name}  {path.stat().st_size:8d} bytes{state}")
+    return 0
+
+
+def select_boot(root: Path, requested: str | None) -> Path:
+    latest = current_state(root).get("boot")
+    files = boot_files(root, latest)
+    if not files:
+        die(f"no boot-*.jsonl or early-*.jsonl under {root}")
+    if requested == "loader":
+        for path in files:
+            if path.name.startswith("early-"):
+                return path
+        die(f"no loader early log under {root}")
+    if requested in (None, "", "last"):
+        return files[0]
+    for path in files:
+        if requested in path.name:
+            return path
+    die(f"no boot log matching {requested!r}")
+
+
+def cmd_show(args) -> int:
+    root = resolve_source(args)
+    path = select_boot(root, args.boot)
+    wanted = level_rank(args.level)
+    shown = 0
+    for rec in read_records(path):
+        if level_rank(str(rec.get("lvl", "info"))) < wanted:
+            continue
+        if args.src and args.src.lower() not in str(rec.get("src", "")).lower():
+            continue
+        if args.grep and args.grep not in str(rec.get("msg", "")):
+            continue
+        shown += 1
+        print(json.dumps(rec, ensure_ascii=False) if args.json
+              else format_record(rec))
+    if not shown:
+        print(f"a20log: no records matched in {path.name}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_summary(args) -> int:
+    root = resolve_source(args)
+    latest = current_state(root)
+    files = boot_files(root, latest.get("boot"))
+    if not files:
+        die(f"no boot-*.jsonl or early-*.jsonl under {root}")
+    print(f"log root   {root}")
+    config = read_config(root)
+    if config:
+        print("config     " + " ".join(f"{k}={v}" for k, v in config.items()))
+    if latest:
+        print(f"current    boot={latest.get('boot', '?')} "
+              f"bootcount={latest.get('bootcount', '?')} "
+              f"state={latest.get('state', '?')} "
+              f"seq={latest.get('seq', '?')} bytes={latest.get('bytes', '?')}")
+    for path in files[: args.limit]:
+        levels: dict[str, int] = {}
+        sources: dict[str, int] = {}
+        first = last = None
+        torn = 0
+        records = 0
+        for rec in read_records(path):
+            records += 1
+            lvl = str(rec.get("lvl", "info"))
+            levels[lvl] = levels.get(lvl, 0) + 1
+            src = str(rec.get("src", "kernel"))
+            sources[src] = sources.get(src, 0) + 1
+            mono = rec.get("mono_ns")
+            if isinstance(mono, (int, float)):
+                first = mono if first is None else min(first, mono)
+                last = mono if last is None else max(last, mono)
+        span = ((last - first) / 1e9) if first is not None else 0.0
+        top = ", ".join(f"{k}={v}" for k, v in
+                        sorted(sources.items(), key=lambda kv: -kv[1])[:8])
+        print(f"\n{path.name}")
+        print(f"  records={records} span={span:.3f}s "
+              f"levels=" + ", ".join(f"{k}={v}" for k, v in sorted(levels.items())))
+        print(f"  sources: {top}")
+        errors = [r for r in read_records(path)
+                  if level_rank(str(r.get("lvl", "info"))) >= 2]
+        for rec in errors[-args.errors:]:
+            print("  " + format_record(rec))
+    return 0
+
+
+def cmd_bootlog(args) -> int:
+    if args.dir:
+        base = Path(args.dir)
+        path = None
+        for name in ("A20OS", "a20os"):
+            candidate = base / name / "boot.log"
+            if candidate.is_file():
+                path = candidate
+                break
+        if path is None:
+            die(f"{base}/A20OS/boot.log: no loader breadcrumb")
+        text = path.read_text(errors="replace")
+        print(text, end="" if text.endswith("\n") else "\n")
+        return 0
+    if args.image:
+        image = Path(args.image)
+        offset = gpt_partition_offset(image, ESP_PARTITION_NAMES)
+        temp = extract_partition(image, offset, ("A20OS/boot.log",))
+        path = temp / "boot.log"
+        if not path.is_file():
+            die(f"{image}: ESP has no A20OS/boot.log")
+        text = path.read_text(errors="replace")
+        print(text, end="" if text.endswith("\n") else "\n")
+        return 0
+    die("bootlog needs a mounted ESP directory or --image")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Read A20OS persistent boot logs on the host.")
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    def add_source(p):
+        p.add_argument("--dir", type=Path,
+                       help="mounted log partition root (e.g. /media/$USER/A20OSLOG)")
+        p.add_argument("--image", type=Path,
+                       help="raw disk image; requires mtools")
+
+    p = sub.add_parser("list", help="list boot logs, newest first")
+    add_source(p)
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("show", help="print records from one boot")
+    add_source(p)
+    p.add_argument("--boot", default="last",
+                   help="boot id or file-name fragment (default: newest)")
+    p.add_argument("--level", default="debug",
+                   choices=("debug", "info", "warn", "err"),
+                   help="minimum level")
+    p.add_argument("--src", help="subsystem tag substring, e.g. NVME")
+    p.add_argument("--grep", help="message substring")
+    p.add_argument("--json", action="store_true", help="emit raw JSON lines")
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("summary", help="counts and recent warnings per boot")
+    add_source(p)
+    p.add_argument("--limit", type=int, default=3,
+                   help="how many boot files to summarise (default 3)")
+    p.add_argument("--errors", type=int, default=10,
+                   help="how many warn/err lines to print per boot")
+    p.set_defaults(func=cmd_summary)
+
+    p = sub.add_parser("bootlog", help="print the UEFI loader breadcrumb")
+    p.add_argument("--dir", type=Path, help="mounted ESP root")
+    p.add_argument("--image", type=Path, help="raw disk image")
+    p.set_defaults(func=cmd_bootlog)
+
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

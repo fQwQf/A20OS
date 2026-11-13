@@ -47,8 +47,17 @@ done
 	exit 1
 }
 
-size_mb=${A20_X86_DISK_MB:-512}
-esp_mb=$((size_mb - 1))
+log_mb=${A20_X86_LOG_MB:-64}
+log_session=${A20_LOG_SESSION:-1}
+base_mb=${A20_X86_DISK_MB:-512}
+if [ "$log_mb" -gt 0 ]; then
+	size_mb=$((base_mb + log_mb + 1))
+else
+	size_mb=$base_mb
+fi
+esp_mb=$((base_mb - 1))
+log_start_mb=$((esp_mb + 1))
+log_end_mb=$((log_start_mb + log_mb))
 
 mkdir -p "$(dirname "$output")"
 rm -f "$output"
@@ -60,9 +69,18 @@ truncate -s "${size_mb}M" "$output"
 parted -s "$output" mklabel gpt
 parted -s "$output" mkpart ESP fat32 1MiB "${esp_mb}MiB"
 parted -s "$output" set 1 esp on
+if [ "$log_mb" -gt 0 ]; then
+	parted -s "$output" mkpart log fat32 "${log_start_mb}MiB" "${log_end_mb}MiB"
+	parted -s "$output" name 2 '"A20OS log"'
+fi
 
 esp_offset=$((1024 * 1024))
 mformat -i "$output@@$esp_offset" -F -v A20OS ::
+if [ "$log_mb" -gt 0 ]; then
+	log_offset=$((log_start_mb * 1024 * 1024))
+	log_sectors=$((log_mb * 1024 * 1024 / 512))
+	mformat -i "$output@@$log_offset" -T "$log_sectors" -F -v A20OSLOG ::
+fi
 
 # mktemp honours TMPDIR; pin it into the checkout (make exports build/tmp for
 # recipes, this covers a manual run) so the scratch files land under build/,
@@ -75,7 +93,8 @@ mkdir -p "$TMPDIR"
 mtoolsrc=$(mktemp)
 tmp_cfg=$(mktemp)
 tmp_efi=$(mktemp)
-trap 'rm -f "$mtoolsrc" "$tmp_cfg" "$tmp_efi"' EXIT HUP INT TERM
+tmp_readme=$(mktemp)
+trap 'rm -f "$mtoolsrc" "$tmp_cfg" "$tmp_efi" "$tmp_readme"' EXIT HUP INT TERM
 
 # mtools maps one image per drive, and the rootfs is itself a FAT32 image file, so
 # it becomes a second drive rather than a glob -- the way the aarch64 image does it.
@@ -137,4 +156,18 @@ printf 'boots=%s\n' 'uefi:EFI/BOOT/BOOTX64.EFI'
 printf 'grub_prefix=%s\n' '/boot/grub'
 printf 'bootx64_sha256=%s\n' "$bootx64_sha"
 printf 'kernel_sha256=%s\n' "$kernel_sha"
+if [ "$log_mb" -gt 0 ]; then
+	cat >"$tmp_readme" <<'EOF'
+A20OS persistent log partition
+
+The kernel writes boot-<id>.jsonl here. See docs/zh/kernel/persistent-logging.md.
+EOF
+	mcopy -o -i "$output@@$log_offset" "$tmp_readme" ::/README.txt
+	printf 'schema=1\nsession=%s\n' "$log_session" >"$tmp_readme"
+	mcopy -o -i "$output@@$log_offset" "$tmp_readme" ::/CONFIG
+	printf 'log_partition_name=A20OS log\n'
+	printf 'log_offset_bytes=%s\n' "$log_offset"
+	printf 'log_size_mb=%s\n' "$log_mb"
+	printf 'log_session=%s\n' "$log_session"
+fi
 echo "uefi disk image ready: $output"

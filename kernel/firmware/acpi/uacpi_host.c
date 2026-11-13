@@ -25,6 +25,11 @@ typedef struct acpi_node_record {
     char *cid;
     size_t cid_size;
     uint32_t sta;
+    uint32_t i2c_address, i2c_speed, hid_desc_register;
+    uacpi_namespace_node *gpio_attention;
+    uint16_t gpio_pin;
+    uint8_t gpio_active_low;
+    int hid_desc_error;
     int sta_error, crs_error;
 } acpi_node_record_t;
 static acpi_context_t active_context;
@@ -106,6 +111,7 @@ static acpi_node_record_t *record_add(uacpi_namespace_node *handle) {
     r->all_next = records;
     records = r;
     r->sta = 0xf;
+    r->hid_desc_error = -ENOENT;
     if (parent) {
         if (parent->last_child)
             parent->last_child->next = r;
@@ -120,7 +126,7 @@ static int append_resource(acpi_node_record_t *r, enum fw_resource_type type,
     if (!length || length - 1 > ~(uint64_t)0 - address)
         return -EINVAL;
     if (r->resource_count >= 256)
-        return -E2BIG;
+        return 0;
     size_t bytes = (r->resource_count + 1) * sizeof(*r->resources);
     fw_resource_t *new = kmalloc(bytes);
     if (!new)
@@ -135,8 +141,10 @@ static int append_resource(acpi_node_record_t *r, enum fw_resource_type type,
 }
 static int append_irq(acpi_node_record_t *r, uint32_t number,
                       unsigned triggering, unsigned polarity) {
-    if (polarity > 1 || triggering > 1 || r->irq_count >= 256)
+    if (polarity > 1 || triggering > 1)
         return -EINVAL;
+    if (r->irq_count >= 256)
+        return 0;
     size_t bytes = (r->irq_count + 1) * sizeof(*r->irqs);
     struct acpi_irq *new = kmalloc(bytes);
     if (!new)
@@ -157,10 +165,22 @@ static int address_resource(acpi_node_record_t *r,
     if (c->direction == UACPI_PRODUCER || c->type == UACPI_RANGE_BUS)
         return 0;
     if (c->type != UACPI_RANGE_MEMORY && c->type != UACPI_RANGE_IO)
-        return -EOPNOTSUPP;
-    if (!c->fixed_min_address || !c->fixed_max_address || min > max || !len ||
-        len - 1 > max - min || translation > ~(uint64_t)0 - min)
-        return -EINVAL;
+        return 0;
+    /*
+     * A range descriptor is not one CPU resource.  Real laptop PCI root
+     * bridges publish QWord/DWord memory ranges with min != max and the
+     * fixed-address flags clear; the old -EINVAL here poisoned the bridge's
+     * _CRS and aborted the whole firmware enumeration before VFS.  Keep the
+     * raw _CRS for the device driver and skip the range in the generic
+     * resource list.
+     */
+    if (!c->fixed_min_address || !c->fixed_max_address || min != max)
+        return 0;
+    if (!len)
+        len = 1;
+    if (translation > ~(uint64_t)0 - min ||
+        len - 1 > ~(uint64_t)0 - (min + translation))
+        return 0;
     return append_resource(
         r, c->type == UACPI_RANGE_IO ? FW_RESOURCE_IO : FW_RESOURCE_MEMORY,
         min + translation, len);
@@ -171,10 +191,8 @@ static uacpi_iteration_decision resource_snapshot(void *opaque,
     int rc = 0;
     switch (res->type) {
         case UACPI_RESOURCE_TYPE_IO:
-            if (res->io.minimum != res->io.maximum) {
-                rc = -EINVAL;
+            if (res->io.minimum != res->io.maximum)
                 break;
-            }
             rc = append_resource(r, FW_RESOURCE_IO, res->io.minimum,
                                  res->io.length);
             break;
@@ -183,19 +201,15 @@ static uacpi_iteration_decision resource_snapshot(void *opaque,
                                  res->fixed_io.length);
             break;
         case UACPI_RESOURCE_TYPE_MEMORY24:
-            if (res->memory24.minimum != res->memory24.maximum) {
-                rc = -EINVAL;
+            if (res->memory24.minimum != res->memory24.maximum)
                 break;
-            }
             rc = append_resource(r, FW_RESOURCE_MEMORY,
                                  (uint64_t)res->memory24.minimum << 8,
                                  (uint64_t)res->memory24.length << 8);
             break;
         case UACPI_RESOURCE_TYPE_MEMORY32:
-            if (res->memory32.minimum != res->memory32.maximum) {
-                rc = -EINVAL;
+            if (res->memory32.minimum != res->memory32.maximum)
                 break;
-            }
             rc = append_resource(r, FW_RESOURCE_MEMORY, res->memory32.minimum,
                                  res->memory32.length);
             break;
@@ -223,21 +237,57 @@ static uacpi_iteration_decision resource_snapshot(void *opaque,
         case UACPI_RESOURCE_TYPE_EXTENDED_IRQ:
             if (res->extended_irq.direction == UACPI_PRODUCER)
                 break;
-            if (res->extended_irq.source.length) {
-                rc = -EOPNOTSUPP;
+            if (res->extended_irq.source.length)
                 break;
-            }
             for (unsigned i = 0; !rc && i < res->extended_irq.num_irqs; i++)
                 rc = append_irq(r, res->extended_irq.irqs[i],
                                 res->extended_irq.triggering,
                                 res->extended_irq.polarity);
+            break;
+        case UACPI_RESOURCE_TYPE_SERIAL_I2C_CONNECTION:
+            if (!r->i2c_address &&
+                res->i2c_connection.addressing_mode == UACPI_I2C_7BIT &&
+                res->i2c_connection.slave_address <= 0x7f) {
+                r->i2c_address = res->i2c_connection.slave_address;
+                r->i2c_speed = res->i2c_connection.connection_speed;
+            }
+            break;
+        case UACPI_RESOURCE_TYPE_GPIO_CONNECTION: {
+            const uacpi_resource_gpio_connection *gpio = &res->gpio_connection;
+            if (r->gpio_attention ||
+                gpio->type != UACPI_GPIO_CONNECTION_INTERRUPT ||
+                gpio->direction != UACPI_CONSUMER ||
+                gpio->intr.triggering != UACPI_TRIGGERING_LEVEL ||
+                gpio->intr.polarity > UACPI_POLARITY_ACTIVE_LOW ||
+                gpio->pin_table_length != 1 || !gpio->source.length)
+                break;
+            uacpi_namespace_node *provider;
+            if (!uacpi_namespace_node_resolve_from_aml_namepath(
+                    r->handle, gpio->source.string, &provider)) {
+                r->gpio_attention = provider;
+                r->gpio_pin = gpio->pin_table[0];
+                r->gpio_active_low = gpio->intr.polarity == UACPI_POLARITY_ACTIVE_LOW;
+            }
+            break;
+        }
+        /* The remaining connection descriptors are not CPU resources. */
+        case UACPI_RESOURCE_TYPE_SERIAL_SPI_CONNECTION:
+        case UACPI_RESOURCE_TYPE_SERIAL_UART_CONNECTION:
+        case UACPI_RESOURCE_TYPE_SERIAL_CSI2_CONNECTION:
+        case UACPI_RESOURCE_TYPE_PIN_FUNCTION:
+        case UACPI_RESOURCE_TYPE_PIN_CONFIGURATION:
+        case UACPI_RESOURCE_TYPE_PIN_GROUP:
+        case UACPI_RESOURCE_TYPE_PIN_GROUP_FUNCTION:
+        case UACPI_RESOURCE_TYPE_PIN_GROUP_CONFIGURATION:
+        case UACPI_RESOURCE_TYPE_GENERIC_REGISTER:
             break;
         case UACPI_RESOURCE_TYPE_END_TAG:
         case UACPI_RESOURCE_TYPE_VENDOR_SMALL:
         case UACPI_RESOURCE_TYPE_VENDOR_LARGE:
             break;
         default:
-            rc = -EOPNOTSUPP;
+            /* Unknown descriptor: keep it in the decoded _CRS, do not poison the
+             * device's whole resource list. */
             break;
     }
     if (rc)
@@ -245,6 +295,41 @@ static uacpi_iteration_decision resource_snapshot(void *opaque,
     return rc ? UACPI_ITERATION_DECISION_BREAK
               : UACPI_ITERATION_DECISION_CONTINUE;
 }
+
+static int record_matches(acpi_node_record_t *r, const char *id);
+
+static int hid_descriptor_register(acpi_node_record_t *r)
+{
+    /* HID-over-I2C _DSM, revision 1, function 1. UUID in ACPI byte order. */
+    static const uint8_t guid[] = {
+        0xf7, 0xf6, 0xdf, 0x3c, 0x67, 0x42, 0x55, 0x45,
+        0xad, 0x05, 0xb3, 0x0a, 0x3d, 0x89, 0x38, 0xde,
+    };
+    uacpi_object *args[] = {
+        uacpi_object_create_buffer((uacpi_data_view){
+            .const_bytes = guid, .length = sizeof(guid),
+        }),
+        uacpi_object_create_integer(1),
+        uacpi_object_create_integer(1),
+        uacpi_object_create_package((uacpi_object_array){0}),
+    };
+    uint64_t value;
+    int rc = -ENOMEM;
+    if (args[0] && args[1] && args[2] && args[3]) {
+        uacpi_object_array params = {.objects = args, .count = ARRAY_SIZE(args)};
+        rc = error(uacpi_eval_integer(r->handle, "_DSM", &params, &value));
+        if (!rc) {
+            if (value > 0xffffU)
+                rc = -EINVAL;
+            else
+                r->hid_desc_register = (uint32_t)value;
+        }
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(args); i++)
+        uacpi_object_unref(args[i]);
+    return rc;
+}
+
 static uacpi_iteration_decision
 snapshot(void *opaque, uacpi_namespace_node *node, uacpi_u32 depth) {
     (void)opaque;
@@ -293,6 +378,8 @@ snapshot(void *opaque, uacpi_namespace_node *node, uacpi_u32 depth) {
                 r->crs_error = error(status);
         }
     }
+    if (r->i2c_address && record_matches(r, "PNP0C50"))
+        r->hid_desc_error = hid_descriptor_register(r);
     return UACPI_ITERATION_DECISION_CONTINUE;
 }
 static const char *node_name(const fw_node_t *n) {
@@ -343,6 +430,17 @@ static int property(const fw_node_t *n, const char *name, fw_property_t *out) {
                record_matches(r, "MSFT0101")) {
         data = &tpm2_start_method;
         size = sizeof(tpm2_start_method);
+    } else if (!strcmp(name, "acpi,i2c-address") && r->i2c_address) {
+        data = &r->i2c_address;
+        size = sizeof(r->i2c_address);
+    } else if (!strcmp(name, "acpi,i2c-speed") && r->i2c_speed) {
+        data = &r->i2c_speed;
+        size = sizeof(r->i2c_speed);
+    } else if (!strcmp(name, "acpi,hid-descriptor-register")) {
+        if (r->hid_desc_error)
+            return r->hid_desc_error;
+        data = &r->hid_desc_register;
+        size = sizeof(r->hid_desc_register);
     } else if (r->info) {
         if ((!strcmp(name, "acpi,hid") || !strcmp(name, "_HID") ||
              !strcmp(name, "hardware-id")) &&
@@ -374,12 +472,18 @@ static int property(const fw_node_t *n, const char *name, fw_property_t *out) {
 }
 static int reference(const fw_node_t *n, const char *name, const char *cells,
                      size_t index, fw_reference_t *out) {
-    (void)n;
-    (void)name;
-    (void)cells;
-    (void)index;
-    (void)out;
-    return -ENOENT;
+    acpi_node_record_t *r = record_for(n);
+    if (!r || !name || !out)
+        return -EINVAL;
+    if (!cells || strcmp(cells, "#gpio-cells") || index ||
+        strcmp(name, "acpi,gpio-attention") || !r->i2c_address || !r->gpio_attention)
+        return -ENOENT;
+    acpi_node_record_t *provider = record_find(r->gpio_attention);
+    if (!provider || provider->sta_error || (provider->sta & 3U) != 3U)
+        return -ENOENT;
+    *out = (fw_reference_t){.node = node_for(provider), .count = 2,
+                            .args = {r->gpio_pin, r->gpio_active_low}};
+    return 0;
 }
 static int resource(const fw_node_t *n, size_t index, fw_resource_t *out) {
     acpi_node_record_t *r = record_for(n);
@@ -581,9 +685,25 @@ int acpi_pci_route(const fw_node_t *n, unsigned dev, unsigned function,
 int acpi_namespace_poweroff(void) {
     if (namespace_state != 1)
         return -ENOENT;
-    return error(uacpi_enter_sleep_state_simple(UACPI_SLEEP_STATE_S5));
+    uacpi_status status = uacpi_prepare_for_sleep_state(UACPI_SLEEP_STATE_S5);
+    printf("[ACPI-POWER] S5 prepare: %s\n", uacpi_status_to_string(status));
+    if (status != UACPI_STATUS_OK)
+        return error(status);
+    printf("[ACPI-POWER] entering firmware S5\n");
+    status = uacpi_enter_sleep_state(UACPI_SLEEP_STATE_S5);
+    printf("[ACPI-POWER] S5 returned: %s\n", uacpi_status_to_string(status));
+    return error(status);
+}
+int acpi_namespace_reboot(void) {
+    if (namespace_state != 1)
+        return -ENOENT;
+    printf("[ACPI-POWER] requesting FADT reset\n");
+    uacpi_status status = uacpi_reboot();
+    printf("[ACPI-POWER] FADT reset returned: %s\n", uacpi_status_to_string(status));
+    return error(status);
 }
 #else
+int acpi_namespace_reboot(void) { return -EOPNOTSUPP; }
 int acpi_namespace_initialize(const acpi_context_t *c, fw_node_t *n) {
     (void)c;
     (void)n;

@@ -1,4 +1,5 @@
 #include "drivers/char/uart.h"
+#include "drivers/char/fbcon.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_register.h"
@@ -187,10 +188,18 @@ void uart_init(void) {
 }
 
 void uart_putc(char c) {
+    fbcon_capture(&c, 1);
+    /* fbcon_write() presents the whole grid after the byte, so interactive
+     * echo is visible immediately just like a TUI cursor update. */
+    fbcon_write(&c, 1);
     arch_uart_putc(c);
 }
 
 void uart_write(const char *data, size_t length) {
+    if (length) {
+        fbcon_capture(data, length);
+        fbcon_write(data, length);
+    }
 #ifdef ARCH_UART_HAS_WRITE
     if (length) arch_uart_write(data, length);
 #else
@@ -351,7 +360,11 @@ wait_queue_t *uart_read_wait_queue(void) {
 }
 
 void uart_puts(const char *s) {
-    while (*s) uart_putc(*s++);
+    size_t n = 0;
+    while (s && s[n])
+        n++;
+    if (n)
+        uart_write(s, n);
 }
 
 void uart_flush(void) {

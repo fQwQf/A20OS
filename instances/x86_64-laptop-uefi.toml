@@ -1,0 +1,70 @@
+# Default bare-metal x86_64 laptop image: XFCE Wayland desktop, no COM1,
+# no installation to the internal disk.
+#
+# A newly packaged USB image carries an ESP, the Alpine "xfce" world named
+# "A20OS distro", and a separate "A20OS log" partition. Discover partitions by
+# GPT type/name rather than a number: upgraded test sticks can use another order.
+#
+# The kernel boots with its own RAM userland, finds the distro partition,
+# mounts it at /extra and chroots into /sbin/init.  That init starts labwc on
+# /dev/dri/card0, which is the retained UEFI GOP scanout exposed by simplefb
+# (software rendering). Embedded USB HID, PS/2 and I2C HID provide evdev input.
+#
+# Build the artifact from an already built desktop rootfs:
+#     tools/a20 package x86_64-laptop-uefi -- PREBUILT_WORLD=1
+# or let it rebuild the world from the package repository (needs the mirror):
+#     tools/a20 package x86_64-laptop-uefi
+#
+# USB is the physical acceptance medium. The same reusable NVMe driver also
+# passes the desktop/power/fsck QEMU gate; an SSD installation still requires
+# a separate backup, target selection and physical acceptance.
+name = "x86_64-laptop-uefi"
+description = "UEFI-only x86_64 laptop: XFCE Wayland desktop on the GOP framebuffer, world on USB"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+# Mount the GPT "A20OS distro" partition at /extra and chroot into it.
+ramfs_distro = true
+wifi_rtw89 = true
+driver_deployment = "embedded"
+ubsan = false
+swap = false
+
+[machine]
+# Start up to 16 logical processors advertised by the ACPI MADT.
+smp = 16
+allow_unverified_smp = true
+
+[package]
+kind = "uefi-disk"
+variant = "world"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 38400
+boot_timeout = "240s"
+# The serial path is optional on a laptop.  These probes are for the automated
+# gate and for a USB-TTL adapter; on a bare screen the desktop itself is the
+# evidence.
+console_check = ["System ready", "[DISTRO]", "[DRM] present"]
+# Write this whole image to the disposable USB stick, never a partition.
+boot_media = ["build/x86_64-pc/a20os-laptop-uefi.img"]
+media_device = "/dev/sdX"
+log = ".kernel-build/console/x86_64-laptop-uefi.log"
+
+[rootfs]
+world = "xfce"
+world_size_mb = 4096
+
+[log]
+level = "info"
+partition_mb = 64
+session = true
+loader = true
+
+[net]
+stack = "bsd"

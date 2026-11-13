@@ -19,11 +19,14 @@ DRIVER_CORE_SRCS := \
 # lsdc-boot is the same explicit bootstrap exception for firmware that exposes
 # an active scanout through controller registers rather than a DT/GOP handoff.
 GENERIC_KERNEL_SERVICE_SRCS := \
+    $(KERNEL_DIR)/drivers/i2c/i2c-core.c \
+    $(KERNEL_DIR)/drivers/gpio/firmware_input.c \
     $(KERNEL_DIR)/drivers/block/loop.c \
     $(KERNEL_DIR)/drivers/block/udisk.c \
     $(KERNEL_DIR)/drivers/net/tun.c \
     $(KERNEL_DIR)/drivers/char/pty.c \
     $(KERNEL_DIR)/drivers/char/uart.c \
+    $(KERNEL_DIR)/drivers/char/fbcon.c \
     $(KERNEL_DIR)/drivers/gpu/framebuffer.c \
     $(KERNEL_DIR)/drivers/gpu/simplefb.c \
     $(KERNEL_DIR)/drivers/gpu/lsdc_boot.c \
@@ -33,6 +36,12 @@ GENERIC_KERNEL_SERVICE_SRCS := \
     $(KERNEL_DIR)/drivers/audio/alsa.c \
     $(KERNEL_DIR)/drivers/input/input_mux.c \
     $(KERNEL_DIR)/drivers/usb/core/usb_core.c
+
+ifeq ($(WIFI_RTW89),1)
+# The resident broker owns DMA lifetime and transports Ethernet frames for
+# the independent userspace radio service.
+GENERIC_KERNEL_SERVICE_SRCS += $(KERNEL_DIR)/drivers/net/rtw89_broker.c
+endif
 
 # Complete device-driver set, statically linked only for the embedded
 # profile.  The generic profile builds each of these as a .a20drv package
@@ -46,8 +55,11 @@ EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/block/sdhci_core.c \
     $(KERNEL_DIR)/drivers/block/virtio_blk.c \
     $(KERNEL_DIR)/drivers/block/virtio_scsi.c \
+    $(KERNEL_DIR)/drivers/i2c/i2c-designware.c \
+    $(KERNEL_DIR)/drivers/hid/i2c-hid.c \
     $(KERNEL_DIR)/drivers/net/e1000.c \
     $(KERNEL_DIR)/drivers/net/ls2k_gmac.c \
+    $(KERNEL_DIR)/drivers/net/r8169.c \
     $(KERNEL_DIR)/drivers/net/rtl8139.c \
     $(KERNEL_DIR)/drivers/net/starfive_gmac.c \
     $(KERNEL_DIR)/drivers/net/virtio_net.c \
@@ -63,6 +75,17 @@ EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/usb/class/usb_hid.c \
     $(KERNEL_DIR)/drivers/usb/class/usb_hub.c \
     $(KERNEL_DIR)/drivers/usb/class/usb_storage.c
+
+# The embedded profile links the driver set this architecture can actually
+# own.  NVMe and PS/2 have thin drvmod packaging and a shared implementation; a machine whose only disk is NVMe
+# (or whose only console input is the i8042 keyboard) needs them before any
+# userspace DriverStore exists, so they are part of the x86_64 embedded set.
+ifeq ($(filter $(ARCH),x86_64 loongarch64),$(ARCH))
+EMBEDDED_DEVICE_DRIVER_SRCS += $(KERNEL_DIR)/drivers/block/nvme.c
+endif
+ifeq ($(ARCH),x86_64)
+EMBEDDED_DEVICE_DRIVER_SRCS += $(KERNEL_DIR)/drivers/input/ps2.c
+endif
 
 ifeq ($(DRIVER_DEPLOYMENT),generic)
 DRIVER_KERNEL_SRCS := $(DRIVER_CORE_SRCS) $(GENERIC_KERNEL_SERVICE_SRCS)

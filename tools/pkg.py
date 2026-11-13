@@ -20,6 +20,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# pkg.py lives in tools/ while mkrootfs.py lives in tools/packaging/; relying on
+# the caller's PYTHONPATH made `make image-world` fail from a clean shell.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "packaging"))
 from mkrootfs import ELF_MACHINES, elf_machine
 
 REPO = Path(__file__).resolve().parent.parent
@@ -212,6 +215,10 @@ def cmd_image_world(a) -> int:
         cmd += ["--driver", d]
     if hasattr(__import__("os"), "getuid") and __import__("os").getuid() != 0:
         cmd += ["--usermode"]
+    # A world image is a deliverable root filesystem, not a crash-test
+    # fixture: give it a journal so an unclean power-off replays instead of
+    # leaving the distro to orphan recovery (which can refuse to mount).
+    cmd += ["--journal"]
     cmd += ["--output", f"{a.image_dir}/{a.world}-{a.arch}.img",
             "--size-mb", a.size_mb]
     run(cmd)

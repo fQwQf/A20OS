@@ -48,11 +48,18 @@ DEFAULT_ALPINE_MIRROR = "https://mirrors.ustc.edu.cn/alpine"
 DEFAULT_ALPINE_VERSION = "v3.23"
 ALPINE_KEYS_REPO = "edge/main/x86_64"
 
-# ext4 feature set matching tools/mk/targets-images.mk (the kernel's ext4
-# implementation is verified against exactly these features).
+# ext4 feature sets matching tools/mk/targets-images.mk (the kernel's ext4
+# implementation is verified against these features).  Development images
+# default to no journal so the crash-recovery gates can exercise the
+# no-journal path; a deliverable world image passes --journal, because the USB
+# system may be force-powered-off when its panel never lights up.
 EXT4_MKFS_ARGS = [
     "mkfs.ext4", "-q", "-F",
     "-O", "^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index",
+]
+EXT4_MKFS_ARGS_JOURNAL = [
+    "mkfs.ext4", "-q", "-F",
+    "-O", "has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index",
 ]
 MKFS_EXT4_FALLBACK_DIRS = (Path("/usr/sbin"), Path("/sbin"))
 
@@ -485,6 +492,8 @@ def main() -> None:
                          "or directory with --format dir)")
     ap.add_argument("--size-mb", type=int, default=512)
     ap.add_argument("--format", choices=["ext4", "dir"], default="ext4")
+    ap.add_argument("--journal", action="store_true",
+                    help="create an internal JBD2 journal (deliverable images)")
     ap.add_argument("--label", default="a20os-rootfs", help="ext4 volume label")
     ap.add_argument("--usermode", action="store_true",
                     help="no sudo; files stay owned by the caller")
@@ -663,7 +672,9 @@ def main() -> None:
         tmp_img.unlink(missing_ok=True)
         check_fits_size_mb(staging, args.size_mb)
         run(["truncate", "-s", f"{args.size_mb}M", str(tmp_img)], [])
-        mkfs = [mkfs_ext4, *EXT4_MKFS_ARGS[1:], "-L", args.label]
+        feature_args = (EXT4_MKFS_ARGS_JOURNAL if args.journal
+                        else EXT4_MKFS_ARGS)
+        mkfs = [mkfs_ext4, *feature_args[1:], "-L", args.label]
         mkfs_sudo = sudo
         if args.usermode:
             # Staging files are owned by the caller; record them as root in
@@ -690,6 +701,22 @@ def main() -> None:
                 else:
                     mkfs = ["fakeroot"] + mkfs
         run(mkfs, mkfs_sudo)
+        if args.journal:
+            # mkfs creates a journal but does not set the JBD2 checksum feature
+            # the A20OS driver requires; patch the 4 KiB journal superblock.
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+            from img import enable_journal_checksums_stream
+            try:
+                enable_journal_checksums_stream(tmp_img)
+            except PermissionError:
+                # mkfs ran through sudo, so the image is root-owned.  Patch it
+                # as the caller and restore root ownership before packaging.
+                if not mkfs_sudo:
+                    raise
+                me = f"{os.getuid()}:{os.getgid()}"
+                run([*mkfs_sudo, "chown", me, str(tmp_img)], [])
+                enable_journal_checksums_stream(tmp_img)
+                run([*mkfs_sudo, "chown", "root:root", str(tmp_img)], [])
         os.replace(tmp_img, output)
         print(f"mkrootfs: wrote {output} ({args.size_mb} MiB, "
               f"{len(pkgs)} packages)")

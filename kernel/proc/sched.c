@@ -1752,6 +1752,25 @@ int proc_sched_resume_task(task_t *t)
  * (the whole interrupt entry above), which is why KERNEL_STACK_SIZE has to
  * cover a full interrupt nest on top of the deepest kernel call.
  */
+/* IRQ_RETURN_PREEMPT_WINDOW:
+ *
+ * This preemption point enables interrupts before it enters the scheduler, so
+ * an interrupt can arrive inside the window.  If that interrupt reaches this
+ * function again, the two windows nest on the same kernel stack, and a
+ * level-triggered line that is still asserted (a device whose handler cannot
+ * quiesce the source -- see IRQF_ONESHOT) can supply those interrupts
+ * back-to-back until the stack overruns the saved task_context_t parked at
+ * its bottom.  That is exactly how a storming INTx source corrupted unrelated
+ * task state.
+ *
+ * One window per CPU at a time is enough: the outer attempt re-evaluates the
+ * runqueue after the nested handler returns, so the nested attempt has no
+ * decision of its own to make.  The flag is cleared again before __switch()
+ * publishes a different stack, so whichever task runs next is free to
+ * preempt at its own interrupt returns.
+ */
+static uint8_t g_irq_return_preempt[CONFIG_NR_CPUS];
+
 void kernel_preempt_at_irq_return(void)
 {
 #ifdef CONFIG_KERNEL_PREEMPT
@@ -1780,8 +1799,12 @@ void kernel_preempt_at_irq_return(void)
     if (cur->first_kernel_entry)
         return;
     if (cur->suspend_pending) {
+        if (__atomic_exchange_n(&g_irq_return_preempt[cpu], 1,
+                                __ATOMIC_ACQ_REL))
+            return;
         arch_local_irq_enable();
         sched_suspend_current();
+        __atomic_store_n(&g_irq_return_preempt[cpu], 0, __ATOMIC_RELEASE);
         return;
     }
     /*
@@ -1790,12 +1813,15 @@ void kernel_preempt_at_irq_return(void)
      */
     if (proc_runq_load_sum() == 0)
         return;
+    if (__atomic_exchange_n(&g_irq_return_preempt[cpu], 1, __ATOMIC_ACQ_REL))
+        return;
     a20_perf_count(A20_PERF_KERNEL_PREEMPTS);
     /* sched()'s slow helpers (bottom halves, zombie reaping, the timer scan)
      * reach code that expects interrupts on, so hand them a CPU with
      * interrupts on rather than resuming into them masked. */
     arch_local_irq_enable();
     proc_yield();
+    __atomic_store_n(&g_irq_return_preempt[cpu], 0, __ATOMIC_RELEASE);
 #endif
 }
 
@@ -2869,6 +2895,11 @@ static void context_switch_locked(task_t *next) {
     if (prev && prev->trap_ctx)
         ARCH_TRAP_FAST_RETURN_DISARM(prev->trap_ctx);
     ARCH_SCHED_SWITCH(next);
+    /* The outgoing task's IRQ-return window ends with its stack; see
+     * IRQ_RETURN_PREEMPT_WINDOW.  Clearing here (before the switch) means the
+     * incoming task resumes with a clean flag on this CPU. */
+    if (cpu < CONFIG_NR_CPUS)
+        __atomic_store_n(&g_irq_return_preempt[cpu], 0, __ATOMIC_RELEASE);
     __switch(next->kstack);
     /* Running as the incoming task now.  x86_64 keeps the user's FS/GS bases
      * out of the syscall path entirely, so the switch-in is the one place that

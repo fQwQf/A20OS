@@ -1,4 +1,5 @@
 #include "proc/resource_ns.h"
+#include "core/klog.h"
 #include "abi/linux/rlimit_policy.h"
 #include "abi/linux/sys_policy.h"
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
@@ -1112,10 +1113,15 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
           magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
          cmd == LINUX_REBOOT_CMD_RESTART)) {
         kinfo("[SD] RESTART CLEAN entry\n");
+        /* Mark the log clean while its vfile is still mounted; the shutdown
+         * path tears down the mount table. */
+        klog_disk_mark_clean();
         int shutdown_ret = vfs_system_shutdown();
         if (shutdown_ret < 0) {
             kinfo("[SD] reboot refused: filesystem shutdown failed (%d)\n",
                   shutdown_ret);
+            if (!mntns_shutdown_active())
+                klog_disk_mark_ready();
             return shutdown_ret;
         }
         firmware_reboot();
@@ -1125,10 +1131,13 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                 (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
                  magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
                 cmd == LINUX_REBOOT_CMD_POWER_OFF)) {
+        klog_disk_mark_clean();
         int shutdown_ret = vfs_system_shutdown();
         if (shutdown_ret < 0) {
             kinfo("[SD] poweroff refused: filesystem shutdown failed (%d)\n",
                   shutdown_ret);
+            if (!mntns_shutdown_active())
+                klog_disk_mark_ready();
             return shutdown_ret;
         }
         kinfo("[SD] POWER_OFF entry\n");

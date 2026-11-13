@@ -124,6 +124,7 @@ static const net_backend_if_ops_t lwip_iface_ops = {
     .del_addr6 = a20_lwip_if_del_addr6,
     .neighbor_update_v4 = neighbor_update_v4,
     .interface_ipv4 = a20_lwip_interface_ipv4,
+    .device_hwaddr = a20_lwip_device_hwaddr,
 };
 
 static const net_backend_packet_ops_t lwip_packet_ops = {

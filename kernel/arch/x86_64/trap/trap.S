@@ -252,12 +252,9 @@ kernel_trap:
      * the kernel stack and call trap_handler, then return via
      * __return_to_user (which uses iretq) so we do not need sysret.
      */
-    .globl __x86_64_syscall_scratch
     .align 16
-
-    .macro syscall_cpu_entry cpu
-    .globl syscall_entry_\cpu
-syscall_entry_\cpu:
+    .globl x86_64_syscall_entry
+x86_64_syscall_entry:
     cli
     swapgs
     lfence
@@ -314,30 +311,6 @@ syscall_entry_\cpu:
     movq  %rsp, %rdi
     call  trap_handler
     jmp   __return_to_user
-    .endm
-
-    syscall_cpu_entry 0
-#if CONFIG_NR_CPUS > 1
-    syscall_cpu_entry 1
-#endif
-#if CONFIG_NR_CPUS > 2
-    syscall_cpu_entry 2
-#endif
-#if CONFIG_NR_CPUS > 3
-    syscall_cpu_entry 3
-#endif
-#if CONFIG_NR_CPUS > 4
-    syscall_cpu_entry 4
-#endif
-#if CONFIG_NR_CPUS > 5
-    syscall_cpu_entry 5
-#endif
-#if CONFIG_NR_CPUS > 6
-    syscall_cpu_entry 6
-#endif
-#if CONFIG_NR_CPUS > 7
-    syscall_cpu_entry 7
-#endif
 
     .globl __return_to_user
 __return_to_user:
@@ -480,28 +453,3 @@ isr_stub_table:
         isr_table_entry %i
         .set i, i+1
     .endr
-
-    .globl syscall_entry_table
-syscall_entry_table:
-    .quad syscall_entry_0
-#if CONFIG_NR_CPUS > 1
-    .quad syscall_entry_1
-#endif
-#if CONFIG_NR_CPUS > 2
-    .quad syscall_entry_2
-#endif
-#if CONFIG_NR_CPUS > 3
-    .quad syscall_entry_3
-#endif
-#if CONFIG_NR_CPUS > 4
-    .quad syscall_entry_4
-#endif
-#if CONFIG_NR_CPUS > 5
-    .quad syscall_entry_5
-#endif
-#if CONFIG_NR_CPUS > 6
-    .quad syscall_entry_6
-#endif
-#if CONFIG_NR_CPUS > 7
-    .quad syscall_entry_7
-#endif

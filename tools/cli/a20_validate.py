@@ -88,6 +88,11 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     """Semantic cross-checks mirroring the Makefile's own guards."""
     e: list[str] = []
     k, m, g, n, r, t = inst.kernel, inst.machine, inst.gui, inst.net, inst.rootfs, inst.test
+    if k.ramfs_fastfetch and k.ramfs_user is not True:
+        e.append("kernel.ramfs_fastfetch requires kernel.ramfs_user=true")
+    if k.wifi_rtw89 and (inst.arch != "x86_64" or k.driver_deployment != "embedded" or
+                        k.ramfs_user is not True):
+        e.append("kernel.wifi_rtw89 requires x86_64, embedded drivers and ramfs_user=true")
     if k.ramfs_media and k.ramfs_user is not True:
         e.append("kernel.ramfs_media requires kernel.ramfs_user=true")
     if k.ramfs_distro:
@@ -176,6 +181,24 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
                             ("world_size_mb", r.world_size_mb)):
         if size is not None and size < 1:
             e.append(f"rootfs.{size_name}: must be >= 1")
+    l = inst.log
+    if l.level is not None and l.level not in ("debug", "info", "warn", "err"):
+        e.append(f"log.level: '{l.level}' must be debug|info|warn|err")
+    if l.mode is not None and l.mode not in ("auto", "partition", "rootfs", "ram", "esp"):
+        e.append(f"log.mode: '{l.mode}' must be auto|partition|rootfs|ram|esp")
+    if l.partition_mb is not None and not 0 <= l.partition_mb <= 4096:
+        e.append("log.partition_mb: must be between 0 and 4096")
+    if l.max_bytes is not None and not 65536 <= l.max_bytes <= 268435456:
+        e.append("log.max_bytes: must be between 65536 and 268435456")
+    if l.enabled is False and l.persistent is True:
+        e.append("log.persistent: cannot be true when log.enabled is false")
+    if l.persistent and inst.kernel.profile == "mcu":
+        e.append("log.persistent: MCU profiles have no block/filesystem stack")
+    if l.partition_mb == 0 and l.mode == "partition":
+        e.append("log.mode=partition requires log.partition_mb > 0")
+    if l.loader and inst.arch not in ("x86_64", "aarch64"):
+        e.append("log.loader: UEFI ESP breadcrumb is implemented only for "
+                 "x86_64 and aarch64")
     if n.hostfwd is not None:
         for fwd in n.hostfwd:
             if not _HOSTFWD_RE.fullmatch(fwd):

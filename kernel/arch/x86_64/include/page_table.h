@@ -52,6 +52,9 @@ static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
 #define PTE_MAT1  0UL
 /* PAT reset entry 3 is UC: match the kernel device alias. */
 #define PTE_DEVICE ((1UL << 3) | (1UL << 4))
+/* Bit 12 is PAT in a 2 MiB leaf.  PAT entry 4 is write-combining by default;
+ * setting PAT (and clearing PCD/PWT) selects WC instead of UC. */
+#define PTE_PAT (1UL << 12)
 
 #define PTE_KERN (PTE_V | PTE_W | PTE_NX | PTE_LEAF)
 #define PTE_USER (PTE_V | PTE_W | PTE_U | PTE_NX | PTE_LEAF)

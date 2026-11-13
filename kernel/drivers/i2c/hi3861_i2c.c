@@ -53,63 +53,6 @@ struct hi3861_i2c {
     i2c_adapter_t adapter;
 };
 
-static i2c_adapter_t *g_i2c_adapters[2];
-
-int i2c_adapter_add(i2c_adapter_t *adapter)
-{
-    if (!adapter || adapter->nr < 0 || adapter->nr >= 2 || !adapter->transfer)
-        return -EINVAL;
-    if (g_i2c_adapters[adapter->nr])
-        return -EEXIST;
-    g_i2c_adapters[adapter->nr] = adapter;
-    return 0;
-}
-
-void i2c_adapter_remove(i2c_adapter_t *adapter)
-{
-    if (adapter && adapter->nr >= 0 && adapter->nr < 2 &&
-        g_i2c_adapters[adapter->nr] == adapter)
-        g_i2c_adapters[adapter->nr] = NULL;
-}
-
-i2c_adapter_t *i2c_adapter_get(int nr)
-{
-    return (nr >= 0 && nr < 2) ? g_i2c_adapters[nr] : NULL;
-}
-
-int i2c_transfer(int nr, i2c_msg_t *msgs, int n)
-{
-    i2c_adapter_t *a = i2c_adapter_get(nr);
-    if (!a || !msgs || n <= 0)
-        return -ENODEV;
-    return a->transfer(a, msgs, n);
-}
-
-int i2c_write(int nr, uint16_t addr, const void *buf, uint16_t len)
-{
-    i2c_msg_t m = {.addr = addr, .flags = I2C_M_WRITE, .len = len,
-                   .buf = (uint8_t *)(uintptr_t)buf};
-    return i2c_transfer(nr, &m, 1);
-}
-
-int i2c_read(int nr, uint16_t addr, void *buf, uint16_t len)
-{
-    i2c_msg_t m = {.addr = addr, .flags = I2C_M_READ, .len = len,
-                   .buf = buf};
-    return i2c_transfer(nr, &m, 1);
-}
-
-int i2c_write_read(int nr, uint16_t addr, const void *wbuf, uint16_t wlen,
-                   void *rbuf, uint16_t rlen)
-{
-    i2c_msg_t m[2] = {
-        {.addr = addr, .flags = I2C_M_WRITE, .len = wlen,
-         .buf = (uint8_t *)(uintptr_t)wbuf},
-        {.addr = addr, .flags = I2C_M_READ, .len = rlen, .buf = rbuf},
-    };
-    return i2c_transfer(nr, m, 2);
-}
-
 static void i2c_fail(struct hi3861_i2c *i2c)
 {
     writel(I2C_CLEAR_ALL, (volatile uint8_t *)i2c->base + I2C_ICR);
@@ -360,7 +303,9 @@ static int hi3861_i2c_remove(device_t *dev)
     struct hi3861_i2c *i2c = dev->drv_priv;
     if (!i2c)
         return 0;
-    i2c_adapter_remove(&i2c->adapter);
+    int ret = i2c_adapter_remove(&i2c->adapter);
+    if (ret)
+        return ret;
     kfree(i2c);
     dev->drv_priv = NULL;
     return 0;

@@ -9,6 +9,7 @@
 #include "fs/readiness.h"
 #include "fs/tty.h"
 #include "core/string.h"
+#include "core/klog.h"
 #include "core/sync.h"
 #include "core/timekeeping.h"
 #include "core/errno.h"
@@ -16,6 +17,7 @@
 #include "proc/proc.h"
 #include "sys/usercopy.h"
 #include "mm/slab.h"
+#include "mt_state.h"
 
 #define INPUT_QUEUE_EVENTS 256
 #define INPUT_KEY_BYTES ((KEY_MAX + 8) / 8)
@@ -32,6 +34,8 @@ typedef struct input_client {
 
 static mutex_t g_input_lock = MUTEX_INIT;
 static input_client_t *g_clients;
+/* Bounded numeric lock-key diagnostics; ordinary typed keys are never logged. */
+static unsigned g_lock_key_reports, g_led_requests;
 /* State belongs to the physical device, including while a client has grabbed
  * it. Keep it for as long as any subscriber can observe that device. */
 typedef struct input_state {
@@ -39,6 +43,7 @@ typedef struct input_state {
     class_device_t *device;
     uint8_t keys[INPUT_KEY_BYTES];
     int32_t abs[64];
+    struct input_mt_state mt;
 } input_state_t;
 static input_state_t *g_states;
 
@@ -50,6 +55,8 @@ static input_state_t *input_state(class_device_t *device) {
     if (s) {
         class_device_get(device);
         s->device = device;
+        input_mt_init(&s->mt);
+        s->abs[0x39] = -1;
         s->next = g_states;
         g_states = s;
     }
@@ -145,6 +152,10 @@ static void input_pump_device(class_device_t *device) {
                 }
             for (unsigned i = 0; i < (unsigned)n / sizeof(events[0]); i++) {
                 const struct input_event *ev = &events[i];
+                if (ev->type == EV_KEY && (ev->code == 58 || ev->code == 69) &&
+                    __atomic_fetch_add(&g_lock_key_reports, 1, __ATOMIC_RELAXED) < 64)
+                    klog_record_only(KLOG_INFO, "[INPUT-LOCK] device=%s code=%u value=%d\n",
+                                     device->name, ev->code, ev->value);
                 if (ev->type == EV_KEY && ev->code <= KEY_MAX) {
                     uint8_t mask = 1U << (ev->code & 7);
                     if (ev->value)
@@ -153,6 +164,7 @@ static void input_pump_device(class_device_t *device) {
                         state->keys[ev->code >> 3] &= ~mask;
                 } else if (ev->type == EV_ABS && ev->code < 64) {
                     state->abs[ev->code] = ev->value;
+                    input_mt_update(&state->mt, ev->code, ev->value);
                 }
                 if (ev->type == EV_REL ||
                     (ev->type == EV_KEY && ev->code >= BTN_MOUSE_FIRST &&
@@ -315,11 +327,89 @@ static int input_poll(vfile_t *vf, short events) {
     return ready;
 }
 
+static int input_output(class_device_t *device, unsigned long request, void *argument) {
+    if (class_device_call_begin(device) < 0)
+        return -ENODEV;
+    const input_dev_ops_t *ops = device->dev->drv->class_ops;
+    int ret = ops && ops->ioctl ? ops->ioctl(device->dev, request, argument) : -EOPNOTSUPP;
+    class_device_call_end(device);
+    return ret;
+}
+
+static int input_write(vfile_t *vf, const char *buf, size_t count) {
+    input_client_t *client = vf->priv;
+    if (!client || count < sizeof(struct input_event))
+        return -EINVAL;
+    if (client->revoked)
+        return -ENODEV;
+    size_t done = 0;
+    while (done + sizeof(struct input_event) <= count) {
+        struct input_event event;
+        memcpy(&event, buf + done, sizeof(event));
+        int ret = 0;
+        if (event.type == EV_LED && event.code <= LED_MAX &&
+            (client->info.bits[EV_LED][event.code >> 3] & (1U << (event.code & 7)))) {
+            if (__atomic_fetch_add(&g_led_requests, 1, __ATOMIC_RELAXED) < 64) {
+                task_t *writer = proc_current();
+                klog_record_only(KLOG_INFO,
+                    "[INPUT-LED] pid=%d device=%s code=%u value=%d\n",
+                    writer ? writer->pid : -1,
+                    client->device ? client->device->name : "aggregate",
+                    event.code, event.value);
+            }
+            /* Control transfers can sleep. Never hold the mux mutex across
+             * a device output transaction or stall touchpad input fanout. */
+            if (client->device) {
+                ret = input_output(client->device, INPUT_IOCTL_LED_EVENT, &event);
+            } else {
+                for (unsigned i = 0;; i++) {
+                    class_device_t *device = class_device_get_by_type(DEV_CLASS_INPUT, i);
+                    if (!device)
+                        break;
+                    int r = input_output(device, INPUT_IOCTL_LED_EVENT, &event);
+                    class_device_put(device);
+                    if (r < 0 && r != -EOPNOTSUPP && r != -ENOTTY)
+                        ret = r;
+                }
+            }
+        }
+        if (ret < 0)
+            return done ? (int)done : ret;
+        done += sizeof(event);
+    }
+    return (int)done;
+}
+
+static uint32_t input_led_state(input_client_t *client) {
+    uint32_t leds = 0;
+    if (client->device)
+        (void)input_output(client->device, INPUT_IOCTL_GET_LEDS, &leds);
+    else {
+        for (unsigned i = 0;; i++) {
+            class_device_t *device = class_device_get_by_type(DEV_CLASS_INPUT, i);
+            if (!device)
+                break;
+            uint32_t value = 0;
+            if (!input_output(device, INPUT_IOCTL_GET_LEDS, &value))
+                leds |= value;
+            class_device_put(device);
+        }
+    }
+    return leds;
+}
+
 static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     input_client_t *client = vf->priv;
     if (!client || A20_IOC_TYPE(req) != 'E')
         return -ENOTTY;
     unsigned nr = A20_IOC_NR(req), len = A20_IOC_SIZE(req);
+    unsigned mt_axis = 0;
+    if (nr == EVIOCGMTSLOTS_NR) {
+        if (len < sizeof(mt_axis))
+            return -EINVAL;
+        if (copy_from_user(&mt_axis, arg, sizeof(mt_axis)) < 0)
+            return -EFAULT;
+    }
     uint8_t data[INPUT_BITMAP_BYTES] = {0};
     unsigned size = 0;
     int ret = 0;
@@ -373,6 +463,28 @@ static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             return -EINVAL;
         mutex_lock(&g_input_lock);
         client->clock_id = clock;
+    } else if (nr == EVIOCGMTSLOTS_NR) {
+        int slots = client->info.abs[0x2f].maximum + 1;
+        if (!client->device || slots < 1 || slots > INPUT_MT_SLOTS_MAX ||
+            mt_axis < INPUT_MT_AXIS_FIRST || mt_axis >= INPUT_MT_AXIS_FIRST + INPUT_MT_AXES ||
+            !(client->info.bits[EV_ABS][0x2f >> 3] & (1U << (0x2f & 7))) ||
+            !(client->info.bits[EV_ABS][mt_axis >> 3] & (1U << (mt_axis & 7)))) {
+            ret = -EINVAL;
+        } else {
+            input_state_t *state = input_state(client->device);
+            unsigned count = (len - sizeof(mt_axis)) / sizeof(int);
+            if (count > (unsigned)slots)
+                count = slots;
+            int values[INPUT_MT_SLOTS_MAX];
+            if (!state)
+                ret = -ENOMEM;
+            else {
+                (void)input_mt_snapshot(&state->mt, mt_axis, values, count);
+                memcpy(data, &mt_axis, sizeof(mt_axis));
+                memcpy(data + sizeof(mt_axis), values, count * sizeof(int));
+                size = sizeof(mt_axis) + count * sizeof(int);
+            }
+        }
     } else if (nr == EVIOCGNAME_NR) {
         size = strlen(client->info.name) + 1;
         memcpy(data, client->info.name, size);
@@ -396,7 +508,11 @@ static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             memcpy(data, &client->info.abs[axis], sizeof(struct input_absinfo));
             size = sizeof(struct input_absinfo);
         }
-    } else if (nr == 0x19 || nr == 0x1a || nr == 0x1b) {
+    } else if (nr == 0x19) { /* EVIOCGLED */
+        uint32_t leds = input_led_state(client);
+        memcpy(data, &leds, sizeof(leds));
+        size = sizeof(data);
+    } else if (nr == 0x1a || nr == 0x1b) {
         size = sizeof(data);
     } else {
         ret = -ENOTTY;
@@ -463,6 +579,7 @@ static size_t input_poll_sources(vfile_t *vf, short events,
 
 vfile_ops_t g_devfs_input_ops = {
     .read = input_read,
+    .write = input_write,
     .ioctl = input_ioctl,
     .poll = input_poll,
     .poll_sources = input_poll_sources,

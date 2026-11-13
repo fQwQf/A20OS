@@ -1,0 +1,7 @@
+#ifndef A20_RTW_ENDIAN_H
+#define A20_RTW_ENDIAN_H
+#define LITTLE_ENDIAN 1234
+#define BIG_ENDIAN 4321
+#define BYTE_ORDER LITTLE_ENDIAN
+#define __LITTLE_ENDIAN__ 1
+#endif

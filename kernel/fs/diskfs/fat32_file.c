@@ -299,6 +299,67 @@ int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
 }
 
 
+/* Commit the directory entry's size without closing the open file.
+ *
+ * FAT32 keeps the file size in the dirent, not in the inode.  A long-lived
+ * writer (the persistent log holds one vfile across the whole boot) would
+ * otherwise leave a zero-length dirent on disk until close, so a power cut
+ * could lose the name→size mapping even though the data clusters were
+ * written.  vfs_fsync_vfile() calls this before its block-cache flush.
+ */
+int fat32_fsync(vfile_t *vf) {
+    fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
+    if (!fc)
+        return -EINVAL;
+    fat32_sb_t *sb = fc->sb;
+    fat32_lock(sb);
+    int rc = 0;
+    if (fc->dirty && !fc->is_dir && fc->first_cluster >= 2) {
+        vnode_t *vn = vf->vnode;
+        fat32_vnode_priv_t *parent_fp = (vn && vn->parent)
+                                         ? (fat32_vnode_priv_t *)vn->parent->fs_data
+                                         : NULL;
+        uint32_t search_cluster = parent_fp ? parent_fp->first_cluster : sb->root_cluster;
+        size_t off = 0;
+        while (1) {
+            fat32_dirent_t de;
+            int r = fat32_chain_read(sb, search_cluster, off, &de, sizeof(de));
+            if (r <= 0) {
+                rc = -EIO;
+                break;
+            }
+            if (de.name[0] == 0x00) {
+                rc = -ENOENT;
+                break;
+            }
+            if ((uint8_t)de.name[0] == 0xE5 || de.attr == FAT_ATTR_LFN) {
+                off += 32;
+                continue;
+            }
+            uint32_t clus = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
+            if (clus == fc->first_cluster) {
+                de.file_size = (uint32_t)fc->file_size;
+                uint32_t dc = search_cluster;
+                size_t rem = off;
+                while (rem >= sb->bytes_per_cluster) {
+                    rem -= sb->bytes_per_cluster;
+                    dc = fat_read(sb, dc);
+                }
+                uint64_t write_off = cluster_byte_offset(sb, dc) + rem;
+                int wr = bcache_write_bytes(sb->bc, write_off, &de, sizeof(de));
+                if (wr < 0)
+                    rc = wr;
+                else
+                    fc->dirty = 0;
+                break;
+            }
+            off += 32;
+        }
+    }
+    fat32_unlock(sb);
+    return rc;
+}
+
 int fat32_fclose(vfile_t *vf) {
     fat32_fctx_t *fc = (fat32_fctx_t *)vf->priv;
     if (fc)
@@ -395,5 +456,6 @@ vfile_ops_t g_fat32_fops = {
     .lseek   = fat32_flseek,
     .readdir = fat32_freaddir,
     .ioctl   = NULL,
+    .sync    = fat32_fsync,
     .close   = fat32_fclose,
 };

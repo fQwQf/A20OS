@@ -1,0 +1,32 @@
+#!/bin/sh
+# DHCP lease updates for the Wi-Fi interface, called by BusyBox udhcpc.
+umask 077
+case "$1" in
+    deconfig)
+        rm -f /run/a20-wifi-lease /run/a20-wifi-capport
+        ifconfig "$interface" 0.0.0.0 up
+        ;;
+    bound|renew)
+        ifconfig "$interface" "$ip" netmask "$subnet" up || exit 1
+        for gateway in $router; do
+            ip route replace default via "$gateway" dev "$interface" || exit 1
+            break
+        done
+        if [ -n "$dns" ]; then
+            {
+                for server in $dns; do
+                    printf 'nameserver %s\n' "$server"
+                done
+            } > /etc/resolv.conf || exit 1
+        fi
+        # Unknown DHCP option 114 is exported as hex by udhcpc; also accept
+        # named forms used by builds which know the CAPPORT option.
+        portal=${captive_portal:-${captiveportal:-${opt114:-}}}
+        if [ -n "$portal" ]; then
+            printf '%s\n' "$portal" > /run/a20-wifi-capport
+        else
+            rm -f /run/a20-wifi-capport
+        fi
+        printf '%s\n' "$ip" > /run/a20-wifi-lease
+        ;;
+esac

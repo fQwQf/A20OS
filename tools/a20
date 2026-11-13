@@ -709,6 +709,17 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"  trim        profile {plan[0].state}; nommu={states['nommu']} "
           f"swap={states['swap']} xlator={states['xlator']} (a20 trim for the full plan)")
 
+    if section_is_set(inst.log):
+        l = inst.log
+        enabled = "on" if l.enabled is not False else "off"
+        persistent = "off" if l.persistent is False else "on"
+        session = "off" if l.session is False else "on"
+        loader = "off" if l.loader is False else "on"
+        print(f"  log         level={l.level or 'info'} enabled={enabled} "
+              f"persistent={persistent} mode={l.mode or 'auto'} "
+              f"partition={l.partition_mb if l.partition_mb is not None else 64}MiB "
+              f"session={session} loader={loader}")
+
     ports = instance_net_ports(inst)
     print(f"  host ports  {', '.join(format_net_port(p) for p in ports) if ports else 'none (nothing to connect to)'}")
 

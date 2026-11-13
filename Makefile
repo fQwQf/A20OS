@@ -115,6 +115,31 @@ endif
 ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
+RAMFS_FASTFETCH ?= 0
+WIFI_RTW89 ?= 0
+# Generic desktop diagnostics/session tools are independent of the radio.
+RAMFS_DESKTOP_TOOLS ?= $(RAMFS_DISTRO)
+ifeq ($(RAMFS_DESKTOP_TOOLS),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_DESKTOP_TOOLS=1 requires RAMFS_USER=1)
+endif
+endif
+ifeq ($(WIFI_RTW89),1)
+ifneq ($(ARCH):$(DRIVER_DEPLOYMENT):$(RAMFS_USER),x86_64:embedded:1)
+$(error WIFI_RTW89=1 requires ARCH=x86_64 DRIVER_DEPLOYMENT=embedded RAMFS_USER=1)
+endif
+endif
+ifeq ($(filter $(RAMFS_FASTFETCH),0 1),)
+$(error RAMFS_FASTFETCH must be 0 or 1)
+endif
+ifeq ($(RAMFS_FASTFETCH),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_FASTFETCH=1 requires RAMFS_USER=1)
+endif
+ifeq ($(wildcard user/external/apps/fastfetch/src/fastfetch.c),)
+$(error fastfetch source missing; run 'git submodule update --init user/external/apps/fastfetch')
+endif
+endif
 RAMFS_NATIVE_TESTS ?= 0
 RAMFS_RT_TESTS ?= 0
 RAMFS_NET_TESTS ?= 0
@@ -1051,7 +1076,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch,)$(if $(filter 1,$(WIFI_RTW89)),-wifi,)$(if $(filter 1,$(RAMFS_DESKTOP_TOOLS)),-desktop-tools,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1336,7 +1361,9 @@ USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TE
 # leaves those directories absent entirely.
 USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/arch user/init_common \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
-                        user/external/tlse user/external/apps/fastfetch)
+                        user/external/tlse user/external/apps/fastfetch \
+                        user/extra/fastfetch_gen_headers.sh user/diagnostics packages/overlay/xfce) \
+                        $(if $(filter 1,$(WIFI_RTW89)),user/wifi user/external/rtw89 tools/drivers/build_rtw89.py)
 NATIVE_TAG_riscv64     := rv
 NATIVE_TAG_loongarch64 := la
 NATIVE_TAG_loongarch32 := la32
@@ -2525,6 +2552,7 @@ KERNEL_SRC += \
     kernel/firmware/device.c \
     kernel/firmware/irq.c \
     kernel/drivers/gpio/hi3861_gpio.c \
+    kernel/drivers/i2c/i2c-core.c \
     kernel/drivers/i2c/hi3861_i2c.c \
     kernel/drivers/spi/hi3861_spi.c \
     kernel/drivers/pwm/hi3861_pwm.c \
@@ -3398,7 +3426,19 @@ endif
 # kernel/fs/rootfs_user.c.  Keep this opt-in so normal disk-backed images do
 # not grow and existing submission artifacts remain unchanged.
 RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
-                      echo uname mkdir rm cp sync poweroff reboot
+                      echo uname mkdir rm cp sync poweroff reboot nvme_stress
+ifeq ($(RAMFS_FASTFETCH),1)
+RAMFS_USER_PROGRAMS += fastfetch
+CFLAGS += -DCONFIG_RAMFS_FASTFETCH
+endif
+ifeq ($(WIFI_RTW89),1)
+RAMFS_USER_PROGRAMS += rtw89d wifi wifi-dhcp rtw89-notices wifi-gui wifi_backend.py wifi_portal.py a20-wifi.desktop
+CFLAGS += -DCONFIG_WIFI_RTW89
+endif
+ifeq ($(RAMFS_DESKTOP_TOOLS),1)
+RAMFS_USER_PROGRAMS += input-probe.py 90-libinput-fuzz-override.rules session-log.py session-power.py 90-a20-ibus.gschema.override
+CFLAGS += -DCONFIG_RAMFS_DESKTOP_TOOLS
+endif
 ifeq ($(RAMFS_USER):$(NET_STACK):$(NET_ROLE),1:bsd:router)
 RAMFS_USER_PROGRAMS += wanctl netctl pppoe pd-lan
 CFLAGS += -DCONFIG_RAMFS_ROUTER
@@ -3423,6 +3463,65 @@ CFLAGS += -DCONFIG_RAMFS_MEDIA
 endif
 ifeq ($(RAMFS_DISTRO),1)
 CFLAGS += -DCONFIG_RAMFS_DISTRO
+endif
+# ---- structured/persistent logging policy ---------------------------------
+# Instances set these through [log]; the Makefile owns the defaults and the
+# enum-to-number mapping.  Runtime a20.log.* cmdline arguments can override
+# level/console/persistent/mode/max_bytes for one boot.
+LOG_ENABLED      ?= 1
+LOG_LEVEL        ?= info
+LOG_CONSOLE      ?= 1
+LOG_PERSISTENT   ?= 1
+LOG_MODE         ?= auto
+LOG_PARTITION_MB ?= 64
+LOG_MAX_BYTES    ?= 8388608
+LOG_SESSION      ?= 1
+LOG_LOADER       ?= 1
+
+ifeq ($(LOG_LEVEL),debug)
+KLOG_LEVEL_NUM := 0
+else ifeq ($(LOG_LEVEL),info)
+KLOG_LEVEL_NUM := 1
+else ifeq ($(LOG_LEVEL),warn)
+KLOG_LEVEL_NUM := 2
+else ifeq ($(LOG_LEVEL),err)
+KLOG_LEVEL_NUM := 3
+else
+$(error LOG_LEVEL must be debug|info|warn|err, got '$(LOG_LEVEL)')
+endif
+
+ifeq ($(LOG_MODE),auto)
+KLOG_MODE_NUM := 0
+else ifeq ($(LOG_MODE),partition)
+KLOG_MODE_NUM := 1
+else ifeq ($(LOG_MODE),rootfs)
+KLOG_MODE_NUM := 2
+else ifeq ($(LOG_MODE),ram)
+KLOG_MODE_NUM := 3
+else ifeq ($(LOG_MODE),esp)
+KLOG_MODE_NUM := 4
+else
+$(error LOG_MODE must be auto|partition|rootfs|ram|esp, got '$(LOG_MODE)')
+endif
+
+ifeq ($(LOG_ENABLED),0)
+KLOG_SESSION_NUM := 0
+KLOG_PERSIST_NUM := 0
+else
+KLOG_SESSION_NUM := $(LOG_SESSION)
+KLOG_PERSIST_NUM := $(LOG_PERSISTENT)
+endif
+
+CFLAGS += -DCONFIG_KLOG_ENABLED=$(LOG_ENABLED)
+CFLAGS += -DCONFIG_KLOG_DEFAULT_LEVEL=$(KLOG_LEVEL_NUM)
+CFLAGS += -DCONFIG_KLOG_CONSOLE=$(LOG_CONSOLE)
+CFLAGS += -DCONFIG_KLOG_MODE=$(KLOG_MODE_NUM)
+CFLAGS += -DCONFIG_KLOG_MAX_BYTES=$(LOG_MAX_BYTES)ULL
+CFLAGS += -DCONFIG_KLOG_SESSION=$(KLOG_SESSION_NUM)
+# Every full (non-MCU) profile compiles the writer; MCU profiles keep the weak
+# no-op stubs and their console-only log.
+ifeq ($(MCU_PROFILE_SELECTED),)
+CFLAGS += -DCONFIG_KLOG_PERSISTENT=$(KLOG_PERSIST_NUM)
 endif
 ifeq ($(STORAGE_READ_ONLY),1)
 RAMFS_USER_PROGRAMS += storage_read_test

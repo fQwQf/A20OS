@@ -3,9 +3,7 @@
 #include "core/string.h"
 
 #define BOOT_MAP_LIMIT 0x100000000ULL
-#define LOW_END 0x80000000ULL
 #define HIGH_BASE 0x100000000ULL
-#define HIGH_CHUNK 0x40000000ULL
 #define LOW_RESERVED 0x100000ULL
 #define MAP_BYTES_MAX 0x10000U
 #define MAP_RECORD_MAX 512U
@@ -75,25 +73,16 @@ static int emit(x86_boot_range_t *out, size_t capacity, size_t *count,
 }
 static int select_range(x86_boot_range_t *out, size_t capacity, size_t *count,
                         uint64_t base, uint64_t end, uint64_t high_end) {
-    uint64_t low = base < LOW_RESERVED ? LOW_RESERVED : base,
-             stop = end > LOW_END ? LOW_END : end;
-    if (low < stop) {
-        low = (low + 4095) & ~4095ULL;
-        stop &= ~4095ULL;
-        int rc = emit(out, capacity, count, low, stop);
-        if (rc)
-            return rc;
-    }
     if (end > high_end)
         end = high_end;
-    if (base < HIGH_BASE)
-        base = HIGH_BASE;
+    if (base < LOW_RESERVED)
+        base = LOW_RESERVED;
     if (base >= end)
         return 0;
-    if (base > (uint64_t)-1 - (HIGH_CHUNK - 1))
+    if (base > (uint64_t)-1 - 4095)
         return -EOVERFLOW;
-    base = (base + HIGH_CHUNK - 1) & ~(HIGH_CHUNK - 1);
-    end &= ~(HIGH_CHUNK - 1);
+    base = (base + 4095) & ~4095ULL;
+    end &= ~4095ULL;
     return emit(out, capacity, count, base, end);
 }
 static int reserve_string(x86_boot_memory_reader_t reader, void *context,

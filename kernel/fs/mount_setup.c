@@ -1,6 +1,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/errno.h"
+#include "core/klog.h"
 #include "fs/vfs.h"
 #include "fs/mount_setup.h"
 #include "fs/block_cache.h"
@@ -37,6 +38,9 @@ typedef struct class_block_dev {
 } class_block_dev_t;
 static class_block_dev_t class_blocks[CLASS_BLOCK_HANDLE_BUDGET];
 static spinlock_t class_blocks_lock = SPINLOCK_INIT;
+/* Disk index the distro rootfs was found on, so the log partition prefers the
+ * same USB stick over an unrelated old A20OS log on the internal NVMe. */
+static int g_distro_disk_index __attribute__((unused)) = -1;
 static class_device_t *class_block_ref(block_dev_t *block) {
     if (!block || !block->priv) return NULL;
     class_block_dev_t *handle = block->priv;
@@ -409,6 +413,302 @@ void mount_ramfs_media(void) {
     printf("[MEDIA] no readable FAT32 media; RAM shell continues\n");
 }
 
+/*
+ * Persistent log partition.
+ *
+ * A dedicated FAT32 GPT partition named "A20OS log" is the one writable
+ * surface whose lifetime is independent of the distro rootfs.  It is mounted
+ * before chroot (at /extra/var/log/a20 when a distro is present, otherwise at
+ * /var/log/a20) so a corrupt or unmountable world cannot take the boot log
+ * with it.  Matching by GPT name, not by filesystem type, is intentional:
+ * parted labels a FAT32 data partition with a different type GUID than an
+ * ext4 one, and the name is what the image builder and the docs agree on.
+ */
+#if CONFIG_KLOG_PERSISTENT
+static int log_partition_name(const uint8_t entry[128]) {
+    static const char name[] = "A20OS log";
+    for (unsigned i = 0; i < 36; i++) {
+        unsigned expected = i < sizeof(name) - 1 ? (unsigned char)name[i] : 0;
+        if (entry[56 + i * 2] != expected || entry[57 + i * 2]) return 0;
+    }
+    return 1;
+}
+static int log_disk_partition(block_dev_t *disk,
+                              partition_block_dev_t *selected) {
+    gpt_table_t table;
+    uint8_t entry[128], candidate[128];
+    if (gpt_read_table(disk, &table)) return -EINVAL;
+    unsigned found = 0, candidate_ordinal = 0;
+    for (unsigned ordinal = 0; ordinal < table.entry_count; ordinal++) {
+        if (gpt_read_entry(disk, &table, ordinal, entry)) return -EIO;
+        if (!gpt_entry_used(entry)) continue;
+        if (!gpt_entry_bounds(&table, entry)) return -EINVAL;
+        if (!log_partition_name(entry)) continue;
+        if (++found != 1) return -EEXIST;
+        memcpy(candidate, entry, sizeof(candidate));
+        candidate_ordinal = ordinal;
+    }
+    if (!found) return -ENODEV;
+    if (read_le64(candidate + 48) & ((1ULL << 60) | (1ULL << 63)))
+        return -EROFS;
+    uint64_t first = read_le64(candidate + 32), last = read_le64(candidate + 40);
+    for (unsigned ordinal = 0; ordinal < table.entry_count; ordinal++) {
+        if (gpt_read_entry(disk, &table, ordinal, entry)) return -EIO;
+        if (!gpt_entry_used(entry)) continue;
+        if (ordinal == candidate_ordinal) continue;
+        uint64_t other_first = read_le64(entry + 32);
+        uint64_t other_last = read_le64(entry + 40);
+        if (first <= other_last && other_first <= last) return -EINVAL;
+    }
+    partition_init(selected, disk, first, last - first + 1, 0);
+    return 0;
+}
+
+/* EFI System Partition type GUID, in the mixed-endian GPT wire form.  Used
+ * only as a fallback when no dedicated "A20OS log" partition exists: an
+ * internal ESP is the one writable FAT32 surface that does not share the USB
+ * xHCI failure.  Writes stay in its \A20LOG directory. */
+static const uint8_t esp_type_guid[16] = {
+    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+    0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b
+};
+
+static int esp_disk_partition(block_dev_t *disk,
+                              partition_block_dev_t *selected) {
+    gpt_table_t table;
+    uint8_t entry[128], candidate[128];
+    if (gpt_read_table(disk, &table)) return -EINVAL;
+    unsigned found = 0, candidate_ordinal = 0;
+    for (unsigned ordinal = 0; ordinal < table.entry_count; ordinal++) {
+        if (gpt_read_entry(disk, &table, ordinal, entry)) return -EIO;
+        if (!gpt_entry_used(entry)) continue;
+        if (!gpt_entry_bounds(&table, entry)) return -EINVAL;
+        if (memcmp(entry, esp_type_guid, sizeof(esp_type_guid))) continue;
+        if (++found != 1) return -EEXIST;
+        memcpy(candidate, entry, sizeof(candidate));
+        candidate_ordinal = ordinal;
+    }
+    if (!found) return -ENODEV;
+    if (read_le64(candidate + 48) & ((1ULL << 60) | (1ULL << 63)))
+        return -EROFS;
+    uint64_t first = read_le64(candidate + 32), last = read_le64(candidate + 40);
+    for (unsigned ordinal = 0; ordinal < table.entry_count; ordinal++) {
+        if (gpt_read_entry(disk, &table, ordinal, entry)) return -EIO;
+        if (!gpt_entry_used(entry)) continue;
+        if (ordinal == candidate_ordinal) continue;
+        uint64_t other_first = read_le64(entry + 32);
+        uint64_t other_last = read_le64(entry + 40);
+        if (first <= other_last && other_first <= last) return -EINVAL;
+    }
+    partition_init(selected, disk, first, last - first + 1, 0);
+    return 0;
+}
+
+/* Do not write boot evidence to the stick whose xHCI controller is the thing
+ * under diagnosis.  Every other block driver at this point is internal
+ * storage (NVMe, AHCI, virtio, SD). */
+static int block_is_internal(int index) {
+    class_device_t *cdev =
+        class_device_get_by_index(DEV_CLASS_BLOCK, (unsigned)index);
+    if (!cdev)
+        return 0;
+    const char *driver = (cdev->dev && cdev->dev->drv) ?
+                         cdev->dev->drv->name : NULL;
+    int internal = driver &&
+                   strcmp(driver, "usb-storage") != 0 &&
+                   strcmp(driver, "udisk") != 0;
+    class_device_put(cdev);
+    return internal;
+}
+
+static void ensure_dir(const char *path) {
+    char tmp[160];
+    if (!path || strlen(path) >= sizeof(tmp))
+        return;
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        (void)vfs_mkdir(tmp, 0755);
+        *p = '/';
+    }
+    (void)vfs_mkdir(tmp, 0755);
+}
+
+static int path_is_mount(const char *path) {
+    kstat_t here, root;
+    if (vfs_stat(path, &here) < 0 || vfs_stat("/", &root) < 0)
+        return 0;
+    return here.st_dev != root.st_dev;
+}
+
+/* Where a rootfs-visible log directory belongs.  /mnt is the external-root
+ * layout, /extra is the RAMFS distro layout; "" means the RAM root. */
+static const char *log_root_prefix(void) {
+    int fd = vfs_open("/mnt/etc/a20-distro", O_RDONLY, 0);
+    if (fd >= 0) {
+        vfs_close(fd);
+        return "/mnt";
+    }
+    fd = vfs_open("/extra/etc/a20-distro", O_RDONLY, 0);
+    if (fd >= 0) {
+        vfs_close(fd);
+        return "/extra";
+    }
+    if (path_is_mount("/mnt"))
+        return "/mnt";
+    if (path_is_mount("/extra"))
+        return "/extra";
+    return "";
+}
+
+int mount_persistent_log(void) {
+    if (!klog_persistent_enabled())
+        return -EOPNOTSUPP;
+    int mode = klog_mode();
+    if (mode == KLOG_MODE_RAM) {
+        ensure_dir("/var/log/a20");
+        if (klog_disk_attach("/var/log/a20") == 0) {
+            printf("[LOG] persistent log at /var/log/a20 (RAM mode)\n");
+            return 0;
+        }
+        printf("[LOG] RAM log location unavailable\n");
+        return -ENODEV;
+    }
+
+    static partition_block_dev_t logpart;
+    static partition_block_dev_t esp_logpart;
+    partition_block_dev_t candidate;
+    int selected_index = -1;
+    int use_log_partition = mode == KLOG_MODE_AUTO || mode == KLOG_MODE_PARTITION;
+
+    /* Prefer the disk the distro came from.  A laptop may still carry an old
+     * A20OS log partition on its internal NVMe; the USB being booted is the
+     * authoritative evidence surface, so a second one elsewhere is not an
+     * ambiguity here. */
+    if (use_log_partition && g_distro_disk_index >= 0) {
+        block_dev_t *disk = mount_setup_block_device(g_distro_disk_index);
+        if (disk && log_disk_partition(disk, &candidate) == 0) {
+            logpart = candidate;
+            logpart.block.priv = &logpart;
+            selected_index = g_distro_disk_index;
+        }
+    }
+    if (use_log_partition && selected_index < 0) {
+        for (unsigned index = 0; index < CLASS_BLOCK_HANDLE_BUDGET; index++) {
+            block_dev_t *disk = mount_setup_block_device((int)index);
+            if (!disk) continue;
+            int rc = log_disk_partition(disk, &candidate);
+            if (rc == -EEXIST) {
+                printf("[LOG] ambiguous A20OS log partitions; not mounting\n");
+                return rc;
+            }
+            if (rc) continue;
+            if (selected_index >= 0) {
+                printf("[LOG] multiple A20OS log disks; not mounting\n");
+                return -EEXIST;
+            }
+            logpart = candidate;
+            logpart.block.priv = &logpart;
+            selected_index = (int)index;
+        }
+    }
+
+    /* Keep USB failures off the kernel's evidence path when the boot medium
+     * is unavailable or explicitly excluded as a log destination. */
+    if (mode == KLOG_MODE_ESP ||
+        (mode == KLOG_MODE_AUTO && selected_index < 0)) {
+        for (unsigned index = 0; index < CLASS_BLOCK_HANDLE_BUDGET; index++) {
+            if (!block_is_internal((int)index))
+                continue;
+            block_dev_t *disk = mount_setup_block_device((int)index);
+            if (!disk)
+                continue;
+            if (esp_disk_partition(disk, &esp_logpart) != 0)
+                continue;
+            ensure_dir("/var/log/a20-esp");
+            int rc = try_mount(&esp_logpart.block, "/var/log/a20-esp", "fat32");
+            if (rc != 0) {
+                printf("[LOG] internal ESP disk %u mount failed (%d)\n",
+                       index, rc);
+                continue;
+            }
+            ensure_dir("/var/log/a20-esp/A20LOG");
+            if (klog_disk_attach("/var/log/a20-esp/A20LOG") == 0) {
+                printf("[LOG] persistent log at /var/log/a20-esp/A20LOG "
+                       "(internal ESP disk %u)\n", index);
+                return 0;
+            }
+            printf("[LOG] internal ESP disk %u: log create failed\n", index);
+            break;
+        }
+        if (mode == KLOG_MODE_ESP) {
+            printf("[LOG] no writable internal ESP for A20LOG\n");
+            return -ENODEV;
+        }
+    }
+
+    const char *prefix = log_root_prefix();
+    char mnt[160];
+    if (prefix[0])
+        snprintf(mnt, sizeof(mnt), "%s/var/log/a20", prefix);
+    else
+        snprintf(mnt, sizeof(mnt), "/var/log/a20");
+
+    if (selected_index >= 0) {
+        ensure_dir(mnt);
+        int rc = try_mount(&logpart.block, mnt, "fat32");
+        if (rc == 0) {
+            printf("[LOG] persistent log at %s (disk %d)\n", mnt,
+                   selected_index);
+            if (klog_disk_attach(mnt) == 0)
+                return 0;
+            printf("[LOG] log file creation failed at %s\n", mnt);
+        } else {
+            printf("[LOG] FAT32 mount for log partition failed (%d)\n", rc);
+        }
+    } else if (mode == KLOG_MODE_ROOTFS) {
+        printf("[LOG] rootfs mode: skipping the dedicated partition\n");
+    } else if (mode == KLOG_MODE_PARTITION) {
+        printf("[LOG] no A20OS log partition and mode=partition\n");
+        return -ENODEV;
+    } else {
+        printf("[LOG] no A20OS log partition; trying a writable filesystem\n");
+    }
+
+    /* Fallback for QEMU/SD images that have no dedicated partition.  A
+     * dedicated FAT32 partition is still preferred: this path shares the
+     * rootfs's failure and capacity, but it is better than no log at all.
+     * Only try a root that actually exists; creating /mnt on the RAM root
+     * would silently turn the log volatile. */
+    if (prefix[0]) {
+        ensure_dir(mnt);
+        if (klog_disk_attach(mnt) == 0) {
+            printf("[LOG] persistent log at %s (rootfs fallback)\n", mnt);
+            return 0;
+        }
+    }
+    if (path_is_mount("/bin")) {
+        ensure_dir("/bin/A20OS-LOG");
+        if (klog_disk_attach("/bin/A20OS-LOG") == 0) {
+            printf("[LOG] persistent log at /bin/A20OS-LOG (rootfs fallback)\n");
+            return 0;
+        }
+    }
+    ensure_dir("/var/log/a20");
+    if (klog_disk_attach("/var/log/a20") == 0) {
+        printf("[LOG] persistent log at /var/log/a20 (RAM fallback)\n");
+        return 0;
+    }
+    printf("[LOG] no writable log location; persistent log unavailable\n");
+    return -ENODEV;
+}
+#else
+int mount_persistent_log(void) { return -EOPNOTSUPP; }
+#endif
+
 #ifdef CONFIG_RAMFS_DISTRO
 static void mount_external_root_pseudo_filesystems(void);
 /* Linux filesystem data GUID, in the mixed-endian GPT wire representation. */
@@ -488,6 +788,7 @@ int mount_ramfs_distro(void) {
         printf("[DISTRO] ext4 mount failed (%d); RAM shell continues\n", rc);
         return rc;
     }
+    g_distro_disk_index = selected_index;
     printf("[DISTRO] disk %d A20OS distro at /extra; embedded /bin retained\n", selected_index);
     mount_external_root_pseudo_filesystems();
     return 0;

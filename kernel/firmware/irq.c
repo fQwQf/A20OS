@@ -187,3 +187,13 @@ void firmware_irq_domains_abort(fw_irq_domain_t *created) {
     if (created && !fw_irq_domain_unregister(created))
         kfree(created);
 }
+
+__attribute__((weak)) int firmware_legacy_irq_map(uint32_t hardware, uint32_t preferred)
+{
+    (void)hardware;
+    if (preferred >= PLATFORM_IRQ_MAX_LINES)
+        return -EINVAL;
+    /* Only an architecture with a legacy ISA routing implementation can
+     * supply this contract; arbitrary logical IRQ numbers are not a route. */
+    return -EOPNOTSUPP;
+}

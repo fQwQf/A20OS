@@ -300,6 +300,28 @@ static class_device_t *netif_binding_get(const a20_lwip_netif_state_t *st) {
     spin_unlock_irqrestore(&g_netif_binding_lock, flags);
     return binding;
 }
+
+int a20_lwip_device_hwaddr(device_t *device, const uint8_t mac[6]) {
+    if (!device || !mac || (mac[0] & 1U) ||
+        !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]))
+        return -EINVAL;
+    uint64_t flags = a20_lwip_lock();
+    int index = a20_lwip_netif_index_for_device(device);
+    int result = -ENODEV;
+    if (index >= 0 && g_netifs[index].state) {
+        struct netif *n = &g_netifs[index];
+        /* A newly registered radio can be administratively UP while its
+         * firmware/efuse are still being initialized. Carrier must stay down. */
+        if (netif_is_link_up(n))
+            result = -EBUSY;
+        else {
+            memcpy(n->hwaddr, mac, ETH_HWADDR_LEN);
+            result = 0;
+        }
+    }
+    a20_lwip_unlock(flags);
+    return result;
+}
 static int netif_device_send(a20_lwip_netif_state_t *st, const void *data, size_t length) {
     class_device_t *cdev = netif_binding_get(st);
     int rc = class_net_send(cdev, data, length); class_device_put(cdev); return rc;
@@ -1776,6 +1798,25 @@ void a20_lwip_poll_rx_locked(unsigned budget)
 {
     if (!g_lwip_ready)
         return;
+
+    /*
+     * Carrier detection.  Drivers publish link state through
+     * class_net_link_up(); nothing re-read it after netif registration, so a
+     * cable plugged in after boot never brought the interface up.  This poll
+     * runs with the lwIP core lock held, which is the context
+     * a20_lwip_netif_sync_link_state() documents, and at most once a second:
+     * a shorter interval only re-reads a register and the transition filter
+     * already suppresses repeated netlink events.
+     */
+    static uint64_t last_carrier_poll;
+    uint64_t now = timer_get_ticks();
+    if ((uint64_t)(now - last_carrier_poll) >= TICKS_PER_SEC) {
+        last_carrier_poll = now;
+        for (int i = 0; i < A20_NET_MAX_DEVS; i++)
+            if (g_netif_state[i].dev)
+                a20_lwip_sync_link_state(&g_netifs[i]);
+    }
+
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
         netif_device_poll(st);

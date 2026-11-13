@@ -143,6 +143,13 @@ int net_stack_interface_snapshot(void *out, int maximum) {
     return -EOPNOTSUPP;
 }
 
+int net_stack_device_hwaddr(struct device *device, const uint8_t mac[6]) {
+    const net_backend_t *b = selected();
+    if (b && b->iface && b->iface->device_hwaddr)
+        return b->iface->device_hwaddr(device, mac);
+    return -EOPNOTSUPP;
+}
+
 int net_stack_addr6_snapshot(nl_addr6_out_t *out, int maximum)
 {
     const net_backend_t *b = selected();

@@ -85,8 +85,29 @@ class KernelCfg:
     storage_read_only: bool | None = None
     external_root: bool | None = None
     ramfs_user: bool | None = None
+    ramfs_fastfetch: bool | None = None
+    wifi_rtw89: bool | None = None
     ramfs_media: bool | None = None
     ramfs_distro: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LogCfg:
+    """Persistent/structured logging policy for one instance.
+
+    These are build-time defaults; `a20.log.*` kernel command-line arguments can
+    override level/console/persistent/mode/max_bytes for a single boot.
+    """
+
+    enabled: bool | None = None
+    level: str | None = None          # debug | info | warn | err
+    console: bool | None = None
+    persistent: bool | None = None
+    mode: str | None = None           # auto | partition | rootfs | ram | esp
+    partition_mb: int | None = None   # dedicated "A20OS log" GPT partition
+    max_bytes: int | None = None      # per-boot JSONL cap
+    session: bool | None = None       # L3 session log
+    loader: bool | None = None        # L0 UEFI ESP breadcrumb
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +334,7 @@ class Instance:
     description: str | None
     abi: str | None
     kernel: KernelCfg
+    log: LogCfg
     machine: MachineCfg
     gui: GuiCfg
     net: NetCfg
@@ -326,8 +348,9 @@ class Instance:
     source: Path
 
 
-CfgSection = (KernelCfg | MachineCfg | GuiCfg | NetCfg | RootfsCfg | TestCfg
-               | Stm32Cfg | FlashCfg | PackageCfg | TargetCfg | HandoffCfg)
+CfgSection = (KernelCfg | LogCfg | MachineCfg | GuiCfg | NetCfg | RootfsCfg
+               | TestCfg | Stm32Cfg | FlashCfg | PackageCfg | TargetCfg
+               | HandoffCfg)
 
 
 def section_is_set(cfg: CfgSection) -> bool:
@@ -345,11 +368,16 @@ _TOP_SPECS: Final = {"name": "str", "description": "str", "arch": "str", "board"
 _SECTION_SPECS: Final = {
     "kernel": {f: ("bool" if f in {
         "bringup", "nommu", "ubsan", "swap", "werror",
-        "cooperative_boot", "storage_read_only", "external_root", "ramfs_user", "ramfs_media", "ramfs_distro",
+        "cooperative_boot", "storage_read_only", "external_root", "ramfs_user",
+        "ramfs_fastfetch", "ramfs_media", "ramfs_distro", "wifi_rtw89",
     } else "int" if f in {
         "virtio_console_rx_slots", "virtio_console_tx_slots",
         "virtio_console_buffer_size", "virtio_console_ring_size",
     } else "str") for f in KernelCfg.__dataclass_fields__},
+    "log": {f: ("bool" if f in ("enabled", "console", "persistent", "session",
+                                "loader")
+                else "int" if f in ("partition_mb", "max_bytes") else "str")
+            for f in LogCfg.__dataclass_fields__},
     "machine": {f: ("int" if f == "smp" else "bool" if f in ("allow_unverified_smp", "gpu_3d", "vm_manager")
                     else "str_list" if f == "extra_qemu" else "str")
                 for f in MachineCfg.__dataclass_fields__},
@@ -455,6 +483,7 @@ def parse_instance(path: Path) -> Instance:
         description=description if isinstance(description, str) else None,
         abi=abi if isinstance(abi, str) else None,
         kernel=KernelCfg(**sections.get("kernel", {})),
+        log=LogCfg(**sections.get("log", {})),
         machine=MachineCfg(**sections.get("machine", {})),
         gui=GuiCfg(**sections.get("gui", {})),
         net=NetCfg(**sections.get("net", {})),

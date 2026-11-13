@@ -11,6 +11,10 @@ typedef uint64_t efi_physical_address_t;
 
 #define EFI_SUCCESS 0
 #define EFI_ERROR(s) ((s) >> 63)
+
+#ifndef A20_LOADER_LOG
+#define A20_LOADER_LOG 1
+#endif
 #define EFI_ALLOCATE_MAX_ADDRESS 1
 #define EFI_ALLOCATE_ADDRESS 2
 #define EFI_INVALID_PARAMETER (0x8000000000000000ULL | 2)
@@ -31,6 +35,34 @@ struct efi_simple_text_output {
     void *reset;
     efi_output_string_t output_string;
 };
+
+/* ESP breadcrumb support.  The aarch64 loader uses the same UEFI file
+ * protocol as the x86_64 one; only the image builder differs. */
+struct efi_file_protocol;
+typedef struct efi_file_protocol efi_file_protocol_t;
+struct efi_file_protocol {
+    uint64_t revision;
+    efi_status_t (*open)(efi_file_protocol_t *, efi_file_protocol_t **,
+                         efi_char16_t *, uint64_t, uint64_t);
+    efi_status_t (*close)(efi_file_protocol_t *);
+    efi_status_t (*delete_file)(efi_file_protocol_t *);
+    efi_status_t (*read)(efi_file_protocol_t *, efi_uintn_t *, void *);
+    efi_status_t (*write)(efi_file_protocol_t *, efi_uintn_t *, void *);
+    efi_status_t (*get_position)(efi_file_protocol_t *, uint64_t *);
+    efi_status_t (*set_position)(efi_file_protocol_t *, uint64_t);
+    void *get_info;
+    void *set_info;
+    efi_status_t (*flush)(efi_file_protocol_t *);
+};
+struct efi_simple_file_system {
+    uint64_t revision;
+    efi_status_t (*open_volume)(struct efi_simple_file_system *,
+                                efi_file_protocol_t **);
+};
+#define EFI_FILE_MODE_READ   0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE  0x0000000000000002ULL
+#define EFI_FILE_MODE_CREATE 0x8000000000000000ULL
+#define EFI_FILE_DIRECTORY   0x0000000000000010ULL
 
 struct efi_guid {
     uint32_t data1;
@@ -161,11 +193,84 @@ static const struct efi_guid loaded_image_protocol_guid = {
     0x9562U,
     0x11d2U,
     {0x8eU, 0x3fU, 0x00U, 0xa0U, 0xc9U, 0x69U, 0x72U, 0x3bU}};
+static const struct efi_guid simple_fs_guid = {
+    0x964e5b22U,
+    0x6459U,
+    0x11d2U,
+    {0x8eU, 0x39U, 0x00U, 0xa0U, 0xc9U, 0x69U, 0x72U, 0x3bU}};
 
 _Static_assert(offsetof(struct efi_loaded_image, load_options_size) == 48,
                "UEFI LoadOptionsSize ABI");
 _Static_assert(offsetof(struct efi_loaded_image, load_options) == 56,
                "UEFI LoadOptions ABI");
+
+static efi_file_protocol_t *g_esp_root;
+static int g_esp_ready;
+
+static size_t ascii_len(const char *s) {
+    size_t n = 0;
+    while (s && s[n])
+        n++;
+    return n;
+}
+
+static void esp_log_text(const char *text) {
+    if (!g_esp_ready || !g_esp_root || !text)
+        return;
+    efi_file_protocol_t *file = 0;
+    efi_status_t status = g_esp_root->open(
+        g_esp_root, &file, L"\\A20OS\\boot.log",
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    if (EFI_ERROR(status) || !file)
+        return;
+    (void)file->set_position(file, 0xffffffffffffffffULL);
+    efi_uintn_t len = ascii_len(text);
+    if (len)
+        (void)file->write(file, &len, (void *)text);
+    (void)file->flush(file);
+    (void)file->close(file);
+}
+
+static void esp_log_stage(const char *stage) {
+    esp_log_text("STAGE ");
+    esp_log_text(stage);
+    esp_log_text("\n");
+}
+
+static void esp_open(struct efi_system_table *st, efi_handle_t image) {
+    if (!A20_LOADER_LOG) {
+        (void)st;
+        (void)image;
+        return;
+    }
+    if (!st || !st->boot_services || !st->boot_services->handle_protocol)
+        return;
+    struct efi_loaded_image *li = 0;
+    if (EFI_ERROR(st->boot_services->handle_protocol(
+            image, &loaded_image_protocol_guid, (void **)&li)) ||
+        !li || !li->device_handle)
+        return;
+    struct efi_simple_file_system *fs = 0;
+    efi_status_t status = st->boot_services->handle_protocol(
+        li->device_handle, &simple_fs_guid, (void **)&fs);
+    if (EFI_ERROR(status) || !fs || !fs->open_volume) {
+        status = st->boot_services->handle_protocol(
+            image, &simple_fs_guid, (void **)&fs);
+    }
+    if (EFI_ERROR(status) || !fs || !fs->open_volume)
+        return;
+    if (EFI_ERROR(fs->open_volume(fs, &g_esp_root)) || !g_esp_root)
+        return;
+    efi_file_protocol_t *dir = 0;
+    status = g_esp_root->open(
+        g_esp_root, &dir, L"\\A20OS",
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
+        EFI_FILE_DIRECTORY);
+    if (!EFI_ERROR(status) && dir)
+        (void)dir->close(dir);
+    g_esp_ready = 1;
+    esp_log_text("\n=== A20OS UEFI boot (aarch64) ===\n");
+}
 
 /* The command line shares the bounded handoff allocation. No late firmware
  * allocation can invalidate the GetMemoryMap/ExitBootServices transaction. */
@@ -235,7 +340,10 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
         return EFI_BAD_BUFFER_SIZE;
     efi_uintn_t pages = (memory_bytes + 4095) / 4096;
     efi_physical_address_t address = KERNEL_LOAD_ADDRESS;
+    esp_open(st, image);
+    esp_log_stage("loader");
     print(st, loading);
+    esp_log_stage("allocate-kernel");
     efi_status_t status = bs->allocate_pages(EFI_ALLOCATE_ADDRESS,
                                              EFI_LOADER_DATA, pages, &address);
     if (EFI_ERROR(status)) {
@@ -244,12 +352,14 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
     }
     if (address != KERNEL_LOAD_ADDRESS)
         return EFI_INVALID_PARAMETER;
+    esp_log_stage("copy-kernel");
     uint8_t *kernel = (uint8_t *)(uintptr_t)address;
     for (size_t i = 0; i < pages * 4096; i++)
         kernel[i] = 0;
     copy_bytes(kernel, _binary_kernel_bin_start, raw_bytes);
 
     /* Both the map and options must be in the kernel's ordinary RAM alias. */
+    esp_log_stage("allocate-handoff");
     efi_physical_address_t physical = A64_UEFI_RAM_END - 1;
     status = bs->allocate_pages(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA,
                                 A64_UEFI_HANDOFF_BYTES / 4096, &physical);
@@ -272,6 +382,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
     handoff->map_offset = A64_UEFI_MAP_OFFSET;
     handoff->kernel_physical = address;
     handoff->kernel_bytes = memory_bytes;
+    esp_log_stage("collect-cmdline");
     status = collect_load_options(st, image, handoff, physical);
     if (EFI_ERROR(status)) {
         bs->free_pages(physical, A64_UEFI_HANDOFF_BYTES / 4096);
@@ -286,6 +397,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
      * the successful snapshot and ExitBootServices, including on a stale-key
      * retry. An oversized map fails instead of accepting a partial snapshot. */
     for (int attempt = 0; attempt < 3; attempt++) {
+        esp_log_stage("memory-map");
         efi_uintn_t bytes = A64_UEFI_MAP_CAPACITY, key = 0, stride = 0;
         uint32_t version = 0;
         status =
@@ -301,6 +413,8 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
         handoff->map_bytes = (uint32_t)bytes;
         handoff->descriptor_bytes = (uint32_t)stride;
         handoff->descriptor_version = version;
+        esp_log_stage("exit-boot-services");
+        esp_log_text("RESULT handoff=attempt\n");
         status = bs->exit_boot_services(image, key);
         if (!EFI_ERROR(status)) {
             sync_loaded_code(handoff, A64_UEFI_HANDOFF_BYTES);

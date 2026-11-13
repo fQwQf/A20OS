@@ -82,10 +82,11 @@ typedef struct {
     uint32_t sector_size;
     int ready;
 
-    /* DMA buffers (kernel heap, physically contiguous). */
-    usb_msc_cbw_t  cbw;
-    usb_msc_csw_t  csw;
-    uint8_t        data[USB_MSC_IO_CHUNK];
+    /* Each BOT stage fits in one xHCI Normal TRB and must not cross a
+     * 64 KiB boundary. Align each buffer to its containing power of two. */
+    usb_msc_cbw_t  cbw ALIGNED(32);
+    usb_msc_csw_t  csw ALIGNED(16);
+    uint8_t        data[USB_MSC_IO_CHUNK] ALIGNED(USB_MSC_IO_CHUNK);
 } usb_storage_dev_t;
 
 static usb_storage_dev_t g_storage[USB_STORAGE_MAX_DEVS];
@@ -178,8 +179,14 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
 
     int result = -EIO;
     if (st->csw.signature == USB_MSC_CSW_SIGNATURE &&
-        st->csw.tag == tag && st->csw.status == USB_MSC_CSW_STATUS_PASS)
-        result = 0;
+        st->csw.tag == tag && st->csw.status == USB_MSC_CSW_STATUS_PASS) {
+        if (!st->csw.residue ||
+            (cdb[0] != SCSI_CMD_READ10 && cdb[0] != SCSI_CMD_WRITE10))
+            result = 0;
+        else
+            kwarn("[USB-STORAGE] incomplete block transfer: opcode=%02x residue=%u/%u\n",
+                  cdb[0], st->csw.residue, datalen);
+    }
     else if (st->csw.status == 1)
         result = -EIO;          /* command failed (see REQUEST SENSE) */
 

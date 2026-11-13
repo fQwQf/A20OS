@@ -1,4 +1,5 @@
 #include "drivers/gpu/drm.h"
+#include "drivers/char/fbcon.h"
 #include "drivers/gpu/drm_geom.h"
 #include "drivers/gpu/drm_scanout.h"
 #include "drivers/gpu/drm_scanout_mapping.h"
@@ -110,6 +111,23 @@ typedef struct drm_context {
     unsigned ev_head;
     unsigned ev_tail;
 } drm_context_t;
+
+/* A non-owning pointer, cleared under this lock before its file is freed.
+ * Serialize the actual scanout copy against restoring the console.  Merely
+ * closing a render/probe fd must not take the display from another client. */
+static mutex_t g_scanout_owner_lock = MUTEX_INIT;
+static drm_context_t *g_scanout_owner;
+
+static void drm_console_release(drm_context_t *ctx)
+{
+    mutex_lock(&g_scanout_owner_lock);
+    if (g_scanout_owner == ctx) {
+        g_scanout_owner = NULL;
+        fbcon_resume();
+        kinfo("[DISPLAY] Desktop released display; console restored.\n");
+    }
+    mutex_unlock(&g_scanout_owner_lock);
+}
 
 /*
  * Simulated vblank machinery.  A20OS scanout presents synchronously inside
@@ -273,7 +291,8 @@ static int drm_scanout_read_vmo(void *opaque, uint64_t offset, void *out, size_t
 /* KMS buffers and the device scanout are separate allocations. Copy and
  * convert dumb buffers into the driver's actual pitch and pixel layout before
  * flush; firmware GOP and DT scanouts need this just as virtual GPUs do. */
-static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
+static int drm_present_buffer_at_locked(drm_context_t *ctx, drm_gem_t *b,
+                                        uint32_t x, uint32_t y)
 {
     static unsigned int present_count;
     if (!b || !b->vmo)
@@ -326,6 +345,10 @@ static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
         return rc;
     }
 
+    /* The compositor has produced its first frame: from here the scanout is
+     * userspace's, and kernel/tty text must not be drawn over it. */
+    g_scanout_owner = ctx;
+    fbcon_suspend();
     /* Flush only the rectangle that was written.  The rest of the host's copy
      * still holds whatever the previous present left there, which is what a
      * partial present means. */
@@ -337,6 +360,15 @@ static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
               (unsigned long)((b->size + PAGE_SIZE - 1) / PAGE_SIZE), ret);
         present_count++;
     }
+    return ret;
+}
+
+static int drm_present_buffer_at(drm_context_t *ctx, drm_gem_t *b,
+                                  uint32_t x, uint32_t y)
+{
+    mutex_lock(&g_scanout_owner_lock);
+    int ret = drm_present_buffer_at_locked(ctx, b, x, y);
+    mutex_unlock(&g_scanout_owner_lock);
     return ret;
 }
 
@@ -1489,6 +1521,7 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
         g_crtc.count_connectors = nconns;
         g_crtc.connector_ids[0] = DRM_CONN_ID;
         drm_unlock();
+        drm_console_release(ctx);
         return 0;
     }
 
@@ -1512,7 +1545,7 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
      * primary scanout resource before issuing TRANSFER_TO_HOST_2D.  The CRTC's
      * recorded position is the right one here: Linux treats x/y as CRTC state
      * that SETCRTC sets, so a later page flip has to keep using it. */
-    int rc = drm_present_buffer_at(b, c.x, c.y);
+    int rc = drm_present_buffer_at(ctx, b, c.x, c.y);
     drm_gem_unpin(b);
     if (rc < 0)
         return -EIO;
@@ -1773,7 +1806,7 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
     }
     /* A flip carries no position of its own; it presents at wherever the CRTC
      * was placed, which is the CRTC's recorded x/y. */
-    int rc = drm_present_buffer_at(b, px, py);
+    int rc = drm_present_buffer_at(ctx, b, px, py);
     drm_gem_unpin(b);
     if (rc < 0) {
         if (wants_event) {
@@ -3090,6 +3123,8 @@ static int drm_close(vfile_t *vf)
             g_vblank.flip_ctx = NULL;
         }
         mutex_unlock(&g_vblank.lock);
+
+        drm_console_release(ctx);
 
         /* Releasing g_vblank.lock first is deliberate: g_drm.lock is documented
          * as never held together with it, and this is the one path that needs
