@@ -10,6 +10,7 @@
 #include "drivers/core/dma_mapping.h"
 #include "drivers/core/memory.h"
 #include "drivers/bus/pci_bus.h"
+#include "drivers/usb/usb.h"
 #include "mm/frame.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
@@ -325,6 +326,46 @@ static void exercise_amdvi_route(bool reserve, bool policy_test) {
         kinfo("AMDVI_POLICY: PASS create=1 retained=1\n");
 }
 
+/* Explicit embedded QEMU q35/xHCI/hub fixture, never a normal boot action. */
+static device_t *xhci_input_child(device_t *controller) {
+    for (int index = 0;; index++) {
+        device_t *dev = device_find_get_by_class(DEV_CLASS_INPUT, index);
+        if (!dev) return NULL;
+        device_t *parent = dev->parent;
+        for (unsigned depth = 0; parent && depth < 16; depth++, parent = parent->parent)
+            if (parent == controller) return dev;
+        device_put(dev);
+    }
+}
+static void exercise_xhci_remove(void) {
+    pci_user_device_info_t info;
+    CHECK(!pci_user_device_find(0x1b36, 0x000d, &info));
+    device_t *controller = NULL;
+    CHECK(!pci_device_find_get(0, info.devid, &controller));
+    CHECK(controller->drv && !strcmp(controller->drv->name, "xhci-hcd"));
+    usb_core_scan();
+    device_t *old = xhci_input_child(controller);
+    CHECK(old);
+    class_device_t *old_class = class_device_ref_for_device(old);
+    CHECK(old_class);
+    driver_t *driver = controller->drv; /* Embedded fixture owns static code. */
+    CHECK(!driver_unregister(driver));
+    CHECK(device_is_registered(controller) && !controller->drv && !controller->drv_priv);
+    uint16_t command = pci_cfg_read16(controller, 4);
+    CHECK(command != 0xffffU && !(command & 4U));
+    CHECK(!device_is_registered(old) && !old->drv && !old->plat_data);
+    CHECK(class_device_call_begin(old_class) == -ENODEV);
+    CHECK(!driver_register(driver) && controller->drv == driver);
+    usb_core_scan();
+    device_t *fresh = xhci_input_child(controller);
+    CHECK(fresh && fresh != old && fresh->drv);
+    device_put(fresh);
+    class_device_put(old_class);
+    device_put(old);
+    device_put(controller);
+    kinfo("DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1\n");
+}
+
 void driver_runtime_selftest_boot(void)
 {
     const char *args = bootargs_get();
@@ -334,6 +375,8 @@ void driver_runtime_selftest_boot(void)
     exercise_resources();
     exercise();
     exercise_firmware();
+    if (boot_flag(args, "driver.xhci_remove_test=1"))
+        exercise_xhci_remove();
     if (boot_flag(args, "driver.iommu_native_test=1"))
         driver_iommu_native_selftest();
     bool amdvi_owner = boot_flag(args, "driver.amdvi_owner_test=1");

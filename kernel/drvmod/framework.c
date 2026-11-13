@@ -464,6 +464,7 @@ const struct drv_export drv_export_table[] = {
     { "device_register",     (void *)device_register },
     { "device_unregister",   (void *)device_unregister },
     { "device_probe_use_remove", (void *)device_probe_use_remove },
+    { "device_add_remove_prepare", (void *)device_add_remove_prepare },
     { "platform_bus",        &platform_bus },
     /* PCI class-driver accessors (device_t-based; modules bind through
      * drv_driver_register with bus = &pci_bus) */

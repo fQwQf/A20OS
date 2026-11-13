@@ -283,12 +283,15 @@ struct device_resource_action {
     void (*release)(void *);
     void *data;
     struct device_resource_action *next;
+    int (*prepare)(void *);
+    bool prepared;
 };
 int device_add_resource_action(device_t *dev, void (*release)(void *), void *data) {
     if (!dev || !release) return -EINVAL;
     struct device_resource_action *action = kmalloc(sizeof(*action));
     if (!action) return -ENOMEM;
-    *action = (struct device_resource_action){release, data, dev->resource_actions};
+    *action = (struct device_resource_action){.release = release, .data = data,
+                                               .next = dev->resource_actions};
     dev->resource_actions = action;
     return 0;
 }
@@ -296,7 +299,7 @@ void device_release_resources(device_t *dev) {
     while (dev && dev->resource_actions) {
         struct device_resource_action *action = dev->resource_actions;
         dev->resource_actions = action->next;
-        action->release(action->data);
+        if (action->release) action->release(action->data);
         kfree(action);
     }
 }
@@ -605,6 +608,28 @@ int device_probe_use_remove(device_t *dev) {
     return ret;
 }
 
+int device_add_remove_prepare(device_t *dev, int (*prepare)(void *), void *context) {
+    if (!dev || !prepare) return -EINVAL;
+    driver_ops_lock();
+    struct device_probe *probe = device_probes;
+    int ret = -EINVAL;
+    if (probe && probe->device == dev && probe->driver == dev->drv &&
+        probe->remove_on_error) {
+        ret = device_is_registered(dev) ? 0 : -ENODEV;
+        if (!ret) {
+            struct device_resource_action *action = kmalloc(sizeof(*action));
+            if (!action) ret = -ENOMEM;
+            else {
+                *action = (struct device_resource_action){.data = context,
+                    .next = dev->resource_actions, .prepare = prepare};
+                dev->resource_actions = action;
+            }
+        }
+    }
+    driver_ops_unlock();
+    return ret;
+}
+
 int driver_resource_request_checked(device_t *owner, const resource_t *res,
                                     driver_resource_claim_t **out) {
     if (!out)
@@ -790,6 +815,20 @@ static int device_unbind(device_t *dev) {
     int result = 0;
     if (dev->state == DEV_STATE_PROBE_CLEANUP)
         class_device_mark_offline(dev);
+    /* An opt-in provider may need to freeze hardware before its consumers
+     * can release DMA-visible storage. Checkpoint each successful action. */
+    for (struct device_resource_action *action = dev->resource_actions;
+         action; action = action->next) {
+        if (!action->prepare) continue;
+        if (dev->state != DEV_STATE_REMOVING && dev->state != DEV_STATE_PROBE_CLEANUP)
+            dev->state = DEV_STATE_PREPARING;
+        class_device_mark_offline(dev);
+        if (!action->prepared) {
+            int ret = action->prepare(action->data);
+            if (ret) { result = ret < 0 ? ret : -EIO; goto done; }
+            action->prepared = true;
+        }
+    }
     for (;;) {
         device_t *dependent = NULL;
         for (int i = 0; i < g_device_count && !dependent; i++) {

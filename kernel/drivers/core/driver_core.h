@@ -87,6 +87,8 @@ typedef struct resource {
 #define DEV_STATE_DEFERRED  6
 /* Explicitly managed failed probe; consumer cleanup may precede quiesce. */
 #define DEV_STATE_PROBE_CLEANUP 7
+/* Opt-in prepare may block teardown before any consumer is unbound. */
+#define DEV_STATE_PREPARING 8
 
 typedef struct firmware_device_id {
     const char *id;
@@ -152,7 +154,8 @@ typedef struct device {
 static inline bool device_is_stopping(const device_t *dev) {
     if (!dev) return false;
     int state = dev->state;
-    return state == DEV_STATE_REMOVING || state == DEV_STATE_PROBE_CLEANUP;
+    return state == DEV_STATE_REMOVING || state == DEV_STATE_PROBE_CLEANUP ||
+           state == DEV_STATE_PREPARING;
 }
 
 /* ============================================================
@@ -284,6 +287,18 @@ int  device_register(device_t *dev);
  * 0 on acceptance; no remove -> -EOPNOTSUPP; not current probe -> -EINVAL;
  * unpublished device -> -ENODEV. No state is armed on API failure. */
 int device_probe_use_remove(device_t *dev);
+/* From this device's current probe, after device_probe_use_remove(): register
+ * a fallible preparation before ANY consumer/child unbind. Install before
+ * activating hardware. LIFO, no allocation during teardown. 0 checkpoints
+ * this action; retries skip completed actions. Error retains binding, graph,
+ * devres and context offline in PREPARING (or PROBE_CLEANUP on probe failure).
+ * The callback freezes/drains its hardware without releasing storage needed
+ * by consumers/remove; it must tolerate partial initialization. Same task /
+ * lifecycle-mutex constraints as remove. Context lives until final devres
+ * release; arrange its release separately. NULL callback/wrong phase ->
+ * -EINVAL; unpublished device -> -ENODEV; allocation failure -> -ENOMEM. */
+int device_add_remove_prepare(device_t *dev, int (*prepare)(void *), void *context);
+
 /* Synchronous, task context. Commit unregister only after successful remove.
  * Failure keeps the registry pin/binding/resources for retry; some consumers
  * may already have stopped. No automatic rollback/re-probe or forced free.
