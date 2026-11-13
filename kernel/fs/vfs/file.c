@@ -411,7 +411,11 @@ static bcache_t *vfs_mount_bcache(mount_t *mnt)
 
 int vfs_sync(void)
 {
+    uint64_t started = timer_get_ticks();
+    kinfo("[SYNC] Saving file data...\n");
     int pc_r = page_cache_writeback_all(NULL, NULL);
+    kinfo("[SYNC] File data result=%d elapsed_ms=%llu\n", pc_r,
+          (unsigned long long)((timer_get_ticks() - started) * 1000 / TICKS_PER_SEC));
     if (pc_r < 0)
         return pc_r;
     for (int i = 0; i < vfs_mount_count(); i++) {
@@ -420,7 +424,11 @@ int vfs_sync(void)
             continue;
         bcache_t *bc = vfs_mount_bcache(mnt);
         if (bc) {
+            uint64_t before = timer_get_ticks();
+            kinfo("[SYNC] Saving filesystem %s...\n", mnt->path);
             int ret = bcache_sync_checked(bc);
+            kinfo("[SYNC] Filesystem %s result=%d elapsed_ms=%llu\n", mnt->path,
+                  ret, (unsigned long long)((timer_get_ticks() - before) * 1000 / TICKS_PER_SEC));
             if (ret < 0)
                 return ret;
         } else if (mnt->type == FS_TYPE_UXFS && mnt->root &&
@@ -433,6 +441,8 @@ int vfs_sync(void)
                 return ret;
         }
     }
+    kinfo("[SYNC] Complete elapsed_ms=%llu\n",
+          (unsigned long long)((timer_get_ticks() - started) * 1000 / TICKS_PER_SEC));
     return 0;
 }
 
