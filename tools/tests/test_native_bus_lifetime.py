@@ -182,10 +182,6 @@ static usb_device_t *usb_create(usb_hcd_t *h,unsigned n) {
  for(unsigned i=0;i<n;i++){u->ifaces[i].dev=u;u->ifaces[i].interface_class=3;u->ifaces[i].eps=kcalloc(1,sizeof(usb_endpoint_t));}
  return u;
 }
-static void usb_discard(usb_device_t *u) {
- for(unsigned i=0;i<u->iface_count;i++){assert(!u->ifaces[i].device);kfree(u->ifaces[i].eps);}
- kfree(u->ifaces);kfree(u);
-}
 static void check_usb(int fault,int registry_fault,int held_device) {
  static device_t parent={.name="hcd",.references=1};
  static const usb_hcd_ops_t ops={.abort_slot=usb_abort};
@@ -194,18 +190,20 @@ static void check_usb(int fault,int registry_fault,int held_device) {
  static device_id_t ids[]={{.vendor=3,.device=DEVICE_ANY,.subvendor=VENDOR_ANY,.subdevice=DEVICE_ANY},{0}};
  static driver_t drv={.name="usb-test",.id_table=ids,.probe=usb_probe,.remove=usb_remove};
  g_drivers[0]=&drv;g_driver_count=1;expected_interfaces=3;
- usb_device_t *u=usb_create(&h,3);int before=allocated;
+ int before=allocated;usb_device_t *u=usb_create(&h,3);ports[0]=u;
  if(fault)fail_at=allocations+fault;
  if(registry_fault){g_device_cap=1;driver_registry_test_fail_next(DRIVER_REGISTRY_TEST_DEVICE);}
  hold_class=held_device;
  int ret=usb_publish_interfaces(u);fail_at=0;
  if(fault||registry_fault) {
-  assert(ret==-ENOMEM&&!g_device_count&&!probes&&!removes&&!discovery_depth&&parent.references==1);
-  assert(allocated==before);usb_discard(u);
+  assert(ret==-ENOMEM&&!probes&&!removes&&!discovery_depth);
+  assert(!usb_disconnect_port(&h,1));
+  assert(!g_device_count&&parent.references==1&&aborts==1&&!ports[0]);
+  assert(allocated==before);
  } else {
   assert(!ret&&probes==3&&g_device_count==3&&parent.references==4);
   if(held_device)assert(held&&held->references==3);
-  ports[0]=u;state[0]=1;usb_disconnect_port(&h,1);
+  assert(!usb_disconnect_port(&h,1));
   assert(!g_device_count&&removes==3&&aborts==1&&!ports[0]&&!state[0]);
   if(held_device) {
    assert(held->references==1&&held->plat_data==NULL&&held->hardware_id->vendor==3);

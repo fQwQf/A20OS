@@ -53,7 +53,7 @@ static void native_remove_case(const char *name) {
  static device_id_t ids[]={{.vendor=3,.device=DEVICE_ANY,.subvendor=VENDOR_ANY,.subdevice=DEVICE_ANY},{0}};
  driver_t drv={.name="failed-usb",.bus=&g_usb_bus,.id_table=ids,.probe=usb_probe,.remove=fail_usb_remove};
  assert(!driver_register(&drv));expected_interfaces=3;
- usb_device_t *u=usb_create(&h,3);u->address=usb_core_alloc_address();u->slot=1;assert(u->address==1);
+ usb_device_t *u=usb_create(&h,3);u->address=usb_core_alloc_address();u->slot=1;assert(u->address==1);h.port_state[0]=USB_PORT_ADDRESS_OWNED;
  assert(!usb_publish_interfaces(u));h.port_devices[0]=u;
  device_t *held=device_get(u->ifaces[0].device);failed_usb=u->ifaces[1].device;
  int already=!strcmp(name,"usb-already");
@@ -64,7 +64,7 @@ static void native_remove_case(const char *name) {
   if(no_abort)h.ops=&missing;else abort_error=1;
   remove_error=0;assert(usb_core_unregister_hcd(&h)==(no_abort?-EOPNOTSUPP:-ETIMEDOUT));
   assert(!removes&&!bus_removes&&g_device_count==3&&h.port_devices[0]==u);
-  assert(h.port_state[0]==USB_PORT_REMOVE_PENDING&&held->plat_data==&u->ifaces[0]);
+  assert(h.port_state[0]==(USB_PORT_REMOVE_PENDING|USB_PORT_ADDRESS_OWNED)&&held->plat_data==&u->ifaces[0]);
   assert(held->references==3&&u->ifaces[0].eps==endpoint);
   abort_error=0;h.ops=&ops;assert(!usb_core_unregister_hcd(&h)&&removes==3&&aborts==2-no_abort);
   assert(!g_hcd_count&&!g_device_count&&!h.port_devices&&!h.port_state&&held->plat_data==NULL);
@@ -73,7 +73,7 @@ static void native_remove_case(const char *name) {
   assert(!driver_unregister(&drv));return;
  }
  int ret=!strcmp(name,"usb-hcd")?usb_core_unregister_hcd(&h):usb_disconnect_port(&h,1);
- assert(ret==-ETIMEDOUT&&g_hcd_count==1&&h.port_devices[0]==u&&h.port_state[0]==(USB_PORT_REMOVE_PENDING|USB_PORT_SLOT_STOPPED));
+ assert(ret==-ETIMEDOUT&&g_hcd_count==1&&h.port_devices[0]==u&&h.port_state[0]==(USB_PORT_REMOVE_PENDING|USB_PORT_SLOT_STOPPED|USB_PORT_ADDRESS_OWNED));
  assert(u->ifaces==interfaces&&u->ifaces[0].eps==endpoint&&u->ifaces[0].eps[0].addr==0);
  assert(!u->ifaces[0].device&&held->plat_data==NULL&&held->references==1);
  assert(failed_usb->state==DEV_STATE_REMOVING&&failed_usb->plat_data==&u->ifaces[1]);

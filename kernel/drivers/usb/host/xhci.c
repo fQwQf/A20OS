@@ -1002,6 +1002,8 @@ static int xhci_op_reset_port(usb_hcd_t *hcd, unsigned port, uint8_t *speed) {
 static int xhci_op_alloc_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
                               uint8_t hub_slot, uint8_t address,
                               usb_slot_t *out) {
+    if (!out) return -EINVAL;
+    *out = (usb_slot_t){0};
     xhci_controller_t *xhci = hcd->priv;
     if (xhci->fatal)
         return -ENODEV;
@@ -1025,6 +1027,10 @@ static int xhci_op_alloc_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
         goto out;
     }
 
+    /* From here the core owns a cleanup token even if Address Device fails.
+     * Do not discard it or issue an unchecked second Disable Slot locally. */
+    out->hcd = slot;
+    out->address = 0; /* xHCI assigns addresses, the software hint is unused. */
     memset(xhci->input_context, 0, sizeof(xhci->input_context));
     uint32_t *control = xhci_input_context(xhci, 0);
     control[1] = (1U << 0) | (1U << 1);
@@ -1042,8 +1048,6 @@ static int xhci_op_alloc_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
     result = xhci_command_locked(xhci, va_to_pa(xhci->input_context), 0,
                                  XHCI_TRB_TYPE(XHCI_TRB_ADDRESS_DEVICE) |
                                  ((uint32_t)slot << 24), &completion);
-    out->hcd = slot;
-    out->address = 0;
     if (result) {
         unsigned cc = completion.status >> 24;
         kerr("[XHCI] slot %u ADDRESS_DEVICE(%u) failed: %d cc=%u%s "
@@ -1059,10 +1063,6 @@ static int xhci_op_alloc_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
                  control[1], in_slot[0], in_slot[1], in_slot[2], in_slot[3],
                  ep0[0], ep0[1], ep0[2], ep0[3], ep0[4]);
         }
-        if (!xhci->fatal)
-            (void)xhci_command_locked(xhci, 0, 0,
-                                      XHCI_TRB_TYPE(XHCI_TRB_DISABLE_SLOT) |
-                                      ((uint32_t)slot << 24), NULL);
         goto out;
     }
     arch_dma_sync_for_cpu(xhci->output_context[slot],

@@ -226,6 +226,38 @@ class XhciFirmwarePolicy(unittest.TestCase):
                            check=True, capture_output=True, text=True)
             subprocess.run([str(exe)], check=True, capture_output=True, text=True)
 
+    def test_alloc_slot_retains_known_context_on_address_failure(self):
+        source = (ROOT / "kernel/drivers/usb/host/xhci.c").read_text()
+        body = function(source, "xhci_op_alloc_slot")
+        model = (ROOT / "tools/tests/xhci_slot_lifetime_host.c").read_text()
+        main = r'''
+int main(int argc,char **argv) {
+ assert(argc==2);which=atoi(argv[1]);
+ xhci_controller_t x={.max_slots=2,.context_size=32};usb_hcd_t h={&x};
+ usb_slot_t token={.hcd=99,.address=99};active_token=&token;
+ if(which==8)x.fatal=1;
+ assert(xhci_op_alloc_slot(&h,1,3,0,1,NULL)==-EINVAL&&!calls);
+ int ret=xhci_op_alloc_slot(&h,1,3,0,1,&token);
+ if(which==0)assert(!ret&&token.hcd==1&&token.address==7&&delays==1&&x.slot_path[1].route==17);
+ else if(which<=3)assert(ret==(which==3?-ETIMEDOUT:-EIO)&&token.hcd==1&&!token.address&&x.dcbaa[1]);
+ else {
+  int error=which==4?-EBUSY:which==5?-EINVAL:which==8?-ENODEV:-EIO;
+  assert(ret==error&&!token.hcd&&!token.address&&!delays);
+ }
+ assert(!owned&&calls==(which<=3?2:which==6||which==7?1:0));
+ assert(releases==(which==4||which==8?0:1));return 0;
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='a20-xhci-slot-') as tmp:
+            path = Path(tmp)
+            (path / 'test.c').write_text(model + body + main)
+            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                            '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                            str(path / 'test.c'), '-o', str(path / 'test')], check=True)
+            for case in range(9):
+                with self.subTest(case=case):
+                    subprocess.run([str(path / 'test'), str(case)], check=True)
+
     def test_integration_order(self):
         source = (ROOT / "kernel/drivers/usb/host/xhci.c").read_text()
         start = function(source, "xhci_op_start")

@@ -21,6 +21,8 @@
 
 #define USB_PORT_REMOVE_PENDING 0x80u
 #define USB_PORT_SLOT_STOPPED   0x40u
+#define USB_PORT_ADDRESS_OWNED  0x20u
+#define USB_PORT_ENUM_ATTEMPTS  0x1fu
 
 #define USB_ENUM_MAX_ATTEMPTS 3U
 
@@ -128,8 +130,9 @@ static int usb_publish_interfaces(usb_device_t *udev)
     return 0;
 
 rollback:
-    for (uint8_t i = 0; i < udev->iface_count; i++)
-        usb_unpublish_interface(&udev->ifaces[i]);
+    /* The port owns even a partially published device. Stop its slot before
+     * removing any bound interfaces; the caller uses disconnect_port(), whose
+     * fallible cleanup retains this graph when the controller cannot stop. */
     driver_discovery_end();
     return ret;
 }
@@ -162,6 +165,7 @@ static int usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
      * issues a transfer -- they only drop their own drv_priv -- so the order
      * swap costs them nothing. */
     uint8_t address = udev->address;
+    bool address_owned = hcd->port_state[port - 1] & USB_PORT_ADDRESS_OWNED;
     uint8_t slot = udev->slot;
     if (!(hcd->port_state[port - 1] & USB_PORT_SLOT_STOPPED)) {
         if (!hcd->ops || !hcd->ops->abort_slot) return -EOPNOTSUPP;
@@ -180,12 +184,11 @@ static int usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
     kfree(udev->ifaces);
     kfree(udev);
     hcd->port_devices[port - 1] = NULL;
-    hcd->port_state[port - 1] = 0;
-    /* Every address an HCD echoes came out of this pool and stays allocated
-     * until here; without the release a repeatedly replugged device walks the
-     * 1..127 range down and the next enumeration fails with -ENOMEM.  Devices
-     * that are addressed implicitly report 0, which the pool rejects. */
-    usb_core_free_address(address);
+    hcd->port_state[port - 1] &= USB_PORT_ENUM_ATTEMPTS;
+    /* Only release our retained software reservation. An implicit controller
+     * address can equal a number reserved by another HCD; observing that
+     * number does not transfer ownership of its pool entry. */
+    if (address_owned) usb_core_free_address(address);
     kinfo("[USB] port %u disconnected: address=%u reclaimed, slot=%u released\n",
           port, address, slot);
     return 0;
@@ -269,14 +272,28 @@ static int usb_parse_config(usb_device_t *udev, const uint8_t *cfg,
 
 int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
 {
-    if (!hcd->port_devices || port == 0 || port > hcd->max_ports)
+    if (!hcd || !hcd->port_devices || !hcd->port_state ||
+        port == 0 || port > hcd->max_ports || !hcd->ops ||
+        !hcd->ops->reset_port || !hcd->ops->alloc_slot ||
+        !hcd->ops->get_descriptor || !hcd->ops->control)
         return -EINVAL;
+    if (hcd->hcd_dev && device_is_stopping(hcd->hcd_dev))
+        return -ENODEV;
+    if (hcd->port_devices[port - 1] ||
+        (hcd->port_state[port - 1] & USB_PORT_REMOVE_PENDING))
+        return -EBUSY;
+    /* Allocate the cleanup owner before the HCD can publish a slot. No
+     * allocation may be required merely to retain a failed hardware setup. */
+    usb_device_t *udev = kcalloc(1, sizeof(*udev));
+    if (!udev) return -ENOMEM;
+    udev->hcd = hcd;
     const usb_hcd_ops_t *ops = hcd->ops;
     uint8_t speed;
     int r = ops->reset_port(hcd, port, &speed);
     if (r) {
         kdebug("[USB] port %u reset failed: %d\n", port, r);
-        return r;
+        kfree(udev);
+        return r < 0 ? r : -EIO;
     }
     mdelay(20);                 /* reset recovery */
 
@@ -284,23 +301,33 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     int address = usb_core_alloc_address();
     if (address < 0) {
         kerr("[USB] port %u address pool exhausted\n", port);
+        kfree(udev);
         return address;
     }
 
-    usb_slot_t slot;
+    usb_slot_t slot = {0};
     r = ops->alloc_slot(hcd, port, speed, hcd->hub_slot,
                         (uint8_t)address, &slot);
-    if (r) {
-        kerr("[USB] port %u alloc_slot failed: %d\n", port, r);
+    if (!slot.hcd) {
+        /* No token was transferred: the HCD owns any uncertain private
+         * controller state. A successful allocation must return a token. */
         usb_core_free_address((uint8_t)address);
-        return r;
+        kfree(udev);
+        return r ? (r < 0 ? r : -EIO) : -EIO;
     }
     /* An HCD that addresses devices implicitly never echoes the number, so
      * the reservation goes straight back.  One that spoke SET_ADDRESS owns
      * it now. */
     if (slot.address != (uint8_t)address)
         usb_core_free_address((uint8_t)address);
+    else
+        hcd->port_state[port - 1] |= USB_PORT_ADDRESS_OWNED;
     slot.port = (uint8_t)port;
+    udev->speed = speed;
+    udev->slot = slot.hcd;
+    udev->address = slot.address;
+    hcd->port_devices[port - 1] = udev;
+    if (r) goto fail; /* Nonzero result can still transfer a cleanup token. */
     /* Reported here rather than after descriptors are read: address reuse is a
      * property of the pool and the controller's slot, and a later failure must
      * still leave the assignment visible in the log. */
@@ -316,10 +343,12 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     usb_device_descriptor_t *dd = (usb_device_descriptor_t *)buf;
     uint16_t max_packet = (speed >= USB_SPEED_SUPER) ? (uint16_t)(1U << dd->max_packet0)
                                                      : dd->max_packet0;
-    if (max_packet) {
+    if (max_packet && ops->update_ep0_mps) {
         r = ops->update_ep0_mps(hcd, slot.hcd, max_packet);
-        if (r)
+        if (r) {
             kdebug("[USB] port %u EP0 MPS update failed: %d\n", port, r);
+            goto fail;
+        }
     }
 
     r = ops->get_descriptor(hcd, slot.hcd, USB_DT_DEVICE,
@@ -353,22 +382,12 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
         goto fail;
     }
 
-    usb_device_t *udev = kcalloc(1, sizeof(*udev));
-    if (!udev) {
-        kfree(config);
-        r = -ENOMEM;
-        goto fail;
-    }
-    udev->hcd = hcd;
-    udev->speed = speed;
-    udev->slot = slot.hcd;
     udev->vendor = vendor;
     udev->product = product;
-    udev->address = slot.address;
     r = usb_parse_config(udev, config, total);
     kfree(config);
     if (r)
-        goto free_device;
+        goto fail;
 
     /* SET_CONFIGURATION (device request). */
     usb_setup_packet_t setup = {
@@ -380,7 +399,7 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     };
     r = ops->control(hcd, slot.hcd, &setup, NULL);
     if (r)
-        goto free_interfaces;
+        goto fail;
 
     kinfo("[USB] device %04x:%04x port=%u speed=%u ifaces=%u config_bytes=%u\n",
           vendor, product, port, speed, udev->iface_count, total);
@@ -388,25 +407,20 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     /* Publish interfaces; class drivers bind and finish setup in probe. */
     r = usb_publish_interfaces(udev);
     if (r < 0)
-        goto free_interfaces;
-    hcd->port_devices[port - 1] = udev;
-    hcd->port_state[port - 1] = 0;
+        goto fail;
+    hcd->port_state[port - 1] &= USB_PORT_ADDRESS_OWNED;
     return 0;
 
-free_interfaces:
-    for (uint8_t i = 0; i < udev->iface_count; i++)
-        kfree(udev->ifaces[i].eps);
-    kfree(udev->ifaces);
-free_device:
-    kfree(udev);
-fail:
-    /* Give the controller context back: leaving it allocated would leak a
-     * slot, and the next hotplug on this port could not be enumerated. */
-    ops->abort_slot(hcd, slot.hcd);
-    /* The address the controller echoes back is ours until released; a probe
-     * that failed after SET_ADDRESS would otherwise strand it. */
-    usb_core_free_address(slot.address);
-    return r;
+fail: {
+    int original = r < 0 ? r : -EIO;
+    int cleanup = usb_disconnect_port(hcd, port);
+    if (cleanup) {
+        kwarn("[USB] port %u setup failed: %d; cleanup failed: %d; context retained\n",
+              port, original, cleanup);
+        return cleanup;
+    }
+    return original;
+}
 }
 
 /* ------------------------------------------------------------------ */
@@ -571,15 +585,17 @@ void usb_core_scan(void)
                 (void)usb_disconnect_port(hcd, port);
                 continue;
             }
-            uint8_t *failures = &hcd->port_state[port - 1];
-            if (hcd->port_devices[port - 1] || *failures >= USB_ENUM_MAX_ATTEMPTS)
+            uint8_t *state = &hcd->port_state[port - 1];
+            unsigned failures = *state & USB_PORT_ENUM_ATTEMPTS;
+            if (hcd->port_devices[port - 1] || failures >= USB_ENUM_MAX_ATTEMPTS)
                 continue;
             int r = usb_core_enumerate_port(hcd, port);
             if (r) {
-                ++*failures;
+                ++failures;
+                *state = (*state & ~USB_PORT_ENUM_ATTEMPTS) | failures;
                 kwarn("[USB] port %u enumeration failed: %d (attempt %u/%u)%s\n",
-                      port, r, *failures, USB_ENUM_MAX_ATTEMPTS,
-                      *failures == USB_ENUM_MAX_ATTEMPTS ? "; waiting for disconnect" : "");
+                      port, r, failures, USB_ENUM_MAX_ATTEMPTS,
+                      failures == USB_ENUM_MAX_ATTEMPTS ? "; waiting for disconnect" : "");
             }
         }
     }

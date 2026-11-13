@@ -125,6 +125,7 @@ check-pc-drivers: check-component-registry
 	  tools.tests.test_pc_module_boundary \
 	  tools.tests.test_xhci_endpoint_types \
 	  tools.tests.test_xhci_event_owner_race tools.tests.test_xhci_firmware_policy \
+	  tools.tests.test_usb_enumeration_cleanup \
 	  tools.tests.test_usb_hid_protocol tools.tests.test_usb_hid_readiness \
 	  tools.tests.test_usb_hid_console tools.tests.test_usb_keyboard_leds \
 	  tools.tests.test_input_mt_state tools.tests.test_evdev_mt_libevdev \
@@ -140,7 +141,8 @@ check-firmware-model:
 	  tools.tests.test_devicetree tools.tests.test_acpi_tables \
 	  tools.tests.test_uacpi_namespace tools.tests.test_pci_resources \
 	  tools.tests.test_e1000_interrupt_setup tools.tests.test_ahci_pci_policy \
-	  tools.tests.test_xhci_firmware_policy tools.tests.test_usb_hid_readiness \
+	  tools.tests.test_xhci_firmware_policy tools.tests.test_usb_enumeration_cleanup \
+	  tools.tests.test_usb_hid_readiness \
 	  tools.tests.test_xhci_endpoint_types \
 	  tools.tests.test_alsa_lib_protocol \
 	  tools.tests.test_hda_pcm_readiness \
