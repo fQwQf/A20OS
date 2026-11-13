@@ -19,6 +19,7 @@ struct driver_dma_domain {
     mutex_t lock;
     size_t mappings;
     bool is_managed, closed, provider_live;
+    struct driver_dma_policy *policy;
 };
 
 struct driver_dma_page {
@@ -40,6 +41,7 @@ static int create_domain(device_t *device,
                            const struct driver_dma_checked_ops *ops,
                            void (*legacy_unmap)(void *, uint64_t, enum driver_dma_direction),
                            const struct driver_dma_managed_ops *managed,
+                           struct driver_dma_policy *policy,
                            void *context, struct driver_dma_domain **out)
 {
     if (!out)
@@ -74,6 +76,8 @@ static int create_domain(device_t *device,
     domain->legacy_unmap = legacy_unmap;
     domain->context = context;
     domain->mask = mask;
+    domain->policy = policy;
+    driver_dma_policy_get(policy);
     *out = domain;
     return 0;
 }
@@ -89,14 +93,14 @@ int driver_dma_domain_create(device_t *device,
     const struct driver_dma_checked_ops checked = {
         .map_page = ops->map_page, .release = ops->release,
     };
-    return create_domain(device, &checked, ops->unmap_page, NULL, context, out);
+    return create_domain(device, &checked, ops->unmap_page, NULL, NULL, context, out);
 }
 
 int driver_dma_domain_create_checked(device_t *device,
                                      const struct driver_dma_checked_ops *ops,
                                      void *context, struct driver_dma_domain **out)
 {
-    return create_domain(device, ops, NULL, NULL, context, out);
+    return create_domain(device, ops, NULL, NULL, NULL, context, out);
 }
 
 int driver_dma_domain_create_managed(device_t *device,
@@ -109,7 +113,21 @@ int driver_dma_domain_create_managed(device_t *device,
     const struct driver_dma_checked_ops checked = {
         .unmap_page = ops->unmap_page, .release = ops->release,
     };
-    return create_domain(device, &checked, NULL, ops, context, out);
+    return create_domain(device, &checked, NULL, ops, NULL, context, out);
+}
+
+int driver_dma_domain_create_managed_policy(struct device *device,
+                    const struct driver_dma_managed_ops *ops, void *context,
+                    struct driver_dma_policy *policy,
+                    struct driver_dma_domain **out)
+{
+    if (out) *out = NULL;
+    if (!policy || !ops || !ops->map_page || !ops->unmap_page || !ops->deactivate)
+        return -EINVAL;
+    const struct driver_dma_checked_ops checked = {
+        .unmap_page = ops->unmap_page, .release = ops->release,
+    };
+    return create_domain(device, &checked, NULL, ops, policy, context, out);
 }
 
 int driver_dma_domain_shutdown(struct driver_dma_domain *domain)
@@ -177,6 +195,7 @@ void driver_dma_domain_put(struct driver_dma_domain *domain)
         return;
     if (domain->ops.release)
         domain->ops.release(domain->context);
+    driver_dma_policy_put(domain->policy);
     device_put(domain->device);
     kfree(domain);
 }
@@ -278,9 +297,17 @@ static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
     if (domain->device->state == DEV_STATE_REMOVING ||
         domain->device->state == DEV_STATE_REMOVED)
         return -ENODEV;
-    for (size_t i = 0; i < count; i++)
+    for (size_t i = 0; i < count; i++) {
         if (!pfn_valid(pages[i]))
             return -EINVAL;
+        if (domain->policy) {
+            bool identity;
+            int ret = driver_dma_policy_check(domain->policy,
+                           pfn_to_phys(pages[i]), PAGE_SIZE, direction, &identity);
+            if (ret)
+                return ret;
+        }
+    }
     struct driver_dma_mapping *mapping = kmalloc(sizeof(*mapping) +
                                          count * sizeof(mapping->pages[0]));
     if (!mapping)
@@ -315,6 +342,13 @@ static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
             if (!rc && ((address & (PAGE_SIZE - 1)) || address > domain->mask ||
                 PAGE_SIZE - 1 > domain->mask - address))
                 rc = -ERANGE;
+            if (!rc && domain->policy) {
+                bool identity;
+                rc = driver_dma_policy_check(domain->policy, pfn_to_phys(pfn),
+                                               PAGE_SIZE, direction, &identity);
+                if (!rc && identity && address != pfn_to_phys(pfn))
+                    rc = -ERANGE;
+            }
         } else {
             frame_put(pfn);
         }
