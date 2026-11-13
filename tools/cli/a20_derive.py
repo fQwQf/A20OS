@@ -7,6 +7,8 @@ exactly one place (the Makefile) and instances carry only their deltas.
 
 from __future__ import annotations
 
+import shlex
+
 from a20_instance import Instance, TargetCfg
 
 
@@ -72,7 +74,11 @@ def derive_make_vars(inst: Instance) -> list[str]:
     if m.extra_qemu:
         # Forwarded to the Makefile, which appends it to every QEMU launch.
         # The Makefile stays the single source of truth for the command line.
-        v.append(f"EXTRA_QEMU={' '.join(m.extra_qemu)}")
+        # This is an argv list, not a shell fragment. Preserve each boundary
+        # through the Makefile's command-line serialization; protect literal
+        # dollars from make's recursive variable/function expansion as well.
+        extra_qemu = shlex.join(m.extra_qemu).replace("$", "$$")
+        v.append(f"EXTRA_QEMU={extra_qemu}")
     if m.gpu_3d is not None:
         v.append(f"GPU_3D={_b(m.gpu_3d)}")
     if m.display_mode is not None:
