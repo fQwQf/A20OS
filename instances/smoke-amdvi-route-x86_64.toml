@@ -1,0 +1,16 @@
+name = "smoke-amdvi-route-x86_64"
+description = "Retained IVRS/PCI/controller route observation for EDU behind a root port; no DMA activation"
+arch = "x86_64"
+abi = "linux"
+
+[machine]
+memory = "1G"
+smp = 2
+extra_qemu = ["-machine", "q35", "-device", "amd-iommu", "-device", "pcie-root-port,id=scope-root,bus=pcie.0,addr=3,chassis=1", "-device", "edu,bus=scope-root,addr=0", "-append", "driver.runtime_test=1 driver.amdvi_owner_test=1 driver.pci_scope_test=1 driver.amdvi_route_test=1"]
+
+[test]
+expect = ["DRIVER_MEMORY: protected ram_ranges=", "AMDVI_OWNER: bound", "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0", "AMDVI_ROUTE: PASS route=1 policy=1 scope=1", "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1 pci=1", "DRIVER_RUNTIME: PASS"]
+timeout = "60s"
+
+[net]
+stack = "bsd"

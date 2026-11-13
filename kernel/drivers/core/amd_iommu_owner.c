@@ -30,7 +30,19 @@ struct amdvi_owner {
     acpi_context_t acpi;
     acpi_table_t table;
     size_t count;
+    size_t routes; /* Protected with the discovery/lifecycle transaction. */
+    bool detached;
+    struct amdvi_owner *next;
     struct amdvi_unit units[];
+};
+
+static struct amdvi_owner *amdvi_owners;
+
+struct amd_iommu_route {
+    struct amdvi_owner *owner;
+    size_t unit;
+    device_t *client, *dma_client, *scope, *dma_scope;
+    uint16_t requester;
 };
 
 struct amdvi_transport {
@@ -193,6 +205,8 @@ static int amdvi_probe(device_t *device) {
         }
     }
     device->drv_priv = owner;
+    owner->next = amdvi_owners;
+    amdvi_owners = owner;
     kinfo(
         "AMDVI_OWNER: bound requester=0x%x units=%lu writes=0 translation=0\n",
         requester, (unsigned long)owner->count);
@@ -208,8 +222,16 @@ table_error:
 static int amdvi_remove(device_t *device) {
     struct amdvi_owner *owner = device->drv_priv;
     device->drv_priv = NULL;
-    if (owner)
-        owner_destroy(owner);
+    if (owner) {
+        struct amdvi_owner **at = &amdvi_owners;
+        while (*at && *at != owner)
+            at = &(*at)->next;
+        if (*at)
+            *at = owner->next;
+        owner->detached = true;
+        if (!owner->routes)
+            owner_destroy(owner);
+    }
     return 0;
 }
 
@@ -229,6 +251,209 @@ static driver_t amdvi_driver = {
     .class_type = DEV_CLASS_NONE,
 };
 DRIVER_REGISTER(amdvi_driver);
+
+static int route_resolve(struct amdvi_owner *owner, uint16_t requester,
+                          acpi_ivrs_route_t *policy, size_t *index) {
+    int ret = acpi_ivrs_route(&owner->table, 0, requester, policy);
+    if (ret)
+        return firmware_error(ret);
+    for (size_t i = 0; i < owner->count; i++) {
+        const acpi_ivrs_hardware_t *unit = &owner->units[i].hardware;
+        if (unit->segment == policy->hardware.segment &&
+            unit->device_id == policy->hardware.device_id &&
+            unit->capability == policy->hardware.capability &&
+            unit->base == policy->hardware.base &&
+            unit->type == policy->hardware.type) {
+            *index = i;
+            return 0;
+        }
+    }
+    return -ENODEV; /* Firmware selected a different controller/capability. */
+}
+
+struct route_view {
+    amd_iommu_route_info_t info;
+    device_t *dma_client, *scope, *dma_scope;
+};
+
+static void route_view_release(struct route_view *view) {
+    device_put(view->dma_scope);
+    device_put(view->scope);
+    device_put(view->dma_client);
+}
+
+static int route_scope(const amd_iommu_snapshot_t *snapshot, device_t *client,
+                        device_t **out) {
+    if (snapshot->range_valid)
+        return amd_iommu_scope_get(snapshot, client, out);
+    unsigned bus, slot, function;
+    int ret = pci_device_location(client, &bus, &slot, &function);
+    if (ret)
+        return ret;
+    unsigned devfn = slot << 3 | function;
+    /* Firmware supplies scope when RngValid=0. Still verify the actual
+     * published client identity and the complete, unambiguous bridge path. */
+    return pci_device_scope_get(client, bus, devfn, devfn, out);
+}
+
+static int route_observe(struct amdvi_owner *owner, size_t index,
+                          device_t *client, const acpi_ivrs_route_t *policy,
+                          struct route_view *view) {
+    if (owner->detached)
+        return -ESHUTDOWN;
+    device_t *controller = owner->device;
+    if (!device_is_registered(controller) || controller->drv != &amdvi_driver ||
+        controller->drv_priv != owner || controller->state == DEV_STATE_REMOVING)
+        return -ENODEV;
+    struct amdvi_unit *unit = &owner->units[index];
+    struct amdvi_transport transport = {owner, unit};
+    amd_iommu_probe_ops_t ops = {&transport, owner_pci_read, owner_mmio_read};
+    amd_iommu_snapshot_t now;
+    int ret = amd_iommu_probe_unit(&unit->hardware, &ops, &now);
+    if (ret)
+        return ret;
+    const amd_iommu_snapshot_t *before = &unit->snapshot;
+    if (now.pci_id != before->pci_id ||
+        now.capability_header != before->capability_header ||
+        now.range != before->range || now.misc != before->misc ||
+        now.register_size != before->register_size ||
+        now.mmio_enabled != before->mmio_enabled ||
+        now.control != before->control || now.efr != before->efr)
+        return -ESTALE;
+    ret = route_scope(&now, client, &view->scope);
+    if (ret)
+        return ret;
+    ret = pci_device_find_get(policy->hardware.segment, policy->dma_requester,
+                              &view->dma_client);
+    if (ret)
+        return ret;
+    ret = route_scope(&now, view->dma_client, &view->dma_scope);
+    if (ret)
+        return ret;
+    view->info = (amd_iommu_route_info_t){
+        .unit = now, .requester = policy->requester,
+        .dma_requester = policy->dma_requester, .settings = policy->settings,
+        .extended = policy->extended, .memory_count = policy->memory_count,
+        .alias = policy->alias, .non_pci_entries = policy->non_pci_entries,
+        .hardware_range_checked = now.range_valid,
+    };
+    return 0;
+}
+
+int amd_iommu_route_acquire(device_t *client, amd_iommu_route_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!client)
+        return -EINVAL;
+    driver_discovery_begin();
+    unsigned bus, slot, function;
+    int ret = pci_device_location(client, &bus, &slot, &function);
+    if (ret)
+        goto done;
+    uint16_t requester = bus << 8 | slot << 3 | function;
+    struct amdvi_owner *selected = NULL;
+    size_t index = 0;
+    acpi_ivrs_route_t policy;
+    for (struct amdvi_owner *owner = amdvi_owners; owner; owner = owner->next) {
+        acpi_ivrs_route_t candidate;
+        size_t candidate_index;
+        ret = route_resolve(owner, requester, &candidate, &candidate_index);
+        if (ret == -ENODEV)
+            continue;
+        if (ret)
+            goto done;
+        if (selected) {
+            ret = -EBUSY;
+            goto done;
+        }
+        selected = owner;
+        index = candidate_index;
+        policy = candidate;
+    }
+    ret = -ENODEV;
+    if (!selected)
+        goto done;
+    struct route_view view = {0};
+    ret = route_observe(selected, index, client, &policy, &view);
+    if (!ret) {
+        struct amd_iommu_route *route = kmalloc(sizeof(*route));
+        if (!route)
+            ret = -ENOMEM;
+        else if (!device_get(client)) {
+            kfree(route);
+            ret = -ENODEV;
+        } else {
+            *route = (struct amd_iommu_route){selected, index, client,
+                view.dma_client, view.scope, view.dma_scope, requester};
+            selected->routes++;
+            *out = route;
+        }
+    }
+    if (ret)
+        route_view_release(&view);
+done:
+    driver_discovery_end();
+    return ret;
+}
+
+int amd_iommu_route_validate(amd_iommu_route_t *route,
+                              amd_iommu_route_info_t *out) {
+    if (!out)
+        return -EINVAL;
+    *out = (amd_iommu_route_info_t){0};
+    if (!route)
+        return -EINVAL;
+    driver_discovery_begin();
+    int ret = -ESHUTDOWN;
+    struct route_view view = {0};
+    if (!route->owner->detached) {
+        acpi_ivrs_route_t policy;
+        size_t index;
+        ret = route_resolve(route->owner, route->requester, &policy, &index);
+        if (!ret && index != route->unit)
+            ret = -ESTALE;
+        if (!ret)
+            ret = route_observe(route->owner, index, route->client, &policy, &view);
+        if (!ret && (view.dma_client != route->dma_client ||
+                     view.scope != route->scope || view.dma_scope != route->dma_scope))
+            ret = -ESTALE;
+        if (!ret)
+            *out = view.info;
+    }
+    route_view_release(&view);
+    driver_discovery_end();
+    return ret;
+}
+
+int amd_iommu_route_memory(amd_iommu_route_t *route, size_t index,
+                            acpi_ivrs_memory_t *out) {
+    if (!out)
+        return -EINVAL;
+    *out = (acpi_ivrs_memory_t){0};
+    if (!route)
+        return -EINVAL;
+    driver_discovery_begin();
+    int ret = acpi_ivrs_route_memory(&route->owner->table, 0, route->requester,
+                                     index, out);
+    driver_discovery_end();
+    return ret ? firmware_error(ret) : 0;
+}
+
+void amd_iommu_route_release(amd_iommu_route_t *route) {
+    if (!route)
+        return;
+    driver_discovery_begin();
+    struct amdvi_owner *owner = route->owner;
+    device_put(route->dma_scope);
+    device_put(route->scope);
+    device_put(route->dma_client);
+    device_put(route->client);
+    kfree(route);
+    if (!--owner->routes && owner->detached)
+        owner_destroy(owner);
+    driver_discovery_end();
+}
 
 int amd_iommu_owner_selftest(void) {
     const acpi_context_t *acpi = arch_acpi_context();
@@ -323,6 +548,26 @@ done:
     return ret;
 }
 #else
+int amd_iommu_route_acquire(struct device *client, amd_iommu_route_t **out) {
+    (void)client;
+    if (!out) return -EINVAL;
+    *out = NULL;
+    return -EOPNOTSUPP;
+}
+int amd_iommu_route_validate(amd_iommu_route_t *route, amd_iommu_route_info_t *out) {
+    (void)route;
+    if (!out) return -EINVAL;
+    *out = (amd_iommu_route_info_t){0};
+    return -EOPNOTSUPP;
+}
+int amd_iommu_route_memory(amd_iommu_route_t *route, size_t index,
+                            acpi_ivrs_memory_t *out) {
+    (void)route; (void)index;
+    if (!out) return -EINVAL;
+    *out = (acpi_ivrs_memory_t){0};
+    return -EOPNOTSUPP;
+}
+void amd_iommu_route_release(amd_iommu_route_t *route) { (void)route; }
 int amd_iommu_owner_selftest(void) {
     return -EOPNOTSUPP;
 }

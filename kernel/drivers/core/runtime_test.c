@@ -265,6 +265,30 @@ static void exercise_pci_scope(void) {
     driver_discovery_end();
 }
 
+static void exercise_amdvi_route(void) {
+    /* Explicit q35/root-port/EDU test. Resolve retained policy only; no DMA
+     * ownership, bus-master enable or device-table programming occurs. */
+    driver_discovery_begin();
+    device_t *client = NULL;
+    CHECK(!pci_device_find_get(0, 0x100, &client));
+    CHECK(pci_device_id(client) == 0x123411e8);
+    amd_iommu_route_t *route = NULL;
+    CHECK(!amd_iommu_route_acquire(client, &route));
+    device_put(client); /* The route independently retains the client. */
+    amd_iommu_route_info_t info;
+    CHECK(!amd_iommu_route_validate(route, &info));
+    CHECK(info.requester == 0x100 && info.dma_requester == 0x100 && !info.alias);
+    CHECK(info.unit.register_size && info.unit.base);
+    acpi_ivrs_memory_t memory;
+    for (size_t i = 0; i < info.memory_count; i++)
+        CHECK(!amd_iommu_route_memory(route, i, &memory));
+    CHECK(amd_iommu_route_memory(route, info.memory_count, &memory) == -ENODEV);
+    CHECK(!memory.start && !memory.length);
+    amd_iommu_route_release(route);
+    driver_discovery_end();
+    kinfo("AMDVI_ROUTE: PASS route=1 policy=1 scope=1\n");
+}
+
 void driver_runtime_selftest_boot(void)
 {
     const char *args = bootargs_get();
@@ -282,6 +306,8 @@ void driver_runtime_selftest_boot(void)
     bool pci_scope = boot_flag(args, "driver.pci_scope_test=1");
     if (pci_scope)
         exercise_pci_scope();
+    if (boot_flag(args, "driver.amdvi_route_test=1"))
+        exercise_amdvi_route();
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */

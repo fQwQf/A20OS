@@ -49,6 +49,39 @@ int amd_iommu_probe_unit(const acpi_ivrs_hardware_t *,
 struct device;
 int amd_iommu_scope_get(const amd_iommu_snapshot_t *, struct device *client,
                           struct device **out);
+/* Native retained route observation, not a DMA domain or requester claim.
+ * The value contains no borrowed firmware pointers. settings/extended and
+ * IVMD constraints are raw policy which an eventual provider must implement. */
+typedef struct amd_iommu_route amd_iommu_route_t;
+typedef struct {
+    amd_iommu_snapshot_t unit;
+    uint16_t requester, dma_requester;
+    uint8_t settings;
+    uint32_t extended;
+    size_t memory_count;
+    bool alias, non_pci_entries, hardware_range_checked;
+} amd_iommu_route_info_t;
+/* Task context, caller holds client reference. Combines retained IVRS policy,
+ * a live passive controller binding and published PCI paths for both original
+ * and alias requesters. Valid hardware Range is an additional constraint;
+ * RngValid=0 uses firmware routing plus PCI topology. Failure clears out.
+ * Success retains device/anchor identities, firmware and aperture claims.
+ * No writes, implicit dependency links, DMA enable or alias exclusivity. */
+int amd_iommu_route_acquire(struct device *client, amd_iommu_route_t **out);
+/* Revalidates binding, PCI identities/paths and the unit's read-only snapshot.
+ * Clears info on failure. Detached owner -> -ESHUTDOWN; changed unit/anchor
+ * -> -ESTALE. Does not freeze hardware: serialize validation AND subsequent
+ * use with an outer discovery transaction. A route never grants activation. */
+int amd_iommu_route_validate(amd_iommu_route_t *, amd_iommu_route_info_t *info);
+/* Copies raw matching IVMDs, including original/alias constraints, in firmware
+ * order. Index outside memory_count -> -ENODEV; error clears out. Retained
+ * immutable policy remains readable after controller unbind. */
+int amd_iommu_route_memory(amd_iommu_route_t *, size_t index,
+                            acpi_ivrs_memory_t *out);
+/* Exclusive release: no concurrent use of this handle. Controller unbind
+ * invalidates live validation immediately, but firmware/MMIO reservations
+ * survive until the final route is released. This is not a hardware stop. */
+void amd_iommu_route_release(amd_iommu_route_t *);
 /* x86 segment-0 boot diagnostic after PCI host initialization. Does not claim
  * the device, enable MMIO, write registers or change DMA routing. */
 int amd_iommu_pci_report(const acpi_context_t *);
