@@ -8,7 +8,7 @@
 
 | 待完成范围 | 关闭条件 |
 |---|---|
-| AMD-Vi 接管前资源完整性 | 已有被动 PCI 唯一绑定、IVRS 保留、完整 aperture checked claim，以及 probe 失败/解绑/重绑的主机与 QEMU 证据。已通过独立存储保留对象导入受管 RAM 与 ACPI 表页。已有 PCI 桥路径引用查询与 AMD Range 补充校验。仍需补齐 PFA 以外 RAM、其他固件/DT 保留来源，将作用域证据与 IVRS requester/alias、控制器绑定和实际 DMA domain 生命周期组合验证，并补物理平台证据；被动绑定和只读快照均不授予硬件启用权限 |
+| AMD-Vi 接管前资源完整性 | 已有被动 PCI 唯一绑定、IVRS 保留、完整 aperture checked claim，以及 probe 失败/解绑/重绑的主机与 QEMU 证据。已通过独立存储保留对象导入受管 RAM 与 ACPI 表页。已有 PCI 桥路径/AMD Range 查询，以及组合 IVRS requester/alias、PCI 路径和控制器上下文租约的保留路由对象。仍需补齐 PFA 以外 RAM、其他固件/DT 保留来源，落实实际 DMA domain 的 requester 独占、IVMD 权限及硬件停止/失败保留，并补物理平台证据；被动绑定和只读快照均不授予硬件启用权限 |
 | AMD-Vi 翻译与故障处理 | 为实际 requester/alias 落实 IVMD 约束，验证页表、失效完成、真实 DMA 读写与非法 IOVA fault；停止/失效超时继续保留硬件可访问页面与上下文，并有可重试关闭证据。现有 RISC-V 测试不能关闭此项 |
 | GPU 内存与请求模型 | 建立每设备 BO、GPUVM、context、提交与 fence 引用，验证进程退出、并发提交、超时/复位时请求完成和资源生命周期；现有通用 fence 不等于 DRM 同步 UAPI 已接通 |
 | Phoenix 原生执行与呈现 | 固定上游/固件版本后，依次取得真实 SDMA copy/fill 回读、Mesa 离屏渲染及显示接管证据；分别记录平台、设备身份与失败行为，不以 GOP、virtio-gpu 或软件渲染结果替代 |
