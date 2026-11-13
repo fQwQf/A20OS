@@ -105,7 +105,7 @@ static void mt_set_parent(void *m, void *v) { ((mount_t *)m)->mnt_parent = (moun
 static void mt_set_child(void *m, void *v) { ((mount_t *)m)->mnt_child = (mount_t *)v; }
 static void mt_set_sibling(void *m, void *v) { ((mount_t *)m)->mnt_sibling = (mount_t *)v; }
 static void mt_set_mp(void *m, void *v) { ((mount_t *)m)->mnt_mp = (vnode_t *)v; }
-static void mt_set_detached(void *m) { ((mount_t *)m)->flags |= VFS_MOUNT_DETACHED; }
+static void mt_set_detached(void *m) { ((mount_t *)m)->detached = 1; }
 static void mt_vnode_get(void *v) { vnode_get((vnode_t *)v); }
 static void mt_vnode_put(void *v) { vnode_put((vnode_t *)v); }
 static void vfs_mount_mark_ready(mount_t *mnt);
@@ -320,7 +320,7 @@ void vfs_mount_vfile_put(mount_t *mnt)
  * Cut @mnt out of the tree without consulting the busy rules.  This is the
  * pivot_root path, and it is exactly the operation that has to be allowed
  * to make a busy root unreachable: the object stays in the table so
- * mountinfo can still report it, but flagged VFS_MOUNT_DETACHED so no
+ * mountinfo can still report it, but marked detached so no
  * absolute path resolves through it again.  Open file descriptors into the
  * old root keep working, which is the whole point.
  */
@@ -352,7 +352,7 @@ static mount_t *vfs_find_mount_common(const char *path, int include_detached,
         cands[n].path = m->path;
         cands[n].ready = m->publish_ready;
         cands[n].teardown = m->teardown_running;
-        cands[n].detached = (m->flags & VFS_MOUNT_DETACHED) ? 1u : 0u;
+        cands[n].detached = m->detached;
         n++;
     }
     mntns_mount_table_unlock(flags);
@@ -371,7 +371,7 @@ mount_t *vfs_find_mount(const char *path)
     return vfs_find_mount_common(path, 0, VFS_EXTERNAL_ROOT_TIE);
 }
 
-/* Same match as vfs_find_mount() but ignoring VFS_MOUNT_DETACHED, for the
+/* Same match as vfs_find_mount() but including detached mounts, for the
  * umount path and for callers that need to name a mount pivot_root cut
  * loose. */
 mount_t *vfs_find_mount_including_detached(const char *path)
@@ -390,7 +390,7 @@ int vfs_move_mount(const char *from, const char *to)
     int noop = 0;
     int vr = a20_vfs_move_mount_check(from, to, mnt != NULL,
                                       mnt ? mnt->path : NULL,
-                                      mnt ? ((mnt->flags & VFS_MOUNT_DETACHED) != 0) : 0,
+                                      mnt ? (mnt->detached != 0) : 0,
                                       covered, &noop);
     if (vr < 0)
         return vr;

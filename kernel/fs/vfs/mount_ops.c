@@ -241,7 +241,9 @@ static int mount_update_existing(const char *path, int flags)
     for (int i = 0; i < vfs_mount_count(); i++) {
         mount_t *existing = vfs_mount_at(i);
         if (existing && strcmp(existing->path, path) == 0) {
-            existing->flags = flags;
+            /* Remount attributes cannot change namespace ownership. */
+            existing->flags = (existing->flags & VFS_MOUNT_NS_SHARED) |
+                              (flags & ~VFS_MOUNT_NS_SHARED);
             vfs_dcache_invalidate_all();
             return 1;
         }
