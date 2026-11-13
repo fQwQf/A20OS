@@ -2,6 +2,19 @@
 
 对应 V1-DRIVER。现状见 [current/drivers-implementation-status.md](../current/drivers-implementation-status.md)。
 
+### 原生 GPU 与 AMD-Vi 基础设施
+
+通用运行时、资源占用和 RISC-V IOMMU provider 的实现及历史验证见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；本机目标与上游复用方案见 [真机 GPU 开发](../../graphics/real-hardware-gpu.md)。工作队列和固件读取已提供，不能再整体记为未实现；厂商固件部署/校验/上传仍属后续工作。
+
+| 待完成范围 | 关闭条件 |
+|---|---|
+| AMD-Vi 控制器所有权 | 通过 PCI 生命周期建立唯一绑定，保留固件/设备上下文，核对完整 aperture 的声明和占用；probe 部分失败、unbind、重新绑定均有回收或保留证据。当前只读快照不授予启用权限，同 owner 可重叠的通用 claim 也不能替代控制器级互斥 |
+| AMD-Vi 翻译与故障处理 | 为实际 requester/alias 落实 IVMD 约束，验证页表、失效完成、真实 DMA 读写与非法 IOVA fault；停止/失效超时继续保留硬件可访问页面与上下文，并有可重试关闭证据。现有 RISC-V 测试不能关闭此项 |
+| GPU 内存与请求模型 | 建立每设备 BO、GPUVM、context、提交与 fence 引用，验证进程退出、并发提交、超时/复位时请求完成和资源生命周期；现有通用 fence 不等于 DRM 同步 UAPI 已接通 |
+| Phoenix 原生执行与呈现 | 固定上游/固件版本后，依次取得真实 SDMA copy/fill 回读、Mesa 离屏渲染及显示接管证据；分别记录平台、设备身份与失败行为，不以 GOP、virtio-gpu 或软件渲染结果替代 |
+
+以上为后续验收条件，不表示已经实现或已经在本机验证。
+
 ### DRIVER-08 控制台 UART 的接收不是真正中断驱动
 
 - 现状：8250 在 `arch_uart_init()`（`kernel/arch/riscv64/include/console.h`）里写了 `IER = 0x01`（RX 中断使能），`uart_init()` 对 `UART0_IRQ`（QEMU virt 为 10）注册了 `uart_irq_wrapper`，`kernel/arch/riscv64/trap/irqchip.c` 也在 PLIC 里按 hart enable 了该源。但实测行为是「只有读者轮询才取字节」：前台跑 `ping`（不读终端）时按 ^C，收端行规一次 ISIG 都没有触发；等 `ping` 结束、shell 重新读终端时那个 `0x03` 才被取走。也就是说接收实际靠 `uart_getc()` 里的 `arch_uart_poll_getc()` 推进，RX 中断没有在起作用（是 `uart_handle_irq` 未被调用，还是 trap 分发没有把外部中断转进来，尚未定位）。
