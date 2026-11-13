@@ -8,7 +8,7 @@
 
 | 待完成范围 | 关闭条件 |
 |---|---|
-| AMD-Vi 控制器所有权 | 通过 PCI 生命周期建立唯一绑定，保留固件/设备上下文，核对完整 aperture 的声明和占用；probe 部分失败、unbind、重新绑定均有回收或保留证据。当前只读快照不授予启用权限，同 owner 可重叠的通用 claim 也不能替代控制器级互斥 |
+| AMD-Vi 接管前资源完整性 | 已有被动 PCI 唯一绑定、IVRS 保留、完整 aperture checked claim，以及 probe 失败/解绑/重绑的主机与 QEMU 证据。仍需导入并核对未发布的 RAM/固件预留，完成物理平台与实际 requester 作用域验证；被动绑定和只读快照均不授予硬件启用权限 |
 | AMD-Vi 翻译与故障处理 | 为实际 requester/alias 落实 IVMD 约束，验证页表、失效完成、真实 DMA 读写与非法 IOVA fault；停止/失效超时继续保留硬件可访问页面与上下文，并有可重试关闭证据。现有 RISC-V 测试不能关闭此项 |
 | GPU 内存与请求模型 | 建立每设备 BO、GPUVM、context、提交与 fence 引用，验证进程退出、并发提交、超时/复位时请求完成和资源生命周期；现有通用 fence 不等于 DRM 同步 UAPI 已接通 |
 | Phoenix 原生执行与呈现 | 固定上游/固件版本后，依次取得真实 SDMA copy/fill 回读、Mesa 离屏渲染及显示接管证据；分别记录平台、设备身份与失败行为，不以 GOP、virtio-gpu 或软件渲染结果替代 |
