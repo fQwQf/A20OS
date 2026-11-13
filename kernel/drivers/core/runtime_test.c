@@ -265,15 +265,18 @@ static void exercise_pci_scope(void) {
     driver_discovery_end();
 }
 
-static void exercise_amdvi_route(void) {
-    /* Explicit q35/root-port/EDU test. Resolve retained policy only; no DMA
-     * ownership, bus-master enable or device-table programming occurs. */
+static void exercise_amdvi_route(bool reserve) {
+    /* Explicit q35/root-port/EDU test. Resolve policy and optionally reserve
+     * software keys; never enable bus mastering or program device tables. */
     driver_discovery_begin();
     device_t *client = NULL;
     CHECK(!pci_device_find_get(0, 0x100, &client));
     CHECK(pci_device_id(client) == 0x123411e8);
     amd_iommu_route_t *route = NULL;
     CHECK(!amd_iommu_route_acquire(client, &route));
+    amd_iommu_route_t *peer = NULL;
+    if (reserve)
+        CHECK(!amd_iommu_route_acquire(client, &peer));
     device_put(client); /* The route independently retains the client. */
     amd_iommu_route_info_t info;
     CHECK(!amd_iommu_route_validate(route, &info));
@@ -284,9 +287,19 @@ static void exercise_amdvi_route(void) {
         CHECK(!amd_iommu_route_memory(route, i, &memory));
     CHECK(amd_iommu_route_memory(route, info.memory_count, &memory) == -ENODEV);
     CHECK(!memory.start && !memory.length);
+    if (reserve) {
+        CHECK(!amd_iommu_route_reserve(route));
+        CHECK(amd_iommu_route_reserve(route) == -EALREADY);
+        CHECK(amd_iommu_route_reserve(peer) == -EBUSY);
+        amd_iommu_route_release(route);
+        route = peer;
+        CHECK(!amd_iommu_route_reserve(route));
+    }
     amd_iommu_route_release(route);
     driver_discovery_end();
     kinfo("AMDVI_ROUTE: PASS route=1 policy=1 scope=1\n");
+    if (reserve)
+        kinfo("AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1\n");
 }
 
 void driver_runtime_selftest_boot(void)
@@ -306,8 +319,9 @@ void driver_runtime_selftest_boot(void)
     bool pci_scope = boot_flag(args, "driver.pci_scope_test=1");
     if (pci_scope)
         exercise_pci_scope();
-    if (boot_flag(args, "driver.amdvi_route_test=1"))
-        exercise_amdvi_route();
+    bool requester = boot_flag(args, "driver.amdvi_requester_test=1");
+    if (requester || boot_flag(args, "driver.amdvi_route_test=1"))
+        exercise_amdvi_route(requester);
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */

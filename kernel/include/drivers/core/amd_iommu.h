@@ -49,7 +49,8 @@ int amd_iommu_probe_unit(const acpi_ivrs_hardware_t *,
 struct device;
 int amd_iommu_scope_get(const amd_iommu_snapshot_t *, struct device *client,
                           struct device **out);
-/* Native retained route observation, not a DMA domain or requester claim.
+/* Native retained route observation, with optional explicit reservation below.
+ * Acquiring an observation alone does not claim a requester or DMA domain.
  * The value contains no borrowed firmware pointers. settings/extended and
  * IVMD constraints are raw policy which an eventual provider must implement. */
 typedef struct amd_iommu_route amd_iommu_route_t;
@@ -73,6 +74,16 @@ int amd_iommu_route_acquire(struct device *client, amd_iommu_route_t **out);
  * -> -ESTALE. Does not freeze hardware: serialize validation AND subsequent
  * use with an outer discovery transaction. A route never grants activation. */
 int amd_iommu_route_validate(amd_iommu_route_t *, amd_iommu_route_info_t *info);
+/* Reserve this route's original AND DMA requester in the PCI namespace.
+ * Task context; caller has stopped DMA. Revalidates the route, requires both
+ * functions kernel-owned with BME disabled, then atomically reserves both IDs.
+ * Duplicate on the same live handle -> -EALREADY; any overlapping reservation
+ * -> -EBUSY, including aliases, old device identities and detached bindings.
+ * Success changes software ownership only; it neither drains DMA nor proves
+ * ACS/peer isolation, alias-peer quiescence, IVMD enforcement or activation.
+ * The route owns this reservation until release; retain it on uncertain stop.
+ * A failed reservation leaves the original observation handle owned by caller. */
+int amd_iommu_route_reserve(amd_iommu_route_t *);
 /* Copies raw matching IVMDs, including original/alias constraints, in firmware
  * order. Index outside memory_count -> -ENODEV; error clears out. Retained
  * immutable policy remains readable after controller unbind. */
@@ -80,7 +91,9 @@ int amd_iommu_route_memory(amd_iommu_route_t *, size_t index,
                             acpi_ivrs_memory_t *out);
 /* Exclusive release: no concurrent use of this handle. Controller unbind
  * invalidates live validation immediately, but firmware/MMIO reservations
- * survive until the final route is released. This is not a hardware stop. */
+ * survive until the final route is released. A reserved route also releases
+ * its requester set: confirm hardware detach before release. No hardware stop
+ * or invalidation is performed by this function. */
 void amd_iommu_route_release(amd_iommu_route_t *);
 /* x86 segment-0 boot diagnostic after PCI host initialization. Does not claim
  * the device, enable MMIO, write registers or change DMA routing. */

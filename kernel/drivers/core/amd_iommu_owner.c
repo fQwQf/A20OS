@@ -43,6 +43,7 @@ struct amd_iommu_route {
     size_t unit;
     device_t *client, *dma_client, *scope, *dma_scope;
     uint16_t requester;
+    pci_requester_reservation_t *reservation;
 };
 
 struct amdvi_transport {
@@ -384,8 +385,10 @@ int amd_iommu_route_acquire(device_t *client, amd_iommu_route_t **out) {
             kfree(route);
             ret = -ENODEV;
         } else {
-            *route = (struct amd_iommu_route){selected, index, client,
-                view.dma_client, view.scope, view.dma_scope, requester};
+            *route = (struct amd_iommu_route){.owner = selected, .unit = index,
+                .client = client, .dma_client = view.dma_client,
+                .scope = view.scope, .dma_scope = view.dma_scope,
+                .requester = requester};
             selected->routes++;
             *out = route;
         }
@@ -440,11 +443,46 @@ int amd_iommu_route_memory(amd_iommu_route_t *route, size_t index,
     return ret ? firmware_error(ret) : 0;
 }
 
+int amd_iommu_route_reserve(amd_iommu_route_t *route) {
+    if (!route)
+        return -EINVAL;
+    driver_discovery_begin();
+    amd_iommu_route_info_t info;
+    int ret = amd_iommu_route_validate(route, &info);
+    if (ret)
+        goto done;
+    if (route->reservation) {
+        ret = -EALREADY;
+        goto done;
+    }
+    if (route->client->user_owned || route->dma_client->user_owned) {
+        ret = -EBUSY;
+        goto done;
+    }
+    uint32_t command = pci_cfg_read32(route->client, 4);
+    uint32_t dma_command = pci_cfg_read32(route->dma_client, 4);
+    if (command == ~(uint32_t)0 || dma_command == ~(uint32_t)0) {
+        ret = -EIO;
+        goto done;
+    }
+    if ((command | dma_command) & 4) {
+        ret = -EBUSY;
+        goto done;
+    }
+    uint16_t ids[] = {info.requester, info.dma_requester};
+    ret = pci_requester_reserve(route->client, info.unit.segment, ids,
+                                ARRAY_SIZE(ids), &route->reservation);
+done:
+    driver_discovery_end();
+    return ret;
+}
+
 void amd_iommu_route_release(amd_iommu_route_t *route) {
     if (!route)
         return;
     driver_discovery_begin();
     struct amdvi_owner *owner = route->owner;
+    pci_requester_release(route->reservation);
     device_put(route->dma_scope);
     device_put(route->scope);
     device_put(route->dma_client);
@@ -548,6 +586,10 @@ done:
     return ret;
 }
 #else
+int amd_iommu_route_reserve(amd_iommu_route_t *route) {
+    (void)route;
+    return -EOPNOTSUPP;
+}
 int amd_iommu_route_acquire(struct device *client, amd_iommu_route_t **out) {
     (void)client;
     if (!out) return -EINVAL;

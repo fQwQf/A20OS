@@ -477,6 +477,7 @@ const struct drv_export drv_export_table[] = {
     { "amd_iommu_scope_get", (void *)amd_iommu_scope_get },
     { "amd_iommu_route_acquire", (void *)amd_iommu_route_acquire },
     { "amd_iommu_route_validate", (void *)amd_iommu_route_validate },
+    { "amd_iommu_route_reserve", (void *)amd_iommu_route_reserve },
     { "amd_iommu_route_memory", (void *)amd_iommu_route_memory },
     { "amd_iommu_route_release", (void *)amd_iommu_route_release },
     { "pci_cfg_write16",     (void *)pci_cfg_write16 },
