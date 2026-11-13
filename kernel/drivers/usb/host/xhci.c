@@ -124,6 +124,9 @@
 #define XHCI_TRB_LINK                 6U
 #define XHCI_TRB_ENABLE_SLOT          9U
 #define XHCI_TRB_DISABLE_SLOT         10U
+#define XHCI_TRB_RESET_ENDPOINT       14U
+#define XHCI_TRB_STOP_ENDPOINT        15U
+#define XHCI_TRB_SET_TR_DEQUEUE       16U
 #define XHCI_TRB_ADDRESS_DEVICE       11U
 #define XHCI_TRB_CONFIGURE_ENDPOINT   12U
 #define XHCI_TRB_EVALUATE_CONTEXT     13U
@@ -173,6 +176,8 @@ typedef struct xhci_ep {
     uint8_t dci;
     uint8_t addr;
     usb_urb_t *pending;         /* armed interrupt URB, or NULL */
+    unsigned callbacks_active; /* retains this ring across unlocked callbacks */
+    uint8_t closing, stopped, disabled; /* one-way endpoint release phases */
 } xhci_ep_t;
 
 typedef struct xhci_slot_path {
@@ -426,14 +431,12 @@ static unsigned xhci_collect_interrupt(xhci_controller_t *xhci,
         return 0;
     xhci_ep_t *ep = xhci_find_ep(xhci, (uint8_t)(event->control >> 24),
                                  (uint8_t)((event->control >> 16) & 0x1fU));
-    if (!ep || !ep->pending)
+    if (!ep || ep->closing || !ep->pending)
         return 0;
     usb_urb_t *urb = ep->pending;
     ep->pending = NULL;
-    /* A class driver that removed its interface clears complete/ctx before it
-     * frees the URB, but this endpoint's transfer ring outlives it until
-     * abort_slot() runs.  Without the check below the drain would dma-sync a
-     * buffer that is already gone. */
+    /* Endpoint release/slot abort close collection and retain the owner
+     * until callbacks drain. A NULL callback is valid, not a lifetime proof. */
     if (!urb->complete)
         return 0;
     uint8_t cc = (uint8_t)(event->status >> 24);
@@ -455,12 +458,18 @@ static void xhci_run_completions(usb_urb_t **ready, unsigned count,
         return;
     if (count > XHCI_IRQ_BATCH) panic("xHCI completion batch overflow");
     uint8_t slots[XHCI_IRQ_BATCH];
+    xhci_ep_t *endpoints[XHCI_IRQ_BATCH];
     for (unsigned i = 0; i < count; i++) {
-        /* A completion may free its URB: keep only scalar slot identities
-         * across the callback. Slot reuse waits for these counters to drain. */
+        /* The URB may free itself. Keep scalar identities and a counted
+         * endpoint record, whose allocation survives until callback return. */
         slots[i] = ready[i]->dev->slot;
         if (!slots[i] || slots[i] > xhci->max_slots)
             panic("xHCI completion has no owned slot");
+        uint8_t addr = ready[i]->ep->addr;
+        uint8_t dci = (uint8_t)((addr & USB_DIR_IN) ? (addr & 15U) * 2U + 1U : (addr & 15U) * 2U);
+        endpoints[i] = xhci_find_ep(xhci, slots[i], dci);
+        if (!endpoints[i]) panic("xHCI completion lost its endpoint");
+        endpoints[i]->callbacks_active++;
         xhci->slot_callbacks[slots[i]]++;
     }
     xhci->callbacks_active += count;
@@ -469,8 +478,10 @@ static void xhci_run_completions(usb_urb_t **ready, unsigned count,
         if (ready[i]->complete)
             ready[i]->complete(ready[i]);
     *flags = spin_lock_irqsave(&xhci->lock);
-    for (unsigned i = 0; i < count; i++)
+    for (unsigned i = 0; i < count; i++) {
+        endpoints[i]->callbacks_active--;
         xhci->slot_callbacks[slots[i]]--;
+    }
     xhci->callbacks_active -= count;
 }
 
@@ -1241,7 +1252,7 @@ static int xhci_op_configure_endpoint(usb_hcd_t *hcd, usb_device_t *dev,
                                       uint8_t addr, uint8_t ep_type,
                                       uint16_t max_packet, uint8_t interval) {
     xhci_controller_t *xhci = hcd->priv;
-    if (xhci->fatal)
+    if (xhci->fatal || !dev->slot || dev->slot > xhci->max_slots)
         return -ENODEV;
     uint8_t number = addr & 0x0fU;
     if (!number)
@@ -1250,7 +1261,7 @@ static int xhci_op_configure_endpoint(usb_hcd_t *hcd, usb_device_t *dev,
     if (dci >= 32 || xhci->ep_count >= XHCI_MAX_EPS)
         return -EINVAL;
 
-xhci_ep_t *ep = NULL;
+    xhci_ep_t *ep = NULL;
     int alloc = xhci_alloc_ep(hcd->hcd_dev, &ep);
     if (alloc)
         return alloc;
@@ -1266,6 +1277,20 @@ xhci_ep_t *ep = NULL;
         kfree(ep->alloc_ptr);
         return result;
     }
+    uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    if (!xhci->dcbaa[dev->slot] || xhci_find_ep(xhci, dev->slot, dci)) {
+        spin_unlock_irqrestore(&xhci->lock, flags);
+        xhci_xfer_release(xhci);
+        kfree(ep->alloc_ptr);
+        return -EBUSY;
+    }
+    /* Publish cleanup ownership BEFORE the controller can read this ring.
+     * An ambiguous Configure Endpoint result must never free live DMA. */
+    ep->closing = 1;
+    ep->next = xhci->eps;
+    xhci->eps = ep;
+    xhci->ep_count++;
+    spin_unlock_irqrestore(&xhci->lock, flags);
     memset(xhci->input_context, 0, sizeof(xhci->input_context));
     arch_dma_sync_for_cpu(xhci->output_context[dev->slot],
                           sizeof(xhci->output_context[dev->slot]));
@@ -1284,20 +1309,100 @@ xhci_ep_t *ep = NULL;
     result = xhci_command_locked(xhci, va_to_pa(xhci->input_context), 0,
                                  XHCI_TRB_TYPE(XHCI_TRB_CONFIGURE_ENDPOINT) |
                                  ((uint32_t)dev->slot << 24), NULL);
-    if (result) {
-        xhci_xfer_release(xhci);
-        kfree(ep->alloc_ptr);
-        return result;
-    }
-    /* Publish the endpoint before dropping xfer_busy, so a completion that
-     * arrives the moment the transfer ends already finds it. */
-    uint64_t flags = spin_lock_irqsave(&xhci->lock);
-    ep->next = xhci->eps;
-    xhci->eps = ep;
-    xhci->ep_count++;
+    flags = spin_lock_irqsave(&xhci->lock);
+    if (!result) ep->closing = 0;
     spin_unlock_irqrestore(&xhci->lock, flags);
     xhci_xfer_release(xhci);
-    return 0;
+    return result;
+}
+
+/* Native endpoint retirement. Caller owns lifecycle coordination and has
+ * drained its interface calls. IRQ callbacks only borrow retained records. */
+static int xhci_op_release_endpoint(usb_hcd_t *hcd, usb_device_t *dev, uint8_t addr) {
+    xhci_controller_t *xhci = hcd->priv;
+    if (!dev || !dev->slot || dev->slot > xhci->max_slots || !(addr & 15U))
+        return -EINVAL;
+    uint8_t dci = (uint8_t)((addr & USB_DIR_IN) ? (addr & 15U) * 2U + 1U : (addr & 15U) * 2U);
+    uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    xhci_ep_t *ep = xhci_find_ep(xhci, dev->slot, dci);
+    if (!ep) { spin_unlock_irqrestore(&xhci->lock, flags); return 0; }
+    ep->closing = 1; /* One-way admission, including a callback's late rearm. */
+    if (ep->callbacks_active || xhci->xfer_busy) {
+        spin_unlock_irqrestore(&xhci->lock, flags);
+        return -EBUSY; /* Never wait on a callback that needs lifecycle. */
+    }
+    bool software = xhci->halted || !xhci->dcbaa[dev->slot];
+    if (!software && xhci->fatal) {
+        spin_unlock_irqrestore(&xhci->lock, flags);
+        return -ESHUTDOWN;
+    }
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    int ret = software ? 0 : xhci_xfer_acquire(xhci, XHCI_XFER_HOLD_BUDGET_MS);
+    if (ret) return ret;
+    if (!software) {
+        /* Intel xHCI 1.2b 4.6.6/4.6.8/4.6.9/4.6.10: drop requires a
+         * stopped endpoint. Halted and Error need their own transitions. */
+        arch_dma_sync_for_cpu(xhci->output_context[dev->slot],
+                              sizeof(xhci->output_context[dev->slot]));
+        unsigned state = ((uint32_t *)xhci_output_context(xhci, dev->slot, dci))[0] & 7U;
+        if (!state) ep->disabled = 1;
+        if (!ep->disabled && !ep->stopped) {
+            if (state != 3U) {
+                uint32_t command = state == 1U ? XHCI_TRB_STOP_ENDPOINT : state == 2U ? XHCI_TRB_RESET_ENDPOINT : XHCI_TRB_SET_TR_DEQUEUE;
+                if (state < 1U || state > 4U) { ret = -EIO; goto out; }
+                uint64_t pointer = state == 4U ?
+                    va_to_pa(&ep->ring.trbs[ep->ring.enqueue]) | ep->ring.cycle : 0;
+                ret = xhci_command_locked(xhci, pointer, 0,
+                    XHCI_TRB_TYPE(command) | ((uint32_t)dci << 16) |
+                    ((uint32_t)dev->slot << 24), NULL);
+                if (ret) goto out;
+                arch_dma_sync_for_cpu(xhci->output_context[dev->slot],
+                                      sizeof(xhci->output_context[dev->slot]));
+                state = ((uint32_t *)xhci_output_context(xhci, dev->slot, dci))[0] & 7U;
+                if (state != 3U) { ret = -EIO; goto out; }
+            }
+            ep->stopped = 1;
+        }
+        if (!ep->disabled) {
+            memset(xhci->input_context, 0, sizeof(xhci->input_context));
+            uint32_t *control = xhci_input_context(xhci, 0);
+            uint32_t *slot = xhci_input_context(xhci, 1);
+            memcpy(slot, xhci_output_context(xhci, dev->slot, 0), xhci->context_size);
+            control[0] = 1U << dci; /* Drop only this endpoint; keep EP0. */
+            control[1] = 1U;
+            unsigned last = 1;
+            for (xhci_ep_t *other = xhci->eps; other; other = other->next)
+                if (other != ep && other->slot == dev->slot && !other->disabled && other->dci > last)
+                    last = other->dci;
+            slot[0] = (slot[0] & 0x07ffffffU) | (last << 27);
+            arch_dma_sync_for_device(xhci->input_context, sizeof(xhci->input_context));
+            ret = xhci_command_locked(xhci, va_to_pa(xhci->input_context), 0,
+                XHCI_TRB_TYPE(XHCI_TRB_CONFIGURE_ENDPOINT) |
+                ((uint32_t)dev->slot << 24), NULL);
+            if (ret) goto out;
+            arch_dma_sync_for_cpu(xhci->output_context[dev->slot],
+                                  sizeof(xhci->output_context[dev->slot]));
+            if (((uint32_t *)xhci_output_context(xhci, dev->slot, dci))[0] & 7U) {
+                ret = -EIO;
+                goto out;
+            }
+            ep->disabled = 1;
+        }
+    }
+    flags = spin_lock_irqsave(&xhci->lock);
+    /* Closing prevented new collection/submission throughout the command
+     * waits; all earlier callbacks were drained before acquiring xfer_busy. */
+    xhci_ep_t **link = &xhci->eps;
+    while (*link && *link != ep) link = &(*link)->next;
+    if (*link != ep || ep->callbacks_active) panic("xHCI endpoint retirement lost ownership");
+    *link = ep->next;
+    xhci->ep_count--;
+    ep->pending = NULL;
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    kfree(ep->alloc_ptr);
+out:
+    if (!software) xhci_xfer_release(xhci);
+    return ret > 0 ? -EIO : ret;
 }
 
 static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
@@ -1320,9 +1425,10 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
         spin_unlock_irqrestore(&xhci->lock, flags);
         return -ENODEV;
     }
-    if (ep->pending) {
+    if (ep->closing || ep->pending) {
+        int ret = ep->closing ? -ESHUTDOWN : -EBUSY;
         spin_unlock_irqrestore(&xhci->lock, flags);
-        return -EBUSY;
+        return ret;
     }
     memset(urb->buf, 0, urb->len);
     arch_dma_sync_for_device(urb->buf, urb->len);
@@ -1367,9 +1473,9 @@ static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
         result = -ENODEV;
         goto out;
     }
-    if (ep->pending) {
+    if (ep->closing || ep->pending) {
         spin_unlock_irqrestore(&xhci->lock, flags);
-        result = -EBUSY;
+        result = ep->closing ? -ESHUTDOWN : -EBUSY;
         goto out;
     }
 
@@ -1453,6 +1559,16 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
         return r < 0 ? r : -EIO;
     }
 
+    for (xhci_ep_t *ep = xhci->eps; ep; ep = ep->next) {
+        if (ep->slot != slot) continue;
+        ep->closing = ep->stopped = ep->disabled = 1;
+        ep->pending = NULL;
+    }
+    if (xhci->slot_callbacks[slot]) {
+        spin_unlock_irqrestore(&xhci->lock, flags);
+        if (!software_only) xhci_xfer_release(xhci);
+        return -EBUSY;
+    }
     xhci_ep_t *dead = NULL;
     xhci_ep_t **pp = &xhci->eps;
     while (*pp) {
@@ -1468,7 +1584,6 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
             pp = &e->next;
         }
     }
-    bool callbacks = xhci->slot_callbacks[slot] != 0;
     spin_unlock_irqrestore(&xhci->lock, flags);
     if (!software_only) xhci_xfer_release(xhci);
     while (dead) {
@@ -1476,10 +1591,7 @@ static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
         dead = e->next;
         kfree(e->alloc_ptr);
     }
-    /* Endpoint rings are stopped/unlinked, but a previously collected URB
-     * callback may still be outside the lock. Keep its class storage alive.
-     * Retry sees DCBAA=0 and never repeats the hardware command. */
-    return callbacks ? -EBUSY : 0;
+    return 0;
 }
 
 /* Polling fallback.  With the interrupt line registered this still runs (the
@@ -1752,6 +1864,7 @@ static const usb_hcd_ops_t xhci_hcd_ops = {
     .control = xhci_op_control,
     .get_descriptor = xhci_op_get_descriptor,
     .configure_endpoint = xhci_op_configure_endpoint,
+    .release_endpoint = xhci_op_release_endpoint,
     .submit_interrupt = xhci_op_submit_interrupt,
     .submit_bulk = xhci_op_submit_bulk,
     .abort_slot = xhci_op_abort_slot,

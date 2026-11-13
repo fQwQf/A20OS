@@ -47,7 +47,7 @@ typedef struct{xhci_trb_t trbs[64];uint16_t enqueue;uint8_t cycle;}xhci_ring_t;
 typedef struct{uint8_t addr;}usb_endpoint_t;
 typedef struct{uint8_t slot;}usb_device_t;
 typedef struct usb_urb{usb_endpoint_t*ep;usb_device_t*dev;void*buf;size_t len;}usb_urb_t;
-typedef struct xhci_ep{struct xhci_ep*next;uint8_t slot,dci;xhci_ring_t ring;usb_urb_t*pending;}xhci_ep_t;
+typedef struct xhci_ep{struct xhci_ep*next;uint8_t slot,dci,closing;xhci_ring_t ring;usb_urb_t*pending;}xhci_ep_t;
 typedef struct{int held;}spinlock_t;
 typedef struct {
     uint32_t route;

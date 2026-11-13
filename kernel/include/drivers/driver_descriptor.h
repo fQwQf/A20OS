@@ -40,7 +40,8 @@
  * uniformly contain CPU physical addresses rather than mapped pointers. */
 /* 8: USB host-controller operations and hub topology metadata changed. */
 /* 9: driver_t adds quiesce, called before draining active class calls. */
-#define A20_DRIVER_ABI 9U
+/* 10: usb_hcd_ops_t appends fallible endpoint release. Rebuild all modules. */
+#define A20_DRIVER_ABI 10U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,

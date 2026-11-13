@@ -34,7 +34,7 @@ static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xh
 '''
         production = (ROOT / 'kernel/drivers/usb/host/xhci.c').read_text()
         bodies = '\n'.join(function(production, name) for name in (
-            'xhci_wait32', 'xhci_xfer_acquire', 'xhci_xfer_release', 'xhci_run_completions',
+            'xhci_find_ep', 'xhci_wait32', 'xhci_xfer_acquire', 'xhci_xfer_release', 'xhci_run_completions',
             'xhci_prepare_remove', 'xhci_op_abort_slot', 'xhci_remove', 'xhci_control'))
         model = model.replace('/* PRODUCTION_FUNCTIONS */', helper + bodies)
         model += (ROOT / 'tools/tests/xhci_callback_host.c').read_text()

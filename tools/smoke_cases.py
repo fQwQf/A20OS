@@ -3138,6 +3138,7 @@ CASES: dict[str, dict] = {
             '\\[USB-HUB\\] downstream bus live: 4 ports behind 0409:55aa',
             '\\[USB-HID\\] keyboard ready',
             '\\[USB-HID\\] mouse ready',
+            'DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1',
             'DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1',
         ],
         'forbid': [

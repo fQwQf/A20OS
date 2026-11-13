@@ -580,6 +580,10 @@ static int usb_hid_probe(device_t *dev)
     if (!ep)
         return -ENODEV;
 
+    if (!udev->hcd->ops->configure_endpoint || !udev->hcd->ops->release_endpoint)
+        return -EOPNOTSUPP;
+    int r = device_probe_use_remove(dev);
+    if (r) return r;
     usb_hid_dev_t *h = kcalloc(1, sizeof(*h));
     if (!h)
         return -ENOMEM;
@@ -605,28 +609,30 @@ static int usb_hid_probe(device_t *dev)
     h->urb.complete = usb_hid_complete;
     h->urb.ctx = h;
 
-    /* Configure the endpoint through the HCD. */
-    int r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, ep->addr,
+    /* Keep partial endpoint/URB ownership in the fallible remove path. */
+    dev->drv_priv = h;
+    /* Re-select the interface before creating a new host context, resetting
+     * device-side endpoint state too (USB 2.0 9.4.10). */
+    r = usb_control_msg(udev, USB_TYPE_STANDARD | USB_RECIP_INTERFACE,
+                        USB_REQ_SET_INTERFACE, iface->alt_setting,
+                        iface->interface_number, NULL, 0);
+    if (r) return r;
+    r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, ep->addr,
                                                USB_XFER_INTERRUPT,
                                                ep->max_packet, ep->interval);
     if (r) {
         kwarn("[USB-HID] %04x:%04x endpoint %02x configure failed: %d\n",
               udev->vendor, udev->product, ep->addr, r);
-        kfree(h);
         return r;
     }
 
     usb_hid_select_protocol(h);
 
-    dev->drv_priv = h;
     h->running = 1;
     r = usb_submit_urb(&h->urb);
     if (r) {
         kwarn("[USB-HID] %04x:%04x first interrupt submit failed: %d\n",
               udev->vendor, udev->product, r);
-        h->running = 0;
-        dev->drv_priv = NULL;
-        kfree(h);
         return r;
     }
 
@@ -639,20 +645,24 @@ static int usb_hid_probe(device_t *dev)
     return 0;
 }
 
+static void usb_hid_quiesce(device_t *dev)
+{
+    usb_hid_dev_t *h = dev->drv_priv;
+    if (!h) return;
+    uint64_t flags = spin_lock_irqsave(&h->lock);
+    h->running = 0;
+    spin_unlock_irqrestore(&h->lock, flags);
+}
+
 static int usb_hid_remove(device_t *dev)
 {
-    usb_hid_dev_t *h = (usb_hid_dev_t *)dev->drv_priv;
-    if (h) {
-        /* The HCD's transfer ring outlives this interface until abort_slot()
-         * runs, and its interrupt handler may still be draining the ring in
-         * that window.  Clearing complete/ctx first is what makes the stale
-         * URB a no-op there instead of a callback into freed memory. */
-        h->urb.complete = NULL;
-        h->urb.ctx = NULL;
-        h->running = 0;
-        dev->drv_priv = NULL;
-        kfree(h);
-    }
+    usb_hid_dev_t *h = dev->drv_priv;
+    if (!h) return 0;
+    usb_hid_quiesce(dev);
+    int ret = usb_interface_release_endpoints(h->iface);
+    if (ret) return ret; /* Keep callback, URB, buffer and module ownership. */
+    dev->drv_priv = NULL;
+    kfree(h);
     return 0;
 }
 
@@ -668,6 +678,7 @@ static driver_t usb_hid_driver = {
     .bus = NULL,
     .probe = usb_hid_probe,
     .remove = usb_hid_remove,
+    .quiesce = usb_hid_quiesce,
     .class_ops = &usb_hid_ops,
     .class_type = DEV_CLASS_INPUT,
 };

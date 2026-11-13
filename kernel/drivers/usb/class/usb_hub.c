@@ -38,6 +38,7 @@ typedef struct usb_hub {
     usb_urb_t sc_urb;
     uint8_t sc_buf[HUB_STATUS_BYTES(USB_HUB_MAX_PORTS)];
     uint8_t sc_armed;
+    uint8_t stopping;
     spinlock_t sc_lock;
 } usb_hub_t;
 
@@ -203,7 +204,7 @@ static int hub_op_poll(usb_hcd_t *hcd)
 {
     usb_hub_t *hub = hcd->priv;
     uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
-    if (hub->sc_armed) {
+    if (hub->stopping || hub->sc_armed) {
         spin_unlock_irqrestore(&hub->sc_lock, flags);
         return 0;
     }
@@ -223,6 +224,12 @@ static int hub_op_poll(usb_hcd_t *hcd)
     return r;
 }
 
+static int hub_op_release_endpoint(usb_hcd_t *hcd, usb_device_t *dev, uint8_t addr)
+{
+    usb_hcd_t *root = hcd->parent_hcd;
+    return root->ops->release_endpoint ? root->ops->release_endpoint(root, dev, addr) : -EOPNOTSUPP;
+}
+
 static const usb_hcd_ops_t hub_hcd_ops = {
     .start = hub_op_start,
     .poll = hub_op_poll,
@@ -233,6 +240,7 @@ static const usb_hcd_ops_t hub_hcd_ops = {
     .control = hub_op_control,
     .get_descriptor = hub_op_get_descriptor,
     .configure_endpoint = hub_op_configure_endpoint,
+    .release_endpoint = hub_op_release_endpoint,
     .submit_interrupt = hub_op_submit_interrupt,
     .submit_bulk = hub_op_submit_bulk,
     .abort_slot = hub_op_abort_slot,
@@ -265,6 +273,9 @@ static int usb_hub_probe(device_t *dev)
         hd->ports > USB_HUB_MAX_PORTS)
         return -EINVAL;
     uint8_t think_time = (hd->characteristics >> USB_HUB_CHAR_TTT_SHIFT) & 3U;
+    if (!root->ops->release_endpoint) return -EOPNOTSUPP;
+    r = device_probe_use_remove(dev);
+    if (r) return r;
     r = root->ops->configure_hub(root, hub_dev, hd->ports, think_time);
     if (r)
         return r;
@@ -278,6 +289,7 @@ static int usb_hub_probe(device_t *dev)
     usb_hub_t *hub = kcalloc(1, sizeof(*hub));
     if (!hub)
         return -ENOMEM;
+    dev->drv_priv = hub;
     hub->dev = hub_dev;
     hub->status_bytes = HUB_STATUS_BYTES(hd->ports);
     spin_init(&hub->sc_lock);
@@ -306,6 +318,10 @@ static int usb_hub_probe(device_t *dev)
         if ((ep->attrs & 3U) != USB_XFER_INTERRUPT || !(ep->addr & USB_DIR_IN) ||
             ep->max_packet < hub->status_bytes)
             continue;
+        r = usb_control_msg(hub_dev, USB_TYPE_STANDARD | USB_RECIP_INTERFACE,
+                            USB_REQ_SET_INTERFACE, iface->alt_setting,
+                            iface->interface_number, NULL, 0);
+        if (r) goto fail;
         r = root->ops->configure_endpoint(root, hub_dev, ep->addr,
                                           USB_XFER_INTERRUPT, ep->max_packet,
                                           ep->interval);
@@ -329,16 +345,19 @@ static int usb_hub_probe(device_t *dev)
     return 0;
 
 fail:
-    kfree(hub);
-    return r;
+    return r; /* Core owns partial downstream registration and endpoint state. */
 }
 
 static int usb_hub_remove(device_t *dev)
 {
     usb_hub_t *hub = dev->drv_priv;
     if (hub) {
-        /* The core aborts the upstream slot before removing its interfaces. */
+        uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
+        hub->stopping = 1;
+        spin_unlock_irqrestore(&hub->sc_lock, flags);
         int ret = usb_core_unregister_hcd(&hub->hcd);
+        if (ret) return ret;
+        ret = usb_interface_release_endpoints(dev->plat_data);
         if (ret) return ret;
         dev->drv_priv = NULL;
         kfree(hub);

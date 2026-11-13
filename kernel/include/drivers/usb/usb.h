@@ -24,6 +24,7 @@
 #define USB_REQ_SET_ADDRESS     5U
 #define USB_REQ_GET_DESCRIPTOR    6U
 #define USB_REQ_SET_CONFIGURATION 9U
+#define USB_REQ_SET_INTERFACE   11U
 #define USB_REQ_SET_IDLE          10U
 #define USB_REQ_SET_PROTOCOL      11U
 
@@ -254,7 +255,8 @@ typedef struct usb_hcd_ops {
     /* Synchronous descriptor fetch; the same caller-buffer rule applies. */
     int  (*get_descriptor)(struct usb_hcd *hcd, uint8_t slot, uint8_t type,
                            uint16_t len, void *buf);
-    /* Configure an endpoint (allocates its transfer ring). */
+    /* Configure an endpoint (allocates its transfer ring). The class first
+     * initializes device-side toggle/sequence state, including on rebind. */
     int  (*configure_endpoint)(struct usb_hcd *hcd, struct usb_device *dev,
                                uint8_t addr, uint8_t ep_type,
                                uint16_t max_packet, uint8_t interval);
@@ -269,6 +271,12 @@ typedef struct usb_hcd_ops {
     /* Publish hub topology to the host controller before addressing children. */
     int  (*configure_hub)(struct usb_hcd *hcd, struct usb_device *dev,
                           uint8_t ports, uint8_t tt_think_time);
+    /* Task/lifecycle context. Permanently close and release one non-EP0
+     * endpoint. 0 confirms no DMA or callback can touch its URBs/buffers;
+     * errors retain endpoint state/storage for explicit retry. Idempotent
+     * after success; other endpoints and the slot remain usable. ABI 10. */
+    int  (*release_endpoint)(struct usb_hcd *hcd, struct usb_device *dev,
+                             uint8_t addr);
 } usb_hcd_ops_t;
 
 typedef struct usb_hcd {
@@ -313,6 +321,10 @@ void usb_core_poll(void);
  * Nonblocking topology entry: -EAGAIN when lifecycle is busy, -ENODEV for
  * stale/stopping/pending-removal devices; no callback then. Not an IRQ API. */
 int usb_device_poll(usb_device_t *dev);
+/* Current interface remove callback, after class calls drain. Releases each
+ * described non-EP0 endpoint, preserving remaining ownership on error.
+ * Caller retains interface/protocol storage; task context, not an IRQ API. */
+int usb_interface_release_endpoints(usb_interface_t *iface);
 
 /* Task context, lifecycle-serialized. Cleanup failure retains slot/address
  * for scan/unregister retry. Occupied/pending port -> -EBUSY; stopping HCD

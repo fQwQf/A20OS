@@ -639,6 +639,7 @@ const struct drv_export drv_export_table[] = {
     { "usb_control_msg",         (void *)usb_control_msg },
     { "usb_submit_urb",          (void *)usb_submit_urb },
     { "usb_device_poll",         (void *)usb_device_poll },
+    { "usb_interface_release_endpoints", (void *)usb_interface_release_endpoints },
     /* Backend-neutral in-kernel network bridge. Loadable NICs never acquire a
      * protocol-private lock or enter FreeBSD/lwIP from their IRQ context. */
     { "net_stack_receive_progress",  (void *)net_stack_receive_progress },

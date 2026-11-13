@@ -14,7 +14,7 @@
 #define XHCI_TRB_DISABLE_SLOT 10U
 #define XHCI_TRB_TYPE(t) ((t)<<10)
 typedef struct {unsigned route;} xhci_slot_path_t;
-typedef struct xhci_ep {struct xhci_ep *next;void *alloc_ptr;uint8_t slot;usb_urb_t *pending;} xhci_ep_t;
+typedef struct xhci_ep {struct xhci_ep *next;void *alloc_ptr;uint8_t slot,dci,closing,stopped,disabled;unsigned callbacks_active;usb_urb_t *pending;} xhci_ep_t;
 typedef struct {
  void *alloc_ptr;usb_hcd_t hcd;uintptr_t op,runtime;spinlock_t lock;
  unsigned fatal,running,hardware_owned,halted,irq_registered,max_slots,xfer_busy,ep_count;
@@ -55,7 +55,7 @@ void free_irq(uint32_t irq,void *context) {
 }
 static void stop_free(void *p) {
  if(p==stop_controller){assert(!stop_controller->hardware_owned||stop_controller->halted);controller_frees++;}
- else if(p&&stop_controller->eps==NULL){endpoint_frees++;}
+ else if(p){endpoint_frees++;}
  kfree(p);
 }
 static int xhci_command_locked(xhci_controller_t *x,uint64_t p,uint32_t status,uint32_t control,void *event) {
