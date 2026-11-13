@@ -12,8 +12,8 @@
  */
 #define A20OS_SYSNAME    "A20OS"
 #define A20OS_NODENAME   "a20os"
-#define A20OS_VERSION    "0.19"
-#define A20OS_RELEASE    "20.0.19"
+#define A20OS_VERSION    "0.20"
+#define A20OS_RELEASE    "20.0.20"
 #define A20OS_VERSION_FULL  A20OS_SYSNAME " " A20OS_VERSION " build " __DATE__ " " __TIME__
 
 #endif
