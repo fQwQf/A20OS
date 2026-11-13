@@ -532,10 +532,18 @@ static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino)
     if (ops.read_head(ops.context, &cur) < 0) return -EIO;
     while (cur) {
         if (cur < ops.first_ino || cur > ops.inode_count ||
-            steps++ >= ops.inode_count) return -EIO;
+            steps++ >= ops.inode_count) {
+            printf("[EXT4] orphan reap preflight invalid target=%u current=%u previous=%u steps=%u\n",
+                   ino, cur, prev, steps);
+            return -EIO;
+        }
         uint16_t links;
         uint32_t next;
-        if (ops.read_inode(ops.context, cur, &links, &next) < 0) return -EIO;
+        if (ops.read_inode(ops.context, cur, &links, &next) < 0) {
+            printf("[EXT4] orphan reap preflight read failed target=%u current=%u previous=%u\n",
+                   ino, cur, prev);
+            return -EIO;
+        }
         if (cur == ino) {
             if (found) return -EIO;
             found = 1;
@@ -546,7 +554,10 @@ static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino)
         prev = cur;
         cur = next;
     }
-    if (!found) return -EIO;
+    if (!found) {
+        printf("[EXT4] orphan reap preflight missing target=%u steps=%u\n", ino, steps);
+        return -EIO;
+    }
     int ret = found_links ? ops.truncate_linked_inode(ops.context, ino)
                           : ops.truncate_unlinked_inode(ops.context, ino);
     if (ret < 0) { ops.abort_transaction(ops.context); return ret; }
@@ -1506,7 +1517,7 @@ int ext4_vn_truncate_unlocked(vnode_t *vn, size_t size) {
 }
 
 
-int ext4_vn_chmod(vnode_t *vn, int mode) {
+static int ext4_vn_chmod_unlocked(vnode_t *vn, int mode) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     ext4_inode_t inode;
     if (ext4_read_inode(p->sb, p->inode_num, &inode) < 0) return -EIO;
@@ -1517,7 +1528,7 @@ int ext4_vn_chmod(vnode_t *vn, int mode) {
 }
 
 
-int ext4_vn_chown(vnode_t *vn, int uid, int gid) {
+static int ext4_vn_chown_unlocked(vnode_t *vn, int uid, int gid) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     ext4_inode_t inode;
     if (ext4_read_inode(p->sb, p->inode_num, &inode) < 0) return -EIO;
@@ -1533,6 +1544,26 @@ int ext4_vn_chown(vnode_t *vn, int uid, int gid) {
     vn->gid = inode.i_gid;
     vn->mode = inode.i_mode;
     return 0;
+}
+
+
+int ext4_vn_chmod(vnode_t *vn, int mode)
+{
+    ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)vn->fs_data)->sb;
+    rw_mutex_write_lock(&sb->metadata_lock);
+    int ret = ext4_vn_chmod_unlocked(vn, mode);
+    rw_mutex_write_unlock(&sb->metadata_lock);
+    return ret;
+}
+
+
+int ext4_vn_chown(vnode_t *vn, int uid, int gid)
+{
+    ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)vn->fs_data)->sb;
+    rw_mutex_write_lock(&sb->metadata_lock);
+    int ret = ext4_vn_chown_unlocked(vn, uid, gid);
+    rw_mutex_write_unlock(&sb->metadata_lock);
+    return ret;
 }
 
 
