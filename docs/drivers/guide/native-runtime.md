@@ -52,6 +52,14 @@ PCI 分配新 MMIO 地址时先避开已有 PCI BAR，再按 busy_end 跳过其�
 
 显式 `driver.runtime_test=1` 会在生产内核执行 metadata-only 的资源自检，输出 `DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1`。该自检不访问测试区间的物理地址，验证重复句柄、冲突、引用、受管申请回收，以及未绑定声明/后续发布与 checked 申请的互斥、存储保留与 MMIO/发布冲突、`RES_MEM` 描述允许共存和实际受管 RAM 申请拒绝。并发申请、阻塞 unmap 和失败注入另由主机 fixture 验证。资源和运行时 PASS 标记在测试末尾同一条日志中输出，避免 best-effort SMP 控制台只丢失早期资源标记。
 
+### PCI requester 集合占用
+
+`pci_requester_reserve(owner, segment, ids, count, &reservation)` 在任务上下文原子占用显式 requester 集合。调用者持有已注册 owner 的有效引用；输入在返回前保持不变，核心复制、排序并去重，输入数量为 1..`PCI_REQUESTER_SET_MAX`（128）。requester 是包含 bus/device/function 的完整 16 位 ID，0 与 0xffff 均是合法键。segment 仅支持 0，非零返回 `-EOPNOTSUPP`；超出输入上限返回 `-E2BIG`，参数错误 `-EINVAL`，未注册或无法保留 owner 返回 `-ENODEV`，分配失败 `-ENOMEM`，任一键冲突 `-EBUSY`；失败清空输出且不占用集合中的其他键。
+
+同一 owner 也不能重复占用重叠集合；没有 MMIO claim 的同 owner 共享例外。冲突检查与发布由 discovery/lifecycle mutex 串行化，成功保留 owner 引用。已占用的键独立于 PCI 枚举槽、驱动绑定和控制器上下文：owner 注销、同 BDF 换设备或控制器重绑均不自动撤销。`pci_requester_release(reservation)` 在任务上下文显式释放，NULL 无操作，非空句柄准确释放一次；硬件停止/失效不确定时必须继续保留句柄，不能因元数据失效就回收 namespace。
+
+该接口只管理协作软件的地址键，不推断 alias、不要求键对应已发布 function，也不证明 PCI 路由、ACS/peer 隔离或设备停止。调用者须提供经固件/硬件策略验证的完整集合；raw 配置写入和未接入该接口的旧 provider 不被强制拦截。它不创建 group 编号、PID 身份或隐式 parent/dependency，也不触碰硬件。
+
 ## 物理存储保留对象
 
 头文件：`kernel/include/drivers/core/memory.h`；保留对象与 claim 共用 `driver_core.c` 的 registry 锁，启动导入位于 `kernel/drivers/core/memory_boot.c`。这是原生 CPU 物理存储清单，独立于 device/binding；RAM 无须伪装成设备，驱动结构布局和 ABI 9 保持不变。reserve/release 已进入模块导出表，启动导入函数只供内核启动路径使用。
@@ -157,7 +165,7 @@ x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再�
 
 没有对应函数/capability 返回 `-ENODEV`；不支持的 class/header/interface/address width 返回 `-EOPNOTSUPP`；畸形链或 aperture 返回 `-EINVAL`；base 或 PCSup 矛盾返回 `-EIO`；transport 错误原样传播。错误清空整个 snapshot。探测成功不等于资源已独占或设备已接管，也不保证后续时刻的硬件状态；硬件初始化时必须重新验证。
 
-PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；下文已提供 PCI 桥路径、有效 Range 补充查询，以及结合 IVRS/绑定生命周期的保留路由对象；requester/alias 独占、IVMD 权限落实及 DMA domain provider 仍待实现。
+PCI host 枚举后，x86 调用 `amd_iommu_pci_report()`，对去重候选做上述探测。当前架构 PCI HAL 没有 segment 参数，启动适配器明确拒绝非零 segment。适配器在 discovery 事务内先检查 active claims/存储保留，再按需映射首个 16-KiB 寄存器窗口并配对 unmap（x86 映射仍遵循架构既有的共享、永久映射契约）。日志报告原始 control/EFR、地址宽度和 aperture；`verified` 只统计只读探测成功的单元。该诊断不建立持久占用。下述被动驱动负责与已发布声明/claims 核对完整 aperture；下文已提供 PCI 桥路径、有效 Range 补充查询，以及结合 IVRS/绑定生命周期的保留路由对象；下述显式 reserve 已接入 PCI 集合占用；全部 alias peer 的停止/归属协调、IVMD 权限落实及 DMA domain provider 仍待实现。
 
 两类报告都不建立 device table、队列或页表，不改变 DMA 路径。`driver_enabled=0` 表示这条发现路径没有启用 AMD-Vi 翻译；它不表示固件此前未开启硬件，也不表示下述软件驱动没有绑定。
 
@@ -199,13 +207,19 @@ PCI 另提供 `pci_device_find_get(segment, requester, &device)`：在 discovery
 
 `amd_iommu_route_acquire(client, &route)` 是任务上下文中的显式对象接口。它在 discovery 事务中，从当前被动绑定保留的 IVRS 解析原 requester 与实际 DMA requester，选择唯一匹配的 controller/capability，重新探测该单元，并核对绑定时的 ID、capability、Range、地址宽度、完整 aperture、MMIO 开关、control/EFR。有效 Range 是额外覆盖约束；无效 Range 采用 IVRS 路由并核对实际 PCI 路径，不将未定义字段解释成全覆盖。原 requester 与 alias 目标都必须是已发布、身份有效且路径无歧义的 PCI function；alias 目标未发布时拒绝，不猜测其存在。多个匹配控制器或固件歧义返回 `-EBUSY`，缺少绑定/路由/目标返回 `-ENODEV`，其余固件、探测和桥查询错误按既有规则传播；失败清空输出。
 
-成功句柄独立保留 client、实际 DMA function 和两条查询的 anchor 引用，并持有控制器上下文的一份租约。它不建立 parent/dependency、不接管 client、不独占 requester/alias，也不启用 BME、翻译、队列或 DMA。原始 settings/extended、non-PCI 标记与 IVMD 都是后续 provider 必须处理的策略，不能当成已落实权限。
+成功获取观察句柄后，它独立保留 client、实际 DMA function 和两条查询的 anchor 引用，并持有控制器上下文的一份租约。仅 acquire 不建立 parent/dependency、不接管 client、不独占 requester/alias，也不启用 BME、翻译、队列或 DMA。原始 settings/extended、non-PCI 标记与 IVMD 都是后续 provider 必须处理的策略，不能当成已落实权限。
 
 `amd_iommu_route_validate(route, &info)` 重新核对当前绑定、硬件快照与两条 PCI 路径，成功返回不含借用指针的值副本。binding 解绑/移除后返回 `-ESHUTDOWN`，即使同一 function 已重新绑定也不会使旧句柄重新有效；单元快照或所保留 alias/anchor 身份变化返回 `-ESTALE`，消失/注销等错误由 PCI 查询传播。所有失败清空 info。查询不冻结硬件；如验证后要继续观察绑定/配置，调用者须用外层 discovery 事务覆盖操作。硬件启用仍需完整 provider 协议。
 
-`amd_iommu_route_memory(route, index, &memory)` 按固件顺序复制原 requester 与 alias 的相关 IVMD，不归并或执行 unity/exclusion/读写权限，越界返回 `-ENODEV` 并清空输出。保留的不可变固件策略在解绑后仍可读取。`amd_iommu_route_release(route)` 在任务上下文独占释放句柄，禁止与同一句柄的查询并发；最后一份路由释放后，detached 控制器才按先 unmap、再释放 claim、最后释放 IVRS 的顺序回收。控制器是内建实现；句柄不提供通用模块绑定保活契约。
+`amd_iommu_route_reserve(route)` 显式为该句柄申请原 requester 与实际 DMA requester 的 PCI 集合占用，两者相同时由 PCI 层去重。接口先重新验证路由，并要求两端均未被用户服务占有且 BME 关闭；BME/用户所有权冲突返回 `-EBUSY`，配置读取全 1 返回 `-EIO`。同一有效句柄重复 reserve 返回 `-EALREADY`；原设备、alias 目标或共享目标的其他 alias 已被占用时返回 `-EBUSY`，没有同 client/owner 豁免。失败不消费原观察句柄，可修复前置条件后重试。
+
+占用由路由持有至 release，独立于控制器绑定代次；旧路由在解绑后虽然 validate 返回 `-ESHUTDOWN`，其 requester 仍阻止新绑定/新 BDF 身份获取重叠占用。调用者须先确认硬件停止/上下文失效，再释放已 reserve 的路由；停止失败则继续保留。只检查两端 BME 并不排空 DMA，也不协调其他未接入占用的 alias peer；当前仍不能据此启用硬件翻译。`info` 保持原值结构，不新增隐藏 group 或用户 ABI。
+
+`amd_iommu_route_memory(route, index, &memory)` 按固件顺序复制原 requester 与 alias 的相关 IVMD，不归并或执行 unity/exclusion/读写权限，越界返回 `-ENODEV` 并清空输出。保留的不可变固件策略在解绑后仍可读取。`amd_iommu_route_release(route)` 在任务上下文独占释放句柄，禁止与同一句柄的查询并发；释放已 reserve 的路由也会释放 requester 集合；最后一份路由释放后，detached 控制器才按先 unmap、再释放 claim、最后释放 IVRS 的顺序回收。控制器是内建实现；句柄不提供通用模块绑定保活契约。
 
 `tools/a20 test smoke-amdvi-route-x86_64` 在 q35 root port 下提供 EDU，并显式设置 `driver.amdvi_route_test=1` 与运行时自检参数。测试获取路由后先释放原始 client 引用，再验证 requester、单元和 IVMD 枚举，释放句柄并输出 `AMDVI_ROUTE: PASS route=1 policy=1 scope=1`。普通启动不执行；该实例不提交 DMA。解绑后的保留、重绑、alias 与有效 Range 分支另由主机后端验证。
+
+新增实例 `tools/a20 test smoke-amdvi-requester-x86_64` 再显式指定 `driver.amdvi_requester_test=1`：两个独立观察句柄竞争同一 EDU requester，验证重复 reserve、冲突与持有占用的句柄释放后的重试，输出 `AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1`。不启用 BME 或提交 DMA；正常启动不执行。
 
 ## 原生异步 fence
 
@@ -277,7 +291,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 ## 验证入口与范围
 
 ```sh
-python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner tools.tests.test_pci_scope tools.tests.test_amd_iommu_route -v
+python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner tools.tests.test_pci_scope tools.tests.test_pci_requester tools.tests.test_amd_iommu_route -v
 python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
@@ -286,6 +300,7 @@ tools/a20 test smoke-driver-runtime-smp2-x86_64
 tools/a20 test smoke-amdvi-owner-x86_64
 tools/a20 test smoke-pci-scope-x86_64
 tools/a20 test smoke-amdvi-route-x86_64
+tools/a20 test smoke-amdvi-requester-x86_64
 tools/a20 test smoke-driver-iommu-native-riscv64
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only -j4
 ```
@@ -297,7 +312,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
-2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，在保留路由对象基础上落实 requester/alias 独占与 IVMD 权限，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
+2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，基于显式 PCI 集合占用补齐全部 alias peer 的停止/归属协调与 IVMD 权限，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
 3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
@@ -366,3 +381,11 @@ IVRS 单元枚举提交：`a96fffc29`；PCI/MMIO 只读探测提交：`6ad339603
 保留其他工作的工作区中，x86_64 双核 embedded 与 generic、AArch64 bringup embedded 内核构建通过；113 个实例与 32 个驱动组件清单检查通过。按新实例参数直接启动双核 x86_64 embedded/generic 内核，退出码 0，匹配全部预期标记，包括 `AMDVI_ROUTE: PASS route=1 policy=1 scope=1` 和 `2/2 configured CPUs online`。这里验证 QEMU 的 IVRS → 保留路由对象 → PCI 路径与只读绑定快照，RngValid=0 的固件路径；有效 Range、alias 和解绑后的资源保留由主机模型验证。没有提交 EDU DMA，没有启用 AMD-Vi 翻译或 GPU 加速。
 
 完整 `tools/a20 test smoke-amdvi-route-x86_64` 已重试，仍在 Native `ufsd` 编译处因 `ARCH_TIMER_FREQ` 未定义退出，不能将直接启动结果记为完整 CLI/用户态门禁通过。文档行号引用检查通过；导航检查仍报告其他工作中的 7 个未索引页面（包括新增 LLVM 文档），本轮六份文档未增加导航/链接错误。日志保存在本地 `.kernel-build/amdvi-route-review/`，不作为长期接口契约或实机翻译证据。
+
+2026-11-14 requester 集合占用：通用 PCI 接口提交 `d12391173`（隔离树 63 项相关回归通过），AMD-Vi 接入提交 `b823664a8`（完整隔离树 128 项主机回归通过）。新增 8 项 PCI 测试覆盖输入复制/去重、完整 ID 位、同 owner 排斥、集合原子失败、分配失败、跨注销 owner pin、最大集合，以及各 64 轮真实线程的重叠竞争和注销竞争；新增 5 项 AMD 测试方法覆盖原/alias/sibling 竞争、BME/用户所有权/读取失败、分配失败和跨 BDF 替换/控制器重绑保留。host 后端替代硬件和调度器，使用生产 core/PCI/AMD/IVRS 代码与 ASan/UBSan。省略 PCI 重叠检查、省略 alias DMA 键两个负控均触发行为断言；路由操作配置写入计数不变。
+
+参数传递修正提交 `423e4ea94`：`machine.extra_qemu` 保留 argv 边界及字面量，Make 查询不执行参数中的表达式。独立提交树的 2 项实际 Make 查询回归通过；当前工作区 216 项 CLI 回归通过（1 项因缺少 arm-none-eabi 工具链跳过）。114 个实例及 32 个驱动组件清单检查通过。
+
+保留其他工作的工作区中，x86_64 双核 embedded 与 AArch64 bringup embedded 内核构建成功，按新实例直接启动 embedded QEMU 获得全部标记并以 0 退出。完整 `tools/a20 test smoke-amdvi-requester-x86_64` 首次已越过此前的 `ufsd` 编译缺口，但因内核参数被拆成多个 argv 失败；修正参数传递后重跑，generic 内核、开发镜像构建与客户机测试均通过，退出码 0，7 个预期标记全部匹配，包括 `AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1`。客户机确认 `2/2 configured CPUs online`。本次完整门禁使用共享工作区中其他工作的 fscompat 适配改动，这些文件未纳入上述提交；隔离提交树的驱动主机测试不依赖这些改动。
+
+QEMU 验证同一个 EDU requester 的软件占用、冲突和释放后重试，没有执行 EDU DMA、AMD-Vi 翻译或 GPU 加速。alias 竞争及解绑后的持续占用由主机模型验证；原有 RISC-V provider 和 raw 配置写入未统一接入新 namespace。全部 alias peer 的停止/归属协调、IVMD 权限与硬件翻译/故障恢复仍待实现。文档行号引用检查通过，导航仍有其他工作的 7 个未索引页面，本轮未新增链接/导航错误。本地日志位于 `.kernel-build/pci-requester-review/`。

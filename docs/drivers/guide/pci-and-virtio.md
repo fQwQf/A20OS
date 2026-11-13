@@ -33,7 +33,9 @@ static const device_id_t ids[] = {
 
 `pci_device_scope_get(client, scope_bus, first_devfn, last_devfn, &anchor)` 可查询 client 或上游 bridge 是否位于指定 bus/devfn 范围，成功返回需配对 `device_put()` 的引用。它检查核心注册状态、live 身份、唯一父桥、完整窗口包含关系、循环与重叠路由；不会以更宽的 subordinate 区间猜测缺失桥。范围包含 function 位，查询不重扫或写配置，也不自动建立 parent/dependency。引用不保证物理存在或 DMA 隔离；错误与 AMD Range 辅助查询见 [桥路径与作用域](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
 
-AMD-Vi 的 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期) 在上述观察接口之上组合 IVRS、原 requester/alias 路径与被动控制器绑定。它保留查询对象和资源租约，并在解绑后拒绝继续使用；不是 PCI 通用 group、requester 独占或 DMA domain。
+`pci_requester_reserve(owner, segment, ids, count, &reservation)` 原子占用复制的显式 requester 集合，同 owner 重叠也拒绝；成功保留 owner 引用，注销/替换不会自动释放，用 `pci_requester_release()` 显式回收。输入最多 128 项，仅支持 segment 0，不要求键已发布、不推断 alias 或授予 DMA。契约见 [集合占用](native-runtime.md#pci-requester-集合占用)。
+
+AMD-Vi 的 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期) 在上述观察接口之上组合 IVRS、原 requester/alias 路径与被动控制器绑定。它保留查询对象和资源租约，并在解绑后拒绝活跃路由校验；仅 acquire 不占用 requester；显式 reserve 接入上述集合占用，仍不证明硬件隔离或建立 DMA domain。
 
 ## BAR 处理
 

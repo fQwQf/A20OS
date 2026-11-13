@@ -40,7 +40,7 @@ make 拥有每一个 flag。`$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)` 在 ma
 
 `_qemu_argv` 只负责打印这个结果，**因此必须没有前置依赖**：一旦它带上依赖，"取一下命令行"就会先把整个世界重新构建一遍。查询命令行要用 `make _qemu_argv`，不要加 `-n`。加了会打印出 `printf` 本身，而不是它输出的命令行。
 
-`a20 test` 与 `run` / `debug` 复用该参数入口；`machine.extra_qemu` 经 `EXTRA_QEMU`参与参数生成。实例层不复制一份 QEMU 默认参数逻辑。
+`a20 test` 与 `run` / `debug` 复用该参数入口；`machine.extra_qemu` 经 `EXTRA_QEMU`参与参数生成。该字段是字面量 argv 数组：派生时保留每项边界并保护 `$`，查询配方将完整命令安全地作为数据打印，Python 再解析 argv。因此多项内核参数须放在同一个 `-append` 值里，混合引号或字面量命令替换不应被 Make/查询 shell 执行。实例层不复制一份 QEMU 默认参数逻辑。
 
 ## 宿主端口探测 {#host-ports}
 
