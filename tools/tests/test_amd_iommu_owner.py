@@ -18,6 +18,8 @@ else:
 
 CASES = r'''
 #include "drivers/core/amd_iommu_owner.c"
+#include "drivers/core/amd_iommu.c"
+#include "drivers/core/memory.h"
 static uint8_t xsdt[44], ivrs[512];
 static size_t ivrs_length;
 static int table_views, mmio_maps, mmio_unmaps, mmio_attempts, mmio_fail;
@@ -120,7 +122,14 @@ static void amd_case(const char *name) {
   if(strstr(name,"expand")||strstr(name,"counters"))reservation=(resource_t){.type=RES_MEM,.start=0xfed90000,.end=0xfed93fff};
   blocker.res=&reservation;blocker.res_count=1;assert(!device_register(&blocker));
  }
+ driver_memory_reservation_t *protected=NULL;
+ int guarded=strstr(name,"reserved")!=NULL;
+ if(guarded) {
+  driver_memory_range_t storage={0xfed80000,0xfed83fff};
+  assert(!driver_memory_reserve(&storage,1,&protected));
+ }
  present=1;pci_enumerate(0,0,1);device_t *dev=pci_current();assert(dev);
+ if(guarded)assert(amd_iommu_pci_report(&acpi)==-EIO&&!mmio_attempts);
  dev->user_owned=strstr(name,"user-owned")!=NULL;
  bus_type_t bystander_bus={.name="bystander",.match=bystander_match};
  driver_t bystander_driver={.name="failed-bystander",.bus=&bystander_bus,.probe=bystander_probe};
@@ -136,11 +145,11 @@ static void amd_case(const char *name) {
  mmio_fail=strstr(name,"map-fail")!=NULL;
  int result=bus_probe_device(dev);fail_at=0;
  int unknown=legacy&&!enabled&&!strstr(name,"legacy-no-efr");
- int bad=blocked||unknown||dev->user_owned||strstr(name,"overlap")||allocation||mmio_fail;
+ int bad=blocked||guarded||unknown||dev->user_owned||strstr(name,"overlap")||allocation||mmio_fail;
  if(bad) {
   assert(result<0&&!dev->drv&&!dev->drv_priv&&!table_views);
   assert(allocated==before&&dev->references==refs);
-  if(blocked||strstr(name,"overlap"))assert(result==-EBUSY);
+  if(blocked||guarded||strstr(name,"overlap"))assert(result==-EBUSY);
   if(unknown)assert(result==-EOPNOTSUPP);
   if(allocation||mmio_fail)assert(result==-ENOMEM);
   if(blocked&&!strstr(name,"expand"))assert(!mmio_attempts);
@@ -172,6 +181,7 @@ static void amd_case(const char *name) {
  if(blocked)device_unregister(&blocker);
  assert(!driver_unregister(&bystander_driver));device_unregister(&bystander);bus_unregister(&bystander_bus);
  assert(bystander.references==1);
+ driver_memory_release(protected);
  assert(blocker.references==1&&peer.references==1);
 }
 '''
@@ -257,6 +267,9 @@ class AmdIommuOwnerTests(unittest.TestCase):
 
     def test_user_owned_function_never_bound(self):
         self.run_case('amd-user-owned')
+
+    def test_reserved_storage_blocks_diagnostic_and_binding_before_mmio(self):
+        self.run_case('amd-enabled-reserved')
 
 
 if __name__ == '__main__':

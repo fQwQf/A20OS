@@ -273,7 +273,8 @@ typedef struct driver_resource_claim driver_resource_claim_t;
  * Manual claims survive unbind and must be released explicitly, exactly once.
  * The owner pin protects storage, not a live binding: callers must serialize
  * admission with their device's stopping/removal state.
- * This is not a RAM reservation, address allocator or CPU access revocation;
+ * All MMIO claims also reject storage protected by drivers/core/memory.h.
+ * This is not a physical-page reservation, allocator or CPU access revocation;
  * raw architecture mapping/port access does not participate automatically. */
 int driver_resource_request(device_t *owner, const resource_t *,
                               driver_resource_claim_t **out);
@@ -283,7 +284,8 @@ int driver_resource_request(device_t *owner, const resource_t *,
  * are inferred. Registration of a conflicting declaration is rejected while
  * this claim survives, including after its owner has been unregistered.
  * Resource mutation must use the bus discovery transaction and range check
- * below. This still does not import RAM maps or revoke raw hardware access. */
+ * below. Boot storage reservations are imported separately (memory.h);
+ * this interface does not revoke raw hardware access. */
 int driver_resource_request_checked(device_t *owner, const resource_t *,
                                       driver_resource_claim_t **out);
 /* Observation only, not a claim. Checks published declarations and active
@@ -292,7 +294,7 @@ int driver_resource_request_checked(device_t *owner, const resource_t *,
  * Bus mutators must hold driver_discovery_begin/end across this check AND the
  * hardware/metadata update. Checked claims use that same lifecycle mutex. */
 int driver_resource_check_range(device_t *owner, const resource_t *, uint64_t *busy_end);
-/* Active claims only, for retaining an already assigned firmware BAR without
+/* Active claims plus protected storage, for retaining a firmware BAR without
  * treating enclosing/duplicate firmware declarations as active users. Bus
  * mutators use the same discovery transaction as check_range(). */
 int driver_resource_check_claims(device_t *owner, const resource_t *);

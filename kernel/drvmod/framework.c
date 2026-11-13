@@ -47,6 +47,7 @@
 #include "proc/signal.h"
 #include "sys/usercopy.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/core/memory.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/pci_msix.h"
@@ -389,6 +390,8 @@ const struct drv_export drv_export_table[] = {
     { "driver_resource_check_range", driver_resource_check_range },
     { "driver_resource_check_claims", driver_resource_check_claims },
     { "driver_resource_release", driver_resource_release },
+    { "driver_memory_reserve", driver_memory_reserve },
+    { "driver_memory_release", driver_memory_release },
     { "arch_device_map_mmio", arch_device_map_mmio },
     { "arch_device_unmap_mmio", arch_device_unmap_mmio },
     { "device_add_resource_action", device_add_resource_action },

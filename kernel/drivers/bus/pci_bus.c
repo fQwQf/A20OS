@@ -463,6 +463,25 @@ static int pci_assign_bars_locked(device_t *dev, int bus_master) {
         uint64_t addr = is_io ? (bar_lo & ~0x3U)
                               : pci_bar_address(info, bar, bar_lo, is_64);
 
+        /* A platform reachability hook may create a CPU MMIO alias. Reject
+         * protected storage/foreign claims BEFORE calling it, including when
+         * hardware BAR contents changed since the enumeration snapshot. */
+        if (addr) {
+            if (size - 1U > (~(uint64_t)0) - addr) {
+                pci_ecam_write(info->bus, info->dev, info->func, 0x04,
+                               original_command);
+                return -ERANGE;
+            }
+            resource_t existing = {.type = is_io ? RES_IOPORT : RES_MMIO,
+                                   .start = addr, .end = addr + size - 1U};
+            int rc = driver_resource_check_claims(dev, &existing);
+            if (rc) {
+                pci_ecam_write(info->bus, info->dev, info->func, 0x04,
+                               original_command);
+                return rc;
+            }
+        }
+
         if (!is_io && (!addr || !arch_pci_bar_reachable(addr, size))) {
             uint64_t aligned;
             int rc = pci_allocate_mmio(size, is_64, &aligned);

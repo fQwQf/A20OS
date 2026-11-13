@@ -11,6 +11,29 @@ else:
     from test_native_bus_lifetime import ROOT, C_FIXTURE
 
 CASES = r'''
+#include "drivers/core/memory.h"
+static unsigned memory_reach_calls;
+static int memory_reachable(uint64_t base,uint64_t size) {
+ resource_t res={.type=RES_MMIO,.start=base,.end=base+size-1};
+ assert(!driver_resource_check_claims(NULL,&res));memory_reach_calls++;
+ return base>=0x10000000&&size<=0x100000&&base<=0x10100000-size;
+}
+static void check_pci_memory(int changed) {
+ driver_memory_range_t storage={0x10000000,0x10003fff};
+ driver_memory_reservation_t *reservation;
+ assert(!driver_memory_reserve(&storage,1,&reservation));
+ present=1;cfg[0]=0x56781234;masks[0]=0xfffff000;
+ pci_enumerate(0,0,1);device_t *dev=pci_current();assert(dev);
+ if(changed) {
+  cfg[4]=0x10000000;uint32_t command=cfg[1];
+  assert(pci_enable_and_assign_bars(dev)==-EBUSY);
+  assert(!memory_reach_calls&&cfg[4]==0x10000000&&cfg[1]==command);
+ } else {
+  assert(!pci_enable_and_assign_bars(dev));
+  assert(cfg[4]==0x10004000&&memory_reach_calls==1);
+ }
+ pci_remove();driver_memory_release(reservation);
+}
 static void check_pci_checked_aperture(int mode) {
  device_t owner={.name="iommu-owner",.references=1};
  assert(!device_register(&owner));
@@ -68,10 +91,15 @@ class ResourcePciIntegration(unittest.TestCase):
         marker = "int main(int argc,char **argv) {"
         assert C_FIXTURE.count(marker) == 1
         source = C_FIXTURE.replace(marker, CASES + "\n" + marker)
+        marker = 'int arch_pci_bar_reachable(uint64_t base,uint64_t size) {return base>=0x10000000&&size<=0x100000&&base<=0x10100000-size;}'
+        assert source.count(marker) == 1
+        source = source.replace(marker, 'static int memory_reachable(uint64_t,uint64_t);\nint arch_pci_bar_reachable(uint64_t base,uint64_t size) {return memory_reachable(base,size);}')
         marker = 'if(!strcmp(argv[1],"pci-retired"))'
         assert source.count(marker) == 1
         source = source.replace(marker,
-            'if(!strcmp(argv[1],"checked-aperture"))check_pci_checked_aperture(0);\n'
+            'if(!strcmp(argv[1],"memory-allocation"))check_pci_memory(0);\n'
+            ' else if(!strcmp(argv[1],"memory-changed-bar"))check_pci_memory(1);\n'
+            ' else if(!strcmp(argv[1],"checked-aperture"))check_pci_checked_aperture(0);\n'
             ' else if(!strcmp(argv[1],"late-bar-conflict"))check_pci_checked_aperture(1);\n'
             ' else if(!strcmp(argv[1],"checked-publication"))check_pci_checked_aperture(2);\n'
             ' else ' + marker)
@@ -99,6 +127,12 @@ class ResourcePciIntegration(unittest.TestCase):
 
     def test_hotplug_publication_rejects_and_recovers(self):
         self.run_case("checked-publication")
+
+    def test_storage_is_skipped_before_reachability_mapping(self):
+        self.run_case("memory-allocation")
+
+    def test_changed_bar_in_storage_is_rejected_before_reachability_mapping(self):
+        self.run_case("memory-changed-bar")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
 #include "drivers/core/amd_iommu.h"
+#include "drivers/core/memory.h"
+#include "mm/frame.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
 #include "core/klog.h"
@@ -220,6 +222,26 @@ static void exercise_resources(void) {
     CHECK(!device_register(&b));
     device_unregister(&b);
     bus_unregister(&bus);
+    a.bus = b.bus = NULL;
+    driver_memory_range_t storage = {range.start, range.end};
+    driver_memory_reservation_t *reservation;
+    CHECK(!driver_memory_reserve(&storage, 1, &reservation));
+    CHECK(driver_resource_request(&a, &range, &conflict) == -EBUSY && !conflict);
+    CHECK(device_register(&a) == -EBUSY);
+    resource_t ram_description = range;
+    ram_description.type = RES_MEM;
+    a.res = &ram_description;
+    CHECK(!device_register(&a)); /* Storage descriptions may coexist. */
+    CHECK(driver_resource_request_checked(&a, &range, &conflict) == -EBUSY && !conflict);
+    device_unregister(&a);
+    driver_memory_release(reservation);
+    CHECK(!driver_resource_request(&a, &range, &first));
+    driver_resource_release(first);
+    CHECK(driver_memory_protect_boot() == -EALREADY);
+    CHECK(pfa.nr_ranges > 0 && pfa.ranges[0].end > pfa.ranges[0].base);
+    resource_t real_ram = {.type = RES_MMIO, .start = pfa.ranges[0].base,
+                           .end = pfa.ranges[0].end - 1};
+    CHECK(driver_resource_request(&a, &real_ram, &conflict) == -EBUSY && !conflict);
     CHECK(a.references == 1 && b.references == 1);
     device_put(&a);
     device_put(&b);
@@ -242,7 +264,7 @@ void driver_runtime_selftest_boot(void)
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1\n"
+    kinfo("%sDRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "");
     if (current_board && current_board->poweroff)
