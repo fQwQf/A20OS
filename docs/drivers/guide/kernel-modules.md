@@ -137,7 +137,9 @@ drvctl list
 
 ## 示例与验证
 
-`kernel/drvmod/examples/` 下的示例：
+`kernel/drvmod/examples/` 中的包入口及历史示例如下。NVMe、PS/2、R8169只保留描述符和入口，
+实际实现位于 `kernel/drivers/<class>/`，embedded与模块共用。
+`make check-pc-drivers` 实际编译这些模块并检查导出依赖；这不代替模块加载和硬件验收。
 
 | 模块 | 架构 | 说明 |
 |---|---|---|
@@ -148,6 +150,7 @@ drvctl list
 | `vinput.c` → `vinput.a20drv` | 四架构 | virtio-input 完整驱动（状态迁移 + 事件 virtqueue + IRQ + input class 设备）；事件经 mux 的 `/dev/event0` 投递；slot 5 双驻留样本保持 user-owned 归 uinputd |
 | `ps2.c` → `ps2.a20drv` | x86_64 | PS/2 键鼠控制器，初始化 + 双向量 ISR 注册；键盘字符经 `uart_receive_char` 进控制台 |
 | `nvme.c` → `nvme.a20drv` | x86_64/loongarch64 | 架构无关 PCI 类 block 驱动（标准 `driver_t` 注册）；`DRVMOD_SMOKE=1` 构建携带与内建版本相同的 capability/I/O smoke 测试，`smoke-pci-portability` 在 loongarch64 上验证 |
+| `r8169.c` → `r8169.a20drv` | x86_64 | Realtek 10ec:8168模块包装；共享NET实现，其他硅片变体需单独验收 |
 | `tpm.c` → `tpm.a20drv` | x86_64 | TPM 2.0 TIS/FIFO 驱动，经 `firmware_acpi_tpm2` 做 ACPI 发现；无 TPM 时 probe 优雅返回 |
 | `hda.c` → `hda.a20drv` | 四架构 | 架构无关 PCI 类 audio 驱动（`hda_match` 按 `pci_class_code` 匹配）；`DRVMOD_SMOKE=1` 携带 in-probe 流 smoke（`HDA_STREAM_SMOKE`），`smoke-hda`（x86_64）与 `smoke-pci-portability`（loongarch64）验证；原 `hda_codec.c` 已并入本模块 |
 | `virtio_console.c` → `virtio-console.a20drv` | riscv64/x86_64/aarch64/loongarch64 | virtio-serial port 0 作为 CHAR 类 `/dev/vport0`；只协商 `VIRTIO_F_VERSION_1`、不协商 MULTIPORT，q0=rx/q1=tx 承载唯一端口；rx 中断驱动、tx 同步有界等待 |
@@ -185,8 +188,8 @@ make smoke-net-rtl8139                               # rtl8139.a20drv + hostfwd 
 | CMOS RTC (MC146818) | 无内建位置（新增）| `kernel/drvmod/examples/cmos_rtc.c` | x86_64（Early）| 新增；x86_64 墙钟来源，绑定两块 x86_64 板级声明的 platform 设备；限制见 [实现状态](../../status/current/drivers-implementation-status.md) |
 | virtio-input 内核探针 | `kernel/drivers/input/virtio_input_kprobe.c`（已删除）| `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
 | virtio-input 完整驱动 | `kernel/drivers/input/virtio_input.c`（已删除）| `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN）|
-| PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
-| NVMe | `kernel/drivers/block/nvme.c`（已删除）| `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
+| PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（共享实现）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
+| NVMe | `kernel/drivers/block/nvme.c`（共享实现）| `kernel/drvmod/examples/nvme.c` | x86_64/loongarch64 | 已迁移；PCI 类标准驱动，`smoke-pci-portability`（loongarch64 dev 镜像 + `DRVMOD_SMOKE=1`）验证绑定与 NVME_CAP/IO_SMOKE |
 | TPM 2.0 | `kernel/drivers/security/tpm.c`（已删除）| `kernel/drvmod/examples/tpm.c` | x86_64 | 已迁移；ACPI TPM2 发现 + TIS FIFO，无设备时优雅失败 |
 | Intel HDA | `kernel/drivers/audio/hda_codec.c`（已删除）| `kernel/drvmod/examples/hda.c` | 四架构 | 已迁移；PCI 类 audio 驱动，`smoke-hda` 验证流 smoke + 绑定 |
 | virtio-blk | `kernel/drivers/block/virtio_blk.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_blk.c` | 四架构（Early）| 已迁移；早期模块嵌入 `/boot/drivers`，根盘挂载前加载并绑定，解除 bootstrap 循环；generic 根挂载与 swap 统一走 block-class 查询 |
