@@ -237,16 +237,21 @@ typedef struct usb_hcd_ops {
      *
      * @hub_slot is the parent hub's controller token, or USB_HUB_NONE for a
      * root port. @address is an optional reservation for HCDs that assign
-     * addresses in software. @out->address reports the assigned address. */
+     * addresses in software. @out->address reports the assigned address.
+     * The caller zeroes out. Nonzero out->hcd transfers a slot cleanup token
+     * even on error; retain its context until abort_slot returns 0. Address is
+     * the software reservation still used, or 0/an implicit address if unused.
+     * With no token, the HCD retains any uncertain controller state privately. */
     int  (*alloc_slot)(struct usb_hcd *hcd, unsigned port, uint8_t speed,
                        uint8_t hub_slot, uint8_t address, usb_slot_t *out);
     /* Update EP0 max packet size after reading the device descriptor. */
     int  (*update_ep0_mps)(struct usb_hcd *hcd, uint8_t slot,
                            uint16_t max_packet);
-    /* Raw control transfer on a slot's EP0. */
+    /* Synchronous EP0 transfer. On any return the HCD must no longer access
+     * the caller's setup/data storage (use retained bounce storage on timeout). */
     int  (*control)(struct usb_hcd *hcd, uint8_t slot,
                     const usb_setup_packet_t *setup, void *data);
-    /* Fetch a descriptor into buf (bounce buffer sized >= len). */
+    /* Synchronous descriptor fetch; the same caller-buffer rule applies. */
     int  (*get_descriptor)(struct usb_hcd *hcd, uint8_t slot, uint8_t type,
                            uint16_t len, void *buf);
     /* Configure an endpoint (allocates its transfer ring). */
@@ -258,7 +263,7 @@ typedef struct usb_hcd_ops {
     /* Submit a bulk transfer; completion calls urb->complete(). */
     int  (*submit_bulk)(struct usb_hcd *hcd, usb_urb_t *urb);
     /* 0 confirms slot/endpoint callbacks are stopped. Failure leaves their
-     * contexts/storage valid for retry. Core retains the published port and
+     * contexts/storage valid for retry. Core retains the partial/published port and
      * address, and does not free interfaces/endpoints until this succeeds. */
     int  (*abort_slot)(struct usb_hcd *hcd, uint8_t slot);
     /* Publish hub topology to the host controller before addressing children. */
@@ -272,7 +277,7 @@ typedef struct usb_hcd {
     struct usb_hcd *parent_hcd; /* root controller behind a hub-provided bus */
     uint8_t hub_slot;           /* USB_HUB_NONE for a root controller */
     unsigned max_ports;
-    uint8_t *port_state;        /* failed enumeration attempts per connection */
+    uint8_t *port_state;        /* core-private retry count and cleanup phases */
     struct usb_device **port_devices; /* owned device for each physical port */
     void    *priv;              /* HCD private (xhci_controller_t *) */
     uint8_t hub_depth;          /* zero on the root bus */
@@ -302,8 +307,9 @@ void usb_core_scan(void);
  * be called from an interrupt handler because add/remove invokes drivers. */
 void usb_core_poll(void);
 
-/* Synchronously enumerate one port (called by the HCD at probe and, in a
- * later phase, on hotplug detection). */
+/* Task context, single-owner with scan/unregister. A partial setup is retained
+ * on cleanup failure, including slot/address; scan/unregister retry it before
+ * any new reset. Occupied/pending port -> -EBUSY; stopping HCD -> -ENODEV. */
 int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port);
 
 /* Generic control transfer on a device's EP0. */
