@@ -30,7 +30,7 @@ make smoke-pci-portability
 
 `check-firmware-model`、`check-pc-drivers` 在宿主编译和执行生产路径测试；`smoke-*` 会构建并启动 QEMU。按改动范围和宿主能力执行，并在提交证据中明确未运行项。
 
-`smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
+`smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe，并以 `DRIVER_REMOVE: PASS retained=1 retry=1 devres=1` 验证失败退出保留/重试；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
 
 `smoke-platform-irq-fallback` 同样用 RISC-V64 bringup 配置，但开 `CONFIG_PLATFORM_IRQ_TEST=y`，验证 `platform_device_irq()` 的四种返回（可用线号 / 无 IRQ 资源得 `-ENODEV` / `RES_IRQ` 区间得 `-EINVAL` / `request_irq` 重复占用得 `-EBUSY`）、`free_irq` 后可重新认领、`driver_irq_dispatch()` 能命中 handler，以及 DW-SDIO 的模式规则与 `a20.dw-sdio.poll=1` 参数解析。**QEMU 没有 dw-mshc 设备模型**，所以控制器侧中断从未被触发，handler 投递是经 `driver_irq_dispatch()` 模拟的；该门禁证明的是"有 IRQ 资源就注册成功、没有资源就干净回退"，不是硬件时序。
 
@@ -108,6 +108,8 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 ```
 
 日志要包含构建命令、平台/VM 设备配置、成功 I/O，以及已知未验证能力。不要只附截图；串口文本更适合代码审查和回归比较。
+
+修改退出路径还应运行 `python3 -m unittest tools.tests.test_driver_remove tools.tests.test_native_bus_remove tools.tests.test_i2c_transport_lifetime -v`。前者直接链接 C/Rust 两条生产注册表路径；bus 测试覆盖缺失/替换 PCI 身份、USB abort/remove 失败后的端点/address 保留与重试。检查失败期间无 devres 提前释放、无下一候选覆盖、无 REMOVE 完成通知；成功后再确认引用与占用回到基线。启动测试不替代真实设备停止超时与 DMA 可达性验证。
 
 ## 门禁失败时怎么办
 

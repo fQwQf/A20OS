@@ -22,13 +22,25 @@
 2. 状态变为 `REMOVING`，`class_device_mark_offline()` 拒绝新类调用，并执行一次 offline observer。
 3. 调用可选 `driver_t.quiesce(dev)`。此时既有 class 调用可能尚未返回，`drv_priv`、IRQ、DMA 和受管资源仍然有效。
 4. `class_device_unpublish()` 撤销 registry publication，等待在途 class 调用结束。
-5. 调用 `remove()`，逆序释放受管资源及依赖，清空绑定。
+5. 调用 `remove()`；只有返回 0，核心才逆序释放受管资源及依赖并清空绑定。
 
-`quiesce` 必须先禁止新的硬件提交，排空或停止/复位硬件，再让未完成请求成功结束或以错误结束。驱动负责同步中断和取消其后台工作；`remove` 才释放请求队列、DMA mapping 和实例存储。驱动私有入口也必须检查自己的 stopping 状态，class offline 不会自动保护绕过 class adapter 的调用。
+`quiesce` 必须先禁止新的硬件提交并停止软件生产者，唤醒未完成请求使其成功结束或以错误结束，并尝试排空/停止硬件。无法确认停止时，记录私有失败状态并由 remove 继续确认或返回错误；软件请求以错误结束不授予 DMA 页回收权限。驱动负责同步中断和取消其后台工作；`remove` 只有确认安全后才释放请求队列、DMA mapping 和实例存储。驱动私有入口也必须检查自己的 stopping 状态，class offline 不会自动保护绕过 class adapter 的调用。
 
 不能依赖 `remove()` 唤醒所有在途请求：核心在进入 `remove` 前已经等待这些调用。没有异步操作的现有驱动可以保持 `quiesce=NULL`。
 
-成功 probe 后 class 发布失败也会执行 `quiesce -> remove -> devres`。失败的 probe 仍自行撤销已经启动的硬件，再返回错误；核心只回收它已登记的资源，不能判断哪些硬件阶段成功。
+成功 probe 后 class 发布失败也会执行 `quiesce -> drain -> remove`，只有 remove 成功才进入 devres 回收。失败的 probe 仍自行撤销已经启动的硬件，再返回错误；核心只回收它已登记的资源，不能判断哪些硬件阶段成功。
+
+### 可失败的解绑与显式重试
+
+`driver_t.remove()` 已有 int 返回值，现在由核心执行：非零结果阻止资源回收，负 errno 原样返回，正数按 `-EIO` 处理。驱动必须在失败时保留有效的 `drv_priv`、硬件可达存储和恢复所需寄存器/代码；不能先释放后报错。`device_unregister()`、`platform_device_unregister()` 和 `device_hotplug(REMOVE)` 返回错误，保留设备注册表引用、绑定、devres、匹配身份及尚未释放的依赖。自己的 remove 已执行失败时，设备保持 `REMOVING`，class 已 offline/撤销 publication；不会重新开放旧句柄。调用者保留对象并在条件修复后重试同一接口，核心只重试 remove，不重复 quiesce/offline observer。正常 unregister 完成前 `device_is_registered()` 仍可为真，不能把成员关系当作在线许可。
+
+先处理 consumer/child；它们停止失败时 provider/parent 尚不 quiesce 或释放，继续供旧 consumer 清理使用。部分 consumer 可能已解除绑定并进入 deferred；失败不是事务回滚，不自动重建原图。移除意图与递归栈由 lifecycle mutex 下的私有栈帧保护：正在退出的驱动不能接收新匹配绑定，递归退出同一对象返回 `-EBUSY`；正在移除的 provider 拒绝新 dependency（`-EPROBE_DEFER`），其 parent 链拒绝新 child 发布（`-EBUSY`），即使它仍处于等待 consumer 停止的阶段。未新增公开 group/上下文标识或布局字段。
+
+`driver_unregister()` 只有在剩余绑定全部成功解绑后才移除驱动登记；失败保留登记与代码所有权，调用者不能释放模块/driver 对象。已完成解绑的设备保持已完成状态，调用者显式重试处理余下绑定。成功 probe 后 class 发布失败且 remove 也失败时，同样保留绑定/资源；`probe_error` 保存原 publication 错误，不允许下一候选驱动覆盖它。普通失败 probe 仍须自行安全回滚，核心无法从一个普通错误码推断未停止的硬件。
+
+REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。尚未发布的 USB 枚举失败清理仍是另一路径，不由这里证明完整。
+
+公开 `device_t`/`driver_t` 布局及驱动 ABI 9 未改变；新增模块导出 `device_unregister`，源码调用方须检查上述 int 返回值。关机/kexec 的 `shutdown`、失败 probe 的硬件回滚、实际 stop/失效完成仍需要各 provider 的明确协议；核心不把超时转换成可释放证明。
 
 当前生命周期回调仍持有全局 lifecycle mutex，禁止等待需要该锁的工作或递归注销自己。quiesce 没有通用超时后强制释放内存的语义：如果不能证实 DMA 已停止，驱动不能继续释放硬件仍可能访问的存储。按设备并发的生命周期协调与通用恢复策略仍需后续开发。
 
@@ -461,3 +473,13 @@ QEMU 只验证单个 EDU requester 的集合查询/预留和空 policy 集成；
 `make smoke-iommu-multidevice` 也完成开发镜像构建与双 EDU 用户态测试并以 0 退出，7 个预期标记全部匹配：两个 domain 已 claim、dev0 fault、dev1 unaffected、domains released、UEDUD PASS、IOMMU enabled 与正常 power-off，未出现禁止标记 `UEDUD: dev1 affected`。这覆盖实际 `udriver` 首次 claim/BME enable、故障与 release 协议，不能代替实体平台或任意用户并发/归属变更验证。
 
 115 个实例与 32 个组件清单、文档行号引用检查通过；导航仍有其他工作的 7 个未索引页面，本轮未新增文档页面。隔离导出仅包含本轮代码，构建/启动使用保留其他改动的共享工作区；`udriver.c` 中既有文档迁移链接未混入代码提交，实际 `docs/zh` 迁移保留，文档提交仍按现有 canonical 路径记录本轮差异。原生和用户后端均未获得自动停止 engine、原子用户归属转移或跨 alias 协调；这些仍由调用者/provider 协议承担。验证日志位于本地 `.kernel-build/iommu-requester-review/`。
+
+2026-11-14 可失败解绑：代码提交 `5cbe6e70c`。隔离导出树中 163 项主机回归通过。新增 9 项核心测试方法、13 个场景逐一运行生产 C/Rust 注册表与 core/class/I²C 路径，验证停止失败的 class 离线/调用排空、私有存储/claim/匹配身份/注册引用保留、quiesce 仅一次、显式 retry、部分 driver 退出、consumer/parent 失败、移除期间的新 child/dependency/绑定拒绝、递归退出拒绝、发布清理失败不覆盖原绑定，以及 bus notification 的最后引用保护。真实 I²C adapter 引用使 remove 返回 `-EBUSY`，put 后重试成功。新增 6 项 bus 测试方法、7 个场景用生产 PCI/USB/core 验证 BDF 替换/缺失时保留、USB slot abort 失败或缺少 callback 时保留所有协议存储和 address、remove 失败后的停止阶段保留、重连前 retry，以及已注销 interface 的 publisher 最后释放。硬件、allocator、任务同步为主机替代，启用 ASan/UBSan。
+
+忽略 remove 返回、忽略 consumer 失败、放行退出中的驱动、发布失败后继续下一匹配、PCI 提前替换、忽略 slot abort、重复已完成的 slot abort、丢失通知引用的八个负控均触发行为断言或 ASan UAF；没有以编译失败作为负控。恢复导出源码后与提交逐文件核对；最后只补充了 header 注释，核对去注释后的声明相同。新测试已接入 `check-firmware-model`，该门禁通过 386 项测试及单独的 1 项 sleep ABI 检查；既有 xHCI 源码顺序检查已适配 unregister 的 int 签名，保留原有顺序断言。
+
+最终 x86_64（`DRIVER_REGISTRY_IMPL=rust`）和 RISC-V64/AArch64（`DRIVER_DEPLOYMENT=embedded`、C 注册表）生命周期 QEMU 门禁均以 0 退出，全部原有标记及新增 `DRIVER_REMOVE: PASS retained=1 retry=1 devres=1` 匹配。RISC-V 首次运行状态断言均通过，但重复的合成 remove 错误加上容量故障注入触发控制台 warn/error 限流，缺少一条串口诊断；启动 fixture 改为一次 remove 失败，重复失败边界仍由主机双注册表用例验证，最终原匹配项全部通过。AArch64 默认 generic 首次构建被既有用户态 `external/sbase/id.c` 缺失阻塞；明确指定 embedded 后内核构建和启动通过，不能将此记录写作 AArch64 generic 门禁通过。
+
+完整 `tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核、模块/开发镜像及双核 QEMU 启动，退出码 0，9 个预期标记全部匹配，客户机确认 `2/2 configured CPUs online`。它验证新的注销语义与既有被动 AMD owner、路由、requester、空 policy 和运行时集成，没有启用 AMD 翻译或 GPU DMA。115 个实例、32 个驱动组件清单与文档行号检查通过；导航仍有其他工作的 7 个未索引页面，本轮没有新增文档页面。
+
+这里只证明核心对驱动已报告错误的保留语义、主机替代后端及合成启动行为，不证明所有旧驱动的 stop 都已正确报告硬件状态。普通失败 probe、未发布 USB 枚举清理、关机/kexec shutdown 和真实厂商 DMA/失效超时仍待明确协议与实机证据。独立提交/导出排除工作区其他未提交修改，实际 `docs/zh` 迁移与原有源码文档链接改动保留；验证日志位于本地 `.kernel-build/driver-remove-review/`。

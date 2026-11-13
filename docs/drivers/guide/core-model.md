@@ -40,7 +40,7 @@ res[] ------> MMIO/IRQ/DMA/MEM resources
 matched_id --> matched id_table entry
 ```
 
-`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止硬件并结束请求，再等待已进入驱动的 class 调用退出，最后调用 `remove` 释放存储；已打开的文件随后返回 `-ENODEV`。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
+`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止新提交并结束软件请求，再等待已进入驱动的 class 调用退出，最后调用可失败的 `remove`：仅返回 0 后才释放受管存储、依赖和绑定；非零保留 `REMOVING` 绑定及注册引用，旧 class 句柄保持离线，调用者显式重试。已打开的文件随后返回 `-ENODEV`。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
 
 ## 数据结构字段
 
@@ -76,7 +76,7 @@ uint64_t size = res->end - res->start + 1;
 
 需要核对未绑定设备的地址声明时，使用 `driver_resource_request_checked()`：owner 必须已注册，核心在生命周期锁内核对其他已发布设备的 MMIO/`RES_MEM`/port 声明及 active claims，再建立句柄。句柄存续时，新设备不能发布冲突声明；owner 注销后保留的句柄仍然生效。此接口不推断 parent/window 的共享例外，资源归属歧义须显式解决。
 
-`device_is_registered(dev)` 仅观察核心注册表成员关系，不增加引用，也不表示驱动在线。持有 device 引用只保护对象存储，不能绕过注销；需要把检查与后续操作协调时，调用者须持有生命周期事务。
+`device_is_registered(dev)` 仅观察核心注册表成员关系，不增加引用，也不表示驱动在线。失败解绑仍保留注册关系，但 class 已离线；持有 device 引用只保护对象存储，不能绕过注销；需要把检查与后续操作协调时，调用者须持有生命周期事务。
 
 PCI 作用域通过 `pci_device_scope_get()` 返回带引用的 client/上游桥观察结果，不另建 Linux group 或隐式修改设备 parent。身份替换、窗口重叠、缺失桥和循环不会被当成有效路径；device 引用不固定硬件或绑定。详见 [PCI 桥路径与 AMD Range 补充查询](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
 
@@ -92,7 +92,7 @@ DMA 内存约束使用独立的 `driver_dma_policy` 不可变对象，不借用 
 
 ### `driver_t`
 
-platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
+platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。remove 失败必须保留实例和硬件可达存储；`device_unregister()`/`driver_unregister()` 返回错误，不能忽略后继续释放设备或模块。quiesce 每次退出只执行一次，之后仅重试 remove。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
 
 匹配分两阶段完成：总线 `bus_type_t.match(dev, drv)` 先按 transport identity 匹配并设置 `dev->matched_id`；可选的 `driver_t.match(dev)` 再按协议字段缩小范围。例如 HDA 检查 `04:03:00`，NVMe 检查 `01:08:02`。第二阶段只能读取已经枚举的身份信息，不得访问设备寄存器、分配 BAR/DMA 或改变硬件；拒绝时核心清除 `matched_id`，不会调用 probe。
 

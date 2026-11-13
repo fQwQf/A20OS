@@ -1,12 +1,12 @@
 # 驱动运行时契约
 
-原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和 remove；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
+原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：下线分为 offline、quiesce、在途调用排空和可失败 remove；错误保留绑定/devres，显式重试不重复 quiesce；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
 ## MMIO
 
-`resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在 probe 失败或解除绑定时回收，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
+`resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在已安全回滚的 probe 失败或成功解除绑定时回收；remove 失败则继续保留，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
 
 这些映射 helper 自动申请 owner 独占区间；另一设备持有重叠区间时拒绝映射。`device_map_resource_exclusive(dev, res, &address)` 返回详细错误（如 `-EBUSY`、`-ENOMEM`、`-EOVERFLOW`），失败清空 address；原有指针接口返回 NULL。受管映射保留设备引用，architecture unmap 完成后才归还区间。驱动应在 quiesce/remove 中停止访问，不能将地址区间的释放当作 CPU 访问撤销或 DMA 停止。
 

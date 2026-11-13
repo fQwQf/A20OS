@@ -35,6 +35,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | driver core | 符合 | 动态 registry；bus ID 后可执行无副作用的 driver protocol match；操作 mutex 串行化注册、probe/remove 与遍历；数组 spinlock 不跨回调；probe 失败完整解绑；增长失败注入在 riscv64（单 hart 与 `-smp 2`）、x86_64、aarch64、loongarch64 上都实跑，driver/device/bus 三条路径均为 `-ENOMEM` → 旧条目保留 → 重试成功 → 计数与 capacity 恢复（`smoke-driver-lifecycle-{x86_64,aarch64,loongarch64,smp2}`） |
 | 固件设备模型 | 已实现 | DT、ACPI/uACPI、静态 provider 共用节点/物理资源/IRQ domain/依赖接口；未知设备独立保留，失败事务回滚，probe 可延后。交接、保留区和架构边界见 [启动模型](../../dev/boot-model.md)；不代表任意板卡已完成实机验证。 |
 | PCI bus | 已扩展 | ECAM、ID/subsystem match、零值未分配 BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id`。BAR 规划在 discovery 事务内核对资源声明/占用，全部通过后提交新地址与资源；规划失败保留原 BAR/command/资源，调用者仍须先 quiesce |
+| 可失败解绑 | 基础可用 | remove 非零保留离线绑定/匹配/devres/依赖和注册引用，device/platform/driver unregister 传播错误并支持显式重试；仅执行一次 quiesce，注销期间拒绝新绑定/消费关系与递归退出。发布失败清理同样保留；PCI 槽、已发布 USB 端口/slot/address 保留已接入。C/Rust 主机失败注入与合成 QEMU 门禁通过；实际硬件停止、失败 probe、关机/kexec shutdown 仍由 provider 负责 |
 | 原生异步驱动运行时 | 基础可用 | ABI 9 `quiesce`、页级 DMA domain/mapping、fence、可取消工作队列、IRQ 全分发排空、有界固件来源/image。失败保留与回收契约及 hosted 限制见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；尚未接入实体 GPU |
 | 资源占用与清单核对 | 基础可用 | owner-pinned MMIO/port claim、受管映射先 unmap 后释放占用；checked claim 核对未绑定设备声明并阻止后续冲突发布。已导入受管 RAM 与 ACPI 表页；PFA 之外的 RAM/其他固件保留区尚不完整，也不拦截 raw MMIO/PIO；主机竞争/失败注入与 QEMU 元数据自检记录见运行时文档 |
 | 物理存储保留 | 基础可用 | 原生独立句柄，复制/归并区间后原子发布，阻止 MMIO claim/map、设备发布和 PCI 地址使用；`RES_MEM` 描述可共存。hosted 启动导入受管 RAM 与 ACPI 表页，失败不发布部分保护；主机竞争/失败注入、QEMU 双核 `memory=1` 已验证。不是 PFA 页分配或 DMA 隔离 |

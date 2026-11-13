@@ -19,12 +19,13 @@ bus detects remove
   -> device_unregister
   -> class device offline
   -> driver remove
-  -> managed resources and dependencies released
+     failure: keep offline binding/resources, return error for explicit retry
+     success: release managed resources and dependencies
   -> bus drops its creator reference
   -> final device_put invokes release
 ```
 
-`device_hotplug()` 位于 `kernel/drivers/core/driver_core.c`。ADD 成功后才调用可选的 `bus_type_t.hotplug(..., BUS_EVENT_ADD)`；REMOVE 则在驱动 `remove` 完成后通知总线。因此 bus 回调只处理总线自己的记录或事件传播，不能取代驱动生命周期。
+`device_hotplug()` 位于 `kernel/drivers/core/driver_core.c`。ADD 成功后才调用可选的 `bus_type_t.hotplug(..., BUS_EVENT_ADD)`；REMOVE 则仅在驱动 `remove` 返回 0、资源回收与注销成功后通知总线；通知期间额外保留 device 引用。非零错误继续保留注册/绑定/资源，不通知完成，调用者必须处理并显式重试。因此 bus 回调只处理总线自己的记录或事件传播，不能取代驱动生命周期。
 
 普通注册会同步尝试匹配和 `probe`；discovery 事务期间先发布完整设备集合，事务结束后由统一 probe/retry 路径绑定。注销会同步执行 `remove`。所以只能从可睡眠的进程、worker 或调度/idle 下半部调用，绝不能直接从硬件中断处理程序调用。
 
@@ -34,16 +35,16 @@ bus detects remove
 
 USB 是当前端到端支持的热插拔总线：
 
-1. `usb_core_poll()` 在进程上下文按 250 ms 节流执行；它由 kernel progress bridge 调用。
+1. `usb_core_poll()` 在进程上下文按约 20 ms（50 Hz）节流执行；它由 kernel progress bridge 调用。
 2. 每个 HCD 轮询事件环并读取每个 root port 的连接状态。
 3. 新连接端口经过 reset、slot/address 分配、descriptor/configuration 解析；每个 USB interface 被发布为一个 `device_t`，USB class driver 自动匹配并 probe。
-4. 连接消失时，先调用 HCD 的 `abort_slot`，断开控制器事件与未完成传输；再对每个 interface 发出 REMOVE，排空类调用并解除驱动绑定。interface、endpoint 和 `usb_device_t` 协议存储在解绑后回收，独立的 `device_t` 记录按引用计数延迟释放。
+4. 连接消失时先将 interface class 置 offline，再调用 HCD 的 `abort_slot`。只有返回 0 才继续 interface REMOVE；abort/remove 失败均保留已发布端口的 address、协议存储和 HCD 登记。已经成功停止的 slot 不重复 abort；失败端口在重连后的新枚举前也会重试。全部 interface 注销成功后才释放 endpoint/`usb_device_t`，独立 `device_t` 记录按引用计数延迟释放。
 
-USB HCD 应准确实现 `port_connected` 和 `abort_slot`。`abort_slot` 必须取消该 slot 的未完成传输，保证在它返回后不会再回调已经释放的 `usb_urb_t` 或 interface 私有状态。
+USB HCD 应准确实现 `port_connected` 和 `abort_slot`。`abort_slot` 必须取消该 slot 的未完成传输，只有返回 0 才确认不会再回调已释放的 `usb_urb_t` 或 interface 私有状态；失败时保留上下文供重试。`usb_core_unregister_hcd()` 返回错误，HCD/hub remove 必须传播，不能继续释放实例。此处覆盖已发布设备的移除，不代替枚举失败路径的硬件清理。
 
 ### PCI
 
-PCI 枚举器维护以 BDF（bus/device/function）为身份的稳定 `device_t` 记录。`pci_rescan()` 将当前 ECAM 配置空间与已发布设备集合对账：新 function 自动 ADD，消失的 function 自动 REMOVE，同一 BDF 的 vendor/device 改变则先 REMOVE 再 ADD。
+PCI 枚举器维护以 BDF（bus/device/function）为身份的稳定 `device_t` 记录。`pci_rescan()` 将当前 ECAM 配置空间与已发布设备集合对账：新 function 自动 ADD，消失的 function 自动 REMOVE，同一 BDF 的 vendor/device 改变则先 REMOVE 再 ADD。REMOVE 失败时保留旧记录和占用，不将槽标为空闲或发布新身份；修复停止条件后再次 rescan 可重试。
 
 PCIe slot controller 或平台热插拔通知的处理者应在进程上下文调用 `pci_rescan()`，而非在 IRQ 中扫描 ECAM。目前通用 PCI 层不假定所有平台都有统一的 PCIe hot-plug controller，因此不自行高频轮询完整 ECAM 范围。
 
@@ -56,9 +57,9 @@ VirtIO-MMIO 与固定 platform device 通常不是物理可热插拔总线；若
 1. 取得实例锁，将 `ready`/`removing` 置为不可用，拒绝新 I/O。
 2. 在设备侧屏蔽中断，注销 IRQ，取消或有界等待进行中的请求。
 3. 停止 DMA 和队列，解除 class 或子系统注册。
-4. 释放未托管的 DMA 和私有内存，清空 `dev->drv_priv`；核心随后逆序执行受管资源回收。
+4. 仅在确认停止后释放未托管 DMA/私有内存、清空 `dev->drv_priv` 并返回 0；无法确认时返回错误并保留实例、页面、IRQ/MMIO 等恢复资源，核心保留绑定与 devres。后续 remove 必须可重试。
 
-持有 `device_get()` 引用只保证设备记录存活，不保证绑定仍在线。类消费者必须在 class call guard 内读取驱动操作表和发起调用；解除绑定先置 offline，等待已经进入的调用退出，再执行 remove。总线不能在 REMOVE 返回时直接释放或重置仍有引用的设备记录；动态对象由最终 `device_put()` 调用 `release()` 回收。解绑后释放协议存储前必须清除相应借用指针。驱动负责停止硬件并释放未托管的 `drv_priv` 资源。
+持有 `device_get()` 引用只保证设备记录存活，不保证绑定仍在线。类消费者必须在 class call guard 内读取驱动操作表和发起调用；解除绑定先置 offline，等待已经进入的调用退出，再执行 remove。总线须检查 REMOVE 的返回值；失败时不能丢弃自己的协议存储或登记，成功后也不能直接释放或重置仍有引用的设备记录；动态对象由最终 `device_put()` 调用 `release()` 回收。解绑后释放协议存储前必须清除相应借用指针。驱动负责停止硬件并释放未托管的 `drv_priv` 资源。
 
 对 USB class driver，所有 URB completion 都必须先检查实例是否仍处于 ready 状态。对 PCI/平台驱动，DMA completion 和 IRQ top half 必须能和 remove 并发发生，且不会在资源释放后访问寄存器或 ring。
 
