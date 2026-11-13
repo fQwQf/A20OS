@@ -99,6 +99,18 @@ static void scope_case(const char *name) {
   root->config[0]=0x99991234;pci_rescan();
   assert(pci_device_id(anchor)==0x12345678&&anchor->state==DEV_STATE_REMOVED);
   device_t *replacement=scope_device(8);assert(replacement!=anchor);device_put(replacement);device_put(anchor);
+ } else if(!strcmp(name,"unregistered")) {
+  assert(device_is_registered(client));device_unregister(client);
+  assert(!device_is_registered(client)&&client->references>0);
+  device_t *missing=(void *)1;assert(pci_device_find_get(0,0x21a,&missing)==-ENODEV&&!missing);
+  scope_expect(client,0,0,255,-ENODEV,NULL);pci_rescan();
+  device_t *replacement=scope_device(0x21a);assert(replacement!=client&&device_is_registered(replacement));
+  scope_expect(replacement,0,0,255,0,top);device_put(replacement);
+ } else if(!strcmp(name,"unregistered-parent")) {
+  device_unregister(top);assert(!device_is_registered(top));
+  scope_expect(client,0,0,255,-ENODEV,NULL);pci_rescan();
+  device_t *replacement=scope_device(8);assert(replacement!=top);
+  scope_expect(client,0,0,255,0,replacement);device_put(replacement);
  } else if(!strcmp(name,"missing")) {
   middle->present=0;pci_enumerate(0,0,3);pci_rescan();scope_expect(client,0,0,255,-EBUSY,NULL);
  } else if(!strcmp(name,"class")) {
@@ -192,6 +204,10 @@ class PciScopeTests(unittest.TestCase):
     def test_live_identity_and_retired_scope_reference(self):
         for case in ["vanished", "replaced", "pinned"]:
             with self.subTest(case=case): self.run_case(case)
+
+    def test_object_pins_do_not_bypass_core_unregistration(self):
+        self.run_case("unregistered")
+        self.run_case("unregistered-parent")
 
     def test_amd_range_requires_validity_and_root_port(self):
         self.run_case("amd")

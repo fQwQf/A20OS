@@ -79,6 +79,7 @@ int device_hotplug(device_t *dev,int event) {
  if(event==BUS_EVENT_ADD)added++;else if(event==BUS_EVENT_REMOVE)removed++;else assert(0);
  return 0;
 }
+bool device_is_registered(const device_t *dev) {(void)dev;return true;}
 void driver_discovery_begin(void) {depth++;transactions++;}
 void driver_discovery_end(void) {assert(depth>0);depth--;}
 int driver_retry_deferred(void) {assert(!depth);retried++;return 0;}
