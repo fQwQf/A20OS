@@ -58,6 +58,27 @@ OpenRC 会用不同环境执行两次 `md5sum /proc/self/environ`，检查 procf
 重复递送。这个语义修复有生产函数主机回归和旧实现负对照；不应将它等同于已证明某个
 用户态退出崩溃的唯一原因。
 
+## 挂载属性与关机反馈
+
+2026-11-13 第17轮实机确认：换用 OpenRC 后桌面、网络可用，但图形重启至最终
+reboot 系统调用入口仍需约101 s，主要等待在服务停止后的最终同步段，尚未进入固件。
+这不是成熟 init 需要固定等待一分钟。
+
+内核曾将 `VFS_MOUNT_DETACHED=0x2` 混在 Linux `MS_*` 属性中；`MS_NOSUID` 也是2。
+OpenRC 更新 `/run` 属性后，查找跳过其 tmpfs，运行状态和 socket 标记被写进底层 ext4。
+下轮启动便可见 D-Bus 的 Address in use。现在 mount 对象单独保存 `detached`，
+挂载属性更新也保留共享命名空间的所有权标记。真正 detach 仍不可从普通路径到达。
+这项修复不代表已经补齐全部 Linux 挂载属性的安全策略。
+
+连续 JBD2 payload 以最多128 KiB合并写出，遇到extent或环边界拆分，内存不足退回单块。
+原有 ordered data、descriptor/data flush、commit、checkpoint 及清除日志的屏障保持原样。
+系统 sync 与 JBD2 各阶段现在有耗时记录；不以省略同步或强制复位缩短关机。
+图形移植工作区还恢复了桌面释放 DRM 后的 framebuffer 文本控制台，避免留下静止旧桌面。
+
+同一候选在16 CPU/8 GiB QEMU中通过USB图形关机、USB普通reboot、NVMe图形重启，
+每轮留下64个文件、16 MiB数据后走正常电源流程，均约10 s，退出后fsck=0、clean、
+RECOVER=0、last_orphan=0。含控制台截图；实机优化耗时仍待第18轮验证。
+
 ## 验证
 
 ```sh
@@ -65,6 +86,7 @@ python3 -m tools.tests.test_boot_init_pid
 python3 -m tools.tests.test_kill_broadcast
 python3 tools/native/check-native-task-object.py
 python3 tools/tests/test_session_power.py
+python3 -m unittest tools.tests.test_mount_flag_namespace tools.tests.test_jbd2_payload_batch
 # 以下三个脚本在 A20OS 测试客体中运行；前两个也可在 Linux 上作对照。
 python3 tools/tests/fifo_guest.py
 python3 tools/tests/proc_environ_guest.py
