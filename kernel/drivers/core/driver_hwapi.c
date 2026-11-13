@@ -4,6 +4,9 @@
 #include "mm/frame.h"
 #include "core/errno.h"
 #include "core/lock.h"
+#include "core/refcount.h"
+#include "core/string.h"
+#include "mm/slab.h"
 #ifdef CONFIG_IOPORT
 #include "cpu.h"
 #endif
@@ -480,6 +483,93 @@ static int dma_page_order(size_t size, size_t alignment)
         order++;
     }
     return (bytes < size || bytes < alignment) ? -1 : order;
+}
+
+/* An allocation owner, independent of mappings, requests and driver binding.
+ * Preserve the physical allocator's compact PFN and actual order for put. */
+struct driver_dma_buffer {
+    refcount_t references;
+    struct device *device;
+    pfn_t pfn;
+    int order;
+    void *data;
+    uint64_t address;
+    size_t size;
+};
+
+int driver_dma_buffer_create(struct device *device, size_t size, size_t alignment,
+                              struct driver_dma_buffer **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!device || !size || !alignment || (alignment & (alignment - 1U)))
+        return -EINVAL;
+    size_t maximum = (size_t)PAGE_SIZE << MAX_ORDER;
+    if (size > maximum || alignment > maximum) return -E2BIG;
+    uint64_t mask = dma_get_mask(device);
+    if (!dma_mask_well_formed(mask)) return -EINVAL;
+    if (!dma_arch_ready()) return -EOPNOTSUPP;
+    if (!device_is_registered(device) || device_is_stopping(device)) return -ENODEV;
+    struct device *owner = device_get(device);
+    if (!owner) return -ENODEV;
+    struct driver_dma_buffer *buffer = kmalloc(sizeof(*buffer));
+    if (!buffer) { device_put(owner); return -ENOMEM; }
+    int order = dma_page_order(size, alignment);
+    pfn_t pfn = mask == DMA_MASK_64BIT ? pfa_alloc(order) : pfa_alloc_max(order, mask);
+    if (pfn == PFN_NONE) { kfree(buffer); device_put(owner); return -ENOMEM; }
+    void *data = pfn_to_virt(pfn);
+    uint64_t address = pfn_to_phys(pfn);
+    size_t bytes = (size_t)PAGE_SIZE << order;
+    int ret = 0;
+    if (!data || (address & (alignment - 1U)) || !dma_range_ok_mask(mask, address, bytes))
+        ret = -ERANGE;
+    else if (!device_is_registered(device) || device_is_stopping(device)) ret = -ENODEV;
+    else if (dma_get_mask(device) != mask) ret = -EAGAIN;
+    if (ret) {
+        pfa_free(pfn, order);
+        kfree(buffer);
+        device_put(owner);
+        return ret;
+    }
+    memset(data, 0, bytes);
+    refcount_set(&buffer->references, 1);
+    buffer->device = owner;
+    buffer->pfn = pfn;
+    buffer->order = order;
+    buffer->data = data;
+    buffer->address = address;
+    buffer->size = size;
+    *out = buffer;
+    return 0;
+}
+
+void driver_dma_buffer_get(struct driver_dma_buffer *buffer)
+{
+    if (buffer) refcount_inc(&buffer->references);
+}
+
+void driver_dma_buffer_put(struct driver_dma_buffer *buffer)
+{
+    if (!buffer || !refcount_dec_and_test(&buffer->references)) return;
+    struct device *device = buffer->device;
+    pfa_free(buffer->pfn, buffer->order);
+    kfree(buffer);
+    device_put(device);
+}
+
+void *driver_dma_buffer_data(const struct driver_dma_buffer *buffer)
+{
+    return buffer ? buffer->data : NULL;
+}
+
+uint64_t driver_dma_buffer_address(const struct driver_dma_buffer *buffer)
+{
+    return buffer ? buffer->address : 0;
+}
+
+size_t driver_dma_buffer_size(const struct driver_dma_buffer *buffer)
+{
+    return buffer ? buffer->size : 0;
 }
 
 void *dma_alloc_coherent_aligned(struct device *dev, size_t size,

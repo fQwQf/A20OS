@@ -12,6 +12,7 @@
 #include "drivers/bus/pci_bus.h"
 #include "drivers/usb/usb.h"
 #include "mm/frame.h"
+#include "mm/slab.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
 #include "core/klog.h"
@@ -377,6 +378,75 @@ static void exercise_usb_interfaces(device_t *controller) {
     kinfo("DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1\n");
 }
 
+static void exercise_dma_buffer(void) {
+    device_t owner = {.name = "dma-buffer-selftest", .references = 1};
+    CHECK(!device_register(&owner));
+    CHECK(!dma_set_mask(&owner, DMA_MASK_32BIT));
+    struct driver_dma_buffer *buffer, *denied = NULL;
+    CHECK(!driver_dma_buffer_create(&owner, 33, 65536, &buffer));
+    CHECK(owner.references == 3 && driver_dma_buffer_size(buffer) == 33);
+    CHECK(!(driver_dma_buffer_address(buffer) & 65535U));
+    CHECK(dma_range_ok(&owner, driver_dma_buffer_address(buffer), 33));
+    uint8_t *data = driver_dma_buffer_data(buffer);
+    CHECK(data);
+    for (unsigned i = 0; i < 33; i++) CHECK(!data[i]);
+    driver_dma_buffer_get(buffer);
+    CHECK(!device_unregister(&owner));
+    device_put(&owner);
+    CHECK(owner.references == 1);
+    CHECK(driver_dma_buffer_create(&owner, 33, 65536, &denied) == -ENODEV && !denied);
+    data[32] = 0xa2;
+    driver_dma_buffer_put(buffer);
+    CHECK(owner.references == 1 && data[32] == 0xa2);
+    driver_dma_buffer_put(buffer);
+    CHECK(!owner.references);
+}
+
+/* Explicit scratch-disk fixture only: QEMU xHCI + blank 8 MiB USB disk. */
+static void exercise_usb_bulk(void) {
+    pci_user_device_info_t info;
+    CHECK(!pci_user_device_find(0x1b36, 0x000d, &info));
+    device_t *controller = NULL, *disk = NULL;
+    CHECK(!pci_device_find_get(0, info.devid, &controller));
+    usb_core_scan();
+    for (int index = 0;; index++) {
+        device_t *candidate = device_find_get_by_class(DEV_CLASS_BLOCK, index);
+        if (!candidate) break;
+        if (candidate->parent == controller && candidate->drv &&
+            !strcmp(candidate->drv->name, "usb-storage")) { disk = candidate; break; }
+        device_put(candidate);
+    }
+    CHECK(disk && disk->plat_data);
+    usb_device_t *protocol = ((usb_interface_t *)disk->plat_data)->dev;
+    CHECK(protocol && protocol->vendor == 0x46f4 && protocol->product == 1);
+    class_device_t *class = class_device_ref_for_device(disk);
+    const void *operations = NULL;
+    CHECK(class && !class_device_ops_begin(class, DEV_CLASS_BLOCK, &operations));
+    const block_dev_ops_t *ops = operations;
+    CHECK(ops->read && ops->write && ops->capacity && ops->sector_size);
+    CHECK(ops->sector_size(disk) == 512 && ops->capacity(disk) == 16384);
+    uint8_t *bytes = kmalloc(8192);
+    CHECK(bytes && !ops->read(disk, 0, bytes, 8));
+    for (unsigned i = 0; i < 4096; i++) CHECK(!bytes[i]);
+    CHECK(!ops->read(disk, 8, bytes + 4096, 8));
+    for (unsigned i = 0; i < 4096; i++) CHECK(!bytes[i + 4096]);
+    for (unsigned i = 0; i < 4096; i++) bytes[i] = (uint8_t)(i * 37U + 11U);
+    CHECK(!ops->write(disk, 8, bytes, 8));
+    memset(bytes + 4096, 0, 4096);
+    CHECK(!ops->read(disk, 8, bytes + 4096, 8));
+    CHECK(!memcmp(bytes, bytes + 4096, 4096));
+    memset(bytes, 0, 4096);
+    CHECK(!ops->write(disk, 8, bytes, 8));
+    CHECK(!ops->read(disk, 8, bytes + 4096, 8));
+    CHECK(!memcmp(bytes, bytes + 4096, 4096));
+    kfree(bytes);
+    class_device_call_end(class);
+    class_device_put(class);
+    device_put(disk);
+    device_put(controller);
+    kinfo("DRIVER_USB_BULK: PASS read=1 write=1 verify=1 restore=1\n");
+}
+
 static void exercise_xhci_remove(void) {
     pci_user_device_info_t info;
     CHECK(!pci_user_device_find(0x1b36, 0x000d, &info));
@@ -414,8 +484,11 @@ void driver_runtime_selftest_boot(void)
         return;
     kinfo("DRIVER_RUNTIME: START\n");
     exercise_resources();
+    exercise_dma_buffer();
     exercise();
     exercise_firmware();
+    if (boot_flag(args, "driver.usb_bulk_test=1"))
+        exercise_usb_bulk();
     if (boot_flag(args, "driver.xhci_remove_test=1"))
         exercise_xhci_remove();
     if (boot_flag(args, "driver.iommu_native_test=1"))
@@ -433,7 +506,8 @@ void driver_runtime_selftest_boot(void)
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
+    kinfo("%sDRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
+          "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",
           pci_scope ? " pci=1" : "");
