@@ -117,6 +117,8 @@ USB 初始化/回滚变更还须运行 `python3 -m unittest tools.tests.test_usb
 
 提前退出协议运行 `python3 -m unittest tools.tests.test_driver_remove tools.tests.test_xhci_remove tools.tests.test_riscv_iommu_requester -v`。核心用 C/Rust 注册表验证准备动作的顺序、逐项完成记录、失败保留与后续阶段重试；xHCI 使用生产 prepare/remove/slot 回收与真实核心/USB 图，注入停止/PCI 读写失败和 active transfer。生命周期门禁新增 `DRIVER_REMOVE_PREPARE: PASS partial=1 before_remove=1`。`make smoke-usb-hub-x86_64` 的 embedded fixture 现在显式传入 `driver.runtime_test=1 driver.xhci_remove_test=1`，在 hub/键鼠就绪后注销整个 xHCI 驱动、检查旧 child 句柄离线及 BME 清零、重新绑定并再次枚举，要求 `DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1`；普通启动不执行此动作。这些正常 QEMU 状态不等于实体设备超时失败证据。
 
+USB 拓扑/回调变更运行 `python3 -m unittest tools.tests.test_usb_concurrency tools.tests.test_xhci_callback_lifetime tools.tests.test_xhci_endpoint_types -v`，两组新增测试已进入 `check-firmware-model` 和 `check-pc-drivers`。真实 core/USB 路径与 pthread 模拟任务竞争，验证阻塞拓扑与非阻塞进度、启动嵌套、probe 策略、注册表压缩/容量/父链、退役分配暂停及失败后重试；生产 xHCI dispatcher/prepare/abort 验证锁外回调保留、slot 独立性、自释放 URB 和停止后 admission，启用 ASan/UBSan。`python3 tools/smoke.py smoke-usb-hub-x86_64 --nr-cpus 2` 覆盖双 CPU 的真实控制器注销/重绑，下游热插拔和 HID IRQ 分别使用 `make smoke-usb-hotplug-x86_64`、`make smoke-usb-x86_64`。正常 QEMU 结果不代替实体硬件失败证据。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

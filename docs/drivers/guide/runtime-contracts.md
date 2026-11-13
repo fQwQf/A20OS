@@ -4,6 +4,10 @@
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
+## 总线拓扑与进度
+
+总线任务可用 `driver_lifecycle_begin/end()` 协调私有拓扑和核心绑定，所属上下文允许嵌套且不压制 probe。`driver_lifecycle_try_begin()` 只接受最外层入口，忙或同上下文重入均返回 `-EAGAIN`；成功后才 end。持 active class 调用时不能阻塞等待正在排空自己的 teardown，USB HID 使用 `usb_device_poll()` 尝试进度。这些 API 不用于 IRQ、不固定存储或模块代码，成功进入后的硬件操作仍可能等待。完整规则见 [原生拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。
+
 ## MMIO
 
 `resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在已安全回滚的 probe 失败或成功解除绑定时回收；remove 失败则继续保留，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
