@@ -115,7 +115,7 @@ int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out) {
         device_t *dev = &g_pci_devs[i];
         if (g_pci_in_use[i] && dev->state != DEV_STATE_REMOVING &&
             ((unsigned)info->bus << 8 | (unsigned)info->dev << 3 | info->func) ==
-                requester) {
+                requester && device_is_registered(dev)) {
             *out = device_get(dev);
             break;
         }
@@ -143,7 +143,7 @@ int pci_device_scope_get(device_t *client, uint8_t scope_bus, uint8_t first,
     for (unsigned i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
         if (!g_pci_in_use[i] || g_pci_devs[i].state == DEV_STATE_REMOVING)
             continue;
-        if (&g_pci_devs[i] == client)
+        if (&g_pci_devs[i] == client && device_is_registered(client))
             client_info = &g_pci_infos[i];
     }
     if (!client_info) {
@@ -157,7 +157,8 @@ int pci_device_scope_get(device_t *client, uint8_t scope_bus, uint8_t first,
             continue;
         const pci_dev_info_t *info = &g_pci_infos[i];
         uint32_t id = pci_ecam_read(info->bus, info->dev, info->func, 0);
-        if (g_pci_devs[i].state == DEV_STATE_REMOVING ||
+        if (!device_is_registered(&g_pci_devs[i]) ||
+            g_pci_devs[i].state == DEV_STATE_REMOVING ||
             id != ((uint32_t)info->device << 16 | info->vendor)) {
             ret = -ENODEV;
             goto done;
@@ -1091,7 +1092,8 @@ static int pci_publish_bdf(int bus, int dev, int func,
             return is_bridge;
         }
         if (g_pci_in_use[slot] &&
-            (g_pci_infos[slot].vendor != vendor ||
+            (!device_is_registered(&g_pci_devs[slot]) ||
+             g_pci_infos[slot].vendor != vendor ||
              g_pci_infos[slot].device != device_id)) {
             device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE);
             g_pci_in_use[slot] = 0;

@@ -547,6 +547,20 @@ int driver_resource_check_claims(device_t *owner, const resource_t *res) {
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
     return ret;
 }
+bool device_is_registered(const device_t *dev) {
+    if (!dev)
+        return false;
+    bool found = false;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (int i = 0; i < g_device_count; i++)
+        if (g_devices[i] == dev) {
+            found = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    return found;
+}
+
 int driver_resource_request_checked(device_t *owner, const resource_t *res,
                                     driver_resource_claim_t **out) {
     if (!out)
@@ -555,10 +569,7 @@ int driver_resource_request_checked(device_t *owner, const resource_t *res,
     if (!owner || !valid_range(res) || res->type == RES_MEM)
         return -EINVAL;
     driver_ops_lock();
-    bool registered = false;
-    for (int i = 0; i < g_device_count; i++)
-        if (g_devices[i] == owner)
-            registered = true;
+    bool registered = device_is_registered(owner);
     int ret = registered && owner->state != DEV_STATE_REMOVING
                   ? check_range(owner, res, NULL)
                   : -ENODEV;

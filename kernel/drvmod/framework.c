@@ -471,6 +471,7 @@ const struct drv_export drv_export_table[] = {
     { "pci_cfg_read32",      (void *)pci_cfg_read32 },
     { "pci_device_find_get", (void *)pci_device_find_get },
     { "pci_device_scope_get", (void *)pci_device_scope_get },
+    { "device_is_registered", (void *)device_is_registered },
     { "amd_iommu_scope_get", (void *)amd_iommu_scope_get },
     { "pci_cfg_write16",     (void *)pci_cfg_write16 },
     { "pci_cfg_write32",     (void *)pci_cfg_write32 },

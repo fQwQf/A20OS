@@ -317,6 +317,10 @@ void device_release_resources(device_t *dev);
  * registry after registration). Static devices may leave release unset. A
  * registered child's parent remains pinned until the child's final put. */
 device_t *device_get(device_t *dev);
+/* Registry membership observation, independent of binding/state. Caller holds
+ * a device reference; a pin alone does not imply registration. Use a discovery
+ * transaction across this check and lifecycle-dependent use. No extra pin. */
+bool device_is_registered(const device_t *dev);
 void device_put(device_t *dev);
 int device_add_dependency(device_t *consumer, device_t *provider);
 /* Returned devices carry a reference; release it with device_put(). */
