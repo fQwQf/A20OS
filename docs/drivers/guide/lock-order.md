@@ -272,11 +272,11 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`irq_events`/`poll_events` 由 process-context 的 `xhci_op_poll()` 快照后打印成 `[XHCI] completions: irq=N poll=M`。
 
-已知限制：门禁只跑单核，未做 SMP 压力验证；class remove 与已排队 URB 的 completion 之间仍有窗口。
+已收集的锁外 completion 用全局/每 slot 计数保留存储；prepare 或 abort 发现相关回调在途返回 `-EBUSY`，不在生命周期锁下等待。标量 slot 快照避免回调自行释放 URB 后再解引用。双 CPU 的控制器退出/重绑与 host 线程交错已验证，interface 驱动独立退出和其他 DMA 错误阶段仍需各自协议。
 
 ### USB 部分枚举清理
 
-USB scan/enumerate/unregister 要求同一任务所有者协调；poll 的原子防重入不保护并发注销。端口清理对象先于 slot 分配建立，硬件已交还 token 后的错误路径无需再分配保留记录。部分 interface 发布失败也要先 offline、确认 abort_slot 成功，再解绑和释放；不能先 remove 再停止可能读 pending URB 的事件环。失败保留对象/计数/阶段，slot 已停后的 remove 重试不重复控制器命令。HCD 的自旋锁不跨等待，完整协议见 [原生运行时](native-runtime.md#部分-usb-枚举的所有权交还)。
+USB register/scan/enumerate/unregister 使用原生生命周期协调器串行保护拓扑；poll 通过 try 入口，忙时清除防重入并跳过。普通协调不压制 probe，支持不同 HCD 的同步嵌套，拒绝同 HCD 重入及活动下游期间注销上游。注册前保留容量，扫描按当前注册表重新选择，避免回调增删导致旧行失效。端口清理对象先于 slot 分配建立，硬件已交还 token 后的错误路径无需再分配保留记录。部分 interface 发布失败也要先 offline、确认 abort_slot 成功，再解绑和释放；不能先 remove 再停止可能读 pending URB 的事件环。失败保留对象/计数/阶段，slot 已停后的 remove 重试不重复控制器命令。HCD 的自旋锁不跨等待，完整协议见 [原生运行时](native-runtime.md#部分-usb-枚举的所有权交还)。
 
 ### USB HID
 
@@ -286,8 +286,8 @@ USB scan/enumerate/unregister 要求同一任务所有者协调；poll 的原子
 
 配套的两条写法也是规范的一部分：
 
-- `usb_hid_read()`/`usb_hid_poll()` 在取 `h->lock` **之前**调用 `hcd->ops->poll()`，即 `xhci->lock -> h->lock` 这个顺序被显式避免；把 HCD poll 放在 class 锁外，代价是热插拔与读之间的串行化少了一层，但换来锁序单向。
-- `usb_hid_remove()` 在释放前清 `urb.complete`/`urb.ctx`，HCD 侧 `xhci_collect_interrupt()` 见到 `complete == NULL` 直接跳过、不碰 `urb->buf`。这**缩小但不消除**该窗口：已经读到指针的 completion 仍可能跑完。
+- `usb_hid_read()`/`usb_hid_poll()` 在取 `h->lock` **之前**调用 `usb_device_poll()`；该入口尝试生命周期协调，忙时直接返回，不阻塞 teardown 排空当前 class 调用。成功后验证注册表、端口归属和全部祖先仍可使用，再在协调域内调用 HCD poll。class 活动调用另保留接口存储。
+- 端口退出先确认 slot 停止且相关锁外回调计数归零，再解绑 HID；同一物理控制器的 pending 端口在彻底清理前阻止新 slot 分配，避免编号提前复用。`usb_hid_remove()` 清回调字段本身不提供排空保证，interface 驱动独立注销仍需补齐取消协议。
 
 ### USB storage
 
@@ -333,7 +333,7 @@ quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止�
 
 ### 提前退出准备
 
-`device_add_remove_prepare()` 的私有记录在当前 probe 分配，并要求先选择可失败 probe 清理；退出本身不分配记录。核心在自己的 removal 帧内 offline class、设置 PREPARING，再依次执行尚未完成的准备。回调失败时还没有递归解除 consumer，成功记录保留到最终 devres 释放；不能等待需要 lifecycle mutex 的工作。xHCI 在控制器自旋锁下封闭提交后释放锁，再 free_irq、检查 active transfer、等待硬件状态和访问 PCI；新的准备路径不在设备自旋锁下调用 PCI/discovery API。通用 USB 并发扫描/注销及旧 timeout 路径仍需独立审查。详见 [原生运行时](native-runtime.md#在-consumer-解绑前准备退出)。
+`device_add_remove_prepare()` 的私有记录在当前 probe 分配，并要求先选择可失败 probe 清理；退出本身不分配记录。核心在自己的 removal 帧内 offline class、设置 PREPARING，再依次执行尚未完成的准备。回调失败时还没有递归解除 consumer，成功记录保留到最终 devres 释放；不能等待需要 lifecycle mutex 的工作。xHCI 在控制器自旋锁下封闭提交后释放锁，再 free_irq、检查 active transfer、等待硬件状态和访问 PCI；新的准备路径不在设备自旋锁下调用 PCI/discovery API。USB 拓扑已接入同一协调器，锁外 completion 另由 controller 私有计数保留；旧 timeout 的独立 DMA 回收仍需审查。详见 [原生运行时](native-runtime.md#在-consumer-解绑前准备退出)。
 
 ### PC I²C 与独立无线服务
 

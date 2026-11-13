@@ -40,7 +40,7 @@ USB 是当前端到端支持的热插拔总线：
 3. 新连接先分配端口清理对象，再经过 reset、slot/address 分配、descriptor/configuration 解析；每个 USB interface 被发布为一个 `device_t`，USB class driver 自动匹配并 probe。
 4. 连接消失时先将 interface class 置 offline，再调用 HCD 的 `abort_slot`。只有返回 0 才继续 interface REMOVE；abort/remove 失败均保留已发布端口的 address、协议存储和 HCD 登记。已经成功停止的 slot 不重复 abort；失败端口在重连后的新枚举前也会重试。全部 interface 注销成功后才释放 endpoint/`usb_device_t`，独立 `device_t` 记录按引用计数延迟释放。
 
-USB HCD 应准确实现 `port_connected` 和 `abort_slot`。`abort_slot` 必须取消该 slot 的未完成传输，只有返回 0 才确认不会再回调已释放的 `usb_urb_t` 或 interface 私有状态；失败时保留上下文供重试。`usb_core_unregister_hcd()` 返回错误，HCD/hub remove 必须传播，不能继续释放实例。部分 slot 初始化和枚举/接口发布失败同样走这一清理路径；错误返回但非零 `slot.hcd` 仍转交清理所有权，失败端口不可覆盖。扫描先重试停止，确认成功后才允许重新 reset；扫描对同一连接的三次枚举预算跨清理重试保留，物理断开后重置。xHCI 自身 start/probe 失败已接入可失败提前准备：先确认控制器停止，再允许核心解绑子接口；已停的控制器只做 slot 软件回收。未知 slot 仍不允许单独猜测完成，其余 HCD、接口独立退出和错误阶段需要各自协议。详见 [部分枚举所有权](native-runtime.md#部分-usb-枚举的所有权交还)。
+USB HCD 应准确实现 `port_connected` 和 `abort_slot`。`abort_slot` 必须取消该 slot 的未完成传输，只有返回 0 才确认不会再回调已释放的 `usb_urb_t` 或 interface 私有状态；失败时保留上下文供重试。`usb_core_unregister_hcd()` 返回错误，HCD/hub remove 必须传播，不能继续释放实例。部分 slot 初始化和枚举/接口发布失败同样走这一清理路径；错误返回但非零 `slot.hcd` 仍转交清理所有权，失败端口不可覆盖。扫描先重试停止，确认成功后才允许重新 reset；扫描对同一连接的三次枚举预算跨清理重试保留，物理断开后重置。xHCI 自身 start/probe 失败已接入可失败提前准备：先确认控制器停止，再允许核心解绑子接口；已停的控制器只做 slot 软件回收。未知 slot 仍不允许单独猜测完成，USB scan/enumerate/unregister 已由原生生命周期协调器保护，HID 进度忙时跳过；xHCI 锁外回调用计数保留，待清理端口阻止同一物理控制器编号复用。其余 HCD、接口独立退出和错误阶段需要各自协议。详见 [部分枚举所有权](native-runtime.md#部分-usb-枚举的所有权交还)。
 
 ### PCI
 

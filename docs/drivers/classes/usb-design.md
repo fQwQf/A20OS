@@ -101,7 +101,7 @@ usb_device_t             /* 逻辑设备：地址、速度、descriptor、配置
 3. 为每个 interface 构建 `device_t`，调用 `device_hotplug(..., BUS_EVENT_ADD)`，由统一核心注册、匹配并 probe class driver。
 4. 断开或枚举失败时先 offline 已发布 class，再检查 HCD `abort_slot`；只有停止成功才执行 interface REMOVE 并回收协议存储。任一步失败保留端口、slot/address、接口与 HCD，扫描/注销显式重试。部分发布也遵守这个顺序；slot 已停后不重复 abort。
 
-`alloc_slot` 非零返回也可能交还非零 `usb_slot_t.hcd` 清理 token，核心必须保留；零 token 的未知控制器状态仍由 HCD 管理。失败清理无需新的分配，禁止覆盖 pending 端口。扫描只对真实枚举增加计数，扫描对同一连接最多尝试三次，物理断开才重置。整个 xHCI 退出另登记 remove prepare，在核心解绑下游接口前先排空 IRQ、确认控制器停机及 BME 清零，失败保留图。该路径与接口单独退出、并发扫描及每次 transfer 错误的存储回收仍须分开验证。详细契约见 [原生运行时](../guide/native-runtime.md#在-consumer-解绑前准备退出)。 热插拔门禁排除启动报告重放，要求实际拔出后的第二次枚举和 ready；QMP 操作等待匹配命令的回包。
+`alloc_slot` 非零返回也可能交还非零 `usb_slot_t.hcd` 清理 token，核心必须保留；零 token 的未知控制器状态仍由 HCD 管理。失败清理无需新的分配，禁止覆盖 pending 端口。扫描只对真实枚举增加计数，扫描对同一连接最多尝试三次，物理断开才重置。整个 xHCI 退出另登记 remove prepare，在核心解绑下游接口前先排空 IRQ、确认控制器停机及 BME 清零，失败保留图。拓扑通过原生生命周期协调器串行保护；锁外 completion 由 controller/slot 计数保留，相关清理返回 `-EBUSY` 并可重试。同一物理控制器仍有待清理端口时暂停新 slot 分配，避免旧回调误用复用的编号。接口单独退出及每次 transfer 错误的存储回收仍须分开验证。详细契约见 [原生运行时](../guide/native-runtime.md#在-consumer-解绑前准备退出)。 热插拔门禁排除启动报告重放，要求实际拔出后的第二次枚举和 ready；QMP 操作等待匹配命令的回包。
 
 ### 4.4 多控制器
 
@@ -150,7 +150,7 @@ typedef struct usb_hcd {
 
 - 当前没有 per-controller 内核线程。`kernel_progress_poll()` 调用按约 20 ms（50 Hz）节流的 `usb_core_poll()`，后者扫描 HCD 端口并推进枚举/移除；input read/poll 还会推进 HID 事件。
 - xHCI 注册自己的共享 INTx handler；可用时由 IRQ 推进完成，未路由时回退轮询，回调在控制器自旋锁外执行。
-- scan/enumerate/unregister 由调用者保证单一任务上下文所有者；poll 的防重入标记不等于通用热拔除并发锁。同步命令/控制/bulk 由 `xfer_busy` 串行化，不能在设备自旋锁内等待停止或 remove。
+- register/scan/enumerate/unregister 由核心生命周期协调器串行保护；普通入口可嵌套但不压制 probe，进度 poll/`usb_device_poll()` 使用 try，忙时跳过，避免 class drain 死锁。相同 HCD 重入或活动下游期间注销上游返回 `-EBUSY`；注册容量预留和有界重选扫描允许其他 HCD 的回调增删。同步命令/控制/bulk 由 `xfer_busy` 串行化，不能在设备自旋锁内等待停止或 remove。完整契约见 [拓扑与退役](../guide/native-runtime.md#总线拓扑的原生生命周期协调)。
 
 ## 8. 内存 / DMA 模型
 

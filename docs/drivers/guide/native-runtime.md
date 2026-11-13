@@ -83,7 +83,25 @@ prepare 必须容忍部分初始化，冻结新提交并排空可能访问 consu
 
 xHCI 在 probe 最前选择失败清理并登记准备动作。准备先封闭提交/轮询、撤销并排空 IRQ；同步传输仍持有 event ring 时返回 `-EBUSY`，不在 lifecycle mutex 下等待它。已取得固件控制权的实例还须确认 RUN/INTE 写回清零、RESET 完成、HCHalted、CNR 清零，以及 PCI BME 清除读回；全 1 读取或超时均保留控制器和所有尚未解绑的子节点。尚未取得控制权的早期失败未发布自己的 DMA 上下文，不执行控制器停机。成功证明在私有上下文中单向保留；之后已知 slot 用软件清理，不再向已停止的命令环提交 Disable Slot。remove 只在确认后释放控制器，start 失败也不再自行释放不确定的 ring 存储。
 
-这里只覆盖受协调的控制器退出及所列所有权。USB interface 驱动的独立退出、Configure Endpoint 失败的独立 ring、同步 bulk 的调用者缓冲区保留，以及并发 poll/scan/unregister 仍需完善；现有单一任务所有者契约没有被这个 hook 自动替换。关机/kexec 的 shutdown 也未改为可失败协议。
+USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 prepare hook 推导。USB interface 驱动的独立退出、Configure Endpoint 失败的独立 ring、同步 bulk 的调用者缓冲区保留仍需完善。关机/kexec 的 shutdown 也未改为可失败协议。
+
+### 总线拓扑的原生生命周期协调
+
+`driver_lifecycle_begin/end()` 复用核心现有的生命周期 mutex，供任务上下文把总线私有拓扑、注册和绑定操作放入同一个协调域。阻塞入口可在所属任务或启动上下文嵌套；它不增加 discovery 深度，不压制同步 probe。需要批量发现后再 probe 的总线仍使用 `driver_discovery_begin/end()`，不能用它代替普通进度协调。两组 API 均不固定设备、绑定或模块代码，调用者另持有效引用。
+
+`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，公开布局/ABI 9 不变。
+
+USB register/enumerate/scan/unregister 全程使用这个协调域，保护 HCD 注册表、端口状态和协议所有权。`usb_core_poll()` 忙时清除防重入标记并跳过，不推进轮询时间；class 持有协议存储期间通过 `usb_device_poll()` 尝试进度。后者忙返回 `-EAGAIN`，端口不再归属该设备、待移除或任一上游 HCD 正在退出返回 `-ENODEV`，均不进入 HCD。HID read/poll 在自身 spinlock 外使用此入口；不能阻塞等候 teardown 所持的生命周期锁。
+
+同步回调可以注册或操作其他 HCD。相同 HCD 的递归 register/enumerate/unregister 返回 `-EBUSY`，嵌套 scan 跳过；活动下游操作（包括尚未发布的 start）也阻止注销上游。重复注册返回 `-EEXIST`，无效/未注册的 parent 链和正在退出的祖先拒绝新注册；已注册下游尚存时上游注销返回 `-EBUSY`。start 前预留注册表容量，防止不同 HCD 的重入注册越界。scan 每轮从当前注册表重新选择未访问地址，以最多 32 项的栈内集合处理回调造成的增删和压缩；同一地址被重新分配时可以延后到下一轮，绝不遍历借用的旧注册表行。
+
+### xHCI 锁外回调与端口退役
+
+xHCI 在 controller 锁下收集 completion，并在解锁前增加全局及每 slot 在途计数；回调结束重新取锁后递减。只跨回调保存标量 slot ID，回调可释放自己的 URB，退役过程不会再次读取该 URB。controller prepare 发现同步传输或任何回调在途时返回 `-EBUSY`，保留图和存储，不能持生命周期锁等待这些回调。
+
+端口 abort 在成功 Disable Slot 后，于同一锁内清 DCBAA 并摘除 endpoint 链；对应 slot 回调未结束时仍返回 `-EBUSY`。重试利用 DCBAA=0 的停止记录，不重复 Disable Slot；其他 slot 的回调不阻止该端口清理。EP0 control 和 interrupt submit 在锁下拒绝已停 slot，interrupt 拒绝发生在清 DMA buffer 和敲 doorbell 之前。
+
+硬件可立即复用 Disable Slot 释放的编号，因此仅记住停止还不够。USB core 在同一物理控制器任一 root/hub 端口仍有 REMOVE_PENDING 时，暂停新的端口枚举，显式入口返回 `-EAGAIN`，scan 跳过且不扣枚举尝试次数；reset 回调后再检查停止和退役状态。直到回调、class 和协议所有者全部交还，才重新开放分配。已有设备的完成处理及其他物理控制器继续运行。该策略保持现有 slot token 和 HCD vtable，不增加另一套公开 generation/所有者模型。
 
 ### 部分 USB 枚举的所有权交还
 
@@ -577,3 +595,14 @@ xHCI 新增 6 项方法、12 个场景，执行生产 wait、xfer admission、pr
 强化的 `make smoke-usb-hub-x86_64` 使用 embedded、单核、显式 `driver.runtime_test=1 driver.xhci_remove_test=1`。真实 xHCI/hub/键鼠初次枚举后，核心注销整个控制器驱动，确认 BME 清零及旧 child/class 句柄已离线，再重新登记静态驱动、重置控制器并枚举新 child；`DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1` 与原 hub/键鼠、资源和运行时标记全部匹配。旧 child metadata 和 class 引用保留到检查完成，未以相同地址的新对象冒充旧引用恢复。`make smoke-usb-hotplug-x86_64` 的 generic 内核/模块/开发镜像和严格 live unplug/replug 检查也通过，验证新增模块导出与正常拔插兼容。
 
 这些证据覆盖核心显式契约、主机失败模型和单核 QEMU 控制器退出/重新绑定。没有验证实体 stop 超时、任意跨 CPU poll/scan/unregister、接口单独退出、Configure Endpoint 的独立 ring 错误回收或同步 bulk 调用者缓冲区保留；也未将关机/kexec shutdown 变成可失败接口。公开布局/ABI 9 保持不变。文档行号检查通过 540 条；导航仍为工作区既有 7 个未索引页面，实际 `docs/zh` 迁移和其他改动保留。本地日志在 `.kernel-build/remove-prepare-review/`。
+
+
+### USB 拓扑与锁外回调验证（2026-11-14）
+
+代码提交 `6ec6c9685`。新增 13 个主机测试方法、18 个场景，运行生产 core/USB 图及 xHCI dispatcher、prepare、abort 和 EP0 admission；任务调度、MMIO/PCI/IRQ 和命令后端由 host 替代，启用 ASan/UBSan。pthread 屏障验证 scan/enumerate 期间并发 unregister 等待，而进度 try 不等待；启动上下文和任务嵌套均保持普通 probe 与 discovery 的不同策略。另覆盖相同 HCD 重入、未发布 start 借用上游、注册容量预留、回调增删/压缩注册表、stopping 祖先、reset 后状态改变、同控制器退役暂停且不扣尝试次数。锁外 callback 的全局/每 slot 保留、其他 slot 独立清理、自释放 URB、停止记录重试，以及停止后 EP0/interrupt 不提交均有行为断言。
+
+14 个负控分别撤掉 try 规则、poll 忙时标记释放、scan 协调、活动下游保护、start 容量预留、slot 退役暂停、reset 后 stopping 检查、退役不扣预算、controller/slot 回调保留、自释放 URB 的标量快照、已停 slot 的重试记录、control/interrupt admission，全部触发运行时失败；编译失败不计入。恢复后的完整隔离回归通过 209 个不同方法，最后再跑 16 项 USB/xHCI 定向测试，并核对 14 个导出路径与代码提交一致。
+
+`make check-firmware-model` 通过 424 项及单独 1 项 sleep ABI，`make check-pc-drivers` 通过 77 项；115 个 instance、32 个 driver component、193 个 smoke case 审计通过。`make smoke-driver-lifecycle DRIVER_DEPLOYMENT=embedded` 实际启动 RISC-V64 并匹配生命周期/失败退出标记。`python3 tools/smoke.py smoke-usb-hub-x86_64 --nr-cpus 2` 在真实 guest 确认 2/2 CPU online，并两次通过 hub/键鼠、旧句柄离线、BME 停止检查与 `DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1`。generic 的 `make smoke-usb-hotplug-x86_64` 通过严格 live 拔出/重插/地址复用检查；`make smoke-usb-x86_64` 通过 HID 中断和实际按键输入检查，覆盖新增模块导出及 class 进度入口。
+
+这些证据覆盖受协调的拓扑变更和所列线程交错，不等于任意 SMP 压力或实体硬件停止超时验证。interface 驱动独立退出、Configure Endpoint 的独立 ring 错误、同步 bulk 调用者缓冲区和可失败 shutdown 仍待完善。公开结构布局与 ABI 9 不变。文档引用检查通过 540 条；导航仍有工作区既有的 7 个未索引页面，没有新增链接/锚点错误。实际 `docs/zh` 迁移及其他改动保留，本轮本地证据位于 `.kernel-build/usb-concurrency-review/`。
