@@ -41,4 +41,8 @@ int amd_iommu_probe_unit(const acpi_ivrs_hardware_t *,
 /* x86 segment-0 boot diagnostic after PCI host initialization. Does not claim
  * the device, enable MMIO, write registers or change DMA routing. */
 int amd_iommu_pci_report(const acpi_context_t *);
+/* Explicit boot-test only: unregister/re-register the passive driver and
+ * verify the first controller's aperture lifetime. Does not change hardware.
+ * Caller must be in task context before clients start using controllers. */
+int amd_iommu_owner_selftest(void);
 #endif

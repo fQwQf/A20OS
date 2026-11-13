@@ -48,6 +48,13 @@ uint32_t pci_device_id(const device_t *dev);
  * Returns -ENODEV for devices on another bus. */
 int pci_device_location(const device_t *dev, unsigned *bus,
                         unsigned *slot, unsigned *function);
+/* Process-context lookup of a published function. Returns a device reference
+ * (device_put by caller), or clears out on failure. Current hosts support only
+ * segment zero (-EOPNOTSUPP otherwise); missing functions return -ENODEV.
+ * The reference pins metadata, not physical presence or a driver binding.
+ * Serialize lookup AND subsequent binding/config use with a discovery
+ * transaction when they must describe the same lifecycle observation. */
+int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out);
 /* Return the MMIO or I/O-port resource for a physical PCI BAR number.
  * Resources are compacted in device->res, so display drivers must not assume
  * that BAR2 is the second resource when BAR0 is a 64-bit BAR. */

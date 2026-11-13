@@ -6,6 +6,7 @@
 #include "drivers/core/fence.h"
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
+#include "drivers/core/amd_iommu.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
 #include "core/klog.h"
@@ -235,11 +236,15 @@ void driver_runtime_selftest_boot(void)
     exercise_firmware();
     if (boot_flag(args, "driver.iommu_native_test=1"))
         driver_iommu_native_selftest();
-    /* Keep both witnesses in one end-of-test console record. A best-effort
+    bool amdvi_owner = boot_flag(args, "driver.amdvi_owner_test=1");
+    if (amdvi_owner)
+        CHECK(!amd_iommu_owner_selftest());
+    /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1\n"
-          "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n");
+    kinfo("%sDRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1\n"
+          "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
+          amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "");
     if (current_board && current_board->poweroff)
         current_board->poweroff();
     panic("DRIVER_RUNTIME: poweroff returned");

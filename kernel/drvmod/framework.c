@@ -461,6 +461,7 @@ const struct drv_export drv_export_table[] = {
     { "pci_find_capability", (void *)pci_find_capability },
     { "pci_cfg_read16",      (void *)pci_cfg_read16 },
     { "pci_cfg_read32",      (void *)pci_cfg_read32 },
+    { "pci_device_find_get", (void *)pci_device_find_get },
     { "pci_cfg_write16",     (void *)pci_cfg_write16 },
     { "pci_cfg_write32",     (void *)pci_cfg_write32 },
     /* message-signalled interrupts: capability parse, table programming and

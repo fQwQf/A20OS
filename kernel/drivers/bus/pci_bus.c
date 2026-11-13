@@ -103,6 +103,27 @@ int pci_device_location(const device_t *dev, unsigned *bus,
     return 0;
 }
 
+int pci_device_find_get(uint16_t segment, uint16_t requester, device_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (segment)
+        return -EOPNOTSUPP;
+    driver_discovery_begin();
+    for (unsigned i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
+        const pci_dev_info_t *info = &g_pci_infos[i];
+        device_t *dev = &g_pci_devs[i];
+        if (g_pci_in_use[i] && dev->state != DEV_STATE_REMOVING &&
+            ((unsigned)info->bus << 8 | (unsigned)info->dev << 3 | info->func) ==
+                requester) {
+            *out = device_get(dev);
+            break;
+        }
+    }
+    driver_discovery_end();
+    return *out ? 0 : -ENODEV;
+}
+
 /* Resolve the INTx interrupt line for an enumerated PCI function through the
  * platform routing hook (arch_pci_intx_irq).  Returns -1 when the function
  * has no interrupt pin or the platform provides no routing for it; callers
