@@ -473,6 +473,10 @@ const struct drv_export drv_export_table[] = {
     { "pci_device_scope_get", (void *)pci_device_scope_get },
     { "device_is_registered", (void *)device_is_registered },
     { "amd_iommu_scope_get", (void *)amd_iommu_scope_get },
+    { "amd_iommu_route_acquire", (void *)amd_iommu_route_acquire },
+    { "amd_iommu_route_validate", (void *)amd_iommu_route_validate },
+    { "amd_iommu_route_memory", (void *)amd_iommu_route_memory },
+    { "amd_iommu_route_release", (void *)amd_iommu_route_release },
     { "pci_cfg_write16",     (void *)pci_cfg_write16 },
     { "pci_cfg_write32",     (void *)pci_cfg_write32 },
     /* message-signalled interrupts: capability parse, table programming and
