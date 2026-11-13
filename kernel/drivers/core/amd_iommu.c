@@ -72,6 +72,11 @@ static int probe_mmio_read(void *context, uint64_t base, uint32_t offset,
                            uint64_t *value) {
     struct probe_mapping *mapping = context;
     if (!mapping->address) {
+        resource_t window = {.type = RES_MMIO, .start = base,
+                              .end = base + 0x3fff};
+        int ret = driver_resource_check_claims(NULL, &window);
+        if (ret)
+            return ret;
         mapping->address = arch_device_map_mmio(base, 0x4000, 0);
         mapping->base = base;
     }
@@ -103,6 +108,10 @@ int amd_iommu_pci_report(const acpi_context_t *context) {
         return ret;
     }
     size_t verified = 0, failed = 0;
+    /* In particular, no new storage reservation can be published between
+     * the callback's check and its paired unmap. This is a boot diagnostic,
+     * not an authorization API for runtime register access. */
+    driver_discovery_begin();
     for (size_t i = 0; i < count; i++) {
         acpi_ivrs_hardware_t hardware;
         ret = acpi_ivrs_unit_get(&table, i, &hardware);
@@ -136,6 +145,7 @@ int amd_iommu_pci_report(const acpi_context_t *context) {
           "driver_enabled=0\n",
           (unsigned long)count, (unsigned long)verified, (unsigned long)failed);
     acpi_table_release(context, &table);
+    driver_discovery_end();
     return ret ? ret : failed ? -EIO : 0;
 #endif
 }

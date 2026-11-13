@@ -2,6 +2,7 @@
  * A20OS Driver Core — registration, matching, enumeration
  */
 #include "drivers/core/driver_core.h"
+#include "drivers/core/memory.h"
 #include "firmware/device.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_registry_test.h"
@@ -281,6 +282,146 @@ struct driver_resource_claim {
  * firmware declaration or an enclosing host-bridge aperture. */
 static driver_resource_claim_t *resource_claims;
 
+struct driver_memory_reservation {
+    struct driver_memory_reservation *next;
+    size_t count;
+    driver_memory_range_t ranges[];
+};
+/* Same registry lock as claims. Storage cannot become reserved in the gap
+ * between a mapper's conflict check and claim publication (or vice versa). */
+static driver_memory_reservation_t *memory_reservations;
+
+static bool reservation_conflict(const driver_memory_reservation_t *reservation,
+                                 uint64_t start, uint64_t end,
+                                 uint64_t *busy_end) {
+    /* Sorted, disjoint ranges: the last start <= end has the greatest end
+     * among possible conflicts. No linear firmware-table scan with IRQs off. */
+    size_t low = 0, high = reservation->count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (reservation->ranges[mid].start <= end)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+    if (!low || reservation->ranges[low - 1].end < start)
+        return false;
+    uint64_t last = reservation->ranges[low - 1].end;
+    if (busy_end && last > *busy_end)
+        *busy_end = last;
+    return true;
+}
+
+static bool memory_conflict(uint64_t start, uint64_t end, uint64_t *busy_end) {
+    bool busy = false;
+    for (driver_memory_reservation_t *at = memory_reservations; at;
+         at = at->next)
+        busy |= reservation_conflict(at, start, end, busy_end);
+    return busy;
+}
+
+int driver_memory_reserve(const driver_memory_range_t *ranges, size_t count,
+                          driver_memory_reservation_t **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!ranges || !count)
+        return -EINVAL;
+    if (count >
+        (~(size_t)0 - sizeof(driver_memory_reservation_t)) / sizeof(*ranges))
+        return -EOVERFLOW;
+    driver_memory_reservation_t *reservation =
+        kmalloc(sizeof(*reservation) + count * sizeof(*ranges));
+    if (!reservation)
+        return -ENOMEM;
+    reservation->count = count;
+    memcpy(reservation->ranges, ranges, count * sizeof(*ranges));
+    for (size_t i = 0; i < count; i++)
+        if (reservation->ranges[i].start > reservation->ranges[i].end) {
+            kfree(reservation);
+            return -EINVAL;
+        }
+    /* Normalize copied input outside both locks. Adjacent/overlapping table
+     * storage can share a reservation, without inventing parent ownership. */
+    for (size_t i = 1; i < count; i++) {
+        driver_memory_range_t range = reservation->ranges[i];
+        size_t j = i;
+        while (j && reservation->ranges[j - 1].start > range.start) {
+            reservation->ranges[j] = reservation->ranges[j - 1];
+            j--;
+        }
+        reservation->ranges[j] = range;
+    }
+    size_t merged = 0;
+    for (size_t i = 0; i < count; i++) {
+        driver_memory_range_t range = reservation->ranges[i];
+        driver_memory_range_t *previous =
+            merged ? &reservation->ranges[merged - 1] : NULL;
+        if (previous && (range.start <= previous->end ||
+                         (previous->end != ~(uint64_t)0 &&
+                          range.start == previous->end + 1))) {
+            if (range.end > previous->end)
+                previous->end = range.end;
+        } else
+            reservation->ranges[merged++] = range;
+    }
+    reservation->count = merged;
+    driver_ops_lock();
+    int ret = 0;
+    for (int i = 0; i < g_device_count && !ret; i++) {
+        const device_t *dev = g_devices[i];
+        if (dev->res_count < 0 || (dev->res_count && !dev->res)) {
+            ret = -EINVAL;
+            break;
+        }
+        for (int j = 0; j < dev->res_count && !ret; j++) {
+            const resource_t *res = &dev->res[j];
+            if (res->type != RES_MMIO)
+                continue;
+            if (res->start > res->end) {
+                ret = -EINVAL;
+                break;
+            }
+            if (reservation_conflict(reservation, res->start, res->end, NULL))
+                ret = -EBUSY;
+        }
+    }
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (driver_resource_claim_t *at = resource_claims; at && !ret;
+         at = at->next) {
+        if (at->type != RES_MMIO)
+            continue;
+        if (reservation_conflict(reservation, at->start, at->end, NULL))
+            ret = -EBUSY;
+    }
+    if (!ret) {
+        reservation->next = memory_reservations;
+        memory_reservations = reservation;
+    }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    driver_ops_unlock();
+    if (ret)
+        kfree(reservation);
+    else
+        *out = reservation;
+    return ret;
+}
+
+void driver_memory_release(driver_memory_reservation_t *reservation) {
+    if (!reservation)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    driver_memory_reservation_t **at = &memory_reservations;
+    while (*at && *at != reservation)
+        at = &(*at)->next;
+    if (!*at) {
+        spin_unlock_irqrestore(&g_driver_core_lock, flags);
+        panic("releasing an unowned driver memory reservation");
+    }
+    *at = reservation->next;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    kfree(reservation);
+}
 static int resource_request(device_t *owner, const resource_t *res,
                             driver_resource_claim_t **out, bool checked) {
     if (!out)
@@ -299,6 +440,13 @@ static int resource_request(device_t *owner, const resource_t *res,
     *claim = (driver_resource_claim_t){owner,    res->type, res->start,
                                        res->end, checked,   NULL};
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    if (claim->type == RES_MMIO &&
+        memory_conflict(claim->start, claim->end, NULL)) {
+        spin_unlock_irqrestore(&g_driver_core_lock, flags);
+        device_put(owner);
+        kfree(claim);
+        return -EBUSY;
+    }
     for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
         if (at->owner != owner && at->type == claim->type &&
             at->start <= claim->end && claim->start <= at->end) {
@@ -355,6 +503,8 @@ static int check_range(device_t *owner, const resource_t *res,
         }
     }
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    if (resource_space(res->type) == RES_MMIO)
+        busy |= memory_conflict(res->start, res->end, &end);
     for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
         if (at->owner != owner && at->type == resource_space(res->type) &&
             at->start <= res->end && res->start <= at->end) {
@@ -384,6 +534,9 @@ int driver_resource_check_claims(device_t *owner, const resource_t *res) {
         return -EINVAL;
     int ret = 0;
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    if (resource_space(res->type) == RES_MMIO &&
+        memory_conflict(res->start, res->end, NULL))
+        ret = -EBUSY;
     for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {
         if (at->owner != owner && at->type == resource_space(res->type) &&
             at->start <= res->end && res->start <= at->end) {
@@ -421,6 +574,12 @@ static int declaration_conflict(device_t *dev) {
         return -EINVAL;
     for (int i = 0; i < dev->res_count; i++) {
         const resource_t *res = &dev->res[i];
+        if (res->type == RES_MMIO && memory_reservations) {
+            if (res->start > res->end)
+                return -EINVAL;
+            if (memory_conflict(res->start, res->end, NULL))
+                return -EBUSY;
+        }
         if (resource_space(res->type) != RES_MMIO && res->type != RES_IOPORT)
             continue;
         for (driver_resource_claim_t *at = resource_claims; at; at = at->next) {

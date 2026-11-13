@@ -42,6 +42,7 @@ extern void acpi_os_start_worker(void);
 #include "net/socket.h"
 #include "net/stack.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/core/memory.h"
 #include "drivers/core/runtime_test.h"
 #include "drvmod/drvmod.h"
 #include "drivers/usb/usb.h"
@@ -185,6 +186,8 @@ void kernel_main(void) {
     mm_pt_anon_prov_init();
 #endif
     driver_core_init();
+    if (driver_memory_protect_boot())
+        panic("boot: cannot protect RAM and firmware storage from MMIO");
     printf("[INIT] Driver core initialized\n");
     usb_core_init();
     printf("[INIT] USB core initialized\n");
