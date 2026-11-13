@@ -35,7 +35,7 @@ A20OS 现在同时支持三种驱动路径：
 
 ## 模块接口
 
-驱动 ABI 当前为 9：`driver_t` 新增 quiesce，旧模块必须重建。模块可使用导出的 `driver_dma_domain_*`、页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。公开布局与 ABI 9 保持不变；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。详细约束见 [原生驱动运行时](native-runtime.md)。
+驱动 ABI 当前为 9：`driver_t` 新增 quiesce，旧模块必须重建。模块可使用导出的 `driver_dma_domain_*`、页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。公开布局与 ABI 9 保持不变；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 xHCI、HID、hub、storage 包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
 
 模块只能解析 `kernel/drvmod/framework.c` 中的导出表。当前导出接口包括：
 
