@@ -1107,6 +1107,13 @@ int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
         mutex_unlock(&ej->lock);
         return -EIO;
     }
+#else
+    /* The C collector also owns the failed transaction's cache image. Never
+     * mutate it after poison, even if a later write reuses a recorded block. */
+    if (ej->txn_faulted) {
+        mutex_unlock(&ej->lock);
+        return -EIO;
+    }
 #endif
 #ifdef CONFIG_UFSD_RUST_JBD2_POLICY
     /* The Rust bcache preserves the legacy C callback's write-through
@@ -1138,9 +1145,9 @@ int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
             /* A transaction that cannot grow is refused rather than silently
              * shrunk: a commit missing a block would replay a filesystem whose
              * inode and bitmap disagree. */
-            printf("[EXT4/JBD2] transaction overflow at %llu blocks; "
+            printf("[EXT4/JBD2] transaction record failed offset=%llu rc=%d; "
                    "refusing further writes; retained held pages\n",
-                   (unsigned long long)byte_off);
+                   (unsigned long long)byte_off, ret);
 #ifdef CONFIG_UFSD_RUST_JBD2_TXN
             (void)a20_jbd2_txn_poison(ej->txn);
 #else

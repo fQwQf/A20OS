@@ -109,7 +109,7 @@ int ext4_fread(vfile_t *vf, char *buf, size_t count) {
 }
 
 
-int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
+static int ext4_fwrite_unlocked(vfile_t *vf, const char *buf, size_t count) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
     if (ext4_is_inconsistent(fc->sb)) return -117;
     if (fc->is_dir) return -EISDIR;
@@ -221,6 +221,24 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         ext4_write_inode(fc->sb, fc->inode_num, inode) < 0)
         return -EIO;
     return (int)done;
+}
+
+
+int ext4_fwrite(vfile_t *vf, const char *buf, size_t count)
+{
+    ext4_fctx_t *fc = vf ? vf->priv : NULL;
+    if (!fc || !fc->sb)
+        return -EINVAL;
+    /* Namespace changes, orphan-link edits and truncate also rewrite this
+     * inode. Serialize the complete read/modify/write, including allocation,
+     * and refresh per-open snapshots even when EOF has not changed. Otherwise
+     * writeback can resurrect i_links_count/i_dtime from before an unlink or
+     * overwrite another writer's extent tree. */
+    rw_mutex_write_lock(&fc->sb->metadata_lock);
+    ext4_fctx_inode_dirty(fc);
+    int ret = ext4_fwrite_unlocked(vf, buf, count);
+    rw_mutex_write_unlock(&fc->sb->metadata_lock);
+    return ret;
 }
 
 
