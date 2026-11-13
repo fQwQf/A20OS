@@ -27,6 +27,9 @@ static int checked_validate(amd_iommu_route_t *route,amd_iommu_route_info_t *out
 static int checked_memory(amd_iommu_route_t *route,size_t index,acpi_ivrs_memory_t *out) {
  unsigned n=scope_writes;int ret=amd_iommu_route_memory(route,index,out);assert(scope_writes==n);return ret;
 }
+static int checked_reserve(amd_iommu_route_t *route) {
+ unsigned n=scope_writes;int ret=amd_iommu_route_reserve(route);assert(scope_writes==n);return ret;
+}
 static void checked_release(amd_iommu_route_t *route) {
  unsigned n=scope_writes;amd_iommu_route_release(route);assert(scope_writes==n);
 }
@@ -114,6 +117,12 @@ static void route_case(const char *name) {
  if(!strcmp(name,"range-missing"))controller->config[0x4c/4]=0x09090080;
  controller->config[0x50/4]=(40U<<8)|(48U<<15);
  route_firmware(alias);
+ if(!strcmp(name,"reserve-alias-sibling")) {
+  scope_add(2,5,0,0);memmove(route_ivrs+108,route_ivrs+100,route_length-100);
+  memset(route_ivrs+100,0,8);route_ivrs[100]=0x42;
+  route_put(route_ivrs,101,0x228,2);route_put(route_ivrs,105,0x220,2);
+  route_length+=8;route_put(route_ivrs,50,60,2);
+ }
  if(!strcmp(name,"alias-range-outside")) {
   scope_hw[2][4][0].present=0;scope_add(0,4,0,0);
   route_put(route_ivrs,93,0x20,2);route_put(route_ivrs,97,0x20,2);
@@ -139,6 +148,7 @@ static void route_case(const char *name) {
   route_acquire_error(NULL,-EINVAL);assert(amd_iommu_route_acquire(client,NULL)==-EINVAL);
   route_error(NULL,-EINVAL);
   assert(amd_iommu_route_validate(NULL,NULL)==-EINVAL);
+  assert(amd_iommu_route_reserve(NULL)==-EINVAL);
   acpi_ivrs_memory_t m;memset(&m,0xa5,sizeof(m));
   assert(amd_iommu_route_memory(NULL,0,&m)==-EINVAL&&!m.start);
   assert(amd_iommu_route_memory(NULL,0,NULL)==-EINVAL);amd_iommu_route_release(NULL);
@@ -166,7 +176,50 @@ static void route_case(const char *name) {
   assert(!amd_iommu_route_memory(route,0,&memory)&&memory.start==0x100000&&memory.flags==7);
   if(alias)assert(!amd_iommu_route_memory(route,1,&memory)&&memory.start==0x200000&&memory.flags==5);
   assert(amd_iommu_route_memory(route,info.memory_count,&memory)==-ENODEV&&!memory.start);
-  if(!strcmp(name,"changed-unit")) {
+  if(!strncmp(name,"reserve-",8)) {
+   if(!strcmp(name,"reserve-allocation")) {
+    int n=allocated;fail_at=allocations+1;
+    assert(amd_iommu_route_reserve(route)==-ENOMEM&&allocated==n);fail_at=0;
+    assert(!amd_iommu_route_validate(route,&info)&&!amd_iommu_route_reserve(route));
+   } else if(!strcmp(name,"reserve-user")||!strcmp(name,"reserve-alias-user")) {
+    device_t *owned=alias?route->dma_client:client;owned->user_owned=1;
+    assert(amd_iommu_route_reserve(route)==-EBUSY);owned->user_owned=0;
+    assert(!amd_iommu_route_reserve(route));
+   } else if(!strcmp(name,"reserve-bme")||!strcmp(name,"reserve-alias-bme")) {
+    struct scope_function *active=alias?&scope_hw[2][4][0]:&scope_hw[2][3][2];
+    active->config[1]|=4;assert(amd_iommu_route_reserve(route)==-EBUSY);
+    active->config[1]&=~4U;assert(!amd_iommu_route_reserve(route));
+   } else if(!strcmp(name,"reserve-read")||!strcmp(name,"reserve-alias-read")) {
+    struct scope_function *bad=alias?&scope_hw[2][4][0]:&scope_hw[2][3][2];
+    uint32_t command=bad->config[1];bad->config[1]=0xffffffff;
+    assert(amd_iommu_route_reserve(route)==-EIO);bad->config[1]=command;
+    assert(!amd_iommu_route_reserve(route));
+   } else if(!strcmp(name,"reserve-generic")) {
+    uint16_t keys[]={info.dma_requester};pci_requester_reservation_t *block=NULL,*free_key=NULL;
+    assert(!pci_requester_reserve(provider,0,keys,1,&block));
+    assert(amd_iommu_route_reserve(route)==-EBUSY);pci_requester_release(block);
+    assert(!pci_requester_reserve(provider,0,keys,1,&free_key));pci_requester_release(free_key);
+    assert(!amd_iommu_route_reserve(route));
+   } else {
+    assert(!amd_iommu_route_reserve(route));
+    assert(amd_iommu_route_reserve(route)==-EALREADY);
+    device_t *other_client=device_get(client);
+    if(!strcmp(name,"reserve-alias")||!strcmp(name,"reserve-alias-sibling")) {
+     device_put(other_client);other_client=scope_device(strstr(name,"sibling")?0x228:0x220);
+    } else if(!strcmp(name,"reserve-replacement")) {
+     scope_hw[2][3][2].config[0]=0x99991234;pci_rescan();route_error(route,-ENODEV);
+     device_put(other_client);other_client=scope_device(0x21a);assert(other_client!=client);
+    } else if(!strcmp(name,"reserve-detach")) {
+     assert(!driver_unregister(&amdvi_driver));route_error(route,-ESHUTDOWN);
+     assert(amd_iommu_route_reserve(route)==-ESHUTDOWN);
+     driver_discovery_begin();assert(!driver_register(&amdvi_driver));driver_discovery_end();
+     assert(!bus_probe_device(provider));
+    } else assert(!strcmp(name,"reserve-duplicate"));
+    amd_iommu_route_t *second=NULL;assert(!amd_iommu_route_acquire(other_client,&second));
+    device_put(other_client);assert(amd_iommu_route_reserve(second)==-EBUSY);
+    amd_iommu_route_release(route);route=second;assert(!amd_iommu_route_reserve(route));
+   }
+  } else if(!strcmp(name,"changed-unit")) {
    controller->config[0x4c/4]=0x08080080;route_error(route,-ESTALE);
   } else if(!strcmp(name,"changed-control")) {
    mmio[0x18]=1;route_error(route,-ESTALE);mmio[0x18]=0;
@@ -203,10 +256,11 @@ static void route_case(const char *name) {
  }
  assert(!driver_unregister(&amdvi_driver)&&!provider->drv&&!provider->drv_priv);
  assert(!amdvi_owners&&!route_tables&&route_maps==route_unmaps);
- if(strcmp(name,"removed-client")&&strcmp(name,"replacement"))assert(client->references==client_refs);
+ if(strcmp(name,"removed-client")&&strcmp(name,"replacement")&&strcmp(name,"reserve-replacement"))assert(client->references==client_refs);
 cleanup:
  device_put(client);device_put(provider);memset(scope_hw,0,sizeof(scope_hw));pci_rescan();
  assert(!g_device_count&&route_peer.references==1);
+ assert(!pci_requester_reservations);
  for(unsigned i=0;i<PCI_MAX_PUBLISHED_DEVICES;i++)assert(g_pci_devs[i].references<=1);
 }
 '''
@@ -230,7 +284,7 @@ class AmdIommuRouteTests(unittest.TestCase):
         source = source.replace(old, 'static void *route_map(uint64_t,size_t,uint32_t);\nstatic void route_unmap(void *,size_t);\nvoid *arch_device_map_mmio(uint64_t pa,size_t n,uint32_t f){return route_map(pa,n,f);}\nvoid arch_device_unmap_mmio(void *p,size_t n){route_unmap(p,n);}')
         marker = 'int main(int argc,char **argv) {'
         cases = CASES
-        for suffix in ('acquire', 'validate', 'memory', 'release'):
+        for suffix in ('acquire', 'validate', 'memory', 'release', 'reserve'):
             cases = cases.replace('amd_iommu_route_' + suffix + '(', 'checked_' + suffix + '(')
         source = source.replace(marker, SCOPE_CASES.split('static void scope_expect(')[0] + WRAPPERS + cases + '\n' + marker)
         source = source.replace('if(!strcmp(argv[1],"pci-retired"))', 'if(!strncmp(argv[1],"route-",6))route_case(argv[1]+6);\n else if(!strcmp(argv[1],"pci-retired"))')
@@ -283,6 +337,21 @@ class AmdIommuRouteTests(unittest.TestCase):
 
     def test_last_handle_retains_aperture_and_firmware_across_rebind(self):
         self.run_cases('detach', 'controller-removed')
+
+    def test_explicit_reservation_and_global_pci_namespace(self):
+        self.run_cases('reserve-duplicate', 'reserve-generic')
+
+    def test_alias_target_and_sibling_alias_cannot_claim_separate_contexts(self):
+        self.run_cases('reserve-alias', 'reserve-alias-sibling')
+
+    def test_reservation_rejects_user_ownership_and_bus_mastering(self):
+        self.run_cases('reserve-user', 'reserve-alias-user', 'reserve-bme', 'reserve-alias-bme', 'reserve-read', 'reserve-alias-read')
+
+    def test_reservation_allocation_failure_keeps_observation_valid(self):
+        self.run_cases('reserve-allocation')
+
+    def test_reservation_survives_bdf_replacement_and_controller_rebind(self):
+        self.run_cases('reserve-replacement', 'reserve-detach')
 
 
 if __name__ == '__main__':
