@@ -38,7 +38,7 @@
 
 `driver_unregister()` 只有在剩余绑定全部成功解绑后才移除驱动登记；失败保留登记与代码所有权，调用者不能释放模块/driver 对象。已完成解绑的设备保持已完成状态，调用者显式重试处理余下绑定。成功 probe 后 class 发布失败且 remove 也失败时，同样保留绑定/资源；`probe_error` 保存原 publication 错误，不允许下一候选驱动覆盖它。未选择受管失败清理的旧 probe 仍须自行安全回滚；核心无法从普通错误码推断未停止的硬件。
 
-REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。尚未发布的 USB 枚举失败清理仍是另一路径，不由这里证明完整。
+REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。USB 枚举的部分 slot 和接口图现在也交给同一端口清理路径，见下文；HCD 自身 start/probe 的停止失败仍需单独接入。
 
 公开 `device_t`/`driver_t` 布局及驱动 ABI 9 未改变；新增模块导出 `device_unregister`，源码调用方须检查上述 int 返回值。关机/kexec 的 `shutdown`、失败 probe 的硬件回滚、实际 stop/失效完成仍需要各 provider 的明确协议；核心不把超时转换成可释放证明。
 
@@ -64,6 +64,18 @@ static int gpu_probe(device_t *dev) {
 子设备/consumer 停止失败可能阻止父设备执行 quiesce。此时失败 probe 保持 `DEV_STATE_PROBE_CLEANUP`，其 class 先 offline，恢复后重试仍须执行首次 quiesce；进入自己的 remove 后才变为 REMOVING，后续仅重试 remove。`device_is_stopping()` 同时观察两种状态；checked resource、PCI 查找/范围观察、managed DMA 创建/新映射及 class 发布均拒绝它们。旧引用和旧资源保留供停止，不授予新使用权限。该 helper 只观察元数据，调用者仍须持有引用并按需使用 discovery 事务协调绑定/配置。
 
 probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（仍为 9）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
+
+### 部分 USB 枚举的所有权交还
+
+USB 使用自己的端口/slot 对象表达协议存储，不额外建立通用事务对象。`usb_core_enumerate_port()` 在 reset/slot 分配前预分配 `usb_device_t` 清理对象，确保硬件初始化后即使 OOM 也无需再分配才能保留失败状态。端口已有对象或 pending 清理时返回 `-EBUSY`，停止中的 HCD 返回 `-ENODEV`，不继续 reset 或覆盖旧对象。
+
+HCD `alloc_slot(..., &slot)` 的错误码与所有权分别表达：核心预先清零输出；只要 `slot.hcd != 0`，包括非零返回，都将可清理的已知 slot 交给核心。`slot.address` 回报仍使用的软件地址或隐式分配的地址；未使用的软件预留立即归还。核心私有状态另外记录是否持有软件预留，停止后只归还该份预留；隐式地址即使与另一个控制器的软件地址同号，也不能释放别人的占用。xHCI 在 Enable Slot 得到有效 token 后保留它，Address Device 失败不再自行忽略 Disable Slot 的结果。hub 转发保留这一契约。没有 token 时，未知的控制器命令状态仍由 HCD 自己持有；零 token 的成功结果按 `-EIO` 处理，不能解释为已获得设备。
+
+EP0 MPS、descriptor/configuration、解析/分配或部分 interface 发布失败均走 `usb_disconnect_port()`：先 offline 已发布 class，再检查 `abort_slot()`；只有成功才继续 interface REMOVE 和协议存储回收。停止失败/缺少回调时保留端口、slot、仍占用的软件地址、已分配的接口/endpoint 和 HCD 登记；负 errno 传播，正数规范化为 `-EIO`，缺少回调返回 `-EOPNOTSUPP`。清理成功返回原枚举错误；清理失败返回清理错误，同时诊断中保留两者。部分发布 helper 不再先解绑后停止硬件。
+
+扫描总在新枚举前重试 pending 清理；HCD 注销也可重试。slot 已停止但 interface remove 失败时保留该阶段，之后不重复 abort。普通重新连接也必须等待旧清理完成。清理重试不增加枚举次数，也不清零失败预算；扫描对同一次连接最多尝试三次枚举，只有观察到物理断开才重新计数。`port_state` 的计数/阶段位是核心私有实现，HCD 不解释它。
+
+这些变更保持公开结构布局和 ABI 9。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
 
 ## 资源占用与受管映射
 
@@ -515,3 +527,18 @@ QEMU 只验证单个 EDU requester 的集合查询/预留和空 policy 集成；
 `make check-firmware-model` 通过 393 项及单独 1 项 sleep ABI 检查；115 个 instance、32 个 driver component 和 193 个 smoke case 审计通过。x86_64 Rust 注册表和 RISC-V64/AArch64 C 注册表 embedded 生命周期 QEMU 门禁均以 0 退出，原标记及 `DRIVER_PROBE_CLEANUP: PASS managed=1 rollback=1` 全部匹配。`tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核/模块/开发镜像与双核 QEMU，9 个标记匹配。AArch64 embedded 结果不代表其 generic 用户态依赖问题已解决。 `tools/a20 test smoke-driver-iommu-native-riscv64` 也完成 generic 内核/开发镜像和 QEMU，3 个标记全部匹配，包括 requester 冲突/释放、真实跨页 EDU DMA、只读映射、unmap 后 fault、detach 与 watch。失败 probe 的故障注入由上述主机集成验证，不能将正常 QEMU DMA 路径记作硬件停止超时证据。
 
 这里只证明显式协议和所列模型/启动路径。旧硬件驱动不会自动拥有部分初始化安全的 stop；实体 GPU、AMD-Vi 翻译、关机/kexec 的可失败 shutdown 和未发布 USB 枚举清理仍须独立完成。文档引用检查通过 540 条；导航仍有原工作区 7 个未索引文档，无新增链接/锚点错误。实际 `docs/zh` 迁移与其他工作区修改保留，验证日志位于本地 `.kernel-build/probe-cleanup-review/`。
+
+
+### USB 部分初始化清理验证（2026-11-14）
+
+USB 代码提交 `5ed8f02e6`，既有 HID 查询导出修复 `866b6e6d2`，QMP/热插拔证据门禁修复 `801343055`。隔离导出树通过 186 项不同的主机测试方法；执行列表中 PCI resource 的 26 项重复选择了一次，实际执行 212 次，全数通过，未把重复执行计为新增覆盖。新增 USB 8 项方法、25 个场景使用生产 core/PCI/USB 代码验证已知部分 slot 的交还、显式/隐式地址、无 token 错误、正数错误、EP0 MPS/四阶段 descriptor/config/control 失败、分配失败、无 abort 回调、预分配 owner OOM、地址耗尽、停止失败的端口保留、三次连接预算、部分发布后的停止/解绑顺序和 remove 重试。类发布后端、硬件、分配器和同步由主机 fixture 替代，启用 ASan/UBSan。部分发布用例通过显式 ADD observer 先绑定首个接口，再注入后续发布失败，检查停止未确认前不释放其 devres。隐式地址同号测试同时覆盖正常释放与失败回滚，确保另一控制器的软件预留仍在。
+
+xHCI 另增 1 项方法、9 个命令场景，执行生产 alloc_slot 回调，以替代命令后端验证 Enable/Address 错误、fatal、非法/缺失 token 和成功路径；Address 失败不自行忽略第二个 Disable Slot。模块边界测试实际编译 NVMe、PS/2、r8169、xHCI、USB HID/hub/storage 共 7 个包装器并核对全部未定义符号可解析。8 个 USB 行为负控与 1 个导出审计负控均按预期失败；恢复后重新执行完整隔离回归并逐文件核对源码与代码提交一致。
+
+首次 `make smoke-usb-hotplug-x86_64` 的 generic 内核/镜像构建和 slot 释放正常，但 HID 因缺少 `fbcon_active` 导出未加载，门禁失败；修复已有只读查询后通过。逐段检查又发现旧 gate 只要求首次 ready/一次释放，BOOT REPORT 重放可伪造第二次枚举，而且 QMP greeting 被当作命令响应会导致最终 device_add 未确认就断开。现以请求 ID 匹配响应，key/action pump 共享握手；post-check 排除报告重放，要求真实拔出后的 address=1 和第二次 ready。最终严格热插拔门禁以 0 退出，日志明确显示首次 port 5、拔出释放、再于 port 6 分配 address=1 并重新 ready，均发生在报告重放之外。`make smoke-usb-x86_64` 的键鼠就绪、中断完成和真实按键 code=30/value=1 匹配；`make smoke-usb-hub-x86_64` 验证嵌入式共享实现的 hub 下游键盘/鼠标枚举。以上不是实体设备停止超时证据。
+
+门禁工具新增 5 项测试：真实 Unix socket peer 注入 greeting、event、无关响应、capabilities 拒绝并延迟最终响应，确认连接保持到匹配回包；另拒绝只由重放组成的 replug 记录及共享槽位忙时读取旧日志。QMP/重放/旧日志的 3 个负控均触发行为失败。Python 负控恢复后清除导出树字节码缓存，避免同秒等长替换残留的 pyc；隔离树 18 项工具回归最终通过，源码与门禁提交逐文件一致。
+
+`check-firmware-model` 通过 402 项及单独 1 项 sleep ABI 检查，最终 `check-pc-drivers` 通过 58 项；115 个 instance、32 个 driver component、193 个 smoke case 审计通过。AArch64 embedded 共享驱动构建通过；一次并行 QEMU 被共享槽位阻止，旧解释器错误地用旧日志显示 PASS，该次不计启动。串行重跑实际启动并匹配所有生命周期标记；解释器现在对状态 75 直接返回，不执行 post-check 或旧日志认证。这不代表 AArch64 USB 设备、generic 用户态或实体 GPU 已运行验证。
+
+公开结构布局/ABI 9 保持不变。未知 Enable Slot 结果、HCD 自身 start/probe、fatal 控制器恢复、scan/unregister 的通用并发协调及厂商 GPU 停止/失效仍有后续工作；已交还的端口对象不会以普通错误码为由提前释放。文档引用检查通过 540 条，导航仍是工作区既有 7 个未索引页面。实际 `docs/zh` 迁移和其他源码修改保留；本地日志位于 `.kernel-build/usb-enumeration-review/`。

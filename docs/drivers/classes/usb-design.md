@@ -97,13 +97,15 @@ usb_device_t             /* 逻辑设备：地址、速度、descriptor、配置
 ### 4.3 枚举流程
 
 1. HCD 轮询根集线器端口：`XHCI_PORTSC` 的 CSC/CCS 变化 → 复位端口。
-2. 新连接：地址 0 复位设备 → `SET_ADDRESS` 分配地址 → 读 device descriptor → 读配置描述符 → 解析 interface/endpoint。
+2. 新连接：先分配端口清理对象，再复位设备和分配 slot/address，读取 device/config descriptor 并解析 interface/endpoint。xHCI 由 Address Device 命令分配地址，不额外发送第二个 SET_ADDRESS。
 3. 为每个 interface 构建 `device_t`，调用 `device_hotplug(..., BUS_EVENT_ADD)`，由统一核心注册、匹配并 probe class driver。
-4. 断开时调用 `device_hotplug(..., BUS_EVENT_REMOVE)`，先下线 class/devfs/sysfs，再执行 `driver->remove()`；随后 HCD `abort_slot` 并释放 interface/endpoint/device 存储。
+4. 断开或枚举失败时先 offline 已发布 class，再检查 HCD `abort_slot`；只有停止成功才执行 interface REMOVE 并回收协议存储。任一步失败保留端口、slot/address、接口与 HCD，扫描/注销显式重试。部分发布也遵守这个顺序；slot 已停后不重复 abort。
+
+`alloc_slot` 非零返回也可能交还非零 `usb_slot_t.hcd` 清理 token，核心必须保留；零 token 的未知控制器状态仍由 HCD 管理。失败清理无需新的分配，禁止覆盖 pending 端口。扫描只对真实枚举增加计数，扫描对同一连接最多尝试三次，物理断开才重置。详细契约见 [原生运行时](../guide/native-runtime.md#部分-usb-枚举的所有权交还)。 热插拔门禁排除启动报告重放，要求实际拔出后的第二次枚举和 ready；QMP 操作等待匹配命令的回包。
 
 ### 4.4 多控制器
 
-- 每控制器动态分配独立 `xhci_controller_t`（由 `device_t->drv_priv` 持有），USB core 最多登记四个 HCD。xHCI 使用 ANY PCI ID 表再由 `.match` 精确检查 PCI class `0x0C0330`。
+- 每控制器动态分配独立 `xhci_controller_t`（由 `device_t->drv_priv` 持有），USB core 最多登记 32 个 HCD（包括 hub 提供的下游总线）。xHCI 使用 ANY PCI ID 表再由 `.match` 精确检查 PCI class `0x0C0330`。
 
 ## 5. HCD 接口（由 xhci_hid 重构而来）
 
@@ -142,13 +144,13 @@ typedef struct usb_hcd {
 
 ### 6.3 集线器
 
-当前仅根集线器（HCD 内置），无外部 hub 级联。通用 hub 驱动（class=9）和递归枚举是计划项，不是当前已实现能力。
+`class/usb_hub.c` 已实现 class=9 hub：通过父 HCD 转发 slot/control/abort，发布下游端口并保留相同的部分 slot 交还契约。递归枚举由 HCD 列表扫描推进；QEMU 门禁为 `make smoke-usb-hub-x86_64`，实体 hub/拓扑边界仍需对应平台证据。
 
 ## 7. 线程 / 并发模型
 
-- 当前没有 per-controller 内核线程。`kernel_progress_poll()` 调用按 250 ms 节流的 `usb_core_poll()`，后者扫描 HCD 端口并推进枚举/移除；input read/poll 还会推进 HID 事件。
-- URB 完成处理在 HCD 轮询上下文。
-- 若改为 controller worker 或 IRQ completion，必须补 controller/endpoint 并发状态机和锁契约；不得沿用旧草案中尚未实现的锁序。
+- 当前没有 per-controller 内核线程。`kernel_progress_poll()` 调用按约 20 ms（50 Hz）节流的 `usb_core_poll()`，后者扫描 HCD 端口并推进枚举/移除；input read/poll 还会推进 HID 事件。
+- xHCI 注册自己的共享 INTx handler；可用时由 IRQ 推进完成，未路由时回退轮询，回调在控制器自旋锁外执行。
+- scan/enumerate/unregister 由调用者保证单一任务上下文所有者；poll 的防重入标记不等于通用热拔除并发锁。同步命令/控制/bulk 由 `xfer_busy` 串行化，不能在设备自旋锁内等待停止或 remove。
 
 ## 8. 内存 / DMA 模型
 
@@ -191,9 +193,9 @@ Phase 2（历史计划，已实现）：BOT 存储。
 - QEMU `usb-storage` 可挂载文件系统。
 - 预计：~1200–1800 行。
 
-Phase 3（未来计划，未实现）：hub 与其它 HCD。
+Phase 3：hub 已实现，其它 HCD 仍待开发。
 
-- 通用 hub 驱动（递归枚举）。
+- 通用 hub 驱动和递归枚举见 §6.3。
 - EHCI/UHCI/OHCI（净室，参考规范）。可选。
 
 ## 12. 风险

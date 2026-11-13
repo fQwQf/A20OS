@@ -274,6 +274,10 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 
 已知限制：门禁只跑单核，未做 SMP 压力验证；class remove 与已排队 URB 的 completion 之间仍有窗口。
 
+### USB 部分枚举清理
+
+USB scan/enumerate/unregister 要求同一任务所有者协调；poll 的原子防重入不保护并发注销。端口清理对象先于 slot 分配建立，硬件已交还 token 后的错误路径无需再分配保留记录。部分 interface 发布失败也要先 offline、确认 abort_slot 成功，再解绑和释放；不能先 remove 再停止可能读 pending URB 的事件环。失败保留对象/计数/阶段，slot 已停后的 remove 重试不重复控制器命令。HCD 的自旋锁不跨等待，完整协议见 [原生运行时](native-runtime.md#部分-usb-枚举的所有权交还)。
+
 ### USB HID
 
 每接口 `usb_hid_dev_t.lock` 保护 event ring 和 previous report；URB 的重提交在锁外进行；`usb_hid_complete()` 现在自己取该锁，因此不论 completion 来自 IRQ handler、`usb_core_poll()` 还是别的 endpoint 的 event wait，锁覆盖都是一致的。

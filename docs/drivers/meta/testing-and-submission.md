@@ -113,6 +113,8 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 
 修改退出路径还应运行 `python3 -m unittest tools.tests.test_driver_remove tools.tests.test_native_bus_remove tools.tests.test_i2c_transport_lifetime -v`。前者直接链接 C/Rust 两条生产注册表路径；bus 测试覆盖缺失/替换 PCI 身份、USB abort/remove 失败后的端点/address 保留与重试。检查失败期间无 devres 提前释放、无下一候选覆盖、无 REMOVE 完成通知；成功后再确认引用与占用回到基线。启动测试不替代真实设备停止超时与 DMA 可达性验证。
 
+USB 初始化/回滚变更还须运行 `python3 -m unittest tools.tests.test_usb_enumeration_cleanup tools.tests.test_native_bus_lifetime tools.tests.test_native_bus_remove tools.tests.test_xhci_firmware_policy -v`。新用例使用生产 core/USB 路径验证部分 slot、描述符/配置/分配失败、地址保留、停止失败后的重试预算、部分发布及 remove 失败；xHCI 用生产 alloc_slot 回调和替代命令后端验证 Address Device 失败的 token 交还。两个相关常规门禁是 `make check-pc-drivers` 和 `make check-firmware-model`。正常硬件路径运行 `make smoke-usb-hotplug-x86_64`、`make smoke-usb-hub-x86_64`；这些是 legacy make smoke 名称，没有对应 `tools/a20 test` instance，不应将实例查找失败写作构建/启动失败。 热插拔门禁的 post-check 排除 BOOT REPORT 重放，要求首次 keyboard ready、拔出释放、再次 address=1 分配与第二次 ready 按顺序出现。QMP pump 按请求 ID 等待匹配回包，不能把 greeting/event/其他响应当作本命令完成。共享槽位忙（75）表示未启动，必须保留失败状态，不能用旧日志认证通过。工具变更须运行 `python3 -m unittest tools.tests.test_smoke_qmp tools.tests.test_smoke_ordered_expect tools.tests.test_smoke_build_paths tools.tests.test_smoke_log_dir -v`。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |
