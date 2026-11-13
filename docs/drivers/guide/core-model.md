@@ -84,6 +84,8 @@ PCI 的 `pci_requester_reserve/release` 显式复制并原子占用 requester �
 
 AMD-Vi 保留路由通过 `amd_iommu_route_acquire/validate/requesters/reserve/memory/release` 显式组合固件策略、PCI 路径与控制器上下文租约。仅 acquire 是观察，显式 requesters 查询完整固件声明集合，reserve 才在全部成员已发布、路径有效、内核所有且 BME 关闭后原子占用，并保留各成员身份/anchor。成员失效不自动释放占用；各驱动停止 DMA 仍由调用者协调。解绑使旧路由失效，占用随 reserve 的句柄保留，控制器资源保留到最后一份路由释放。它不改变 parent/dependency，也不授予 DMA。详见 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期)。
 
+RISC-V 的原生和用户 DMA domain 已共同接入上述 PCI requester 登记，在发布硬件上下文前取得占用；失效失败保留设备、页表和占用。原生 shutdown 确认 detach 后，占用仍随 managed context 保留至最后 put，在映射锁之外释放。该后端只声明一个 RID，不推断 alias。
+
 DMA 内存约束使用独立的 `driver_dma_policy` 不可变对象，不借用 IVRS 或设备上下文。带 policy 的 managed domain 在整批 frame pin/provider 调用前检查物理权限，并将 Unity 地址违规纳入可失败回滚；引用随清理和 shutdown 保留。AMD 的 route policy 转换不授予硬件启用权限。见 [物理约束](native-runtime.md#不可变物理约束与映射入口检查)。
 
 总线修改地址前，须在 `driver_discovery_begin/end` 事务内查询资源并完成硬件和元数据更新。PCI BAR 分配已接入该事务：分配新地址跳过声明和占用区间，已有 BAR 在 reachability/mapping hook 前检查 active claims 与受保护存储；全部 BAR 规划通过后才写入新地址。调用者仍须先停止设备，配置写入失败/硬件消失的恢复不由此接口保证。

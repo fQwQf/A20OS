@@ -4,7 +4,7 @@
 
 ### 原生 GPU 与 AMD-Vi 基础设施
 
-通用运行时、资源占用和 RISC-V IOMMU provider 的实现及历史验证见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；本机目标与上游复用方案见 [真机 GPU 开发](../../graphics/real-hardware-gpu.md)。工作队列和固件读取已提供，不能再整体记为未实现；厂商固件部署/校验/上传仍属后续工作。
+通用运行时、资源占用和 RISC-V IOMMU provider 的实现及历史验证见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；本机目标与上游复用方案见 [真机 GPU 开发](../../graphics/real-hardware-gpu.md)。工作队列和固件读取已提供，不能再整体记为未实现；厂商固件部署/校验/上传仍属后续工作。RISC-V 原生/用户 domain 已在 DC 发布前使用共享 requester 登记并保留失败占用；其他未参与的 provider、raw 配置和跨驱动归属变更仍需协调，这不关闭下列 AMD 硬件接管项。
 
 | 待完成范围 | 关闭条件 |
 |---|---|

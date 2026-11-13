@@ -35,6 +35,8 @@ static const device_id_t ids[] = {
 
 `pci_requester_reserve(owner, segment, ids, count, &reservation)` 原子占用复制的显式 requester 集合，同 owner 重叠也拒绝；成功保留 owner 引用，注销/替换不会自动释放，用 `pci_requester_release()` 显式回收。输入最多 128 项，仅支持 segment 0，不要求键已发布、不推断 alias 或授予 DMA。契约见 [集合占用](native-runtime.md#pci-requester-集合占用)。
 
+RISC-V IOMMU 的原生和用户 domain 都在 DC 发布前接入同一 requester 登记，冲突拒绝，失效失败保留占用。原生成功 shutdown 后直到最后 domain put 才释放占用；用户成功 release 才释放。它只占用显式单个 RID，不推断 alias，见 [原生运行时](native-runtime.md)。
+
 AMD-Vi 的 [保留路由对象](native-runtime.md#保留路由对象与控制器生命周期) 在上述观察接口之上组合 IVRS、原 requester/alias 路径与被动控制器绑定。它保留查询对象和资源租约，并在解绑后拒绝活跃路由校验；仅 acquire 不占用 requester；requesters 可复制完整固件声明集合；显式 reserve 检查每个成员的发布/身份/路径、用户归属和 BME，再原子占用并保留成员引用。成员消失/替换使校验失败但继续占用，仍需调用者通过各所属驱动停止 DMA；不证明硬件隔离或建立 DMA domain。
 
 `amd_iommu_route_policy_create()` 还可将完整声明集合中任一成员（含 sibling alias）的匹配 IVMD 逐记录复制为独立 `driver_dma_policy`，供带约束的 managed domain 做整批权限预检及 Unity 地址核对。相关 ExclusionRange/未知 flags 拒绝，不降级为无约束映射。它不自动占用 requester、保持绑定或配置硬件，见 [IVMD policy](native-runtime.md#从-ivmd-构造独立-dma-policy)。
