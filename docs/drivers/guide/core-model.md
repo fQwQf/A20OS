@@ -70,11 +70,13 @@ uint64_t size = res->end - res->start + 1;
 
 受管 MMIO 映射现在同时申请设备独占的地址区间；`device_map_mmio()`、`device_map_resource()` 和 `pci_map_bar()` 使用同一路径。不同设备的重叠申请失败，同一设备可重复申请，各自保留独立生命周期。需要区分冲突与分配错误时用 `device_map_resource_exclusive(dev, res, &mapping)`，失败清空输出；资源必须属于 `dev->res`。映射回收先执行 architecture unmap，再释放区间占用。
 
-`device_claim_resource(dev, res)` 可仅申请受管 MMIO/port I/O 占用；`driver_resource_request()` / `driver_resource_release()` 则提供显式句柄，适合需要跨 unbind 保留资源的恢复路径。显式句柄保留设备引用但不保留绑定，须由调用者管理 stopping 状态和释放时机。占用登记只覆盖使用这些 API 的访问者，未自动导入所有固件/RAM/PCI window 预留；完整契约见 [原生驱动运行时](native-runtime.md)。
+`device_claim_resource(dev, res)` 可仅申请受管 MMIO/port I/O 占用；`driver_resource_request()` / `driver_resource_release()` 则提供显式句柄，适合需要跨 unbind 保留资源的恢复路径。显式句柄保留设备引用但不保留绑定，须由调用者管理 stopping 状态和释放时机。占用登记只覆盖使用这些 API 的访问者。hosted 启动还以独立存储对象保护受管 RAM 与 ACPI 表页；其余固件/RAM 和 PCI window 预留尚未完整导入；完整契约见 [原生驱动运行时](native-runtime.md)。
+
+物理存储使用独立的 `driver_memory_reserve()` / `driver_memory_release()` 句柄，复制区间并跨设备解绑保留。它阻止基本/checked MMIO claim、受管映射和冲突设备发布，不能通过同 owner 绕过；不为 PFA 分配或预留页面，也不承担 DMA 隔离。详细语义见 [物理存储保留对象](native-runtime.md#物理存储保留对象)。
 
 需要核对未绑定设备的地址声明时，使用 `driver_resource_request_checked()`：owner 必须已注册，核心在生命周期锁内核对其他已发布设备的 MMIO/`RES_MEM`/port 声明及 active claims，再建立句柄。句柄存续时，新设备不能发布冲突声明；owner 注销后保留的句柄仍然生效。此接口不推断 parent/window 的共享例外，资源归属歧义须显式解决。
 
-总线修改地址前，须在 `driver_discovery_begin/end` 事务内查询资源并完成硬件和元数据更新。PCI BAR 分配已接入该事务：分配新地址跳过声明和占用区间，保留已有 BAR 时检查 active claims；全部 BAR 规划通过后才写入新地址。调用者仍须先停止设备，配置写入失败/硬件消失的恢复不由此接口保证。
+总线修改地址前，须在 `driver_discovery_begin/end` 事务内查询资源并完成硬件和元数据更新。PCI BAR 分配已接入该事务：分配新地址跳过声明和占用区间，已有 BAR 在 reachability/mapping hook 前检查 active claims 与受保护存储；全部 BAR 规划通过后才写入新地址。调用者仍须先停止设备，配置写入失败/硬件消失的恢复不由此接口保证。
 
 ### `driver_t`
 

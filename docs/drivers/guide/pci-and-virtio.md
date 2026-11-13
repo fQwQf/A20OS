@@ -48,7 +48,7 @@ LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZ
 
 64 位 BAR 占两个配置 BAR slot，但只生成一个 MMIO resource，所以必须用 `pci_get_bar_resource(dev, physical_bar_number)`。校验 `end >= start` 和最小 aperture 大小后才能访问。资源中的 BAR 地址是 CPU 物理地址；驱动用 `pci_map_bar(dev, physical_bar_number)` 获取受管映射，不能直接访问资源地址。
 
-BAR 更新由 `driver_discovery_begin/end` 生命周期事务串行化。新 MMIO 分配跳过已发布设备声明与 active claims；复用已有 BAR 时只核对其他 owner 的 active claims。全部 BAR 规划通过后，才写入新的分配地址并发布资源表。规划失败会恢复原 command，保留原 BAR 和资源元数据；单调分配游标可能前移。sizing 本身仍会临时写 BAR，此保证不涵盖设备消失或 PCI 配置写入失效。
+BAR 更新由 `driver_discovery_begin/end` 生命周期事务串行化。新 MMIO 分配跳过已发布设备声明、active claims 和物理存储保留区；已有非零 BAR 先核对其他 owner 的 active claims 与物理存储，再调用可能建立映射的 reachability hook。受管 RAM 与 ACPI 表页由启动导入保护；其他可信存储可使用独立的 `driver_memory_reserve()` 对象。全部 BAR 规划通过后，才写入新的分配地址并发布资源表。规划失败会恢复原 command，保留原 BAR 和资源元数据；单调分配游标可能前移。sizing 本身仍会临时写 BAR，此保证不涵盖设备消失或 PCI 配置写入失效。
 
 `pci_map_bar()` 通过受管映射申请资源占用；MMIO 映射撤销完成后才释放占用。它使用基本 claim，不自动核对全部未绑定设备声明。需要保留非 BAR aperture 的调用者，应另行使用 `driver_resource_request_checked()` 并管理完整窗口的生命周期。AMD-Vi 被动 PCI 驱动已采用此路径，保留固件视图与完整窗口占用；只读启动报告本身不保留占用，也不承担硬件接管。详细接口与限制见 [原生驱动运行时](native-runtime.md#资源占用与受管映射)。
 
