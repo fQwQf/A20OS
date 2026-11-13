@@ -602,7 +602,7 @@ void init_kthread(void) {
     } else {
         init_argv[0] = (char *)init_path;
     }
-    /* pid 2 keeps the syscall time path (no vDSO); everything it execs
+    /* The initial user image keeps the syscall time path (no vDSO); what it execs
      * gets the vDSO through the regular exec path (proc/exec.c). */
     uintptr_t init_auxv[A20_AUXV_MAX_PAIRS][2];
     uint32_t init_auxv_n = 0;
@@ -626,24 +626,19 @@ void init_kthread(void) {
                                 info.nommu_alloc_types, info.num_nommu_allocs
 #endif
                                 ,
-                                0);
-    if (ret < 0) {
-        panic("init: proc_alloc_user failed: %d\n", ret);
+                                PROC_USER_IMAGE_BOOT_INIT | PROC_USER_IMAGE_DEFER_READY);
+    if (ret != 1) {
+        panic("init: PID 1 creation failed: %d\n", ret);
     }
 
-    /* Publish the init image's auxv for /proc/<pid>/auxv.  proc_alloc_user_image
-     * creates the mm, so this has to land after it rather than be passed in. */
-    {
-        task_t *init_task = proc_find_get(ret);
-        if (init_task && init_task->mm) {
-            init_task->mm->auxv_n = init_auxv_n;
-            for (uint32_t i = 0; i < init_auxv_n && i < A20_AUXV_MAX_PAIRS;
-                 i++) {
-                init_task->mm->auxv[i][0] = init_auxv[i][0];
-                init_task->mm->auxv[i][1] = init_auxv[i][1];
-            }
-            proc_put(init_task);
-        }
+    /* Complete loader-owned state before PID1 becomes runnable. */
+    task_t *init_task = proc_find_get(ret);
+    if (!init_task || !init_task->mm)
+        panic("init: missing initial address space");
+    init_task->mm->auxv_n = init_auxv_n;
+    for (uint32_t i = 0; i < init_auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
+        init_task->mm->auxv[i][0] = init_auxv[i][0];
+        init_task->mm->auxv[i][1] = init_auxv[i][1];
     }
 
 #ifdef CONFIG_NOMMU
@@ -657,17 +652,16 @@ void init_kthread(void) {
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n", ret,
            (unsigned long)info.entry, (unsigned long)user_sp);
 
+    proc_publish_deferred_task(init_task);
+    proc_put(init_task);
+
 #ifdef CONFIG_COOPERATIVE_BOOT
-    /* PID 0 remains the reaper and scheduler host. */
+    /* PID 0 remains the scheduler host; userspace PID1 reaps its children. */
     printf("[INIT] entering cooperative idle loop\n");
     idle_loop();
 #endif
 
-    /* Become the init reaper: wait for any children (including the user init
-     * process) so they don't become un-reaped zombies. */
-    while (1) {
-        int ret = proc_wait4(-1, NULL, 0);
-        if (ret == -ECHILD)
-            proc_yield();
-    }
+    /* The upstream userspace PID1 is the reaper. The bootstrap thread has no
+     * permanent userspace role; exiting also avoids an ECHILD/yield busy loop. */
+    proc_exit(0);
 }

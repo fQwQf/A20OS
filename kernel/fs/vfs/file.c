@@ -110,14 +110,14 @@ static int vfs_read_file_impl(vfile_t *vf, char *buf, size_t count)
 
 /* Anonymous IPC/character-device I/O does not access mount data. Holding the
  * namespace transaction counter while a desktop service waits for a pipe or
- * tty byte makes orderly shutdown permanently EBUSY. Block-device and all
- * vnode filesystem operations (including named FIFOs) remain gated. */
+ * tty byte makes orderly shutdown permanently EBUSY. Block-device and vnode filesystem I/O remain gated; FIFO payloads
+ * live only in the pipe ring and do not access filesystem metadata. */
 static int vfs_rw_needs_mount_gate(vfile_t *vf)
 {
     if (!vf || !vf->vnode)
         return 0;
     unsigned type = vf->vnode->mode & S_IFMT;
-    return type != S_IFCHR;
+    return type != S_IFCHR && type != S_IFIFO;
 }
 
 int vfs_read_file(vfile_t *vf, char *buf, size_t count)
@@ -141,6 +141,13 @@ static int vfs_write_file_impl(vfile_t *vf, const char *buf, size_t count)
     if ((vf->vnode || vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf)) &&
         !vfs_should_write(vf->flags))
         return -EBADF;
+    /* Named FIFOs have an inode for lookup/stat, but pipe bytes never grow
+     * that inode, consume disk quota, or invalidate filesystem page cache. */
+    if (vfs_is_pipe_vfile(vf)) {
+        int result = vf->ops->write(vf, buf, count);
+        if (result > 0) proc_io_account(0, (uint64_t)result, 0, 0);
+        return result;
+    }
     if (vf->seals & F_SEAL_WRITE)
         return -EPERM;
     if ((vf->seals & F_SEAL_GROW) && vf->vnode &&
@@ -686,6 +693,7 @@ static int vfs_fsync_vfile_impl(vfile_t *vf)
         return -EBADF;
     if (vf->backend_close_done)
         return -ESHUTDOWN;
+    if (vfs_is_pipe_vfile(vf)) return -EINVAL;
     int r = 0;
     /* Filesystems that commit per open file (littlefs) sync here, before
      * the generic device flush below. */

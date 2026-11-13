@@ -216,6 +216,25 @@ void a20_process_vm_mark_dirty(mm_struct_t *mm, uintptr_t address)
 }
 #endif
 
+long process_vm_read_mm_kernel(mm_struct_t *mm, const void *src, void *dst, size_t len)
+{
+    if (!mm || !dst || !process_vm_range_ok((uintptr_t)src, len)) return -EFAULT;
+    size_t done = 0;
+    while (done < len) {
+        void *address;
+        size_t available;
+        pfn_t frame;
+        int ret = process_vm_pin_leaf(mm, (vaddr_t)(uintptr_t)src + done, 0,
+                                      &address, &available, &frame, NULL);
+        if (ret < 0) return done ? (long)done : ret;
+        if (available > len - done) available = len - done;
+        memcpy((char *)dst + done, address, available);
+        frame_put(frame);
+        done += available;
+    }
+    return (long)done;
+}
+
 #ifndef CONFIG_PROCESS_VM_RUST
 long process_vm_read_kernel(struct task_t *src_task, const void *src,
                             void *dst, size_t len)

@@ -790,6 +790,10 @@ int      proc_alloc_deferred(void (*entry)(void));
 /* Detached kernel workers do not inherit user process resources. */
 int      proc_alloc_detached(void (*entry)(void));
 int      proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir);
+enum {
+    PROC_USER_IMAGE_DEFER_READY = 1,
+    PROC_USER_IMAGE_BOOT_INIT = 2,
+};
 int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                                struct mm_seg *mmap, vaddr_t brk,
                                vaddr_t stack_top, size_t total_vm,
@@ -798,7 +802,7 @@ int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                           , void **nommu_allocs, const size_t *nommu_alloc_sizes,
                            const uint8_t *nommu_alloc_types, int num_nommu_allocs
 #endif
-                          , int defer_ready);
+                          , int create_flags);
 /* Publish a fully initialized task created with defer_ready=1. */
 void     proc_publish_deferred_task(task_t *task);
 void     proc_free_pid(int pid);

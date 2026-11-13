@@ -1,3 +1,4 @@
+#include "fs/pipe.h"
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
 #include "fs/file.h"
@@ -499,7 +500,8 @@ int ext4_freaddir(vfile_t *vf, void *dirp, size_t count) {
             dent->d_off    = (int64_t)(b * bs + off);
             dent->d_reclen = (uint16_t)reclen;
             dent->d_type   = (de->file_type == EXT4_FT_DIR) ? DT_DIR :
-                             (de->file_type == EXT4_FT_SYMLINK) ? DT_LNK : DT_REG;
+                             (de->file_type == EXT4_FT_SYMLINK) ? DT_LNK :
+                             (de->file_type == EXT4_FT_FIFO) ? DT_FIFO : DT_REG;
             memcpy(dent->d_name, fname, nl + 1);
             total += reclen;
 
@@ -530,6 +532,7 @@ int ext4_fclose(vfile_t *vf) {
 
 
 vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
+    if ((vn->mode & S_IFMT) == S_IFIFO) return fifo_open_vnode(vn, flags);
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vn->fs_data;
     ext4_fctx_t *fc = (ext4_fctx_t *)kmalloc(sizeof(ext4_fctx_t));
     if (!fc) return NULL;

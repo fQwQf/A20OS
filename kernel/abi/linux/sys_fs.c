@@ -509,7 +509,6 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
          * cross-segment atomicity there). */
         if (total_len <= (1u << 20)) {
             char *kbuf = proc_scratch_buffer(total_len);
-            { static int wv_dbg; if (wv_dbg < 12) { kinfo("[WV] cnt=%d total=%u kbuf=%d\n", iovcnt, (unsigned)total_len, kbuf != NULL); wv_dbg++; } }
             if (kbuf) {
                 size_t off = 0;
                 for (int i = 0; i < iovcnt; i++) {
@@ -610,7 +609,8 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     if (pr < 0) {
         return pr;
     }
-    int gfd = vfs_open(full, flags, mode);
+    /* open creates regular files; type bits belong exclusively to mknod. */
+    int gfd = vfs_open(full, flags, mode & 07777);
     if (gfd < 0) {
         return gfd;
     }

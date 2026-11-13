@@ -14,6 +14,10 @@
 #include "core/types.h"
 
 struct task_t;
+struct mm_struct;
+/* Caller pins this MM, which may outlive a concurrent exec in its task. */
+long process_vm_read_mm_kernel(struct mm_struct *mm, const void *src,
+                                void *dst, size_t len);
 
 /* Copy @len bytes from @src_task's user address @src to the current task's
  * kernel buffer @dst. The caller keeps a task reference for the duration; the

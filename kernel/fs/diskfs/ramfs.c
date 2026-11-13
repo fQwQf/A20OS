@@ -1,4 +1,5 @@
 #include "fs/ramfs.h"
+#include "fs/pipe.h"
 #include "fs/file.h"
 #include "fs/rootfs_overlay.h"
 #include "fs/rootfs_user.h"
@@ -415,6 +416,7 @@ static vnode_t *ramfs_make_vnode_locked(mount_t *mnt, ramfs_inode_t *inode) {
     vn->ino = (uint64_t)inode->inum;
     if (inode->type == FT_DIRECTORY) vn->type = VFS_FT_DIR;
     else if (inode->type == FT_SYMLINK) vn->type = VFS_FT_SYMLINK;
+    else if ((inode->mode & S_IFMT) == S_IFIFO) vn->type = VFS_FT_FIFO;
     else vn->type = VFS_FT_REGULAR;
 
     vn->mode = inode->mode;
@@ -1154,6 +1156,7 @@ static int ramfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
             if (child) {
                 if (child->type == FT_DIRECTORY) d->d_type = DT_DIR;
                 else if (child->type == FT_SYMLINK) d->d_type = DT_LNK;
+                else if ((child->mode & S_IFMT) == S_IFIFO) d->d_type = DT_FIFO;
                 else if (child->type == FT_REGULAR) d->d_type = DT_REG;
             }
             memcpy(d->d_name, de->name, namelen + 1);
@@ -1225,6 +1228,7 @@ vnode_t *ramfs_mount_empty(mount_t *mnt) {
 }
 
 static vfile_t *ramfs_open_vnode(vnode_t *vn, int flags) {
+    if ((vn->mode & S_IFMT) == S_IFIFO) return fifo_open_vnode(vn, flags);
     vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
     vf->vnode = vn;

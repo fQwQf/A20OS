@@ -41,13 +41,20 @@ int64_t sys_kill(int pid, int sig) {
         return r < 0 ? r : 0;
     }
 
+    task_t *self = proc_current();
+    int self_tgid = self ? (self->tgid > 0 ? self->tgid : self->pid) : 0;
     int count = 0;
     int max_pid = proc_pid_max();
-    for (int p = 1; p <= max_pid; p++) {
+    for (int p = 2; p <= max_pid; p++) {
         task_t *target = proc_find_get_user(p);
         if (!target)
             continue;
-        if (target->pid > 1 && target->pgdir) {
+        int tgid = target->tgid > 0 ? target->tgid : target->pid;
+        /* kill(-1) addresses processes once, excluding the caller and PID1.
+         * Iterating every TID can redeliver a catchable signal on other CPUs
+         * after the first thread consumed it. Kernel workers are not user
+         * processes even when they carry the shared kernel page table. */
+        if (target->pid == tgid && tgid != self_tgid && target->mm) {
             int perm = signal_send_permission(proc_current(), target);
             if (perm >= 0 && proc_kill(target->pid, sig) == 0)
                 count++;
