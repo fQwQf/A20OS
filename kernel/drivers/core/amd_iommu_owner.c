@@ -7,6 +7,7 @@
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
+#include "drivers/core/dma_mapping.h"
 #include "core/klog.h"
 #include "mm/slab.h"
 
@@ -477,6 +478,57 @@ done:
     return ret;
 }
 
+int amd_iommu_route_policy_create(amd_iommu_route_t *route,
+                                    struct driver_dma_policy **out) {
+    if (!out)
+        return -EINVAL;
+    *out = NULL;
+    if (!route)
+        return -EINVAL;
+    driver_discovery_begin();
+    amd_iommu_route_info_t info;
+    int ret = amd_iommu_route_validate(route, &info);
+    if (ret)
+        goto done;
+    if (info.memory_count > DRIVER_DMA_POLICY_MAX_RULES) {
+        ret = -E2BIG;
+        goto done;
+    }
+    struct driver_dma_rule *rules = NULL;
+    if (info.memory_count) {
+        rules = kmalloc(info.memory_count * sizeof(*rules));
+        if (!rules) {
+            ret = -ENOMEM;
+            goto done;
+        }
+    }
+    for (size_t i = 0; i < info.memory_count; i++) {
+        acpi_ivrs_memory_t memory;
+        ret = amd_iommu_route_memory(route, i, &memory);
+        if (ret)
+            goto discard;
+        /* AMD 48882 rev 3.10, table 111: upper bits are reserved;
+         * exclusion ignores IR/IW/Unity and requires hardware-wide handling. */
+        if (memory.flags & 0xf8) {
+            ret = -EOPNOTSUPP;
+            goto discard;
+        }
+        if ((memory.flags & 1) && !(memory.flags & 6)) {
+            ret = -EINVAL;
+            goto discard;
+        }
+        rules[i] = (struct driver_dma_rule){memory.start,
+            memory.start + memory.length - 1, (memory.flags >> 1) & 3,
+            (memory.flags & 1) ? DRIVER_DMA_POLICY_IDENTITY : 0};
+    }
+    ret = driver_dma_policy_create(rules, info.memory_count, out);
+discard:
+    kfree(rules);
+done:
+    driver_discovery_end();
+    return ret;
+}
+
 void amd_iommu_route_release(amd_iommu_route_t *route) {
     if (!route)
         return;
@@ -586,6 +638,13 @@ done:
     return ret;
 }
 #else
+int amd_iommu_route_policy_create(amd_iommu_route_t *route,
+                                    struct driver_dma_policy **out) {
+    (void)route;
+    if (!out) return -EINVAL;
+    *out = NULL;
+    return -EOPNOTSUPP;
+}
 int amd_iommu_route_reserve(amd_iommu_route_t *route) {
     (void)route;
     return -EOPNOTSUPP;

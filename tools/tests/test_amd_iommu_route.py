@@ -30,6 +30,9 @@ static int checked_memory(amd_iommu_route_t *route,size_t index,acpi_ivrs_memory
 static int checked_reserve(amd_iommu_route_t *route) {
  unsigned n=scope_writes;int ret=amd_iommu_route_reserve(route);assert(scope_writes==n);return ret;
 }
+static int checked_policy_create(amd_iommu_route_t *route,struct driver_dma_policy **out) {
+ unsigned n=scope_writes;int ret=amd_iommu_route_policy_create(route,out);assert(scope_writes==n);return ret;
+}
 static void checked_release(amd_iommu_route_t *route) {
  unsigned n=scope_writes;amd_iommu_route_release(route);assert(scope_writes==n);
 }
@@ -103,6 +106,20 @@ static void route_acquire_error(device_t *client,int expected) {
  amd_iommu_route_t *route=(void *)1;
  assert(amd_iommu_route_acquire(client,&route)==expected&&!route);
 }
+static size_t route_memory_offset(unsigned index) {
+ for(size_t at=48;at<route_length;at+=acpi_le16(route_ivrs+at+2))
+  if(route_ivrs[at]>=0x20&&route_ivrs[at]<=0x22) {if(!index--)return at;}
+ assert(0);return 0;
+}
+static void route_policy_error(amd_iommu_route_t *route,int expected) {
+ struct driver_dma_policy *p=(void *)1;int before=allocated;
+ assert(amd_iommu_route_policy_create(route,&p)==expected&&!p&&allocated==before);
+}
+static void route_policy_check(struct driver_dma_policy *p,uint64_t address,
+                               enum driver_dma_direction direction,int error,bool expected) {
+ bool identity=!expected;
+ assert(driver_dma_policy_check(p,address,0x1000,direction,&identity)==error&&identity==expected);
+}
 static void route_case(const char *name) {
  int alias=strstr(name,"alias")!=NULL,valid=strstr(name,"range")!=NULL;
  struct scope_function *root=scope_bridge(0,1,1,2);
@@ -117,6 +134,30 @@ static void route_case(const char *name) {
  if(!strcmp(name,"range-missing"))controller->config[0x4c/4]=0x09090080;
  controller->config[0x50/4]=(40U<<8)|(48U<<15);
  route_firmware(alias);
+ unsigned expected_memory_count=alias?2:1;
+ unsigned first_flags=7,second_flags=5;uint64_t second_start=0x200000;
+ if(!strcmp(name,"policy-deny"))first_flags=0;
+ if(!strcmp(name,"policy-read"))first_flags=2;
+ if(!strcmp(name,"policy-unity-read"))first_flags=3;
+ if(!strcmp(name,"policy-write"))first_flags=4;
+ if(!strcmp(name,"policy-linear"))first_flags=6;
+ if(!strcmp(name,"policy-exclusion"))first_flags=15;
+ if(!strcmp(name,"policy-reserved"))first_flags=0x87;
+ if(!strcmp(name,"policy-invalid-unity"))first_flags=1;
+ route_ivrs[route_memory_offset(0)+1]=first_flags;
+ if(!strcmp(name,"policy-alias-overlap")) {
+  size_t at=route_memory_offset(1);second_flags=2;second_start=0x100800;
+  route_ivrs[at+1]=second_flags;route_put(route_ivrs,at+16,second_start,8);
+  route_put(route_ivrs,at+24,0x800,8);
+ }
+ if(!strcmp(name,"policy-alternatives")) {
+  /* The selected 11h IVHD must not hide restrictions beneath its legacy
+   * 10h alternative, which describes the very same controller/capability. */
+  size_t at=route_length;route_ivrs[at]=0x10;route_put(route_ivrs,at+2,28,2);
+  route_put(route_ivrs,at+4,0x10,2);route_put(route_ivrs,at+6,0x40,2);
+  route_put(route_ivrs,at+8,0xfed80000,8);route_length+=24;route_select(0x21a,0x13);
+  route_ivmd(0x21a,0x100800,2);expected_memory_count=2;
+ }
  if(!strcmp(name,"reserve-alias-sibling")) {
   scope_add(2,5,0,0);memmove(route_ivrs+108,route_ivrs+100,route_length-100);
   memset(route_ivrs+100,0,8);route_ivrs[100]=0x42;
@@ -149,6 +190,7 @@ static void route_case(const char *name) {
   route_error(NULL,-EINVAL);
   assert(amd_iommu_route_validate(NULL,NULL)==-EINVAL);
   assert(amd_iommu_route_reserve(NULL)==-EINVAL);
+  route_policy_error(NULL,-EINVAL);assert(amd_iommu_route_policy_create(NULL,NULL)==-EINVAL);
   acpi_ivrs_memory_t m;memset(&m,0xa5,sizeof(m));
   assert(amd_iommu_route_memory(NULL,0,&m)==-EINVAL&&!m.start);
   assert(amd_iommu_route_memory(NULL,0,NULL)==-EINVAL);amd_iommu_route_release(NULL);
@@ -171,12 +213,58 @@ static void route_case(const char *name) {
   amd_iommu_route_info_t info;assert(!amd_iommu_route_validate(route,&info));
   assert(info.requester==0x21a&&info.dma_requester==(alias?0x220:0x21a));
   assert(info.unit.requester==0x10&&info.unit.base==0xfed80000&&info.settings==0x13);
-  assert(info.alias==alias&&info.hardware_range_checked==valid&&info.memory_count==(alias?2:1));
+  assert(info.alias==alias&&info.hardware_range_checked==valid&&info.memory_count==expected_memory_count);
   acpi_ivrs_memory_t memory;
-  assert(!amd_iommu_route_memory(route,0,&memory)&&memory.start==0x100000&&memory.flags==7);
-  if(alias)assert(!amd_iommu_route_memory(route,1,&memory)&&memory.start==0x200000&&memory.flags==5);
+  assert(!amd_iommu_route_memory(route,0,&memory)&&memory.start==0x100000&&memory.flags==first_flags);
+  if(alias)assert(!amd_iommu_route_memory(route,1,&memory)&&memory.start==second_start&&memory.flags==second_flags);
   assert(amd_iommu_route_memory(route,info.memory_count,&memory)==-ENODEV&&!memory.start);
-  if(!strncmp(name,"reserve-",8)) {
+  if(!strncmp(name,"policy-",7)) {
+   if(!strcmp(name,"policy-exclusion")||!strcmp(name,"policy-reserved"))route_policy_error(route,-EOPNOTSUPP);
+   else if(!strcmp(name,"policy-invalid-unity"))route_policy_error(route,-EINVAL);
+   else if(!strcmp(name,"policy-stale")) {
+    controller->config[0x4c/4]=0x08080080;route_policy_error(route,-ESTALE);
+   } else {
+    if(!strcmp(name,"policy-allocation")) {
+     for(unsigned i=1;i<=2;i++) {
+      fail_at=allocations+i;route_policy_error(route,-ENOMEM);fail_at=0;
+     }
+    }
+    struct driver_dma_policy *p=NULL;assert(!amd_iommu_route_policy_create(route,&p)&&p);
+    if(!strcmp(name,"policy-deny")) {
+     route_policy_check(p,0x100000,DRIVER_DMA_TO_DEVICE,-EACCES,false);
+     route_policy_check(p,0x100000,DRIVER_DMA_FROM_DEVICE,-EACCES,false);
+    } else if(!strcmp(name,"policy-read")||!strcmp(name,"policy-unity-read")) {
+     route_policy_check(p,0x100000,DRIVER_DMA_TO_DEVICE,0,(first_flags&1)!=0);
+     route_policy_check(p,0x100000,DRIVER_DMA_FROM_DEVICE,-EACCES,false);
+    } else if(!strcmp(name,"policy-write")) {
+     route_policy_check(p,0x100000,DRIVER_DMA_FROM_DEVICE,0,false);
+     route_policy_check(p,0x100000,DRIVER_DMA_TO_DEVICE,-EACCES,false);
+    } else if(!strcmp(name,"policy-linear")) {
+     route_policy_check(p,0x100000,DRIVER_DMA_BIDIRECTIONAL,0,false);
+    } else {
+     route_policy_check(p,0x100000,DRIVER_DMA_TO_DEVICE,0,true);
+     if(!strcmp(name,"policy-alias-overlap")||!strcmp(name,"policy-alternatives"))
+      route_policy_check(p,0x100000,DRIVER_DMA_FROM_DEVICE,-EACCES,false);
+     else route_policy_check(p,0x100000,DRIVER_DMA_FROM_DEVICE,0,true);
+    }
+    if(alias&&!strcmp(name,"policy-alias")) {
+     route_policy_check(p,0x200000,DRIVER_DMA_FROM_DEVICE,0,true);
+     route_policy_check(p,0x200000,DRIVER_DMA_TO_DEVICE,-EACCES,false);
+    }
+    if(!strcmp(name,"policy-detach")) {
+     assert(!driver_unregister(&amdvi_driver));route_policy_error(route,-ESHUTDOWN);
+     amd_iommu_route_release(route);route=NULL;assert(!route_tables);
+     /* Reuse firmware storage only after all its old mappings are gone.
+      * The policy must still describe the old copied restrictions. */
+     route_ivrs[route_memory_offset(0)+1]=0;route_checksum(route_ivrs,route_length);
+     route_policy_check(p,0x100000,DRIVER_DMA_TO_DEVICE,0,true);
+     driver_discovery_begin();assert(!driver_register(&amdvi_driver));driver_discovery_end();
+     assert(!bus_probe_device(provider));
+    }
+    route_policy_check(p,0x400000,DRIVER_DMA_BIDIRECTIONAL,0,false);
+    driver_dma_policy_put(p);
+   }
+  } else if(!strncmp(name,"reserve-",8)) {
    if(!strcmp(name,"reserve-allocation")) {
     int n=allocated;fail_at=allocations+1;
     assert(amd_iommu_route_reserve(route)==-ENOMEM&&allocated==n);fail_at=0;
@@ -284,7 +372,7 @@ class AmdIommuRouteTests(unittest.TestCase):
         source = source.replace(old, 'static void *route_map(uint64_t,size_t,uint32_t);\nstatic void route_unmap(void *,size_t);\nvoid *arch_device_map_mmio(uint64_t pa,size_t n,uint32_t f){return route_map(pa,n,f);}\nvoid arch_device_unmap_mmio(void *p,size_t n){route_unmap(p,n);}')
         marker = 'int main(int argc,char **argv) {'
         cases = CASES
-        for suffix in ('acquire', 'validate', 'memory', 'release', 'reserve'):
+        for suffix in ('acquire', 'validate', 'memory', 'release', 'reserve', 'policy_create'):
             cases = cases.replace('amd_iommu_route_' + suffix + '(', 'checked_' + suffix + '(')
         source = source.replace(marker, SCOPE_CASES.split('static void scope_expect(')[0] + WRAPPERS + cases + '\n' + marker)
         source = source.replace('if(!strcmp(argv[1],"pci-retired"))', 'if(!strncmp(argv[1],"route-",6))route_case(argv[1]+6);\n else if(!strcmp(argv[1],"pci-retired"))')
@@ -301,6 +389,7 @@ class AmdIommuRouteTests(unittest.TestCase):
             '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'kernel'),
             str(path), str(ROOT / 'kernel/drivers/core/amd_iommu_probe.c'),
             str(ROOT / 'kernel/drivers/core/amd_iommu_scope.c'),
+            str(ROOT / 'kernel/drivers/core/dma_policy.c'),
             str(ROOT / 'kernel/firmware/acpi/tables.c'),
             str(ROOT / 'kernel/firmware/acpi/ivrs.c'),
             str(ROOT / 'kernel/firmware/acpi/ivrs_policy.c'), '-o', str(cls.binary),
@@ -352,6 +441,15 @@ class AmdIommuRouteTests(unittest.TestCase):
 
     def test_reservation_survives_bdf_replacement_and_controller_rebind(self):
         self.run_cases('reserve-replacement', 'reserve-detach')
+
+    def test_ivmd_access_identity_and_alias_intersections(self):
+        self.run_cases('policy-rw', 'policy-read', 'policy-unity-read', 'policy-write', 'policy-linear', 'policy-deny', 'policy-alias', 'policy-alias-overlap', 'policy-alternatives')
+
+    def test_unsupported_ivmd_cannot_become_unrestricted_policy(self):
+        self.run_cases('policy-exclusion', 'policy-reserved', 'policy-invalid-unity')
+
+    def test_policy_copy_failures_liveness_and_independent_storage(self):
+        self.run_cases('policy-allocation', 'policy-stale', 'policy-detach')
 
 
 if __name__ == '__main__':

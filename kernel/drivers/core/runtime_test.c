@@ -7,6 +7,7 @@
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
 #include "drivers/core/amd_iommu.h"
+#include "drivers/core/dma_mapping.h"
 #include "drivers/core/memory.h"
 #include "drivers/bus/pci_bus.h"
 #include "mm/frame.h"
@@ -265,7 +266,7 @@ static void exercise_pci_scope(void) {
     driver_discovery_end();
 }
 
-static void exercise_amdvi_route(bool reserve) {
+static void exercise_amdvi_route(bool reserve, bool policy_test) {
     /* Explicit q35/root-port/EDU test. Resolve policy and optionally reserve
      * software keys; never enable bus mastering or program device tables. */
     driver_discovery_begin();
@@ -282,6 +283,11 @@ static void exercise_amdvi_route(bool reserve) {
     CHECK(!amd_iommu_route_validate(route, &info));
     CHECK(info.requester == 0x100 && info.dma_requester == 0x100 && !info.alias);
     CHECK(info.unit.register_size && info.unit.base);
+    struct driver_dma_policy *policy = NULL;
+    if (policy_test) {
+        CHECK(!info.memory_count); /* QEMU fixture has no IVMD blocks. */
+        CHECK(!amd_iommu_route_policy_create(route, &policy));
+    }
     acpi_ivrs_memory_t memory;
     for (size_t i = 0; i < info.memory_count; i++)
         CHECK(!amd_iommu_route_memory(route, i, &memory));
@@ -296,10 +302,18 @@ static void exercise_amdvi_route(bool reserve) {
         CHECK(!amd_iommu_route_reserve(route));
     }
     amd_iommu_route_release(route);
+    if (policy_test) {
+        bool identity = true;
+        CHECK(!driver_dma_policy_check(policy, 0, 1, DRIVER_DMA_BIDIRECTIONAL, &identity));
+        CHECK(!identity);
+        driver_dma_policy_put(policy);
+    }
     driver_discovery_end();
     kinfo("AMDVI_ROUTE: PASS route=1 policy=1 scope=1\n");
     if (reserve)
         kinfo("AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1\n");
+    if (policy_test)
+        kinfo("AMDVI_POLICY: PASS create=1 retained=1\n");
 }
 
 void driver_runtime_selftest_boot(void)
@@ -320,8 +334,9 @@ void driver_runtime_selftest_boot(void)
     if (pci_scope)
         exercise_pci_scope();
     bool requester = boot_flag(args, "driver.amdvi_requester_test=1");
-    if (requester || boot_flag(args, "driver.amdvi_route_test=1"))
-        exercise_amdvi_route(requester);
+    bool policy_test = boot_flag(args, "driver.amdvi_policy_test=1");
+    if (requester || policy_test || boot_flag(args, "driver.amdvi_route_test=1"))
+        exercise_amdvi_route(requester, policy_test);
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
