@@ -294,6 +294,9 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
     STATIC_NODE(DEVFS_NET_DIR, "net", 0),
     STATIC_NODE(DEVFS_TUN, "tun", 0x0ac8),
+#ifdef CONFIG_WIFI_RTW89
+    STATIC_NODE(DEVFS_WIFI, "rtw89", 0xf001),
+#endif
     STATIC_NODE(DEVFS_DRI_DIR, "dri", 0),
     STATIC_NODE(DEVFS_DRM, "card0", 0xe200),
     STATIC_NODE(DEVFS_DRM, "renderD128", 0xe280),
@@ -1310,6 +1313,17 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
             return NULL;
         }
         break;
+#ifdef CONFIG_WIFI_RTW89
+    case DEVFS_WIFI: {
+        extern int rtw89_file_open(vfile_t *file);
+        if (rtw89_file_open(vf) < 0) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        break;
+    }
+#endif
     case DEVFS_INPUT:
         if (input_file_open(vf, node->class_dev) < 0) {
             vnode_put(vf->vnode);

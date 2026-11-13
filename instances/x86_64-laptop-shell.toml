@@ -1,0 +1,62 @@
+# Laptop / UEFI-only machine with native graphics console and PS/2 keyboard.
+#
+# This is the physical-hardware shape of x86_64-pc: no COM1, no AHCI disk and
+# no assumption that firmware is QEMU.  The ESP carries BOOTX64.EFI (the UEFI
+# loader, which preserves the ACPI RSDP and the active GOP scanout) and the
+# userland is embedded in the kernel image, so the machine needs no root
+# filesystem on any of its disks.  Write the .img to a disposable USB stick and
+# boot it with Secure Boot disabled.
+#
+# What the port supplies beyond the serial bring-up image:
+#   - drivers/char/fbcon.c renders kernel and tty output on the GOP scanout;
+#   - the COM1 probe no longer hangs when no 16550 is decoded;
+#   - embedded PS/2 and USB HID expose their own keyboards through input class;
+#     the accepted Lenovo keyboard uses USB, not the i8042 path;
+#   - the embedded NVMe driver makes PCIe SSDs visible as block devices.
+#
+# This is the text-only fallback to x86_64-laptop-uefi, which boots the XFCE
+# world from the same USB stick.  Use it when debugging the kernel before the
+# desktop exists, or on a machine whose GPU/DRM path cannot start labwc.
+name = "x86_64-laptop-shell"
+description = "UEFI-only x86_64 laptop: GOP text console, PS/2 keyboard, embedded RAM shell (no GUI)"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ramfs_fastfetch = true
+# The keyboard and the disk are needed before userspace exists, so the driver
+# set is linked in rather than loaded from /lib/drivers.
+driver_deployment = "embedded"
+ubsan = false
+swap = false
+
+[machine]
+smp = 1
+
+[package]
+kind = "uefi-disk"
+
+[target]
+# Serial is optional on this target: set it to a real adapter when one exists.
+# The acceptance evidence for a machine with no COM1 is the screen, not this
+# log.
+serial = "/dev/ttyUSB0"
+baud = 38400
+boot_timeout = "180s"
+console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/x86_64-pc/a20os-laptop-shell.img"]
+# Replace with the whole disposable USB device, never a partition.
+media_device = "/dev/sdX"
+log = ".kernel-build/console/x86_64-laptop-shell.log"
+
+[log]
+level = "info"
+partition_mb = 64
+session = false
+loader = true
+
+[net]
+stack = "bsd"

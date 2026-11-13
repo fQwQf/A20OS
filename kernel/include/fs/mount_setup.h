@@ -34,4 +34,9 @@ void mount_ramfs_media(void);
  * The embedded /bin survives a missing, ambiguous or invalid distro image. */
 int mount_ramfs_distro(void);
 
+/* CONFIG_KLOG_PERSISTENT: mount the uniquely named "A20OS log" GPT partition
+ * read-write and attach the persistent kernel log writer.  Called after the
+ * distro rootfs mount (when any) and before chroot. */
+int mount_persistent_log(void);
+
 #endif /* _MOUNT_SETUP_H */

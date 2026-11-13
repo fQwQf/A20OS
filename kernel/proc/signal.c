@@ -192,6 +192,15 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
 {
     if (!t || !t->signals)
         return -EINVAL;
+#if defined(CONFIG_KLOG_SESSION) && CONFIG_KLOG_SESSION
+    if (signum == SIGKILL || signum == SIGTERM || signum == SIGABRT) {
+        task_t *sender = proc_current();
+        klog_record_only(KLOG_INFO, "[SIGNAL] request sender=%u name=%s target=%u name=%s signal=%d thread=%d\n",
+                         sender ? (unsigned)sender->pid : 0,
+                         sender ? sender->name : "kernel", (unsigned)t->pid,
+                         t->name, signum, thread_directed);
+    }
+#endif
 
 #if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) && \
     !defined(CONFIG_MCU)
@@ -692,6 +701,8 @@ void signal_deliver(void) {
             continue;
         }
         if (txn.outcome == A20_DELIVERY_FATAL) {
+            klog_record_only(KLOG_WARN, "[SIGNAL] process terminated: pid=%u name=%s signal=%d\n",
+                             (unsigned)t->pid, t->name, txn.sig);
             /* Kernel-context delivery cannot produce a core file, so the
              * WCOREDUMP bit must stay clear here. */
             proc_exit_group(-signal_wait_status_dumped(txn.sig, 0));

@@ -1,0 +1,8 @@
+# A20OS native I2C-HID axes have zero fuzz; no kernel hysteresis to remove.
+# Preserve the distribution's libinput helper path for other input drivers.
+ACTION=="remove", GOTO="libinput_fuzz_override_end"
+KERNEL!="event*", GOTO="libinput_fuzz_override_end"
+ATTR{name}=="I2C HID touchpad", ENV{ID_INPUT_TOUCHPAD}=="1", ENV{LIBINPUT_FUZZ_00}="0", ENV{LIBINPUT_FUZZ_01}="0", GOTO="libinput_fuzz_override_end"
+ATTRS{capabilities/abs}!="0", ENV{ID_INPUT_TOUCHPAD}=="1", IMPORT{program}="/usr/lib/udev/libinput-fuzz-extract %S%p", RUN{program}+="/usr/lib/udev/libinput-fuzz-to-zero %S%p", GOTO="libinput_fuzz_override_end"
+ATTRS{capabilities/abs}!="0", ENV{ID_INPUT_TOUCHSCREEN}=="1", IMPORT{program}="/usr/lib/udev/libinput-fuzz-extract %S%p", RUN{program}+="/usr/lib/udev/libinput-fuzz-to-zero %S%p", GOTO="libinput_fuzz_override_end"
+LABEL="libinput_fuzz_override_end"

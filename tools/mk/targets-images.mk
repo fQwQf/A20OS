@@ -190,7 +190,8 @@ $(addprefix $(RAMFS_USER_BLOB_DIR)/,native_futex.o native_spawn.o native_input.o
 # separate userspace output root so its stamp cannot clean or invalidate the
 # full development userland (nor pull fastfetch/media dependencies into a
 # 64 MiB shell image).
-RAMFS_USER_BUILD_DIR = user/build/$(USER_VARIANT)-ramfs
+RAMFS_USER_VARIANT = $(USER_VARIANT)-ramfs$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch)$(if $(filter 1,$(WIFI_RTW89)),-wifi)
+RAMFS_USER_BUILD_DIR = user/build/$(RAMFS_USER_VARIANT)
 RAMFS_USER_BUILD_STAMP = $(RAMFS_USER_BUILD_DIR)/.ramfs-build-id
 ifeq ($(RAMFS_NATIVE_TESTS),1)
 RAMFS_USER_BUILD_DIR = $(USER_BUILD_DIR)
@@ -200,7 +201,7 @@ $(RAMFS_USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_D
 	@$(PYTHON) tools/stamps.py user \
 		--stamp "$@" --build-id "$(USER_BUILD_ID):ramfs:$(RAMFS_USER_PROGRAMS)" \
 		--arch "$(ARCH)" --nommu "$(NOMMU)" \
-		--user-build-dir "$(RAMFS_USER_BUILD_DIR)" --user-variant "$(USER_VARIANT)-ramfs" \
+		--user-build-dir "$(RAMFS_USER_BUILD_DIR)" --user-variant "$(RAMFS_USER_VARIANT)" \
 		--user-opt="$(USER_OPT)" --profile "$(PROFILE)" \
 		--targets "$(RAMFS_USER_PROGRAMS)" \
 		--roots "user/Makefile $(USER_BUILD_CHECK_DIRS)" \
@@ -219,12 +220,15 @@ $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BUILD_STAMP)
 # Directly bootable x86_64 UEFI disk.  Unlike pc-rescue-disk this stages
 # BOOTX64.EFI rather than GRUB, because GRUB 2.12 drops the multiboot ACPI tags
 # and the kernel then never learns the RSDP (see instances/vbox-x86_64.toml).
+# 64 MiB "A20OS log" partition: the kernel's only persistent surface that
+# does not depend on the distro rootfs.  See docs/zh/kernel/persistent-logging.md.
+UEFI_LOG_MB ?= $(LOG_PARTITION_MB)
 ifeq ($(RAMFS_USER),1)
 $(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) tools/boot/mk_uefi_fat_image.sh
-	tools/boot/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ - BOOTX64.EFI
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ - BOOTX64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
 else
 $(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified $(FAT32_IMG) tools/boot/mk_uefi_fat_image.sh
-	tools/boot/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
 endif
 
 .PHONY: x86_64-uefi-loader
@@ -236,6 +240,7 @@ $(VBOX_X86_64_EFI): kernel/include/boot/framebuffer.h kernel/include/core/types.
 	$(CC) -Ikernel/include -mabi=ms -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
 		-fno-builtin -fvisibility=hidden \
 		-DKERNEL_MEMORY_BYTES=$$memory_bytes \
+		-DA20_LOADER_LOG=$(LOG_LOADER) \
 		-DX86_KERNEL_LOAD_ADDRESS=$(X86_KERNEL_LOAD_ADDRESS_CANONICAL) \
 		-c kernel/arch/x86_64/boot/uefi/x86_64_loader.c -o $(BUILD_DIR)/x86-64-uefi-loader.o
 	$(CC) -fpic -ffreestanding -fno-stack-protector \
@@ -255,6 +260,7 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) $(KERNEL_ELF) tools/elf_load_span.py kernel/a
 	@memory_bytes="$$($(PYTHON) tools/elf_load_span.py $(KERNEL_ELF) --expected-base $(VBOX_AARCH64_LOAD_ADDRESS))" && \
 	$(CC) -march=armv8-a -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
 		-DKERNEL_MEMORY_BYTES=$$memory_bytes \
+		-DA20_LOADER_LOG=$(LOG_LOADER) \
 		-fno-builtin -fvisibility=hidden -mno-outline-atomics \
 		-DKERNEL_LOAD_ADDRESS=$(VBOX_AARCH64_LOAD_ADDRESS) \
 		-c kernel/arch/aarch64/boot/uefi/aarch64_loader.c \
@@ -285,10 +291,10 @@ $(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(FAT32_IMG) $(USER
 		--bringup "$(BRINGUP)" --nommu "$(NOMMU)" --opt="$(OPT)"
 
 $(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/boot/mk_uefi_fat_image.sh
-	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG) BOOTAA64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
 
 $(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/boot/mk_uefi_fat_image.sh
-	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG) BOOTAA64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
 
 # ---- kallsyms: two-pass link ----
 # Pass 1 links the kernel without the symbol table; tools/gen_kallsyms.py

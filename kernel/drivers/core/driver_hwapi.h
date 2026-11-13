@@ -228,6 +228,34 @@ void  irq_free_vectors(uint32_t first, unsigned count);
  * handlers alike. */
 #define IRQF_SHARED          0x04
 #define IRQF_NO_AUTO_ENABLE  0x08
+/* IRQ_TRIGGER_MODEL:
+ *
+ * A level-triggered line stays asserted until the device's interrupt source
+ * is cleared.  If dispatch hands that line back to the CPU while it is still
+ * asserted, the CPU takes the same interrupt again immediately; when the
+ * interrupt-return preemption path enables interrupts before entering the
+ * scheduler, those deliveries nest interrupt entry on the interrupted task's
+ * kernel stack.  Dispatch therefore masks a level line before it calls the
+ * handler.  After the handler it either
+ *
+ *   - unmasks it (the handler quiesced the source), or
+ *   - leaves it masked under IRQF_ONESHOT, and the driver unmasks it with
+ *     irq_enable() once the work that clears the source has actually run.
+ *     This is the required model for a handler that only wakes a thread.
+ *
+ * arch_irq_line_is_level() answers from the platform's routing knowledge (on
+ * x86_64: IOAPIC-routed PCI INTx).  A driver on a platform without that hook
+ * declares its own line with IRQF_LEVEL.  Both are advisory to dispatch; a
+ * driver that needs the oneshot shape must still say so, because only the
+ * driver knows whether it can clear the source inside the handler.
+ */
+#define IRQF_LEVEL           0x10
+#define IRQF_ONESHOT         0x20
+
+/* Weak architecture hook: 1 when @irq is level-triggered.  The default keeps
+ * every line edge-triggered, which is the safe answer for a platform that has
+ * not described its routing. */
+int arch_irq_line_is_level(uint32_t irq);
 
 /* ============================================================
  * Delay / Timer helpers

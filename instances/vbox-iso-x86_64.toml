@@ -10,3 +10,8 @@ kind = "grub-iso"
 
 [net]
 stack = "bsd"
+
+[log]
+persistent = false
+loader = false
+session = false

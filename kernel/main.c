@@ -10,6 +10,7 @@ extern void acpi_os_start_worker(void);
 #include "core/bootargs.h"
 #include "hyp/hyp.h"
 #include "drivers/char/uart.h"
+#include "drivers/char/fbcon.h"
 #include "mm/mm.h"
 #include "mm/oom.h"
 #include "mm/elf.h"
@@ -74,6 +75,39 @@ __attribute__((weak)) void arch_run_platform_selftests(void) {
 __attribute__((weak)) void arch_run_bootarg_selftests(void) {
 }
 
+/*
+ * Boot self-tests that belong to a driver but need no device.  Each driver
+ * provides its own hook; a build without that driver keeps the weak default,
+ * which reports -ENOSYS and is skipped rather than printed as a failure.
+ * They must not touch hardware: the point is to pin down the parts of the
+ * driver whose constants and bit arithmetic can be checked without a bus.
+ */
+__attribute__((weak)) int a20_boot_selftest_i2c_hid(void) { return -ENOSYS; }
+__attribute__((weak)) int a20_boot_selftest_r8169(void) { return -ENOSYS; }
+__attribute__((weak)) int a20_boot_selftest_i2c_dw(void) { return -ENOSYS; }
+__attribute__((weak)) int a20_boot_selftest_dma_window(void) { return -ENOSYS; }
+__attribute__((weak)) void a20_i2c_hid_start_worker(void) {}
+
+static void a20_run_one_selftest(const char *name, int (*fn)(void))
+{
+    int rc = fn();
+    if (rc == -ENOSYS)
+        return;
+    if (rc == 0)
+        kinfo("[SELFTEST] %s: PASS\n", name);
+    else
+        kerr("[SELFTEST] %s: FAIL\n", name);
+}
+
+__attribute__((weak)) void a20_driver_boot_selftests(void) {
+    a20_run_one_selftest("i2c-hid", a20_boot_selftest_i2c_hid);
+    a20_run_one_selftest("r8169", a20_boot_selftest_r8169);
+    a20_run_one_selftest("i2c-dw", a20_boot_selftest_i2c_dw);
+#ifdef CONFIG_WIFI_RTW89
+    a20_run_one_selftest("dma-window", a20_boot_selftest_dma_window);
+#endif
+}
+
 /* User thread-pointer restore after a context switch defaults to nothing:
  * most architectures keep the user TLS in state that __switch already
  * carries.  x86_64 overrides this in trap/irqchip.c. */
@@ -115,10 +149,44 @@ static void bringup_smoke_test(void) {
 static void boot_advance(enum boot_phase expected, enum boot_phase next) {
     if (boot_context_advance(expected, next) < 0)
         panic("boot: invalid initialization phase transition");
+    /* Flush at every phase boundary.  This is process context and happens
+     * before the step that could hang, so the persistent log always names the
+     * last completed phase even if the next one never returns. */
+    klog_disk_sync();
 }
+
+#if CONFIG_KLOG_ENABLED
+/* One-shot diagnostic report, deliberately late: the shell has started, the
+ * USB stack has had time to fail its first command, and the user is looking
+ * at a screen they cannot scroll.  It is bounded and self-contained, so the
+ * last lines (the fatal controller state) stay visible without a keyboard. */
+static void boot_report_thread(void) {
+    proc_set_name(proc_current(), "bootreport");
+    /* Wait long enough for the shell to start, but break out as soon as the
+     * xHCI fatal block lands so the user does not have to time a screenshot.
+     * Ten seconds is the ceiling when no fatal appears. */
+    for (unsigned i = 0; i < 20; i++) {
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(500));
+        if (klog_has_fatal()) {
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(500));
+            break;
+        }
+    }
+    klog_boot_report();
+    for (;;)
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(3600000));
+}
+#endif
 
 void kernel_main(void) {
     arch_boot_context_init();
+    /* Allocate this boot's random identity before anything can log.  The
+     * persistent writer names its file after it, and the loader records the
+     * same boot sequence in the ESP breadcrumb. */
+    klog_init();
+    /* Publish the firmware scanout as a text console before the first banner
+     * line.  A machine with no COM1 has no other place for that output. */
+    fbcon_init();
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     extern void a20_registry_init(void);
 #endif
@@ -155,6 +223,9 @@ void kernel_main(void) {
     mm_init();
     boot_advance(BOOT_PHASE_EARLY, BOOT_PHASE_MEMORY);
     printf("[INIT] Memory initialized\n");
+    /* A GOP scanout above 4 GiB is only mappable now that frames exist.  This
+     * is a no-op when the boot console already attached. */
+    fbcon_attach_late();
     /* Split the boot megapage map into per-section kernel permissions
      * (text ROX / rodata RO / data RW+NX, direct map NX).  Must run before
      * the first process page table copies the kernel half and before SMP
@@ -171,6 +242,7 @@ void kernel_main(void) {
      * returns, so swapping the guard cannot produce a false positive. */
     stack_protector_init();
     bootargs_init();
+    klog_configure();
     printf("[INIT] Boot arguments parsed\n");
     /* The W^X policy depends on the cmdline (a20.wx=deny|strip|off), so this
      * must run after bootargs */
@@ -195,11 +267,15 @@ void kernel_main(void) {
     fw_node_t acpi_root = {0};
     const acpi_context_t *acpi = arch_acpi_context();
     if (acpi) {
-        if (acpi_namespace_initialize(acpi, &acpi_root) < 0)
-            panic("boot: ACPI namespace initialization failed");
-        if (!fw_node_valid(&boot_context_get()->hardware_root) &&
-            boot_context_set_hardware_root(&acpi_root) < 0)
-            panic("boot: cannot publish ACPI hardware root");
+        if (acpi_namespace_initialize(acpi, &acpi_root) < 0) {
+            /* A firmware quirk must leave a boot log rather than a panic
+             * before the persistent log is even mounted.  The board/static
+             * fallback below still gets a chance to publish devices. */
+            kerr("[ACPI] namespace initialization failed; continuing\n");
+        } else if (!fw_node_valid(&boot_context_get()->hardware_root) &&
+                   boot_context_set_hardware_root(&acpi_root) < 0) {
+            kerr("[ACPI] cannot publish hardware root; continuing\n");
+        }
     }
 #endif
 #if defined(CONFIG_X86_64) && defined(CONFIG_ACPI)
@@ -208,7 +284,8 @@ void kernel_main(void) {
     const fw_node_t *hardware = &boot_context_get()->hardware_root;
     if (fw_node_valid(hardware)) {
         if (firmware_device_enumerate(hardware) < 0)
-            panic("boot: firmware device enumeration failed");
+            kerr("[FIRMWARE] enumeration incomplete; continuing with "
+                 "already-discovered devices\n");
     } else if (current_board && current_board->enumerate_devices) {
         current_board->enumerate_devices();
         printf("[INIT] Static board fallback devices enumerated (%s)\n",
@@ -247,13 +324,12 @@ void kernel_main(void) {
      * mounting /bin; user-service packages still wait for proc_init(). */
     driver_manager_early_init();
 #endif
-    if (current_board && current_board->defer_network_init) {
-        printf("[INIT] Network deferred by board recovery profile\n");
-    } else {
-        net_init();
-        printf("[INIT] Network initialized\n");
-    }
 
+    /* Storage and the persistent log come before the network stack.  The
+     * block drivers are already probed, and a slow or hanging NIC probe must
+     * not cost the boot log for everything that happens after this point.  In
+     * the distro layout /extra must be mounted first so the log lands at
+     * /extra/var/log/a20 and remains visible after chroot. */
 #if defined(CONFIG_STORAGE_READ_ONLY)
     mount_read_only_storage();
 #elif defined(CONFIG_RAMFS_USER)
@@ -261,7 +337,18 @@ void kernel_main(void) {
      * Keep embedded executables visible; data disks can be mounted explicitly. */
     printf("[INIT] RAMFS userspace: keeping embedded /bin\n");
 #ifdef CONFIG_RAMFS_DISTRO
+    /* Explicit ESP logging is independent of the desktop filesystem. Flush
+     * the pre-mount evidence even if a USB read prevents /extra from mounting. */
+    if (klog_mode() == KLOG_MODE_ESP) {
+        mount_persistent_log();
+        kinfo("[INIT] probing desktop root\n");
+        klog_disk_sync();
+    }
     mount_ramfs_distro();
+    if (klog_mode() != KLOG_MODE_ESP)
+        mount_persistent_log();
+#else
+    mount_persistent_log();
 #endif
 #ifdef CONFIG_RAMFS_MEDIA
     mount_ramfs_media();
@@ -270,9 +357,21 @@ void kernel_main(void) {
     printf("[INIT] BRINGUP mode: no block devices\n");
 #else
     mount_block_devices();
+    /* Non-RAMFS profiles (external root, SD/FIT worlds) get the same
+     * persistent log.  A dedicated "A20OS log" partition is preferred; the
+     * mount code falls back to a writable rootfs directory. */
+    mount_persistent_log();
 #endif
 
+    if (current_board && current_board->defer_network_init) {
+        printf("[INIT] Network deferred by board recovery profile\n");
+    } else {
+        net_init();
+        printf("[INIT] Network initialized\n");
+    }
+
     proc_init();
+    a20_i2c_hid_start_worker();
 #ifdef CONFIG_ACPI
     acpi_os_start_worker();
 #endif
@@ -306,7 +405,11 @@ void kernel_main(void) {
         panic("Failed to create init_kthread");
     if (proc_alloc(oom_kswapd_thread) < 0)
         kerr("[KSWAPD] failed to spawn background reclaimer\n");
-    /* Cluster subsystem self-check (docs/cluster/03-kernel-impl.md §5.6):
+#if CONFIG_KLOG_PERSISTENT
+    if (klog_disk_ready() && proc_alloc(klog_disk_thread) < 0)
+        kerr("[LOG] failed to spawn persistent log writer\n");
+#endif
+    /* Cluster subsystem self-check (docs/zh/cluster/03-kernel-impl.md §5.6):
      * inert unless the command line carries clxselftest=1; costs one
      * strstr on normal boots.  Also calls a20_clx_core_init() when the
      * bootarg is present, so the check does not depend on a userspace
@@ -320,6 +423,7 @@ void kernel_main(void) {
 #endif
 
     boot_advance(BOOT_PHASE_DEVICES, BOOT_PHASE_READY);
+    klog_disk_mark_ready();
     printf("[INIT] System ready\n\n");
     printf("\033[1;36m");
     printf("%s\n",
@@ -393,6 +497,7 @@ void init_kthread(void) {
 
     driver_runtime_selftest_boot();
     arch_run_bootarg_selftests();
+    a20_driver_boot_selftests();
     hyp_boot_selftest();
 
     /* Generic systems discover optional packages after the root filesystem is
@@ -400,6 +505,14 @@ void init_kthread(void) {
 #ifdef CONFIG_DRIVER_DEPLOYMENT_GENERIC
     driver_manager_init();
 #endif
+    /* Start the one-shot diagnostic before the network attach: a hung NIC or
+     * protocol stack must not be able to take the final screen report with
+     * it.  The thread sleeps first, so it does not race normal boot output. */
+#if CONFIG_KLOG_ENABLED
+    if (proc_alloc(boot_report_thread) < 0)
+        kerr("[LOG] failed to spawn boot report thread\n");
+#endif
+
     /* BSD starts a process-context executor here even when the NIC driver is
      * statically linked. Driver packaging must not decide whether it starts. */
     if (!current_board || !current_board->defer_network_init)
@@ -417,9 +530,9 @@ void init_kthread(void) {
     int is_distro_shebang = 0;
 
     int distro_via_embedded_init = 0;
-#ifdef CONFIG_WIFI_RTW89
-    /* This image's embedded init stages and starts the independent radio
-     * service before handing off to the existing distro init. */
+#if defined(CONFIG_WIFI_RTW89) || defined(CONFIG_RAMFS_DESKTOP_TOOLS)
+    /* Stage embedded radio/desktop tools in RAM before executing the
+     * distribution's unmodified init; desktop staging is radio-independent. */
     distro_via_embedded_init = 1;
 #endif
     if (!distro_via_embedded_init) {

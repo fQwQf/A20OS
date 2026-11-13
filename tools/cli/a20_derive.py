@@ -17,7 +17,8 @@ def _b(v: bool) -> str:
 def derive_make_vars(inst: Instance) -> list[str]:
     """Derive make variable assignments; unset fields keep Makefile defaults."""
     v: list[str] = [f"ARCH={inst.arch}", f"BOARD={inst.board}"]
-    k, m, g, n, r, t = inst.kernel, inst.machine, inst.gui, inst.net, inst.rootfs, inst.test
+    k, l, m, g, n, r, t = (inst.kernel, inst.log, inst.machine, inst.gui,
+                           inst.net, inst.rootfs, inst.test)
     if inst.abi is not None:
         v.append(f"ABI={inst.abi}")
     if k.profile is not None:
@@ -46,6 +47,10 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"EXTERNAL_ROOT={_b(k.external_root)}")
     if k.ramfs_user is not None:
         v.append(f"RAMFS_USER={_b(k.ramfs_user)}")
+    if k.ramfs_fastfetch is not None:
+        v.append(f"RAMFS_FASTFETCH={_b(k.ramfs_fastfetch)}")
+    if k.wifi_rtw89 is not None:
+        v.append(f"WIFI_RTW89={_b(k.wifi_rtw89)}")
     if k.ramfs_media is not None:
         v.append(f"RAMFS_MEDIA={_b(k.ramfs_media)}")
     if k.ramfs_distro is not None:
@@ -112,6 +117,24 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"PKG_ALPINE={_b(r.alpine)}")
     if r.drivers is not None:
         v.append(f"DRIVER_SELECTION={' '.join(f'{d}.a20drv' for d in r.drivers)}")
+    if l.enabled is not None:
+        v.append(f"LOG_ENABLED={_b(l.enabled)}")
+    if l.level is not None:
+        v.append(f"LOG_LEVEL={l.level}")
+    if l.console is not None:
+        v.append(f"LOG_CONSOLE={_b(l.console)}")
+    if l.persistent is not None:
+        v.append(f"LOG_PERSISTENT={_b(l.persistent)}")
+    if l.mode is not None:
+        v.append(f"LOG_MODE={l.mode}")
+    if l.partition_mb is not None:
+        v.append(f"LOG_PARTITION_MB={l.partition_mb}")
+    if l.max_bytes is not None:
+        v.append(f"LOG_MAX_BYTES={l.max_bytes}")
+    if l.session is not None:
+        v.append(f"LOG_SESSION={_b(l.session)}")
+    if l.loader is not None:
+        v.append(f"LOG_LOADER={_b(l.loader)}")
     if t.timeout is not None:
         v.append(f"SMOKE_TIMEOUT={t.timeout}")
     if t.input_delay is not None:

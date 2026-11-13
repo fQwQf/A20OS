@@ -19,7 +19,7 @@
 #include "mm/slab.h"
 #include "core/errno.h"
 
-#define USB_CTRL_BUF_SZ 512
+#define USB_ENUM_MAX_ATTEMPTS 3U
 
 /* ------------------------------------------------------------------ */
 /* usb bus                                                            */
@@ -201,8 +201,12 @@ static int usb_parse_config(usb_device_t *udev, const uint8_t *cfg,
         if (size < 2 || off + size > length)
             break;
         if (type == USB_DT_INTERFACE && size >= 9) {
-            usb_interface_descriptor_t *id = (usb_interface_descriptor_t *)(cfg + off);
-            if (iface_count < cd->num_interfaces) {
+            const usb_interface_descriptor_t *id =
+                (const usb_interface_descriptor_t *)(cfg + off);
+            /* SET_CONFIGURATION activates alternate setting zero. Endpoints
+             * in another setting must not be attached to the active one. */
+            cur = -1;
+            if (id->alt_setting == 0 && iface_count < cd->num_interfaces) {
                 cur = iface_count++;
                 usb_interface_t *iface = &ifaces[cur];
                 memset(iface, 0, sizeof(*iface));
@@ -218,6 +222,8 @@ static int usb_parse_config(usb_device_t *udev, const uint8_t *cfg,
                 if (iface->ep_count) {
                     iface->eps = kcalloc(iface->ep_count, sizeof(*iface->eps));
                     if (!iface->eps) {
+                        for (uint8_t i = 0; i < cur; i++)
+                            kfree(ifaces[i].eps);
                         kfree(ifaces);
                         return -ENOMEM;
                     }
@@ -246,6 +252,8 @@ static int usb_parse_config(usb_device_t *udev, const uint8_t *cfg,
 
 int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
 {
+    if (!hcd->port_devices || port == 0 || port > hcd->max_ports)
+        return -EINVAL;
     const usb_hcd_ops_t *ops = hcd->ops;
     uint8_t speed;
     int r = ops->reset_port(hcd, port, &speed);
@@ -255,9 +263,7 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     }
     mdelay(20);                 /* reset recovery */
 
-    /* Reserve the bus address before the HCD builds any context: a device
-     * behind a hub is addressed by the hub, so the number has to be settled
-     * before the first transfer can reach it. */
+    /* Provide a reservation for HCDs that assign addresses in software. */
     int address = usb_core_alloc_address();
     if (address < 0) {
         kerr("[USB] port %u address pool exhausted\n", port);
@@ -265,7 +271,7 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     }
 
     usb_slot_t slot;
-    r = ops->alloc_slot(hcd, port, speed, hcd->hub_address,
+    r = ops->alloc_slot(hcd, port, speed, hcd->hub_slot,
                         (uint8_t)address, &slot);
     if (r) {
         kerr("[USB] port %u alloc_slot failed: %d\n", port, r);
@@ -284,7 +290,7 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     kinfo("[USB] port %u slot=%u address=%u\n", port, slot.hcd, slot.address);
     mdelay(5);
 
-    uint8_t buf[USB_CTRL_BUF_SZ];
+    uint8_t buf[sizeof(usb_device_descriptor_t)];
     r = ops->get_descriptor(hcd, slot.hcd, USB_DT_DEVICE, 8, buf);
     if (r) {
         kdebug("[USB] port %u device descriptor(8) failed: %d\n", port, r);
@@ -304,40 +310,48 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     if (r)
         goto fail;
     dd = (usb_device_descriptor_t *)buf;
+    uint16_t vendor = dd->vendor;
+    uint16_t product = dd->product;
+
+    r = ops->get_descriptor(hcd, slot.hcd, USB_DT_CONFIG,
+                            sizeof(usb_config_descriptor_t), buf);
+    if (r)
+        goto fail;
+    uint16_t total = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+    if (buf[1] != USB_DT_CONFIG || buf[0] < sizeof(usb_config_descriptor_t) ||
+        total < buf[0] || total > USB_CONTROL_MAX_LENGTH) {
+        kwarn("[USB] %04x:%04x port %u invalid config header: type=%u length=%u total=%u (limit=%u)\n",
+              vendor, product, port, buf[1], buf[0], total, USB_CONTROL_MAX_LENGTH);
+        r = total > USB_CONTROL_MAX_LENGTH ? -EMSGSIZE : -EINVAL;
+        goto fail;
+    }
+    uint8_t *config = kmalloc(total);
+    if (!config) {
+        r = -ENOMEM;
+        goto fail;
+    }
+    r = ops->get_descriptor(hcd, slot.hcd, USB_DT_CONFIG, total, config);
+    if (r) {
+        kfree(config);
+        goto fail;
+    }
 
     usb_device_t *udev = kcalloc(1, sizeof(*udev));
-    if (!udev)
+    if (!udev) {
+        kfree(config);
+        r = -ENOMEM;
         goto fail;
+    }
     udev->hcd = hcd;
     udev->speed = speed;
     udev->slot = slot.hcd;
-    udev->vendor = dd->vendor;
-    udev->product = dd->product;
+    udev->vendor = vendor;
+    udev->product = product;
     udev->address = slot.address;
-
-    r = ops->get_descriptor(hcd, slot.hcd, USB_DT_CONFIG, 9, buf);
-    if (r) {
-        kfree(udev);
-        goto fail;
-    }
-    uint16_t total = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
-    if (total < 9 || total > sizeof(buf)) {
-        kfree(udev);
-        goto fail;
-    }
-    r = ops->get_descriptor(hcd, slot.hcd, USB_DT_CONFIG, total, buf);
-    if (r) {
-        kfree(udev);
-        goto fail;
-    }
-    r = usb_parse_config(udev, buf, total);
-    if (r) {
-        kfree(udev);
-        goto fail;
-    }
-
-    kinfo("[USB] device %04x:%04x port=%u speed=%u ifaces=%u\n",
-          udev->vendor, udev->product, port, speed, udev->iface_count);
+    r = usb_parse_config(udev, config, total);
+    kfree(config);
+    if (r)
+        goto free_device;
 
     /* SET_CONFIGURATION (device request). */
     usb_setup_packet_t setup = {
@@ -349,32 +363,25 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     };
     r = ops->control(hcd, slot.hcd, &setup, NULL);
     if (r)
-        kdebug("[USB] SET_CONFIGURATION failed: %d\n", r);
+        goto free_interfaces;
+
+    kinfo("[USB] device %04x:%04x port=%u speed=%u ifaces=%u config_bytes=%u\n",
+          vendor, product, port, speed, udev->iface_count, total);
 
     /* Publish interfaces; class drivers bind and finish setup in probe. */
     r = usb_publish_interfaces(udev);
-    if (r < 0) {
-        for (uint8_t i = 0; i < udev->iface_count; i++)
-            if (udev->ifaces[i].eps)
-                kfree(udev->ifaces[i].eps);
-        kfree(udev->ifaces);
-        kfree(udev);
-        goto fail;
-    }
-    if (!hcd->port_devices || port == 0 || port > hcd->max_ports) {
-        r = -EINVAL;
-        for (uint8_t i = 0; i < udev->iface_count; i++) {
-            usb_unpublish_interface(&udev->ifaces[i]);
-            kfree(udev->ifaces[i].eps);
-        }
-        kfree(udev->ifaces);
-        kfree(udev);
-        goto fail;
-    }
+    if (r < 0)
+        goto free_interfaces;
     hcd->port_devices[port - 1] = udev;
-    hcd->port_state[port - 1] = 1;
+    hcd->port_state[port - 1] = 0;
     return 0;
 
+free_interfaces:
+    for (uint8_t i = 0; i < udev->iface_count; i++)
+        kfree(udev->ifaces[i].eps);
+    kfree(udev->ifaces);
+free_device:
+    kfree(udev);
 fail:
     /* Give the controller context back: leaving it allocated would leak a
      * slot, and the next hotplug on this port could not be enumerated. */
@@ -433,7 +440,7 @@ usb_interface_t *usb_find_interface(usb_device_t *dev, uint8_t num)
 /* Registration                                                        */
 /* ------------------------------------------------------------------ */
 
-#define USB_MAX_HCDS 4
+#define USB_MAX_HCDS 32
 static usb_hcd_t *g_hcds[USB_MAX_HCDS];
 static int g_hcd_count;
 
@@ -441,13 +448,7 @@ static int g_hcd_count;
 /* Bus address pool                                                    */
 /* ------------------------------------------------------------------ */
 
-/* A root controller may address devices implicitly — an xHCI slot id is
- * enough to route a transfer and no SET_ADDRESS is ever sent — but a device
- * behind a hub is addressed by the hub, and every address on a bus has to be
- * unique across the whole tree.  So hub-attached devices draw from this pool
- * while root devices never touch it, and there is nothing for them to
- * collide with.  Bit 0 of the bitmap is address 0, which is the reserved
- * "not addressed yet" value and is never handed out. */
+/* Bit 0 is the USB default address and is never handed out. */
 static uint8_t g_usb_addresses[16];
 static spinlock_t g_usb_address_lock;
 
@@ -484,6 +485,8 @@ int usb_core_register_hcd(usb_hcd_t *hcd)
 {
     if (!hcd || !hcd->ops || !hcd->ops->start)
         return -EINVAL;
+    if (g_hcd_count == USB_MAX_HCDS)
+        return -ENOSPC;
     hcd->port_state = kcalloc(hcd->max_ports ? hcd->max_ports : 1, 1);
     if (!hcd->port_state)
         return -ENOMEM;
@@ -502,8 +505,7 @@ int usb_core_register_hcd(usb_hcd_t *hcd)
         hcd->port_state = NULL;
         return r;
     }
-    if (g_hcd_count < USB_MAX_HCDS)
-        g_hcds[g_hcd_count++] = hcd;
+    g_hcds[g_hcd_count++] = hcd;
     return 0;
 }
 
@@ -542,15 +544,20 @@ void usb_core_scan(void)
             int connected = hcd->ops->port_connected &&
                             hcd->ops->port_connected(hcd, port);
             if (!connected) {
-                if (hcd->port_devices && hcd->port_devices[port - 1])
-                    usb_disconnect_port(hcd, port);
+                usb_disconnect_port(hcd, port);
+                hcd->port_state[port - 1] = 0;
                 continue;
             }
-            if (hcd->port_devices && hcd->port_devices[port - 1])
+            uint8_t *failures = &hcd->port_state[port - 1];
+            if (hcd->port_devices[port - 1] || *failures >= USB_ENUM_MAX_ATTEMPTS)
                 continue;
             int r = usb_core_enumerate_port(hcd, port);
-            if (r)
-                kerr("[USB] port %u enumeration failed: %d\n", port, r);
+            if (r) {
+                ++*failures;
+                kwarn("[USB] port %u enumeration failed: %d (attempt %u/%u)%s\n",
+                      port, r, *failures, USB_ENUM_MAX_ATTEMPTS,
+                      *failures == USB_ENUM_MAX_ATTEMPTS ? "; waiting for disconnect" : "");
+            }
         }
     }
 }
@@ -558,14 +565,25 @@ void usb_core_scan(void)
 void usb_core_poll(void)
 {
     static uint64_t last_poll;
+    static bool polling;
+    /* A scheduler pass on another CPU can overlap a slow port reset. Keep
+     * enumeration and its per-port retry accounting single-owner. */
+    if (__atomic_exchange_n(&polling, true, __ATOMIC_ACQUIRE))
+        return;
     uint64_t now = timer_get_ticks();
-    uint64_t interval = clock_ticks_per_sec() / 4;
+    /* 50 Hz, not 4 Hz.  HID interrupt transfers fall back to this loop when a
+     * platform does not route the xHCI line; at 4 Hz a boot keyboard drops
+     * every keystroke that is pressed and released between two sweeps.  The
+     * port sweep is a handful of MMIO reads and the IRQ path remains the
+     * normal completion source. */
+    uint64_t interval = clock_ticks_per_sec() / 50;
     if (!interval)
         interval = 1;
-    if (now - last_poll < interval)
-        return;
-    last_poll = now;
-    usb_core_scan();
+    if (now - last_poll >= interval) {
+        last_poll = now;
+        usb_core_scan();
+    }
+    __atomic_store_n(&polling, false, __ATOMIC_RELEASE);
 }
 
 void usb_core_init(void)

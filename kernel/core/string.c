@@ -122,9 +122,33 @@ void *memcpy(void *d, const void *s, size_t n) {
 }
 
 void *memmove(void *d, const void *s, size_t n) {
-    unsigned char *dp = d; const unsigned char *sp = s;
-    if (dp < sp) { while (n--) *dp++ = *sp++; }
-    else { dp += n; sp += n; while (n--) *--dp = *--sp; }
+    unsigned char *dp = d;
+    const unsigned char *sp = s;
+    if (dp == sp || n == 0)
+        return d;
+    /* Forward overlap is exactly memcpy's contract when dest < src.  memcpy
+     * already has a 64-bit path; a byte loop here made fbcon's per-line
+     * scroll of a 1280x800 scanout (about 4 MiB) visibly slow on real
+     * hardware. */
+    if (dp < sp)
+        return memcpy(d, s, n);
+    if (n >= 8 && !((uintptr_t)dp & 7) && !((uintptr_t)sp & 7)) {
+        dp += n;
+        sp += n;
+        while (n >= 8) {
+            dp -= 8;
+            sp -= 8;
+            *(uint64_t *)dp = *(const uint64_t *)sp;
+            n -= 8;
+        }
+        while (n--)
+            *--dp = *--sp;
+        return d;
+    }
+    dp += n;
+    sp += n;
+    while (n--)
+        *--dp = *--sp;
     return d;
 }
 

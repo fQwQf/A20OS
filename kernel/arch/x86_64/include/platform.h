@@ -11,12 +11,8 @@
 #define PAGE_OFFSET        0xFFFF800000000000UL
 #define USER_VA_LIMIT      0x0000800000000000UL
 
-/* End of the physical range the firmware maps into the direct map.  The boot
- * map stops at 4 GiB, so anything usable above that is mapped a whole 1 GiB
- * chunk at a time (see firmware.c).  Shared with mm/kwx.c, which has to
- * demote every 1 GiB slot the direct map actually covers -- see
- * arch_kernel_wx_finalize(). */
-#define X86_HIGH_RAM_MAP_END  0x200000000ULL
+/* Reserve the first PDPT slots for RAM. Device aliases use slots above it. */
+#define X86_HIGH_RAM_MAP_END  (64ULL << 30)
 
 /* RAM ranges are discovered at boot from the multiboot memory map (see
  * arch/x86_64/platform/firmware.c).  The old inline here returned a hardcoded
@@ -36,8 +32,7 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 #define PCI_ECAM_BASE      (0xB0000000UL + PAGE_OFFSET)
 #define PCI_MMIO_BASE      (0xC0000000UL + PAGE_OFFSET)
 
-/* The higher-half direct map (boot_pdpt_hh in entry.S) covers physical
- * 0..4 GiB.  Anything above this is unreachable via addr + PAGE_OFFSET. */
+/* Bootstrap map limit before the firmware RAM map is processed. */
 #define PHYS_MAP_LIMIT     0x100000000ULL
 
 /* UART - COM1 uses I/O ports, not MMIO */
@@ -102,6 +97,10 @@ int  arch_pci_pirq_program(int pirq, int irq);
  * entry for a routed PCI vector (0x40+gsi) or the local APIC LVT for a
  * message-signalled one.  Anything else is ignored. */
 void x86_64_pci_irq_set_masked(int vector, int masked);
+/* Force a legacy ISA line onto the IOAPIC with edge/active-high semantics.
+ * The PS/2 path uses this when ACPI already mapped GSI1/GSI12 with different
+ * trigger flags and arch_firmware_irq_map() refuses to steal the entry. */
+int x86_64_route_isa_irq_forced(uint32_t gsi, uint32_t vector);
 void x86_64_set_trap_state(uint64_t cause, uint64_t epc, uint64_t tval);
 uint64_t x86_64_get_trap_cause(void);
 uint64_t x86_64_get_trap_epc(void);

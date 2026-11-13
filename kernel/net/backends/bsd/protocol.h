@@ -81,6 +81,7 @@ void *a20_bsd_port_nic_attach(const a20_bsd_nic_config_t *config);
 void a20_bsd_port_nic_progress(void *context, unsigned budget);
 void a20_bsd_port_nic_stats(void *context, a20_bsd_nic_stats_t *out);
 int a20_bsd_port_nic_set_mtu(void *context, int mtu);
+int a20_bsd_port_nic_set_hwaddr(void *context, const uint8_t mac[6]);
 void a20_bsd_port_nic_set_carrier(void *context, int carrier);
 int a20_bsd_port_nic_set_up(void *context, int up);
 /* Replace the primary IPv4 address. old_* is the address currently installed

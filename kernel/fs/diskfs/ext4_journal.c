@@ -1586,6 +1586,46 @@ static int jbd2_legacy_readonly_allowed(
 #endif
 }
 
+/* Linux can clear journal_checksum_v3 when loading an ext4 filesystem that
+ * lacks metadata_csum, even on a normal "ro" mount. Only a demonstrably clean
+ * filesystem with an empty, error-free, known unchecksummed internal journal
+ * can be upgraded in place. This never reinterprets or discards a dirty log. */
+static int jbd2_clean_unchecked_upgrade_allowed(const jbd2_t *j,
+                                               const ext4_superblock_t *sb)
+{
+    const uint8_t *m = j->meta;
+    uint32_t size = get_be32(m + 12), maxlen = get_be32(m + 16);
+    uint32_t first = get_be32(m + 20), incompat = get_be32(m + 40);
+    return sb->s_state == EXT4_VALID_FS && !sb->s_last_orphan &&
+        !(sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) &&
+        get_be32(m) == JBD2_MAGIC_NUMBER &&
+        get_be32(m + 4) == JBD2_SUPERBLOCK_V2 &&
+        !get_be32(m + 28) && !get_be32(m + 32) &&
+        !get_be32(m + 36) && !get_be32(m + 44) &&
+        !(incompat & ~(JBD2_FEATURE_INCOMPAT_REVOKE | JBD2_FEATURE_INCOMPAT_64BIT)) &&
+        (m[80] == 0 || m[80] == JBD2_CRC32C_CHKSUM) &&
+        !memcmp(m + 48, sb->s_uuid, 16) &&
+        size == j->fs->block_size && size == 4096 &&
+        maxlen >= 2 && maxlen <= JBD2_MAX_JOURNAL_BLOCKS &&
+        first >= 1 && first < maxlen &&
+        ext4_inode_size(&j->journal_inode) / size >= maxlen;
+}
+
+static int jbd2_upgrade_clean_unchecked(jbd2_t *j)
+{
+    put_be32(j->meta + 40, get_be32(j->meta + 40) | JBD2_FEATURE_INCOMPAT_CSUM_V3);
+    j->meta[80] = JBD2_CRC32C_CHKSUM;
+    put_be32(j->meta + JBD2_SUPERBLOCK_CHECKSUM_OFF, 0);
+    put_be32(j->meta + JBD2_SUPERBLOCK_CHECKSUM_OFF,
+             ext4_crc32c(0xffffffffU, j->meta, JBD2_SUPERBLOCK_BYTES));
+    int ret = jbd2_write_block(j, 0, j->meta);
+    if (!ret)
+        ret = bcache_sync_checked(j->fs->bc);
+    if (!ret)
+        printf("[EXT4/JBD2] clean empty unchecked journal upgraded to checksum v3\n");
+    return ret;
+}
+
 int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
                              int read_only)
 {
@@ -1613,6 +1653,17 @@ int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
      * also not proof of an empty log: report it as pending and let the
      * recovery attempt produce the diagnostic. */
     ret = jbd2_load_superblock(&j);
+    if (ret == -EOPNOTSUPP && !read_only &&
+        jbd2_clean_unchecked_upgrade_allowed(&j, disk_sb)) {
+        ret = jbd2_upgrade_clean_unchecked(&j);
+        if (!ret)
+            ret = jbd2_load_superblock(&j);
+        if (ret < 0) {
+            printf("[EXT4/JBD2] checksum upgrade failed (%d); refusing mount\n", ret);
+            kfree(j.meta);
+            return ret;
+        }
+    }
     if (ret == -EOPNOTSUPP && read_only) {
         uint32_t compat = get_be32(j.meta + 36);
         uint32_t incompat = get_be32(j.meta + 40);

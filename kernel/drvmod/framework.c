@@ -57,6 +57,10 @@
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
 #include "core/timekeeping.h"
+#ifdef CONFIG_X86_64
+#include "firmware/irq.h"
+#include "platform.h"
+#endif
 extern void input_mux_wake(void);
 #include "core/sync.h"
 #include "core/timer.h"
@@ -523,8 +527,10 @@ const struct drv_export drv_export_table[] = {
      * callable from a module read path but not from an ISR -- it reaches
      * proc_current() through arch_entropy_sample(). */
     { "random_reseed",        (void *)random_reseed },
+    { "random_fill",          (void *)random_fill },
     { "clock_get_ticks",     (void *)clock_get_ticks },
     { "klog_write",          (void *)klog_write },
+    { "klog_write_ex",       (void *)klog_write_ex },
     { "klog_level",          (void *)&klog_level },
     { "mdelay",              (void *)mdelay },
     { "udelay",              (void *)udelay },
@@ -575,6 +581,18 @@ const struct drv_export drv_export_table[] = {
     { "request_irq",         (void *)request_irq },
     { "free_irq",            (void *)free_irq },
     { "synchronize_irq",     (void *)synchronize_irq },
+#ifdef CONFIG_X86_64
+    /* Shared core lock headers use this function as the early-CPU fallback;
+     * do not export the APIC lookup table or let modules own CPU topology. */
+    { "x86_64_apic_to_cpu", (void *)x86_64_apic_to_cpu },
+    { "ioport_read8", (void *)ioport_read8 },
+    { "ioport_write8", (void *)ioport_write8 },
+    /* Legacy i8042 routing: PS/2 is a loadable x86 module and must be able
+     * to program GSI1/GSI12 before request_irq() unmasks the line. */
+    { "arch_firmware_irq_map", (void *)arch_firmware_irq_map },
+    { "firmware_legacy_irq_map", (void *)firmware_legacy_irq_map },
+    { "x86_64_route_isa_irq_forced", (void *)x86_64_route_isa_irq_forced },
+#endif
     { "irq_enable",          (void *)irq_enable },
     { "irq_disable",         (void *)irq_disable },
     /* frame allocator passthroughs (virtio-gpu framebuffer pages) */

@@ -16,10 +16,6 @@
 #define AP_ICR_WAIT_TICKS (TICKS_PER_SEC / 10)
 #define AP_START_WAIT_TICKS (TICKS_PER_SEC * 2)
 
-#if CONFIG_NR_CPUS > 8
-#error x86_64 syscall entry stubs currently support at most 8 CPUs
-#endif
-
 #if CONFIG_NR_CPUS > 1
 static uint8_t ap_stacks[CONFIG_NR_CPUS][AP_STACK_SIZE] __attribute__((aligned(16)));
 static int trampoline_ready;

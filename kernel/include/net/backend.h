@@ -214,6 +214,9 @@ typedef struct net_backend_if_ops {
     int (*neighbor_update_v4)(uint32_t ifindex, uint32_t address,
                               const uint8_t mac[6]);
     uint32_t (*interface_ipv4)(int index);
+    /* Publish an immutable hardware address learned after device registration.
+     * Only while carrier is down; no protocol-private types cross this API. */
+    int (*device_hwaddr)(struct device *device, const uint8_t mac[6]);
 } net_backend_if_ops_t;
 
 /* ------------------------------------------------------------------ *

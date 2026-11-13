@@ -2,6 +2,7 @@
 #include "core/string.h"
 #include "core/lock.h"
 #include "drivers/char/uart.h"
+#include "core/klog.h"
 
 /* The console lock lives with the ring buffer in kernel/core/klog.c, so
  * klog_write() and vprintf() cannot splice their output into each other.
@@ -180,9 +181,11 @@ void vprintf(const char *fmt, va_list args) {
     vprintf_ctx_t vc = { .pos = 0 };
     do_format(fmt, args, vprintf_putc, &vc);
     vc.buf[vc.pos] = '\0';
-    uint64_t flags = spin_lock_irqsave(&klog_console_lock);
-    console_emit_locked(vc.buf, (size_t)vc.pos);
-    spin_unlock_irqrestore(&klog_console_lock, flags);
+    /* printf() used to bypass the ring buffer entirely, so lines such as
+     * [DISTRO]/[SMP]/[DRM] were visible on the console but absent from
+     * /dev/kmsg and from the persistent log.  Both entry points now share the
+     * same append-and-emit path. */
+    klog_emit_text(KLOG_INFO, vc.buf, (size_t)vc.pos);
 }
 
 void printf(const char *fmt, ...) {

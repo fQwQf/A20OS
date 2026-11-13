@@ -23,14 +23,26 @@ mkdir -p "$OUT_DIR"
 # ---------------------------------------------------------------
 # fastfetch_config.h
 # ---------------------------------------------------------------
-cat > "$OUT_DIR/fastfetch_config.h" <<'HCONFIG'
+FF_VERSION=$(sed -nE '/^project\(fastfetch([[:space:]]|$)/,/^\)/{
+    s/^[[:space:]]+VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$/\1/p
+}' "$FF_SRC/CMakeLists.txt")
+if [ -z "$FF_VERSION" ]; then
+    echo "Cannot read the fastfetch project version from $FF_SRC/CMakeLists.txt" >&2
+    exit 1
+fi
+FF_VERSION_MAJOR=${FF_VERSION%%.*}
+FF_VERSION_MINOR_PATCH=${FF_VERSION#*.}
+FF_VERSION_MINOR=${FF_VERSION_MINOR_PATCH%%.*}
+FF_VERSION_PATCH=${FF_VERSION_MINOR_PATCH#*.}
+
+cat > "$OUT_DIR/fastfetch_config.h" <<HCONFIG
 #pragma once
 
 #define FASTFETCH_PROJECT_NAME "fastfetch"
-#define FASTFETCH_PROJECT_VERSION "2.66.0"
-#define FASTFETCH_PROJECT_VERSION_MAJOR 2
-#define FASTFETCH_PROJECT_VERSION_MINOR 66
-#define FASTFETCH_PROJECT_VERSION_PATCH 0
+#define FASTFETCH_PROJECT_VERSION "$FF_VERSION"
+#define FASTFETCH_PROJECT_VERSION_MAJOR $FF_VERSION_MAJOR
+#define FASTFETCH_PROJECT_VERSION_MINOR $FF_VERSION_MINOR
+#define FASTFETCH_PROJECT_VERSION_PATCH $FF_VERSION_PATCH
 #define FASTFETCH_PROJECT_VERSION_GIT ""
 #define FASTFETCH_PROJECT_VERSION_TWEAK ""
 #define FASTFETCH_PROJECT_VERSION_TWEAK_NUM 0

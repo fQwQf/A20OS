@@ -199,6 +199,12 @@ arches = ["x86_64", "aarch64", "loongarch64"]
 description = "USB hub class driver"
 
 [[driver]]
+name = "r8169"
+source = "kernel/drvmod/examples/r8169.c"
+arches = ["x86_64"]
+description = "Realtek RTL8168/8111 PCIe NIC (r8169 family)"
+
+[[driver]]
 name = "rtl8139"
 source = "kernel/drvmod/examples/rtl8139.c"
 arches = ["x86_64"]

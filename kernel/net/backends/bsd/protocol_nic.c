@@ -1113,6 +1113,14 @@ int port_nic_set_mtu(void *context, int mtu)
     return if_setmtu(ifp, mtu);
 }
 
+int port_nic_set_hwaddr(void *context, const uint8_t mac[6])
+{
+    struct ff_dpdk_if_context *ctx = context;
+    if (!ctx || !ctx->ifp || !mac)
+        return ENODEV;
+    return if_setlladdr(ctx->ifp, mac, ETHER_ADDR_LEN);
+}
+
 /*
  * Static ARP injection (Linux SIOCSARP / ATF_COM).
  *

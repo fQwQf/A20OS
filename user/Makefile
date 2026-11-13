@@ -722,6 +722,53 @@ $(BUILD_DIR)/sh: $(BUILD_DIR)/mksh | build_dir
 	@mkdir -p $(dir $@)
 	cp $< $@
 
+# The GPL radio stack runs as a separate Linux-ABI process.
+$(BUILD_DIR)/rtw89d: $(wildcard wifi/*.c wifi/*.h wifi/compat/*/*.h wifi/compat/*.h) \
+                    ../tools/drivers/build_rtw89.py external/rtw89/Makefile | build_dir musl_prepare
+	@test "$(ARCH)" = x86_64
+	$(PYTHON) ../tools/drivers/build_rtw89.py --cc "$(CC)" \
+		--musl-build "$(MUSL_BUILD)" --out "$(abspath $(BUILD_DIR))/rtw89-build" --jobs 8
+	cp $(BUILD_DIR)/rtw89-build/rtw89d $@
+	$(CROSS_COMPILE)strip --strip-debug $@
+
+$(BUILD_DIR)/wifi: wifi/wifi.c wifi/control.h | build_dir musl_prepare
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(CRT_START) wifi/wifi.c $(CRT_END) $(LIBC)
+
+$(BUILD_DIR)/wifi-dhcp: wifi/wifi-dhcp | build_dir
+	cp $< $@
+	chmod 755 $@
+
+$(addprefix $(BUILD_DIR)/,wifi-gui wifi_backend.py wifi_portal.py a20-wifi.desktop): $(BUILD_DIR)/%: wifi/% | build_dir
+	cp $< $@
+	chmod 755 $@
+
+$(BUILD_DIR)/input-probe.py: diagnostics/input-probe.py | build_dir
+	cp $< $@
+	chmod 755 $@
+
+$(BUILD_DIR)/90-libinput-fuzz-override.rules: ../packages/overlay/xfce/etc/udev/rules.d/90-libinput-fuzz-override.rules | build_dir
+	cp $< $@
+	chmod 644 $@
+
+$(BUILD_DIR)/90-a20-ibus.gschema.override: ../packages/overlay/xfce/usr/share/glib-2.0/schemas/90-a20-ibus.gschema.override | build_dir
+	cp $< $@
+	chmod 644 $@
+
+$(BUILD_DIR)/session-log.py: ../packages/overlay/xfce/usr/lib/a20/session-log.py | build_dir
+	cp $< $@
+	chmod 755 $@
+
+$(BUILD_DIR)/session-power.py: ../packages/overlay/xfce/usr/lib/a20/session-power.py | build_dir
+	cp $< $@
+	chmod 755 $@
+
+$(BUILD_DIR)/rtw89-notices: wifi/LICENSE external/rtw89/LICENSE external/rtw89/CREDITS.md \
+                          external/rtw89/firmware/LICENCE.rtlwifi_firmware.txt \
+                          external/rtw89/third_party/hostap/COPYING \
+                          external/rtw89/third_party/hostap/README \
+                          external/rtw89/third_party/mbedtls/LICENSE | build_dir
+	cat $^ > $@
+
 # Optional libc/kernel ABI regression executable; not installed by `all`.
 .PHONY: stock-musl-abi
 stock-musl-abi: tests/test_stock_musl_abi.c cmds/linux_sched.h Makefile | build_dir musl_prepare
@@ -845,7 +892,8 @@ $(OBJ_DIR)/mksh/%.o: $(MKSH_DIR)/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
-$(FF_GEN)/.headers-stamp: $(shell find $(FF_DIR)/src/logo/ascii -name '*.txt' 2>/dev/null) \
+$(FF_GEN)/.headers-stamp: extra/fastfetch_gen_headers.sh \
+                          $(shell find $(FF_DIR)/src/logo/ascii -name '*.txt' 2>/dev/null) \
                           $(FF_DIR)/doc/help.json $(FF_DIR)/CMakeLists.txt
 	@mkdir -p $(FF_GEN)
 	$(SHELL) extra/fastfetch_gen_headers.sh $(abspath $(FF_DIR)) $(FF_GEN)

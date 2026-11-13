@@ -9,11 +9,13 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_msix.h"
 #include "drivers/bus/pci_hal.h"
+#include "drivers/bus/platform_bus.h"
 #include "core/progress.h"
 #include "platform.h"
 #include "firmware.h"
 #include "core/string.h"
 #include "core/errno.h"
+#include "core/lock.h"
 #include "firmware/irq.h"
 
 #include "trap_frame.h"
@@ -104,7 +106,7 @@ static uint8_t df_stack[CONFIG_NR_CPUS][4096 * 4] __attribute__((aligned(16)));
 
 extern uint64_t isr_stub_table[256];
 extern void syscall_entry(void);
-extern void *syscall_entry_table[CONFIG_NR_CPUS];
+extern void x86_64_syscall_entry(void);
 
 #define MSR_EFER        0xC0000080
 #define MSR_STAR        0xC0000081
@@ -386,6 +388,10 @@ static void ioapic_init(void) {
 
 static uint32_t firmware_vector_gsi[256];
 static uint8_t firmware_vector_valid[256];
+/* Trigger model per routed vector: 1 = level, 0 = edge.  Recorded by whoever
+ * programmed the redirection entry, because that is the only place that knows
+ * (see IRQ_TRIGGER_MODEL in drivers/core/driver_hwapi.h). */
+static uint8_t firmware_vector_level[256];
 int arch_firmware_irq_map(uint32_t gsi, uint32_t flags) {
     unsigned idx; uint32_t entry;
     /* 0x58..0xef belongs to MSI-X; never alias that allocator's vectors. */
@@ -406,6 +412,7 @@ int arch_firmware_irq_map(uint32_t gsi, uint32_t flags) {
     ioapic_write_at(base, reg + 1, arch_ioapic_dest_id(idx));
     ioapic_write_at(base, reg, low);
     firmware_vector_gsi[vector] = gsi; firmware_vector_valid[vector] = 1;
+    firmware_vector_level[vector] = (flags == 4 || flags == 8);
     return (int)vector;
 }
 
@@ -428,6 +435,7 @@ void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
     ioapic_write_at(base, low_reg + 1U, arch_ioapic_dest_id(idx));
     ioapic_write_at(base, low_reg, (uint32_t)vector | (1U << 13) | (1U << 15) |
                                    (1U << 16));
+    firmware_vector_level[vector] = 1;
 }
 
 /* Route an ISA IRQ that a PIIX3 PIRQ link feeds into the IOAPIC.  Unlike a
@@ -446,6 +454,30 @@ void x86_64_route_isa_irq(uint32_t gsi, uint8_t vector)
     uint32_t low_reg = 0x10U + entry * 2U;
     ioapic_write_at(base, low_reg + 1U, arch_ioapic_dest_id(idx));
     ioapic_write_at(base, low_reg, (uint32_t)vector | (1U << 15) | (1U << 16));
+    firmware_vector_level[vector] = 0;
+}
+
+/* Legacy i8042 fallback: ACPI sometimes publishes GSI1/GSI12 with level/low
+ * flags while the keyboard controller is edge/active-high.  Rewrite the entry
+ * with the ISA semantics, publish the vector in the firmware map so
+ * request_irq()'s auto-enable can find and unmask it, and leave the PIC path
+ * untouched as a second delivery route. */
+int x86_64_route_isa_irq_forced(uint32_t gsi, uint32_t vector)
+{
+    if (vector >= 256)
+        return -EINVAL;
+    unsigned idx;
+    uint32_t entry;
+    if (arch_ioapic_gsi_lookup(gsi, &idx, &entry) != 0)
+        return -EOPNOTSUPP;
+    uintptr_t base = arch_ioapic_base(idx);
+    uint32_t low_reg = 0x10U + entry * 2U;
+    ioapic_write_at(base, low_reg + 1U, arch_ioapic_dest_id(idx));
+    ioapic_write_at(base, low_reg, vector | (1U << 16)); /* masked, edge/high */
+    firmware_vector_gsi[vector] = gsi;
+    firmware_vector_valid[vector] = 1;
+    firmware_vector_level[vector] = 0;
+    return 0;
 }
 
 /* X86_64_PCI_INTX_MODEL:
@@ -717,6 +749,16 @@ int arch_msix_vector_setup(uint32_t vector, int cpu, int masked)
 #endif
 }
 
+/* IOAPIC_INTX_MASK_LOCK:
+ *
+ * A level-triggered INTx line is masked by driver_irq_dispatch() on the CPU
+ * that took the interrupt and unmasked by the driver's thread once it has
+ * cleared the source, possibly on another CPU.  Mask and unmask are a
+ * read-modify-write of one redirection entry, so they must not interleave or
+ * one of them is lost (a line left masked stops delivering, a line left
+ * unmasked storms).  MSI-X needs no lock: its LVT is per-CPU state. */
+static spinlock_t g_pci_intx_mask_lock = SPINLOCK_INIT;
+
 void x86_64_pci_irq_set_masked(int vector, int masked) {
     if (x86_64_msix_vector_p((uint32_t)vector)) {
         x86_64_msix_lvt((uint32_t)vector, masked);
@@ -735,12 +777,25 @@ void x86_64_pci_irq_set_masked(int vector, int masked) {
         return;
     uintptr_t base = arch_ioapic_base(idx);
     uint32_t low_reg = 0x10U + entry * 2U;
+    uint64_t lock_flags = spin_lock_irqsave(&g_pci_intx_mask_lock);
     uint32_t low = ioapic_read_at(base, low_reg);
     if (masked)
         low |= (1U << 16);
     else
         low &= ~(1U << 16);
     ioapic_write_at(base, low_reg, low);
+    spin_unlock_irqrestore(&g_pci_intx_mask_lock, lock_flags);
+}
+
+/*
+ * IRQ_TRIGGER_MODEL (x86_64 answer): report the trigger the routing code
+ * actually programmed for this vector.  PCI INTx is level/active-low,
+ * a PIIX3 PIRQ conversion is edge, and an ACPI interrupt resource carries its
+ * own trigger bits; MSI-X vectors are message-signalled and never appear here.
+ * A vector nobody programmed is reported as edge, which is the safe answer.
+ */
+int arch_irq_line_is_level(uint32_t irq) {
+    return irq < 256U && firmware_vector_level[irq] != 0;
 }
 
 void trap_init(void) {
@@ -772,7 +827,7 @@ void trap_init(void) {
     uint64_t star = ((uint64_t)0x1bULL << 48) | ((uint64_t)0x08ULL << 32);
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_STAR), "a"((uint32_t)star), "d"((uint32_t)(star >> 32)));
 
-    uint64_t lstar = (uint64_t)(uintptr_t)syscall_entry_table[cpu_current_id()];
+    uint64_t lstar = (uint64_t)(uintptr_t)x86_64_syscall_entry;
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_LSTAR), "a"((uint32_t)lstar), "d"((uint32_t)(lstar >> 32)));
 
     /* SFMASK: clear IF on syscall entry so the assembly entry can use the
@@ -890,6 +945,19 @@ void arch_dump_trap_extra_context(const trap_context_t *ctx)
 void arch_user_breakpoint(trap_context_t *ctx)
 {
     ctx->rflags &= ~(1UL << 8); /* Single-step is one-shot. */
+}
+
+int firmware_legacy_irq_map(uint32_t hardware, uint32_t preferred)
+{
+    if (preferred >= PLATFORM_IRQ_MAX_LINES)
+        return -EINVAL;
+    int routed = arch_firmware_irq_map(hardware, 1);
+    if (routed == (int)preferred)
+        return routed;
+    int forced = x86_64_route_isa_irq_forced(hardware, preferred);
+    kinfo("[ISA] irq=%u route=%d force=%d vector=%u\n",
+          hardware, routed, forced, preferred);
+    return (int)preferred; /* Existing PIC path when no IOAPIC route exists. */
 }
 
 #endif

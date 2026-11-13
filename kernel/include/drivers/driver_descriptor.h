@@ -38,6 +38,7 @@
  * block vtables and are rejected before the kernel can read beyond them. */
 /* 5: firmware nodes and explicit probe state in device_t; MMIO resources
  * uniformly contain CPU physical addresses rather than mapped pointers. */
+/* 8: USB host-controller operations and hub topology metadata changed. */
 /* 9: driver_t adds quiesce, called before draining active class calls. */
 #define A20_DRIVER_ABI 9U
 

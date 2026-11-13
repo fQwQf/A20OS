@@ -113,6 +113,9 @@ typedef struct pfa_huge_stats {
 /* Core API */
 void   pfa_init(paddr_t kernel_end);
 pfn_t  pfa_alloc(int order);
+/* Contiguous block whose final physical byte is <= max_address. Searches the
+ * buddy lists directly; bypasses CPU caches and does not trigger reclaim. */
+pfn_t  pfa_alloc_max(int order, uint64_t max_address);
 pfn_t  pfa_alloc_flags(int order, int can_reclaim);
 void   pfa_free(pfn_t pfn, int order);
 pfn_t  pfa_alloc_page(void);

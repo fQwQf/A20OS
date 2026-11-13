@@ -481,9 +481,27 @@ void pfa_init(paddr_t kernel_end) {
     size_t meta_sz = (size_t)pfa.total_frames * sizeof(frame_meta_t);
     size_t freemap_sz = ((size_t)pfa.total_frames + 7) / 8;
     paddr_t meta_pa = ROUND_UP(kernel_end, 64);
-    const pfa_range_t *kernel_range = find_range_by_pa(meta_pa);
-    if (!kernel_range || meta_pa + meta_sz + freemap_sz > kernel_range->end)
-        panic("pfa_init: frame metadata does not fit in kernel ram range");
+    const pfa_range_t *kernel_range = find_range_by_pa(kernel_end - 1);
+    const pfa_range_t *meta_range = kernel_range;
+    size_t metadata_bytes = meta_sz + freemap_sz;
+    if (!kernel_range)
+        panic("pfa_init: kernel end outside usable RAM");
+    if (meta_pa > kernel_range->end ||
+        metadata_bytes > kernel_range->end - meta_pa) {
+        /* A firmware hole can leave the kernel in a short low RAM range.
+         * Store metadata at the start of another mapped range in that case. */
+        meta_range = NULL;
+        for (size_t r = 0; r < pfa.nr_ranges; r++) {
+            const pfa_range_t *range = &pfa.ranges[r];
+            if (range != kernel_range && metadata_bytes <= range->end - range->base) {
+                meta_range = range;
+                meta_pa = range->base;
+                break;
+            }
+        }
+        if (!meta_range)
+            panic("pfa_init: no usable range fits frame metadata");
+    }
 
     frame_meta_t *meta = (frame_meta_t *)(meta_pa + PAGE_OFFSET);
     memset(meta, 0, meta_sz);
@@ -505,17 +523,14 @@ void pfa_init(paddr_t kernel_end) {
         pfa.free_lists[i].count = 0;
     }
 
-    paddr_t used_end_pa = ROUND_UP(meta_pa + meta_sz + freemap_sz, PAGE_SIZE);
     for (size_t r = 0; r < pfa.nr_ranges; r++) {
         const pfa_range_t *range = &pfa.ranges[r];
-        pfn_t range_frames = range->end_pfn - range->start_pfn;
-        pfn_t used_frames = 0;
-
-        if (meta_pa >= range->base && meta_pa < range->end) {
-            used_frames = (pfn_t)((used_end_pa - range->base) >> PAGE_SIZE_BITS);
-            if (used_frames > range_frames)
-                used_frames = range_frames;
-        }
+        paddr_t used_end_pa = range->base;
+        if (range == meta_range)
+            used_end_pa = ROUND_UP(meta_pa + metadata_bytes, PAGE_SIZE);
+        else if (range == kernel_range)
+            used_end_pa = ROUND_UP(kernel_end, PAGE_SIZE);
+        pfn_t used_frames = (pfn_t)((used_end_pa - range->base) >> PAGE_SIZE_BITS);
 
         for (pfn_t i = range->start_pfn; i < range->start_pfn + used_frames; i++) {
             meta[i].flags    = FRAME_F_KDATA;
@@ -531,16 +546,8 @@ void pfa_init(paddr_t kernel_end) {
 
 // Try to satisfy a high-order allocation by splitting lower-order blocks.
 // Called with pfa.lock held. Returns PFN_NONE or a valid pfn.
-static pfn_t pfa_alloc_from_buddy(int order)
+static pfn_t pfa_take_block(pfn_t blk, int o, int order)
 {
-    int o;
-    for (o = order; o <= MAX_ORDER; o++)
-        if (pfa.free_lists[o].head != PFN_NONE)
-            break;
-    if (o > MAX_ORDER)
-        return PFN_NONE;
-
-    pfn_t blk = pfa.free_lists[o].head;
     fl_remove(blk, o);
 
     if (pfa.meta[blk].flags != FRAME_F_FREE || pfa.meta[blk].order != (uint8_t)o ||
@@ -595,6 +602,35 @@ static pfn_t pfa_alloc_from_buddy(int order)
 
     pfa.free_frames -= (1u << order);
     return blk;
+}
+
+static pfn_t pfa_alloc_from_buddy(int order)
+{
+    for (int o = order; o <= MAX_ORDER; o++)
+        if (pfa.free_lists[o].head != PFN_NONE)
+            return pfa_take_block(pfa.free_lists[o].head, o, order);
+    return PFN_NONE;
+}
+
+pfn_t pfa_alloc_max(int order, uint64_t max_address)
+{
+    if (order < 0 || order > MAX_ORDER)
+        return PFN_NONE;
+    uint64_t bytes = (uint64_t)PAGE_SIZE << order;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    pfn_t result = PFN_NONE;
+    for (int o = order; o <= MAX_ORDER && result == PFN_NONE; o++) {
+        for (pfn_t blk = pfa.free_lists[o].head; blk != PFN_NONE;
+             blk = pfa.meta[blk].next) {
+            uint64_t pa = pfn_to_phys(blk);
+            if (pa <= max_address && bytes - 1 <= max_address - pa) {
+                result = pfa_take_block(blk, o, order);
+                break;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&pfa.lock, flags);
+    return result;
 }
 
 pfn_t pfa_alloc_flags(int order, int can_reclaim) {

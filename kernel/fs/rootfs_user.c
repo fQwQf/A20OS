@@ -24,6 +24,27 @@ extern const unsigned char _binary_cp_start[], _binary_cp_end[];
 extern const unsigned char _binary_sync_start[], _binary_sync_end[];
 extern const unsigned char _binary_poweroff_start[], _binary_poweroff_end[];
 extern const unsigned char _binary_reboot_start[], _binary_reboot_end[];
+extern const unsigned char _binary_nvme_stress_start[], _binary_nvme_stress_end[];
+#ifdef CONFIG_RAMFS_FASTFETCH
+extern const unsigned char _binary_fastfetch_start[], _binary_fastfetch_end[];
+#endif
+#ifdef CONFIG_RAMFS_DESKTOP_TOOLS
+extern const unsigned char _binary_session_log_py_start[], _binary_session_log_py_end[];
+extern const unsigned char _binary_session_power_py_start[], _binary_session_power_py_end[];
+extern const unsigned char _binary_90_a20_ibus_gschema_override_start[], _binary_90_a20_ibus_gschema_override_end[];
+extern const unsigned char _binary_input_probe_py_start[], _binary_input_probe_py_end[];
+extern const unsigned char _binary_90_libinput_fuzz_override_rules_start[], _binary_90_libinput_fuzz_override_rules_end[];
+#endif
+#ifdef CONFIG_WIFI_RTW89
+extern const unsigned char _binary_rtw89d_start[], _binary_rtw89d_end[];
+extern const unsigned char _binary_wifi_start[], _binary_wifi_end[];
+extern const unsigned char _binary_wifi_dhcp_start[], _binary_wifi_dhcp_end[];
+extern const unsigned char _binary_rtw89_notices_start[], _binary_rtw89_notices_end[];
+extern const unsigned char _binary_wifi_gui_start[], _binary_wifi_gui_end[];
+extern const unsigned char _binary_wifi_backend_py_start[], _binary_wifi_backend_py_end[];
+extern const unsigned char _binary_wifi_portal_py_start[], _binary_wifi_portal_py_end[];
+extern const unsigned char _binary_a20_wifi_desktop_start[], _binary_a20_wifi_desktop_end[];
+#endif
 
 #ifdef CONFIG_STORAGE_READ_ONLY
 extern const unsigned char _binary_storage_read_test_start[];
@@ -124,6 +145,28 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/sync", sync),
     USER_ENTRY("/bin/poweroff", poweroff),
     USER_ENTRY("/bin/reboot", reboot),
+    USER_ENTRY("/bin/nvme_stress", nvme_stress),
+    USER_ENTRY("/bin/nvstress", nvme_stress),
+#ifdef CONFIG_RAMFS_FASTFETCH
+    USER_ENTRY("/bin/fastfetch", fastfetch),
+#endif
+#ifdef CONFIG_RAMFS_DESKTOP_TOOLS
+    USER_ENTRY("/bin/session-log.py", session_log_py),
+    USER_ENTRY("/bin/session-power.py", session_power_py),
+    USER_ENTRY("/bin/90-a20-ibus.gschema.override", 90_a20_ibus_gschema_override),
+    USER_ENTRY("/bin/input-probe.py", input_probe_py),
+    USER_ENTRY("/bin/90-libinput-fuzz-override.rules", 90_libinput_fuzz_override_rules),
+#endif
+#ifdef CONFIG_WIFI_RTW89
+    USER_ENTRY("/bin/rtw89d", rtw89d),
+    USER_ENTRY("/bin/wifi", wifi),
+    USER_ENTRY("/bin/wifi-dhcp", wifi_dhcp),
+    USER_ENTRY("/bin/rtw89-notices", rtw89_notices),
+    USER_ENTRY("/bin/wifi-gui", wifi_gui),
+    USER_ENTRY("/bin/wifi_backend.py", wifi_backend_py),
+    USER_ENTRY("/bin/wifi_portal.py", wifi_portal_py),
+    USER_ENTRY("/bin/a20-wifi.desktop", a20_wifi_desktop),
+#endif
 #ifdef CONFIG_RAMFS_MEDIA
     USER_ENTRY("/bin/videoplay", videoplay),
     USER_ENTRY("/bin/audioplay", audioplay),

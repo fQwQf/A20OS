@@ -1,10 +1,12 @@
 #include "core/panic.h"
 #include "drivers/char/uart.h"
+#include "drivers/char/fbcon.h"
 #include "core/stdio.h"
 #include "core/defs.h"
 #include "core/arch.h"
 #include "core/cpu.h"
 #include "core/kallsyms.h"
+#include "core/klog.h"
 #include "proc/proc.h"
 
 #define PANIC_MAX_BACKTRACE 16
@@ -50,6 +52,9 @@ NORETURN void panic(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
 
+    /* If a compositor owns the scanout, take it back so the panic is visible
+     * on a machine with no COM1. */
+    fbcon_resume();
     uart_puts("\n\n========== KERNEL PANIC ==========\n");
     vprintf(fmt, args);
     va_end(args);
@@ -84,6 +89,11 @@ NORETURN void panic(const char *fmt, ...) {
     }
 
     arch_panic_dump();
+
+    /* Persist the panic if the log partition is already attached.  This is a
+     * trylock/best-effort path: a panic inside the block or VFS stack must not
+     * deadlock here; the screen remains the primary channel in that case. */
+    klog_disk_panic();
 
     uart_puts("\n[PANIC] attempting firmware poweroff\n");
     firmware_shutdown();

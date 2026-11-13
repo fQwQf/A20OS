@@ -30,3 +30,6 @@
 	path = kernel/external/f-stack
 	url = https://github.com/F-Stack/f-stack.git
 	shallow = true
+[submodule "user/external/rtw89"]
+	path = user/external/rtw89
+	url = https://github.com/FranciumOS-org/AirPort_RTW89.git

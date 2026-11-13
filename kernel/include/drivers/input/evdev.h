@@ -6,6 +6,8 @@
 
 /* Internal driver query; argument is a kernel buffer, never a user pointer. */
 #define INPUT_IOCTL_GET_INFO 0xa200U
+#define INPUT_IOCTL_LED_EVENT 0xa201U /* kernel struct input_event */
+#define INPUT_IOCTL_GET_LEDS 0xa202U  /* kernel uint32_t bitmap */
 #define INPUT_EVENT_TYPES 32
 #define INPUT_BITMAP_BYTES 128
 struct input_device_info {

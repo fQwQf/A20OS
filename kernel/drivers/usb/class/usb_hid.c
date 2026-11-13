@@ -9,11 +9,14 @@
 
 #include "core/klog.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/input/virtio_input.h"
+#include "drivers/char/fbcon.h"
+#include "drivers/char/uart.h"
 #include "mm/slab.h"
 #include "core/errno.h"
 #include "drivers/input/evdev.h"
@@ -31,6 +34,12 @@ extern void input_mux_wake(void);
 
 #define VBOX_USB_VENDOR 0x80eeU
 #define VBOX_USB_TABLET 0x0021U
+#define ITE_USB_VENDOR  0x048dU
+#define ITE_8910_KBD    0xc102U
+#define ITE_8910_REPORT_ID   1U
+#define ITE_8910_ARRAY      3U
+#define ITE_8910_BITMAP     9U
+#define ITE_8910_REPORT_LEN 37U
 
 #define BTN_LEFT    0x110U
 #define BTN_RIGHT   0x111U
@@ -44,6 +53,10 @@ typedef struct usb_hid_dev {
     uint8_t          previous[USB_HID_REPORT_MAX];
     uint8_t          kind;
     uint8_t          report_size;
+    uint8_t          ite_keyboard;
+    uint8_t          report_logged;
+    uint8_t          transfer_error_logged;
+    uint8_t          console_input_logged;
     int              running;
     struct input_event events[USB_HID_EVENTS];
     uint16_t         head;
@@ -56,6 +69,9 @@ typedef struct usb_hid_dev {
     uint8_t          key_pending;
     uint8_t          key_logged;
     spinlock_t       lock;
+    mutex_t         led_lock;
+    uint32_t        leds;
+    uint8_t         leds_valid;
 } usb_hid_dev_t;
 
 static const uint16_t hid_usage_to_linux[0x74] = {
@@ -115,19 +131,89 @@ static int usb_hid_key_present(const uint8_t report[8], uint8_t usage)
     return 0;
 }
 
-static void usb_hid_parse_keyboard(usb_hid_dev_t *h)
+/* The text shell has no compositor reading evdev, so a USB keyboard must also
+ * feed the console byte stream.  PS/2 already does this from its IRQ; do the
+ * same for boot-protocol HID reports while fbcon owns the scanout.  The ASCII
+ * map is the US layout, matching the PS/2 console keymap.  The GUI path still
+ * consumes the evdev events; fbcon_active() is false once DRM presents. */
+static char usb_hid_usage_ascii(uint8_t usage, int shift) {
+    if (usage >= 0x04 && usage <= 0x1d)
+        return (char)((shift ? 'A' : 'a') + (usage - 0x04));
+    switch (usage) {
+    case 0x1e: return shift ? '!' : '1';
+    case 0x1f: return shift ? '@' : '2';
+    case 0x20: return shift ? '#' : '3';
+    case 0x21: return shift ? '$' : '4';
+    case 0x22: return shift ? '%' : '5';
+    case 0x23: return shift ? '^' : '6';
+    case 0x24: return shift ? '&' : '7';
+    case 0x25: return shift ? '*' : '8';
+    case 0x26: return shift ? '(' : '9';
+    case 0x27: return shift ? ')' : '0';
+    case 0x28: return '\n';
+    case 0x29: return 0x1b;
+    case 0x2a: return 0x7f;
+    case 0x2b: return '\t';
+    case 0x2c: return ' ';
+    case 0x2d: return shift ? '_' : '-';
+    case 0x2e: return shift ? '+' : '=';
+    case 0x2f: return shift ? '{' : '[';
+    case 0x30: return shift ? '}' : ']';
+    case 0x31: return shift ? '|' : '\\';
+    case 0x32: return shift ? '~' : '#';
+    case 0x33: return shift ? ':' : ';';
+    case 0x34: return shift ? '"' : '\'';
+    case 0x35: return shift ? '~' : '`';
+    case 0x36: return shift ? '<' : ',';
+    case 0x37: return shift ? '>' : '.';
+    case 0x38: return shift ? '?' : '/';
+    default: return 0;
+    }
+}
+
+static int usb_hid_console_key(uint8_t usage, uint8_t mods) {
+    if (!fbcon_active())
+        return 0;
+    int shift = (mods & ((1U << 1) | (1U << 5))) != 0;
+    int ctrl = (mods & ((1U << 0) | (1U << 4))) != 0;
+    char c = usb_hid_usage_ascii(usage, shift);
+    if (!c)
+        return 0;
+    if (ctrl) {
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 1);
+        else if (c >= 'A' && c <= 'Z')
+            c = (char)(c - 'A' + 1);
+        else if (c == '[')
+            c = 0x1b;
+        else if (c == '\\')
+            c = 0x1c;
+        else if (c == ']')
+            c = 0x1d;
+        else if (c == '^')
+            c = 0x1e;
+        else if (c == '_')
+            c = 0x1f;
+    }
+    uart_receive_char(c);
+    return 1;
+}
+
+static int usb_hid_keyboard_modifiers(usb_hid_dev_t *h, uint8_t old, uint8_t now)
 {
     static const uint16_t mods[8] = { 29, 42, 56, 125, 97, 54, 100, 126 };
+    uint8_t changed = now ^ old;
+    for (unsigned bit = 0; bit < 8; bit++)
+        if (changed & (1U << bit))
+            usb_hid_emit(h, EV_KEY, mods[bit], !!(now & (1U << bit)));
+    return changed != 0;
+}
+
+static void usb_hid_parse_keyboard(usb_hid_dev_t *h)
+{
     const uint8_t *now = h->report;
     const uint8_t *old = h->previous;
-    int changed = 0;
-    uint8_t mod = now[0] ^ old[0];
-    for (unsigned bit = 0; bit < 8; bit++) {
-        if (mod & (1U << bit)) {
-            usb_hid_emit(h, EV_KEY, mods[bit], !!(now[0] & (1U << bit)));
-            changed = 1;
-        }
-    }
+    int changed = usb_hid_keyboard_modifiers(h, old[0], now[0]);
     for (unsigned i = 2; i < 8; i++) {
         uint8_t usage = old[i];
         if (usage > 3 && !usb_hid_key_present(now, usage) &&
@@ -141,12 +227,51 @@ static void usb_hid_parse_keyboard(usb_hid_dev_t *h)
         if (usage > 3 && !usb_hid_key_present(old, usage) &&
             usage < ARRAY_SIZE(hid_usage_to_linux) && hid_usage_to_linux[usage]) {
             usb_hid_emit(h, EV_KEY, hid_usage_to_linux[usage], 1);
+            usb_hid_console_key(usage, now[0]);
             changed = 1;
         }
     }
     if (changed)
         usb_hid_emit(h, EV_SYN, SYN_REPORT, 0);
     memcpy(h->previous, now, 8);
+}
+
+/* 048d:c102 report 1 contains modifiers, one reserved byte, six key usages
+ * and a keyboard-usage bitmap. A key can appear in either representation.
+ * The other report IDs carry consumer controls and are not keyboard state. */
+static int usb_hid_ite_key_present(const uint8_t *report, unsigned usage)
+{
+    if (report[ITE_8910_BITMAP + usage / 8U] & (1U << (usage % 8U)))
+        return 1;
+    for (unsigned i = ITE_8910_ARRAY; i < ITE_8910_BITMAP; i++)
+        if (report[i] == usage)
+            return 1;
+    return 0;
+}
+
+static int usb_hid_parse_ite_keyboard(usb_hid_dev_t *h)
+{
+    const uint8_t *now = h->report;
+    const uint8_t *old = h->previous;
+    if (now[0] != ITE_8910_REPORT_ID)
+        return 0;
+    int forwarded = 0;
+    int changed = usb_hid_keyboard_modifiers(h, old[1], now[1]);
+    for (unsigned usage = 4; usage < ARRAY_SIZE(hid_usage_to_linux); usage++) {
+        if (!hid_usage_to_linux[usage])
+            continue;
+        int pressed = usb_hid_ite_key_present(now, usage);
+        if (pressed == usb_hid_ite_key_present(old, usage))
+            continue;
+        usb_hid_emit(h, EV_KEY, hid_usage_to_linux[usage], pressed);
+        if (pressed)
+            forwarded |= usb_hid_console_key((uint8_t)usage, now[1]);
+        changed = 1;
+    }
+    if (changed)
+        usb_hid_emit(h, EV_SYN, SYN_REPORT, 0);
+    memcpy(h->previous, now, ITE_8910_REPORT_LEN);
+    return forwarded;
 }
 
 static void usb_hid_parse_mouse(usb_hid_dev_t *h)
@@ -212,9 +337,24 @@ static void usb_hid_complete(usb_urb_t *urb)
         return;
     uint64_t flags = spin_lock_irqsave(&h->lock);
     int running = h->running;
+    int status = urb->status;
+    int report_seen = running && h->ite_keyboard && !status && !h->report_logged;
+    int transfer_failed = running && h->ite_keyboard && status &&
+                          !h->transfer_error_logged;
+    uint8_t report_id = h->report[0];
+    if (report_seen)
+        h->report_logged = 1;
+    if (transfer_failed)
+        h->transfer_error_logged = 1;
     uint16_t old_head = h->head;
-    if (running && urb->status == 0) {
-        if (h->kind == USB_HID_KBD)
+    int first_console_input = 0;
+    if (running && !status) {
+        if (h->ite_keyboard) {
+            int forwarded = usb_hid_parse_ite_keyboard(h);
+            first_console_input = forwarded && !h->console_input_logged;
+            if (first_console_input)
+                h->console_input_logged = 1;
+        } else if (h->kind == USB_HID_KBD)
             usb_hid_parse_keyboard(h);
         else if (h->kind == USB_HID_MOUSE)
             usb_hid_parse_mouse(h);
@@ -234,14 +374,23 @@ static void usb_hid_complete(usb_urb_t *urb)
      * an xHCI IRQ alone never wakes the evdev readiness source. */
     if (queued)
         input_mux_wake();
+    if (report_seen)
+        kinfo("[USB-HID] ITE first interrupt report: id=%u fbcon=%d\n",
+              report_id, fbcon_active());
+    if (transfer_failed)
+        kwarn("[USB-HID] ITE interrupt transfer failed: %d\n", status);
     if (announce)
         kinfo("[USB-HID] key event: code=%u value=%d\n", code, value);
+    if (first_console_input)
+        kinfo("[USB-HID] ITE first console input forwarded\n");
     if (!running)
         return;
     /* Re-arm the periodic transfer outside h->lock: usb_submit_urb() reaches
      * the HCD, and nesting the controller lock inside the interface lock is
      * the one order this driver is allowed to take. */
-    (void)usb_submit_urb(urb);
+    int r = usb_submit_urb(urb);
+    if (r)
+        kwarn("[USB-HID] interrupt rearm failed: %d\n", r);
 }
 
 static int usb_hid_read(device_t *dev, void *buffer, size_t count)
@@ -282,13 +431,55 @@ static int usb_hid_poll(device_t *dev, short events)
     return ready;
 }
 
+static int usb_hid_led_event(usb_hid_dev_t *h, const struct input_event *event)
+{
+    if (h->kind != USB_HID_KBD || event->type != EV_LED || event->code > LED_SCROLLL)
+        return -EOPNOTSUPP;
+    mutex_lock(&h->led_lock);
+    uint32_t leds = h->leds;
+    if (event->value)
+        leds |= 1U << event->code;
+    else
+        leds &= ~(1U << event->code);
+    int result = 0;
+    if (!h->leds_valid || leds != h->leds) {
+        /* Boot protocol has no report ID; ITE's recorded descriptor declares
+         * output report 1, five LED bits and three padding bits. */
+        uint8_t report[2] = {h->ite_keyboard ? ITE_8910_REPORT_ID : (uint8_t)leds,
+                             (uint8_t)leds};
+        result = usb_control_msg(h->iface->dev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                                  0x09 /* SET_REPORT */, 0x0200 | (h->ite_keyboard ? 1 : 0),
+                                  h->iface->interface_number, report,
+                                  h->ite_keyboard ? 2 : 1);
+        if (!result) {
+            __atomic_store_n(&h->leds, leds, __ATOMIC_RELEASE);
+            h->leds_valid = 1;
+            kinfo("[USB-HID] %04x:%04x keyboard LEDs=%x report=%u\n",
+                  h->iface->dev->vendor, h->iface->dev->product, (unsigned)leds,
+                  h->ite_keyboard ? 1 : 0);
+        } else {
+            kwarn("[USB-HID] keyboard LED SET_REPORT failed: %d\n", result);
+        }
+    }
+    mutex_unlock(&h->led_lock);
+    return result;
+}
+
 static int usb_hid_ioctl(device_t *dev, unsigned long request, void *argument)
 {
-    if (request != INPUT_IOCTL_GET_INFO || !argument)
+    if (!argument)
         return -ENOTTY;
     usb_hid_dev_t *h = dev ? dev->drv_priv : NULL;
     if (!h)
         return -ENODEV;
+    if (request == INPUT_IOCTL_LED_EVENT)
+        return usb_hid_led_event(h, argument);
+    if (request == INPUT_IOCTL_GET_LEDS) {
+        *(uint32_t *)argument = __atomic_load_n(&h->leds, __ATOMIC_ACQUIRE);
+        return h->kind == USB_HID_KBD ? 0 : -EOPNOTSUPP;
+    }
+    if (request != INPUT_IOCTL_GET_INFO)
+        return -ENOTTY;
     struct input_device_info *info = argument;
     memset(info, 0, sizeof(*info));
     strncpy(info->name, h->kind == USB_HID_KBD ? "USB HID keyboard" :
@@ -298,6 +489,8 @@ static int usb_hid_ioctl(device_t *dev, unsigned long request, void *argument)
     info->id.product = h->iface->dev->product;
     input_info_bit(info, EV_SYN, SYN_REPORT);
     if (h->kind == USB_HID_KBD) {
+        for (unsigned i = LED_NUML; i <= LED_SCROLLL; i++)
+            input_info_bit(info, EV_LED, i);
         for (unsigned i = 0; i < ARRAY_SIZE(hid_usage_to_linux); i++)
             if (hid_usage_to_linux[i])
                 input_info_bit(info, EV_KEY, hid_usage_to_linux[i]);
@@ -327,6 +520,39 @@ static const input_dev_ops_t usb_hid_ops = {
     .ioctl = usb_hid_ioctl,
     .poll = usb_hid_poll,
 };
+
+static void usb_hid_select_protocol(usb_hid_dev_t *h)
+{
+    usb_device_t *udev = h->iface->dev;
+    usb_interface_t *iface = h->iface;
+    uint8_t kind = h->kind;
+    int r;
+    /* Firmware can leave a boot keyboard in boot protocol. ITE input and
+     * its report-ID-prefixed LED output both require report protocol; select
+     * it explicitly instead of inferring state from an interrupt packet. */
+    if (kind == USB_HID_KBD || kind == USB_HID_MOUSE) {
+        uint16_t protocol = h->ite_keyboard ? 1 : 0;
+        r = usb_control_msg(udev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                            USB_REQ_SET_PROTOCOL, protocol,
+                            iface->interface_number, NULL, 0);
+        if (r)
+            kwarn("[USB-HID] %04x:%04x SET_PROTOCOL(%u) failed: %d\n",
+                  udev->vendor, udev->product, protocol, r);
+        if (h->ite_keyboard && !r) {
+            uint8_t actual = 0xff;
+            int check = usb_control_msg(udev,
+                USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                0x03 /* GET_PROTOCOL */, 0, iface->interface_number,
+                &actual, sizeof(actual));
+            kinfo("[USB-HID] %04x:%04x report protocol requested=%u actual=%u rc=%d\n",
+                  udev->vendor, udev->product, protocol, actual, check);
+        }
+    }
+    if (!h->ite_keyboard)
+        (void)usb_control_msg(udev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                              USB_REQ_SET_IDLE, 0, iface->interface_number,
+                              NULL, 0);
+}
 
 static int usb_hid_probe(device_t *dev)
 {
@@ -363,9 +589,15 @@ static int usb_hid_probe(device_t *dev)
         return -ENOMEM;
     spin_init(&h->lock);
     h->iface = iface;
+    mutex_init(&h->led_lock);
     h->ep = ep;
     h->kind = kind;
+    h->ite_keyboard = kind == USB_HID_KBD &&
+                      udev->vendor == ITE_USB_VENDOR && udev->product == ITE_8910_KBD &&
+                      iface->interface_number == 0 && ep->max_packet >= ITE_8910_REPORT_LEN;
     h->report_size = (kind == USB_HID_MOUSE) ? 4 : 8;
+    if (h->ite_keyboard)
+        h->report_size = USB_HID_REPORT_MAX;
     if (h->report_size > ep->max_packet)
         h->report_size = (uint8_t)ep->max_packet;
     h->urb.dev = udev;
@@ -382,33 +614,32 @@ static int usb_hid_probe(device_t *dev)
                                                USB_XFER_INTERRUPT,
                                                ep->max_packet, ep->interval);
     if (r) {
+        kwarn("[USB-HID] %04x:%04x endpoint %02x configure failed: %d\n",
+              udev->vendor, udev->product, ep->addr, r);
         kfree(h);
         return r;
     }
 
-    /* Boot protocol + idle for keyboard/mouse. */
-    if (kind == USB_HID_KBD || kind == USB_HID_MOUSE) {
-        (void)usb_control_msg(udev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                              USB_REQ_SET_PROTOCOL, 0,
-                              iface->interface_number, NULL, 0);
-    }
-    (void)usb_control_msg(udev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                          USB_REQ_SET_IDLE, 0, iface->interface_number, NULL, 0);
+    usb_hid_select_protocol(h);
 
     dev->drv_priv = h;
     h->running = 1;
     r = usb_submit_urb(&h->urb);
     if (r) {
+        kwarn("[USB-HID] %04x:%04x first interrupt submit failed: %d\n",
+              udev->vendor, udev->product, r);
         h->running = 0;
         dev->drv_priv = NULL;
         kfree(h);
         return r;
     }
 
-    kinfo("[USB-HID] %s ready: if=%u ep=%02x\n",
+    kinfo("[USB-HID] %s ready: if=%u ep=%02x id=%04x:%04x mode=%s len=%u\n",
           kind == USB_HID_KBD ? "keyboard" :
           kind == USB_HID_MOUSE ? "mouse" : "tablet",
-          iface->interface_number, ep->addr);
+          iface->interface_number, ep->addr, udev->vendor, udev->product,
+          h->ite_keyboard ? "report" : kind == USB_HID_TABLET ? "report" : "boot",
+          h->report_size);
     return 0;
 }
 

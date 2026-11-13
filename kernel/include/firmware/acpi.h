@@ -97,4 +97,5 @@ int acpi_pci_child(const fw_node_t *parent, unsigned dev, unsigned function,
 int acpi_pci_route(const fw_node_t *bus, unsigned dev, unsigned function,
                    unsigned pin, uint32_t *gsi);
 int acpi_namespace_poweroff(void);
+int acpi_namespace_reboot(void);
 #endif

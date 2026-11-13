@@ -32,6 +32,9 @@ DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
                  -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
 endif
 DRVMOD_CFLAGS += -std=gnu99
+ifeq ($(ARCH),x86_64)
+DRVMOD_CFLAGS += -DCONFIG_NR_CPUS=$(NR_CPUS)
+endif
 ifeq ($(STORAGE_READ_ONLY),1)
 DRVMOD_CFLAGS += -DCONFIG_STORAGE_READ_ONLY
 endif
@@ -122,7 +125,7 @@ $(USER_BUILD_DIR)/hda.a20drv: $(DRVMOD_DIR)/hda.c kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) $(if $(filter 1,$(DRVMOD_SMOKE)),-DCONFIG_HDA_SMOKE_TEST,) -c $< -o $@
 
-$(USER_BUILD_DIR)/nvme.a20drv: $(DRVMOD_DIR)/nvme.c kernel/include/drvmod/drvmod.h
+$(USER_BUILD_DIR)/nvme.a20drv: $(DRVMOD_DIR)/nvme.c kernel/drivers/block/nvme.c kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) $(if $(filter 1,$(DRVMOD_SMOKE)),-DCONFIG_NVME_SMOKE_TEST,) -c $< -o $@
 
@@ -130,7 +133,7 @@ $(USER_BUILD_DIR)/tpm.a20drv: $(DRVMOD_DIR)/tpm.c kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
-$(USER_BUILD_DIR)/ps2.a20drv: $(DRVMOD_DIR)/ps2.c kernel/include/drvmod/drvmod.h
+$(USER_BUILD_DIR)/ps2.a20drv: $(DRVMOD_DIR)/ps2.c kernel/drivers/input/ps2.c kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
@@ -242,6 +245,10 @@ $(USER_BUILD_DIR)/virtio-rng.a20drv: $(DRVMOD_DIR)/virtio_rng.c \
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
 $(USER_BUILD_DIR)/e1000.a20drv: $(DRVMOD_DIR)/e1000.c kernel/drivers/net/e1000.c
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/r8169.a20drv: $(DRVMOD_DIR)/r8169.c kernel/drivers/net/r8169.c
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 

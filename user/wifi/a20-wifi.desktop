@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Wi-Fi 网络
+Name[en]=Wi-Fi Networks
+Comment=连接无线热点并打开校园网认证网页
+Exec=/a20/wifi-gui
+Icon=network-wireless
+Terminal=false
+Categories=Network;Settings;
+StartupNotify=true

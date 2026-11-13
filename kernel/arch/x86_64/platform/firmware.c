@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "console.h"
 #include "platform.h"
+#include "page_table.h"
 #include "core/string.h"
 #include "core/klog.h"
 #include "mm/frame.h"
@@ -182,9 +183,11 @@ size_t firmware_acpi_ioapics(firmware_acpi_ioapic_t *out, size_t max) {
 void firmware_acpi_poweroff(void) {
     fw_node_t root;
     const acpi_context_t *context = firmware_acpi_context();
+    int result = -ENOENT;
     if (context && (!acpi_namespace_root(&root) ||
                     !acpi_namespace_initialize(context, &root)))
-        (void)acpi_namespace_poweroff();
+        result = acpi_namespace_poweroff();
+    kerr("[ACPI-POWER] poweroff failed: %d; halting\n", result);
     /* No guessed SLP_TYP or emulator-specific register writes on real PCs. */
     arch_halt();
 }
@@ -351,11 +354,24 @@ const char *firmware_bootargs(void) {
 }
 
 void firmware_reboot(void) {
-    uint8_t val;
-    do {
-        val = inb(0x64);
-    } while (val & 0x02);
-    outb(0x64, 0xFE);
+    fw_node_t root;
+    const acpi_context_t *context = firmware_acpi_context();
+    int result = -ENOENT;
+    if (context && (!acpi_namespace_root(&root) ||
+                    !acpi_namespace_initialize(context, &root)))
+        result = acpi_namespace_reboot();
+    kwarn("[ACPI-POWER] reset failed: %d; trying bounded i8042 fallback\n", result);
+    /* Many modern laptops have no usable i8042. Never spin forever on 0xff. */
+    for (unsigned i = 0; i < 100000; i++) {
+        uint8_t status = inb(0x64);
+        if (status == 0xff)
+            break;
+        if (!(status & 0x02)) {
+            outb(0x64, 0xFE);
+            break;
+        }
+        cpu_relax();
+    }
     arch_halt();
 }
 
@@ -371,14 +387,58 @@ int firmware_console_getchar(void) {
     return arch_uart_poll_getc();
 }
 
-/* The bootstrap maps 0..4 GiB independently of firmware input. RAM above
- * that window is admitted only as wholly usable 1 GiB chunks, backed by
- * ordinary 2 MiB leaves (no optional 1 GiB-page CPU requirement). */
-#define X86_HIGH_RAM_BASE 0x100000000ULL
-#define X86_HIGH_PAGE 0x40000000ULL
+/* The bootstrap uses uncached leaves for 2..4 GiB, where RAM and MMIO may
+ * coexist. Replace the usable RAM pages with write-back mappings. Above
+ * 4 GiB, leave holes unmapped. Only interval edges need 4 KiB tables. */
+#define X86_BOOT_UC_BASE (2ULL << 30)
 extern uint64_t boot_pdpt_hh[512];
-static uint64_t high_ram_pd[(X86_HIGH_RAM_MAP_END-X86_HIGH_RAM_BASE)>>30][512]
+static uint64_t high_ram_pd[(X86_HIGH_RAM_MAP_END - PHYS_MAP_LIMIT) >> 30][512]
     __attribute__((aligned(4096)));
+static uint64_t ram_edge_pt[2 * PFA_MAX_RANGES][512]
+    __attribute__((aligned(4096)));
+static size_t ram_edge_count;
+
+static void x86_map_ram(uint64_t base, uint64_t end)
+{
+    if (base < X86_BOOT_UC_BASE)
+        base = X86_BOOT_UC_BASE;
+    while (base < end) {
+        uint64_t block = base & ~(PMD_SIZE - 1);
+        uint64_t stop = block + PMD_SIZE;
+        if (stop > end)
+            stop = end;
+        unsigned slot = block >> 30;
+        uint64_t *pd;
+        if (block < PHYS_MAP_LIMIT) {
+            pd = arch_pte_to_ptr(boot_pdpt_hh[slot]);
+        } else {
+            pd = high_ram_pd[slot - (PHYS_MAP_LIMIT >> 30)];
+            boot_pdpt_hh[slot] = ((uintptr_t)pd - PAGE_OFFSET) | PTE_V | PTE_W;
+        }
+        uint64_t *entry = &pd[(block >> 21) & 511U];
+        if (base == block && stop == block + PMD_SIZE) {
+            *entry = block | PTE_V | PTE_W | PTE_PS;
+        } else {
+            uint64_t *pt;
+            if ((*entry & (PTE_V | PTE_PS)) == PTE_V) {
+                pt = arch_pte_to_ptr(*entry);
+            } else {
+                if (ram_edge_count == ARRAY_SIZE(ram_edge_pt))
+                    panic("x86: exhausted RAM boundary page tables");
+                pt = ram_edge_pt[ram_edge_count++];
+                if (block < PHYS_MAP_LIMIT)
+                    for (unsigned i = 0; i < 512; i++)
+                        pt[i] = (block + i * PAGE_SIZE) | PTE_V | PTE_W |
+                                PTE_LEAF | PTE_DEVICE;
+                *entry = ((uintptr_t)pt - PAGE_OFFSET) | PTE_V | PTE_W;
+            }
+            for (uint64_t pa = base; pa < stop; pa += PAGE_SIZE)
+                pt[(pa >> 12) & 511U] = pa | PTE_V | PTE_W | PTE_LEAF;
+        }
+        base = stop;
+    }
+}
+
 static void x86_high_ram_map_flush(void) {
     __asm__ __volatile__("movq %%cr3, %%rax\n\tmovq %%rax, %%cr3\n\t" ::: "rax", "memory");
 }
@@ -435,19 +495,13 @@ static void x86_ram_detect(void) {
      * this range. A reserved hole through the kernel must never split it. */
     extern char _bss_end[];
     uint64_t kernel_end=(uintptr_t)_bss_end-PAGE_OFFSET;
-    int kernel_found=0,mapped_high=0;
+    int kernel_found=0;
     for(size_t i=0;i<count;i++)
         if(ranges[i].base<=KERNEL_ENTRY && ranges[i].end>=kernel_end) kernel_found=1;
     if(!kernel_found) panic("x86: linked kernel is outside usable boot RAM");
     for(size_t i=0;i<count;i++) {
         g_ram_base[i]=ranges[i].base;g_ram_end[i]=ranges[i].end;
-        if(ranges[i].base<X86_HIGH_RAM_BASE) continue;
-        for(uint64_t chunk=ranges[i].base;chunk<ranges[i].end;chunk+=X86_HIGH_PAGE) {
-            uint64_t *pd=high_ram_pd[(chunk-X86_HIGH_RAM_BASE)>>30];
-            for(unsigned j=0;j<512;j++) pd[j]=(chunk+(uint64_t)j*0x200000)|0x83ULL;
-            boot_pdpt_hh[chunk>>30]=((uintptr_t)pd-PAGE_OFFSET)|0x003ULL;
-            mapped_high=1;
-        }
+        x86_map_ram(ranges[i].base, ranges[i].end);
     }
     g_ram_count=count;g_ram_done=1;
     if(source==X86_BOOT_MEMORY_FIXED)
@@ -455,7 +509,7 @@ static void x86_ram_detect(void) {
     for(size_t i=0;i<count;i++)
         printf("[RAM] usable %p..%p (%lu MiB)\n",(void *)g_ram_base[i],(void *)g_ram_end[i],
             (unsigned long)((g_ram_end[i]-g_ram_base[i])>>20));
-    if(mapped_high)x86_high_ram_map_flush();
+    x86_high_ram_map_flush();
 }
 
 size_t arch_ram_range_count(void) {

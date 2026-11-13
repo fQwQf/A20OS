@@ -77,7 +77,7 @@ pc-rescue-iso: $(if $(filter 1,$(BRINGUP) $(RAMFS_USER)),kernel-only,dev-build)
 # thin-client route described in docs/platforms/x86_64-pc.md.
 pc-rescue-disk: dev-build
 	@mkdir -p build/x86_64-pc
-	tools/boot/mk_grub_disk_image.sh \
+	A20_X86_LOG_MB=$(LOG_PARTITION_MB) A20_LOG_SESSION=$(KLOG_SESSION_NUM) tools/boot/mk_grub_disk_image.sh \
 		$(KERNEL_ELF) build/x86_64-pc/a20os-rescue-disk.img $(FAT32_IMG)
 	@echo "rescue disk ready: build/x86_64-pc/a20os-rescue-disk.img"
 
@@ -94,9 +94,21 @@ x86_64-uefi-disk: $(VBOX_X86_64_IMG)
 
 # Reuse the apk world builder and distro init used by run-world-gui, with the
 # world on an explicitly named GPT partition instead of a QEMU second disk.
+#
+# PREBUILT_WORLD=1 uses WORLD_IMAGE as-is instead of rebuilding the world from
+# the package repository.  That is how a physical-machine image is assembled
+# from an already-built desktop rootfs (build/images/xfce-x86_64.img): the
+# rebuild needs the apk mirror, while the artifact only needs the ext4 image.
+WORLD_IMAGE ?= $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img
 pc-uefi-world-disk: $(VBOX_X86_64_EFI)
+ifeq ($(PREBUILT_WORLD),1)
+	@test -s "$(WORLD_IMAGE)" || { \
+		echo "PREBUILT_WORLD=1 but $(WORLD_IMAGE) is missing or empty" >&2; \
+		exit 1; }
+else
 	$(MAKE) PKG_WORLD=$(PKG_WORLD) PKG_SIZE_MB=$(PKG_SIZE_MB_WORLD) image-world
-	tools/boot/mk_uefi_fat_image.sh "$(VBOX_X86_64_EFI)" "$(PC_UEFI_OUTPUT)" - BOOTX64.EFI "$(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img"
+endif
+	tools/boot/mk_uefi_fat_image.sh "$(VBOX_X86_64_EFI)" "$(PC_UEFI_OUTPUT)" - BOOTX64.EFI "$(WORLD_IMAGE)" "$(UEFI_LOG_MB)" "$(KLOG_SESSION_NUM)"
 
 # A board with no block driver has no medium to write, so its artifact is the
 # kernel plus the commands that hand it to the boot chain already on the board.

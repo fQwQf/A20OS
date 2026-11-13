@@ -36,6 +36,15 @@ typedef struct irq_shared_node {
 
 static irq_shared_node_t *irq_shared_chain[256];
 
+/* See IRQ_TRIGGER_MODEL in driver_hwapi.h.  A platform that knows which of
+ * its lines are level-triggered overrides this; the default reports edge so
+ * dispatch never masks a line whose platform did not say it was safe. */
+int __attribute__((weak)) arch_irq_line_is_level(uint32_t irq)
+{
+    (void)irq;
+    return 0;
+}
+
 uint8_t ioport_read8(uint16_t port)
 {
 #ifdef CONFIG_IOPORT
@@ -272,6 +281,7 @@ void driver_irq_dispatch(uint32_t irq) {
     irq_handler_t handler = irq_handlers[irq];
     void *priv = irq_priv[irq];
     irq_shared_node_t *shared = irq_shared_chain[irq];
+    unsigned long flags = irq_flags[irq];
     if (!handler) {
         spin_unlock_irqrestore(&irq_table_lock, lock_flags);
         if (current_board && current_board->irqchip &&
@@ -281,6 +291,20 @@ void driver_irq_dispatch(uint32_t irq) {
     }
     __atomic_add_fetch(&irq_active[irq], 1, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+
+    /*
+     * Mask a level-triggered line for the duration of its handlers.  The
+     * source is still asserted at this point (that is why the interrupt was
+     * delivered), so leaving the line armed would let it re-enter as soon as
+     * any return path enables interrupts.  IRQF_ONESHOT leaves the mask in
+     * place: the handler is only a wake-up, and the thread that clears the
+     * source is responsible for irq_enable().  See IRQ_TRIGGER_MODEL.
+     */
+    int oneshot = (flags & IRQF_ONESHOT) != 0;
+    int level = oneshot || (flags & IRQF_LEVEL) != 0 ||
+                arch_irq_line_is_level(irq);
+    if (level)
+        irq_disable(irq);
 
     if (current_board && current_board->irqchip &&
         current_board->irqchip->ack)
@@ -295,6 +319,8 @@ void driver_irq_dispatch(uint32_t irq) {
         shared->handler((int)irq, shared->priv);
         shared = next;
     }
+    if (level && !oneshot)
+        irq_enable(irq);
 
     if (current_board && current_board->irqchip &&
         current_board->irqchip->eoi)
@@ -372,12 +398,6 @@ int dma_range_ok(const struct device *dev, uint64_t addr, size_t size)
     return dma_range_ok_mask(dma_get_mask(dev), addr, size);
 }
 
-/* How many times the frame allocator is asked for a block inside a narrowed DMA
- * window before the caller is told there is none.  Bounded so a mask that no
- * memory on this board can satisfy costs a fixed number of allocations rather
- * than spinning the whole probe. */
-#define DMA_MASK_ALLOC_ATTEMPTS 8
-
 static int dma_page_order(size_t size, size_t alignment);
 
 static void *dma_alloc_pages(uint64_t mask, size_t size, size_t alignment,
@@ -386,32 +406,23 @@ static void *dma_alloc_pages(uint64_t mask, size_t size, size_t alignment,
     int order = dma_page_order(size, alignment);
     if (order < 0)
         return NULL;
-    /* Bounded retry rather than a zone-aware allocator: the frame allocator has
-     * no "give me memory below 4 GiB" entry point, so the only way to honour a
-     * narrow mask is to try again and let a full order come from somewhere
-     * else.  Running out of attempts is reported as NULL, never as a handle the
-     * device cannot use. */
-    for (int attempt = 0; attempt < DMA_MASK_ALLOC_ATTEMPTS; attempt++) {
-        pfn_t pfn = pfa_alloc(order);
-        if (pfn == PFN_NONE)
-            return NULL;
-        void *ptr = pfn_to_virt(pfn);
-        if (!ptr) {
-            pfa_free(pfn, order);
-            continue;
-        }
-        uint64_t pa = pfn_to_phys(pfn);
-        if (!dma_range_ok_mask(mask, pa, PAGE_SIZE << order)) {
-            pfa_free(pfn, order);
-            continue;
-        }
-        extern void *memset(void *, int, size_t);
-        memset(ptr, 0, PAGE_SIZE << order);
-        if (dma_handle)
-            *dma_handle = pa;
-        return ptr;
+    /* Freeing and retrying the unrestricted allocator can return the same
+     * high block forever, despite free low memory. Select within the mask. */
+    pfn_t pfn = mask == DMA_MASK_64BIT ? pfa_alloc(order)
+                                     : pfa_alloc_max(order, mask);
+    if (pfn == PFN_NONE)
+        return NULL;
+    void *ptr = pfn_to_virt(pfn);
+    uint64_t pa = pfn_to_phys(pfn);
+    if (!ptr || !dma_range_ok_mask(mask, pa, PAGE_SIZE << order)) {
+        pfa_free(pfn, order);
+        return NULL;
     }
-    return NULL;
+    extern void *memset(void *, int, size_t);
+    memset(ptr, 0, PAGE_SIZE << order);
+    if (dma_handle)
+        *dma_handle = pa;
+    return ptr;
 }
 
 void *dma_alloc_coherent(struct device *dev, size_t size, uint64_t *dma_handle)
@@ -491,6 +502,38 @@ void dma_free_coherent_aligned(void *vaddr, size_t size, uint64_t dma_handle)
     pfn_t pfn = virt_to_pfn(vaddr);
     if (order >= 0 && pfn != PFN_NONE)
         pfa_free(pfn, order);
+}
+
+/* Exercises the actual frame allocator and direct-map aliases, without
+ * submitting DMA to hardware. Keep all buffers live to catch alias reuse. */
+int a20_boot_selftest_dma_window(void)
+{
+    struct device test_device = {0};
+    void *buffers[32] = {0};
+    uint64_t addresses[32] = {0};
+    const size_t size = 64U << 10;
+    int result = dma_set_mask(&test_device, DMA_MASK_32BIT);
+    if (result)
+        return result;
+    for (unsigned i = 0; i < 32; i++) {
+        buffers[i] = dma_alloc_coherent_aligned(&test_device, size, PAGE_SIZE, &addresses[i]);
+        if (!buffers[i] || !dma_range_ok(&test_device, addresses[i], size)) {
+            result = -ENOMEM;
+            break;
+        }
+        for (unsigned j = 0; j < i; j++)
+            if (addresses[j] == addresses[i])
+                result = -EIO;
+        ((volatile uint32_t *)buffers[i])[0] = 0xa2000000U + i;
+    }
+    for (unsigned i = 0; i < 32; i++) {
+        if (!buffers[i])
+            continue;
+        if (((volatile uint32_t *)buffers[i])[0] != 0xa2000000U + i)
+            result = -EIO;
+        dma_free_coherent_aligned(buffers[i], size, addresses[i]);
+    }
+    return result;
 }
 
 void dma_sync_for_device(void *vaddr, size_t size) {

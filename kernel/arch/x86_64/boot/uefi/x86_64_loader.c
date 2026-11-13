@@ -18,6 +18,10 @@ typedef uint64_t efi_physical_address_t;
 
 #define EFI_ERROR(s) ((s) >> 63)
 
+#ifndef A20_LOADER_LOG
+#define A20_LOADER_LOG 1
+#endif
+
 /* Values from the UEFI spec.  ANY_PAGES is 0 and MAX_ADDRESS is 1; defining
  * ANY_PAGES as 1 makes the firmware read the zeroed address as a maximum and
  * refuse the allocation. */
@@ -58,6 +62,37 @@ struct efi_simple_text_output {
     void *reset;
     efi_output_string_t output_string;
 };
+
+/* EFI_FILE_PROTOCOL and EFI_SIMPLE_FILE_SYSTEM_PROTOCOL, enough to append a
+ * breadcrumb file and a boot counter to the ESP.  These are boot services, so
+ * they are valid up to ExitBootServices and never after it. */
+struct efi_file_protocol;
+typedef struct efi_file_protocol efi_file_protocol_t;
+struct efi_file_protocol {
+    uint64_t revision;
+    efi_status_t (*open)(efi_file_protocol_t *, efi_file_protocol_t **,
+                         efi_char16_t *, uint64_t, uint64_t);
+    efi_status_t (*close)(efi_file_protocol_t *);
+    efi_status_t (*delete_file)(efi_file_protocol_t *);
+    efi_status_t (*read)(efi_file_protocol_t *, efi_uintn_t *, void *);
+    efi_status_t (*write)(efi_file_protocol_t *, efi_uintn_t *, void *);
+    efi_status_t (*get_position)(efi_file_protocol_t *, uint64_t *);
+    efi_status_t (*set_position)(efi_file_protocol_t *, uint64_t);
+    void *get_info;
+    void *set_info;
+    efi_status_t (*flush)(efi_file_protocol_t *);
+};
+
+struct efi_simple_file_system {
+    uint64_t revision;
+    efi_status_t (*open_volume)(struct efi_simple_file_system *,
+                                efi_file_protocol_t **);
+};
+
+#define EFI_FILE_MODE_READ   0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE  0x0000000000000002ULL
+#define EFI_FILE_MODE_CREATE 0x8000000000000000ULL
+#define EFI_FILE_DIRECTORY   0x0000000000000010ULL
 
 struct efi_guid {
     uint32_t data1;
@@ -171,6 +206,39 @@ static const struct efi_guid acpi10_table_guid = {
     0x2d88U,
     0x11d3U,
     {0x9aU, 0x16U, 0x00U, 0x90U, 0x27U, 0x3fU, 0xc1U, 0x4dU}};
+/* EFI_SIMPLE_FILE_SYSTEM_PROTOCOL */
+static const struct efi_guid simple_fs_guid = {
+    0x964e5b22U,
+    0x6459U,
+    0x11d2U,
+    {0x8eU, 0x39U, 0x00U, 0xa0U, 0xc9U, 0x69U, 0x72U, 0x3bU}};
+/* EFI_FILE_SYSTEM_INFO_ID */
+static const struct efi_guid file_system_info_guid = {
+    0x09576e93U,
+    0x6d3fU,
+    0x11d2U,
+    {0x8eU, 0x39U, 0x00U, 0xa0U, 0xc9U, 0x69U, 0x72U, 0x3bU}};
+
+struct efi_file_system_info {
+    uint64_t size;
+    uint8_t read_only;
+    uint8_t pad[7];
+    uint64_t volume_size;
+    uint64_t free_space;
+    uint32_t block_size;
+    efi_char16_t volume_label[1];
+};
+_Static_assert(offsetof(struct efi_file_system_info, volume_size) == 16,
+               "UEFI file-system-info VolumeSize ABI");
+_Static_assert(offsetof(struct efi_file_system_info, volume_label) == 36,
+               "UEFI file-system-info VolumeLabel ABI");
+
+typedef efi_status_t (*efi_locate_handle_t)(uint32_t, const struct efi_guid *,
+                                            void *, efi_uintn_t *,
+                                            efi_handle_t *);
+typedef efi_status_t (*efi_file_get_info_t)(efi_file_protocol_t *,
+                                            const struct efi_guid *,
+                                            efi_uintn_t *, void *);
 
 /* Must match kernel/arch/x86_64/platform/firmware.c. */
 struct mb_info {
@@ -219,6 +287,414 @@ static void print(struct efi_system_table *st, efi_char16_t *m) {
         st->con_out->output_string(st->con_out, m);
 }
 
+/* ESP breadcrumb state.  The file is opened per line: the loader writes a
+ * handful of lines and this keeps every stage durable even if the next
+ * firmware call never returns. */
+static efi_file_protocol_t *g_esp_root;
+static int g_esp_ready;
+static struct efi_system_table *g_esp_st;
+static void report_failure(struct efi_system_table *st, const char *stage,
+                           efi_status_t status);
+
+/* Early JSONL on the "A20OS log" FAT32 partition.  The kernel cannot touch
+ * block storage until after firmware enumeration, PCI/USB probing and VFS
+ * setup; this file starts at the loader stage, so a machine that dies before
+ * mount_persistent_log() still leaves structured evidence on the stick.  If
+ * the log partition is absent the same records go to the ESP instead. */
+static efi_file_protocol_t *g_early_file;
+static uint32_t g_early_bootcount;
+static unsigned g_early_seq;
+static int g_early_ready;
+
+static size_t early_append(char *dst, size_t cap, size_t at,
+                           const char *src) {
+    if (!dst || !cap)
+        return 0;
+    while (src && *src && at + 1 < cap)
+        dst[at++] = *src++;
+    dst[at] = '\0';
+    return at;
+}
+
+static size_t early_u32(char *dst, size_t cap, size_t at, uint32_t value) {
+    char digits[16];
+    size_t n = 0;
+    if (!value)
+        digits[n++] = '0';
+    while (value) {
+        digits[n++] = (char)('0' + value % 10U);
+        value /= 10U;
+    }
+    while (n && at + 1 < cap)
+        dst[at++] = digits[--n];
+    if (cap)
+        dst[at] = '\0';
+    return at;
+}
+
+static size_t early_hex64(char *dst, size_t cap, size_t at, uint64_t value) {
+    static const char hex[] = "0123456789abcdef";
+    at = early_append(dst, cap, at, "0x");
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        if (at + 1 >= cap)
+            break;
+        dst[at++] = hex[(value >> shift) & 15U];
+    }
+    if (cap)
+        dst[at] = '\0';
+    return at;
+}
+
+static void early_raw(const char *text, size_t len) {
+    if (!g_early_ready || !g_early_file || !text || !len)
+        return;
+    (void)g_early_file->set_position(g_early_file, 0xffffffffffffffffULL);
+    efi_uintn_t count = len;
+    efi_status_t status = g_early_file->write(g_early_file, &count,
+                                              (void *)text);
+    if (EFI_ERROR(status)) {
+        (void)g_early_file->close(g_early_file);
+        g_early_file = 0;
+        g_early_ready = 0;
+        return;
+    }
+    /* Flush each record: the next firmware call may never return. */
+    (void)g_early_file->flush(g_early_file);
+}
+
+static void early_line(const char *level, const char *msg) {
+    char line[384];
+    size_t at = 0;
+    at = early_append(line, sizeof(line), at,
+                      "{\"v\":1,\"boot\":\"loader-");
+    at = early_u32(line, sizeof(line), at, g_early_bootcount);
+    at = early_append(line, sizeof(line), at, "\",\"bootcount\":");
+    at = early_u32(line, sizeof(line), at, g_early_bootcount);
+    at = early_append(line, sizeof(line), at, ",\"seq\":");
+    at = early_u32(line, sizeof(line), at, g_early_seq++);
+    at = early_append(line, sizeof(line), at,
+                      ",\"mono_ns\":0,\"rt\":0,\"lvl\":\"");
+    at = early_append(line, sizeof(line), at, level ? level : "info");
+    at = early_append(line, sizeof(line), at,
+                      "\",\"src\":\"UEFI\",\"msg\":\"");
+    for (const char *p = msg; p && *p && at + 8 < sizeof(line); p++) {
+        if (*p == '"' || *p == '\\') {
+            line[at++] = '\\';
+            line[at++] = *p;
+        } else if (*p == '\n') {
+            line[at++] = '\\';
+            line[at++] = 'n';
+        } else {
+            line[at++] = *p;
+        }
+    }
+    at = early_append(line, sizeof(line), at, "\"}\n");
+    early_raw(line, at);
+}
+
+static void early_stage(const char *stage) {
+    char msg[96];
+    size_t at = early_append(msg, sizeof(msg), 0, "STAGE ");
+    at = early_append(msg, sizeof(msg), at, stage ? stage : "?");
+    (void)at;
+    early_line("info", msg);
+}
+
+static void early_fail(const char *stage, efi_status_t status) {
+    char msg[128];
+    size_t at = early_append(msg, sizeof(msg), 0, "FAIL stage=");
+    at = early_append(msg, sizeof(msg), at, stage ? stage : "?");
+    at = early_append(msg, sizeof(msg), at, " status=");
+    at = early_hex64(msg, sizeof(msg), at, status);
+    (void)at;
+    early_line("err", msg);
+}
+
+static int volume_label_is_log(const efi_char16_t *label) {
+    static const char want[] = "A20OSLOG";
+    if (!label)
+        return 0;
+    for (unsigned i = 0; i < sizeof(want) - 1; i++)
+        if (label[i] != (efi_char16_t)(unsigned char)want[i])
+            return 0;
+    return 1;
+}
+
+static void ascii_to_utf16(efi_char16_t *out, size_t cap, const char *src) {
+    size_t i = 0;
+    if (!out || !cap)
+        return;
+    while (src && *src && i + 1 < cap)
+        out[i++] = (efi_char16_t)(unsigned char)*src++;
+    out[i] = 0;
+}
+
+static int early_open_path(efi_file_protocol_t *root, const efi_char16_t *path) {
+    if (!root || !path)
+        return 0;
+    efi_status_t status = root->open(
+        root, &g_early_file, (efi_char16_t *)path,
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    if (EFI_ERROR(status) || !g_early_file) {
+        g_early_file = 0;
+        return 0;
+    }
+    g_early_ready = 1;
+    return 1;
+}
+
+static void early_open(uint32_t bootcount) {
+    g_early_bootcount = bootcount;
+    g_early_seq = 0;
+    g_early_ready = 0;
+    g_early_file = 0;
+
+    char name[64];
+    size_t at = early_append(name, sizeof(name), 0, "\\early-");
+    at = early_u32(name, sizeof(name), at, bootcount);
+    at = early_append(name, sizeof(name), at, ".jsonl");
+
+    efi_char16_t path[64];
+    ascii_to_utf16(path, sizeof(path) / sizeof(path[0]), name);
+
+    struct efi_boot_services *bs = g_esp_st ? g_esp_st->boot_services : 0;
+    if (bs && bs->locate_handle) {
+        efi_handle_t handles[32];
+        efi_uintn_t size = sizeof(handles);
+        efi_status_t status = ((efi_locate_handle_t)bs->locate_handle)(
+            2 /* ByProtocol */, &simple_fs_guid, 0, &size, handles);
+        if (!EFI_ERROR(status)) {
+            unsigned count = (unsigned)(size / sizeof(handles[0]));
+            for (unsigned i = 0; i < count; i++) {
+                struct efi_simple_file_system *fs = 0;
+                if (EFI_ERROR(bs->handle_protocol(handles[i], &simple_fs_guid,
+                                                  (void **)&fs)) || !fs)
+                    continue;
+                efi_file_protocol_t *root = 0;
+                if (EFI_ERROR(fs->open_volume(fs, &root)) || !root)
+                    continue;
+                uint8_t info_buf[512];
+                efi_uintn_t info_size = sizeof(info_buf);
+                struct efi_file_system_info *info =
+                    (struct efi_file_system_info *)info_buf;
+                status = ((efi_file_get_info_t)root->get_info)(
+                    root, &file_system_info_guid, &info_size, info_buf);
+                int match = !EFI_ERROR(status) && info_size >= 52 &&
+                            info->size >= 52 &&
+                            volume_label_is_log(info->volume_label);
+                if (match) {
+                    (void)early_open_path(root, path);
+                    (void)root->close(root);
+                    if (g_early_ready)
+                        return;
+                } else {
+                    (void)root->close(root);
+                }
+            }
+        }
+    }
+
+    /* No log partition (or its FAT driver is read-only): keep the same JSONL
+     * records on the ESP, next to the human-readable boot.log. */
+    if (g_esp_ready && g_esp_root) {
+        char esp_name[80];
+        at = early_append(esp_name, sizeof(esp_name), 0, "\\A20OS\\early-");
+        at = early_u32(esp_name, sizeof(esp_name), at, bootcount);
+        at = early_append(esp_name, sizeof(esp_name), at, ".jsonl");
+        ascii_to_utf16(path, sizeof(path) / sizeof(path[0]), esp_name);
+        (void)early_open_path(g_esp_root, path);
+    }
+}
+
+static void early_close(void) {
+    if (g_early_file) {
+        (void)g_early_file->flush(g_early_file);
+        (void)g_early_file->close(g_early_file);
+        g_early_file = 0;
+    }
+    g_early_ready = 0;
+}
+
+static size_t ascii_len(const char *s) {
+    size_t n = 0;
+    while (s && s[n])
+        n++;
+    return n;
+}
+
+static void esp_log_text(const char *text) {
+    if (!g_esp_ready || !g_esp_root || !text)
+        return;
+    efi_file_protocol_t *file = NULL;
+    efi_status_t status = g_esp_root->open(
+        g_esp_root, &file, L"\\A20OS\\boot.log",
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    if (EFI_ERROR(status) || !file) {
+        static int reported;
+        if (!reported && g_esp_st) {
+            reported = 1;
+            report_failure(g_esp_st, "ESP open boot.log", status);
+        }
+        return;
+    }
+    (void)file->set_position(file, 0xffffffffffffffffULL);
+    efi_uintn_t len = ascii_len(text);
+    if (len)
+        (void)file->write(file, &len, (void *)text);
+    (void)file->flush(file);
+    (void)file->close(file);
+}
+
+static void esp_log_hex(efi_status_t value) {
+    char buf[32];
+    size_t n = 0;
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    for (int shift = 60; shift >= 0; shift -= 4)
+        buf[n++] = "0123456789abcdef"[(value >> shift) & 15];
+    buf[n] = '\0';
+    esp_log_text(buf);
+}
+
+static void esp_log_stage(const char *stage) {
+    esp_log_text("STAGE ");
+    esp_log_text(stage);
+    esp_log_text("\n");
+    early_stage(stage);
+}
+
+static void esp_log_fail(const char *stage, efi_status_t status) {
+    esp_log_text("FAIL stage=");
+    esp_log_text(stage ? stage : "?");
+    esp_log_text(" status=");
+    esp_log_hex(status);
+    esp_log_text("\n");
+    early_fail(stage, status);
+}
+
+static uint32_t esp_read_bootcount(void) {
+    if (!g_esp_ready || !g_esp_root)
+        return 0;
+    efi_file_protocol_t *file = NULL;
+    efi_status_t status = g_esp_root->open(
+        g_esp_root, &file, L"\\A20OS\\bootcount", EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(status) || !file)
+        return 0;
+    char buf[32] = {0};
+    efi_uintn_t len = sizeof(buf) - 1;
+    (void)file->read(file, &len, buf);
+    (void)file->close(file);
+    uint32_t value = 0;
+    for (efi_uintn_t i = 0; i < len && buf[i] && buf[i] != '\n'; i++) {
+        char c = buf[i];
+        unsigned digit;
+        if (c >= '0' && c <= '9') digit = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') digit = (unsigned)(c - 'A' + 10);
+        else break;
+        value = value * 16U + digit;
+    }
+    return value;
+}
+
+static void esp_write_bootcount(uint32_t value) {
+    if (!g_esp_ready || !g_esp_root)
+        return;
+    efi_file_protocol_t *file = NULL;
+    efi_status_t status = g_esp_root->open(
+        g_esp_root, &file, L"\\A20OS\\bootcount",
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+    if (EFI_ERROR(status) || !file)
+        return;
+    (void)file->set_position(file, 0);
+    char buf[16];
+    size_t n = 0;
+    for (int shift = 28; shift >= 0; shift -= 4)
+        buf[n++] = "0123456789abcdef"[(value >> shift) & 15];
+    buf[n++] = '\n';
+    efi_uintn_t len = n;
+    (void)file->write(file, &len, buf);
+    (void)file->flush(file);
+    (void)file->close(file);
+}
+
+static void esp_open(struct efi_system_table *st, efi_handle_t image) {
+    if (!A20_LOADER_LOG) {
+        (void)st;
+        (void)image;
+        return;
+    }
+    g_esp_st = st;
+    struct efi_loaded_image *li = NULL;
+    if (!st || !st->boot_services || !st->boot_services->handle_protocol)
+        return;
+    if (EFI_ERROR(st->boot_services->handle_protocol(
+            image, &loaded_image_guid, (void **)&li)) ||
+        !li || !li->device_handle) {
+        report_failure(st, "ESP loaded-image handle", 1);
+        return;
+    }
+    struct efi_simple_file_system *fs = NULL;
+    efi_status_t status = st->boot_services->handle_protocol(
+        li->device_handle, &simple_fs_guid, (void **)&fs);
+    if (EFI_ERROR(status) || !fs || !fs->open_volume) {
+        /* Some firmware publishes the filesystem on the image handle rather
+         * than the partition handle; try it before giving up. */
+        status = st->boot_services->handle_protocol(
+            image, &simple_fs_guid, (void **)&fs);
+    }
+    if (EFI_ERROR(status) || !fs || !fs->open_volume) {
+        report_failure(st, "ESP simple-filesystem", status);
+        return;
+    }
+    status = fs->open_volume(fs, &g_esp_root);
+    if (EFI_ERROR(status) || !g_esp_root) {
+        report_failure(st, "ESP open-volume", status);
+        return;
+    }
+    efi_file_protocol_t *dir = NULL;
+    status = g_esp_root->open(
+        g_esp_root, &dir, L"\\A20OS",
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
+        EFI_FILE_DIRECTORY);
+    if (!EFI_ERROR(status) && dir)
+        (void)dir->close(dir);
+    else
+        report_failure(st, "ESP create A20OS dir", status);
+    g_esp_ready = 1;
+    esp_log_text("\n=== A20OS UEFI boot ===\n");
+    esp_log_text("loader=");
+    esp_log_text("x86_64");
+    esp_log_text("\n");
+}
+
+static void append_cmdline_bootcount(uint32_t cmdline, uint32_t bootcount) {
+    if (!cmdline)
+        return;
+    char *buf = (char *)(uintptr_t)cmdline;
+    size_t len = ascii_len(buf);
+    char suffix[48];
+    size_t n = 0;
+    const char *key = " a20.bootcount=";
+    while (*key)
+        suffix[n++] = *key++;
+    char digits[16];
+    size_t d = 0;
+    if (!bootcount)
+        digits[d++] = '0';
+    while (bootcount) {
+        digits[d++] = (char)('0' + (bootcount % 10));
+        bootcount /= 10;
+    }
+    while (d)
+        suffix[n++] = digits[--d];
+    suffix[n] = '\0';
+    if (len + n + 1 >= CMDLINE_MAX)
+        return;
+    for (size_t i = 0; i <= n; i++)
+        buf[len + i] = suffix[i];
+}
+
 /* Keep failed firmware calls diagnosable on a serial-backed EFI console. */
 static void report_failure(struct efi_system_table *st, const char *stage,
                            efi_status_t status) {
@@ -238,6 +714,7 @@ static void report_failure(struct efi_system_table *st, const char *stage,
     line[n++] = '\n';
     line[n] = 0;
     print(st, line);
+    esp_log_fail(stage, status);
 }
 
 static uintptr_t find_acpi_rsdp(struct efi_system_table *st) {
@@ -255,16 +732,17 @@ static uintptr_t find_acpi_rsdp(struct efi_system_table *st) {
 /* Copy LoadOptions out as ASCII, the way GRUB hands a multiboot cmdline over. */
 static uint32_t collect_load_options(struct efi_system_table *st,
                                      efi_handle_t image, uint64_t scratch) {
+    uint8_t *out = (uint8_t *)(uintptr_t)(scratch + MB_CMDLINE_OFFSET);
+    out[0] = '\0';
     struct efi_loaded_image *li = NULL;
     if (EFI_ERROR(st->boot_services->handle_protocol(image, &loaded_image_guid,
                                                      (void **)&li)))
-        return 0;
+        return (uint32_t)(scratch + MB_CMDLINE_OFFSET);
     if (!li || !li->load_options || !li->load_options_size)
-        return 0;
+        return (uint32_t)(scratch + MB_CMDLINE_OFFSET);
     size_t chars = li->load_options_size / sizeof(efi_char16_t);
     if (chars >= CMDLINE_MAX)
         chars = CMDLINE_MAX - 1;
-    uint8_t *out = (uint8_t *)(uintptr_t)(scratch + MB_CMDLINE_OFFSET);
     const efi_char16_t *in = (const efi_char16_t *)li->load_options;
     for (size_t i = 0; i < chars; i++)
         out[i] = (in[i] < 0x80) ? (uint8_t)in[i] : '?';
@@ -642,8 +1120,8 @@ static int describe_gop(const struct efi_gop_mode *mode,
         i->pixels_per_scanline < i->width || pitch > UINT32_MAX ||
         !mode->framebuffer_base || (mode->framebuffer_base & 4095) ||
         mode->framebuffer_bytes > 256ULL * 1024 * 1024 ||
-        mode->framebuffer_base >= 0x100000000ULL ||
-        mode->framebuffer_bytes > 0x100000000ULL-mode->framebuffer_base ||
+        !mode->framebuffer_bytes ||
+        mode->framebuffer_base > UINT64_MAX - mode->framebuffer_bytes ||
         ((visible + 4095) & ~4095ULL) > mode->framebuffer_bytes ||
         overlaps(KERNEL_LOAD_ADDRESS, KERNEL_MEMORY_BYTES,
                  mode->framebuffer_base, mode->framebuffer_bytes)) return -1;
@@ -680,6 +1158,8 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
     const char *stage = "validate kernel span";
     uintptr_t acpi_rsdp = find_acpi_rsdp(st);
     uint32_t cmdline;
+    uint32_t bootcount = 0;
+    int exit_attempted = 0;
     if (!ksize || KERNEL_MEMORY_BYTES < ksize ||
         KERNEL_MEMORY_BYTES > 0x80000000ULL - KERNEL_LOAD_ADDRESS) {
         status = 0x8000000000000002ULL;
@@ -690,6 +1170,26 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
     status = bs->handle_protocol(image, &loaded_image_guid, (void **)&loaded);
     if (EFI_ERROR(status))
         goto failed;
+    /* Establish the ESP breadcrumb before any check that can fail.  A machine
+     * whose panel never lights up still leaves this file on the stick. */
+    esp_open(st, image);
+    bootcount = esp_read_bootcount() + 1U;
+    esp_write_bootcount(bootcount);
+    early_open(bootcount);
+    esp_log_stage("loader");
+    esp_log_text("bootcount=");
+    {
+        char digits[16];
+        size_t d = 0;
+        uint32_t v = bootcount;
+        if (!v) digits[d++] = '0';
+        while (v) { digits[d++] = (char)('0' + (v % 10)); v /= 10; }
+        char out[17]; size_t n = 0;
+        while (d) out[n++] = digits[--d];
+        out[n] = '\0';
+        esp_log_text(out);
+    }
+    esp_log_text("\n");
     stage = "validate loaded image";
     status = 0x8000000000000002ULL;
     if (!loaded || !loaded->image_size ||
@@ -722,6 +1222,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
         status = 0x8000000000000002ULL;
         goto failed;
     }
+    esp_log_stage("scratch");
     stage = "allocate scratch";
     status = bs->allocate_pages(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA,
                                 SCRATCH_PAGES, &scratch);
@@ -752,8 +1253,13 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
     /* A synthetic return slot and 32-byte MS ABI shadow area fit in scratch. */
     *(uint64_t *)(uintptr_t)stack = 0;
     cmdline = collect_load_options(st, image, scratch);
+    append_cmdline_bootcount(cmdline, bootcount);
 
-    for (int attempt = 0; attempt < 2; attempt++) {
+    esp_log_stage("memory-map");
+    /* Validate the destination once while firmware diagnostics are still
+     * available. Then finish file I/O before taking the actual exit map.
+     * Opening, flushing and closing even the ESP log can change its key. */
+    for (int pass = 0; pass < 3; pass++) {
         stage = "GetMemoryMap";
         map_size = EFI_MAP_BYTES;
         status = bs->get_memory_map(&map_size, (void *)(uintptr_t)scratch,
@@ -783,7 +1289,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
         status = 0x8000000000000002ULL;
         if (!target_reclaimable(map, map_size, desc_size, KERNEL_LOAD_ADDRESS,
                                 kernel_pages * 4096)) {
-            for (size_t o = 0; o < map_size; o += desc_size) {
+            for (size_t o = 0; pass == 0 && o < map_size; o += desc_size) {
                 struct efi_memory_descriptor d;
                 copy_bytes(&d, (const uint8_t *)map + o, sizeof(d));
                 if (!overlaps(KERNEL_LOAD_ADDRESS, kernel_pages * 4096,
@@ -808,7 +1314,22 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
         mi->mmap_addr = (uint32_t)(info_base + sizeof(struct mb_info));
         mi->mmap_length = (uint32_t)(entries * sizeof(struct mb_mmap_entry));
         mi->cmdline = cmdline;
+        if (pass == 0) {
+            esp_log_stage("destination");
+            esp_log_stage("exit-boot-services");
+            esp_log_text("RESULT handoff=attempt\n");
+            early_close();
+            if (g_esp_root) {
+                (void)g_esp_root->close(g_esp_root);
+                g_esp_root = NULL;
+                g_esp_ready = 0;
+            }
+            continue;
+        }
         stage = "ExitBootServices";
+        /* If the firmware partially shuts down on the first attempt, only
+         * refresh the map and retry. Console and filesystem calls are unsafe. */
+        exit_attempted = 1;
         status = bs->exit_boot_services(image, map_key);
         if (!EFI_ERROR(status)) {
             /* Preload every operand before dropping the firmware's stack and
@@ -828,6 +1349,9 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st) {
             break;
     }
 failed:
-    report_failure(st, stage, status);
+    if (!exit_attempted) {
+        report_failure(st, stage, status);
+        early_close();
+    }
     return status;
 }

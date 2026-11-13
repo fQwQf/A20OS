@@ -28,7 +28,13 @@ struct input_absinfo {
 #define EV_REL   0x02
 #define EV_ABS   0x03
 #define EV_MSC   0x04
+#define EV_LED   0x11
 #define EV_REP   0x14
+
+#define LED_NUML   0
+#define LED_CAPSL  1
+#define LED_SCROLLL 2
+#define LED_MAX    0x0f
 
 #define SYN_REPORT  0
 #define SYN_CONFIG  1

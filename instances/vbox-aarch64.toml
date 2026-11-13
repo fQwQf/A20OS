@@ -12,3 +12,8 @@ variant = "default"
 
 [net]
 stack = "bsd"
+
+[log]
+level = "info"
+partition_mb = 64
+loader = true

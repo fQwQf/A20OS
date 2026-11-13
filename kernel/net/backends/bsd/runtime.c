@@ -657,6 +657,40 @@ static int if_get_addr(unsigned index, uint8_t *address, uint8_t *mask, uint8_t 
     return -ENODEV;
 }
 
+typedef struct hwaddr_job {
+    device_t *device;
+    uint8_t mac[6];
+} hwaddr_job_t;
+
+static int hwaddr_job_run(void *argument)
+{
+    hwaddr_job_t *job = argument;
+    for (unsigned i = 0; i < BSD_MAX_NICS; i++) {
+        bsd_nic_slot_t *nic = &nics[i];
+        if (!nic->attached || nic->device != job->device)
+            continue;
+        if (nic->carrier == NIC_CARRIER_UP || nic->has_ip)
+            return -EBUSY;
+        int result = a20_bsd_port_nic_set_hwaddr(nic->context, job->mac);
+        if (result)
+            return result > 0 ? -result : result;
+        memcpy(nic->mac, job->mac, 6);
+        net_netlink_link_notify_one(public_index_for_slot(i), 0);
+        return 0;
+    }
+    return -ENODEV;
+}
+
+static int device_hwaddr(device_t *device, const uint8_t mac[6])
+{
+    if (!device || !mac || (mac[0] & 1U) ||
+        !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]))
+        return -EINVAL;
+    hwaddr_job_t job = {.device = device};
+    memcpy(job.mac, mac, 6);
+    return a20_bsd_executor_call(hwaddr_job_run, &job);
+}
+
 typedef struct mtu_job {
     void *context;
     int mtu;
@@ -1395,6 +1429,7 @@ static const net_backend_if_ops_t bsd_iface_ops = {
     .owns_ipv4 = owns_ipv4,
     .mtu = if_mtu,
     .hwaddr = if_hwaddr,
+    .device_hwaddr = device_hwaddr,
     .snapshot = interface_snapshot,
     .snapshot_addr6 = addr6_snapshot,
     .config_snapshot = config_snapshot,

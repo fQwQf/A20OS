@@ -28,4 +28,7 @@ int firmware_irq_domains_prepare(const fw_node_t *root,
 void firmware_irq_domains_abort(fw_irq_domain_t *created);
 /* ACPI GSI -> architecture driver IRQ id; flags use DT trigger encodings. */
 int arch_firmware_irq_map(uint32_t hardware, uint32_t trigger_flags);
+/* ISA controller fallback, supplied by the platform; callers do not program
+ * IOAPIC/PIC routes themselves. Returns a driver IRQ ID or negative errno. */
+int firmware_legacy_irq_map(uint32_t hardware, uint32_t preferred);
 #endif

@@ -344,19 +344,22 @@ int pci_msix_commit(device_t *dev)
 void pci_msix_disable(device_t *dev)
 {
     pci_msix_state_t *st = msix_state(dev, 0);
+
+    /* A function can leave firmware with MSI-X enabled even though no A20OS
+     * driver ever called pci_msix_enable(), so the capability must still be
+     * cleared when st is NULL.  Mask the whole function first, then clear
+     * Enable; a message posted between the two would otherwise land on a
+     * vector with no owner. */
+    pci_msix_info_t info;
+    if (pci_msix_capability(dev, &info) == 0)
+        msix_control_write(dev, info.cap_offset,
+                           PCI_MSIX_FUNCTION_MASK, PCI_MSIX_ENABLE);
     if (!st)
         return;
 
-    /* Mask first, then clear Enable: a message posted between the two would
-     * otherwise land on a vector with no owner. */
     for (unsigned i = 0; i < st->programed && i < st->table_size; i++)
         pci_msix_set_vector_mask(dev, i, 1);
 
-    pci_msix_info_t info;
-    if (pci_msix_capability(dev, &info) == 0) {
-        msix_control_write(dev, info.cap_offset,
-                           PCI_MSIX_FUNCTION_MASK, PCI_MSIX_ENABLE);
-    }
     st->table = 0;
     st->programed = 0;
     st->dev = NULL;

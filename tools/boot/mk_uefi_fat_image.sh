@@ -2,6 +2,8 @@
 # Create a GPT disk with a UEFI System Partition containing an A20OS EFI loader.
 # Serves both architectures: the ESP entry name is the 4th argument, so BOOTAA64.EFI
 # for aarch64 and BOOTX64.EFI for x86_64 produce the same layout.
+# The optional 6th argument adds a FAT32 partition named "A20OS log"; the
+# kernel mounts it at /var/log/a20 for the persistent boot log.
 set -eu
 
 efi_image=${1:-}
@@ -9,6 +11,10 @@ output=${2:-}
 rootfs_image=${3:-}
 efi_name=${4:-BOOTAA64.EFI}
 world_image=${5:-}
+# Optional dedicated log partition, in MiB.  The laptop artifact passes 64 so
+# the kernel has a writable surface that is independent of the distro rootfs.
+log_mb=${6:-0}
+log_session=${7:-1}
 
 if [ -z "$efi_image" ] || [ -z "$output" ] || [ -z "$rootfs_image" ]; then
     echo "Usage: $0 <loader.efi> <output.img> <rootfs-fat32.img|-> [esp-entry-name] [world-ext4.img]" >&2
@@ -60,9 +66,22 @@ for command_name in parted mformat mmd mcopy sha256sum awk truncate; do
     }
 done
 
+case "$log_mb" in
+    ''|*[!0-9]*) echo "Error: log partition size must be a number of MiB" >&2; exit 1 ;;
+esac
+
 mkdir -p "$(dirname "$output")"
 rm -f "$output"
-if [ -n "$world_image" ]; then
+if [ "$log_mb" -gt 0 ]; then
+    if [ -n "$world_image" ]; then
+        log_start_mb=$((world_mb + 256))
+    else
+        log_start_mb=256
+    fi
+    log_end_mb=$((log_start_mb + log_mb))
+    # One MiB at the end for the backup GPT.
+    truncate -s "$((log_end_mb + 1))M" "$output"
+elif [ -n "$world_image" ]; then
     truncate -s "$((world_mb + 257))M" "$output"
 else
     truncate -s 256M "$output"
@@ -79,6 +98,41 @@ if [ -n "$world_image" ]; then
     parted -s "$output" mkpart distro ext4 256MiB "$((world_mb + 256))MiB"
     parted -s "$output" name 2 '"A20OS distro"'
     dd if="$world_image" of="$output" bs=1M seek=256 conv=sparse,notrunc status=none
+fi
+
+if [ "$log_mb" -gt 0 ]; then
+    log_partition_number=2
+    [ -n "$world_image" ] && log_partition_number=3
+    parted -s "$output" mkpart log fat32 "${log_start_mb}MiB" "${log_end_mb}MiB"
+    parted -s "$output" name "$log_partition_number" '"A20OS log"'
+    log_offset=$((log_start_mb * 1024 * 1024))
+    log_sectors=$((log_mb * 1024 * 1024 / 512))
+    mformat -i "$output@@$log_offset" -T "$log_sectors" -F -v A20OSLOG ::
+    log_readme=$(mktemp)
+    cat > "$log_readme" <<'LOGREADME'
+A20OS persistent log partition
+==============================
+
+The UEFI loader writes early-<bootcount>.jsonl here before it starts the
+kernel.  The kernel writes boot-<id>.jsonl after it mounts this partition;
+CURRENT names the newest kernel boot and its state.  Both files are JSONL:
+a line without a closing brace is a torn write from a power cut and should be
+discarded.
+
+When the screen never lit up, read early-<bootcount>.jsonl first.  It covers
+the loader-to-handoff window even when no kernel log could be written.
+/A20OS/boot.log on the EFI System Partition carries the same stages in plain
+text.
+
+Mount this partition read-only on any Linux/Windows/macOS host, or use
+tools/a20log in the A20OS source tree to filter and summarise the records.
+LOGREADME
+    mcopy -o -i "$output@@$log_offset" "$log_readme" ::/README.txt
+    rm -f "$log_readme"
+    log_config=$(mktemp)
+    printf 'schema=1\nsession=%s\n' "$log_session" > "$log_config"
+    mcopy -o -i "$output@@$log_offset" "$log_config" ::/CONFIG
+    rm -f "$log_config"
 fi
 
 esp_offset=$((1024 * 1024))
@@ -126,6 +180,12 @@ trap 'rm -f "$tmp_mtoolsrc" "$manifest"' EXIT HUP INT TERM
         printf 'distro_offset_bytes=268435456\n'
         printf 'distro_sha256='
         sha256sum "$world_image" | awk '{print $1}'
+    fi
+    if [ "$log_mb" -gt 0 ]; then
+        printf 'log_partition_name=A20OS log\n'
+        printf 'log_offset_bytes=%s\n' "$((log_start_mb * 1024 * 1024))"
+        printf 'log_size_mb=%s\n' "$log_mb"
+        printf 'log_session=%s\n' "$log_session"
     fi
 } > "$manifest"
 MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$manifest" b:/A20OS.MANIFEST

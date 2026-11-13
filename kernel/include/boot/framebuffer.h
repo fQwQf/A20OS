@@ -2,6 +2,10 @@
 #define A20_BOOT_FRAMEBUFFER_H
 #include "core/types.h"
 
+/* arch_device_map_mmio() hint: the caller wants a write-combining alias for a
+ * linear framebuffer.  A cached direct-map leaf already satisfies this. */
+#define ARCH_MMIO_WC 0x1U
+
 #define BOOT_FRAMEBUFFER_MAGIC 0x41463230U
 #define BOOT_FRAMEBUFFER_VERSION 1U
 /* A copied, firmware-independent scanout description. No firmware pointers or

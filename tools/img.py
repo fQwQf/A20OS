@@ -168,7 +168,9 @@ def build_fat32(a) -> int:
 # journal it creates: the log has no descriptor, commit or data checksums at
 # all.  A kernel that mounts such a log cannot tell a complete transaction from
 # one whose tail was torn by a power cut, which is the only thing the journal
-# exists for, so ext4_journal.c declines those images outright.  e2fsprogs
+# exists for, so ext4_journal.c refuses to replay such logs. It can upgrade a
+# strictly clean, empty internal journal before enabling writes; published images
+# initialize v3 here so the first boot already uses checksums. e2fsprogs
 # understands journal_checksum_v3 (dumpe2fs prints it) but never turns it on
 # during creation, and there is no mke2fs or tune2fs knob that does either.
 #
@@ -269,11 +271,11 @@ def _journal_superblock_offset(img: bytes) -> int:
         raise SystemExit("ext4-journal: not an ext4 image")
     block_size = 1024 << _le32(sb, 0x18)
     incompat = _le32(sb, 0x60)
-    if incompat & EXT4_INCOMPAT_64BIT:
-        inode_size = _le16(sb, EXT4_S_INODE_SIZE)
-        desc_size = _le16(sb, EXT4_S_DESC_SIZE)
-    else:
-        inode_size, desc_size = 128, 32
+    # s_inode_size is authoritative even when the 64BIT feature is off:
+    # e2fsprogs creates 256-byte inodes on modern defaults, and assuming 128
+    # would make inode 8 point into the middle of inode 7.
+    inode_size = _le16(sb, EXT4_S_INODE_SIZE) or 128
+    desc_size = _le16(sb, EXT4_S_DESC_SIZE) if incompat & EXT4_INCOMPAT_64BIT else 32
     # The descriptor table follows the primary superblock, whatever the
     # feature flags say: block 1 for a 4 KiB filesystem (the superblock starts
     # at byte 0), block 2 for a 1 KiB one (the superblock starts at byte 1024,
@@ -307,6 +309,61 @@ def enable_journal_checksums(path: Path) -> None:
     path.write_bytes(bytes(data))
     print(f"img: journal superblock at block {offset // 4096}: "
           f"64bit|csum_v3, crc32c {checksum:#010x}")
+
+
+def enable_journal_checksums_stream(path: Path) -> None:
+    """Enable 64bit|csum_v3 in the journal superblock without reading the image.
+
+    The in-memory helper above is fine for the small crash-test images, but a
+    deliverable world image is 4 GiB and must not be loaded into RAM just to
+    patch 4 KiB.  This walks the same on-disk structures with pread/pwrite.
+    """
+    fd = os.open(path, os.O_RDWR)
+    try:
+        sb = os.pread(fd, 1024, EXT4_SB)
+        if _le16(sb, 0x38) != 0xEF53:
+            raise SystemExit("ext4-journal: not an ext4 image")
+        block_size = 1024 << _le32(sb, 0x18)
+        incompat = _le32(sb, 0x60)
+        inode_size = _le16(sb, EXT4_S_INODE_SIZE) or 128
+        desc_size = (_le16(sb, EXT4_S_DESC_SIZE)
+                     if incompat & EXT4_INCOMPAT_64BIT else 32)
+        gdt_block = _le32(sb, EXT4_S_FIRST_DATA_BLOCK) + 1
+        group_desc = os.pread(fd, desc_size, gdt_block * block_size)
+        inode_table = _le32(group_desc, 8)
+        if desc_size >= 0x2C:
+            inode_table |= _le32(group_desc, 0x28) << 32
+        journal_inum = _le32(sb, EXT4_S_JOURNAL_INUM)
+        if not journal_inum:
+            raise SystemExit("ext4-journal: image has no journal inode")
+        inode_off = inode_table * block_size + (journal_inum - 1) * inode_size
+
+        def first_extent(header_off: int) -> int:
+            hdr = os.pread(fd, 24, header_off)
+            magic, entries, _max, depth = struct.unpack_from("<HHHH", hdr, 0)
+            if magic != EXTENT_MAGIC or not entries:
+                raise SystemExit("ext4-journal: journal inode has no extent tree")
+            if depth == 0:
+                return _le32(hdr, 20) | (_le16(hdr, 18) << 32)
+            leaf = _le32(hdr, 16) | (_le16(hdr, 20) << 32)
+            return first_extent(leaf * block_size)
+
+        journal_off = first_extent(inode_off + EXT4_INODE_IBLOCK) * block_size
+        meta = bytearray(os.pread(fd, block_size, journal_off))
+        if _be32(meta, 0) != JBD2_MAGIC or _be32(meta, 4) != JBD2_SUPERBLOCK_V2:
+            raise SystemExit("ext4-journal: inode 8 is not a JBD2 superblock")
+        new_incompat = (_be32(meta, JBD2_SB_INCOMPAT_OFF) |
+                        JBD2_FEATURE_INCOMPAT_64BIT |
+                        JBD2_FEATURE_INCOMPAT_CSUM_V3)
+        struct.pack_into(">I", meta, JBD2_SB_INCOMPAT_OFF, new_incompat)
+        meta[JBD2_SB_CHECKSUM_TYPE_OFF] = JBD2_CRC32C_CHKSUM
+        struct.pack_into(">I", meta, JBD2_SB_CHECKSUM_OFF, 0)
+        checksum = _crc32c(0xFFFFFFFF, bytes(meta[:JBD2_SB_CHECKSUM_BYTES]))
+        struct.pack_into(">I", meta, JBD2_SB_CHECKSUM_OFF, checksum)
+        os.pwrite(fd, meta, journal_off)
+    finally:
+        os.close(fd)
+    print(f"img: journal superblock patched: 64bit|csum_v3, crc32c {checksum:#010x}")
 
 
 def downgrade_journal_to_v1(path: Path) -> None:

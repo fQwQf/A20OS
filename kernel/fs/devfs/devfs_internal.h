@@ -52,6 +52,7 @@ enum {
      * symlinks created at runtime under /dev. */
     DEVFS_DYN_DIR,
     DEVFS_DYN_SYMLINK,
+    DEVFS_WIFI,
 };
 
 /* shared helpers defined in devfs_mem.c */

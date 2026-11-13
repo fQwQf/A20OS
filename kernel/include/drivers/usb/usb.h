@@ -16,7 +16,9 @@
 #define USB_TYPE_CLASS    0x20U
 #define USB_RECIP_DEVICE   0x00U
 #define USB_RECIP_INTERFACE 0x01U
+#define USB_RECIP_OTHER     0x03U
 
+#define USB_REQ_GET_STATUS      0U
 #define USB_REQ_CLEAR_FEATURE   1U
 #define USB_REQ_SET_FEATURE     3U
 #define USB_REQ_SET_ADDRESS     5U
@@ -31,21 +33,29 @@
 #define USB_DT_INTERFACE 4U
 #define USB_DT_ENDPOINT  5U
 #define USB_DT_HUB       0x29U
+#define USB_DT_SS_HUB    0x2aU
+
+/* Bounded EP0 request size shared by enumeration and the HCD bounce buffer. */
+#define USB_CONTROL_MAX_LENGTH 4096U
 
 #define USB_CLASS_HID          3U
 #define USB_CLASS_MASS_STORAGE 8U
 #define USB_CLASS_HUB          9U
 
-/* Hub class feature selectors.  The "C_PORT_*" values are change bits: they
- * are acknowledged with CLEAR_FEATURE, not set. */
-#define USB_FEAT_C_PORT_ENABLE      0x00U
-#define USB_FEAT_C_PORT_RESET       0x08U
-#define USB_FEAT_C_PORT_CONNECTION  0x10U
-#define USB_FEAT_PORT_RESET         0x14U
+/* Hub class feature selectors. */
+#define USB_FEAT_PORT_RESET          4U
+#define USB_FEAT_PORT_POWER          8U
+#define USB_FEAT_C_PORT_CONNECTION  16U
+#define USB_FEAT_C_PORT_ENABLE      17U
+#define USB_FEAT_C_PORT_SUSPEND     18U
+#define USB_FEAT_C_PORT_OVER_CURRENT 19U
+#define USB_FEAT_C_PORT_RESET       20U
+#define USB_FEAT_C_BH_PORT_RESET    29U
+#define USB_FEAT_C_PORT_LINK_STATE  25U
+#define USB_FEAT_C_PORT_CONFIG_ERROR 26U
+#define USB_REQ_SET_HUB_DEPTH       12U
 
-/* A device behind a hub has no address of its own until the hub assigns one,
- * so the controller has to be told which hub owns the port when it builds the
- * device's context. */
+/* Root ports have no parent hub slot. */
 #define USB_HUB_NONE               0U
 #define USB_HUB_MAX_PORTS          127U
 
@@ -55,8 +65,8 @@
 #define USB_REQ_BULK_ONLY_RESET  0xFFU
 #define USB_REQ_GET_MAX_LUN      0xFEU
 
-#define USB_SPEED_LOW   1U
-#define USB_SPEED_FULL  2U
+#define USB_SPEED_FULL  1U
+#define USB_SPEED_LOW   2U
 #define USB_SPEED_HIGH  3U
 #define USB_SPEED_SUPER 4U
 
@@ -126,27 +136,17 @@ typedef struct __attribute__((packed)) usb_endpoint_descriptor {
     uint8_t  bInterval;
 } usb_endpoint_descriptor_t;
 
-/* The fixed part of a hub descriptor.  Two variable-length bitmap arrays
- * follow: DeviceRemovable[ceil(bNbrPorts/8)] then PortPwrCtrlMask[] of the
- * same length, so the descriptor's total length is
- * 7 + 2 * ((bNbrPorts + 7) / 8). */
+/* Common seven-byte header of USB 2 and SuperSpeed hub descriptors. */
 typedef struct __attribute__((packed)) usb_hub_descriptor {
     uint8_t  length;
     uint8_t  type;
-    uint8_t  hub_type;           /* bHubType */
     uint8_t  ports;              /* bNbrPorts */
     uint16_t characteristics;    /* wHubCharacteristics */
     uint8_t  pwr_on2pwr_good;    /* bPwrOn2PwrGood */
-    uint8_t  hub_contr_current;   /* bHubHdrDecLat */
+    uint8_t  hub_contr_current;
 } usb_hub_descriptor_t;
 
-#define USB_HUB_CHAR_PER_PORT_OC     0x0001U
-#define USB_HUB_CHAR_NO_TT           0x0002U
-#define USB_HUB_CHAR_IND_OVERCURRENT 0x0100U
-#define USB_HUB_CHAR_TT_PER_8        0x0200U
-/* Bit 2 of wHubCharacteristics: the hub itself runs at SuperSpeed or above,
- * so its downstream ports are SuperSpeed ports. */
-#define USB_HUB_CHAR_SUPERSPEED      0x0004U
+#define USB_HUB_CHAR_TTT_SHIFT        5U
 
 /* ------------------------------------------------------------------ */
 /* Device model                                                        */
@@ -235,13 +235,11 @@ typedef struct usb_hcd_ops {
     /* Build a controller context for the device on @port and report the
      * token the other ops are keyed on.
      *
-     * @hub_address names the hub the port belongs to, or USB_HUB_NONE for a
-     * root port.  @address is the USB address the core reserved for the
-     * device; an HCD that speaks SET_ADDRESS applies it and echoes it back
-     * in @out->address, while one that addresses devices implicitly leaves
-     * it zero. */
+     * @hub_slot is the parent hub's controller token, or USB_HUB_NONE for a
+     * root port. @address is an optional reservation for HCDs that assign
+     * addresses in software. @out->address reports the assigned address. */
     int  (*alloc_slot)(struct usb_hcd *hcd, unsigned port, uint8_t speed,
-                       uint8_t hub_address, uint8_t address, usb_slot_t *out);
+                       uint8_t hub_slot, uint8_t address, usb_slot_t *out);
     /* Update EP0 max packet size after reading the device descriptor. */
     int  (*update_ep0_mps)(struct usb_hcd *hcd, uint8_t slot,
                            uint16_t max_packet);
@@ -261,17 +259,21 @@ typedef struct usb_hcd_ops {
     int  (*submit_bulk)(struct usb_hcd *hcd, usb_urb_t *urb);
     /* Tear down a slot on removal. */
     int  (*abort_slot)(struct usb_hcd *hcd, uint8_t slot);
+    /* Publish hub topology to the host controller before addressing children. */
+    int  (*configure_hub)(struct usb_hcd *hcd, struct usb_device *dev,
+                          uint8_t ports, uint8_t tt_think_time);
 } usb_hcd_ops_t;
 
 typedef struct usb_hcd {
     const usb_hcd_ops_t *ops;
     struct device *hcd_dev;     /* host controller device_t */
     struct usb_hcd *parent_hcd; /* root controller behind a hub-provided bus */
-    uint8_t hub_address;        /* USB_HUB_NONE for a root controller */
+    uint8_t hub_slot;           /* USB_HUB_NONE for a root controller */
     unsigned max_ports;
-    uint8_t *port_state;        /* per-port enumeration state */
+    uint8_t *port_state;        /* failed enumeration attempts per connection */
     struct usb_device **port_devices; /* owned device for each physical port */
     void    *priv;              /* HCD private (xhci_controller_t *) */
+    uint8_t hub_depth;          /* zero on the root bus */
 } usb_hcd_t;
 
 /* ------------------------------------------------------------------ */
@@ -283,10 +285,7 @@ void usb_core_init(void);
 int usb_core_register_hcd(usb_hcd_t *hcd);
 void usb_core_unregister_hcd(usb_hcd_t *hcd);
 
-/* Bus address pool.  A root controller may address devices implicitly, but a
- * device behind a hub is addressed by the hub and must be unique across the
- * whole bus, so every such address comes from here.  Returns 1..127, or a
- * negative errno. */
+/* Address reservations for controllers that assign addresses in software. */
 int usb_core_alloc_address(void);
 void usb_core_free_address(uint8_t address);
 

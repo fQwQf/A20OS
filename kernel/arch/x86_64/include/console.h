@@ -4,7 +4,16 @@
 #include "core/types.h"
 #include "cpu.h"
 
+/* Probe for a real 16550 at the legacy COM1 window.  A machine without one
+ * (any laptop) returns 0xFF from these ports; configuring the UART then waits
+ * forever on status bits that never change, which used to hang the boot before
+ * the banner.  The scratch register at +7 is the architecturally sanctioned
+ * presence test. */
+int x86_uart_present(void);
+
 static inline void arch_uart_init(void) {
+    if (!x86_uart_present())
+        return;
     outb(0x3F8 + 1, 0x00);  /* Disable interrupts */
     outb(0x3F8 + 3, 0x80);  /* Enable DLAB */
 #ifdef CONFIG_BOARD_QEMU_VIRT_X86_64
@@ -35,6 +44,8 @@ static inline void arch_uart_flush(void) { x86_shared_console_flush(); }
  * A UART without enabled FIFOs keeps the single-byte path. Callers serialize
  * this with every other console writer, including interrupt-time printk. */
 static inline void arch_uart_write(const char *data, size_t length) {
+    if (!x86_uart_present())
+        return;
     size_t depth = (inb(0x3F8 + 2) & 0xc0) == 0xc0 ? 16 : 1;
     while (length) {
         while (!(inb(0x3F8 + 5) & 0x20))
@@ -47,12 +58,16 @@ static inline void arch_uart_write(const char *data, size_t length) {
 }
 
 static inline void arch_uart_putc(char c) {
+    if (!x86_uart_present())
+        return;
     while ((inb(0x3F8 + 5) & 0x20) == 0)
         ;
     outb(0x3F8, (uint8_t)c);
 }
 
 static inline int arch_uart_poll_getc(void) {
+    if (!x86_uart_present())
+        return -1;
     if (inb(0x3F8 + 5) & 0x01) {
         return inb(0x3F8);
     }
@@ -60,6 +75,8 @@ static inline int arch_uart_poll_getc(void) {
 }
 
 static inline void arch_uart_flush(void) {
+    if (!x86_uart_present())
+        return;
     while ((inb(0x3F8 + 5) & 0x40) == 0)
         ;
 }

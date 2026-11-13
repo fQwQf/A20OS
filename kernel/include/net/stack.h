@@ -42,6 +42,7 @@ int  net_stack_packet_tx(unsigned index, const uint8_t *frame, size_t len);
 
 /* Interface and address transactions. */
 int  net_stack_interface_snapshot(void *out, int maximum);
+int  net_stack_device_hwaddr(struct device *device, const uint8_t mac[6]);
 int  net_stack_addr6_snapshot(nl_addr6_out_t *out, int maximum);
 int  net_stack_if_up(unsigned index);
 int  net_stack_if_default_index(void);

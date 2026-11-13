@@ -716,6 +716,15 @@ void proc_force_exit(task_t *t, int exit_code)
 {
     if (!t)
         return;
+#if defined(CONFIG_KLOG_SESSION) && CONFIG_KLOG_SESSION
+    if (exit_code < 0) {
+        task_t *sender = proc_current();
+        klog_record_only(KLOG_WARN, "[PROCESS] force exit sender=%u name=%s target=%u name=%s status=%d caller=%p\n",
+                         sender ? (unsigned)sender->pid : 0,
+                         sender ? sender->name : "kernel", (unsigned)t->pid,
+                         t->name, exit_code, __builtin_return_address(0));
+    }
+#endif
     if (t == proc_current())
         proc_exit(exit_code);
 

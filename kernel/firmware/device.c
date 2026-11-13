@@ -214,15 +214,29 @@ static int register_node(const fw_node_t *node, device_t *parent,
     if (rc == -EOPNOTSUPP) {
         resource_error = rc;
         memory_count = 0;
-    } else if (rc != -ENOENT)
-        return rc;
+    } else if (rc != -ENOENT) {
+        /* ACPI firmware is hostile input: one device with a range or an
+         * unparseable _CRS must not abort discovery for every other node.
+         * Static/FDT trees stay strict so a malformed test tree still fails
+         * closed and rolls back. */
+        resource_error = rc;
+        kerr("[FIRMWARE] %s _CRS: %d; continuing\n",
+             fw_node_name(node) ? fw_node_name(node) : "?", rc);
+        if (!fw_node_source(node) || strcmp(fw_node_source(node), "acpi") != 0)
+            return rc;
+    }
     while (!(rc = fw_node_irq(node, irq_count, &reference)))
         irq_count++;
     if (rc == -EOPNOTSUPP) {
         resource_error = rc;
         irq_count = 0;
-    } else if (rc != -ENOENT)
-        return rc;
+    } else if (rc != -ENOENT) {
+        resource_error = rc;
+        kerr("[FIRMWARE] %s IRQ: %d; continuing\n",
+             fw_node_name(node) ? fw_node_name(node) : "?", rc);
+        if (!fw_node_source(node) || strcmp(fw_node_source(node), "acpi") != 0)
+            return rc;
+    }
     if (memory_count > 0x7fffffffU || irq_count > 0x7fffffffU - memory_count ||
         memory_count + irq_count > SIZE_MAX / sizeof(resource_t))
         return -EOVERFLOW;
@@ -280,32 +294,60 @@ failed:
 }
 static int walk(const fw_node_t *node, device_t *parent, unsigned depth,
                 firmware_device_t **created) {
-    if (depth > 64)
-        return -ELOOP;
+    if (depth > 64) {
+        kerr("[FIRMWARE] %s: depth limit; skipping subtree\n",
+             fw_node_name(node) ? fw_node_name(node) : "?");
+        return 0;
+    }
     int rc = fw_node_available(node);
-    if (rc < 0)
-        return rc;
-    if (rc && (rc = register_node(node, parent, created)) < 0)
-        return rc;
+    if (rc < 0) {
+        kerr("[FIRMWARE] %s _STA: %d; skipping node\n",
+             fw_node_name(node) ? fw_node_name(node) : "?", rc);
+        return 0;
+    }
+    if (rc) {
+        int rr = register_node(node, parent, created);
+        if (rr < 0) {
+            kerr("[FIRMWARE] %s register: %d; failing enumeration\n",
+                 fw_node_name(node) ? fw_node_name(node) : "?", rr);
+            return rr;
+        }
+    }
     rc = fw_node_children_available(node);
-    if (rc <= 0)
-        return rc;
+    if (rc < 0) {
+        kerr("[FIRMWARE] %s children _STA: %d; skipping children\n",
+             fw_node_name(node) ? fw_node_name(node) : "?", rc);
+        return 0;
+    }
+    if (rc == 0)
+        return 0;
     device_t *registered = firmware_device_find(node);
     if (registered)
         parent = registered;
     fw_node_t child, previous;
     int has_previous = 0;
+    int child_rc = 0;
     while ((rc = fw_node_next_child(node, has_previous ? &previous : NULL,
                                     &child)) == 0) {
         previous = child;
         has_previous = 1;
-        rc = walk(&child, parent, depth + 1, created);
-        if (rc)
+        child_rc = walk(&child, parent, depth + 1, created);
+        if (child_rc)
             break;
     }
     if (registered)
         device_put(registered);
-    return rc == -ENOENT ? 0 : rc;
+    /* A child failure is structural for static/FDT trees and must roll the
+     * whole enumeration back; `next_child` itself failing is a malformed
+     * iterator, which is not worth panicking the machine over. */
+    if (child_rc)
+        return child_rc;
+    if (rc != -ENOENT) {
+        kerr("[FIRMWARE] %s next child: %d; continuing\n",
+             fw_node_name(node) ? fw_node_name(node) : "?", rc);
+        return 0;
+    }
+    return 0;
 }
 int firmware_device_enumerate(const fw_node_t *root) {
     if (!fw_node_valid(root))
