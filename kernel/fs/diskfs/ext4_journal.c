@@ -7,6 +7,7 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/timer.h"
 
 /*
  * Minimal, fail-closed JBD2 for ext4's internal journal.
@@ -1246,19 +1247,67 @@ static int jbd2_write_transaction_data(ext4_journal_t *ej, uint32_t first_log)
     jbd2_t *j = &ej->j;
     uint32_t logical = first_log;
     uint32_t tx_count = jbd2_txn_count(ej);
-    for (uint32_t i = 0; i < tx_count; i++) {
-        uint64_t target;
-        if (jbd2_txn_block(ej, i, &target) < 0)
-            return -EIO;
-        int ret = jbd2_metadata_image(ej, target, j->data);
+    if (!tx_count)
+        return 0;
+    block_dev_t *dev = j->fs->bc ? j->fs->bc->dev : NULL;
+    if (!dev || !dev->write_sector)
+        return -EIO;
+
+    /* USB BOT pays a command/data/status round trip for every write.  Journal
+     * payload is normally contiguous: submit up to 128 KiB per command rather
+     * than one command per metadata block.  Never cross a physical extent or
+     * the log's ring boundary.  The caller still owns every durability barrier
+     * and commits only after ALL payload writes have succeeded and flushed. */
+    uint32_t capacity = (128U * 1024U) / j->block_size;
+    if (capacity > tx_count)
+        capacity = tx_count;
+    uint8_t *batch = capacity > 1 ? kmalloc(capacity * j->block_size) : NULL;
+    if (!batch)
+        capacity = 1; /* Allocation pressure must not prevent a safe sync. */
+    uint8_t *buffer = batch ? batch : j->data;
+    uint32_t i = 0;
+    int ret = 0;
+    while (i < tx_count) {
+        uint64_t first;
+        ret = jbd2_physical_block(j, logical, &first);
         if (ret < 0)
-            return ret;
-        ret = jbd2_direct_write(j, logical, j->data);
+            break;
+        uint32_t count = 0;
+        do {
+            uint64_t target;
+            if (jbd2_txn_block(ej, i, &target) < 0) {
+                ret = -EIO;
+                goto out;
+            }
+            ret = jbd2_metadata_image(ej, target,
+                                      buffer + count * j->block_size);
+            if (ret < 0)
+                goto out;
+            count++;
+            i++;
+            uint32_t previous = logical;
+            logical = jbd2_advance(j, logical);
+            if (i == tx_count || count == capacity || logical <= previous)
+                break;
+            uint64_t next;
+            ret = jbd2_physical_block(j, logical, &next);
+            if (ret < 0)
+                goto out;
+            if (next != first + count)
+                break;
+        } while (1);
+        for (uint32_t n = 0; n < count; n++)
+            bcache_invalidate_page(j->fs->bc,
+                (first + n) * j->block_size / PCACHE_PAGE_SIZE);
+        ret = dev->write_sector(dev,
+            first * j->block_size / BCACHE_BLOCK_SIZE, buffer,
+            count * (j->block_size / BCACHE_BLOCK_SIZE));
         if (ret < 0)
-            return ret;
-        logical = jbd2_advance(j, logical);
+            break;
     }
-    return 0;
+out:
+    kfree(batch);
+    return ret < 0 ? ret : 0;
 }
 
 static int jbd2_write_commit(ext4_journal_t *ej, uint32_t logical)
@@ -1638,6 +1687,9 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
 #endif
 
     int ret;
+    uint64_t started = timer_get_ticks();
+    uint64_t ordered_done = started, log_done = started;
+    uint64_t checkpoint_done = started;
     uint32_t committed_sequence = j->sequence;
     uint32_t blocks = tx_count;
     if (txn_phase == JBD2_TXN_WRITING_LOG) {
@@ -1662,6 +1714,7 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
         ej->recover_flag = 1;
     }
     jbd2_crash_point(ej, "post-recover-flag");
+    ordered_done = timer_get_ticks();
 
     /* 3. The log copy.  Descriptor first, then every data block, each phase
      *    flushed, so a torn log is always recognisably torn. */
@@ -1716,6 +1769,7 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
 
     txn_phase = JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT;
     }
+    log_done = timer_get_ticks();
 
     /* 5. Checkpoint.  The transaction is durable in the log, so the metadata
      *    may now reach its home location; the hold exists only to enforce the
@@ -1733,6 +1787,7 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
         txn_phase = JBD2_TXN_CHECKPOINTED_NEEDS_LOG_CLEAR;
         jbd2_crash_point(ej, "post-checkpoint");
     }
+    checkpoint_done = timer_get_ticks();
 
     /* 6. Resolve the transaction: the log is empty again and the recover flag
      *    can come down. */
@@ -1770,8 +1825,13 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
 #endif
     }
     printf("[EXT4/JBD2] commit %u: %u metadata blocks, sequence %u->%u, "
-           "head %u\n", (unsigned)ej->commits, blocks, committed_sequence,
-           j->sequence, ej->head);
+           "head %u; ms ordered=%llu log=%llu checkpoint=%llu finish=%llu\n",
+           (unsigned)ej->commits, blocks, committed_sequence, j->sequence,
+           ej->head,
+           (unsigned long long)((ordered_done - started) * 1000 / TICKS_PER_SEC),
+           (unsigned long long)((log_done - ordered_done) * 1000 / TICKS_PER_SEC),
+           (unsigned long long)((checkpoint_done - log_done) * 1000 / TICKS_PER_SEC),
+           (unsigned long long)((timer_get_ticks() - checkpoint_done) * 1000 / TICKS_PER_SEC));
 
 out:
     if (ret < 0)
