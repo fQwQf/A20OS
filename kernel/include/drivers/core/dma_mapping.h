@@ -15,6 +15,34 @@ enum driver_dma_direction {
     DRIVER_DMA_BIDIRECTIONAL,
 };
 
+/* Immutable physical-memory restrictions, independent of device/firmware
+ * storage and hardware ownership. Access is from the DEVICE's perspective. */
+#define DRIVER_DMA_POLICY_READ  1U
+#define DRIVER_DMA_POLICY_WRITE 2U
+#define DRIVER_DMA_POLICY_IDENTITY 1U
+#define DRIVER_DMA_POLICY_MAX_RULES 1024U
+struct driver_dma_policy;
+struct driver_dma_rule {
+    uint64_t start, end; /* Inclusive physical bytes; end may be UINT64_MAX. */
+    uint32_t access; /* READ/WRITE, or zero to deny all DMA. */
+    uint32_t flags;  /* IDENTITY requires IOVA == physical address. */
+};
+/* Task context. Copies up to MAX_RULES; zero rules is unrestricted. Overlap
+ * intersects access and combines identity requirements; gaps are unrestricted.
+ * Rules remain restrictions, never permission to access memory or enable DMA.
+ * Failure clears out; bad rules -> -EINVAL, excessive count -> -E2BIG. */
+int driver_dma_policy_create(const struct driver_dma_rule *, size_t count,
+                              struct driver_dma_policy **out);
+void driver_dma_policy_get(struct driver_dma_policy *);
+void driver_dma_policy_put(struct driver_dma_policy *);
+/* Caller holds policy reference. Checks every intersecting byte interval.
+ * TO_DEVICE requires READ, FROM_DEVICE WRITE, bidirectional both. Any denied
+ * byte -> -EACCES; any identity rule makes the whole requested span identity.
+ * Error clears identity. No page rounding, allocation or hardware access. */
+int driver_dma_policy_check(const struct driver_dma_policy *, uint64_t physical,
+                             uint64_t length, enum driver_dma_direction,
+                             bool *identity);
+
 /* Native, page-granular RAM mappings. A provider maps exactly PAGE_SIZE
  * bytes per call; failure must leave that page unmapped. unmap_page must
  * synchronously invalidate device translations before returning. Providers
@@ -84,6 +112,16 @@ int driver_dma_domain_shutdown(struct driver_dma_domain *domain);
  * never a fallback after an IOMMU/provider error. No isolation is promised. */
 int driver_dma_domain_create_direct(struct device *device,
                                     struct driver_dma_domain **out);
+/* Same managed lifetime, with an independently retained immutable policy.
+ * Preflights ALL physical pages before any provider call/pin. A returned IOVA
+ * violating identity -> -ERANGE and normal fallible rollback (possibly a
+ * retained cleanup handle). Provider must honor access and identity BEFORE
+ * publishing translations; it can query the same policy from its context.
+ * Core validation is not hardware PTE inspection or automatic unity mapping.
+ * Success retains policy; failure consumes neither context nor policy. */
+int driver_dma_domain_create_managed_policy(struct device *,
+                    const struct driver_dma_managed_ops *, void *context,
+                    struct driver_dma_policy *, struct driver_dma_domain **out);
 void driver_dma_domain_get(struct driver_dma_domain *domain);
 void driver_dma_domain_put(struct driver_dma_domain *domain);
 

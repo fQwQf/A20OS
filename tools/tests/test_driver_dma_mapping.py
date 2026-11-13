@@ -17,6 +17,9 @@ class DriverDmaMapping(unittest.TestCase):
     def test_managed_map_shutdown_serialization(self):
         self.run_harness("driver_dma_managed_host.c", threaded=True)
 
+    def test_immutable_policy_and_managed_enforcement(self):
+        self.run_harness("driver_dma_policy_host.c")
+
     def run_harness(self, harness, threaded=False):
         with tempfile.TemporaryDirectory(prefix="a20-dma-mapping-") as temp:
             work = Path(temp)
@@ -55,6 +58,7 @@ static inline void mutex_unlock(mutex_t *m) { assert(!pthread_mutex_unlock(m)); 
                 "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests" / harness),
                 str(ROOT / "kernel/drivers/core/dma_mapping.c"), "-o", str(binary),
+                str(ROOT / "kernel/drivers/core/dma_policy.c"),
             ], check=True)
             subprocess.run([str(binary)], check=True, timeout=10)
 

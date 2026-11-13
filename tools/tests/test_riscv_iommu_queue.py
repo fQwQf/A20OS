@@ -49,6 +49,7 @@ uint64_t clock_ticks_per_sec(void);
                 "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests/riscv_iommu_queue_host.c"), "-o", str(binary),
                 str(ROOT / "kernel/drivers/core/dma_mapping.c"),
+                str(ROOT / "kernel/drivers/core/dma_policy.c"),
             ], check=True)
             subprocess.run([str(binary)], check=True, timeout=15)
 
