@@ -155,7 +155,7 @@ provider 必须在发布翻译前落实方向权限和 identity 地址分配，�
 
 iterator 和 typed hardware/memory/device accessor 返回借用的表视图，使用结束后才可释放 ACPI mapping；底层读取器保留 alias、extended、HID 的原始字节和 IVMD 顺序。不同 IVHD 格式可以描述同一单元，记录数不能作为唯一硬件单元数。
 
-`kernel/firmware/acpi/ivrs_policy.c` 在全表校验后提供两个只读查询：
+`kernel/firmware/acpi/ivrs_policy.c` 在全表校验后提供只读路由与集合查询：
 
 - `acpi_ivrs_route(table, segment, requester, out)`：返回硬件描述、实际 DMA requester、DTE settings、extended settings、alias/non-PCI 标记及相关 IVMD 数量。同一 `(segment, IOMMU DeviceID, capability offset)` 采用 A20OS 的 `40h > 11h > 10h` 选择顺序；这是一项显式软件策略，不表示规范要求所有平台使用相同顺序。同一格式重复、base/info 矛盾、不同单元的 16-KiB MMIO 窗口重叠或查询命中多个单元返回 `ACPI_IVRS_AMBIGUOUS`。ALL 是单元内的默认属性，具体 select/range 覆盖默认；ALL 与命中的 alias 并存则报歧义。ALL 不能自动解释成任意设备均可启用；仍须核对实际 PCI 拓扑、对应单元与当次有效的硬件约束，不能使用无效 Range 字段推断覆盖。
 - `acpi_ivrs_route_memory(table, segment, requester, index, out)`：按固件顺序返回属于该单元、适用于原 requester 或 alias DMA requester 的 IVMD。所有替代 IVHD 下的约束都会保留，未命中的设备区间跳过；不去重、不合并权限、不建立 unity mapping，也不执行 exclusion。
@@ -165,6 +165,14 @@ iterator 和 typed hardware/memory/device accessor 返回借用的表视图，�
 没有匹配返回 `ACPI_NOT_FOUND`，格式错误返回 `ACPI_INVALID`。查询失败清空输出；超过 64 个单元或 1024 个 block 返回 unsupported。输出借用不可变表映射，调用者不得释放映射后继续使用 `hardware.entries`。这些是路由候选接口：没有建立 alias 隔离组、合并共享 DTE 属性或落实 IVMD 权限，不授予启用 IOMMU/DMA 的条件。
 
 x86 启动时调用 `amd_iommu_firmware_report()`，先完成全表校验，再记录 IVHD 的类型、segment/requester、寄存器地址及 capability offset，并释放表映射。该报告仍使用原始记录，不自动执行上述路由查询，也不读写 IOMMU 寄存器。`acpi_ivrs_unit_count()` / `acpi_ivrs_unit_get()` 则按单元首次出现的顺序枚举去重后的候选描述，复用路由查询的全表结构与条目策略检查。输出视图借用表映射；出错清空 count/view。单元枚举不代替对具体 requester 的作用域和 alias 查询。
+
+### 固件声明的共享 requester 集合
+
+`acpi_ivrs_requesters(table, segment, requester, &view)` 使用相同的已选 IVHD 策略，返回原 requester、DMA 目标和该 segment 中所有指向同一目标的 alias select/range 来源。结果为排序去重的最多 128 个完整 ID；从目标或任一 alias 查询得到同一成员集合。逐一解析来源以拒绝跨单元/冲突归属，并在完成集合后再次扫描指向成员的 alias，拒绝记录顺序无关的传入链。超限或不支持的链返回 `ACPI_IVRS_UNSUPPORTED`，失败清空整个 view，不暴露部分集合。
+
+`view.memory_count` 与 `acpi_ivrs_requester_memory(&view, index, &memory)` 枚举适用于任一成员的 IVMD，覆盖同一单元的全部替代 IVHD；同一原始记录即使匹配多个成员也只返回一次，保留原始顺序与 flags。原 `acpi_ivrs_route()`/`route_memory()` 的数量和枚举仍只面向原 requester/DMA 目标，语义不变。view 借用表描述符及映射，两者都须保留且不得修改 view；这不是设备引用、占用或权限合并。
+
+这里的完整性限于固件在已选策略下声明的集合，不证明所有物理 alias、ACS 或 peer 隔离。共享 DTE settings/extended 属性的兼容性、特殊设备与实际硬件接管仍须 provider 明确处理；不创建 Linux group 编号或隐式 parent/dependency。
 
 ### PCI 与 MMIO 只读探测
 
@@ -224,23 +232,29 @@ PCI 另提供 `pci_device_find_get(segment, requester, &device)`：在 discovery
 
 `amd_iommu_route_validate(route, &info)` 重新核对当前绑定、硬件快照与两条 PCI 路径，成功返回不含借用指针的值副本。binding 解绑/移除后返回 `-ESHUTDOWN`，即使同一 function 已重新绑定也不会使旧句柄重新有效；单元快照或所保留 alias/anchor 身份变化返回 `-ESTALE`，消失/注销等错误由 PCI 查询传播。所有失败清空 info。查询不冻结硬件；如验证后要继续观察绑定/配置，调用者须用外层 discovery 事务覆盖操作。硬件启用仍需完整 provider 协议。
 
-`amd_iommu_route_reserve(route)` 显式为该句柄申请原 requester 与实际 DMA requester 的 PCI 集合占用，两者相同时由 PCI 层去重。接口先重新验证路由，并要求两端均未被用户服务占有且 BME 关闭；BME/用户所有权冲突返回 `-EBUSY`，配置读取全 1 返回 `-EIO`。同一有效句柄重复 reserve 返回 `-EALREADY`；原设备、alias 目标或共享目标的其他 alias 已被占用时返回 `-EBUSY`，没有同 client/owner 豁免。失败不消费原观察句柄，可修复前置条件后重试。
+`amd_iommu_route_requesters(route, ids, capacity, &count)` 复制完整固件声明集合，不返回借用指针。NULL ids/capacity=0 可查询数量，容量不足返回 `-ENOSPC` 并报告所需 count；缓冲区在所有错误下不变，其他错误清零 count。元数据在控制器解绑后仍可读取，这项查询不执行活跃接管检查。
 
-占用由路由持有至 release，独立于控制器绑定代次；旧路由在解绑后虽然 validate 返回 `-ESHUTDOWN`，其 requester 仍阻止新绑定/新 BDF 身份获取重叠占用。调用者须先确认硬件停止/上下文失效，再释放已 reserve 的路由；停止失败则继续保留。只检查两端 BME 并不排空 DMA，也不协调其他未接入占用的 alias peer；当前仍不能据此启用硬件翻译。`info` 保持原值结构，不新增隐藏 group 或用户 ABI。
+`amd_iommu_route_reserve(route)` 重新验证路由，再检查完整集合的每个成员：必须已发布、内核所有、PCI 路径有效且满足可用 Range，配置读取正常且 BME 关闭。缺失成员返回 `-ENODEV`，不假定固件声明但未发布的 function 已安全停止；BME/用户所有权冲突返回 `-EBUSY`，读取全 1 返回 `-EIO`。全部检查成功才原子占用所有 requester，并保留每个成员的 device/anchor 引用。同一有效句柄重复 reserve 返回 `-EALREADY`，任一重叠占用返回 `-EBUSY`，没有同 client/owner 豁免。分配或其他检查失败回收全部临时引用，没有部分占用，也不消费原观察句柄，可修复后重试。
+
+预留后的 `validate` 还检查所保留的每个成员：身份/anchor 替换返回 `-ESTALE`，消失/注销返回 `-ENODEV`，转交用户所有权返回 `-EBUSY`。失败清空 info，但不释放占用或刷新旧身份。占用独立于控制器绑定代次；解绑后旧句柄返回 `-ESHUTDOWN`，仍阻止新绑定/新 BDF 身份取得重叠占用，直至显式 release。`info` 保持原值结构。
+
+调用者须先通过各设备的所属驱动停止全部成员的 DMA，再 reserve；接口不自动解绑、调用其他驱动的 quiesce 或排空硬件。device 引用不固定成员驱动绑定，validate 也不重新证明 BME 关闭或 DMA 已停止。raw 配置与旧 provider 未被强制接入占用登记。硬件使用和归属变更仍须外层事务与 provider 协议协调；停止/失效不确定时继续保留路由与占用，确认停止后才 release。
 
 `amd_iommu_route_memory(route, index, &memory)` 按固件顺序复制原 requester 与 alias 的相关 IVMD，不归并或执行 unity/exclusion/读写权限，越界返回 `-ENODEV` 并清空输出。保留的不可变固件策略在解绑后仍可读取。`amd_iommu_route_release(route)` 在任务上下文独占释放句柄，禁止与同一句柄的查询并发；释放已 reserve 的路由也会释放 requester 集合；最后一份路由释放后，detached 控制器才按先 unmap、再释放 claim、最后释放 IVRS 的顺序回收。控制器是内建实现；句柄不提供通用模块绑定保活契约。
 
 `tools/a20 test smoke-amdvi-route-x86_64` 在 q35 root port 下提供 EDU，并显式设置 `driver.amdvi_route_test=1` 与运行时自检参数。测试获取路由后先释放原始 client 引用，再验证 requester、单元和 IVMD 枚举，释放句柄并输出 `AMDVI_ROUTE: PASS route=1 policy=1 scope=1`。普通启动不执行；该实例不提交 DMA。解绑后的保留、重绑、alias 与有效 Range 分支另由主机后端验证。
 
-新增实例 `tools/a20 test smoke-amdvi-requester-x86_64` 再显式指定 `driver.amdvi_requester_test=1`：两个独立观察句柄竞争同一 EDU requester，验证重复 reserve、冲突与持有占用的句柄释放后的重试，输出 `AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1`。不启用 BME 或提交 DMA；正常启动不执行。
+实例 `tools/a20 test smoke-amdvi-requester-x86_64` 再显式指定 `driver.amdvi_requester_test=1`：两个独立观察句柄竞争同一 EDU requester，验证重复 reserve、冲突与持有占用的句柄释放后的重试，输出 `AMDVI_REQUESTER: PASS reserve=1 conflict=1 release=1`。不启用 BME 或提交 DMA；正常启动不执行。
+
+上述 requester 实例及 policy 实例还验证集合的容量查询和复制契约，输出 `AMDVI_PEERS: PASS query=1`。未新增启动参数；QEMU EDU 只有一个声明成员，多 alias 成员检查由主机模型验证。
 
 ### 从 IVMD 构造独立 DMA policy
 
-`amd_iommu_route_policy_create(route, &policy)` 在 discovery 事务中重新验证活跃路由，再复制原 requester、实际 DMA requester 以及全部保留 IVHD 替代格式下的匹配 IVMD。按 [AMD IOMMU 3.10 表 110–111（303–304 页）](https://kib.kiev.ua/x86docs/AMD/IOMMU/48882-3.10.pdf)，IR/IW 转为设备 READ/WRITE，Unity 转为 IOVA identity；不同记录的限制由通用 policy 交集处理，不能只取选中 IVHD 的记录或忽略 alias 目标。
+`amd_iommu_route_policy_create(route, &policy)` 在 discovery 事务中重新验证活跃路由，再为完整固件声明集合复制全部保留 IVHD 替代格式下的匹配 IVMD，包括 sibling alias 的独有约束；每个原始记录只复制一次。按 [AMD IOMMU 3.10 表 110–111（303–304 页）](https://kib.kiev.ua/x86docs/AMD/IOMMU/48882-3.10.pdf)，IR/IW 转为设备 READ/WRITE，Unity 转为 IOVA identity；不同记录的限制由通用 policy 交集处理，不能只取选中 IVHD 的记录或忽略目标/其他 alias 成员。原 `info.memory_count` 和 `amd_iommu_route_memory()` 仍保留原 requester/DMA 目标两者的枚举语义，完整 policy 的规则数可更多。
 
 相关 ExclusionRange 或非零高四位返回 `-EOPNOTSUPP`，不把硬件旁路降格为普通规则或无约束 domain；非排除记录的 Unity=1 且 IR=IW=0 返回 `-EINVAL`。其他路由错误原样传播，失败清空输出并回收部分规则，原 route 仍由调用者持有。没有匹配 IVMD 时返回空 policy；这表示没有额外内存限制，不证明设备可启用。
 
-policy 是不含借用指针的值快照，其引用不保留 route、设备或控制器；关闭路由、解绑控制器并释放固件映射后仍可检查旧约束。创建新 policy 仍要求活跃路由，旧快照不因重绑而刷新。创建 policy 不自动 reserve requester，也不初始化硬件。未来 AMD provider 仍需协调全部 alias peer、完整控制器策略与活跃状态，选择带 policy 的 managed 构造器，并在硬件中落实权限和必需 Unity 映射。只检查本路由匹配的记录，不能推导其他 requester 没有 ExclusionRange。
+policy 是不含借用指针的值快照，其引用不保留 route、设备或控制器；关闭路由、解绑控制器并释放固件映射后仍可检查旧约束。创建新 policy 仍要求活跃路由，旧快照不因重绑而刷新。创建 policy 不要求先 reserve，也不会自动占用 requester 或初始化硬件；它不替代成员已发布/停止的接管检查。未来 AMD provider 仍需协调全部 alias peer、完整控制器策略与活跃状态，选择带 policy 的 managed 构造器，并在硬件中落实权限和必需 Unity 映射。只检查本路由匹配的记录，不能推导其他 requester 没有 ExclusionRange。
 
 `tools/a20 test smoke-amdvi-policy-x86_64` 显式增加 `driver.amdvi_policy_test=1`，在路由释放后检查独立 policy，输出 `AMDVI_POLICY: PASS create=1 retained=1`。QEMU fixture 没有 IVMD；它只验证空 policy 的启动集成和引用，不验证有效 IVMD 或实际硬件映射。权限、Unity、跨 alias/替代格式的交集、错误、源表释放后的独立存储与分配回滚由主机后端验证。
 
@@ -421,3 +435,11 @@ AMD 转换提交 `54959a1ba`，最终隔离树 132 项主机回归通过。新�
 保留其他工作的工作区中，x86_64 双核 embedded、AArch64 bringup embedded 内核构建通过；完整 `tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核与开发镜像构建、QEMU 测试，退出码 0，8 个预期标记全部匹配，包含 `AMDVI_POLICY: PASS create=1 retained=1`，客户机确认 `2/2 configured CPUs online`。115 个实例与 32 个驱动组件清单检查通过。工作区同时包含并行 LLVM 构建支持等改动，本轮提交未打包其他工作的未提交变更。
 
 QEMU IVRS 没有 IVMD，本轮启动验证只证明空 policy 的构造、保留和集成，不证明有效 IVMD 的硬件执行；没有提交 EDU DMA，没有启用 AMD-Vi 翻译或 GPU 加速。带 policy 的通用 mapper 已检查请求权限/返回地址，但实际 PTE 权限、必需 Unity 映射、完整控制器 Exclusion/alias peer 协调仍须由硬件 provider 实现。旧 domain 不自动获得新 policy。文档行号引用检查通过，导航仍有其他工作的 7 个未索引页面，本轮无新增链接/导航错误。验证日志在本地 `.kernel-build/dma-policy-review/`。
+
+2026-11-14 完整声明 requester 集合：固件查询提交 `e33e0d9ad`，原生接管检查与保留提交 `764192677`。固件阶段隔离树的 20 项 IVRS/路由回归通过；最终隔离提交树 138 项主机回归通过。新增固件用例覆盖 select/range、重复、FFFF 上界、128 项限制、替代 IVHD、跨单元歧义、从目标反查所有 alias、记录顺序无关的传入链，以及任一成员 IVMD 按原始记录只计一次。新增 5 项原生测试方法覆盖查询容量/错误不写缓冲、第三成员缺失/BME/用户归属/读取失败/Range 外、两阶段分配失败、冲突原子性、独立成员引用、成员替换/移除/转交用户后的失败保留、解绑后查询与重绑冲突，以及 sibling 独有约束/Exclusion 拒绝。使用生产 core/PCI/AMD/IVRS 代码与 ASan/UBSan，硬件与任务同步由主机 fixture 替代。
+
+去掉传入 alias 链二次扫描、跳过第三成员 BME、跳过已保留成员校验、仅收原/目标 IVMD 的四个负控均触发运行时行为断言。最终恢复导出源码并核对与代码提交一致；没有以编译失败计为负控。路由 API 测试逐次确认无 PCI 配置写入，未自动解绑其他驱动或新增隐式依赖。
+
+保留其他工作的工作区中，x86_64 双核 embedded、AArch64 bringup embedded 内核构建通过；完整 `tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核/开发镜像构建及 QEMU 启动，退出码 0，9 个标记全部匹配，包括 `AMDVI_PEERS: PASS query=1`，客户机确认 `2/2 configured CPUs online`。115 个实例与 32 个驱动组件清单检查通过，文档行号引用检查通过。导航仍有其他工作的 7 个未索引页面，本轮无新增页面或导航条目。
+
+QEMU 只验证单个 EDU requester 的集合查询/预留和空 policy 集成；多 alias、有效 Range 与带约束 IVMD 由主机模型验证。没有提交 EDU DMA、启用 AMD-Vi 翻译或 GPU 加速。已实现固件声明集合的接管前检查与持续身份占用；跨驱动停止协议、归属变更协调、全部物理 alias/ACS 证明、共享 DTE 属性兼容、实际硬件权限/Unity/Exclusion 与故障恢复仍须实际 provider 完成。验证日志位于本地 `.kernel-build/amdvi-peers-review/`。
