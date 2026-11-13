@@ -172,11 +172,10 @@ static int usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
      * unreachable, so a drain racing this teardown finds no endpoint rather
      * than one pointing at a class driver's freed URB.
      *
-     * Running it after the class removes left exactly that window open: a
-     * class remove that freed its URB between the two calls handed the drain a
-     * dangling pointer to read through.  No class remove touches an endpoint or
-     * issues a transfer -- they only drop their own drv_priv -- so the order
-     * swap costs them nothing. */
+     * The stronger slot proof precedes interface removal. Migrated HID/hub
+     * removes reuse it without issuing commands to this stopped slot; their
+     * independent driver withdrawal instead releases their own endpoints.
+     * Callback and class storage remain owned until both proofs/drains finish. */
     uint8_t address = udev->address;
     bool address_owned = hcd->port_state[port - 1] & USB_PORT_ADDRESS_OWNED;
     uint8_t slot = udev->slot;
@@ -772,6 +771,38 @@ int usb_device_poll(usb_device_t *dev) {
             break;
         }
     }
+    driver_lifecycle_end();
+    return ret;
+}
+
+int usb_interface_release_endpoints(usb_interface_t *iface) {
+    if (!iface || !iface->dev || !iface->device || (iface->ep_count && !iface->eps)) return -EINVAL;
+    driver_lifecycle_begin();
+    usb_device_t *dev = iface->dev;
+    usb_hcd_t *hcd = dev->hcd;
+    int ret = -ENODEV;
+    if (!device_is_stopping(iface->device) || iface->device->plat_data != iface) {
+        ret = -EINVAL;
+        goto out;
+    }
+    if (!usb_hcd_registered(hcd)) goto out;
+    bool owned = false, stopped = false;
+    for (unsigned port = 0; port < hcd->max_ports; port++) {
+        if (hcd->port_devices[port] != dev) continue;
+        owned = true;
+        stopped = hcd->port_state[port] & USB_PORT_SLOT_STOPPED;
+        break;
+    }
+    if (!owned) goto out;
+    ret = 0;
+    if (stopped) goto out; /* Slot abort already proved the stronger condition. */
+    if (iface->ep_count && !hcd->ops->release_endpoint) { ret = -EOPNOTSUPP; goto out; }
+    for (uint8_t i = 0; i < iface->ep_count; i++) {
+        if (!(iface->eps[i].addr & 0x0fU)) { ret = -EINVAL; break; }
+        ret = hcd->ops->release_endpoint(hcd, dev, iface->eps[i].addr);
+        if (ret) { if (ret > 0) ret = -EIO; break; }
+    }
+out:
     driver_lifecycle_end();
     return ret;
 }

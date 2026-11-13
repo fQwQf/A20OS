@@ -337,6 +337,46 @@ static device_t *xhci_input_child(device_t *controller) {
         device_put(dev);
     }
 }
+/* Embedded fixture: withdraw interface drivers with the root HCD alive. */
+static void exercise_usb_interfaces(device_t *controller) {
+    device_t *input = xhci_input_child(controller);
+    CHECK(input && input->drv && input->plat_data);
+    driver_t *hid = input->drv;
+    driver_t *root = controller->drv;
+    usb_interface_t *iface = input->plat_data;
+    usb_device_t *protocol = iface->dev;
+    uint8_t slot = protocol->slot;
+    class_device_t *old_class = class_device_ref_for_device(input);
+    CHECK(old_class);
+    CHECK(!driver_unregister(hid));
+    CHECK(controller->drv == root && controller->drv_priv);
+    CHECK(device_is_registered(input) && !input->drv && !input->drv_priv);
+    CHECK(input->plat_data == iface && iface->dev == protocol && protocol->slot == slot);
+    CHECK(class_device_call_begin(old_class) == -ENODEV);
+    CHECK(!driver_register(hid) && input->drv == hid && input->drv_priv);
+    class_device_t *new_class = class_device_ref_for_device(input);
+    CHECK(new_class && new_class != old_class);
+    class_device_put(old_class);
+    device_t *hub = device_get(input->parent);
+    CHECK(hub && hub->drv && hub->plat_data);
+    CHECK(((usb_interface_t *)hub->plat_data)->interface_class == USB_CLASS_HUB);
+    driver_t *hub_driver = hub->drv;
+    CHECK(!driver_unregister(hub_driver));
+    CHECK(controller->drv == root && controller->drv_priv);
+    CHECK(device_is_registered(hub) && !hub->drv && !hub->drv_priv);
+    CHECK(!device_is_registered(input) && !input->plat_data);
+    CHECK(class_device_call_begin(new_class) == -ENODEV);
+    CHECK(!driver_register(hub_driver) && hub->drv == hub_driver);
+    usb_core_scan();
+    device_t *fresh = xhci_input_child(controller);
+    CHECK(fresh && fresh != input && fresh->drv == hid);
+    device_put(fresh);
+    device_put(hub);
+    class_device_put(new_class);
+    device_put(input);
+    kinfo("DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1\n");
+}
+
 static void exercise_xhci_remove(void) {
     pci_user_device_info_t info;
     CHECK(!pci_user_device_find(0x1b36, 0x000d, &info));
@@ -344,6 +384,7 @@ static void exercise_xhci_remove(void) {
     CHECK(!pci_device_find_get(0, info.devid, &controller));
     CHECK(controller->drv && !strcmp(controller->drv->name, "xhci-hcd"));
     usb_core_scan();
+    exercise_usb_interfaces(controller);
     device_t *old = xhci_input_child(controller);
     CHECK(old);
     class_device_t *old_class = class_device_ref_for_device(old);
