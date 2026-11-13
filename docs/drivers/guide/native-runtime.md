@@ -36,13 +36,34 @@
 
 先处理 consumer/child；它们停止失败时 provider/parent 尚不 quiesce 或释放，继续供旧 consumer 清理使用。部分 consumer 可能已解除绑定并进入 deferred；失败不是事务回滚，不自动重建原图。移除意图与递归栈由 lifecycle mutex 下的私有栈帧保护：正在退出的驱动不能接收新匹配绑定，递归退出同一对象返回 `-EBUSY`；正在移除的 provider 拒绝新 dependency（`-EPROBE_DEFER`），其 parent 链拒绝新 child 发布（`-EBUSY`），即使它仍处于等待 consumer 停止的阶段。未新增公开 group/上下文标识或布局字段。
 
-`driver_unregister()` 只有在剩余绑定全部成功解绑后才移除驱动登记；失败保留登记与代码所有权，调用者不能释放模块/driver 对象。已完成解绑的设备保持已完成状态，调用者显式重试处理余下绑定。成功 probe 后 class 发布失败且 remove 也失败时，同样保留绑定/资源；`probe_error` 保存原 publication 错误，不允许下一候选驱动覆盖它。普通失败 probe 仍须自行安全回滚，核心无法从一个普通错误码推断未停止的硬件。
+`driver_unregister()` 只有在剩余绑定全部成功解绑后才移除驱动登记；失败保留登记与代码所有权，调用者不能释放模块/driver 对象。已完成解绑的设备保持已完成状态，调用者显式重试处理余下绑定。成功 probe 后 class 发布失败且 remove 也失败时，同样保留绑定/资源；`probe_error` 保存原 publication 错误，不允许下一候选驱动覆盖它。未选择受管失败清理的旧 probe 仍须自行安全回滚；核心无法从普通错误码推断未停止的硬件。
 
 REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 device 引用，防止 registry 最后一次 put 提前销毁元数据。PCI rescan 停止失败时保留旧 BDF 记录，不发布替代身份，也不将缺失 function 的槽标为空闲。已发布 USB 端口先 offline interfaces，再检查 `abort_slot` 的返回；缺少停止回调返回 `-EOPNOTSUPP`，失败保留 slot/address、interface/endpoint 和 HCD 登记。slot 停止成功但后续 remove 失败时，重试不重复 Disable Slot；port 的 pending 状态会在重新枚举前重试，即使物理连接已经恢复。`usb_core_unregister_hcd()` 返回错误，xHCI/hub remove 传播它并保留实例。尚未发布的 USB 枚举失败清理仍是另一路径，不由这里证明完整。
 
 公开 `device_t`/`driver_t` 布局及驱动 ABI 9 未改变；新增模块导出 `device_unregister`，源码调用方须检查上述 int 返回值。关机/kexec 的 `shutdown`、失败 probe 的硬件回滚、实际 stop/失效完成仍需要各 provider 的明确协议；核心不把超时转换成可释放证明。
 
 当前生命周期回调仍持有全局 lifecycle mutex，禁止等待需要该锁的工作或递归注销自己。quiesce 没有通用超时后强制释放内存的语义：如果不能证实 DMA 已停止，驱动不能继续释放硬件仍可能访问的存储。按设备并发的生命周期协调与通用恢复策略仍需后续开发。
+
+### 显式选择失败 probe 的清理所有权
+
+新驱动可在自己的 `probe(dev)` 中、任何硬件初始化之前调用 `device_probe_use_remove(dev)`，检查返回 0 后再启动初始化。它不分配内存、可重复调用，仅为本次 probe 选择失败时的清理路径；成功 probe 保持原有发布流程。当前 probe 之外或嵌套 probe 操作祖先返回 `-EINVAL`，未注册设备返回 `-ENODEV`，缺少 remove 返回 `-EOPNOTSUPP`；失败不设置清理意图。不要忽略错误后继续激活硬件。
+
+```c
+static int gpu_probe(device_t *dev) {
+    int ret = device_probe_use_remove(dev);
+    if (ret) return ret;
+    /* Install partial-init-safe private state before hardware activation. */
+    return gpu_initialize(dev);
+}
+```
+
+选定后，probe 非零返回会交给既有 consumer-first、quiesce、class drain、可失败 remove 管线。回调须能处理部分初始化乃至 NULL `drv_priv`；probe 不再自行释放交给 remove 的存储。remove 返回 0 才允许 devres/依赖回收及清空绑定。若 provider 构造失败同时返回非 NULL DMA 清理句柄，应保存在实例中；remove 重试 shutdown，成功后才 put。不能因为初始化返回错误就丢弃清理句柄、页表或 requester 租约。
+
+核心保存原 probe 错误于 `probe_error`（正数规范化为 `-EIO`）。清理成功时 probe 调用路径仍返回原错误，设备转为 UNINIT 或原错误为 `-EPROBE_DEFER` 时的 DEFERRED；清理失败则返回清理错误，保留原 `probe_error`、绑定、匹配身份、私有状态、devres 和依赖。device_register/driver_register 接受登记不表示 probe 成功，仍须观察绑定结果。保留的失败绑定不进入下一候选或自动 deferred reprobe，只能显式注销重试清理；这不是硬件恢复/重新初始化接口。
+
+子设备/consumer 停止失败可能阻止父设备执行 quiesce。此时失败 probe 保持 `DEV_STATE_PROBE_CLEANUP`，其 class 先 offline，恢复后重试仍须执行首次 quiesce；进入自己的 remove 后才变为 REMOVING，后续仅重试 remove。`device_is_stopping()` 同时观察两种状态；checked resource、PCI 查找/范围观察、managed DMA 创建/新映射及 class 发布均拒绝它们。旧引用和旧资源保留供停止，不授予新使用权限。该 helper 只观察元数据，调用者仍须持有引用并按需使用 discovery 事务协调绑定/配置。
+
+probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（仍为 9）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
 
 ## 资源占用与受管映射
 
@@ -483,3 +504,14 @@ QEMU 只验证单个 EDU requester 的集合查询/预留和空 policy 集成；
 完整 `tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核、模块/开发镜像及双核 QEMU 启动，退出码 0，9 个预期标记全部匹配，客户机确认 `2/2 configured CPUs online`。它验证新的注销语义与既有被动 AMD owner、路由、requester、空 policy 和运行时集成，没有启用 AMD 翻译或 GPU DMA。115 个实例、32 个驱动组件清单与文档行号检查通过；导航仍有其他工作的 7 个未索引页面，本轮没有新增文档页面。
 
 这里只证明核心对驱动已报告错误的保留语义、主机替代后端及合成启动行为，不证明所有旧驱动的 stop 都已正确报告硬件状态。普通失败 probe、未发布 USB 枚举清理、关机/kexec shutdown 和真实厂商 DMA/失效超时仍待明确协议与实机证据。独立提交/导出排除工作区其他未提交修改，实际 `docs/zh` 迁移与原有源码文档链接改动保留；验证日志位于本地 `.kernel-build/driver-remove-review/`。
+
+
+### 失败 probe 清理验证（2026-11-14）
+
+代码提交 `d166313e4`。隔离导出提交树中 171 项主机回归通过；核心新增 7 项测试方法、11 个场景逐一运行 C/Rust 注册表，覆盖无分配选择、未初始化实例、正数错误规范化、deferred 原错误、清理失败的绑定/claim/依赖保留、下一候选拒绝、子设备阻塞后的首次 quiesce、嵌套帧恢复、构造期递归退出拒绝、缺少 remove/未注册设备，以及旧 probe 的自回滚契约。RISC-V 集成另增 1 项方法、2 个场景，使用生产 core/PCI/provider/managed mapper，验证构造失败的非 NULL 清理句柄、页表及 requester 租约保留，失效恢复后才释放；子设备阻塞时保留开放 domain，同时新映射返回 `-ENODEV`，不增加 frame pin 或硬件命令。硬件 MMIO/完成、allocator 和调度器由主机 fixture 替代，启用 ASan/UBSan。
+
+跳过显式清理、漏掉停止状态 admission、提前进入 REMOVING、允许修改错误 probe 帧、放行构造期递归退出、把旧 probe 自动转入 remove、允许 pending-cleanup domain 新映射的 7 个负控均触发运行时断言；编译失败不计为负控。恢复后完整隔离回归通过，并逐文件核对导出树与代码提交一致。
+
+`make check-firmware-model` 通过 393 项及单独 1 项 sleep ABI 检查；115 个 instance、32 个 driver component 和 193 个 smoke case 审计通过。x86_64 Rust 注册表和 RISC-V64/AArch64 C 注册表 embedded 生命周期 QEMU 门禁均以 0 退出，原标记及 `DRIVER_PROBE_CLEANUP: PASS managed=1 rollback=1` 全部匹配。`tools/a20 test smoke-amdvi-policy-x86_64` 完成 generic 内核/模块/开发镜像与双核 QEMU，9 个标记匹配。AArch64 embedded 结果不代表其 generic 用户态依赖问题已解决。 `tools/a20 test smoke-driver-iommu-native-riscv64` 也完成 generic 内核/开发镜像和 QEMU，3 个标记全部匹配，包括 requester 冲突/释放、真实跨页 EDU DMA、只读映射、unmap 后 fault、detach 与 watch。失败 probe 的故障注入由上述主机集成验证，不能将正常 QEMU DMA 路径记作硬件停止超时证据。
+
+这里只证明显式协议和所列模型/启动路径。旧硬件驱动不会自动拥有部分初始化安全的 stop；实体 GPU、AMD-Vi 翻译、关机/kexec 的可失败 shutdown 和未发布 USB 枚举清理仍须独立完成。文档引用检查通过 540 条；导航仍有原工作区 7 个未索引文档，无新增链接/锚点错误。实际 `docs/zh` 迁移与其他工作区修改保留，验证日志位于本地 `.kernel-build/probe-cleanup-review/`。
