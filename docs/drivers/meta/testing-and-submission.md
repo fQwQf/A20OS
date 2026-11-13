@@ -119,6 +119,8 @@ USB 初始化/回滚变更还须运行 `python3 -m unittest tools.tests.test_usb
 
 USB 拓扑/回调变更运行 `python3 -m unittest tools.tests.test_usb_concurrency tools.tests.test_xhci_callback_lifetime tools.tests.test_xhci_endpoint_types -v`，两组新增测试已进入 `check-firmware-model` 和 `check-pc-drivers`。真实 core/USB 路径与 pthread 模拟任务竞争，验证阻塞拓扑与非阻塞进度、启动嵌套、probe 策略、注册表压缩/容量/父链、退役分配暂停及失败后重试；生产 xHCI dispatcher/prepare/abort 验证锁外回调保留、slot 独立性、自释放 URB 和停止后 admission，启用 ASan/UBSan。`python3 tools/smoke.py smoke-usb-hub-x86_64 --nr-cpus 2` 覆盖双 CPU 的真实控制器注销/重绑，下游热插拔和 HID IRQ 分别使用 `make smoke-usb-hotplug-x86_64`、`make smoke-usb-x86_64`。正常 QEMU 结果不代替实体硬件失败证据。
 
+endpoint 生命周期变更运行 `python3 -m unittest tools.tests.test_usb_endpoint_release tools.tests.test_xhci_callback_lifetime tools.tests.test_xhci_remove tools.tests.test_pci_resources tools.tests.test_drvctl_descriptor_host -v`。新增测试执行真实 USB/core、HID probe/quiesce/remove 和 xHCI Configure/Stop/Drop/回调计数路径，替代硬件后端注入错误并启用 ASan/UBSan；PCI 用生产总线检查已持有查询的无配置写入。两组主门禁已纳入新 endpoint 测试。双 CPU hub fixture 另要求 `DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1`，先单独注销/重绑 HID，再 hub，最后整个控制器，旧 class 句柄保持离线。ABI 10 的包由 generic 热插拔门禁构建/装载，旧 ABI descriptor 由真实 drvctl parser 拒绝。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

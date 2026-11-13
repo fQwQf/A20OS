@@ -35,7 +35,7 @@ A20OS 现在同时支持三种驱动路径：
 
 ## 模块接口
 
-驱动 ABI 当前为 9：`driver_t` 新增 quiesce，旧模块必须重建。模块可使用导出的 `driver_dma_domain_*`、页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。公开布局与 ABI 9 保持不变；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 xHCI、HID、hub、storage 包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
+驱动 ABI 当前为 10：`usb_hcd_ops_t` 新增可失败 `release_endpoint`；ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_domain_*`、页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 xHCI、HID、hub、storage 包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
 
 模块只能解析 `kernel/drvmod/framework.c` 中的导出表。当前导出接口包括：
 
@@ -46,7 +46,7 @@ A20OS 现在同时支持三种驱动路径：
 - 延时/时间：`drv_udelay`、`drv_mdelay`、`drv_clock_ticks`。
 - 中断：`drv_register_isr`、`drv_unregister_isr`（桥接 hwapi `request_irq`，向量在注册时校验范围，arch IRQ 分发真实投递）。
 - 板级 IRQ 资源与内核参数：`platform_device_irq`、`bootargs_get`。前者是模块驱动读自己 IRQ 线号的唯一入口，返回 `>= 0` 表示可用线号、`-ENODEV` 表示板级没发布 `RES_IRQ`（应当轮询，不是错误）；后者读 `a20.*` 内核参数串，配合导出表里已有的 `memcmp` 手工切 token，避免为一次参数解析再引入 `strncmp` 依赖。
-`usb_device_poll` 另导出给 USB class 模块，调用者持有协议存储，忙时返回 `-EAGAIN`；不得从 active class 调用直接阻塞等待拓扑锁。
+`usb_device_poll` 和 `usb_interface_release_endpoints` 另导出给 USB class 模块；后者用于当前 remove，在 class drain 后逐项永久释放 endpoint，错误保留 URB/实例/模块所有权并显式重试。前者的调用者持有协议存储，忙时返回 `-EAGAIN`；不得从 active class 调用直接阻塞等待拓扑锁。
 
 - 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。

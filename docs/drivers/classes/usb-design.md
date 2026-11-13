@@ -101,7 +101,7 @@ usb_device_t             /* 逻辑设备：地址、速度、descriptor、配置
 3. 为每个 interface 构建 `device_t`，调用 `device_hotplug(..., BUS_EVENT_ADD)`，由统一核心注册、匹配并 probe class driver。
 4. 断开或枚举失败时先 offline 已发布 class，再检查 HCD `abort_slot`；只有停止成功才执行 interface REMOVE 并回收协议存储。任一步失败保留端口、slot/address、接口与 HCD，扫描/注销显式重试。部分发布也遵守这个顺序；slot 已停后不重复 abort。
 
-`alloc_slot` 非零返回也可能交还非零 `usb_slot_t.hcd` 清理 token，核心必须保留；零 token 的未知控制器状态仍由 HCD 管理。失败清理无需新的分配，禁止覆盖 pending 端口。扫描只对真实枚举增加计数，扫描对同一连接最多尝试三次，物理断开才重置。整个 xHCI 退出另登记 remove prepare，在核心解绑下游接口前先排空 IRQ、确认控制器停机及 BME 清零，失败保留图。拓扑通过原生生命周期协调器串行保护；锁外 completion 由 controller/slot 计数保留，相关清理返回 `-EBUSY` 并可重试。同一物理控制器仍有待清理端口时暂停新 slot 分配，避免旧回调误用复用的编号。接口单独退出及每次 transfer 错误的存储回收仍须分开验证。详细契约见 [原生运行时](../guide/native-runtime.md#在-consumer-解绑前准备退出)。 热插拔门禁排除启动报告重放，要求实际拔出后的第二次枚举和 ready；QMP 操作等待匹配命令的回包。
+`alloc_slot` 非零返回也可能交还非零 `usb_slot_t.hcd` 清理 token，核心必须保留；零 token 的未知控制器状态仍由 HCD 管理。失败清理无需新的分配，禁止覆盖 pending 端口。扫描只对真实枚举增加计数，扫描对同一连接最多尝试三次，物理断开才重置。整个 xHCI 退出另登记 remove prepare，在核心解绑下游接口前先排空 IRQ、确认控制器停机及 BME 清零，失败保留图。拓扑通过原生生命周期协调器串行保护；锁外 completion 由 controller/slot 计数保留，相关清理返回 `-EBUSY` 并可重试。同一物理控制器仍有待清理端口时暂停新 slot 分配，避免旧回调误用复用的编号。HID/hub 独立退出已接入 endpoint 释放；storage 及每次 transfer 错误的存储回收仍须分开验证。详细契约见 [原生运行时](../guide/native-runtime.md#在-consumer-解绑前准备退出)。 热插拔门禁排除启动报告重放，要求实际拔出后的第二次枚举和 ready；QMP 操作等待匹配命令的回包。
 
 ### 4.4 多控制器
 
@@ -120,7 +120,7 @@ typedef struct usb_hcd {
 } usb_hcd_t;
 ```
 
-当前 `usb_hcd_ops_t` 由 `start`、`poll`、端口状态/复位、slot 初始化、EP0 control/descriptor、endpoint 配置、interrupt/bulk 提交和 `abort_slot` 组成；权威声明是 `kernel/include/drivers/usb/usb.h`，不存在文中旧草案的单一 `submit_urb` 或 `stop` 回调。
+当前 `usb_hcd_ops_t` 由 `start`、`poll`、端口状态/复位、slot 初始化、EP0 control/descriptor、endpoint 配置、interrupt/bulk 提交、`abort_slot` 和 `release_endpoint` 组成；权威声明是 `kernel/include/drivers/usb/usb.h`，不存在文中旧草案的单一 `submit_urb` 或 `stop` 回调。
 
 历史重构要点（已完成）：
 
@@ -145,6 +145,8 @@ typedef struct usb_hcd {
 ### 6.3 集线器
 
 `class/usb_hub.c` 已实现 class=9 hub：通过父 HCD 转发 slot/control/abort，发布下游端口并保留相同的部分 slot 交还契约。递归枚举由 HCD 列表扫描推进；QEMU 门禁为 `make smoke-usb-hub-x86_64`，实体 hub/拓扑边界仍需对应平台证据。
+
+`usb_interface_release_endpoints()` 供当前 remove 回调在 class drain 后逐项释放非 EP0 endpoint。HCD 的 `release_endpoint` 返回 0 才交还 URB/buffer 和 ring 所有权，错误保留未完成项并可重试。xHCI 先确认 Stopped，再 Drop Context/确认 Disabled；HID/hub probe/独立退出均使用可失败清理，其他 endpoint 继续工作。该 vtable 字段使当前模块 ABI 升为 10，旧模块必须重建。完整契约见 [接口独立退出](../guide/native-runtime.md#接口独立退出与-endpoint-释放)。
 
 ## 7. 线程 / 并发模型
 
