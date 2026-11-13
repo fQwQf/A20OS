@@ -155,6 +155,7 @@ check-firmware-model:
 	  tools.tests.test_drm_scanout_mapping \
 	  tools.tests.test_aarch64_uefi_memory tools.tests.test_aarch64_uefi_loader \
 	  tools.tests.test_class_binding tools.tests.test_native_bus_lifetime \
+	  tools.tests.test_driver_remove tools.tests.test_native_bus_remove \
 	  tools.tests.test_sunxi_mmc tools.tests.test_sdhci \
 	  tools.tests.test_dw_sdio tools.tests.test_ls2k0300_liointc \
 	  tools.tests.test_board_shell_profiles tools.tests.test_pc_package_paths \

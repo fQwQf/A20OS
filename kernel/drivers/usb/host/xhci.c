@@ -1933,7 +1933,8 @@ static int xhci_remove(device_t *dev)
     xhci_controller_t *xhci = (xhci_controller_t *)dev->drv_priv;
     if (!xhci)
         return 0;
-    usb_core_unregister_hcd(&xhci->hcd);
+    int ret = usb_core_unregister_hcd(&xhci->hcd);
+    if (ret) return ret;
     /* Mask the controller's interrupts before releasing the handler: a
      * completion racing the teardown must not find a freed ring.  Masking
      * under the same lock the handler takes is what makes "running = 0" and

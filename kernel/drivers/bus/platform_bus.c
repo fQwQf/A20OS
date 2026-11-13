@@ -38,10 +38,9 @@ int platform_device_register(platform_device_t *pdev)
     return device_register(&pdev->dev);
 }
 
-void platform_device_unregister(platform_device_t *pdev)
+int platform_device_unregister(platform_device_t *pdev)
 {
-    if (pdev)
-        device_unregister(&pdev->dev);
+    return pdev ? device_unregister(&pdev->dev) : -EINVAL;
 }
 
 /* Resources already contain domain-resolved driver IRQ identifiers. */

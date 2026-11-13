@@ -237,7 +237,7 @@ class XhciFirmwarePolicy(unittest.TestCase):
                         probe.index("xhci_baytrail_route_ports"))
         core = (ROOT / "kernel/drivers/usb/core/usb_core.c").read_text()
         register = core[core.index("int usb_core_register_hcd("):
-                        core.index("void usb_core_unregister_hcd(")]
+                        core.index("int usb_core_unregister_hcd(")]
         self.assertNotIn("usb_enumerate", register)
         self.assertNotIn("usb_core_scan", register)
 

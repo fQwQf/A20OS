@@ -801,7 +801,8 @@ static int pci_user_device_find_index_locked(uint16_t vendor, uint16_t device,
     unsigned seen = 0;
     for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
         pci_dev_info_t *info = &g_pci_infos[i];
-        if (!g_pci_in_use[i] || info->vendor != vendor ||
+        if (!g_pci_in_use[i] || g_pci_devs[i].state == DEV_STATE_REMOVING ||
+            !device_is_registered(&g_pci_devs[i]) || info->vendor != vendor ||
             info->device != device)
             continue;
         if (seen++ != index)
@@ -1191,7 +1192,14 @@ static int pci_publish_bdf(int bus, int dev, int func,
             (!device_is_registered(&g_pci_devs[slot]) ||
              g_pci_infos[slot].vendor != vendor ||
              g_pci_infos[slot].device != device_id)) {
-            device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE);
+            int ret = device_is_registered(&g_pci_devs[slot])
+                          ? device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE) : 0;
+            if (ret) {
+                (*seen)[slot] = 1;
+                kwarn("[BUS] pci: replacement retained %02x:%02x.%x: %d\n",
+                      bus, dev, func, ret);
+                return 0; /* Do not traverse an unadmitted replacement bridge. */
+            }
             g_pci_in_use[slot] = 0;
             /* Unregister drops the registry pin, not external references.
              * Find a safe record again before writing a replacement identity. */
@@ -1342,8 +1350,10 @@ static void pci_scan_current(int remove_missing)
     if (remove_missing) {
         for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
             if (g_pci_in_use[i] && !seen[i]) {
-                device_hotplug(&g_pci_devs[i], BUS_EVENT_REMOVE);
-                g_pci_in_use[i] = 0;
+                int ret = device_is_registered(&g_pci_devs[i])
+                              ? device_hotplug(&g_pci_devs[i], BUS_EVENT_REMOVE) : 0;
+                if (!ret) g_pci_in_use[i] = 0;
+                else kwarn("[BUS] pci: missing function retained: %d\n", ret);
             }
         }
     }

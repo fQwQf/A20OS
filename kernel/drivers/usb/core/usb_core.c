@@ -19,6 +19,9 @@
 #include "mm/slab.h"
 #include "core/errno.h"
 
+#define USB_PORT_REMOVE_PENDING 0x80u
+#define USB_PORT_SLOT_STOPPED   0x40u
+
 #define USB_ENUM_MAX_ATTEMPTS 3U
 
 /* ------------------------------------------------------------------ */
@@ -64,17 +67,19 @@ static void usb_interface_device_release(device_t *dev)
     kfree(dev);
 }
 
-static void usb_unpublish_interface(usb_interface_t *iface)
+static int usb_unpublish_interface(usb_interface_t *iface)
 {
     device_t *dev = iface->device;
     if (!dev)
-        return;
-    device_hotplug(dev, BUS_EVENT_REMOVE);
+        return 0;
+    int ret = device_is_registered(dev) ? device_hotplug(dev, BUS_EVENT_REMOVE) : 0;
+    if (ret) return ret;
     /* Class removal has drained operations. An open class handle can retain
      * the device shell, but must never retain freed interface storage. */
     dev->plat_data = NULL;
     iface->device = NULL;
     device_put(dev); /* Drop the publisher's creator reference. */
+    return 0;
 }
 
 static int usb_publish_interfaces(usb_device_t *udev)
@@ -129,13 +134,19 @@ rollback:
     return ret;
 }
 
-static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
+static int usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
 {
     if (!hcd || port == 0 || port > hcd->max_ports || !hcd->port_devices)
-        return;
+        return -EINVAL;
     usb_device_t *udev = hcd->port_devices[port - 1];
-    if (!udev)
-        return;
+    if (!udev) {
+        hcd->port_state[port - 1] = 0;
+        return 0;
+    }
+    hcd->port_state[port - 1] |= USB_PORT_REMOVE_PENDING;
+    for (uint8_t i = 0; i < udev->iface_count; i++)
+        if (udev->ifaces[i].device)
+            class_device_mark_offline(udev->ifaces[i].device);
 
     /* Tear the controller side down FIRST.  The transfer rings this slot owns
      * outlive the class devices underneath it, and the controller's interrupt
@@ -152,15 +163,20 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
      * swap costs them nothing. */
     uint8_t address = udev->address;
     uint8_t slot = udev->slot;
-    if (hcd->ops && hcd->ops->abort_slot)
-        hcd->ops->abort_slot(hcd, udev->slot);
+    if (!(hcd->port_state[port - 1] & USB_PORT_SLOT_STOPPED)) {
+        if (!hcd->ops || !hcd->ops->abort_slot) return -EOPNOTSUPP;
+        int ret = hcd->ops->abort_slot(hcd, udev->slot);
+        if (ret) return ret < 0 ? ret : -EIO;
+        hcd->port_state[port - 1] |= USB_PORT_SLOT_STOPPED;
+    }
 
     /* Remove class devices before their interface and endpoint storage. */
     for (uint8_t i = 0; i < udev->iface_count; i++) {
-        usb_interface_t *iface = &udev->ifaces[i];
-        usb_unpublish_interface(iface);
-        kfree(iface->eps);
+        int ret = usb_unpublish_interface(&udev->ifaces[i]);
+        if (ret) return ret; /* Keep every endpoint and the port/address for retry. */
     }
+    for (uint8_t i = 0; i < udev->iface_count; i++)
+        kfree(udev->ifaces[i].eps);
     kfree(udev->ifaces);
     kfree(udev);
     hcd->port_devices[port - 1] = NULL;
@@ -172,6 +188,7 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
     usb_core_free_address(address);
     kinfo("[USB] port %u disconnected: address=%u reclaimed, slot=%u released\n",
           port, address, slot);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -509,22 +526,25 @@ int usb_core_register_hcd(usb_hcd_t *hcd)
     return 0;
 }
 
-void usb_core_unregister_hcd(usb_hcd_t *hcd)
+int usb_core_unregister_hcd(usb_hcd_t *hcd)
 {
-    if (!hcd)
-        return;
+    if (!hcd) return -EINVAL;
+    if (!hcd->port_devices) return 0;
+    for (unsigned port = 1; port <= hcd->max_ports; port++) {
+        int ret = usb_disconnect_port(hcd, port);
+        if (ret) return ret;
+    }
     for (int i = 0; i < g_hcd_count; i++) {
         if (g_hcds[i] == hcd) {
             g_hcds[i] = g_hcds[--g_hcd_count];
             break;
         }
     }
-    for (unsigned port = 1; port <= hcd->max_ports; port++)
-        usb_disconnect_port(hcd, port);
     kfree(hcd->port_devices);
     hcd->port_devices = NULL;
     kfree(hcd->port_state);
     hcd->port_state = NULL;
+    return 0;
 }
 
 /*
@@ -537,15 +557,18 @@ void usb_core_scan(void)
 {
     for (int i = 0; i < g_hcd_count; i++) {
         usb_hcd_t *hcd = g_hcds[i];
+        if (hcd->hcd_dev && hcd->hcd_dev->state == DEV_STATE_REMOVING)
+            continue;
         if (hcd->ops->poll)
             hcd->ops->poll(hcd);
         for (unsigned port = 1; port <= hcd->max_ports; port++) {
+            if ((hcd->port_state[port - 1] & USB_PORT_REMOVE_PENDING) && usb_disconnect_port(hcd, port))
+                continue;
             /* Port connected?  Ask the HCD (MMIO read). */
             int connected = hcd->ops->port_connected &&
                             hcd->ops->port_connected(hcd, port);
             if (!connected) {
-                usb_disconnect_port(hcd, port);
-                hcd->port_state[port - 1] = 0;
+                (void)usb_disconnect_port(hcd, port);
                 continue;
             }
             uint8_t *failures = &hcd->port_state[port - 1];
