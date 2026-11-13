@@ -89,6 +89,16 @@ int amd_iommu_route_reserve(amd_iommu_route_t *);
  * immutable policy remains readable after controller unbind. */
 int amd_iommu_route_memory(amd_iommu_route_t *, size_t index,
                             acpi_ivrs_memory_t *out);
+/* Build an independent immutable DMA policy from this live route's matching
+ * IVMDs (original AND aliased requester, all retained IVHD alternatives).
+ * IR/IW become device READ/WRITE restrictions; Unity requires identity.
+ * Reserved flags or related ExclusionRange -> -EOPNOTSUPP; Unity with neither
+ * IR nor IW -> -EINVAL. Never silently ignore unsupported hardware policy.
+ * Clears out on failure. No reservation, hardware access writes, auto unity
+ * mappings or activation; a policy reference does not retain the route or
+ * controller. Provider still coordinates ALL alias peers and hardware state. */
+struct driver_dma_policy;
+int amd_iommu_route_policy_create(amd_iommu_route_t *, struct driver_dma_policy **out);
 /* Exclusive release: no concurrent use of this handle. Controller unbind
  * invalidates live validation immediately, but firmware/MMIO reservations
  * survive until the final route is released. A reserved route also releases
