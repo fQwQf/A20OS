@@ -346,3 +346,7 @@ VirtIO-MMIO 的固件 bridge 在 probe 中建立子设备，并用 devres 在 br
 没有 probe 日志时先找 `[BUS] pci ... id=vendor:device`；没有设备说明 ECAM/固件问题。有设备但未绑定，检查 ID 表和 `.driver_init`。BAR setup 失败检查 BAR size/地址窗口。`incomplete capabilities` 是 VirtualBox 控制器模式或 capability 解析问题。feature rejected 是驱动写了设备不接受的位。queue timeout 时同时检查 DMA 地址是否为物理地址、cache sync、descriptor writable 顺序、queue notify offset 和设备 status。
 
 ID 表里只写 `vendor = 0x1af4, device = 0x1000` 这种宽泛 class ID，匹配语义会错，也无法覆盖所有 VirtIO 设备：subsystem 字段必须显式填 ANY。同样不要把不支持的 feature 位写进 `DRIVER_FEATURES` 里协商。
+
+## VirtIO reset 的确认
+
+`virtio_transport_reset(t, timeout_ms)` 使用既有 MMIO 风格 read32/write32；PCI adapter 仍在内部转换 status 寄存器宽度。写 status=0 后必须等待读回 0，不能立即设置 ACK/DRIVER 重新初始化，也不能把 FAILED 当作停止。helper 在任务上下文执行，时间预算 1–1000 ms，另有独立 poll 上限；失败保留 transport、IRQ 和所有 DMA 可达资源，调用者继续通过原生可失败 remove 重试。它不授予 PCI BME、IOMMU 或资源占用权限，不延长裸 ops 的绑定寿命。virtio-gpu 是首个接入者；其他 VirtIO 驱动没有自动迁移，见 [完整契约](native-runtime.md#virtio-reset-确认与-gpu-退出)。

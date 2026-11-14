@@ -242,6 +242,12 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 get_scanout 必须在 scoped class access 内与 producer 模式替换协调，先取得 VMO 引用再交出一致描述符。fbdev 持临时 snapshot 调用 unlocked mm_mmap_vmo_cap；wrapper 开启 TLB window、取得 MM lock、调用既有 locked mapper，解锁后 finish/deferred release。VMA 自持 VMO，不把驱动 release callback 带入 MM。临时 snapshot 先清描述符再 put，producer remove 只交还自己的引用；最终 MM 释放不需要 class/lifecycle 锁或设备代码。引用存活不能替代硬件停止。
 
+### VirtIO reset 与命令封闭
+
+原生 lifecycle 串行化 probe/remove 和静态 GPU instance owner 的交接；claim 不得覆盖保留中的实例。GPU quiesce 只原子设置 closing，核心随后 drain class 调用；不在 quiesce 等 command mutex。四个 issuer 在 mutex 内完成准入、staging、descriptor 发布和等待，command_active 标记覆盖整个持锁事务。未知 completion 先设置 command_failed，再交还 active/mutex；后续 issuer 在接触暂存区前返回错误。
+
+remove 先检查 command_active（拒绝同 owner 的递归退出），再 trylock；忙返回 EBUSY 并保留所有对象。持 command mutex 执行有界 transport reset，只有 status=0 读回后才 free_irq/同步排空 handler，再交还 buffer/VMO 和默认选择，最后允许新 claim。reset helper 本身无设备锁，不用于 IRQ/spinlock 上下文；调用者负责完整排他。旧 raw DRM 使用仍须外层协调，不能把该 mutex 当作 class 引用或模块寿命。
+
 ### VirtIO-GPU transport
 
 `inst->command_lock`（`virtio_gpu.c`）保护共享请求/响应暂存区（`big_req`/`big_resp`）、descriptor 表、avail/used ring 索引。四个提交循环都必须在它之下运行。

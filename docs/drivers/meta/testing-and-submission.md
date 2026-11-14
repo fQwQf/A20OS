@@ -149,6 +149,14 @@ CPU 物理映射变更运行 `python3 -m unittest tools.tests.test_physical_mapp
 
 RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连续 VMO 页 1–2 建立 IOVA，先销毁源对象再执行实际跨页 DMA；新增 `DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1`，原有 high-order buffer、不连续页、权限/故障/watch 标记继续保留。运行显式 embedded instance，仍为单核；停止/BME 清除后才解除映射。上述结果验证 RAM 所有权基础，不表示实体 GPU、厂商固件或完整 virtio 停止/恢复已经验证。
 
+## VirtIO reset 与 GPU 失败退出回归
+
+`test_virtio_gpu_stop.py` 运行真实 GPU instance/claim、四条命令路径、init/probe/quiesce/remove/release 和 bus reset；RAM 使用既有真实 VMO/PFA split/Rust 回收 fixture。16 项方法覆盖参数、延迟 ACK、超时/重试、停滞/未知频率和时钟回绕，失败 probe、framebuffer OOM、第二设备拒绝、失败 remove 保留 IRQ/暂存/RAM、递归 active 拒绝，以及四条命令的成功、超时、错误 used id/增量、三条可增长 staging 的 OOM。故障后必须独立断言 command_failed，再验证全队列拒绝继续提交；不能用生产字段决定是否执行该断言。
+
+寄存器、时钟、IRQ 和 core probe admission 在这个 fixture 中为模型，未测试真实 IRQ 排空或硬件超时；native core 的失败 probe/remove 保留另有既有测试。`test_pc_module_boundary` 同时实际编译 virtio-gpu 包装器并核对 loader 导出，防止仅 host 提取函数通过。
+
+`tools/a20 test smoke-driver-gpu-stop-x86_64` 显式选择 embedded、双 CPU 和真实 virtio-gpu PCI；要求 `DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1`。真实 class 取得 VMO 并交给 VMA，交还 snapshot/class 调用后注销 driver，旧 publication 必须离线；旧 VMA 保留 RAM，再登记 driver 得到不同 scanout VMO，完成真实刷新并核对旧页 canary。该内核视图未 fault 用户 PTE，resident framebuffer fork 仍由 generic 2D 用户门禁覆盖。QEMU 不注入设备拒绝 reset，不表示实体 GPU 或 raw DRM 并发热拔插通过。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

@@ -135,7 +135,7 @@ FBIO_MAP_FB 同样优先 owning RAM 路径，映射完整 scanout 页覆盖并�
 
 ## VirtIO GPU 范例
 
-`virtio_gpu.c` 支持 MMIO/PCI transport。probe 顺序为 modern feature negotiation、controlq、分配连续 framebuffer、`RESOURCE_CREATE_2D`、`ATTACH_BACKING`、`SET_SCANOUT`、首次 flush、注册 display。flush 依次执行 cache clean、`TRANSFER_TO_HOST_2D`、`RESOURCE_FLUSH`。framebuffer 已用连续 VMO 工厂创建，remove 复位 transport、注销 display 并交还 producer 的 VMO 引用；尚存 VMA/snapshot 独立保留 RAM。现有 reset 写入与失败初始化路径尚未形成完整的硬件停止/确认协议，此改动只落实存储引用。
+`virtio_gpu.c` 支持 MMIO/PCI transport。probe 顺序为 modern feature negotiation、controlq、分配连续 framebuffer、`RESOURCE_CREATE_2D`、`ATTACH_BACKING`、`SET_SCANOUT`、首次 flush、注册 display。flush 依次执行 cache clean、`TRANSFER_TO_HOST_2D`、`RESOURCE_FLUSH`。framebuffer 已用连续 VMO 工厂创建，remove 复位 transport、注销 display 并交还 producer 的 VMO 引用；尚存 VMA/snapshot 独立保留 RAM。初始化和退出已通过有界 status=0 读回确认 reset，失败初始化走原生可失败 remove，超时保留绑定、IRQ 和内部 DMA 存储；四条命令路径超时或异常 completion 后封闭共享暂存区，成功 reset 前不复用。当前单静态 controlq 以 owner 守卫拒绝第二设备覆盖，尚未实现多实例；旧 DRM 裸调用仍须外层生命周期协调。详见 [VirtIO reset](../guide/native-runtime.md#virtio-reset-确认与-gpu-退出)。
 
 当前模式固定 1024x768x32，controlq 使用实例 mutex 串行化同步命令；请求和响应先复制到实例内稳定 DMA staging，等待期间保持中断开启。不得把调用者栈对象直接写入 descriptor，也不得用 `spin_lock_irqsave` 包围设备完成等待。
 

@@ -170,7 +170,21 @@ GPU vtable **末尾**新增 `get_scanout(device, &snapshot)`，因此当前模�
 
 virtio-gpu 的 RAM framebuffer 已由该工厂创建；producer、临时 snapshot 和 VMA 分别持有 VMO 引用。MMU fbdev mmap/旧 `FBIO_MAP_FB` 优先走 `get_scanout`，内核 adapter 以 `mm_mmap_vmo_cap()` 接入既有 Rust VMO 放置/权限事务。wrapper 检查初始权限不超 ceiling，负责锁外 TLB begin、MM lock、locked mapper、锁外 finish/deferred release；VMA 自持 VMO，未新增 backing 注册表、VMA 字段或模块释放回调。映射使用 Normal RAM 属性、共享写入并支持 fork/split；mprotect 不得超过创建时有效硬件权限。末页 padding 可见且已清零。旧 ioctl 仍用固定 NOREPLACE。
 
-`get_fb` 继续是借用 CPU PA/可见长度的兼容查询；没有 owning 回调的 simplefb/VRAM 路径继续走下述物理视图，NOMMU 也保留旧直接地址行为。fbdev 的每次操作仍重新选择默认设备，尚未绑定每个 open 的 GPU 身份。RAM VMO 存活不证明 transport 已停止：virtio-gpu 仍需另行完善 reset 确认、失败初始化与 DMA/IRQ 退役；当前 DRM/GEM/virgl 全局对象和裸 ops、厂商 BO/VRAM/GPUVM/请求队列也未由此完成迁移。
+`get_fb` 继续是借用 CPU PA/可见长度的兼容查询；没有 owning 回调的 simplefb/VRAM 路径继续走下述物理视图，NOMMU 也保留旧直接地址行为。fbdev 的每次操作仍重新选择默认设备，尚未绑定每个 open 的 GPU 身份。RAM VMO 存活不证明 transport 已停止：virtio-gpu 的 reset 读回、失败初始化保留与内部 DMA/IRQ 退役已接入下述协议；当前 DRM/GEM/virgl 全局对象和裸 ops、厂商 BO/VRAM/GPUVM/请求队列也未由此完成迁移。
+
+## VirtIO reset 确认与 GPU 退出
+
+`virtio_transport_reset(transport, timeout_ms)` 位于原生 bus 层并导出给模块，不改变 transport vtable 或当前 ABI 11。任务上下文、不持 spinlock，调用者持有 transport/MMIO/代码和设备所有权，并排除新提交、并发 reset 及重新初始化。参数要求完整 read32/write32、1–1000 ms，否则 `-EINVAL` 且不访问寄存器。函数写 status=0、执行 barrier 后反复读回，只有读到 0 才成功。规则依据 [OASIS VirtIO 1.3 的 2.4、4.1.4.3.2](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)：设备在报告 reset 完成后停止队列交互和通知，PCI 重新初始化须等 status 读回 0。
+
+时间预算以频率分解计算 ceil，避免毫秒乘法溢出；elapsed 差值允许计数器回绕，起点 0 也是有效时钟。另有 100 万次读取上限，保护早期启动、频率未知或停滞时钟；因此 poll 预算可能先于时间预算耗尽，并非保证等待足额毫秒。任务存在时每 256 次尝试 yield；无任务时有界 poll。耗尽返回 `-ETIMEDOUT`，不隐式清理任何资源。它只确认合规 transport 的状态，不排空软件调用、不注销 IRQ、不解除 IOMMU 或回收存储，也不证明恶意/损坏硬件或物理拔除安全。
+
+virtio-gpu 在任何 PCI/MMIO 初始化前选择 `device_probe_use_remove()`，并把已初始化 mutex/wait queue 的部分实例交给 dev->drv_priv。验证 transport 身份后，首次 reset 也必须读回确认，再协商特性/发布 controlq。失败仍可设置 FAILED，但由原生 offline/quiesce/drain/remove 管线清理；FAILED 本身不授权释放 DMA。reset 不完成时返回错误，核心保留绑定、原 probe_error、MMIO/devres、IRQ、命令暂存和 framebuffer owner，后续显式重试同一个 remove。
+
+quiesce 原子关闭提交，先于 class drain，不等待 command mutex。四条 controlq issuer 在同一 mutex 内检查 closing/command_failed，再分配、填充和发布 descriptor；closing 返回 `-ENODEV`，已故障队列返回 `-EIO`。等待发现 closing 可结束本次调用。未确认完成返回 `-ETIMEDOUT` 并封闭整个共享 queue，不能只封闭该 ioctl；错误 used id 或 used index 增量不等于 1 同样封闭，不再复用、扩容或释放设备仍可能访问的暂存区。已确认返回链的设备错误响应本身不等于 DMA 未结束。未发布的 staging OOM 返回 `-ENOMEM`，交还软件锁，不凭空将队列判为故障。
+
+remove 先拒绝 command_active，再 trylock；这同时防止原生递归 mutex 把同上下文的活动命令误当成可退出。忙返回 `-EBUSY`，不在 lifecycle 锁下等候 issuer。所有合法 class 调用已由核心排空，随后在 mutex 内执行可失败 reset；确认成功后才 free_irq 排空 handler、撤销默认选择并交还命令/framebuffer owner。reset 失败保留全部状态，既不清 drv_priv，也不释放 RAM 或 IRQ。snapshot/VMA 引用可在 producer 成功退出后继续保留旧 RAM。
+
+该旧驱动仍为单静态 controlq 实例，尚未实现每设备队列。实例有生命周期域内的 owner 守卫：已绑定或失败清理保留时，其他匹配设备返回 `-EBUSY`，绝不 memset 覆盖其 DMA 存储；仅成功 remove 才允许后续 claim。它复用原生绑定所有权，不是另建公开设备注册表。旧 DRM 裸 ops/全局对象仍要求外层生命周期协调；此处的队列防护不能给未持 class access 的调用补发绑定租约，也不能解决外部 GEM backing 提前释放、GPU 多实例或一般热拔插。
 
 ## 驱动 CPU 物理映射事务
 
@@ -819,3 +833,17 @@ MM 提交 `1c5172d60`，GPU/fbdev 与 ABI 11 提交 `3f150e766`。先分别导�
 RISC-V embedded 单核 native IOMMU/EDU guest 匹配全部 7 项预期，新增 `DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1`；源 VMO 先销毁，真实 EDU 随后对页 1–2 的 IOVA 跨页往返，确认停止/BME 清除后 unmap。旧 ANONYMOUS VMO、高阶 buffer、不连续页、权限和故障/watch 用例同时保留。三个启动串行运行并观察到最终退出，成功 guest 日志保存在 `.kernel-build/scanout-vmo-review/guest-gpu-retained.log`、`guest-hub.log`、`guest-iommu.log`。
 
 当前文档引用检查通过 540 条；导航检查仍报告共享迁移工作区既有 7 篇未编目文档，本轮没有新增导航/锚点错误。14 篇文档仅投影本轮内容到 canonical 路径提交，保留其他会话的 docs/zh 迁移。完整日志及负控在 `.kernel-build/scanout-vmo-review/`。此证据验证 RAM 引用链，未执行实体 GPU 加速或实际 virtio 解绑后的停止确认；raw 物理视图、DRM 全局对象/每文件身份和厂商 BO/GPUVM 仍需后续开发。
+
+### VirtIO reset 与 GPU 失败退出验证（2026-11-14）
+
+实现提交 `88ec7fadb`。新增 bus helper 沿用 read32/write32，不扩展 transport vtable 或 ABI 11；virtio-gpu 先选择原生失败 probe 管线，保留部分实例，再执行 transport 初始化。quiesce 封闭四条 issuer，未知完成封闭整个 staging/queue，remove 只有 reset 状态读回 0 后才交还 IRQ 和存储；失败保留原绑定/owner，静态实例不允许第二次 probe 覆盖。
+
+16 个新主机方法执行实际 instance/claim、四条 issuer、init/probe/quiesce/remove/release、reset helper，以及既有 C/PFA split/Rust VMO 回收。寄存器/clock/IRQ/core admission 是模型，PCI 分支初始化 fixture 使用回调 transport，不能据此声称已注入硬件超时或执行真实 IRQ 排空。PC module boundary 另实际编译 virtio-gpu 包装器并核对 imports。原生核心的 19 项 remove/失败 probe 方法与相关回归一起运行；隔离导出的最终源码树共通过 312 个不同驱动 unittest 方法。
+
+隔离树中的 16 项编译成功负控逐项破坏 reset 读回、deadline、poll 预算、初始 reset、probe opt-in、静态 owner、closing/fault 准入、超时封闭、used id/index、递归 active 拒绝、失败 reset 的返回，以及过早 storage/IRQ 释放和 owner 丢失，均触发运行时断言/ASan。最初“漏设超时故障标志”的变体逃过测试，因为 oracle 以该标志决定是否检查故障；补上独立的 command_failed 断言后，全部负控重新拒绝，恢复源码后再运行完整回归。11 个代码/配置路径与隔离输入和提交逐一核对。
+
+最终 `check-firmware-model` 通过 541 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 177 项；均在独立超时断言补齐后运行。116 个 instance、32 个 driver component 的清单审计通过。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，没有运行 AArch64 guest。初次 x86 构建因新 bus 源文件缺少 clock API 声明失败，不计成功；补齐原生 driver_hwapi include 后，重新构建及下述 guest 通过。
+
+`tools/a20 test smoke-driver-gpu-stop-x86_64` 显式 embedded、双 CPU，实际 2/2 online；真实 virtio-gpu PCI reset/退出后，旧 class publication 离线，旧 VMA 保留 framebuffer canary，重新登记后得到不同 VMO 并完成真实 flush，匹配 `DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1`，旧 scanout/runtime 标记同时保留。内核视图未 fault 用户 PTE；另串行运行 generic 模块双 CPU 2D 门禁，保留 resident framebuffer fork、`DRM_SYSFS: PASS` 和 videoplay 10 帧。成功 guest 日志在 `.kernel-build/virtio-stop-review/guest-stop-final.log` 与 `guest-generic.log`。这两项 QEMU 运行没有模拟硬件拒绝 reset。
+
+11 篇文档仅将本轮内容差异投影到 canonical 路径提交，其他会话的 docs/zh 迁移及工作区改动保留。引用检查通过 540 条；导航仍报告迁移工作区既有的 7 篇未编目文档，没有新增链接/锚点错误。完整证据在 `.kernel-build/virtio-stop-review/`。目前仍是单静态 queue，原始 DRM ops/全局对象、每文件 GPU 身份、外部 GEM backing 的提交/完成引用、多 GPU、模块 unload 和实体厂商 GPU 停止协议尚未因此完成。

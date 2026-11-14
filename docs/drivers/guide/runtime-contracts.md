@@ -16,6 +16,10 @@
 
 fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议。active call 只保护调用；有 get_scanout 的 RAM 映射另经拥有引用的 snapshot 进入普通 VMO VMA，因此在 class 调用和 producer 解绑后仍可保留存储。旧 get_fb 物理路径仍借用 backing，fbdev open 尚不固定设备，DRM 全局对象表仍需迁移。完整所有权与限制见 [GPU publication](native-runtime.md#gpu-publication-与作用域调用) 和 [连续 RAM scanout](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 
+## VirtIO 停止与失败保留
+
+VirtIO driver 可用导出的 `virtio_transport_reset(t, timeout_ms)` 在排除提交/重初始化、保留 transport/存储时写 0 并等待读回 0。时间和 poll 双预算，失败返回 `-ETIMEDOUT`，不交还任何硬件可达资源。virtio-gpu 已选择原生失败 probe 清理：quiesce 封闭四个 issuer，超时/异常 completion 封闭共享暂存区，remove 在 reset 确认后才排空 IRQ 和交还 owner；失败保留绑定、存储与重试入口。单静态实例有明确 owner 守卫，不能覆盖尚未退出的设备。调用/错误/限制见 [VirtIO reset](native-runtime.md#virtio-reset-确认与-gpu-退出)。
+
 ## MMIO
 
 `resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在已安全回滚的 probe 失败或成功解除绑定时回收；remove 失败则继续保留，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
