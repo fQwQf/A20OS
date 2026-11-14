@@ -22,6 +22,31 @@
 #define CLASS_INDEX_SPACE     256U
 #define CLASS_DEVICE_MAX      ((DEV_CLASS_AUDIO + 1) * CLASS_INDEX_SPACE)
 
+/* Public class layout is unchanged. Core publications carry a private stop
+ * receipt, owned until the binding's successful remove reaches devres release. */
+struct class_publication {
+    class_device_t public;
+    volatile int binding_stopped;
+    bool has_stop_contract;
+};
+
+static void class_binding_release(void *data)
+{
+    struct class_publication *publication = data;
+    /* Fail closed if a caller incorrectly releases devres while online. */
+    if (publication->has_stop_contract &&
+        !__atomic_load_n(&publication->public.online, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&publication->binding_stopped, 1, __ATOMIC_RELEASE);
+    class_device_put(&publication->public);
+}
+
+bool class_device_binding_stopped(const class_device_t *cdev)
+{
+    if (!cdev) return false;
+    const struct class_publication *publication = (const void *)cdev;
+    return __atomic_load_n(&publication->binding_stopped, __ATOMIC_ACQUIRE) != 0;
+}
+
 static class_device_t *g_class_devices[CLASS_DEVICE_MAX];
 static unsigned g_class_count;
 static unsigned g_class_next_index[DEV_CLASS_AUDIO + 1];
@@ -127,24 +152,35 @@ int class_device_publish(struct device *dev)
     if (dev->class_dev)
         return -EEXIST;
 
-    class_device_t *cdev = kcalloc(1, sizeof(*cdev));
-    if (!cdev)
-        return -ENOMEM;
-    cdev->dev = dev;
+    struct class_publication *publication = kcalloc(1, sizeof(*publication));
+    if (!publication) return -ENOMEM;
+    class_device_t *cdev = &publication->public;
+    cdev->dev = device_get(dev);
+    if (!cdev->dev) { kfree(publication); return -ENODEV; }
+    publication->has_stop_contract = dev->drv->remove != NULL;
     cdev->class_type = dev->drv->class_type;
     refcount_set(&cdev->refs, 1);
     spin_init(&cdev->state_lock);
+    class_device_get(cdev); /* The binding action owns the stop receipt. */
+    int action = device_add_resource_action(dev, class_binding_release, publication);
+    if (action) {
+        class_device_put(cdev);
+        class_device_put(cdev);
+        return action;
+    }
 
     uint64_t flags = spin_lock_irqsave(&g_class_lock);
     if (g_class_count >= CLASS_DEVICE_MAX) {
         spin_unlock_irqrestore(&g_class_lock, flags);
-        kfree(cdev);
+        (void)device_release_resource_action(dev, class_binding_release, publication);
+        class_device_put(cdev);
         return -ENOSPC;
     }
     int ret = class_allocate_index(cdev->class_type, &cdev->index);
     if (ret < 0) {
         spin_unlock_irqrestore(&g_class_lock, flags);
-        kfree(cdev);
+        (void)device_release_resource_action(dev, class_binding_release, publication);
+        class_device_put(cdev);
         return ret;
     }
     cdev->devt = class_devt(cdev->class_type, cdev->index);
@@ -167,14 +203,10 @@ int class_device_publish(struct device *dev)
     for (unsigned i = 0; i < g_class_count; i++) {
         if (strcmp(g_class_devices[i]->name, cdev->name) == 0) {
             spin_unlock_irqrestore(&g_class_lock, flags);
-            kfree(cdev);
+            (void)device_release_resource_action(dev, class_binding_release, publication);
+            class_device_put(cdev);
             return -EEXIST;
         }
-    }
-    if (!device_get(dev)) {
-        spin_unlock_irqrestore(&g_class_lock, flags);
-        kfree(cdev);
-        return -ENODEV;
     }
     if (cdev->class_type == DEV_CLASS_BLOCK)
         g_class_next_index[DEV_CLASS_BLOCK] = cdev->index + 1;

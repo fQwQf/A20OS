@@ -42,6 +42,8 @@ matched_id --> matched id_table entry
 
 `plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止新提交并结束软件请求，再等待已进入驱动的 class 调用退出，最后调用可失败的 `remove`：仅返回 0 后才释放受管存储、依赖和绑定；非零保留 `REMOVING` 绑定及注册引用，旧 class 句柄保持离线，调用者显式重试。经该 publication 准入的后续调用返回 `-ENODEV`；仍绕过 class 的旧消费者须单独迁移。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
 
+持有旧 class publication 的消费者，可用 `class_device_binding_stopped()` 区分离线与旧绑定已经成功停止。该凭据仅在显式 remove 成功进入核心 devres 回收时成立，重绑不改变旧凭据，没有 remove 则不成立。它不延长存储或证明全部资源已经析构；调用者必须保留 publication 引用。完整条件和局部 devres 回滚见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
+
 ## 数据结构字段
 
 ### `device_id_t`

@@ -45,6 +45,16 @@ REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 devi
 
 当前生命周期回调仍持有全局 lifecycle mutex，禁止等待需要该锁的工作或递归注销自己。quiesce 没有通用超时后强制释放内存的语义：如果不能证实 DMA 已停止，驱动不能继续释放硬件仍可能访问的存储。按设备并发的生命周期协调与通用恢复策略仍需后续开发。
 
+### 原生 publication 的绑定停止凭据
+
+持有真实核心 publication 引用的消费者可调用 `class_device_binding_stopped(cdev)`。它记录这个 publication 所属旧绑定的显式成功 remove 契约：在线、仅 offline、调用已排空或 remove 返回错误时均为 false；没有 remove 的绑定也永远为 false。只有核心接受 remove 成功并开始 devres 回收，才发布 true。设备重新绑定后旧凭据保持 true，新 publication 从 false 开始。NULL 返回 false，不能传入栈上仿造的 class 对象。
+
+该状态存放在核心 allocation 的私有尾部，没有新增公开 class/device/driver 字段，模块 ABI 保持 11。绑定持有一个 devres action 引用；unpublish 不会提前销毁凭据。发布过程发生分配、编号或名称冲突错误时，精确撤销该 action 并归还引用，失败不留下额外设备 pin 或 devres 项。消费者自行保留 publication 引用，查询不会固定或重新进入驱动代码。
+
+true 表示驱动已经履行 remove 停止契约，不是对硬件寄存器的探测，也不证明全部 devres 已执行完。它不替代 DMA 失效、CPU/TLB 退休或存储引用。禁止从 `dev->drv`、默认设备变化、class 离线或设备注册状态推导相同结论；旧对象的清理身份不能用于重绑后的新设备。驱动必须在 remove 返回 0 前确认不再访问由消费者准备回收的存储。
+
+`device_release_resources()` 是核心完整绑定退出入口，驱动不得在仍在线或停止失败的绑定上自行排空它。局部步骤回滚使用 `device_release_resource_action(dev, release, data)`：在串行 probe/lifecycle 上下文中，分离最新的 callback/data 精确匹配项并调用一次，剩余动作顺序保持；不分配内存，不隐式停止硬件。无匹配返回 `-ENOENT`，无效 device/callback 返回 `-EINVAL`。它不适用于 class/IRQ 并发修改 devres。该新接口与停止查询均已导出，不改变现有结构布局。
+
 ### 显式选择失败 probe 的清理所有权
 
 新驱动可在自己的 `probe(dev)` 中、任何硬件初始化之前调用 `device_probe_use_remove(dev)`，检查返回 0 后再启动初始化。它不分配内存、可重复调用，仅为本次 probe 选择失败时的清理路径；成功 probe 保持原有发布流程。当前 probe 之外或嵌套 probe 操作祖先返回 `-EINVAL`，未注册设备返回 `-ENODEV`，缺少 remove 返回 `-EOPNOTSUPP`；失败不设置清理意图。不要忽略错误后继续激活硬件。
@@ -64,7 +74,7 @@ static int gpu_probe(device_t *dev) {
 
 子设备/consumer 停止失败可能阻止父设备执行 quiesce。此时失败 probe 保持 `DEV_STATE_PROBE_CLEANUP`，其 class 先 offline，恢复后重试仍须执行首次 quiesce；进入自己的 remove 后才变为 REMOVING，后续仅重试 remove。`device_is_stopping()` 同时观察两种状态；checked resource、PCI 查找/范围观察、managed DMA 创建/新映射及 class 发布均拒绝它们。旧引用和旧资源保留供停止，不授予新使用权限。该 helper 只观察元数据，调用者仍须持有引用并按需使用 discovery 事务协调绑定/配置。
 
-probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（当前为 10）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
+probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（当前为 11）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
 
 ### 在 consumer 解绑前准备退出
 
@@ -847,3 +857,9 @@ RISC-V embedded 单核 native IOMMU/EDU guest 匹配全部 7 项预期，新增 
 `tools/a20 test smoke-driver-gpu-stop-x86_64` 显式 embedded、双 CPU，实际 2/2 online；真实 virtio-gpu PCI reset/退出后，旧 class publication 离线，旧 VMA 保留 framebuffer canary，重新登记后得到不同 VMO 并完成真实 flush，匹配 `DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1`，旧 scanout/runtime 标记同时保留。内核视图未 fault 用户 PTE；另串行运行 generic 模块双 CPU 2D 门禁，保留 resident framebuffer fork、`DRM_SYSFS: PASS` 和 videoplay 10 帧。成功 guest 日志在 `.kernel-build/virtio-stop-review/guest-stop-final.log` 与 `guest-generic.log`。这两项 QEMU 运行没有模拟硬件拒绝 reset。
 
 11 篇文档仅将本轮内容差异投影到 canonical 路径提交，其他会话的 docs/zh 迁移及工作区改动保留。引用检查通过 540 条；导航仍报告迁移工作区既有的 7 篇未编目文档，没有新增链接/锚点错误。完整证据在 `.kernel-build/virtio-stop-review/`。目前仍是单静态 queue，原始 DRM ops/全局对象、每文件 GPU 身份、外部 GEM backing 的提交/完成引用、多 GPU、模块 unload 和实体厂商 GPU 停止协议尚未因此完成。
+
+### 原生停止凭据与局部 devres 回滚验证（2026-11-14）
+
+新增 `test_class_stop` 的 7 个主机方法编译生产 driver core/class 代码，覆盖显式成功 remove、失败保留与重试、offline/调用排空不等于停止、旧凭据跨重绑稳定、缺少 remove、publication/action 分配失败，以及精确 action 回滚。分配和同步使用模型，ASan/UBSan 检查引用与存储归还；不声称已观察厂商硬件停止。
+
+停止凭据、GPU access、class binding、可失败 remove 和 PC module boundary 在独立导出的源码树共通过 41 个 unittest 方法。5 个编译成功的负控分别破坏凭据发布、把 offline 当停止、忽略 remove 契约、漏撤销发布失败 action、放宽 callback/data 匹配，均由运行时断言拒绝；恢复源码后再执行回归。两个新 API 已导出，公开 class/device/driver 布局与 ABI 11 不变。证据在 `.kernel-build/drm-binding-review/stop-isolated.log` 和 `negative-stop*.log`。DRM 的每 publication 状态和自动退休仍是后续消费者迁移，不能由本凭据单独推导完成。

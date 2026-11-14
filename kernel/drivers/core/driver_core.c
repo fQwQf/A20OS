@@ -295,6 +295,23 @@ int device_add_resource_action(device_t *dev, void (*release)(void *), void *dat
     dev->resource_actions = action;
     return 0;
 }
+int device_release_resource_action(device_t *dev, void (*release)(void *), void *data) {
+    if (!dev || !release) return -EINVAL;
+    struct device_resource_action **link = &dev->resource_actions;
+    while (*link) {
+        struct device_resource_action *action = *link;
+        if (action->release != release || action->data != data) {
+            link = &action->next;
+            continue;
+        }
+        *link = action->next;
+        release(data);
+        kfree(action);
+        return 0;
+    }
+    return -ENOENT;
+}
+
 void device_release_resources(device_t *dev) {
     while (dev && dev->resource_actions) {
         struct device_resource_action *action = dev->resource_actions;

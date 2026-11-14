@@ -10,6 +10,8 @@
 
 `device_find_get_by_class(class, index)` 按当前在线设备的顺序返回持有引用的设备；`index` 是在线列表中的位置。调用者必须以 `device_put()` 归还引用。引用保证设备对象仍存在；调用驱动前还必须取得 class 引用，并在 `class_device_ops_begin()` 与 `class_device_call_end()` 之间访问 vtable。块设备持久句柄使用 `class_device_get_by_index()` 的稳定索引：每次成功发布消耗一个 0–255 索引，解绑后该索引永久离线，本次启动不会分配给另一块盘。
 
+需要在 class 调用结束后保留存储的 adapter，必须分别持有 publication 和 backing 引用。`class_device_binding_stopped()` 只记录该旧 publication 的显式成功 remove 契约，offline/排空本身不成立，缺少 remove 永不成立；旧对象不会跟随设备重新绑定。完整条件见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
+
 ## Block：`DEV_CLASS_BLOCK`
 
 ```c

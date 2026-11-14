@@ -639,6 +639,8 @@ const struct drv_export drv_export_table[] = {
     { "gpu_device_access_begin", (void *)gpu_device_access_begin },
     { "gpu_device_default_begin", (void *)gpu_device_default_begin },
     { "gpu_device_access_end", (void *)gpu_device_access_end },
+    { "class_device_binding_stopped", (void *)class_device_binding_stopped },
+    { "device_release_resource_action", (void *)device_release_resource_action },
     { "gpu_device_scanout_get", (void *)gpu_device_scanout_get },
     { "gpu_scanout_put", (void *)gpu_scanout_put },
     { "vmo_create_contiguous", (void *)vmo_create_contiguous },
