@@ -129,6 +129,10 @@ buffer/domain 衔接运行 `python3 -m unittest tools.tests.test_driver_buffer_m
 
 `tools/a20 test smoke-driver-iommu-native-riscv64` 在 manifest 中显式选择 embedded，使构建和启动使用同一驱动配置；增加真实高阶 buffer 的跨页 EDU DMA，要求 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`；释放 allocator caller 引用后仍由 mapping 保留，再确认 DMA/BME 停止并解除映射。原有不连续页 DMA、非法 IOVA fault/watch 与 detach 验证继续执行。通用 runtime 的显式 direct domain 另要求 `DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1`；USB hub/bulk 门禁纳入该标记，但 USB 读写本身仍使用原 identity-DMA 暂存路径。QEMU 正常失效不是实体失效超时的证据。
 
+VMO 导入运行 `python3 -m unittest tools.tests.test_driver_dma_vmo -v`，执行生产 Rust lifecycle、C 锁/slot/PFA 原语及 DMA adapter/mapper/policy，验证源销毁、provider 中 resize、真正 pthread 的 pin/resize 排斥、缺页无部分输出/无 pin、physical/unknown 拒绝、临时引用在 OOM/policy/关闭/架构失败后交还，以及可失败回滚/部分 unmap 保留；其中另运行 7 项 Rust 生命周期测试，包含最大批次和合法 PFN 0。host 的源销毁/resize 副作用、PFA/provider/cache 为模型，不等于实际 Rust resize/destructor 已被该 fixture 执行。
+
+通用 runtime 新增真实 VMO 的缺页拒绝、物化、direct domain 的页 1–2 映射、resize 到 0/销毁源、最后 unmap，要求 `DRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1`，USB hub/bulk 门禁同时检查。RISC-V IOMMU 实例还执行真实 VMO 销毁后的 EDU 跨页 DMA，要求 `DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1`；保留原有高阶 buffer、不连续页、权限、fault/watch 和 detach 验证。实体停止/失效超时仍需独立证据。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |
