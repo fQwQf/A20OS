@@ -4,6 +4,8 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/fence.h"
+#include "drivers/core/protocol.h"
+#include "drivers/net/interface.h"
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
 #include "drivers/core/amd_iommu.h"
@@ -940,6 +942,46 @@ static void exercise_xhci_remove(void) {
     device_put(old);
     device_put(controller);
     kinfo("DRIVER_XHCI_REMOVE: PASS prepare=1 stopped=1 children=1 rebind=1\n");
+}
+
+static void exercise_driver_protocols(void)
+{
+    class_device_t *network = class_device_get_by_type(DEV_CLASS_NET, 0);
+    CHECK(network && driver_endpoint_protocol_count(network) >= 2);
+    bool primary = false, extension = false;
+    for (size_t i = 0; i < driver_endpoint_protocol_count(network); i++) {
+        struct driver_protocol_info info;
+        CHECK(!driver_endpoint_protocol_info(network, i, &info));
+        primary |= info.id == DRIVER_PROTOCOL_NET;
+        extension |= info.id == DRIVER_PROTOCOL_NET_STATS;
+    }
+    CHECK(primary && extension);
+    net_dev_stats_t before, after;
+    CHECK(!class_net_read_stats(network, &before));
+    const struct driver_protocol_requirement need = {
+        DRIVER_PROTOCOL_NET, 1,
+        __builtin_offsetof(net_dev_ops_t, send) + sizeof(((net_dev_ops_t *)0)->send), 0,
+    };
+    struct driver_protocol_access access;
+    CHECK(!driver_protocol_begin(network, &need, &access));
+    const net_dev_ops_t *ops = access.ops;
+    /* A minimum Ethernet frame exercises the actual provider, not a test ops
+     * table. Submission counters are not a remote-delivery/DMA-stop proof. */
+    uint8_t frame[60] = {0xff,0xff,0xff,0xff,0xff,0xff,2,0,0,0,0,1,0x88,0xb5};
+    CHECK(ops->send && ops->send(access.device, frame, sizeof(frame)) == sizeof(frame));
+    driver_protocol_end(&access);
+    class_net_poll(network);
+    CHECK(!class_net_read_stats(network, &after) && after.tx_packets > before.tx_packets);
+    class_device_put(network);
+    kinfo("DRIVER_PROTOCOLS: PASS primary=1 extension=1 send=1 stats=1\n");
+}
+
+void driver_runtime_selftest_runtime(void)
+{
+    if (!boot_flag(bootargs_get(), "driver.protocol_test=1")) return;
+    exercise_driver_protocols();
+    if (current_board && current_board->poweroff) current_board->poweroff();
+    panic("DRIVER_PROTOCOLS: poweroff returned");
 }
 
 void driver_runtime_selftest_boot(void)

@@ -1,6 +1,12 @@
-# 原生驱动运行时：GPU 开发的第一阶段基础
+# 原生驱动运行时
 
 本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、资源占用与物理存储保留、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。DMA/fence/workqueue/firmware 和本页运行时自检面向 hosted 内核；资源占用接口随完整 driver core 编入，相应 MCU 配置不包含 hosted 异步运行时。
+
+## 服务发现与调用边界
+
+通用架构以每绑定 endpoint 的协议集合连接资源、执行和各子系统；详见[完整架构与开发流程](core-model.md#架构与开发入口)。既有 class publication 与原生 endpoint 共用身份、active call 和退出路径，没有第二个全局注册表。发布时复制并排序 ID/version/ops_size/capabilities，调用在本地二分查询后准入，元数据与代码访问分离。新扩展不更改 device_t/driver_t 或既有 class vtable，ABI 12 不变。无传统 class 的服务和 MCU driver-core 配置同样使用这一模型。
+
+protocol access 借用 caller 的 endpoint 引用，caller 必须持有到 end；准入/结束不分配、不执行最后 put，可在 IRQ 中使用，方法另行声明上下文。它保护当次绑定的方法与实例，不保留返回 backing、不停止 DMA、不授予用户权限。队列/请求、存储和完成仍按本页的各自所有权退出。
 
 ## 分层与边界
 
@@ -1051,3 +1057,9 @@ test_driver_fence 共 17 个 unittest 方法，运行完整生产 fence/watch，
 五条标准 guest 门禁最终返回 0：x86_64 单核/双核 runtime 均观察 DRIVER_FENCE_WATCH 的 notify/cancel/error/work 标记，成功与错误 source fence 的短通知调度真实 kernel worker，并验证撤销与 terminal 拒绝；embedded 双核 GPU stop 同时保留 DRM reaper、旧 VMA、重绑及新通知标记；generic 模块显示保留 DRM_SYSFS、FBDEV_MAP/fork 与 videoplay 10 帧；RISC-V PRIME 保留 DRM_FILE、共享映射、SCM_RIGHTS、80 exports 与 sync-file。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行该架构 guest。
 
 runtime guest 的 source signal 在测试任务上下文，不能据此宣称实体设备 IRQ 通知已验证。双核任务曾因 disk 低于既有 8192 MiB 门槛等待；仅清理已完成旧自检的可重建缓存/镜像、保留内核/日志/审计后，同一活跃进程继续并通过，未降低资源门槛。没有运行本轮 virgl/厂商 GPU、真实硬件停止超时、BO/GPUVM/job 调度或 Linux pending sync-file；当前 DRM adapter 仍为同步后端。源树、负控和日志位于 .kernel-build/fence-watch-review/。
+
+### 通用协议与架构集成验证（2026-11-14）
+
+按绑定发布的组合协议已接入现有 publication、devres 与 offline/drain；传统六类自动提供 primary，无 class 服务及 MCU driver-core backend 共用同一实现。VirtIO-net、RTL8139 和 lwIP 统计消费者使用统一接口，真实模块编译/导入检查通过。主文档给出架构、所有权、版本/前缀检查和完整开发流程，示例改用每设备受管实例并经实际头文件语法编译。新扩展不改变 device_t/driver_t 或既有类表布局，ABI 12 保持。
+
+最终隔离驱动回归 430 项、firmware 656 项加 sleep ABI 1 项、PC 292 项通过，119 个 instance 与 32 个 component 清单通过。四个新完整流程分别在 hosted 与 MCU backend 执行原生服务/重绑、primary+扩展互通、在途调用排空、失败发布/probe/remove 保留。新 generic 双核 LWIP QEMU 门禁通过实际 VirtIO 网卡模块查询、发送和统计；既有 embedded GPU stop、generic 模块显示及 AArch64 embedded kernel-only 构建也通过。没有运行 MCU 实板或厂商 GPU，不把网络提交计数当成远端送达/停止证明。标准请求/队列与恢复仍需继续整合；证据位于 .kernel-build/driver-architecture-review/。

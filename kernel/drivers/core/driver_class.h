@@ -12,6 +12,7 @@
 #include "core/refcount.h"
 #include "core/lock.h"
 #include "uapi/a20/block.h"
+#include "drivers/net/interface.h"
 
 struct device;
 struct block_write;
@@ -112,37 +113,10 @@ typedef struct block_dev_ops {
  *
  * Used by: lwIP network stack / socket layer
  * ============================================================ */
-/* Driver-level counters, distinct from the stack's own per-netif counts in
- * a20_lwip_netif_state_t.  The stack counts what lwIP was handed; these count
- * what the device actually moved, so the two diverging is what localizes a
- * loss to the window between the ring and the protocol stack.
- *
- * Deliberately not a function pointer in net_dev_ops_t: that vtable is shared
- * with loadable .a20drv modules, so appending a field makes the kernel read
- * one field past the end of any module built against an older header, and then
- * call it.  Appended fields therefore require bumping A20_DRIVER_ABI, which
- * drvmod_load() now rejects on (a20_driver_descriptor_sane()), so a stale
- * module fails to load instead of being misread.  A weak symbol is a separate
- * mechanism and remains absent rather than wrong.
- *
- * Known limit: a weak symbol only resolves when the driver is linked into the
- * kernel, which today means the embedded profile (virtio_net.c is in
- * EMBEDDED_DEVICE_DRIVER_SRCS).  Under DRIVER_DEPLOYMENT=generic the driver is
- * a .a20drv package and the kernel cannot call into it by name, so the net_dev
- * report omits the driver line rather than showing zeros.  Closing that needs
- * either a size-checked vtable registration or an ABI version in the module
- * descriptor that drvmod_load() validates -- neither is a driver-local change.
- *
- * The same rule is why send_sg() and caps() below are appended rather than
- * inserted, and why landing them required A20_DRIVER_ABI 1 -> 2: the field
- * order is now part of the module ABI.
- */
-typedef struct net_dev_stats {
-    uint64_t rx_packets;
-    uint64_t rx_drops;
-    uint64_t tx_packets;
-    uint64_t tx_drops;
-} net_dev_stats_t;
+/* Driver-level counters are distinct from stack counters. Optional statistics
+ * are published as DRIVER_PROTOCOL_NET_STATS (drivers/net/interface.h), so
+ * kernel modules and embedded providers use the same binding-scoped lookup.
+ * This extends neither the primary net vtable nor its binary layout. */
 
 /*
  * One segment of a transmit buffer chain.  Same shape as POSIX struct iovec
@@ -226,8 +200,8 @@ typedef struct net_dev_ops {
      * A driver must not retain them. */
     int            (*send_sg)(struct device *dev, const net_iovec_t *iov,
                               unsigned nr);
-    /* Optional capability query, in the same appended-field position and for
-     * the same reason: see the ABI note above net_dev_stats_t.  NULL, or a 0
+    /* Optional query in the legacy module ABI. Independent additions use
+     * device_add_protocol instead of growing this table. NULL, or a 0
      * return, means "linear send only, no offload, no mergeable RX", which is
      * the safe reading for a driver that has not been converted. */
     uint32_t       (*caps)(struct device *dev);
@@ -244,6 +218,7 @@ uint32_t class_net_caps(class_device_t *cdev);
 int class_net_link_up(class_device_t *cdev);
 int class_net_rx_irq_driven(class_device_t *cdev);
 int class_net_copy_mac(class_device_t *cdev, uint8_t out[6]);
+int class_net_read_stats(class_device_t *cdev, net_dev_stats_t *out);
 
 /* net ioctl requests */
 #define NET_IOCTL_GET_MAC    0x2001

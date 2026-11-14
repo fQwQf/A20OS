@@ -1,5 +1,7 @@
 # A20OS 驱动文档
 
+架构总入口是[核心设备与驱动模型](guide/core-model.md#架构与开发入口)：发现、绑定、组合协议、资源、执行和部署使用一套原生模型，传统设备类是其适配层。新能力通过按绑定发布的版本/大小检查扩展，不再依赖具体驱动的弱符号。
+
 如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及 generic 的架构模块清单与 embedded 的显式静态源码账本。
 
 通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/arch/<arch>/boards/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块包装位于 `kernel/drvmod/examples/`。full profile 不按类目录通配收集设备驱动：`tools/mk/driver-sources.mk` 仍通配收集 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 generic 内核服务和 embedded 设备实现采用显式源码账本；generic 的设备包则以 `tools/mk/driver-modules.mk` 的每架构清单为准。
@@ -15,7 +17,7 @@
 | [驱动部署 Profile](guide/deployment-profiles.md) | generic 架构模块清单、embedded 静态账本、Early/Runtime DriverStore |
 | [启动与硬件发现](../dev/boot-model.md) | 交接阶段、DT/ACPI/静态 provider、设备图、资源和依赖 |
 | [x86 实机驱动复用](guide/x86-hardware-reuse.md) | 代码归属、硬件匹配、上游服务边界与移植验证 |
-| [核心设备与驱动模型](guide/core-model.md) | `device_t`、`driver_t`、`bus_type_t` 与 probe/remove 生命周期 |
+| [核心设备与驱动模型](guide/core-model.md) | 完整架构、原生 endpoint/protocol、所有权与 probe/remove 生命周期 |
 | [热插拔与即插即用](guide/hotplug-and-pnp.md) | USB/PCI 运行期发现、ADD/REMOVE 生命周期与驱动编写要求 |
 | [设备类接口](guide/device-classes.md) | 各类操作、单位、返回值和阻塞语义 |
 | [总线与平台](guide/bus-and-platform.md) | platform device、板级资源、MMIO/IRQ |

@@ -383,3 +383,9 @@ buffer allocation owner 可与 mapping device 不同。其最后 put 可能触�
 fence spinlock 保护 terminal status 与 watch 链和状态。create 在锁外分配，锁内重新验证 pending、取得引用并发布；try_remove 在锁内 O(1) 解除 pending 或检查 RUNNING，成功后在锁外交还 fence/watch。signal 在锁内发布 status，锁外 wake waiters，随后逐个在锁内选择/标记 RUNNING，锁外 callback，返回后再锁内发布 DONE；之后不再解引用 watch。通知与 waiters 不在 fence 锁下执行，不引入 fence → workqueue 的嵌套锁序。外层 producer 仍须避免持有通知所需的锁跨 signal；锁外只指 fence 自己的锁。
 
 producer 引用覆盖整个 signal，watch 另持 fence 引用；IRQ 不做 watch 最后 put/free。callback 必须短小、IRQ-safe、不分配或阻塞；其他任务看到 status terminal 时，try_remove 仍可能 EBUSY，必须保留代码/context 及登记对象后重试。成功 remove 只证明该 callback 不会再运行，已调度的工作由 workqueue 取消/排空协议另行管理，不能在其所需锁下等待。
+
+### 原生协议发布与调用
+
+描述符登记与快照构造由既有 lifecycle owner 串行执行。元数据保存在 devres，publication 一次分配不可变排序数组；没有全局协议注册表。hosted 的设备 endpoint 引用查询沿用 g_class_lock，MCU 仅有设备指针的短保护锁；调用准入只取 endpoint state_lock，不取 lifecycle mutex，随后无锁二分查询不可变元数据。caller 持引用到 end，end 清空 access 后只交还 active call，不在 IRQ/外层锁下触发最后 put。
+
+NET_STATS 的方法是非阻塞计数快照，继承调用者 IRQ 状态，读计数时使用 NIC 的锁，不调用 VFS/分配/生命周期操作。lwIP 的控制面统计路径允许 g_lwip_lock → NIC stats lock；NIC 的 IRQ/收包路径必须先释放自己的锁再进入 stack，禁止反向嵌套。协议本身不允许把这个顺序推广到阻塞 I/O 方法。退出仍先 offline，再 quiesce/排空 active call，最后 remove；metadata ref 不是在线许可。

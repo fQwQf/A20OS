@@ -238,3 +238,9 @@ generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Ea
 `driver_dma_map_owned_vmo` 为固定 kind 4/5 的 RAM 显式保留整个 VMO/预算 owner，成功与失败清理句柄同样持有；完整回滚不发布 owner。buffer/VMO 最终 put 在 domain 锁外，try_unmap 的临时 domain 引用跨 owner 回调；构造回滚依靠 caller 全程持有的 domain 引用。内部 adopt helper 不导出，公开布局与 ABI 12 不变；旧 map_vmo 的裸帧快照语义保持不变。详见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
 
 原生 `driver_fence_watch_create` / `driver_fence_watch_try_remove` 已加入模块导出；公开结构与 ABI 12 不变。登记仅持 fence，不替模块保留 callback 代码或上下文。IRQ-safe callback 只能执行短操作；最终 watch 回收在任务上下文，RUNNING 返回 EBUSY 时必须保留模块/实例供重试。成功 remove 后还须停止/排空它已调度的 work；这不使模块运行期卸载自动可用。见 [一次性通知](native-runtime.md#一次性通知与显式撤销)。
+
+## 组合协议与模块扩展
+
+新模块通过 device_add_protocol 在自己的 probe 中登记独立版本/大小/能力接口，原生 endpoint 复用原有 publication。框架复制描述符，模块必须保证 ops 及其代码在绑定退出前有效；成功 access 与原有 active call 使用同一个排空计数。offline 后不能取得旧表，消费者保留的元数据不阻止模块在正常解绑后交还代码。
+
+device_add_protocol、device_endpoint_get、driver_endpoint_get/put、driver_endpoint_protocol_count/info、driver_protocol_begin/end 及 class_net_read_stats 已导出。新增扩展不修改 device_t/driver_t 或既有 net 表，保持 ABI 12；公开对象布局或传统表布局的未来变更仍须遵循 ABI 检查。VirtIO-net 与 RTL8139 的真实模块包装器已作为导入边界验证对象，统计不再依赖内建弱符号。完整接口和开发流程见[原生协议](core-model.md#原生协议组合能力而非扩大全局-vtable)。

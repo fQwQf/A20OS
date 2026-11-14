@@ -1,5 +1,7 @@
 # 驱动运行时契约
 
+统一服务入口为原生 endpoint/protocol，完整设计见[架构](core-model.md#架构与开发入口)。协议仅在本设备 probe 中登记并复制，table/code 随绑定保留；元数据可跨 offline 读取，ops 只能在成功 access 内使用。版本必须相等，表大小覆盖所用前缀，能力包含所需位，错误清空 access。caller 引用贯穿 begin/end，借用准入不分配/不析构，不引入全局生命周期锁；具体方法声明 task/IRQ 规则。新服务无需伪造 class 节点，旧 endpoint 不跟随重绑。
+
 原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：失败 probe 可在初始化前显式选择 `device_probe_use_remove()`，由同一退出路径处理部分实例，清理失败保留绑定与原 probe_error；子设备阻塞时保持 PROBE_CLEANUP 并拒绝新资源/DMA 使用。需要提前保护 child 存储的 provider 可登记可失败 remove prepare，先于 consumer 解绑，失败保留 PREPARING 并跳过已完成动作。下线分为 offline、quiesce、在途调用排空和可失败 remove；错误保留绑定/devres，显式重试不重复 quiesce；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。

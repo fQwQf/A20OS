@@ -56,3 +56,5 @@ FreeBSD 的 [drm-kmod](https://github.com/freebsd/drm-kmod) 使用 LinuxKPI 移�
 限定本机单 GPU、复用上游和 Mesa、由熟悉内核/DRM 的全职开发者实施时，首次可靠硬件任务通常应按月规划，基本加速桌面按多个季度规划。该估算不是测试结论，不由源码行数线性换算，也不覆盖多个 GPU 世代、视频、休眠和日常稳定性。
 
 当前交付的是通用运行时与发现/资源管理基础，尚未达到本机 AMD-Vi 接管或 GPU 硬件初始化的验收条件。具体排期应在固定源码/固件版本、列出依赖并完成首个硬件初始化实验后修订；剩余基础设施的关闭条件见 [驱动缺口](../status/gaps/drivers.md#原生-gpu-与-amd-vi-基础设施)。
+
+原生服务层已采用通用 endpoint/protocol：新 GPU 扩展可声明独立版本、实际表大小和能力，复用绑定的在线准入/排空，而不要求继续扩展所有类的表。既有 DISPLAY 自动提供 primary protocol；这不把 VirtIO/DRM 协议定义为通用 GPU 执行模型，也不等于 BO/GPUVM/job 已实现。后续原生 GPU 请求与队列应在此基础上组合既有 VMO、DMA 与 fence，详见[完整驱动架构](../drivers/guide/core-model.md#架构与开发入口)。

@@ -1,4 +1,5 @@
 #include "drivers/core/driver_class.h"
+#include "drivers/core/driver_protocol_internal.h"
 #include "drivers/core/driver_core.h"
 #include "core/errno.h"
 #include "core/lock.h"
@@ -21,31 +22,6 @@
  * its device is published. */
 #define CLASS_INDEX_SPACE     256U
 #define CLASS_DEVICE_MAX      ((DEV_CLASS_AUDIO + 1) * CLASS_INDEX_SPACE)
-
-/* Public class layout is unchanged. Core publications carry a private stop
- * receipt, owned until the binding's successful remove reaches devres release. */
-struct class_publication {
-    class_device_t public;
-    volatile int binding_stopped;
-    bool has_stop_contract;
-};
-
-static void class_binding_release(void *data)
-{
-    struct class_publication *publication = data;
-    /* Fail closed if a caller incorrectly releases devres while online. */
-    if (publication->has_stop_contract &&
-        !__atomic_load_n(&publication->public.online, __ATOMIC_ACQUIRE))
-        __atomic_store_n(&publication->binding_stopped, 1, __ATOMIC_RELEASE);
-    class_device_put(&publication->public);
-}
-
-bool class_device_binding_stopped(const class_device_t *cdev)
-{
-    if (!cdev) return false;
-    const struct class_publication *publication = (const void *)cdev;
-    return __atomic_load_n(&publication->binding_stopped, __ATOMIC_ACQUIRE) != 0;
-}
 
 static class_device_t *g_class_devices[CLASS_DEVICE_MAX];
 static unsigned g_class_count;
@@ -145,42 +121,26 @@ static int class_allocate_index(uint32_t type, uint32_t *index)
 int class_device_publish(struct device *dev)
 {
     if (device_is_stopping(dev)) return -ESHUTDOWN;
-    if (!dev || !dev->drv || !dev->drv->class_ops ||
-        dev->drv->class_type == DEV_CLASS_NONE ||
-        dev->drv->class_type > DEV_CLASS_AUDIO)
-        return 0;
-    if (dev->class_dev)
-        return -EEXIST;
-
-    struct class_publication *publication = kcalloc(1, sizeof(*publication));
-    if (!publication) return -ENOMEM;
-    class_device_t *cdev = &publication->public;
-    cdev->dev = device_get(dev);
-    if (!cdev->dev) { kfree(publication); return -ENODEV; }
-    publication->has_stop_contract = dev->drv->remove != NULL;
-    cdev->class_type = dev->drv->class_type;
-    refcount_set(&cdev->refs, 1);
-    spin_init(&cdev->state_lock);
-    class_device_get(cdev); /* The binding action owns the stop receipt. */
-    int action = device_add_resource_action(dev, class_binding_release, publication);
-    if (action) {
-        class_device_put(cdev);
-        class_device_put(cdev);
-        return action;
+    class_device_t *cdev;
+    int ret = driver_publication_create(dev, &cdev);
+    if (ret || !cdev) return ret;
+    if (cdev->class_type == DEV_CLASS_NONE) {
+        uint64_t flags = spin_lock_irqsave(&g_class_lock);
+        __atomic_store_n(&cdev->online, 1, __ATOMIC_RELEASE);
+        dev->class_dev = cdev;
+        spin_unlock_irqrestore(&g_class_lock, flags);
+        return 0; /* Native protocols need neither a legacy class nor devfs. */
     }
-
     uint64_t flags = spin_lock_irqsave(&g_class_lock);
     if (g_class_count >= CLASS_DEVICE_MAX) {
         spin_unlock_irqrestore(&g_class_lock, flags);
-        (void)device_release_resource_action(dev, class_binding_release, publication);
-        class_device_put(cdev);
+        driver_publication_discard(dev, cdev);
         return -ENOSPC;
     }
-    int ret = class_allocate_index(cdev->class_type, &cdev->index);
+    ret = class_allocate_index(cdev->class_type, &cdev->index);
     if (ret < 0) {
         spin_unlock_irqrestore(&g_class_lock, flags);
-        (void)device_release_resource_action(dev, class_binding_release, publication);
-        class_device_put(cdev);
+        driver_publication_discard(dev, cdev);
         return ret;
     }
     cdev->devt = class_devt(cdev->class_type, cdev->index);
@@ -203,8 +163,7 @@ int class_device_publish(struct device *dev)
     for (unsigned i = 0; i < g_class_count; i++) {
         if (strcmp(g_class_devices[i]->name, cdev->name) == 0) {
             spin_unlock_irqrestore(&g_class_lock, flags);
-            (void)device_release_resource_action(dev, class_binding_release, publication);
-            class_device_put(cdev);
+            driver_publication_discard(dev, cdev);
             return -EEXIST;
         }
     }
@@ -221,23 +180,6 @@ int class_device_publish(struct device *dev)
     if (subsystem)
         netlink_uevent_emit("add", subsystem, cdev->name, cdev->devt);
     return 0;
-}
-
-void class_device_mark_offline(struct device *dev)
-{
-    class_device_t *cdev = dev ? dev->class_dev : NULL;
-    if (!cdev)
-        return;
-
-    uint64_t state_flags = spin_lock_irqsave(&cdev->state_lock);
-    __atomic_store_n(&cdev->online, 0, __ATOMIC_RELEASE);
-    void (*offline)(class_device_t *, void *) = cdev->offline;
-    void *offline_data = cdev->offline_data;
-    cdev->offline = NULL; cdev->offline_data = NULL;
-    spin_unlock_irqrestore(&cdev->state_lock, state_flags);
-
-    if (offline)
-        offline(cdev, offline_data);
 }
 
 void class_device_unpublish(struct device *dev)
@@ -259,21 +201,6 @@ void class_device_unpublish(struct device *dev)
     while (__atomic_load_n(&cdev->active_calls, __ATOMIC_ACQUIRE) != 0)
         __asm__ volatile("" ::: "memory");
     class_device_put(cdev);
-}
-
-void class_device_get(class_device_t *cdev)
-{
-    if (cdev)
-        refcount_inc(&cdev->refs);
-}
-
-void class_device_put(class_device_t *cdev)
-{
-    if (cdev && refcount_dec_and_test(&cdev->refs)) {
-        device_t *dev = cdev->dev;
-        kfree(cdev);
-        device_put(dev);
-    }
 }
 
 /* Reading dev->class_dev on its own races class_device_unpublish(), which
@@ -346,56 +273,9 @@ class_device_t *class_device_get_by_index(uint32_t type, unsigned index)
     spin_unlock_irqrestore(&g_class_lock, flags);
     return result;
 }
-int class_device_set_offline(class_device_t *cdev,
-                             void (*callback)(class_device_t *, void *), void *data)
-{
-    if (!cdev || !callback) return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&cdev->state_lock);
-    int rc = 0;
-    if (!__atomic_load_n(&cdev->online, __ATOMIC_ACQUIRE)) rc = -ENODEV;
-    else if (cdev->offline && cdev->offline != callback) rc = -EBUSY;
-    else { cdev->offline = callback; cdev->offline_data = data; }
-    spin_unlock_irqrestore(&cdev->state_lock, flags);
-    return rc;
-}
-
 class_device_t *class_device_get_nth(unsigned index)
 {
     return class_device_get_match(NULL, DEV_CLASS_NONE, index, 0);
-}
-
-int class_device_call_begin(class_device_t *cdev)
-{
-    if (!cdev)
-        return -ENODEV;
-    uint64_t flags = spin_lock_irqsave(&cdev->state_lock);
-    if (!__atomic_load_n(&cdev->online, __ATOMIC_ACQUIRE)) {
-        spin_unlock_irqrestore(&cdev->state_lock, flags);
-        return -ENODEV;
-    }
-    __atomic_add_fetch(&cdev->active_calls, 1, __ATOMIC_ACQUIRE);
-    spin_unlock_irqrestore(&cdev->state_lock, flags);
-    return 0;
-}
-int class_device_ops_begin(class_device_t *cdev, uint32_t class_type, const void **ops)
-{
-    if (!ops) return -EINVAL;
-    *ops = NULL;
-    int rc = class_device_call_begin(cdev);
-    if (rc) return rc;
-    driver_t *drv = cdev->dev->drv;
-    if (!drv || cdev->class_type != class_type || drv->class_type != class_type || !drv->class_ops) {
-        class_device_call_end(cdev);
-        return -ENODEV;
-    }
-    *ops = drv->class_ops;
-    return 0;
-}
-
-void class_device_call_end(class_device_t *cdev)
-{
-    if (cdev)
-        __atomic_sub_fetch(&cdev->active_calls, 1, __ATOMIC_RELEASE);
 }
 
 int class_device_has_devnode(const class_device_t *cdev)

@@ -75,7 +75,7 @@ Socket 选项元数据由 socket 锁保护。TCP/IP 选项快照在该锁下取�
 >> | `NET_PROFILE_LANE_RXQ_SLOTS` / `_BUDGET` / 槽位下界断言 | `net_profile.h:344-346` / `347-349` / `350-351` | `net_profile.h:571-573` / `574-576` / `577-578` |
 >> | `CONFIG_NET_LOCK_ASSERT` 的三档说明 | `net_profile.h:44-45` | `net_profile.h:44-60`（`#ifndef` 兜底在 `:59-61`） |
 >> | `a20_lwip_poll_timers_locked()` | `lwip_stack.c:651` | `lwip_stack.c:1279` |
->>已复核**仍然正确**、因此未改的：`lwip_stack.c:634-635` / `:642-643`（owner 写入）、`:84` / `:87`（常量与变量）、`:612-615`（arm）、`:726-739`（记站点）、`:760-773`（断言函数）、`:767-768`（arm 前提前返回）、`:1613-1617` 与 `:1629-1632`（`/proc/net/stats` 两行）、`lwipopts.h:298-304`（宏映射）、`opt.h:227`（上游空宏）、`lock.h:95-98`（全局顺序不变式）、`net_lane.c:66`（lane 队列预算断言）。`driver_class.h` 的 `send_sg()` 由旧引的 `:174-175` 移到 `:190`，`caps()` 在 `:196`。新增的规范说明（探针现状、以及迁移检查清单里随之改写的两行）在下文标了 `2dd28758c`。下文已逐条按当前树重新核过行号；断言的行为描述保持一致。
+>>已复核**仍然正确**、因此未改的：`lwip_stack.c:634-635` / `:642-643`（owner 写入）、`:84` / `:87`（常量与变量）、`:612-615`（arm）、`:726-739`（记站点）、`:760-773`（断言函数）、`:767-768`（arm 前提前返回）、`:1613-1617` 与 `:1629-1632`（`/proc/net/stats` 两行）、`lwipopts.h:298-304`（宏映射）、`opt.h:227`（上游空宏）、`lock.h:95-98`（全局顺序不变式）、`net_lane.c:66`（lane 队列预算断言）。当前 `driver_class.h` 的 `send_sg()` 在 `:201-202`，`caps()` 在 `:207`。新增的规范说明（探针现状、以及迁移检查清单里随之改写的两行）在下文标了 `2dd28758c`。下文已逐条按当前树重新核过行号；断言的行为描述保持一致。
 
 ## 范围与目标
 
@@ -166,7 +166,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有 socket 锁的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
-`089a2055c` 给 `net_dev_ops_t` 加了可选的 `send_sg()`（`driver_class.h:190`）与`caps()`（`:196`）。它在 `a20_lwip_linkoutput()` 里与原来的线性 `send()` **同一个临界区**、同一个设备锁下二选一（`lwip_stack.c:388-402`），所以不引入新的锁序；没实现`send_sg` 的驱动走同函数的原线性拷贝分支（`lwip_stack.c:403-411`），逐字节不变。
+`089a2055c` 给 `net_dev_ops_t` 加了可选的 `send_sg()`（`driver_class.h:201`）与`caps()`（`:207`）。它在 `a20_lwip_linkoutput()` 里与原来的线性 `send()` **同一个临界区**、同一个设备锁下二选一（`lwip_stack.c:388-402`），所以不引入新的锁序；没实现`send_sg` 的驱动走同函数的原线性拷贝分支（`lwip_stack.c:403-411`），逐字节不变。
 
 **但它不是零拷贝，这一点不能含糊**：命中 SG 分支的前提是 `p->next == NULL`（`lwip_stack.c:388`，单段 pbuf），而且帧仍然先 `pbuf_copy_partial()` 进`st->tx_frame`——因为 netfilter 的 output hook 是**对调用方手里那块帧的原地改写**（NAT），它拿的是可写指针，而 pbuf payload 是别的持有者也在看的池内存，就地 SNAT 会写坏整块池。所以 SG 分支给驱动的是**描述符而不是 lwIP 的 pbuf**（省掉驱动内部再拷一次），代价是仍然要从 `st->tx_frame` 读。回环 netif 走不到这个函数（`netif_loop_output()` 绕过 linkoutput）。
 

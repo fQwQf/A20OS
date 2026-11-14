@@ -518,6 +518,8 @@ void init_kthread(void) {
     if (!current_board || !current_board->defer_network_init)
         net_stack_attach_interfaces();
 
+    driver_runtime_selftest_runtime();
+
 #ifdef CONFIG_BSD_BOOTSTRAP_TEST
     extern void a20_bsd_bootstrap_test(void);
     a20_bsd_bootstrap_test();

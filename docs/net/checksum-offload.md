@@ -67,7 +67,7 @@ TCP 这一行是本次调查最要紧的发现：**打开 `LWIP_CHECKSUM_CTRL_PE
 |---|---|---|
 | 打开 per-netif 校验和控制 | `opt.h:2371-2373` 或 `lwipopts.h` 定义 `LWIP_CHECKSUM_CTRL_PER_NETIF=1` | **改上游文件**（opt.h 是上游的；也可以只在本树 `lwipopts.h` 里定义，不动上游，但那样就不是"分歧"而是"配置"——见 §3） |
 | lwIP 在 `netif->linkoutput` 之前把 L4 校验和降级成伪首部部分和 | `src/core/tcp_out.c:1587-1596`（TCP）、`src/core/udp.c:942-960`（UDP） | **改上游文件**：TCP 那处没有任何 `IF__NETIF_CHECKSUM_ENABLED` 包裹，必须新增 |
-| 一个把 `csum_start` / `csum_offset` 从栈传给驱动的通道 | `net_dev_ops_t::send` / `send_sg`（`driver_class.h:167`、`:190`）目前只有 `(dev, pkt, len)` | **改驱动 ABI**：要么给 `net_iovec_t` 加头字段并升 `A20_DRIVER_ABI`，要么加一个 `send_offload()` 回调 |
+| 一个把 `csum_start` / `csum_offset` 从栈传给驱动的通道 | `net_dev_ops_t::send` / `send_sg`（`driver_class.h:178`、`:201`）目前只有 `(dev, pkt, len)` | 新增带逐帧元数据的独立原生 TX 协议可保留旧表；若改变 `net_iovec_t` 或 primary net 表布局，仍须升模块 ABI |
 | 驱动据此填 `hdr.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM`、`gso_type`、`csum_start`、`csum_offset` | `kernel/drivers/net/virtio_net.c:803-810` | 本树内 |
 | netif 上置 `NETIF_CHECKSUM_GEN_IP/UDP/TCP` | `kernel/net/backends/lwip/lwip_stack.c` 建 netif 处 | 本树内 |
 
@@ -86,7 +86,7 @@ TCP 这一行是本次调查最要紧的发现：**打开 `LWIP_CHECKSUM_CTRL_PE
 2. **NAT 与发送卸载互斥。** `netfilter_rewrite.c` 的 `netfilter_set_addr` / `netfilter_set_port` 对 L4 校验和做**增量修正**（改地址/端口后按 one's complement 折叠）：同文件中的 `netfilter_csum_delta()`计算差量，`netfilter_fix_l4()` 修正 L4 地址校验和，`netfilter_set_port()` 修正端口校验和。若校验和字段此时是"部分和"而不是完整校验和，增量算出来的值没有意义——NAT 表里的连接全部发出去就是错包。启用发送卸载必须同时决定：NAT 之后由谁补完校验和（设备？栈？还是禁止带 NAT 的 netif 卸载？）。
 3. **TCP 路径不会被开关关住。** 见 §1.2：`tcp_out.c:1587-1596` 无条件写完整校验和。只打开 `LWIP_CHECKSUM_CTRL_PER_NETIF` 会得到"UDP 卸载了、TCP 没卸载"的半吊子状态，比全不卸载更难排查。
 4. **`CHECKSUM_CHECK_IP` 的语义会变。** `NETIF_CHECKSUM_CHECK_IP` 关掉后，`ip4.c:531-546` 不再验 IPv4 头校验和。IPv4 头校验和错误在真实网络上通常是丢包，但它同时是**分片重组与地址错误的第一道过滤**，关掉它等于把这条信息全部推给上层。
-5. **驱动 ABI 变动。** `send_offload` / `net_iovec_t` 加字段要升 `A20_DRIVER_ABI`（当前 2，`kernel/include/drivers/driver_descriptor.h:33`；追加字段的 ABI 约定写在 `driver_class.h:86-100`），所有已发布的 `.a20drv` 包都要重发。这不是驱动内部改动。
+5. **接口与 ABI。** 独立原生协议按 ID/version/实际大小发布，可新增逐帧 TX/RX 元数据而保留旧 primary 表；它仍要求 stack 与 provider 共同实现，不能只设置一个能力位。若直接改变 `net_iovec_t` 或既有 net 表布局，须提升模块 ABI 并重建对应包；当前 `A20_DRIVER_ABI` 为 12（`kernel/include/drivers/driver_descriptor.h:47`）。协议机制见[核心模型](../drivers/guide/core-model.md#原生协议组合能力而非扩大全局-vtable)。
 
 ## 4. 结论
 
