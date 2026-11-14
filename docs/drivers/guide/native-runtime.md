@@ -227,17 +227,21 @@ virtio-gpu 不再使用全局静态实例或 owner 槽。每次 probe 在选择�
 
 `drm_create_vfile_for(publication, &file)` 是内核 adapter 的显式构造接口：在 DISPLAY class access 内捕获这个 publication，并要求其驱动提供显式 remove；缺少停止契约返回 `-EOPNOTSUPP`，离线返回 `-ENODEV`，失败清空输出。`drm_open_vfile(&file)` 只在 open 时读取一次默认 publication；旧指针包装 `drm_create_vfile()` 仍以 NULL 表示错误。这些入口不新增用户 ABI 或模块导出。
 
-每个 DRM 文件固定一个 publication。同一 publication 的文件共享兼容 GEM handle/name、framebuffer、CRTC、EDID、virgl ID 和 vblank 状态，不同 publication 分区；同一 device 重新绑定也创建新命名空间。私有 namespace 列表是 class 的消费者状态，没有第二个设备发布入口。当前节点仍是 card0/renderD128 默认聚合入口，未实现多 GPU 节点枚举；同 publication 的 handle 仍是历史共享语义，不等于已经实现每文件 handle 所有权、DRM master/auth 或完整进程隔离。
+每个 DRM 文件固定一个 publication。同一 publication 的对象 ID、legacy name、CRTC、EDID、virgl ID 与 vblank 状态属于同一 namespace，不同 publication 分区；同一 device 重新绑定也创建新 namespace。每个 open file 独立持有 handle 集合与 framebuffer；数值 ID 在 namespace 内分配，但只有该文件拥有 handle 才能用于 GEM、mmap、PRIME 导出、virtgpu 操作和 ADDFB。猜中另一文件的 ID 返回 `-ENOENT`。dup/fork 共享同一 vfile，最后一个文件引用关闭才交还这些 owner。私有 namespace 是 class 的消费者状态，没有第二个设备发布入口；当前仍为 card0/renderD128 聚合入口，没有多 GPU 节点枚举。
 
 DRM ioctl/mmap 与需要设备访问的 dma-buf sync，显式携带栈上 `drm_call`，从文件或 GEM 的原始 publication 取得同一 device/ops。先等每设备操作 mutex，再取得 active class call，避免持租约排队阻塞退出。操作另持 CPU namespace 使用计数，直到解锁、唤醒及最终收尾结束，最后一个 dma-buf close 不能让 worker 提前释放 namespace。read/poll 只访问本文件事件，不持硬件租约睡眠；离线 observer 唤醒等待者，read 在排空已有事件后返回 `-ENODEV`，poll 报 HUP/ERR，并在连接等待队列后重查事件和离线条件以防丢失唤醒。
 
-PRIME dma-buf pin 固定原 GEM 和 CPU 存储；同 publication 导入沿用兼容 handle，不同 publication 返回 `-EXDEV`，没有隐式跨 GPU DMA attach。fd 引用解析和最终 put，以及导出文件的 fd 安装/失败 close，位于 GPU 操作作用域之外，不能在持 GPU A mutex 时触发 GPU B 的最后一次 close。持有 dma-buf 的 CPU VMO 映射可在设备离线后继续存在；sync/DRM 新操作不因此获得离线硬件访问权。
+PRIME dma-buf pin 固定原 GEM 和 CPU 存储；同 publication 导入为接收文件显式建立一个 handle owner，数值沿用对象 ID；同一文件重复导入幂等，不叠加隐形引用。不同 publication 返回 `-EXDEV`，没有隐式跨 GPU DMA attach。fd 引用解析和最终 put，以及导出文件的 fd 安装/失败 close，位于 GPU 操作作用域之外，不能在持 GPU A mutex 时触发 GPU B 的最后一次 close。持有 dma-buf 的 CPU VMO 映射可在设备离线后继续存在；sync/DRM 新操作不因此获得离线硬件访问权。
 
 resource/context 的所选 ID 在发命令前成为清理身份，未知完成不能解释为对象不存在或 ready。成功 resource_unref/ctx_destroy 才确认该对象不再被设备访问；非零结果或缺少在线 ops 将原对象和 VMO 放入每设备失败列表，保留身份重试，正数错误规范化为 `-EIO`。在线下一次操作或原生 worker 做一次重试，不忙循环；offline 不授权释放。停止凭据成立后，worker 不再调用旧驱动代码，清空显示/host 身份并释放无 pin 的 GEM 和失败 context；dma-buf pin 与普通 VMA 的 VMO 引用继续保留 CPU 存储。无文件、操作、GEM 或失败清理对象时，才移除离线 namespace 并交还 publication 引用。
 
-在线 namespace 保留兼容共享状态；全局 reaper 服务随内核运行。离线未确认停止或失败清理按 100 ms 延迟重试；已经停止但仍有文件/dma-buf 的 namespace 不持续轮询，最终 close 重新调度回收。该协议依赖驱动诚实履行 remove，不是硬件故障后的强制释放。
+正常 close 先移除该文件的 framebuffer，再交还全部 handle，最后处理 host context；不再把所有在线 GEM 保留到设备停止。`GEM_CLOSE`/`DESTROY_DUMB` 只撤销调用文件的 owner，其他导入文件、framebuffer、dma-buf pin 与普通 VMA 各自保留存储。失败 host 清理仍进入原有保留列表。停止凭据成立后，worker 可退休硬件对象和未被 dma-buf pin 保留的 GEM；离线文件的 handle 条目只保存 ID，不保存已退休 GEM 指针，最后 close 安全清空条目。在线 namespace 保留共享显示/缓存元数据；全局 reaper 服务随内核运行。离线未确认停止或失败清理按 100 ms 延迟重试；已经停止但仍有文件/dma-buf 的 namespace 不持续轮询，最终 close 重新调度回收。该协议依赖驱动诚实履行 remove，不是硬件故障后的强制释放。
 
-DRM 和 dma-buf mmap 复用 `mm_mmap_vmo_cap()`：只允许共享非空读写及可选 FIXED/NOREPLACE，拒绝 EXEC、private、未知 flags、溢出/越界和未对齐 offset，保留原生 errno 与创建权限 ceiling。DRM 假 offset 仍编码 handle，拒绝高位截断 alias，不是 GPUVM 或完整 mmap-offset 区间分配器。GEM_CREATE/CREATE_DUMB 输出复制失败撤销未交付 handle。PRIME 导入输出复制失败恢复原 handle 存活状态，不能凭空增加存储所有权。原生 VMA 自持 VMO，既有用户映射不需要在最终回收时进入驱动模块。
+DRM 和 dma-buf mmap 复用 `mm_mmap_vmo_cap()`：只允许共享非空读写及可选 FIXED/NOREPLACE，拒绝 EXEC、private、未知 flags、溢出/越界和未对齐 offset，保留原生 errno 与创建权限 ceiling。DRM 假 offset 仍编码 handle，拒绝高位截断 alias，不是 GPUVM 或完整 mmap-offset 区间分配器。GEM_CREATE/CREATE_DUMB 输出复制失败撤销未交付 handle。PRIME/GEM_OPEN/GETFB 导入或重建 handle 时，分配失败不安装引用，输出复制失败仅撤销本次新增 owner，已有 owner 保持。原生 VMA 自持 VMO，既有用户映射不需要在最终回收时进入驱动模块。
+
+framebuffer 归创建文件所有。RMFB/SETCRTC/PAGE_FLIP 拒绝另一文件的 framebuffer；owner 即使先 GEM_CLOSE，也可通过 framebuffer 自持引用继续呈现。GETFB/GETFB2 可为 framebuffer owner 重建 handle；其他文件只查询元数据，不获得新 backing 权限，除非已经显式导入同一 GEM。查询失败回滚新引用。未经完整仲裁的 `is_master` 标志不授予这种访问。
+
+GEM_FLINK/GEM_OPEN 作为 DRM legacy 显式共享入口保留在 adapter：name 由内核分配、重复 FLINK 稳定，不能用输入 name 覆盖其他对象；最后一个 handle owner 退出时撤销 name，name 本身不保留 backing。它不是原生能力句柄，也不提供保密共享；新原生机制继续使用 VMO/类型化对象。当前尚缺完整 DRM master/auth、DMA-BUF 只读权限传播、命令流验证、预算及厂商请求生命周期，不能将本轮 handle 所有权描述为完整进程/GPU 隔离。
 
 这些消费者更改不扩展公开布局，当前模块 ABI 为 12，不实现厂商 BO/VRAM、驻留/预算、GPUVM、通用 job scheduler、DRM 同步 UAPI、完整模块卸载或实体 GPU 加速。fbdev open 仍按操作选择默认设备，旧 get_fb 持久物理视图仍借用存储。
 
@@ -626,7 +630,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
 2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，基于显式 PCI 集合占用和 IVMD 约束补齐全部 alias peer 的停止/归属协调、硬件 PTE/Unity/Exclusion 策略，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
-3. GPU 每设备实例、BO 驻留/固定、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系。
+3. 在已有每设备实例和每文件 adapter 所有权上实现 BO 驻留/预算、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系；补齐 master/auth 和共享访问权。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
 以上是待实现工作，不能以头文件预留或本阶段测试代替实现证据。
@@ -954,3 +958,15 @@ GPU access 主机夹具执行生产核心/class/能力 helper，以及 simplefb�
 另串行运行最终双 VirtIO 设备实例、generic 模块双核显示、embedded stop/DRM reaper 和 RISC-V PRIME 用户态门禁。真实两个 VirtIO 2D 设备的原生 RENDER 与实际 get_features 协商位一致，且仍保留独立 stop/rebind/旧 VMA；generic ABI 12 包实际加载并完成 DRM_SYSFS、resident framebuffer fork 和 videoplay 10 帧；PRIME 仍通过 shared mapping/SCM_RIGHTS/export lifetime/80 exports/sync-file。成功日志在 `.kernel-build/gpu-caps-review/guest-caps-serial.log` 与 `guest-{instances,generic,stop,prime}-final-serial.log`。没有在 guest 中注入旧包、硬件停止超时或运行 virgl/厂商 GPU 加速。
 
 十四篇文档仅将本轮内容投影到 canonical 路径，保留共享 docs/zh 迁移及其他改动。工作区引用检查通过 540 条；导航仍是既有 7 篇未编目文档，无新增链接/锚点错误。完整本地证据在 `.kernel-build/gpu-caps-review/`。本轮关闭默认策略的旧表推断；通用 BO/GPUVM/job、完整权限/格式/队列限制、多 GPU 用户节点、显示拓扑/固件安全交接和厂商硬件仍需继续实现。
+
+### DRM 每文件 handle 与 framebuffer 所有权验证（2026-11-14）
+
+GEM 的对象 ID 仍在每 publication 内分配，每文件 handle 集合只保存 ID，并按对象记录 handle_refs。所有 wire handle 查找要求调用文件拥有该条目；PRIME/GEM_OPEN 显式安装幂等 owner。正常最后 close 交还本文件 framebuffer、全部 handle 和 host context，失败硬件清理仍保留原对象；dup/fork 的共享 vfile 只在最后引用退出时清理。framebuffer 保留 backing，GEM_CLOSE 后仍可由 owner 呈现；GETFB/GETFB2 不向未持有者授予 backing，owner 重建 handle 的失败输出会回滚。legacy name 由 adapter 分配，最后一个 handle 退出后失效。模块 ABI 12 与公开结构均不变。
+
+`test_drm_binding` 共 39 个 unittest 方法，执行生产 DRM/core/class 与实际 anonfd 安装器，ASan/UBSan 覆盖未导入 handle 的 ioctl/mmap/导出/提交拒绝、重复导入、分配和输出失败回滚、framebuffer 保留和所有权、在线混合批次 close、共享 vfile、VMA/导出 pin 保留、最后 handle 的 name 撤销、停止后 ID 条目及清理失败重试。VMO/PFA、MM、VFS、work 和调度边界仍为模型；VMO release 另断言不持 store mutex。初始化先预分配 handle 条目，避免成功创建 VMO 后因条目 OOM 而在 store 锁内销毁。12 个编译成功负控破坏上述所有权、正常 close、幂等/输出回滚、FB 权限/保留、name 退休或恢复该错误分配顺序，均被运行时断言拒绝；还原后隔离源码树通过 376 个不同驱动 unittest 方法。
+
+最终 check-firmware-model 通过 601 项及独立 1 项 sleep ABI，check-pc-drivers 通过 237 项；118 个 instance、32 个 component 的清单审计通过。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行 AArch64 guest。
+
+三项标准 guest 门禁最终完整通过：embedded 双核 stop/DRM reaper 门禁保留旧 VMA/重绑检查，并增加在线新文件不调用 GEM_CLOSE 而直接 close 后，真实 VMA 成为 VMO 唯一 owner 的断言；generic 模块双核显示保留 DRM_SYSFS、FBDEV_MAP/fork 与 videoplay 10 帧；RISC-V PRIME 新增两个独立 open 的未导入拒绝、显式共享、producer 正常 close 自动移除 FB/handle 与既有 VMA 保留，输出 `DRM_FILE: PASS ownership+close+framebuffer+prime+retained-vma`，并继续通过 SCM_RIGHTS、80 exports 和 sync-file。初次 PRIME guest 已输出成功标记，但门禁正则未转义加号，不能记为标准门禁通过；修复后重新执行目标，最终 exit 0。没有运行本轮 virgl 或厂商 GPU 渲染，也没有完成 master/auth、DMA-BUF 只读权限传播、命令流验证、预算或 GPUVM。
+
+十二篇文档同步所有权/限制，并修正总览中已过期的 driver_manager ABI 包含与 RISC-V 动态 IOMMU 描述。共享 docs/zh 迁移及其他修改保留；canonical 文档仅投影本轮变更。工作区 540 条、canonical 653 条行号引用检查通过；两侧导航均保留各自既有的 7 个未编目项，列表与本轮前完全一致。源码快照、负控及最终日志位于 `.kernel-build/drm-file-review/`。

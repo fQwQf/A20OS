@@ -15,6 +15,54 @@
 struct dumb { uint32_t height, width, bpp, flags, handle, pitch; uint64_t size; };
 struct map { uint32_t handle, pad; uint64_t offset; };
 struct prime { uint32_t handle, flags; int32_t fd; };
+struct fb { uint32_t id, width, height, pitch, bpp, depth, handle; };
+
+/* Independent opens share storage only after explicit import. Normal close
+ * releases handles and framebuffers; an existing VMA owns its VMO separately. */
+static int file_ownership(void)
+{
+    int a = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    int b = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    CHECK(a >= 0 && b >= 0);
+    struct dumb d = {32, 32, 32, 0, 0, 0, 0};
+    CHECK(ioctl(a, 0xc02064b2UL, &d) == 0);
+    struct map m = {d.handle, 0, 0};
+    CHECK(ioctl(a, 0xc01064b3UL, &m) == 0);
+    uint32_t *pixels = mmap(NULL, d.size, PROT_READ | PROT_WRITE, MAP_SHARED, a, m.offset);
+    CHECK(pixels != MAP_FAILED);
+    pixels[0] = 0xa20f11e;
+    errno = 0;
+    CHECK(ioctl(b, 0xc01064b3UL, &m) == -1 && errno == ENOENT);
+    errno = 0;
+    CHECK(mmap(NULL, d.size, PROT_READ, MAP_SHARED, b, m.offset) == MAP_FAILED && errno == ENOENT);
+    struct { uint32_t handle, pad; } close_gem = {d.handle, 0};
+    errno = 0;
+    CHECK(ioctl(b, 0x40086409UL, &close_gem) == -1 && errno == ENOENT);
+    struct fb f = {0, d.width, d.height, d.pitch, 32, 24, d.handle};
+    CHECK(ioctl(a, 0xc01c64aeUL, &f) == 0);
+    struct fb info = {.id = f.id, .handle = 99};
+    CHECK(ioctl(b, 0xc01c64adUL, &info) == 0 && info.handle == 0 && info.width == d.width);
+    errno = 0;
+    CHECK(ioctl(b, 0xc00464afUL, &f.id) == -1 && errno == ENOENT);
+    struct prime p = {d.handle, O_RDWR | O_CLOEXEC, -1};
+    CHECK(ioctl(a, 0xc00c642dUL, &p) == 0);
+    struct prime imported = {0, 0, p.fd};
+    CHECK(ioctl(b, 0xc00c642eUL, &imported) == 0 && imported.handle == d.handle);
+    CHECK(ioctl(b, 0xc00c642eUL, &imported) == 0);
+    CHECK(close(a) == 0 && close(p.fd) == 0); /* no explicit GEM_CLOSE/RMFB */
+    info.id = f.id;
+    errno = 0;
+    CHECK(ioctl(b, 0xc01c64adUL, &info) == -1 && errno == ENOENT);
+    CHECK(ioctl(b, 0xc01064b3UL, &m) == 0);
+    uint32_t *shared = mmap(NULL, d.size, PROT_READ | PROT_WRITE, MAP_SHARED, b, m.offset);
+    CHECK(shared != MAP_FAILED && shared[0] == pixels[0]);
+    CHECK(close(b) == 0);
+    shared[1] = 0xbac001;
+    CHECK(pixels[1] == shared[1]);
+    CHECK(munmap(shared, d.size) == 0 && munmap(pixels, d.size) == 0);
+    puts("DRM_FILE: PASS ownership+close+framebuffer+prime+retained-vma");
+    return 0;
+}
 
 static int transfer_fd(int sock, int fd)
 {
@@ -66,6 +114,7 @@ static int consume(int sock, size_t size)
 
 int main(void)
 {
+    CHECK(file_ownership() == 0);
     int drm = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
     CHECK(drm >= 0);
     struct dumb b = {64, 64, 32, 0, 0, 0, 0};

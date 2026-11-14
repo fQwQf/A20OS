@@ -38,6 +38,8 @@ static struct mutex_back *mutexes;
 static pthread_mutex_t mutex_map=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local mutex_t *observed_mutex;
 static _Thread_local unsigned observed_depth;
+static _Thread_local mutex_t *observed_store;
+static _Thread_local unsigned store_depth;
 static int close_import_fd;
 static struct mutex_back *get_mutex(mutex_t *m){
  assert(!pthread_mutex_lock(&mutex_map));struct mutex_back *b=mutexes;
@@ -46,8 +48,8 @@ static struct mutex_back *get_mutex(mutex_t *m){
  assert(!pthread_mutex_unlock(&mutex_map));return b;
 }
 void mutex_init(mutex_t *m){(void)get_mutex(m);}
-void mutex_lock(mutex_t *m){assert(!pthread_mutex_lock(&get_mutex(m)->native));if(m==observed_mutex)observed_depth++;}
-void mutex_unlock(mutex_t *m){if(m==observed_mutex){assert(observed_depth);observed_depth--;}assert(!pthread_mutex_unlock(&get_mutex(m)->native));}
+void mutex_lock(mutex_t *m){assert(!pthread_mutex_lock(&get_mutex(m)->native));if(m==observed_mutex)observed_depth++;if(m==observed_store)store_depth++;}
+void mutex_unlock(mutex_t *m){if(m==observed_store){assert(store_depth);store_depth--;}if(m==observed_mutex){assert(observed_depth);observed_depth--;}assert(!pthread_mutex_unlock(&get_mutex(m)->native));}
 int mutex_trylock(mutex_t *m){return !pthread_mutex_trylock(&get_mutex(m)->native);}
 void wait_queue_init(wait_queue_t *q){memset(q,0,sizeof(*q));spin_init(&q->lock);}
 unsigned wait_queue_wake_all(wait_queue_t *q,uintptr_t key,proc_wake_reason_t r){(void)q;(void)key;(void)r;return 0;}
@@ -86,6 +88,7 @@ struct vmo *vmo_create(uint32_t type,uint64_t size,uint32_t options){struct vmo 
 void vmo_ref(struct vmo *v){if(v)refcount_inc(&v->refcount);}
 static int device_references_page(pfn_t);
 void vmo_release(struct vmo *v){
+ assert(!store_depth);
  if(!v||!refcount_dec_and_test(&v->refcount))return;
  for(uint32_t i=0;i<v->page_count;i++)if(v->pages[i]!=PFN_NONE){assert(page_used[v->pages[i]]==1&&!device_references_page(v->pages[i]));page_used[v->pages[i]]=0;page_live--;}
  kfree(v->pages);vmo_live--;kfree(v);
@@ -187,6 +190,120 @@ static void dispose_sample(struct sample *s){
 }
 static void dimensions(vfile_t *v,unsigned id){struct drm_mode_card_res res={0};assert(!v->ops->ioctl(v,DRM_IOCTL_MODE_GETRESOURCES,&res)&&res.max_width==16+id&&res.max_height==8+id);}
 
+static int map_handle(vfile_t *v,uint32_t h){struct drm_mode_map_dumb m={.handle=h};return v->ops->ioctl(v,DRM_IOCTL_MODE_MAP_DUMB,&m);}
+static unsigned file_handles(vfile_t *v){unsigned n=0;for(drm_handle_t *h=((drm_context_t *)v->priv)->handles;h;h=h->next)n++;return n;}
+static uint32_t add_fb(vfile_t *v,uint32_t h){struct drm_mode_fb_cmd f={.handle=h};assert(!v->ops->ioctl(v,DRM_IOCTL_MODE_ADDFB,&f)&&f.fb_id);return f.fb_id;}
+static void file_case(struct sample *s,vfile_t **first,const char *name){
+ vfile_t *a=*first,*b=open_sample(s);drm_device_t *d=((drm_context_t *)a->priv)->device;observed_store=&d->store_lock;
+ if(!strcmp(name,"file-create-oom")){
+  long heap=heap_live;for(int at=0;at<4;at++){fail_after=at;struct drm_mode_create_dumb c={.width=32,.height=32,.bpp=32};assert(a->ops->ioctl(a,DRM_IOCTL_MODE_CREATE_DUMB,&c)==-ENOMEM);fail_after=-1;assert(!file_handles(a)&&!vmo_live&&heap_live==heap);}
+ }else if(!strcmp(name,"file-close-failure")){
+  struct drm_virtgpu_resource_create c=resource(a,0);a->ops->ioctl(a,DRM_IOCTL_MODE_ADDFB,&(struct drm_mode_fb_cmd){.handle=c.bo_handle});
+  s->unref_error=-ETIMEDOUT;vfs_put_file(a);*first=NULL;assert(d->retained&&vmo_live==1&&page_live==1&&!d->fbs[0].used);
+  pump();assert(d->retained&&vmo_live==1);s->unref_error=0;pump();assert(!d->retained&&!vmo_live&&!page_live);
+ }else{
+  uint32_t h=dumb(a);assert(file_handles(a)==1&&!file_handles(b)&&vmo_live==1);
+  if(!strcmp(name,"file-deny")){
+   assert(map_handle(b,h)==-ENOENT);struct drm_gem_close close={h,0};assert(b->ops->ioctl(b,DRM_IOCTL_GEM_CLOSE,&close)==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_MODE_DESTROY_DUMB,&(struct drm_mode_destroy_dumb){h})==-ENOENT);
+   assert(b->ops->ioctl(b,A20_GPU_IOCTL_GEM_MMAP,&(struct drm_gem_mmap){.handle=h})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_VIRTGPU_MAP,&(struct drm_virtgpu_map){.handle=h})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_GEM_FLINK,&(struct drm_gem_flink){.handle=h})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_PRIME_HANDLE_TO_FD,&(struct drm_prime_handle){.handle=h})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_MODE_ADDFB,&(struct drm_mode_fb_cmd){.handle=h})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_MODE_ADDFB2,&(struct drm_mode_fb_cmd2){.handles={h}})==-ENOENT);
+   assert(b->ops->mmap(b,0,PAGE_SIZE,PROT_READ,MAP_SHARED,(uint64_t)h*PAGE_SIZE)==-ENOENT);
+   assert(!file_handles(b)&&!map_handle(a,h)&&vmo_live==1);
+   struct drm_virtgpu_resource_create c=resource(a,0);
+   assert(b->ops->ioctl(b,DRM_IOCTL_VIRTGPU_RESOURCE_INFO,&(struct drm_virtgpu_resource_info){.bo_handle=c.bo_handle})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_VIRTGPU_WAIT,&(struct drm_virtgpu_3d_wait){.handle=c.bo_handle})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST,&(struct drm_virtgpu_3d_transfer){.bo_handle=c.bo_handle,.box={.w=1,.h=1,.d=1}})==-ENOENT);
+   uint32_t cmd=0,handle=c.bo_handle;
+   assert(b->ops->ioctl(b,DRM_IOCTL_VIRTGPU_EXECBUFFER,&(struct drm_virtgpu_execbuffer){.size=sizeof(cmd),.command=(uintptr_t)&cmd,.num_bo_handles=1,.bo_handles=(uintptr_t)&handle})==-ENOENT&&!s->submits&&!s->transfers);
+  }else if(!strcmp(name,"file-close")){
+   vfile_get(a);vfs_put_file(a);assert(file_handles(a)==1&&vmo_live==1);
+   vfs_put_file(a);*first=NULL;assert(!vmo_live&&!page_live&&!file_handles(b));
+  }else if(!strcmp(name,"file-close-many")){
+   /* Close a mixed batch while the device stays online. A stop-time sweep
+    * cannot hide a missed file owner; only the import and VMA may remain. */
+   for(unsigned i=0;i<16;i++)add_fb(a,dumb(a));
+   struct drm_virtgpu_resource_create c=resource(a,0);
+   int fd=prime(a,h);struct drm_prime_handle imported={.fd=fd};
+   assert(!b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&imported));
+   static mm_struct_t mm;current_task.mm=&mm;
+   assert(a->ops->mmap(a,0,PAGE_SIZE,PROT_READ,MAP_SHARED,(uint64_t)c.bo_handle*PAGE_SIZE)>0);
+   assert(vmo_live==18&&file_handles(a)==18&&file_handles(b)==1);
+   vfs_put_file(a);*first=NULL;
+   assert(vmo_live==2&&!s->resource_live[c.res_handle]&&!d->retained&&!map_handle(b,h));
+   for(unsigned i=0;i<DRM_MAX_FBS;i++)assert(!d->fbs[i].used);
+   assert(!fdtable_close_current(fd));vfs_put_file(b);b=NULL;assert(vmo_live==1);
+   unmap_all();assert(!vmo_live&&!page_live);
+  }else if(!strcmp(name,"file-map-close")){
+   static mm_struct_t mm;current_task.mm=&mm;assert(a->ops->mmap(a,0,PAGE_SIZE,PROT_READ|PROT_WRITE,MAP_SHARED,(uint64_t)h*PAGE_SIZE)>0);
+   struct vmo *memory=maps[0].memory;pfn_t page;assert(!vmo_get_page_charged(memory,0,NULL,&page));host_ram[page*PAGE_SIZE]=0xa9;
+   vfs_put_file(a);*first=NULL;assert(vmo_live==1&&refcount_read(&memory->refcount)==1&&host_ram[page*PAGE_SIZE]==0xa9);unmap_all();assert(!vmo_live&&!page_live);
+  }else if(!strncmp(name,"file-import-",12)){
+   int fd=prime(a,h);drm_gem_t *gem=fds[fd]->priv;struct drm_prime_handle p={.fd=fd,.handle=99};
+   if(!strcmp(name,"file-import-oom")){fail_after=0;assert(b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p)==-ENOMEM);fail_after=-1;assert(!file_handles(b)&&gem->handle_refs==1&&p.handle==99);}
+   else if(!strcmp(name,"file-import-copyout")){copyout_fault=1;assert(b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p)==-EFAULT);copyout_fault=0;assert(!file_handles(b)&&gem->handle_refs==1);}
+   else{
+    assert(!b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p)&&p.handle==h&&gem->handle_refs==2&&file_handles(b)==1);
+    if(!strcmp(name,"file-import-idempotent")){
+     for(unsigned i=0;i<4;i++)assert(!b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p));
+     copyout_fault=1;assert(b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p)==-EFAULT);copyout_fault=0;
+     assert(gem->handle_refs==2&&file_handles(b)==1);close_gem(b,h);assert(map_handle(b,h)==-ENOENT&&gem->handle_refs==1&&!file_handles(b));
+    }else{assert(!strcmp(name,"file-import-close"));vfs_put_file(a);*first=NULL;assert(gem->handle_refs==1&&!map_handle(b,h));}
+   }
+   assert(!fdtable_close_current(fd));
+   if(!*first){assert(vmo_live==1);vfs_put_file(b);b=NULL;assert(!vmo_live);}
+  }else if(!strcmp(name,"file-name-expiry")){
+   struct drm_gem_flink f={.handle=h};assert(!a->ops->ioctl(a,DRM_IOCTL_GEM_FLINK,&f));int fd=prime(a,h);
+   close_gem(a,h);assert(vmo_live==1&&!d->gem_name_count);
+   struct drm_gem_open o={.name=f.name};assert(b->ops->ioctl(b,DRM_IOCTL_GEM_OPEN,&o)==-ENOENT&&!file_handles(b));
+   assert(!fdtable_close_current(fd)&&!vmo_live);
+  }else if(!strncmp(name,"file-flink",10)){
+   struct drm_gem_flink f={.handle=h,.name=99};
+   if(!strcmp(name,"file-flink-rollback")){
+    copyout_fault=1;assert(a->ops->ioctl(a,DRM_IOCTL_GEM_FLINK,&f)==-EFAULT);copyout_fault=0;assert(!d->gem_name_count);
+   }
+   assert(!a->ops->ioctl(a,DRM_IOCTL_GEM_FLINK,&f)&&f.name&&f.name!=99&&d->gem_name_count==1);
+   uint32_t flink_name=f.name;f.name=123;assert(!a->ops->ioctl(a,DRM_IOCTL_GEM_FLINK,&f)&&f.name==flink_name&&d->gem_name_count==1);
+   struct drm_gem_open o={.name=flink_name};
+   if(!strcmp(name,"file-flink-rollback")){
+    fail_after=0;assert(b->ops->ioctl(b,DRM_IOCTL_GEM_OPEN,&o)==-ENOMEM);fail_after=-1;assert(!file_handles(b));
+    copyout_fault=1;assert(b->ops->ioctl(b,DRM_IOCTL_GEM_OPEN,&o)==-EFAULT);copyout_fault=0;assert(!file_handles(b));
+   }
+   assert(!b->ops->ioctl(b,DRM_IOCTL_GEM_OPEN,&o)&&o.handle==h&&o.size==PAGE_SIZE);
+   assert(!b->ops->ioctl(b,DRM_IOCTL_GEM_OPEN,&o)&&file_handles(b)==1);
+   vfs_put_file(a);*first=NULL;assert(!map_handle(b,h)&&vmo_live==1);vfs_put_file(b);b=NULL;assert(!vmo_live&&!d->gem_name_count);
+  }else if(!strcmp(name,"file-framebuffer")||!strcmp(name,"file-getfb-rollback")){
+   uint32_t fb=add_fb(a,h);close_gem(a,h);assert(!file_handles(a)&&vmo_live==1);
+   struct drm_mode_fb_cmd info={.fb_id=fb,.handle=99};struct drm_mode_fb_cmd2 info2={.fb_id=fb,.handles={99}};
+   assert(!b->ops->ioctl(b,DRM_IOCTL_MODE_GETFB,&info)&&!info.handle&&info.width==32);
+   assert(!b->ops->ioctl(b,DRM_IOCTL_MODE_GETFB2,&info2)&&!info2.handles[0]&&!file_handles(b));
+   assert(b->ops->ioctl(b,DRM_IOCTL_MODE_RMFB,&fb)==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_MODE_SETCRTC,&(struct drm_mode_crtc){.fb_id=fb})==-ENOENT);
+   assert(b->ops->ioctl(b,DRM_IOCTL_MODE_PAGE_FLIP,&(struct drm_mode_crtc_page_flip){.fb_id=fb})==-ENOENT);
+   if(!strcmp(name,"file-getfb-rollback")){
+    copyout_fault=1;assert(a->ops->ioctl(a,DRM_IOCTL_MODE_GETFB,&info)==-EFAULT&&!file_handles(a));assert(a->ops->ioctl(a,DRM_IOCTL_MODE_GETFB2,&info2)==-EFAULT&&!file_handles(a));copyout_fault=0;
+    fail_after=0;assert(a->ops->ioctl(a,DRM_IOCTL_MODE_GETFB,&info)==-ENOMEM);fail_after=-1;assert(!file_handles(a));
+   }
+   assert(!a->ops->ioctl(a,DRM_IOCTL_MODE_GETFB,&info)&&info.handle==h&&file_handles(a)==1);
+   assert(!a->ops->ioctl(a,DRM_IOCTL_MODE_GETFB2,&info2)&&info2.handles[0]==h&&file_handles(a)==1);
+   close_gem(a,h);
+   assert(!a->ops->ioctl(a,DRM_IOCTL_MODE_SETCRTC,&(struct drm_mode_crtc){.fb_id=fb})&&s->flushes==1);
+   assert(!a->ops->ioctl(a,DRM_IOCTL_MODE_PAGE_FLIP,&(struct drm_mode_crtc_page_flip){.fb_id=fb})&&s->flushes==2);
+   vfs_put_file(a);*first=NULL;assert(!vmo_live&&!d->fbs[0].used&&!d->crtc.fb_id);
+  }else if(!strcmp(name,"file-stop-entries")){
+   int fd=prime(a,h);struct drm_prime_handle p={.fd=fd};assert(!b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p));
+   assert(!driver_unregister(&s->driver));pump();assert(vmo_live==1&&file_handles(a)==1&&file_handles(b)==1);
+   vfs_put_file(a);*first=NULL;assert(vmo_live==1);vfs_put_file(b);b=NULL;assert(vmo_live==1);assert(!fdtable_close_current(fd));pump();assert(!vmo_live);
+  }else assert(0);
+ }
+ if(b)vfs_put_file(b);
+ assert(!store_depth);observed_store=NULL;
+}
+
 static struct sample *hook_sample;
 static void withdraw_hook(void){on_link=NULL;assert(!driver_unregister(&hook_sample->driver));}
 static void promote_hook(void){on_copy=NULL;gpu_device_unregister(&hook_sample->device);}
@@ -214,11 +331,12 @@ int main(int argc,char **argv){
    assert(heap_live==before+(g_drm_reaper_work?2:0));fa=open_sample(&a);
   }else{
    fa=open_sample(&a);
-   if(!strcmp(name,"binding")||!strcmp(name,"namespaces")||!strcmp(name,"prime")||!strcmp(name,"prime-boundaries")||!strcmp(name,"edid")){
+   if(!strncmp(name,"file-",5)){file_case(&a,&fa,name);}
+   else if(!strcmp(name,"binding")||!strcmp(name,"namespaces")||!strcmp(name,"prime")||!strcmp(name,"prime-boundaries")||!strcmp(name,"edid")){
     fa2=open_sample(&a);create_sample(&b,2);fb=open_sample(&b);assert(((drm_context_t *)fa->priv)->device==((drm_context_t *)fa2->priv)->device&&((drm_context_t *)fa->priv)->device!=((drm_context_t *)fb->priv)->device);
     gpu_device_unregister(&a.device);dimensions(fa,1);dimensions(fb,2);
     if(!strcmp(name,"binding")){hook_sample=&b;on_copy=promote_hook;dimensions(fa,1);assert(!on_copy);dimensions(fa2,1);}
-    if(!strcmp(name,"namespaces")){uint32_t ha=dumb(fa),hb=dumb(fb);assert(ha==hb);struct drm_mode_map_dumb m={.handle=ha};assert(!fa2->ops->ioctl(fa2,DRM_IOCTL_MODE_MAP_DUMB,&m));close_gem(fa,ha);assert(fa->ops->ioctl(fa,DRM_IOCTL_MODE_MAP_DUMB,&m)==-ENOENT);assert(!fb->ops->ioctl(fb,DRM_IOCTL_MODE_MAP_DUMB,&m));close_gem(fb,hb);}
+    if(!strcmp(name,"namespaces")){uint32_t ha=dumb(fa),hb=dumb(fb);assert(ha==hb);struct drm_mode_map_dumb m={.handle=ha};assert(fa2->ops->ioctl(fa2,DRM_IOCTL_MODE_MAP_DUMB,&m)==-ENOENT);close_gem(fa,ha);assert(fa->ops->ioctl(fa,DRM_IOCTL_MODE_MAP_DUMB,&m)==-ENOENT);assert(!fb->ops->ioctl(fb,DRM_IOCTL_MODE_MAP_DUMB,&m));close_gem(fb,hb);}
     if(!strcmp(name,"prime-boundaries")){
      uint32_t h=dumb(fa);int fd=prime(fa,h);struct drm_prime_handle imported={.fd=fd,.handle=99};
      observed_mutex=&((drm_context_t *)fb->priv)->device->gpu_lock;close_import_fd=1;
@@ -230,7 +348,7 @@ int main(int argc,char **argv){
      copyout_fault=1;assert(fa->ops->ioctl(fa,DRM_IOCTL_PRIME_HANDLE_TO_FD,&failed)==-EFAULT);copyout_fault=0;
      fd=prime(fa,h);close_gem(fa,h);imported=(struct drm_prime_handle){.fd=fd};
      copyout_fault=1;assert(fa2->ops->ioctl(fa2,DRM_IOCTL_PRIME_FD_TO_HANDLE,&imported)==-EFAULT);copyout_fault=0;
-     assert(!((drm_gem_t *)fds[fd]->priv)->dumb_live&&!fdtable_close_current(fd)&&!vmo_live&&!observed_depth);
+     assert(!((drm_gem_t *)fds[fd]->priv)->handle_refs&&!fdtable_close_current(fd)&&!vmo_live&&!observed_depth);
      observed_mutex=NULL;
     }
     if(!strcmp(name,"prime")){uint32_t h=dumb(fa);int fd=prime(fa,h);struct drm_prime_handle imported={.fd=fd};assert(!fa2->ops->ioctl(fa2,DRM_IOCTL_PRIME_FD_TO_HANDLE,&imported)&&imported.handle==h);imported.handle=99;assert(fb->ops->ioctl(fb,DRM_IOCTL_PRIME_FD_TO_HANDLE,&imported)==-EXDEV&&imported.handle==99);close_gem(fa,h);assert(!fdtable_close_current(fd));}

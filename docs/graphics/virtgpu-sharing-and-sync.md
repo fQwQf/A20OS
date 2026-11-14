@@ -8,9 +8,9 @@ native virtgpu 传输路径现在双向都发送固定的 virtio 线格式负载
 
 PRIME 导出持有活跃的 GEM 对象并映射同一个 VMO，取代了 memfd 快照与 64 项描述符表。`dup` 与 `SCM_RIGHTS` 保留该文件及其对象 pin。导入的缓冲在导出方 `GEM_CLOSE` 与 fd close 之后仍然存活。最后一个描述符关闭之后映射仍保留 VMO。导出标志使用 Linux 的 `DRM_CLOEXEC=O_CLOEXEC` 与 `DRM_RDWR=O_RDWR`。
 
-`DMA_BUF_IOCTL_SYNC` 在 START READ 时下载 host 数据，在 END WRITE 时上传 CPU 数据。该同步后端支持 sync-file 的导出/导入与 poll。CPU 同步目前覆盖线性的 level-zero 资源；压缩格式、mip 链与数组布局需要进一步的布局跟踪。GEM 句柄仍是设备级：per-open 归属与命名空间记账属于另外的工作。不导入任意外部 DMA-BUF exporter。
+`DMA_BUF_IOCTL_SYNC` 在 START READ 时下载 host 数据，在 END WRITE 时上传 CPU 数据。该同步后端支持 sync-file 的导出/导入与 poll。CPU 同步目前覆盖线性的 level-zero 资源；压缩格式、mip 链与数组布局需要进一步的布局跟踪。GEM 的 ID 在每 publication 内分配，handle owner 属于每个 open file；通过 PRIME/GEM_OPEN 才能建立另一文件的引用，同一文件重复导入幂等。正常最后 close 回收本文件 GEM/FB，保留其他文件、dma-buf 与 VMA 的独立存储引用。完整 master/auth、只读共享权限与命令流隔离仍未实现。不导入任意外部 DMA-BUF exporter。
 
-设备 mmap 分派使用 `vfile_ops_t.mmap`，由 DRM 与 DMA-BUF 文件共用；syscall 层不再识别 DRM 文件。驱动 ABI 3 拒绝为旧 GPU 与文件操作表构建的模块，需用当前内核重新构建模块。
+设备 mmap 分派使用 `vfile_ops_t.mmap`，由 DRM 与 DMA-BUF 文件共用；syscall 层不再识别 DRM 文件。当前模块 ABI 为 12，旧模块必须重建；本轮私有 handle/FB owner 不改变公开布局。
 
 ## 覆盖范围
 
@@ -24,6 +24,6 @@ PRIME 导出持有活跃的 GEM 对象并映射同一个 VMO，取代了 memfd �
 - 双向共享 mmap 写入、80 个并发导出、跨 fork 的 `SCM_RIGHTS`、导入方先于导出方拆除、fd 关闭后映射仍可用；
 - sync-file merge、details、deadline 提示与非法参数拒绝。
 
-`make smoke-drm-prime` 是可复用的非 virgl 共享回归门禁。ARM32 与 AArch64 内核构建以及七项架构边界断言也在覆盖范围内。这些是接口测试；Minecraft 的实际可玩性另行验证。
+`make smoke-drm-prime` 是可复用的非 virgl 共享回归门禁；同时要求 `DRM_FILE` 标记，覆盖两个独立 open 的未导入拒绝、PRIME 导入、直接 close 自动移除 framebuffer/handle 与 VMA 保留，不把既有 host virgl 历史记录当成本轮硬件渲染证据。ARM32 与 AArch64 内核构建以及七项架构边界断言也在覆盖范围内。这些是接口测试；Minecraft 的实际可玩性另行验证。
 
 大请求、后端挂载与 fenced 提交现在使用与短命令相同的「中断优先」等待策略：订阅之后重新检查 used index，为启动阶段或 IRQ 注册失败保留有界的 poll/yield。这消除了运行时任务进入睡眠之前固定的 65,536 次 cache 同步轮询。
