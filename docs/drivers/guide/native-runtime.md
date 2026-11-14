@@ -8,7 +8,7 @@
 |---|---|
 | 设备核心 | device/driver/bus/class、绑定、引用、依赖、资源回收、下线顺序 |
 | 通用运行时 | DMA mapping/domain、IRQ 排空、工作队列、等待与原生 fence、固件读取 |
-| GPU 子系统 | 后续实现 BO、GPUVM、上下文、任务队列、显示设备、同步 UAPI |
+| GPU 子系统 | 已有 DISPLAY 默认选择与带引用的调用入口；后续实现每设备 BO、GPUVM、上下文、任务队列和同步 UAPI |
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
 
@@ -130,6 +130,31 @@ EP0 MPS、descriptor/configuration、解析/分配或部分 interface 发布失�
 扫描总在新枚举前重试 pending 清理；HCD 注销也可重试。slot 已停止但 interface remove 失败时保留该阶段，之后不重复 abort。普通重新连接也必须等待旧清理完成。清理重试不增加枚举次数，也不清零失败预算；扫描对同一次连接最多尝试三次枚举，只有观察到物理断开才重新计数。`port_state` 的计数/阶段位是核心私有实现，HCD 不解释它。
 
 这些变更保持公开结构布局和 ABI 10。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
+
+## GPU publication 与作用域调用
+
+GPU 的默认选择是既有 DISPLAY class 上的策略，不另建发布注册表。`gpu_device_register/unregister()` 在原生 lifecycle 协调域内更新选择；普通 probe 仍同步执行。选择持有一个 device 元数据引用，替换/撤销后在选择 spinlock 外交还。它不持有绑定、模块或硬件使用权。当前优先级仍是旧 DRM 所需的完整 virgl transport 函数集合是否存在：在 probe 所有权或有效 class 调用内计算并缓存；不在选择锁下解引用旧驱动表。这不是通用 GPU 能力协商，也不表示设备已协商出 3D 特性。
+
+`gpu_device_default_get()` 在锁内临时保留所选 device，锁外取得其 class publication 引用，再交还临时 device 引用；调用者最终 `class_device_put()`。返回值可能已经 offline；probe 尚未发布 class、publication 已撤销或无选择时返回 NULL。该读取入口不等待 lifecycle mutex，避免与持该锁排空 active call 的退出路径互相等待。重新选择遍历在线 DISPLAY publication，不受旧的 16 项限制。共享 class rank 枚举先过滤 offline 再计序号，get_by_type/get_nth 不会因仍在 quiesce/drain 的离线项而提前返回 NULL；get_by_index 仍是独立的稳定 publication index 查询，离线 index 不会转指其他 publication。
+
+`gpu_device_access_begin(publication, &access)` 要求调用者持有 publication 引用。它另取一份 class 引用，再经 `class_device_ops_begin(..., DEV_CLASS_DISPLAY, ...)` 准入；成功后 `access.device` 和 `access.ops` 属于同一个绑定，直到 `gpu_device_access_end()`。调用者可在 begin 成功后交还原引用。`gpu_device_default_begin(&access)` 合并默认选择与准入。有效输出参数在失败时清零；无在线 DISPLAY publication 返回 `-ENODEV`，NULL 输出返回 `-EINVAL`。旧 publication 不会跟随同一 device 的新绑定，也不会跟随默认 GPU promotion。
+
+```c
+struct gpu_device_access access;
+int ret = gpu_device_default_begin(&access);
+if (ret) return ret;
+ret = access.ops->get_info
+    ? access.ops->get_info(access.device, &width, &height, &bpp)
+    : -EOPNOTSUPP;
+gpu_device_access_end(&access);
+return ret;
+```
+
+这些入口用于任务上下文。成功 begin 必须在所有返回路径配对 end；不能复制 live access 或覆盖尚未 end 的输出，也不能等待需要该 active call 排空的生命周期修改。end 先清零输出，再结束 active call、交还独立 class 引用，允许最后 put 在锁外回收 publication/device；NULL 或已 end 的对象可再次 end。active call 保护调用期间的绑定、实例和操作表，quiesce 仍可封闭硬件提交并使调用报错；它不保证硬件持续运行，不提供 DMA 停止证明，也不保留方法返回的 framebuffer 存储。
+
+fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属性的一次内容生成，已捕获同一 publication/device/ops 并在结束时交还。sysfs 只保存复制后的内容，不在读取期间借用已结束的驱动调用；不同 open 的属性仍可观察到不同默认 GPU。fbdev 文件尚不固定到某设备，下一次操作可能选择新默认设备。mmap 安装返回后 active call 已结束，现有 VMA 仍映射裸物理地址，尚无跨解绑的 framebuffer/BO 存储租约。
+
+`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。现有 DRM/GEM/virgl 路径仍有该旧入口和全局对象表，尚未整体迁移；需要每设备 BO/context/request/fence、文件绑定及映射退役协议。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项新函数已导出，既有 device/driver/vtable 布局与 ABI 10 不变。
 
 ## 资源占用与受管映射
 
@@ -722,3 +747,16 @@ MM 提交 `3c6f93fcc`，驱动/首个使用者提交 `1f981757b`。VMO 生命周
 `tools/a20 test smoke-driver-iommu-native-riscv64` 在实际 guest 匹配全部 6 个要求标记，并另有通用 VMO resize PASS。新增 `DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1` 验证真实原生 VMO 的页 1–2 导入 IOVA，先销毁源 VMO，再由 EDU 跨页读入/写回，核对模式及未传输区域，确认 DMA/BME 停止后解除映射。原高阶 buffer DMA、不连续页、只读权限、unmap 后 fault/watch、requester 归属与 detach 检查继续通过。这里使用实际 MM/Rust/PFA 和硬件翻译模拟器，不等于在实体设备注入了停止/失效超时。
 
 这些接口只提供稳定 RAM 帧和通用映射所有权，不建立 BO 驻留、cgroup charge 转移、VMO extent/CPU 关联租约、GPUVM、进程 context 或任务调度。现有 DRM/GEM/virgl 路径没有因此自动改用原生 domain；未来 GPU 提交须另保留请求/fence、访问权和预算，协调源变动及硬件停止。ABI 10 不变。文档引用检查通过 540 条，导航仍为工作区迁移既有 7 个未索引页面。实际 `docs/zh` 迁移及其他改动保留；本轮本地证据在 `.kernel-build/vmo-dma-review/`，RISC-V 完整 guest 在 `iommu-guest.log`，双 CPU guest 在 `usb-bulk-guest.log` 与 `usb-hub-guest.log`。
+
+
+### GPU publication 与消费者调用验证（2026-11-14）
+
+代码提交 `d1518f841`。GPU 默认策略保留 device 元数据，新增四个 class publication/access 导出；fbdev ioctl、mmap 安装、后台刷新及 sysfs GPU 内容生成使用一次同绑定的 device/const ops。共享 class rank 枚举修正为先过滤 offline 再计序号，稳定 publication index 查询保持独立。没有增加第二套设备模型，既有 device/driver/vtable 布局及 ABI 10 不变。
+
+新增 12 项主机方法运行生产 core/class/GPU 策略和提取的生产 framebuffer/sysfs 函数，使用 pthread 与 ASan/UBSan；加既有 class binding 定向回归共 13 项通过。覆盖选择与 class lookup 间的 device pin、重复注册/提升/最终回收、旧 publication 不跟随同 device 重绑、解绑等候 active call 且离线 reader 不等 lifecycle、生命周期修改后的成员复查、丢失 provider 撤销时的元数据存活和旧 ops 不再读取，以及 promotion 中刷新/属性的同绑定一致性。21 设备用例包含一个仍在 registry 的 offline publication，并特意把末项设为 2D，避免 unpublish 的末项交换掩盖超过 16 项的 live 3D fallback。host 中 3D 函数只作存在性占位、从不执行；PCI/usercopy/锁及硬件为模型，mmap 仅执行 NOMMU 分支。
+
+19 个负控分别破坏 offline rank 过滤、默认元数据 pin、lookup 临时 pin、独立 publication 引用、旧 publication 准入、active-call 结束、最后引用交还、reader 不等 lifecycle、策略修改协调、缓存能力读取、16 项上限、候选 owning ref 转移、ioctl/mmap 配对 end、刷新设备一致性、sysfs end/设备一致性/提前退出，以及缺失方法检查，均触发断言或 ASan/UBSan/泄漏检查；编译失败不计入。恢复后最终隔离导出树通过 268 个不同 unittest 方法，13 个源码/测试配置路径逐一与提交核对。`check-firmware-model` 通过 497 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 133 项；115 个 instance、32 个 driver component 与 195 个 smoke case 表审计通过。
+
+新增 `make smoke-gpu-access-x86_64` 固定 generic 配置，实际双 CPU 2/2 online，加载真实 virtio-gpu 模块并匹配 `DRM_SYSFS: PASS` 与 `videoplay: presented 10 frames`，覆盖 MMU 的 framebuffer 安装/ioctl/2D 刷新。双 CPU embedded hub guest 匹配 `DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1`，保留旧 endpoint/controller 退出与重新枚举及 VMO/buffer runtime 标记。假 GPU 总线仅匹配本地 driver 身份；最初通配匹配导致其他驱动抢占的失败尝试已修正，不计为成功证据。最终两次 guest 均在共享 QEMU 资源串行协调下运行，成功日志保存在 `.kernel-build/gpu-access-review/gpu-guest.log` 与 `hub-guest.log`。
+
+这些结果证明调用准入、引用和现有 2D 消费者回归，不是图像视觉核验、实体 GPU 加速或设备停止/复位证明。fbdev mmap 返回后仍是裸物理 VMA，文件不固定 GPU；DRM/GEM/virgl 全局对象与旧借用 getter 尚未整体迁移。每设备 BO/context、GPUVM、请求/fence 及映射退役仍为后续工作。文档引用检查通过 540 条；导航仍是迁移工作区既有 7 个未索引页面。文档迁移及其他会话修改保留，本轮完整本地证据位于 `.kernel-build/gpu-access-review/`。

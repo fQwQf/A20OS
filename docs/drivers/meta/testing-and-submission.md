@@ -133,6 +133,10 @@ VMO 导入运行 `python3 -m unittest tools.tests.test_driver_dma_vmo -v`，执�
 
 通用 runtime 新增真实 VMO 的缺页拒绝、物化、direct domain 的页 1–2 映射、resize 到 0/销毁源、最后 unmap，要求 `DRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1`，USB hub/bulk 门禁同时检查。RISC-V IOMMU 实例还执行真实 VMO 销毁后的 EDU 跨页 DMA，要求 `DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1`；保留原有高阶 buffer、不连续页、权限、fault/watch 和 detach 验证。实体停止/失效超时仍需独立证据。
 
+GPU publication/消费者变更运行 `python3 -m unittest tools.tests.test_gpu_access -v`，已纳入 `check-firmware-model` 与 `check-pc-drivers`。12 项方法运行生产 core/class/GPU 策略及提取的生产 fbdev/sysfs 函数，使用 pthread 与 ASan/UBSan；覆盖选择/lookup 间的元数据 pin、同 device 重绑的旧 publication、active-call drain 与不等待 lifecycle 的离线读取、超过 16 项且包含离线项的重新选择、promotion 中刷新/属性的一致 device/ops，以及错误/提前返回的引用平衡。3D 函数指针仅作存在性占位，绝不执行；不记为 3D 渲染。host framebuffer mmap 运行 NOMMU 分支，PCI/usercopy/锁与硬件使用替代后端。
+
+`make smoke-gpu-access-x86_64` 使用双 CPU generic 内核、真实 `.a20drv` 与 virtio-gpu 2D，执行 `drm_sysfs_test` 和 `videoplay --test 32 32 1`，要求 `DRM_SYSFS: PASS` 与 `videoplay: presented 10 frames`；这是 MMU 的 framebuffer 安装/ioctl/刷新回归，不是图像视觉核验或硬件 3D 加速。embedded hub/bulk 的 runtime 另要求 `DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1`，验证实际 class publication 引用与离线，不把假 GPU 当成真实 framebuffer。fixture 总线按本地 driver 身份匹配，不能通配抢占其他驱动。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

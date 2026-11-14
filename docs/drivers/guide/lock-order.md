@@ -214,9 +214,15 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 `vmsvga_device_t.lock`（`svga->lock`）保护 command buffer header、command submission 和 update 序列，没有局部顺序。`flush` 在锁内提交并轮询短 command completion；不得在此锁下执行 framebuffer 映射、VFS 或用户 copy。
 
+### GPU 默认选择与 class 调用
+
+默认选择修改在 lifecycle 协调域内完成；`g_gpu_lock` 只保护所选 device 元数据引用与缓存的旧 virgl transport 能力。锁内允许 device_get 保留快照，不能解引用可撤销的驱动 ops、调用驱动、分配、日志或做最后 put。被替换 device 在锁外交还。重新选择在 lifecycle 域内枚举在线 class，使用短 active call 检查候选 ops。
+
+默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序没有给持久 VMA 或现有 DRM 全局对象建立存储租约。
+
 ### DRM/KMS/virtio-gpu 3D
 
-`g_drm_store.lock`（`drm.c`）保护全部 device-global 状态：GEM 表`g_gems[]`、framebuffer 表 `g_fbs[]`、CRTC 绑定 `g_crtc`、GEM name 表、 PRIME 表、virgl 资源/上下文 id 计数器，以及 EDID 的一次性缓存。这些表按设计是设备全局的——一个 open 建立的 buffer 必须对另一个 open 可见——所以 wlroots backend 与 renderD128 上的 GBM client 会并发访问它们。
+`g_drm_store.lock`（`drm.c`）保护全部 device-global 状态：GEM 表`g_gems[]`、framebuffer 表 `g_fbs[]`、CRTC 绑定 `g_crtc`、GEM name 表、 PRIME 表、virgl 资源/上下文 id 计数器，以及 EDID 的一次性缓存。这些表当前是单一全局集合，尚未按 GPU 绑定分区；一个 open 建立的 buffer 对另一个 open 可见，因此 wlroots backend 与 renderD128 上的 GBM client 会并发访问它们。
 
 局部顺序：
 
