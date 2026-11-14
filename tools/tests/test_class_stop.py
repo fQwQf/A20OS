@@ -15,7 +15,7 @@ class ClassStop(unittest.TestCase):
             p=work/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body)
         cls.binary=work/'test'
         subprocess.run(['cc','-std=gnu11','-pthread','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-fsanitize=address,undefined','-fno-sanitize-recover=all',
-            '-I'+str(work),'-I'+str(ROOT/'kernel/include'),'-I'+str(ROOT/'kernel'),str(ROOT/'tools/tests/class_stop_host.c'),str(ROOT/'kernel/drivers/core/driver_core.c'),str(ROOT/'kernel/drivers/core/driver_class.c'),str(ROOT/'kernel/firmware/node.c'),'-o',str(cls.binary)],check=True)
+            '-I'+str(work),'-I'+str(ROOT/'kernel/include'),'-I'+str(ROOT/'kernel'),str(ROOT/'tools/tests/class_stop_host.c'),str(ROOT/'kernel/drivers/core/driver_core.c'),str(ROOT / 'kernel/drivers/core/driver_class.c'), str(ROOT / 'kernel/drivers/core/driver_protocol.c'),str(ROOT/'kernel/firmware/node.c'),'-o',str(cls.binary)],check=True)
     def run_case(self,name):subprocess.run([str(self.binary),name],check=True,timeout=15)
     def test_exact_action_release_detaches_once_and_preserves_order(self):self.run_case('actions')
     def test_stop_receipt_follows_successful_remove(self):self.run_case('success')

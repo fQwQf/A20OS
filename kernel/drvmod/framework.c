@@ -26,6 +26,7 @@
 #include "drivers/core/riscv_iommu.h"
 #include "drivers/core/amd_iommu.h"
 #include "drivers/core/fence.h"
+#include "drivers/core/protocol.h"
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
 #include "drvmod/drvmod.h"
@@ -370,6 +371,15 @@ const struct drv_export drv_export_table[] = {
     { "driver_dma_mapping_sync_for_cpu", driver_dma_mapping_sync_for_cpu },
     { "driver_dma_unmap_pages", driver_dma_unmap_pages },
     { "driver_dma_try_unmap_pages", driver_dma_try_unmap_pages },
+    { "device_add_protocol", (void *)device_add_protocol },
+    { "device_endpoint_get", (void *)device_endpoint_get },
+    { "driver_endpoint_get", (void *)driver_endpoint_get },
+    { "driver_endpoint_put", (void *)driver_endpoint_put },
+    { "driver_endpoint_protocol_count", (void *)driver_endpoint_protocol_count },
+    { "driver_endpoint_protocol_info", (void *)driver_endpoint_protocol_info },
+    { "driver_protocol_begin", (void *)driver_protocol_begin },
+    { "driver_protocol_end", (void *)driver_protocol_end },
+    { "class_net_read_stats", (void *)class_net_read_stats },
     { "driver_fence_create", driver_fence_create },
     { "driver_fence_get", driver_fence_get },
     { "driver_fence_put", driver_fence_put },

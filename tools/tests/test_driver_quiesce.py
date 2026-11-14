@@ -31,7 +31,7 @@ class DriverQuiesce(unittest.TestCase):
                 "-I" + str(ROOT / "kernel/include"), "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests/driver_quiesce_host.c"),
                 str(ROOT / "kernel/drivers/core/driver_core.c"),
-                str(ROOT / "kernel/drivers/core/driver_class.c"), "-o", str(binary),
+                str(ROOT / "kernel/drivers/core/driver_class.c"), str(ROOT / "kernel/drivers/core/driver_protocol.c"), "-o", str(binary),
                 str(ROOT / "kernel/firmware/node.c"),
                 str(ROOT / "kernel/drivers/core/driver_registry_test.c"),
             ], check=True)

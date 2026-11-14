@@ -43,7 +43,7 @@ class DriverRemove(unittest.TestCase):
                     '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                     '-DCONFIG_NR_CPUS=2', '-I'+str(work), '-I'+str(ROOT / 'kernel/include'), '-I'+str(ROOT / 'kernel'),
                     str(fixture), str(ROOT / 'kernel/drivers/core/driver_core.c'),
-                    str(ROOT / 'kernel/drivers/core/driver_class.c'), str(ROOT / 'kernel/firmware/node.c'),
+                    str(ROOT / 'kernel/drivers/core/driver_class.c'), str(ROOT / 'kernel/drivers/core/driver_protocol.c'), str(ROOT / 'kernel/firmware/node.c'),
                     str(ROOT / 'kernel/drivers/i2c/i2c-core.c'), '-o', str(binary)]
             if implementation == 'rust':
                 args += ['-DCONFIG_DRIVER_REGISTRY_RUST', str(library)]

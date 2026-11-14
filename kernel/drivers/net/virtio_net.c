@@ -4,6 +4,8 @@
 #include "drivers/block/virtio_blk.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/net/interface.h"
+#include "core/errno.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "net/stack.h"
@@ -1017,11 +1019,20 @@ static void virtio_net_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
 }
 
+static const struct driver_net_stats_ops virtio_net_stats_ops;
+
 static int virtio_net_driver_probe(device_t *dev) {
     if (g_nnet >= VIRTIO_NET_MAX_DEVS) {
         kinfo("[VIRTIO-NET] Too many devices (max %d)\n", VIRTIO_NET_MAX_DEVS);
         return -1;
     }
+
+    const struct driver_protocol_descriptor stats = {
+        .info = {DRIVER_PROTOCOL_NET_STATS, 1, sizeof(virtio_net_stats_ops), 0},
+        .ops = &virtio_net_stats_ops,
+    };
+    int protocol = device_add_protocol(dev, &stats);
+    if (protocol) return protocol;
 
     int idx = g_nnet;
     virtio_net_inst_t *net = &g_net[idx];
@@ -1177,24 +1188,17 @@ static uint32_t virtio_net_class_caps(struct device *dev) {
     return caps;
 }
 
-/* Published to the stack as a weak symbol rather than through net_dev_ops_t.
- * These four counters were already maintained here but were unreachable from
- * anywhere, so a drop could not be attributed to the device or to lwIP. */
-void virtio_net_dev_stats(struct device *dev, net_dev_stats_t *out) {
-    if (!out)
-        return;
-    out->rx_packets = out->rx_drops = 0;
-    out->tx_packets = out->tx_drops = 0;
-    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
-    if (!net)
-        return;
+static int virtio_net_stats_read(struct device *dev, net_dev_stats_t *out) {
+    if (!out) return -EINVAL;
+    *out = (net_dev_stats_t){0};
+    virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
+    if (!net || !net->valid) return -ENODEV;
     uint64_t flags = spin_lock_irqsave(&net->lock);
-    out->rx_packets = net->rx_packets;
-    out->rx_drops   = net->rx_drops;
-    out->tx_packets = net->tx_packets;
-    out->tx_drops   = net->tx_drops;
+    *out = (net_dev_stats_t){net->rx_packets, net->rx_drops, net->tx_packets, net->tx_drops};
     spin_unlock_irqrestore(&net->lock, flags);
+    return 0;
 }
+static const struct driver_net_stats_ops virtio_net_stats_ops = {virtio_net_stats_read};
 
 static int virtio_net_class_link_up(device_t *dev)
 {

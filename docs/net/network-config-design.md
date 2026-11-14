@@ -251,7 +251,7 @@ MTU 是配置面的关键路径之一。`a20_lwip_if_set_mtu()` 按档位帧缓�
 
 `/proc/net/` 下另有 `tcp6` 与 `udp6` 两个文件（`procfs.c:464-469`），按 v6 的四字布局渲染，与 `tcp` / `udp` 分开，v4 文件不再混入 v6 行。这一对文件是 `c34ddd7f8`（AF_INET6 socket 真正拿到 pcb）带进来的——在那之前 v6 的 bind/listen/accept 走不通，把它们渲染出来只会显示一张空表，把"v6 入站不可达"这件事藏起来。
 
-**`[tx_csum_offload:off]` 与 `[rx_csum_offload:off]` 是设计结果，不是没做完。**两个能力位已定义（`kernel/drivers/core/driver_class.h:145-146`）但**永不置位**。理由（已按源码复核，见 `docs/net/checksum-offload.md`）：lwIP 2.2.2 **确实带**承载该握手的位（`netif.h:140-153` 的 `NETIF_CHECKSUM_GEN_*/CHECKSUM_*` 与 `:340-342` 的`netif->chksum_flags`），但被 `LWIP_CHECKSUM_CTRL_PER_NETIF` 关着（`opt.h:2371-2373`默认 0），而且打开它也不够：TCP 发送路径 `tcp_out.c:1587-1596` 无条件写完整校验和，`recv()` 这条 HAL 没有逐帧传递"验过了"的通道，而 QEMU 的 virtio-net 从不设置`VIRTIO_NET_HDR_F_DATA_VALID`。贸然置位会让 lwIP 去验一个设备根本没算的校验和，属于静默损坏。`MRG_RXBUF` 不同：它是纯设备侧的接收属性，lwIP 从来看不见，所以协商了的驱动**应该**上报它（virtio-net 就是这样，且现已由真实跨缓冲收帧验证）。
+**`[tx_csum_offload:off]` 与 `[rx_csum_offload:off]` 是设计结果，不是没做完。**两个能力位已定义（`kernel/drivers/core/driver_class.h:171-172`）但**永不置位**。理由（已按源码复核，见 `docs/net/checksum-offload.md`）：lwIP 2.2.2 **确实带**承载该握手的位（`netif.h:140-153` 的 `NETIF_CHECKSUM_GEN_*/CHECKSUM_*` 与 `:340-342` 的`netif->chksum_flags`），但被 `LWIP_CHECKSUM_CTRL_PER_NETIF` 关着（`opt.h:2371-2373`默认 0），而且打开它也不够：TCP 发送路径 `tcp_out.c:1587-1596` 无条件写完整校验和，`recv()` 这条 HAL 没有逐帧传递"验过了"的通道，而 QEMU 的 virtio-net 从不设置`VIRTIO_NET_HDR_F_DATA_VALID`。贸然置位会让 lwIP 去验一个设备根本没算的校验和，属于静默损坏。`MRG_RXBUF` 不同：它是纯设备侧的接收属性，lwIP 从来看不见，所以协商了的驱动**应该**上报它（virtio-net 就是这样，且现已由真实跨缓冲收帧验证）。
 
 ## 用户命令消费方式
 

@@ -46,7 +46,7 @@ static inline int mutex_trylock(mutex_t *m) { return !pthread_mutex_trylock(m); 
                 "-I" + str(ROOT / "kernel/include"), "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests/driver_resource_host.c"),
                 str(ROOT / "kernel/drivers/core/driver_core.c"),
-                str(ROOT / "kernel/drivers/core/driver_class.c"),
+                str(ROOT / "kernel/drivers/core/driver_class.c"), str(ROOT / "kernel/drivers/core/driver_protocol.c"),
                 str(ROOT / "kernel/firmware/node.c"), "-o", str(binary),
             ], check=True)
             subprocess.run([str(binary)], check=True, timeout=15,

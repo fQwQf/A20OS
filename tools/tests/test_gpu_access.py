@@ -58,7 +58,7 @@ int printf(const char *,...);int snprintf(char *,size_t,const char *,...);
             '-Wno-misleading-indentation','-ffunction-sections','-fdata-sections','-Wl,--gc-sections',
             '-fsanitize=address,undefined','-fno-sanitize-recover=all',
             '-I'+str(work),'-I'+str(ROOT/'kernel/include'),'-I'+str(ROOT/'kernel'),str(fixture),
-            str(ROOT/'kernel/drivers/core/driver_core.c'),str(ROOT/'kernel/drivers/core/driver_class.c'),
+            str(ROOT/'kernel/drivers/core/driver_core.c'),str(ROOT / 'kernel/drivers/core/driver_class.c'), str(ROOT / 'kernel/drivers/core/driver_protocol.c'),
             str(ROOT/'kernel/firmware/node.c'),'-o',str(cls.binary)],check=True)
 
     def run_case(self,name): subprocess.run([str(self.binary),name],check=True,timeout=15)

@@ -2560,6 +2560,7 @@ ifeq ($(ARCH)/$(BOARD),riscv32/hi3861)
 KERNEL_SRC += \
     kernel/drivers/core/driver_core.c \
     kernel/drivers/core/driver_class_mcu.c \
+    kernel/drivers/core/driver_protocol.c \
     kernel/drivers/bus/platform_bus.c \
     kernel/firmware/device.c \
     kernel/firmware/irq.c \

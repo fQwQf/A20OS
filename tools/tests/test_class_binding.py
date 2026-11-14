@@ -128,7 +128,7 @@ class ClassBindingTest(unittest.TestCase):
                 p=work/path;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text)
             (work/'test.c').write_text(HARNESS)
             executable=work/'test'
-            sources=['kernel/drivers/core/driver_core.c','kernel/drivers/core/driver_class.c',
+            sources=['kernel/drivers/core/driver_core.c','kernel/drivers/core/driver_class.c', 'kernel/drivers/core/driver_protocol.c',
                      'kernel/firmware/node.c','kernel/fs/mount_setup.c']
             subprocess.run(['cc','-std=gnu99','-O1','-g','-Wall','-Wextra','-Werror','-pthread',
                 '-DBRINGUP','-DCONFIG_NR_CPUS=2','-ffunction-sections','-fdata-sections',

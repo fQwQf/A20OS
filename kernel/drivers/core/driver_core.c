@@ -7,6 +7,7 @@
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_registry_test.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/core/driver_protocol_internal.h"
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -286,6 +287,23 @@ struct device_resource_action {
     int (*prepare)(void *);
     bool prepared;
 };
+struct protocol_action {
+    struct device_resource_action action;
+    struct driver_protocol_descriptor descriptor;
+};
+static void release_protocol_metadata(void *data) { (void)data; }
+/* Probe/publish lifecycle owner only. Metadata lives in the existing devres
+ * list; publication copies it before any consumer can enter this binding. */
+size_t device_protocols_copy(const device_t *dev, struct driver_protocol_descriptor *out)
+{
+    size_t count = 0;
+    for (const struct device_resource_action *a = dev->resource_actions; a; a = a->next)
+        if (a->release == release_protocol_metadata) {
+            if (out) out[count] = *(const struct driver_protocol_descriptor *)a->data;
+            count++;
+        }
+    return count;
+}
 int device_add_resource_action(device_t *dev, void (*release)(void *), void *data) {
     if (!dev || !release) return -EINVAL;
     struct device_resource_action *action = kmalloc(sizeof(*action));
@@ -625,6 +643,37 @@ int device_probe_use_remove(device_t *dev) {
     return ret;
 }
 
+int device_add_protocol(device_t *dev, const struct driver_protocol_descriptor *descriptor)
+{
+    if (!dev || !descriptor || !descriptor->info.id || !descriptor->info.version ||
+        !descriptor->info.ops_size || !descriptor->ops) return -EINVAL;
+    driver_ops_lock();
+    struct device_probe *probe = device_probes;
+    int ret = -EINVAL;
+    if (!probe || probe->device != dev || probe->driver != dev->drv) goto done;
+    if (!device_is_registered(dev)) { ret = -ENODEV; goto done; }
+    if (dev->drv->class_ops && descriptor->info.id == driver_protocol_class_id(dev->drv->class_type)) {
+        ret = -EEXIST; goto done;
+    }
+    for (struct device_resource_action *a = dev->resource_actions; a; a = a->next)
+        if (a->release == release_protocol_metadata &&
+            ((const struct driver_protocol_descriptor *)a->data)->info.id == descriptor->info.id) {
+            ret = -EEXIST; goto done;
+        }
+    struct protocol_action *entry = kmalloc(sizeof(*entry));
+    if (!entry) { ret = -ENOMEM; goto done; }
+    entry->descriptor = *descriptor;
+    entry->action = (struct device_resource_action){
+        .release = release_protocol_metadata, .data = &entry->descriptor,
+        .next = dev->resource_actions,
+    };
+    dev->resource_actions = &entry->action;
+    ret = 0;
+done:
+    driver_ops_unlock();
+    return ret;
+}
+
 int device_add_remove_prepare(device_t *dev, int (*prepare)(void *), void *context) {
     if (!dev || !prepare) return -EINVAL;
     driver_ops_lock();
@@ -911,15 +960,9 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
         dev->state = prepared == -EPROBE_DEFER ? DEV_STATE_DEFERRED : DEV_STATE_UNINIT;
         return prepared;
     }
-    if (!drv->probe) {
-        dev->probe_error = 0;
-        dev->state = DEV_STATE_PROBED;
-        driver_progress_binding_changed();
-        return 0;
-    }
     struct device_probe probe = {dev, drv, false, device_probes};
     device_probes = &probe;
-    int ret = drv->probe(dev);
+    int ret = drv->probe ? drv->probe(dev) : 0;
     device_probes = probe.previous;
     if (ret && probe.remove_on_error) {
         int original = ret < 0 ? ret : -EIO;

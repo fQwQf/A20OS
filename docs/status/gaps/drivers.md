@@ -1,5 +1,7 @@
 # DRIVER 缺口
 
+通用架构已有按绑定组合的原生协议：六类 primary、无 class 服务、版本/前缀/能力检查与共享 offline/drain，模块扩展不再需要修改全局类表。网络统计已有两种实际 provider 和 stack consumer。后续重点是把现有 IRQ/DMA/fence/workqueue 组合为标准请求、队列与恢复路径，补齐取消/背压/停止失败保留，并分批迁移旧驱动；不能把协议发现或已有原语等同于完整异步执行模型。主架构与开发流程见[核心模型](../../drivers/guide/core-model.md#架构与开发入口)。
+
 对应 V1-DRIVER。现状见 [current/drivers-implementation-status.md](../current/drivers-implementation-status.md)。
 
 ### 原生 GPU 与 AMD-Vi 基础设施

@@ -2,6 +2,96 @@
 
 `device_t`、`driver_t`、`bus_type_t` 三个对象如何配合，probe/remove 的完整回滚流程，以及一份可直接编译的 PCI 网络驱动骨架。具体声明以 `kernel/drivers/core/driver_core.h`、`driver_class.h`、`driver_register.h` 为准。
 
+## 架构与开发入口
+
+驱动框架分成发现、绑定、协议、资源、执行和部署六部分。它们服务于字符、块、网络、输入、音频、显示和没有传统设备节点的控制器/服务。硬件协议留在具体驱动，Linux 文件/ioctl 和 Native handle 是上层适配，不定义内核对象的所有权。
+
+```mermaid
+flowchart TD
+    F[DT / ACPI / 静态固件描述] --> B[PCI / USB / platform 等总线]
+    B --> D[device：硬件身份、资源与依赖]
+    D --> E[当次绑定的 publication / endpoint]
+    E --> P[按 ID、版本、大小发布的原生协议]
+    P --> C[块、网络、输入、音频、显示等子系统]
+    P --> N[无传统 class 的原生服务]
+    C --> A[Native / Linux ABI 适配]
+    E --> R[MMIO / IRQ / DMA / 固件 / VMO]
+    E --> X[请求 / fence / workqueue / quiesce 与可失败 remove]
+```
+
+| 部分 | 驱动作者依赖的接口 | 框架保证与作者责任 |
+|---|---|---|
+| 发现与归属 | firmware node、bus match、device_register、dependency | 一个硬件实例由一个枚举者发布；驱动不重新扫描/配置已归属硬件 |
+| 绑定与服务 | device_add_protocol、device_endpoint_get、driver_protocol_begin/end | 每次绑定有独立不可变协议快照；离线拒绝新调用，排空后才能回收实例/代码 |
+| 传统设备类 | class_ops、原生 primary protocol、class adapter | 六类既有驱动自动提供协议；扩展能力无需修改所有类的公共 vtable |
+| CPU/设备资源 | checked MMIO/port claim、IRQ、DMA domain/mapping、原生 buffer/VMO | 地址空间、访问许可、缓存交接、存储引用和硬件停止分别管理；错误不得静默退化成裸物理 DMA |
+| 执行与完成 | IRQ、fence、watch、workqueue、驱动自己的硬件队列 | IRQ 路径短且不分配；请求必须保留 backing，完成和退出必须确认硬件状态；通用执行队列仍需后续整合 |
+| 部署与用户边界 | 同一 driver_t、.a20drv、用户态服务代理 | 内建和模块同一生命周期；用户服务还要经过 Native 权限/资源仲裁，协议 ID 本身不授权硬件访问 |
+
+四类所有权不能混用：device 引用保留硬件元数据；endpoint 引用保留当次绑定的服务身份；access 保留一次正在执行的调用；VMO/buffer/mapping 保留存储与地址。前三者都不自动保留方法返回的缓冲区。引用计数、DMA 失效、producer 停止和用户权限各自有明确条件。
+
+## 原生协议：组合能力而非扩大全局 vtable
+
+公共入口是 `drivers/core/protocol.h`。endpoint 是现有 publication 的原生服务角色，不另建对象目录或一套设备注册表。一个驱动可发布多个协议，协议描述符复制进现有 devres，在 probe 成功后形成排序的不可变快照；不属于传统 class 的服务同样可取得 endpoint，而不伪造 `/dev` 节点。MCU 复用同一发布/调用核心，不依赖 devfs/sysfs。
+
+协议以 ID、语义版本、实际 ops 大小和 capabilities 描述。版本必须相等，结构允许同一版本下追加兼容尾部，consumer 声明自己需要的前缀大小及能力位。未知 ID、短表或缺少能力返回 EOPNOTSUPP，版本不符返回 EPROTONOSUPPORT，旧绑定离线返回 ENODEV，失败清空 access。元数据可在 offline 后读取；operation table 只能在成功 access 内使用。
+
+字符、块、网络、输入、显示、音频的既有 class_ops 自动发布为相应 `DRIVER_PROTOCOL_*`，版本为 1，大小为实际传统表大小。新增独立扩展协议不改变 device_t/driver_t 布局，也不要求所有驱动同步扩展公共表；旧 class ABI 的布局变更仍按模块 ABI 规则处理。ID 是类型标识，不是用户 capability。内核保留 A20 命名空间，实验/设备私有协议应选择不冲突的私有 ID；同一绑定的重复 ID（含自动 primary）被拒绝。
+
+登记必须发生在本设备的 probe 内，推荐在启动硬件前登记，失败即可按普通 probe 回滚。描述符被复制，但 ops 及其代码必须在绑定停止前有效，不能指向 probe 栈。调用准入/结束不分配，不调用最终析构，也不获取全局生命周期 mutex；每 endpoint 准入锁加本地二分查找构成调用路径。caller 的 endpoint 引用必须覆盖整个 access；结束只交还 active call，随后由 caller put endpoint。方法是否可从 IRQ 调用由协议本身规定，不因通用准入 IRQ-safe 就允许任意方法阻塞。
+
+例如，无需增加新的 class enum，温度服务可发布一个私有协议：
+
+```c
+struct temperature_ops {
+    int (*read_millicelsius)(struct device *, int32_t *out);
+};
+static const struct temperature_ops temperature = { read_temperature };
+static int sensor_probe(device_t *dev) {
+    const struct driver_protocol_descriptor service = {
+        .info = { 0x8000000000000001ULL, 1, sizeof(temperature), 0 },
+        .ops = &temperature,
+    };
+    int ret = device_add_protocol(dev, &service);
+    if (ret) return ret;
+    /* map declared resources, initialize per-device state, then start hardware */
+    return sensor_start(dev);
+}
+```
+
+consumer 从自己已拥有引用的 device 取得 endpoint；旧 endpoint 永远不会转到重绑后的新驱动：
+
+```c
+driver_endpoint_t *endpoint = device_endpoint_get(dev);
+if (!endpoint) return -ENODEV;
+const struct driver_protocol_requirement need = {
+    0x8000000000000001ULL, 1, sizeof(struct temperature_ops), 0,
+};
+struct driver_protocol_access access;
+int ret = driver_protocol_begin(endpoint, &need, &access);
+if (!ret) {
+    const struct temperature_ops *ops = access.ops;
+    ret = ops->read_millicelsius(access.device, &temperature_value);
+    driver_protocol_end(&access);
+}
+driver_endpoint_put(endpoint);
+return ret;
+```
+
+网络统计是实际扩展协议：VirtIO-net、RTL8139 通过 NET_STATS 提供非阻塞计数快照，class_net_read_stats 隐藏版本/大小检查；lwIP 消费者不依赖具体驱动符号。模块与内建走相同查找与离线保护。它说明了扩展标准方式；队列、设备专属能力和其他类也应在这一模型上组合，而不是新增架构专有 getter 或重复注册表。
+
+## 完整开发流程
+
+1. 选择已有总线/固件描述和设备类；列出公开协议、必需资源、数据单位、错误与执行上下文。独立服务可只发布原生协议。
+2. probe 在硬件启动前建立失败清理所有权、协议元数据和实例；所有可失败分配预先完成，再申请 MMIO/IRQ/DMA 并启动 producer。
+3. 控制面使用有界同步操作；数据面围绕每设备/队列组织，批处理与 SG 由对应协议显式协商，不在每包路径分配框架对象。硬件队列格式属于驱动。
+4. 对异步 DMA，请求保留 owning backing/mapping 和 producer fence，IRQ 只发布已确认的完成并调度任务工作；超时不提前交还硬件仍可访问的存储。
+5. 退出遵循 consumer/child → offline → quiesce → active call drain → remove → devres。remove 无法确认停止/失效时返回错误并保留实例/队列/代码，显式重试；不能通过释放资源制造“成功”。
+6. 将驱动打包为内建、模块或已有受支持的用户服务形态；ABI 适配检查用户权限，不能把内核协议描述符直接暴露成不受约束的用户调用。
+7. 验证正常 I/O、多实例、进程/消费者退出、并发调用与解绑，以及初始化/停止失败。测试匹配实际改动范围；硬件或平台未验证的能力保持明确的支持边界。
+
+通用协议与生命周期可服务不同驱动，但不替具体设备实现复位、IOMMU 后端、GPUVM 或固件协议；这些能力按后端声明支持。后续基础设施的重点是统一可组合的请求/队列与恢复路径，使作者不必自行拼接所有异步原语。
+
 ## 三个核心对象
 
 `device_t` 代表一个硬件实例，由总线或板级枚举器创建。创建者拥有设备名、资源数组和 `plat_data` 的存储。注册表、父子关系、依赖和进度快照会持有设备引用；动态对象通过 `release()` 在最终 `device_put()` 时回收，不能在 `device_unregister()` 返回时直接释放。不要在枚举函数栈上分配设备描述。
@@ -190,6 +280,7 @@ probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/string.h"
+#include "mm/slab.h"
 
 typedef struct {
     uintptr_t regs;
@@ -197,8 +288,6 @@ typedef struct {
     uint8_t mac[6];
     int ready;
 } example_priv_t;
-
-static example_priv_t g_example; /* 多实例驱动应改为槽数组或动态分配 */
 
 static int example_send(device_t *dev, const void *data, size_t len) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
@@ -227,22 +316,22 @@ static const net_dev_ops_t example_ops = {
 };
 
 static int example_probe(device_t *dev) {
-    int ret = pci_enable_and_assign_bars(dev);
-    if (ret < 0)
-        return ret;
-    resource_t *bar0 = pci_get_bar_resource(dev, 0);
-    if (!bar0 || bar0->end < bar0->start ||
-        bar0->end - bar0->start + 1 < 0x1000)
-        return -ENODEV;
-
-    example_priv_t *p = &g_example;
-    memset(p, 0, sizeof(*p));
+    int ret = device_probe_use_remove(dev);
+    if (ret) return ret;
+    example_priv_t *p = kcalloc(1, sizeof(*p));
+    if (!p) return -ENOMEM;
+    ret = device_add_resource_action(dev, kfree, p);
+    if (ret) { kfree(p); return ret; }
+    dev->drv_priv = p; /* Partial cleanup can find this device's own instance. */
     spin_init(&p->lock);
-    p->regs = (uintptr_t)pci_map_bar(dev, 0);
-    if (!p->regs)
+    ret = pci_enable_and_assign_bars(dev);
+    if (ret < 0) return ret;
+    resource_t *bar0 = pci_get_bar_resource(dev, 0);
+    if (!bar0 || bar0->end < bar0->start || bar0->end - bar0->start + 1 < 0x1000)
         return -ENODEV;
+    p->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!p->regs) return -ENODEV;
     /* reset, identify, allocate DMA, initialize rings */
-    dev->drv_priv = p;
     p->ready = 1;
     return 0;
 }
@@ -252,9 +341,10 @@ static int example_remove(device_t *dev) {
     if (!p)
         return 0;
     p->ready = 0;
-    /* mask IRQ, stop DMA, free_irq, dma_free_coherent */
+    /* Real implementations confirm stop here; return its errno on failure,
+     * retaining p/queues/IRQ for retry. This skeleton has not started hardware. */
     dev->drv_priv = NULL;
-    memset(p, 0, sizeof(*p));
+    /* p is devres-owned: core frees it only after confirmed remove success. */
     return 0;
 }
 

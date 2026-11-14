@@ -5,6 +5,8 @@
 /* Inert unless driver.runtime_test=1 is an exact boot argument. Called from
  * init_kthread after scheduler startup; success powers off the test machine. */
 void driver_runtime_selftest_boot(void);
+/* Protocol/provider integration after runtime packages and NIC attach. */
+void driver_runtime_selftest_runtime(void);
 /* Explicit native IOMMU test, called only by the runtime boot gate. */
 void driver_iommu_native_selftest(void);
 #ifndef CONFIG_NOMMU
@@ -14,5 +16,6 @@ int drm_native_binding_selftest(struct class_device *publication);
 #endif
 #else
 static inline void driver_runtime_selftest_boot(void) {}
+static inline void driver_runtime_selftest_runtime(void) {}
 #endif
 #endif

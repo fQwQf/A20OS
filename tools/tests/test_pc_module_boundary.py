@@ -15,7 +15,7 @@ class PcModuleBoundary(unittest.TestCase):
         exports = set(re.findall(r'\{\s*"([^"\n]+)"\s*,',
                                 (ROOT/'kernel/drvmod/framework.c').read_text()))
         with tempfile.TemporaryDirectory(prefix='a20-pc-modules-') as tmp:
-            for name in ('virtio_gpu', 'nvme', 'ps2', 'r8169', 'xhci', 'usb_hid', 'usb_hub', 'usb_storage'):
+            for name in ('virtio_gpu', 'virtio_net', 'rtl8139', 'nvme', 'ps2', 'r8169', 'xhci', 'usb_hid', 'usb_hub', 'usb_storage'):
                 with self.subTest(module=name):
                     output = Path(tmp)/(name+'.a20drv')
                     subprocess.run(['x86_64-linux-gnu-gcc', '-ffreestanding', '-nostdlib',

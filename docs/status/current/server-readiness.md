@@ -258,9 +258,9 @@ UDP/RAW 侧的 `SO_SNDBUF` / `SO_RCVBUF` 已支持并执行（`92b399e5d`）：�
 
 ### 驱动：SG 发送与能力位上报已接线，校验和卸载刻意不做（`d12733f48` / `089a2055c`）
 
-`net_dev_ops_t` 增加了可选的 `send_sg()` 与 `caps()`（`driver_class.h:174-175`），`lwip_stack.c` 在 `a20_lwip_linkoutput()` 里二选一。**没实现 `send_sg` 的驱动走原线性拷贝路径，逐字节不变**——但要注意 SG 分支**不是零拷贝**：命中前提是`p->next == NULL`，帧仍然先拷进 `st->tx_frame`，因为 netfilter 的 output hook 是对调用方手里那块帧的**原地改写**，而 pbuf payload 是别的持有者也在看的池内存。SG 给驱动的是描述符而不是 lwIP 的 pbuf，省掉的是驱动内部再拷一次。
+`net_dev_ops_t` 增加了可选的 `send_sg()` 与 `caps()`（`driver_class.h:201-207`），`lwip_stack.c` 在 `a20_lwip_linkoutput()` 里二选一。**没实现 `send_sg` 的驱动走原线性拷贝路径，逐字节不变**——但要注意 SG 分支**不是零拷贝**：命中前提是`p->next == NULL`，帧仍然先拷进 `st->tx_frame`，因为 netfilter 的 output hook 是对调用方手里那块帧的**原地改写**，而 pbuf payload 是别的持有者也在看的池内存。SG 给驱动的是描述符而不是 lwIP 的 pbuf，省掉的是驱动内部再拷一次。
 
-**校验和卸载按诚实原则未启用**：`TX_CSUM_OFFLOAD` / `RX_CSUM_OFFLOAD` 两个能力位已定义（`driver_class.h:145-146`）但**永不置位**。此前记录的理由（"vendored lwIP 2.2.2 没有任何承载该握手的 flag"）经复核**不成立**，已更正：位与字段都在（`netif.h:140-153`、`:340-342`、`:408-417`），只是被`LWIP_CHECKSUM_CTRL_PER_NETIF` 关着（`opt.h:2371-2373` 默认 0）。不启用的真实理由是三条接不上的线：TCP 发送路径 `tcp_out.c:1587-1596` 无条件写完整校验和、lwIP 的位是**每 netif** 而不是**每帧**而本 HAL 的 `recv()` 只回长度、QEMU 的 virtio-net 从不设置`VIRTIO_NET_HDR_F_DATA_VALID`。完整调查与"要启用需要改哪些上游文件"见`docs/net/checksum-offload.md`，意向已登记在`kernel/external/lwip/DIVERGENCE.md` §2.11。`MRG_RXBUF` 不同：它是纯设备侧的接收属性，lwIP 从来看不见，所以协商了的驱动**应该**上报它。
+**校验和卸载按诚实原则未启用**：`TX_CSUM_OFFLOAD` / `RX_CSUM_OFFLOAD` 两个能力位已定义（`driver_class.h:171-172`）但**永不置位**。此前记录的理由（"vendored lwIP 2.2.2 没有任何承载该握手的 flag"）经复核**不成立**，已更正：位与字段都在（`netif.h:140-153`、`:340-342`、`:408-417`），只是被`LWIP_CHECKSUM_CTRL_PER_NETIF` 关着（`opt.h:2371-2373` 默认 0）。不启用的真实理由是三条接不上的线：TCP 发送路径 `tcp_out.c:1587-1596` 无条件写完整校验和、lwIP 的位是**每 netif** 而不是**每帧**而本 HAL 的 `recv()` 只回长度、QEMU 的 virtio-net 从不设置`VIRTIO_NET_HDR_F_DATA_VALID`。完整调查与"要启用需要改哪些上游文件"见`docs/net/checksum-offload.md`，意向已登记在`kernel/external/lwip/DIVERGENCE.md` §2.11。`MRG_RXBUF` 不同：它是纯设备侧的接收属性，lwIP 从来看不见，所以协商了的驱动**应该**上报它。
 
 virtio-net 收发环 32 → 256 并协商 `MRG_RXBUF`；e1000 环 64 → 256、多缓冲帧线性重组、 82574L ITR 节流。**MRG_RXBUF 的重组分支现在由真实流量跑到了**：接收缓冲改为 512 字节载荷的小缓冲（各占一条独立 avail 条目、非链式描述符），按 QEMU 的收包循环算术，一个满 MTU 帧跨 3 个缓冲、600 字节上下的帧跨 2 个。QEMU 10.0.13 下实测首个跨缓冲帧打出 `[VIRTIO-NET0] first frame reassembled from 2 buffers (rxbuf=524)`，同一轮里 guest `wget` 取回 65536 字节且 `wc -c` 复核为 65536、`ping 10.0.2.2 4` 为 4/4。原先"重组永不触发"的原因是投递的缓冲比帧还大，而"拆成多个描述符就收不到"的原因是把头拆去了另一个描述符——取舍与三组实测数据写在`virtio_net.c` 的 `VIRTIO_NET_RX_DESC_MAX` 注释里。
 
@@ -367,7 +367,7 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 
 可观测性接口已全面向真实测量对齐（参见 [hardening.md](../../security/hardening.md) 的数据一致性原则）：`/proc/<pid>/io`、`/proc/loadavg`、`/proc/pressure`、`getrusage`、`TCP_CONGESTION` 现均为真实值。
 
-`TCP_CONGESTION` 这一条在 `0d42ca758` 之后才真正成立：此前它接受 `"cubic"` 并返回成功，而本树**没有** CUBIC，`getsockopt` 也不回真实算法名。现在未知名返回`-ENOPROTOOPT`，回读的是真正生效的算法。同一原则下，`SO_SNDBUF` / `SO_RCVBUF`也从"接受然后忽略"变成真的生效值（`aacce4dcc`）；而**驱动能力位里那两个校验和卸载位刻意永不置位**（`driver_class.h:145-146`），因为 vendored 的 lwIP 2.2.2 没有承载该握手的 flag，置位会让 lwIP 去验设备没算的校验和——`/proc/net/stats` 里那两行因此**恒为 `off`，且这是设计结果不是未完成项**。
+`TCP_CONGESTION` 这一条在 `0d42ca758` 之后才真正成立：此前它接受 `"cubic"` 并返回成功，而本树**没有** CUBIC，`getsockopt` 也不回真实算法名。现在未知名返回`-ENOPROTOOPT`，回读的是真正生效的算法。同一原则下，`SO_SNDBUF` / `SO_RCVBUF`也从"接受然后忽略"变成真的生效值（`aacce4dcc`）；而**驱动能力位里那两个校验和卸载位刻意永不置位**（`driver_class.h:171-172`），因为 vendored 的 lwIP 2.2.2 没有承载该握手的 flag，置位会让 lwIP 去验设备没算的校验和——`/proc/net/stats` 里那两行因此**恒为 `off`，且这是设计结果不是未完成项**。
 
 仍然缺失或不可用：
 

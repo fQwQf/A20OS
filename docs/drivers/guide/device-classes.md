@@ -4,6 +4,12 @@
 
 驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针（唯一的例外是 char `ioctl`，它拿到原始用户指针，由驱动自己做 usercopy）。probe 成功后核心自动发布 class device；char、block、audio 分别得到动态 `/dev/charN`、`/dev/diskN`、`/dev/audioN`（char 驱动可在 probe 里改用自己的名字，见下文），所有类都进入 `/sys/class/<class>/`。display 与 input 仍由固定聚合节点提供专用 ABI，详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
+## 原生协议与传统 class
+
+原生 `drivers/core/protocol.h` 定义一个绑定可组合的协议集合；传统六类自动提供 primary protocol，类之外的服务也可发布 endpoint。新增扩展独立声明语义版本、实际表大小与 capabilities，consumer 检查所需前缀和能力；不要求扩大所有设备的 class_ops。endpoint 和既有 class publication 是同一个对象。begin/end 只管理 active call，caller 持 endpoint 引用贯穿整个操作，因此准入不分配、不触发最终析构，可用于 IRQ；具体方法的上下文由协议定义。完整模型见[架构与开发入口](core-model.md#架构与开发入口)。
+
+NET_STATS 是已接入的扩展：VirtIO-net 与 RTL8139 发布统计，class_net_read_stats 按当次绑定查询，lwIP 不再直接调用特定驱动的弱符号。缺接口/离线会返回错误而不伪造零计数。模块和内建使用相同路径，主 net 表布局未改变。
+
 ## 通用调用规则
 
 每个入口必须检查 `dev`、`dev->drv_priv`、buffer 和长度。read/write 的 class buffer 是内核地址。可能并发的入口必须在实例内同步。可选操作留 `NULL`；不要“返回成功但什么也不做”来假装支持。未知 ioctl 返回 `-ENOTTY`，硬件不支持的已知能力返回 `-EOPNOTSUPP`。当前动态 devfs 只为内建 block ioctl 和 audio 通用 ioctl 完成 usercopy；自定义 block/char `ops->ioctl` 仍收到原始 `arg`，在增加通用封送前不得直接解引用它。

@@ -215,3 +215,9 @@ RISC-V 原生 EDU 门禁现在对 resident 分支采用 owned 视图：交还 ca
 17 个编译成功负控分别破坏初始 terminal 无分配、fence 引用取得/交还、登记回收、RUNNING 保护与 DONE 发布、锁外 callback、成功/错误 status、terminal 准入、取消链、输出清理、通知派发、首条登记可达性、IRQ 不回收和先唤醒 waiter；必须由运行时断言/ASan 拒绝，不能把编译失败或存活变体计为通过。还原后运行完整驱动回归；firmware 与 PC 门禁均已纳入 fence 测试。
 
 `tools/a20 test smoke-driver-runtime-x86_64` 及 `tools/a20 test smoke-driver-runtime-smp2-x86_64` 要求 `DRIVER_FENCE_WATCH: PASS notify=1 cancel=1 error=1 work=1`：实际原生 fence 的成功/错误通知调度真实 kernel worker，并检查 pending 撤销和 terminal 拒绝。signal 在测试任务上下文执行，不将其称为真实硬件 IRQ 完成验证。继续运行 embedded 双核 GPU stop、generic 模块显示及 RISC-V PRIME；跨架构编译另行记录。该基础不表示已接入 GPU 请求队列、Linux pending sync-file 或实体 GPU。
+
+## 通用协议与驱动架构验收
+
+原生协议按完整使用流程验证：`python3 -m unittest tools.tests.test_driver_protocol tools.tests.test_class_binding tools.tests.test_driver_remove tools.tests.test_class_stop tools.tests.test_gpu_access tools.tests.test_drm_binding tools.tests.test_pc_module_boundary`。新集成夹具运行生产 driver core/publication/protocol，在完整与 MCU 两种 backend 下执行无 class 服务、primary+扩展互通、版本/大小/能力拒绝、重绑快照、在途调用排空、发布 OOM 与失败 probe/remove 保留。模型边界为 allocator、firmware、IRQ/Park 与系统发布，不能代替硬件停止验证。
+
+`tools/a20 test smoke-driver-protocols-x86_64` 在 runtime 模块加载及 NIC attach 后，通过真实 VirtIO 网卡模块查询 primary 和 NET_STATS，调用发送并读取计数，要求 `DRIVER_PROTOCOLS: PASS primary=1 extension=1 send=1 stats=1`。不把发送计数解释为远端送达或 DMA 停止证明。VirtIO-net 与 RTL8139 包装器纳入实际编译/导入白名单检查，另回归 GPU stop/通用模块消费者与跨架构构建。仅在对应构建/运行证据存在时声明平台支持；无需为每个字段另造重复测试。

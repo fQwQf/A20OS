@@ -22,14 +22,6 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
-/* Optional driver facility, resolved weakly for the same reason
- * core/progress.c resolves virtio_net_poll_rx_all_bounded weakly: virtio-net
- * may be absent or supplied as a loadable .a20drv, and the stack must build and
- * run either way.  Checked for non-NULL before use, so an absent driver leaves
- * the counters out rather than reporting zeros that look like a quiet link. */
-extern void virtio_net_dev_stats(struct device *dev,
-                                 net_dev_stats_t *out) __attribute__((weak));
-
 #include "core/cpu.h"
 #include "lwip/init.h"
 #include "lwip/netif.h"
@@ -2267,27 +2259,19 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
                  st ? st->tx_errors : 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL);
         a20_lwip_append(buf, bufsz, &off, row);
 
-        /* Driver-level counts, when the driver publishes them.  A separate line
-         * rather than extra columns because these count what the device moved
-         * while the block above counts what lwIP was handed, and the two
-         * diverging is how a loss between the ring and the protocol stack gets
-         * localized.  The symbol is weak: it is absent, not zero, when the
-         * driver is not loaded. */
-        if (virtio_net_dev_stats && st && st->dev) {
+        /* Optional native protocol, available equally to embedded and module
+         * providers. The retained publication cannot drift across rebind. */
+        if (st && st->dev) {
             net_dev_stats_t ds;
-            memset(&ds, 0, sizeof(ds));
             class_device_t *binding = netif_binding_get(st);
-            const void *stats_ops;
-            if (!class_device_ops_begin(binding, DEV_CLASS_NET, &stats_ops)) {
-                virtio_net_dev_stats(binding->dev, &ds);
-                class_device_call_end(binding);
-            }
+            int result = class_net_read_stats(binding, &ds);
             class_device_put(binding);
-            snprintf(row, sizeof(row),
-                     "%s-drv: rx %llu pkts %llu drops, tx %llu pkts %llu drops\n",
-                     name, ds.rx_packets, ds.rx_drops,
-                     ds.tx_packets, ds.tx_drops);
-            a20_lwip_append(buf, bufsz, &off, row);
+            if (!result) {
+                snprintf(row, sizeof(row),
+                         "%s-drv: rx %llu pkts %llu drops, tx %llu pkts %llu drops\n",
+                         name, ds.rx_packets, ds.rx_drops, ds.tx_packets, ds.tx_drops);
+                a20_lwip_append(buf, bufsz, &off, row);
+            }
         }
     }
     a20_lwip_unlock(flags);

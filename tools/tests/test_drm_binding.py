@@ -43,7 +43,7 @@ int copy_to_user(void *,const void *,size_t);
         subprocess.run(['cc','-std=gnu11','-D_GNU_SOURCE','-DCONFIG_X86_64','-DCONFIG_64BIT','-DCONFIG_NR_CPUS=2','-pthread','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
           '-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-fsanitize=address,undefined','-fno-sanitize-recover=all',
           '-I'+str(work),'-I'+str(ROOT/'kernel/arch/x86_64/include'),'-I'+str(ROOT/'kernel/include'),'-I'+str(ROOT/'kernel'),
-          str(code),str(ROOT/'kernel/drivers/core/driver_core.c'),str(ROOT/'kernel/drivers/core/driver_class.c'),str(ROOT/'kernel/firmware/node.c'),'-o',str(cls.binary)],check=True)
+          str(code),str(ROOT/'kernel/drivers/core/driver_core.c'),str(ROOT / 'kernel/drivers/core/driver_class.c'), str(ROOT / 'kernel/drivers/core/driver_protocol.c'),str(ROOT/'kernel/firmware/node.c'),'-o',str(cls.binary)],check=True)
     def run_case(self,name):subprocess.run([str(self.binary),name],check=True,timeout=15)
     def test_initial_binding(self):self.run_case('initial')
     def test_exact_devres_release_preserves_remaining_order(self):self.run_case('actions')

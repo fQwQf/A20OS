@@ -45,6 +45,7 @@
 
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/net/interface.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
@@ -243,7 +244,8 @@ typedef struct {
      * ring pointer, the transmit descriptor busy mask, the TSAD/TSD programming
      * and the bounce buffers.  The IRQ handler takes only g_lwip_lock and then
      * calls into lwIP; send/recv/poll take only nic->lock and never call back
-     * into lwIP.  The two are never held together -- see
+     * into lwIP. The control-plane NET_STATS reader may take this lock under
+     * the stack lock; no IRQ/RX path enters the stack while holding it. See
      * docs/drivers/guide/lock-order.md. */
     spinlock_t lock;
     uint8_t *rx;                  /* RTL8139_RX_BUF_SIZE ring */
@@ -648,8 +650,27 @@ static int rtl8139_rx_irq_driven(device_t *dev)
     return nic && nic->irq_registered;
 }
 
+static int rtl8139_stats_read(struct device *dev, net_dev_stats_t *out)
+{
+    if (!out) return -EINVAL;
+    *out = (net_dev_stats_t){0};
+    rtl8139_device_t *nic = dev ? dev->drv_priv : NULL;
+    if (!nic || !nic->ready) return -ENODEV;
+    uint64_t flags = spin_lock_irqsave(&nic->lock);
+    *out = (net_dev_stats_t){nic->rx_packets, nic->rx_drops, nic->tx_packets, nic->tx_drops};
+    spin_unlock_irqrestore(&nic->lock, flags);
+    return 0;
+}
+static const struct driver_net_stats_ops rtl8139_stats_ops = {rtl8139_stats_read};
+
 static int rtl8139_probe(device_t *dev)
 {
+    const struct driver_protocol_descriptor stats = {
+        .info = {DRIVER_PROTOCOL_NET_STATS, 1, sizeof(rtl8139_stats_ops), 0},
+        .ops = &rtl8139_stats_ops,
+    };
+    int protocol = device_add_protocol(dev, &stats);
+    if (protocol) return protocol;
     rtl8139_parse_cmdline();
 
     if (pci_enable_and_assign_bars(dev) < 0)
