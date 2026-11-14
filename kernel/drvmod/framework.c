@@ -633,6 +633,10 @@ const struct drv_export drv_export_table[] = {
     { "gpu_device_register",   (void *)gpu_device_register },
     { "gpu_device_unregister", (void *)gpu_device_unregister },
     { "gpu_device_get_default", (void *)gpu_device_get_default },
+    { "gpu_device_default_get", (void *)gpu_device_default_get },
+    { "gpu_device_access_begin", (void *)gpu_device_access_begin },
+    { "gpu_device_default_begin", (void *)gpu_device_default_begin },
+    { "gpu_device_access_end", (void *)gpu_device_access_end },
     /* user copy helpers (virtio-gpu 3D ioctl passthrough) */
     { "copy_from_user",        (void *)copy_from_user },
     { "copy_to_user",          (void *)copy_to_user },

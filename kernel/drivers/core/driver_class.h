@@ -46,9 +46,12 @@ int class_device_publish(struct device *dev);
 void class_device_mark_offline(struct device *dev);
 void class_device_unpublish(struct device *dev);
 class_device_t *class_device_get_by_name(const char *name);
+/* Dense rank among online publications, not a persistent identity. Registry
+ * changes can reorder ranks; callers retain each returned reference. */
 class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index);
 /* Stable publication index, not the rank among currently online devices. */
 class_device_t *class_device_get_by_index(uint32_t class_type, unsigned index);
+/* Same online rank semantics, across all classes. */
 class_device_t *class_device_get_nth(unsigned index);
 void class_device_get(class_device_t *cdev);
 void class_device_put(class_device_t *cdev);
