@@ -1263,12 +1263,21 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
         for (unsigned i = 0; i < 128; i++)
             vmo_data[i < 64 ? 0 : 1][i < 64 ? PAGE_SIZE - 64 + i : i - 64] = (uint8_t)(i * 19U + 3U);
         struct driver_dma_mapping *vmo_mapping;
-        DMA_CHECK(!driver_dma_map_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &vmo_mapping));
+        int vmo_result = kind == 2 ?
+            driver_dma_map_owned_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &vmo_mapping) :
+            driver_dma_map_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &vmo_mapping);
+        DMA_CHECK(!vmo_result);
         uint64_t vmo_address, vmo_next;
         DMA_CHECK(!driver_dma_page_address(vmo_mapping, 0, &vmo_address));
         DMA_CHECK(!driver_dma_page_address(vmo_mapping, 1, &vmo_next) && vmo_next == vmo_address + PAGE_SIZE);
         DMA_CHECK(vmo_address != pfn_to_phys(vmo_first) && vmo_next != pfn_to_phys(vmo_second));
-        vmo_release(vmo); /* The original storage owner dies before real DMA. */
+        vmo_release(vmo); /* Drop the caller's reference before real DMA. */
+        /* The resident mapping owns the original object, not just its selected
+         * frames. Snapshot variants above still demonstrate independent pins. */
+        if (kind == 2) {
+            DMA_CHECK(vmo_peek_page(vmo, 0) != PFN_NONE);
+            DMA_CHECK(vmo_peek_page(vmo, 1) == vmo_first && vmo_peek_page(vmo, 2) == vmo_second);
+        }
         uint16_t vmo_command = pci_cfg_read16(device, 4);
         pci_cfg_write16(device, 4, vmo_command | 4U);
         native_test_edu_transfer(bar, vmo_address + PAGE_SIZE - 64, 0x40000, false);
@@ -1285,7 +1294,7 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
         DMA_CHECK(!(pci_cfg_read16(device, 4) & 4U));
         DMA_CHECK(!driver_dma_try_unmap_pages(&vmo_mapping) && !vmo_mapping);
         if (kind == 2)
-            kinfo("DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1\n");
+            kinfo("DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1 owner=1\n");
         else if (kind == 1)
             kinfo("DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1\n");
         else

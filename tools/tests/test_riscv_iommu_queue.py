@@ -51,6 +51,7 @@ uint64_t clock_ticks_per_sec(void);
                 "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests/riscv_iommu_queue_host.c"), "-o", str(binary),
                 str(ROOT / "tools/tests/dma_buffer_unused_host.c"),
+                str(ROOT / "tools/tests/vmo_unused_host.c"),
                 str(ROOT / "kernel/drivers/core/dma_mapping.c"),
                 str(ROOT / "kernel/drivers/core/dma_policy.c"),
             ], check=True)

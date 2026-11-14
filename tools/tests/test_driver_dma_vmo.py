@@ -45,7 +45,7 @@ void dma_sync_for_cpu(void *,size_t);
         library = work/'owner.a'
         subprocess.run(['rustc','--edition=2021','--crate-type=staticlib','-Cpanic=abort','-Copt-level=1',str(owner),'-o',str(library)],check=True)
         production=(ROOT/'kernel/mm/vmo.c').read_text()
-        names=['int vmo_pin_pages(', 'uint32_t a20_vmo_lifecycle_type_locked(',
+        names=['void vmo_ref(', 'void vmo_release(', 'int vmo_pin_pages(', 'uint32_t a20_vmo_lifecycle_type_locked(',
                'uint32_t a20_vmo_lifecycle_pin_limit(',
                'int a20_vmo_lifecycle_frame_valid(', 'void a20_vmo_lifecycle_pin_frames(',
                'void a20_vmo_lifecycle_ref_inc(', 'int a20_vmo_lifecycle_ref_dec_last(',
@@ -53,7 +53,7 @@ void dma_sync_for_cpu(void *,size_t);
                'uint32_t a20_vmo_lifecycle_page_count_locked(', 'pfn_t a20_vmo_lifecycle_slot_locked(']
         bodies='\n'.join(extract_function(production,name) for name in names)
         model=(ROOT/'tools/tests/driver_dma_vmo_host.c').read_text()
-        model=model.replace('/* PRODUCTION_VMO_PRIMITIVES */','extern int a20_vmo_pin_pages_rust(struct vmo *,uint32_t,uint32_t,pfn_t *);\n'+bodies)
+        model=model.replace('/* PRODUCTION_VMO_PRIMITIVES */','extern void a20_vmo_ref_rust(struct vmo *);\nextern void a20_vmo_release_rust(struct vmo *);\nextern int a20_vmo_pin_pages_rust(struct vmo *,uint32_t,uint32_t,pfn_t *);\n'+bodies)
         fixture=work/'fixture.c';fixture.write_text(model);cls.binary=work/'test'
         subprocess.run(['cc','-std=gnu11','-pthread','-O1','-g','-Wall','-Wextra','-Werror',
                         '-fsanitize=address,undefined','-fno-sanitize-recover=all',

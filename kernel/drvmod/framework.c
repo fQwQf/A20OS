@@ -363,6 +363,7 @@ const struct drv_export drv_export_table[] = {
     { "driver_dma_map_pages", driver_dma_map_pages },
     { "driver_dma_map_buffer", driver_dma_map_buffer },
     { "driver_dma_map_vmo", driver_dma_map_vmo },
+    { "driver_dma_map_owned_vmo", (void *)driver_dma_map_owned_vmo },
     { "driver_dma_mapping_count", driver_dma_mapping_count },
     { "driver_dma_page_address", driver_dma_page_address },
     { "driver_dma_mapping_sync_for_device", driver_dma_mapping_sync_for_device },

@@ -29,6 +29,7 @@ class RiscvIommuRequester(unittest.TestCase):
         marker = 'int main(int argc,char **argv) {'
         model = (ROOT / 'tools/tests/riscv_iommu_requester_host.c').read_text()
         model = model.replace('/* PRODUCTION_BUFFER */', native_buffer_implementation())
+        model = model.replace('#include "tools/tests/vmo_unused_host.c"', (ROOT / 'tools/tests/vmo_unused_host.c').read_text())
         source = source.replace(marker, model + '\n' + marker)
         source = source.replace('if(!strcmp(argv[1],"pci-retired"))',
                                 'if(!strncmp(argv[1],"iommu-",6))requester_iommu_case(argv[1]+6);\n else if(!strcmp(argv[1],"pci-retired"))')

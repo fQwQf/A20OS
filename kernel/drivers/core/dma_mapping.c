@@ -4,10 +4,12 @@
 #include "drivers/core/dma_buffer.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/dma_mapping_internal.h"
 #include "core/errno.h"
 #include "core/refcount.h"
 #include "core/sync.h"
 #include "mm/slab.h"
+#include "mm/vmo.h"
 
 struct driver_dma_domain {
     refcount_t references;
@@ -31,6 +33,7 @@ struct driver_dma_page {
 struct driver_dma_mapping {
     struct driver_dma_domain *domain;
     struct driver_dma_buffer *buffer;
+    struct vmo *memory; /* optional whole-object owner, including budget */
     size_t count, mapped;
     bool usable, sync_cpu;
     enum driver_dma_direction direction;
@@ -231,7 +234,21 @@ int driver_dma_mapping_sync_for_cpu(struct driver_dma_mapping *mapping)
     return 0;
 }
 
-static int release_mapping(struct driver_dma_mapping *mapping)
+struct mapping_retired {
+    struct driver_dma_buffer *buffer;
+    struct vmo *memory;
+};
+
+/* Allocation owners may destroy device metadata or enter MM/TLB/cgroup
+ * teardown. Public entry points drain these references outside domain locks. */
+static void put_retired(struct mapping_retired *retired)
+{
+    if (retired->buffer) driver_dma_buffer_put(retired->buffer);
+    if (retired->memory) vmo_release(retired->memory);
+}
+
+static int release_mapping(struct driver_dma_mapping *mapping,
+                             struct mapping_retired *retired)
 {
     struct driver_dma_domain *domain = mapping->domain;
     mapping->usable = false;
@@ -250,9 +267,9 @@ static int release_mapping(struct driver_dma_mapping *mapping)
     if (mapping->sync_cpu && mapping->direction != DRIVER_DMA_TO_DEVICE)
         for (size_t i = 0; i < mapping->count; i++)
             dma_sync_for_cpu(mapping_page_data(mapping, i), PAGE_SIZE);
-    if (mapping->buffer)
-        driver_dma_buffer_put(mapping->buffer);
-    else
+    retired->buffer = mapping->buffer;
+    retired->memory = mapping->memory;
+    if (!mapping->buffer)
         for (size_t i = 0; i < mapping->count; i++)
             frame_put(mapping->pages[i].pfn);
     if (domain->is_managed)
@@ -269,14 +286,18 @@ int driver_dma_try_unmap_pages(struct driver_dma_mapping **pointer)
     if (!*pointer)
         return 0;
     struct driver_dma_domain *domain = (*pointer)->domain;
+    struct mapping_retired retired = {0};
     driver_dma_domain_get(domain);
     if (domain->is_managed)
         mutex_lock(&domain->lock);
-    int ret = release_mapping(*pointer);
+    int ret = release_mapping(*pointer, &retired);
     if (!ret)
         *pointer = NULL;
     if (domain->is_managed)
         mutex_unlock(&domain->lock);
+    /* Failed unmap leaves retired empty and retains the original mapping.
+     * Keep the temporary domain reference through any owner callbacks. */
+    put_retired(&retired);
     driver_dma_domain_put(domain);
     return ret;
 }
@@ -291,6 +312,7 @@ void driver_dma_unmap_pages(struct driver_dma_mapping **pointer)
 static int map_storage(struct driver_dma_domain *domain, const pfn_t *pages,
                           struct driver_dma_buffer *buffer,
                           size_t count, enum driver_dma_direction direction,
+                          struct mapping_retired *retired,
                           struct driver_dma_mapping **out)
 {
     if (!out)
@@ -331,6 +353,7 @@ static int map_storage(struct driver_dma_domain *domain, const pfn_t *pages,
         return -ENOMEM;
     mapping->domain = domain;
     mapping->buffer = buffer;
+    mapping->memory = NULL;
     mapping->count = mapping->mapped = 0;
     mapping->usable = true;
     mapping->sync_cpu = false;
@@ -375,7 +398,7 @@ static int map_storage(struct driver_dma_domain *domain, const pfn_t *pages,
         if (rc) {
             /* A failed rollback still owns pins and translations. Expose only
              * a cleanup handle, never a partially usable DMA mapping. */
-            if (release_mapping(mapping))
+            if (release_mapping(mapping, retired))
                 *out = mapping;
             return rc < 0 ? rc : -EIO;
         }
@@ -390,16 +413,25 @@ int driver_dma_map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
                           size_t count, enum driver_dma_direction direction,
                           struct driver_dma_mapping **out)
 {
-    if (!domain || !domain->is_managed)
-        return map_storage(domain, pages, NULL, count, direction, out);
     if (!out)
         return -EINVAL;
     *out = NULL;
-    mutex_lock(&domain->lock);
-    int ret = domain->closed ? -ESHUTDOWN :
-              map_storage(domain, pages, NULL, count, direction, out);
-    mutex_unlock(&domain->lock);
+    struct mapping_retired retired = {0};
+    bool managed = domain && domain->is_managed;
+    if (managed) mutex_lock(&domain->lock);
+    int ret = managed && domain->closed ? -ESHUTDOWN :
+              map_storage(domain, pages, NULL, count, direction, &retired, out);
+    if (managed) mutex_unlock(&domain->lock);
+    put_retired(&retired);
     return ret;
+}
+
+void driver_dma_mapping_adopt_vmo(struct driver_dma_mapping *mapping, struct vmo *vmo)
+{
+    /* The only caller transfers its private reference before publication.
+     * Fresh map_storage rollback always has memory == NULL; adopted owners
+     * are retired only by try_unmap after all invalidations have succeeded. */
+    mapping->memory = vmo;
 }
 
 int driver_dma_map_buffer(struct driver_dma_domain *domain, struct driver_dma_buffer *buffer,
@@ -410,12 +442,13 @@ int driver_dma_map_buffer(struct driver_dma_domain *domain, struct driver_dma_bu
     size_t size = driver_dma_buffer_size(buffer);
     if (!buffer || !size) return -EINVAL;
     size_t count = (size - 1U) / PAGE_SIZE + 1U;
-    if (!domain || !domain->is_managed)
-        return map_storage(domain, NULL, buffer, count, direction, out);
-    mutex_lock(&domain->lock);
-    int ret = domain->closed ? -ESHUTDOWN :
-              map_storage(domain, NULL, buffer, count, direction, out);
-    mutex_unlock(&domain->lock);
+    struct mapping_retired retired = {0};
+    bool managed = domain && domain->is_managed;
+    if (managed) mutex_lock(&domain->lock);
+    int ret = managed && domain->closed ? -ESHUTDOWN :
+              map_storage(domain, NULL, buffer, count, direction, &retired, out);
+    if (managed) mutex_unlock(&domain->lock);
+    put_retired(&retired);
     return ret;
 }
 

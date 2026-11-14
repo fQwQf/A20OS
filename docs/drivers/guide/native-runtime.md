@@ -211,7 +211,7 @@ virtio-gpu 的 RAM framebuffer 已由该工厂创建；producer、临时 snapsho
 
 失败清空有效输出：零长度/NULL 输出返回 `-EINVAL`，页取整或 dense table 无法表示返回 `-E2BIG`，预算/元数据/页面分配失败返回 `-ENOMEM`，CPU alias 异常返回 `-ERANGE`。参数预检在 charge 前；预算拒绝在分配前。对象构造中途失败复用原有 Rust destructor，交还已获得的每个 canonical 页、全部预收 charge 与 owner pin；没有发布半成品、第二套页注册表或 driver 回调。VMO/VMA 引用、页 pin、DMA 地址和硬件停止继续是不同契约。
 
-canonical snapshot 与 driver_dma_map_vmo 已接受 kind 5；mapping 仍只持独立帧引用，不保留源 VMO、预算或访问 lease。resident 的固定 extent 来自工厂。需要预算 owner 在请求期间存活时，请求必须另持 VMO 引用；不能把完成 fence、page pin 或 metadata 离线解释为该引用或硬件停止。工厂不检查设备 mask、不建立 IOVA、不授予 DMA 权限；缓存同步、页地址查询、可失败 unmap/停止仍由既有 domain 协议负责。
+canonical snapshot 与 driver_dma_map_vmo 已接受 kind 5；`driver_dma_map_vmo` 的 mapping 仍只持独立帧引用，不保留源 VMO、预算或访问 lease；新增 `driver_dma_map_owned_vmo` 可显式保留固定 RAM VMO 的整个 owner。resident 的固定 extent 来自工厂。需要预算 owner 在请求期间存活时，可显式使用 owned 映射或由请求另持 VMO 引用；不能把完成 fence、page pin 或 metadata 离线解释为该引用或硬件停止。工厂不检查设备 mask、不建立 IOVA、不授予 DMA 权限；缓存同步、页地址查询、可失败 unmap/停止仍由既有 domain 协议负责。
 
 DRM 的 GEM_CREATE、CREATE_DUMB 与 VIRTGPU_RESOURCE_CREATE 已使用该工厂。adapter 在 GPU mutex 前通过 cg_task_group_pin 捕获当前分配任务的 cgroup，操作结束后交还临时 pin；工厂为 VMO 保留自己的引用。GEM/handle 元数据和 RAM 构造位于 store mutex 外，仅最终 ID/handle/对象发布进入 store mutex；没有在硬件命令路径延迟物化 backing。创建失败传播原生 errno，输出失败或正常 close 沿用每文件 owner/失败退休；framebuffer、导出 pin 和普通 VMA 仍各自保留 VMO，因此 backing 的原始 charge 随 VMO 一起存活。该 RAM 底座不提供 BO 迁移/回收策略、VRAM、GPUVM、任务/请求调度或共享访问权。
 
@@ -357,16 +357,17 @@ bulk 是精确长度同步接口，不运行 complete 回调：0 表示完整长
 - `driver_dma_map_pages()`：映射调用者已持有的 order-0 RAM 页数组。页面可以物理不连续；每页获得独立的设备 DMA 地址。
 - `driver_dma_map_buffer()`：显式保留并映射原生 buffer 的页覆盖范围；与页数组使用相同后续接口，整块分配不拆分，详见 [buffer 映射](#将-buffer-显式映射到-domain)。
 - `driver_dma_map_vmo()`：按 first/count 页索引导入已物化的原生 VMO RAM，先取得稳定页引用，再交给页映射；不建立活的 VMO 大小/驻留租约，详见 [VMO 页快照](#从原生-vmo-保留页并映射)。
+- `driver_dma_map_owned_vmo()`：显式保留固定 RAM VMO 的整个 backing/预算 owner，设备仅映射选定页视图；成功和失败清理句柄使用同一所有权，见 [VMO owner](#持有-vmo-的-dma-视图与锁外-owner-退休)。
 - `driver_dma_page_address()`：读取设备地址，不根据 PFN 或 CPU 地址推算。地址 0 可以合法，错误由返回值区分。
 - `driver_dma_mapping_sync_for_device/cpu()`：在 CPU 与设备停止访问的边界执行缓存同步。映射时自动执行初次 device 同步，成功映射解除时执行必要的 CPU 同步。
 - `driver_dma_try_unmap_pages(&mapping)`：硬件停止访问后，逆序解除翻译；全部成功才同步 CPU、释放页面和 domain 引用并置空指针。失败返回负 errno 并保留 mapping，必须重试。
 - `driver_dma_unmap_pages(&mapping)`：原有 infallible provider 的兼容入口；内部也保留失败对象，但不返回状态，checked provider 应使用 try 接口。
 
-页数组映射独立保留每一页的 frame 引用；buffer 映射独立保留整个分配对象。调用者可在映射成功后释放原始页面引用，设备仍使用的 RAM 不会因此回收。页映射失败会尝试回滚之前的翻译及页面引用；checked 回滚如果失败，`driver_dma_map_pages()` 返回原始映射错误，同时通过非空 `*out` 交出仅供清理的句柄。调用者必须保留并反复 try_unmap，不能只判断返回码就丢弃输出。回滚没有完成初次 device 同步的 mapping 时不执行 CPU invalidate，避免丢失尚未交给设备的 CPU 数据。
+页数组映射独立保留每一页的 frame 引用；buffer 映射独立保留整个分配对象；owned VMO 映射另保留整个固定 VMO 与其 charge。调用者可在映射成功后释放原始页面引用，设备仍使用的 RAM 不会因此回收。页映射失败会尝试回滚之前的翻译及页面引用；checked 回滚如果失败，`driver_dma_map_pages()` 返回原始映射错误，同时通过非空 `*out` 交出仅供清理的句柄。调用者必须保留并反复 try_unmap，不能只判断返回码就丢弃输出。回滚没有完成初次 device 同步的 mapping 时不执行 CPU invalidate，避免丢失尚未交给设备的 CPU 数据。
 
 provider 的 `map_page` 每次映射一整页，失败不得留下该页翻译或未确认的失效。旧 `unmap_page` 返回前必须完成设备地址翻译失效；checked `unmap_page` 只有返回 0 才确认失效，失败时必须保留 IOVA，且允许重试已经清除 PTE 的操作。设备地址需要页对齐且整页落在 domain 的 mask 内，违反条件时解除该页及之前映射，返回错误，绝不回退到物理地址。
 
-解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留的页条目数量。失败时全部 frame 引用或整个 buffer 保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
+解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留的页条目数量。失败时全部 frame 引用及 buffer/VMO owner 保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
 
 managed provider 的 `map_page` 显式返回 `needs_unmap`：只要当前页已安装翻译或保留 IOVA，就设置 true，并交出可供 unmap 的地址，包含返回负 errno 的情况。核心将当前页也纳入回滚；失效再次失败时，清理句柄保留当前页及前序页面引用。返回成功却没有设置 needs_unmap 是 provider 契约错误，转为 `-EIO`；失败且 false 仍要求当前页没有硬件残留。旧 infallible/checked provider 的接口及回滚语义保持原样。
 
@@ -425,6 +426,20 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 mapping 独立持有所需 frame 引用，调用者在成功返回后可释放 VMO；对可变源也可缩小 VMO，而设备仍引用取得快照时的原页面。新的 CPU fault/重新增长可能选用不同页面，不能把这解释为自动跟踪源地址。若映射失败只发布了一个前缀，清理句柄只保留那些可能被硬件访问的帧，未发布后缀的临时 pin 正常交还。失效失败仍按既有协议保留 mapping，只有全部确认成功后才进行必要 CPU sync 和最后释放。
 
 所有 provider/cache 调用均不持 VMO lock；锁顺序只在快照期间是 VMO → PFA，释放 VMO lock 后才取得 managed domain mutex。该接口只保证帧存活，不冻结 VMO extent，不转移 cgroup charge，也不授予源对象访问权或硬件 DMA 权限。GPU BO/request 层仍须管理访问权、驻留/预算、CPU/device 排他和提交/完成；VMO resize/销毁释放其原有预算不代表 DMA pin 已经消失。这里不增加用户态 UAPI、Linux GEM 结构依赖或 GPUVM。
+
+### 持有 VMO 的 DMA 视图与锁外 owner 退休
+
+`driver_dma_map_owned_vmo(domain, memory, first, count, direction, &mapping)` 是显式的存储所有权入口，仅接受工厂发布的 CONTIGUOUS（kind 4）和 RESIDENT（kind 5）固定 RAM；其他类型返回 `-EOPNOTSUPP`。调用者在整个任务上下文调用期间持有 VMO/domain 引用。它复用 map_vmo 的 canonical 页快照、4096 页上限、mask/policy 检查、cache sync 和逐页设备地址接口，不另建页注册表、用户 ABI 或 GPU 对象模型。
+
+adapter 在任何 provider 调用前取得一份 VMO 引用，用局部输出接收映射，在发布成功句柄或失败清理句柄前无分配地交接该引用。整个 VMO 的固定 extent、全部页面及原始 cgroup charge/pin（如有）都随句柄保留，包括 first/count 之外未映射的页；硬件只获得请求视图覆盖的页。多个视图分别持有 VMO 引用，原始 charge 仍只计一次，不转移给导入者或设备。kind 4 的内核分配本身没有该 cgroup charge。设备地址可能不连续，必须逐页查询。
+
+参数/元数据分配/policy 检查拒绝，或映射失败但已完整回滚时，输出为空并交还额外 owner；若回滚无法确认，则保留原始 errno 并返回非空清理句柄。部分 map、非法 IOVA 及部分 unmap 的失败都保留整个 VMO 和 charge，直到重试确认所有翻译失效，不能因一部分页已解除而提前交还 owner。清理句柄不允许地址查询、sync 或继续提交。可变 ANONYMOUS/PAGED/SHARED_ANON 和物理 VMO 不使用这一入口，也不能在拒绝后静默降级为页快照映射。
+
+`driver_dma_map_vmo` 继续只保留快照帧，不保留源 VMO/charge；需要整个固定对象所有权时应显式选择 owned 入口。固定 extent 来自 MM 工厂，不是 mapper 新增的驻留策略。两种接口都不授予对象访问权、不提供 GPUVM，也不证明 DMA 停止。调用者仍须停止 producer 或观察真正的硬件完成，协调 CPU/device 排他，再 unmap；fence 元数据完成、设备 offline 或最终 caller put 不能替代这些条件。
+
+普通 unmap 和构造回滚共用退休协议：所有可失败失效与必要 CPU sync 成功后，移除 mapping、更新 domain mapping 计数；try_unmap 同时清空调用者指针。buffer/VMO 的最终 put 在退出 domain mutex 后执行，try_unmap 的临时 domain 引用跨越全部 owner 析构回调，随后才交还；构造回滚由调用者贯穿整个调用的 domain 引用保护。失败时不移动 owner。原来的裸页 frame_put 仍在已确认失效之后按页路径执行。这一规则也覆盖 allocation owner 与 mapping device 不同的 buffer：最后 put 可能触发另一设备的 release 并重新进入 domain shutdown。provider 的 map/unmap/deactivate 回调仍不得重入本 domain；锁外 owner 退休是另一个阶段，不放宽 provider 的约束。
+
+新增函数已导出给 `.a20drv`；内部 owner 交接 helper 不导出。公开结构与模块 ABI 12 不变。
 
 ### 不可变物理约束与映射入口检查
 
@@ -998,3 +1013,17 @@ GEM 的对象 ID 仍在每 publication 内分配，每文件 handle 集合只保
 RISC-V 原生 IOMMU/EDU 标准门禁最终通过，新增 `DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1`：新对象全部页已物化且拒绝 resize，源 VMO 销毁后真实设备通过非恒等 IOVA 跨页读写，并逐字节比对数据及 guard。使用内核 NULL budget owner，不表示实际 cgroup OOM 或实体 GPU 验证。x86_64 embedded 双核 stop/DRM/VMA 门禁检查真实 kind/预分配页、旧 VMA 保留与在线 close 后唯一 VMA owner；generic 模块双核显示完成 DRM_SYSFS、FBDEV_MAP/fork 和 videoplay 10 帧；RISC-V PRIME 保留 DRM_FILE、共享映射、SCM_RIGHTS、80 exports 和 sync-file。上述标准目标均返回 0；没有运行本轮 virgl/厂商 GPU 加速、真实硬件超时或完整 BO/GPUVM/job。
 
 十二篇文档同步工厂、预算与锁边界；共享 docs/zh 迁移及其他工作区改动保留，canonical 路径仅投影本轮内容。工作区/canonical 行号引用检查通过，导航保留各自本轮前已有的 7 项未编目条目，没有增加链接/锚点错误。源码树、负控及最终主机/guest 日志位于 `.kernel-build/resident-vmo-review/`。
+
+### 固定 RAM VMO 的 owning DMA 视图验证（2026-11-14）
+
+新增 driver_dma_map_owned_vmo，复用原生快照和 DMA mapper，限定工厂固定 kind 4/5。adapter 在 provider 前取得 VMO 引用，在局部 success/cleanup 输出中无分配地交接后才发布；整个对象、未映射页与原始 charge/pin 保留，设备只映射选定页。旧 map_vmo 继续只保留帧。buffer 与 VMO 最终 put 在确认全部失效、sync、mapping 退休并退出 domain mutex 后执行；try_unmap 的临时 domain 引用跨 owner 回调，构造回滚依靠 caller 贯穿调用的引用。只新增函数导出和私有 mapping 字段，公开布局与 ABI 12 不变。
+
+新增 15 个 resident mapping unittest 方法执行生产 C resident/contiguous 工厂、cgroup 原语、Rust ref/destroy 和 DMA mapper；PFA、CPU alias、cache hook 与 provider 是边界模型。验证整对象/charge、多个视图、kind 4 正例、拒绝可变/物理类型、参数/元数据失败、policy、部分 map、非法 IOVA、部分 unmap/重试、detach 失败和锁外 owner 回调重新进入 shutdown。provider 逐次断言所选 PFN，防止把保留的额外页暴露给设备。两个 buffer 方法另验证不同 allocation device 的最终 release，在正常 unmap 和映射失败所返回清理句柄的最终 unmap 后均可锁外重入 shutdown。
+
+16 个编译成功的负控均被运行时断言拒绝，覆盖丢失/泄漏 VMO 或 buffer 引用、失败 cleanup 丢 owner、失效前退休、错误类型/视图、错误输出、锁内回调、domain 过早释放及旧 snapshot 语义改变。首次 wrong-first 负控删除了参数使用，被 -Werror 拒绝编译；改为仍使用参数但产生错误页索引后，确认由运行时 PFN 断言检出，未把编译错误计为通过。还原后导出源码逐文件等于 staged source tree，最终隔离回归 410 个不同 unittest 方法通过。check-firmware-model 通过 635 项及独立 1 项 sleep ABI，check-pc-drivers 通过 271 项，118 个 instance 与 32 个 component 清单审计通过。
+
+五条 guest 门禁最终返回 0：RISC-V 原生 IOMMU/EDU 的 resident 分支采用 owning 视图，交还 caller 引用后核对包括未映射页的整个对象，再完成真实跨页 DMA/逐字节数据与 guard 比对，要求 owner=1；x86_64 embedded 双核 stop 验证 DRM/退休/VMA/重绑；generic 模块显示完成 DRM_SYSFS、FBDEV_MAP/fork 与 videoplay 10 帧；RISC-V PRIME 完成 DRM_FILE、共享映射、SCM_RIGHTS、80 exports 与 sync-file；x86_64 lifecycle 完成失败 probe/remove/prepare 与 registry capacity 注入。lifecycle 是 legacy smoke case，通过 python3 tools/smoke.py 调用，首次 tools/a20 test 因无对应 instance 拒绝，未计为运行证据。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行该架构 guest。
+
+EDU 的 budget owner 为 NULL；真实 charge/namespace pin 生命周期由生产 C/Rust 主机集成验证。匿名/连续 EDU 分支仍使用旧快照，连续 owning 正例由主机集成覆盖。没有运行本轮 virgl/厂商 GPU、真实硬件停止超时或实板 cgroup OOM；本接口不是 BO 迁移、GPUVM、共享权限或 job 调度器。源码快照、负控与日志位于 .kernel-build/resident-map-review/。
+
+十二篇文档同步 owning 视图、预算与锁外退休契约。工作区与 canonical 行号引用检查通过；导航检查各自保留本轮前已有的 7 项未编目条目，错误列表完全相同，没有增加链接/锚点错误。共享 docs/zh 迁移仅投影本轮内容，其他工作区改动保留。

@@ -46,6 +46,8 @@ matched_id --> matched id_table entry
 
 DISPLAY provider 通过 ABI 12 `get_capabilities` 声明原生 SCANOUT/RENDER/RAM_SCANOUT/BOOT_SCANOUT。默认输出排除 headless，先比较渲染能力，同级优先原生管理输出，等分保持；不再从 virgl 表推断。能力快照是元数据，不固定 backing 或授予硬件访问；consumer 在 scoped access 内查询，见 [原生能力与默认选择](native-runtime.md#原生-gpu-能力与默认选择)。
 
+固定 RAM 的 DMA 请求可用 `driver_dma_map_owned_vmo` 保留原生 VMO 的整个 backing 与原始预算 owner；设备只获得选定页视图。映射、存储引用与硬件停止仍分别管理。buffer/VMO 最终 put 在 domain 锁外，失败失效保留句柄供重试，见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
+
 ## 数据结构字段
 
 ### `device_id_t`

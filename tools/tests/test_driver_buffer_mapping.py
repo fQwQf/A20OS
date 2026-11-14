@@ -17,20 +17,24 @@ class DriverBufferMapping(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         work = Path(cls.temp.name)
         source = native_buffer_source()
+        (work / 'mm').mkdir()
+        (work / 'mm/vmo.h').write_text((ROOT / 'tools/tests/vmo_api_only_host.h').read_text())
         # Keep the weak readiness definition after both production users.
         marker = 'int arch_device_dma_ready(void) {return dma_ready;}'
         source = source.replace(marker, '#include "drivers/core/dma_policy.c"\n'
-                                '#include "drivers/core/dma_mapping.c"\n'+marker)
+                                '#include "drivers/core/dma_mapping.c"\n'
+                                '#include "tools/tests/vmo_unused_host.c"\n'+marker)
         model = (ROOT / 'tools/tests/driver_buffer_mapping_host.c').read_text()
         source = source.replace('int main(int argc,char **argv) {', model+'\nint main(int argc,char **argv) {')
         source = source.replace('if(!strncmp(argv[1],"buffer-",7))',
                                 'if(!strncmp(argv[1],"map-",4))buffer_mapping_case(argv[1]+4);\n else if(!strncmp(argv[1],"buffer-",7))')
+        source = source.replace('#include "tools/tests/vmo_unused_host.c"', (ROOT / 'tools/tests/vmo_unused_host.c').read_text())
         fixture = work / 'fixture.c';fixture.write_text(source);cls.binary = work / 'test'
         subprocess.run(['cc', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Werror', '-ffreestanding',
                         '-fno-builtin', '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
                         '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                         '-DCONFIG_X86_64', '-DCONFIG_NR_CPUS=1', '-DCONFIG_DRIVER_LIFECYCLE_TEST',
-                        '-I'+str(ROOT / 'kernel/arch/x86_64/include'), '-I'+str(ROOT / 'kernel/include'),
+                        '-I'+str(work), '-I'+str(ROOT / 'kernel/arch/x86_64/include'), '-I'+str(ROOT / 'kernel/include'),
                         '-I'+str(ROOT / 'kernel'), str(fixture), '-o', str(cls.binary)], check=True)
 
     def run_case(self, name): subprocess.run([str(self.binary), 'map-'+name], check=True, timeout=15)
@@ -48,3 +52,6 @@ class DriverBufferMapping(unittest.TestCase):
     def test_identity_policy_violation_retains_cleanup_then_retries(self): self.run_case('identity')
     def test_invalid_admission_oom_and_provider_errors_balance_references(self): self.run_case('errors')
     def test_mapping_and_shutdown_serialize_before_closing_admission(self): self.run_case('shutdown')
+
+    def test_foreign_buffer_owner_reenters_shutdown_outside_domain_lock(self):self.run_case("reentrant-normal")
+    def test_failed_map_cleanup_retires_foreign_owner_outside_domain_lock(self):self.run_case("reentrant-rollback")

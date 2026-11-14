@@ -73,6 +73,14 @@ static void *buffer_close_thread(void *arg) {
  __atomic_store_n(&close_finished,1,__ATOMIC_RELEASE);return NULL;
 }
 
+static struct driver_dma_domain *retiring_domain;
+static unsigned owner_callbacks;
+static void retiring_buffer_owner(device_t *owner) {
+ assert(retiring_domain&&!retiring_domain->lock.depth&&!retiring_domain->mappings);
+ assert(!driver_dma_domain_shutdown(retiring_domain));
+ owner_callbacks++;buffer_owner_release(owner);
+}
+
 static void buffer_mapping_case(const char *name) {
  struct driver_dma_buffer *b=map_test_buffer(!strcmp(name,"padding")?33:8193);
  device_t *owner=allocation_owner,*target=buffer_owner();
@@ -90,7 +98,17 @@ static void buffer_mapping_case(const char *name) {
   assert(!driver_dma_domain_create_managed_policy(target,&buffer_provider_ops,&p,policy,&domain));
   driver_dma_policy_put(policy);
  } else assert(!driver_dma_domain_create_managed(target,&buffer_provider_ops,&p,&domain));
- if(!strcmp(name,"preflight")) {
+ if(!strncmp(name,"reentrant-",10)) {
+  retiring_domain=domain;owner->release=retiring_buffer_owner;
+  if(!strcmp(name,"reentrant-rollback")) {
+   p.fail_map=2;p.pending=1;p.fail_unmap=1;
+   assert(driver_dma_map_buffer(domain,b,p.direction,&m)==-EIO&&m&&p.live==2);
+  }else{assert(!strcmp(name,"reentrant-normal"));assert(!driver_dma_map_buffer(domain,b,p.direction,&m));}
+  driver_dma_buffer_put(b);b=NULL;buffer_destroy_owner(owner);owner=NULL;
+  assert(!owner_callbacks&&!owner_releases&&!page_frees);
+  assert(!driver_dma_try_unmap_pages(&m)&&!m&&owner_callbacks==1&&owner_releases==1&&page_frees==1);
+  assert(p.detaches==1&&!p.live);
+ }else if(!strcmp(name,"preflight")) {
   assert(driver_dma_map_buffer(domain,b,p.direction,&m)==-EACCES&&!m&&!p.calls);
   assert(refcount_read(&b->references)==1&&!domain->mappings&&!map_device_syncs);
  } else if(!strcmp(name,"rollback")) {

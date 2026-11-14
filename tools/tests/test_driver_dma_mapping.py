@@ -24,6 +24,7 @@ class DriverDmaMapping(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="a20-dma-mapping-") as temp:
             work = Path(temp)
             stubs = {**STUBS,
+                     "mm/vmo.h": (ROOT / "tools/tests/vmo_api_only_host.h").read_text(),
                      "core/arch.h": "#define PAGE_OFFSET 0x100000000UL\n",
                      "drivers/core/driver_hwapi.h": '''#pragma once
 #include "core/types.h"
@@ -58,6 +59,7 @@ static inline void mutex_unlock(mutex_t *m) { assert(!pthread_mutex_unlock(m)); 
                 "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests" / harness),
                 str(ROOT / "tools/tests/dma_buffer_unused_host.c"),
+                str(ROOT / "tools/tests/vmo_unused_host.c"),
                 str(ROOT / "kernel/drivers/core/dma_mapping.c"), "-o", str(binary),
                 str(ROOT / "kernel/drivers/core/dma_policy.c"),
             ], check=True)

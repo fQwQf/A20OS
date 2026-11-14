@@ -61,6 +61,7 @@ void dma_sync_for_device(void *p,size_t n) {(void)p;(void)n;}
 #undef readl
 #undef writel
 #include "drivers/core/dma_mapping.c"
+#include "tools/tests/vmo_unused_host.c"
 #include "drivers/core/dma_policy.c"
 int arch_device_dma_ready(void) {return 1;}
 static uint8_t ddt[4096] __attribute__((aligned(4096)));

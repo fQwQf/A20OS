@@ -184,7 +184,7 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 ## 固定 resident RAM
 
-原生 `vmo_create_resident` 在发布前预分配并清零全部 order-0 RAM；kind 5 的 extent/slot 不可 resize/补洞，物理连续性不保证。owner charge 和 cgroup pin 随 VMO 保留，NULL 明确表示内核无 charge 存储；预算或部分分配失败完整回滚。DRM 已在 store 锁外采用它，在 GPU mutex 前捕获预算 owner。页 pin/映射仍不保留 VMO 或转移 charge，需要预算 owner 的请求另持 VMO；不授予 DMA 地址、设备访问或停止证明。详见[resident RAM](native-runtime.md#固定-resident-ram-vmo-与预算-owner)。
+原生 `vmo_create_resident` 在发布前预分配并清零全部 order-0 RAM；kind 5 的 extent/slot 不可 resize/补洞，物理连续性不保证。owner charge 和 cgroup pin 随 VMO 保留，NULL 明确表示内核无 charge 存储；预算或部分分配失败完整回滚。DRM 已在 store 锁外采用它，在 GPU mutex 前捕获预算 owner。裸页 pin 和 `driver_dma_map_vmo` 不保留 VMO/charge；请求可另持 VMO，或显式使用只接受固定 kind 4/5 的 `driver_dma_map_owned_vmo` 保留整个 backing 与原始预算 owner；不授予 DMA 地址、设备访问或停止证明。详见[resident RAM](native-runtime.md#固定-resident-ram-vmo-与预算-owner)。
 
 ## VMO 页快照导入
 
@@ -192,7 +192,7 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 ## 可失败的 DMA 失效
 
-可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()`、`driver_dma_map_buffer()` 或 `driver_dma_map_vmo()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
+可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()`、`driver_dma_map_buffer()`、`driver_dma_map_vmo()` 或 `driver_dma_map_owned_vmo()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
 
 ## 固件读取
 
@@ -209,3 +209,7 @@ RISC-V 原生 PCI 驱动可显式使用 `riscv_iommu_dma_domain_create()`。创�
 原生 RISC-V 驱动使用 `riscv_iommu_dma_fault_poll()` 取得并处理共享 FQ 故障。`blocked`、`isolated` 和 `isolation_error` 必须分开检查：软件停发与隔离命令完成都不证明设备请求已停止，不能直接回收 DMA 页。`queue_error` 非零表示 fault 记录可能丢失，应将已知 count 当作下界并进入恢复流程。接口是任务上下文轮询，不自动完成 fence，不自动恢复硬件。
 
 需要后台监测时使用 `riscv_iommu_dma_watch_start()`。回调固定创建时的 owner token，快照有效期仅到回调返回；可 signal 驱动持有的 fence，但不自动停止硬件。quiesce 中先 `watch_stop()` 排空，再销毁 domain/context。停止超时保留句柄和回调资源，必须重试；回调内自停止返回 `-EDEADLK`。watch 不保持绑定有效，也不自动固定回调所在模块。
+
+## DMA owner 的锁外退休
+
+owned VMO 视图在 provider 调用前取得引用，成功或失败清理句柄均保留整个固定对象与 charge，包括未映射页。完整回滚不发布 owner；unmap 失败不交还 owner。确认失效、CPU sync、mapping 计数退休和调用者指针清空后，buffer/VMO 最终 put 在 domain 锁外执行，try_unmap 的临时 domain 引用跨越 owner 回调，构造回滚依靠 caller 全程持有的 domain 引用。provider 回调仍禁止重入自身 domain；此规则不授权在 DMA 未停止时 unmap。完整协议见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
