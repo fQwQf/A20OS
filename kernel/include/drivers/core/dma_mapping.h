@@ -151,7 +151,9 @@ int driver_dma_map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
  * Returned addresses need not be contiguous; query each page. Uses the same
  * sync/address/try_unmap APIs and fallible cleanup contract as map_pages.
  * Caller coordinates CPU/device access across ALL mappings of this buffer.
- * Unmap failure retains the entire buffer, including unexposed backing. */
+ * Unmap failure retains the entire buffer, including unexposed backing.
+ * Confirmed retirement drops the buffer owner outside the domain lock,
+ * including rollback; its final put may release another device's metadata. */
 int driver_dma_map_buffer(struct driver_dma_domain *, struct driver_dma_buffer *,
                            enum driver_dma_direction, struct driver_dma_mapping **out);
 /* Page-indexed import of existing VMO RAM. Caller holds VMO/domain references.
@@ -169,8 +171,23 @@ int driver_dma_map_buffer(struct driver_dma_domain *, struct driver_dma_buffer *
 int driver_dma_map_vmo(struct driver_dma_domain *, struct vmo *, uint32_t first,
                         uint32_t count, enum driver_dma_direction,
                         struct driver_dma_mapping **out);
+/* Explicit whole-object owner for factory-only VMO_RESIDENT or VMO_CONTIGUOUS
+ * RAM (other kinds -> EOPNOTSUPP). Caller holds VMO/domain references through
+ * this task-context call. In addition to the page snapshot, a usable OR failed-rollback mapping
+ * owns one VMO reference, retaining its entire immutable extent and original
+ * cgroup charge/pin where present, including pages outside the selected view. Multiple views
+ * share that charge; none transfers it to the device or mapping caller.
+ * Addresses may be sparse; query each page. Same page limit, validation,
+ * cache/mask/policy checks and non-NULL cleanup
+ * error contract as map_vmo. No owner is published on a fully rolled-back
+ * error. Confirmed unmap drops the owner outside the domain/provider lock;
+ * failure preserves it for retry. A completed fence or final caller put does
+ * not stop DMA/unmap, and this owner grants no CPU/device access permission. */
+int driver_dma_map_owned_vmo(struct driver_dma_domain *, struct vmo *, uint32_t first,
+                        uint32_t count, enum driver_dma_direction,
+                        struct driver_dma_mapping **out);
 /* Number of retained page entries, including during failed cleanup. A buffer
- * mapping retains its whole allocation regardless of this count. */
+ * or owning VMO mapping retains its whole backing regardless of count. */
 size_t driver_dma_mapping_count(const struct driver_dma_mapping *mapping);
 int driver_dma_page_address(const struct driver_dma_mapping *mapping,
                              size_t index, uint64_t *out);
@@ -178,11 +195,14 @@ int driver_dma_page_address(const struct driver_dma_mapping *mapping,
  * the mapping before synchronization. These functions do not wait for DMA. */
 int driver_dma_mapping_sync_for_device(struct driver_dma_mapping *mapping);
 int driver_dma_mapping_sync_for_cpu(struct driver_dma_mapping *mapping);
-/* Task context, after DMA has stopped. Invalidates translations, syncs writes
+/* Task context, after DMA has stopped, outside locks required by backing-owner
+ * finalizers. Invalidates translations, syncs writes
  * back to the CPU and drops frame pins or the buffer on success, consuming
  * *mapping to NULL.
  * A mapping is single-owner; serialize sync/address/unmap against each other.
- * No automatic devres release: a timeout must never free active DMA memory. */
+ * Buffer/VMO final puts run after the domain lock is released, with a temporary
+ * domain reference kept through their callbacks. No automatic devres release:
+ * a timeout must never free active DMA memory. */
 void driver_dma_unmap_pages(struct driver_dma_mapping **mapping);
 /* Required for checked providers. Success consumes *mapping. Failure retains
  * all frame pins or the whole buffer, domain and pointer, disabling address/sync

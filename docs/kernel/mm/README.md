@@ -67,6 +67,8 @@ GPU 原生能力快照是内部元数据，RAM_SCANOUT 标志不取得 VMO/page 
 
 内核 MM 提供 `vmo_create_resident(bytes, owner, &out)`：页取整范围在发布前全部获得 canonical order-0 RAM 并清零，kind 5 固定 extent/slot、内容可写，无物理连续性保证。它复用 Rust VMO ref/pin/destroy 与普通 VMA；不创建 GPU 专用页表或对象注册表。公开 vmo_create 不接受 kind 5，resize 与空 slot 的重新物化被拒绝，连续地址查询也拒绝这种对象。
 
-owner cgroup 的整个 backing charge 和 namespace pin 随 VMO 存活，采用既有共享匿名 backing 记账，避免进程 RSS teardown 提前扣除共享存储；NULL 明确选择内核无 charge 存储。预检、预算和任意部分分配失败交还全部资源。DRM 已在 store 锁外采用该工厂，预算 owner 在 GPU mutex 前捕获，映射/导出方不转移原始 charge。独立 page pin/DMA mapping 只保留帧；需要预算 owner 的请求须另持 VMO 引用。
+owner cgroup 的整个 backing charge 和 namespace pin 随 VMO 存活，采用既有共享匿名 backing 记账，避免进程 RSS teardown 提前扣除共享存储；NULL 明确选择内核无 charge 存储。预检、预算和任意部分分配失败交还全部资源。DRM 已在 store 锁外采用该工厂，预算 owner 在 GPU mutex 前捕获，映射/导出方不转移原始 charge。独立 page pin 与 `driver_dma_map_vmo` 只保留帧；需要预算 owner 的请求须另持 VMO 引用，或显式采用 `driver_dma_map_owned_vmo`。后者仅接受工厂 kind 4/5，成功及失败清理都保留整个 VMO 与原始 charge，包括未映射页；多个视图不重复 charge。
 
 这是固定 RAM 分配契约，不是 DMA 授权、VRAM/BO 迁移、GPUVM 或任务调度；owning scanout 目前仍限 kind 4。接口、错误与验证见[原生 resident RAM](../../drivers/guide/native-runtime.md#固定-resident-ram-vmo-与预算-owner)。
+
+DMA owner 最后 release 在所有失效确认、mapping 退休并退出 domain mutex 后执行；try_unmap 的临时 domain 引用跨过析构回调，构造回滚依靠 caller 全程持有的 domain 引用。页快照与 fixed extent 工厂语义不变，未增加 MM 对设备停止的推断。详见 [owned DMA 视图](../../drivers/guide/native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。

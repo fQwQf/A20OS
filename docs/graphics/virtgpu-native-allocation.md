@@ -12,3 +12,5 @@ GEM store 改用哈希桶中的动态分配对象，取代原先 64 项的固定
 - 96 个并发资源、互不相同的输出句柄，`size=0` 的后端为页大小，随后逐个 close 并在已退休句柄上得到 ENOENT。
 
 本改动确立的是 native 分配与命令流直接渲染；Minecraft 加速还需要额外的传输与 scanout 工作。
+
+固定 RAM backing 可显式交给原生 `driver_dma_map_owned_vmo`：成功或失败清理句柄保留整个 VMO 和原始预算归属，硬件只获得选定页视图；确认失效后才在 domain 锁外交还 owner。现有 map_vmo 继续只保留帧。该入口不自动为 VirtIO attach_backing 建立 domain，也不提供厂商 BO、GPUVM 或请求完成；这些后端必须显式接入。见 [VMO owner](../drivers/guide/native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。

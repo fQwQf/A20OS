@@ -199,3 +199,11 @@ RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连
 另运行 `python3 tools/tests/test_shared_anon_host.py`、`python3 tools/tests/test_vmo_page_host.py` 与 vmo_lifecycle Rust 单测；共享匿名集成执行完整生产 C VMO/Rust 物化/resize/析构及真实 cgroup 记账，resident fault 不重复向映射任务 charge，失败 resize 不改变范围，页 pin 和预算寿命各按自身契约。
 
 `tools/a20 test smoke-driver-iommu-native-riscv64` 增加 resident VMO，通过已物化页查询与拒绝 resize、源对象销毁后的实际 EDU 跨页 DMA 及数据/guard 比对，要求 `DRIVER_IOMMU_RESIDENT_VMO` 成功标记。该 fixture 使用无 cgroup charge 的内核 owner，不是实板 GPU 或真实 cgroup OOM 验证。`smoke-driver-gpu-stop-x86_64` 的 DRM 自检检查新 GEM 的 kind/已物化页与真实 VMA 唯一 backing owner；generic 显示及 RISC-V PRIME 仍回归。当前模块 ABI 12 与公开结构不变，新增工厂及测试不表示 GPUVM/job 或 BO 迁移已实现。
+
+## 固定 RAM 的 owning DMA 验证
+
+运行 `python3 -m unittest tools.tests.test_driver_resident_mapping tools.tests.test_driver_buffer_mapping tools.tests.test_driver_dma_vmo tools.tests.test_driver_dma_mapping tools.tests.test_riscv_iommu_requester tools.tests.test_riscv_iommu_queue`。新增 resident mapping 的 15 个方法执行生产 resident/contiguous 工厂、真实 cgroup charge/ref 原语、Rust 生命周期/析构与完整 DMA mapper；边界模型是 PFA/CPU alias、cache hook 和 provider。断言每次 provider 只收到选定页，覆盖整个 VMO/未映射页与 charge、多视图、kind 4 正例、其他 kind 拒绝、全部回滚/部分失败/非法 IOVA/失效重试、shutdown 与最终 owner 回调。buffer 夹具另覆盖分配设备不同于 mapping device，最后 release 在 domain 锁外重新进入 shutdown；正常映射与失败回滚保留的清理句柄均覆盖。不持有 VMO 的旧页/buffer/IOMMU 夹具使用禁止非空 VMO release 的断言 stub；实际 owning VMO 集成执行生产 C/Rust 析构。
+
+16 个编译成功的负控分别破坏引用取得/交接、失败清理 owner、失败引用回收、VMO/buffer 最后 put、失效前提前退休、类型准入、多视图引用、first/count 视图、错误输出、锁外回调、临时 domain 引用顺序，以及旧快照不持 VMO 的契约，均须由运行时断言拒绝；负控改动还原后重新运行正例和广回归。检查 VMO owner 的 callback 与跨设备 buffer callback 是两条独立路径，不能只验证元数据字段。
+
+RISC-V 原生 EDU 门禁现在对 resident 分支采用 owned 视图：交还 caller VMO 引用后，仍可通过句柄保留的对象核对未映射页，再执行实际跨页 DMA/数据和 guard 比对，要求 `DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1 owner=1`。匿名与连续分支仍回归旧页快照；连续 owning 正例由主机集成覆盖。guest 的 owner 为 NULL 内核预算，真实 cgroup 保留证据来自主机 C/Rust 集成，不是实板 GPU/cgroup OOM 或物理失效超时证据。其余必跑门禁为 x86_64 lifecycle、embedded 双核 GPU stop、generic 模块显示及 RISC-V PRIME；详见原生运行时的本轮验证记录。

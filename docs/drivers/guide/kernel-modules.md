@@ -35,7 +35,7 @@ A20OS 现在同时支持三种驱动路径：
 
 ## 模块接口
 
-驱动 ABI 当前为 12：GPU vtable 末尾新增显式原生 `get_capabilities`；ABI 11 已增加 owning RAM `get_scanout`；ABI 10 已增加 HCD 可失败 `release_endpoint`，ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_buffer_create/get/put/data/address/size`（显式存储引用，最终 put 不能代替停止 DMA）、`driver_dma_domain_*`、`driver_dma_map_buffer`、`driver_dma_map_vmo` 和页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD 与 GPU vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 virtio-gpu、xHCI、HID、hub、storage 等包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
+驱动 ABI 当前为 12：GPU vtable 末尾新增显式原生 `get_capabilities`；ABI 11 已增加 owning RAM `get_scanout`；ABI 10 已增加 HCD 可失败 `release_endpoint`，ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_buffer_create/get/put/data/address/size`（显式存储引用，最终 put 不能代替停止 DMA）、`driver_dma_domain_*`、`driver_dma_map_buffer`、`driver_dma_map_vmo`、`driver_dma_map_owned_vmo` 和页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD 与 GPU vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 virtio-gpu、xHCI、HID、hub、storage 等包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
 
 模块只能解析 `kernel/drvmod/framework.c` 中的导出表。当前导出接口包括：
 
@@ -234,3 +234,5 @@ generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Ea
 4. 用一个真实设备 smoke 验证，再从内建源列表移除该驱动。
 
 因此 generic 的内核只保留显式服务账本，设备能力取决于目标架构实际列出的包；embedded 只静态链接 `EMBEDDED_DEVICE_DRIVER_SRCS` 当前列出的共享驱动，不与 generic 模块清单自动保持能力对等。RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 及 vinput-probe 等 module-only 实现当前不在 embedded 静态账本。详见[驱动部署 Profile](deployment-profiles.md)。
+
+`driver_dma_map_owned_vmo` 为固定 kind 4/5 的 RAM 显式保留整个 VMO/预算 owner，成功与失败清理句柄同样持有；完整回滚不发布 owner。buffer/VMO 最终 put 在 domain 锁外，try_unmap 的临时 domain 引用跨 owner 回调；构造回滚依靠 caller 全程持有的 domain 引用。内部 adopt helper 不导出，公开布局与 ABI 12 不变；旧 map_vmo 的裸帧快照语义保持不变。详见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。

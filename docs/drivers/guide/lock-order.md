@@ -371,3 +371,9 @@ quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止�
 - I²C-HID 的 `io_lock` 串行报告、恢复与停止；`event_lock` 只保护事件 ring。workqueue 的 cancel/destroy 在 `io_lock` 外等待，退出失败保留 context、work 和 adapter。每设备独立 work，回调不持注册表锁。
 - RTW broker 的顺序是 `wifi_open_lock -> wifi.control -> packets_lock`；最后一把只保护固定容量队列，不做用户拷贝、映射或分配。probe/open/remove/close 通过外层 mutex 串行化；存活 owner 或隔离 DMA 阻止新实例覆盖传输状态。
 - R8169 的 ring/counter 锁是每设备对象；remove 先停止新 I/O、屏蔽并归还 IRQ，再确认 TX/RX 停止，随后释放 DMA 和实例。停止超时保留 ring，不能以释放内存冒充清理成功。
+
+### DMA 的 VMO owner 与锁外退休
+
+`driver_dma_map_owned_vmo` 仅接受工厂固定 RAM（kind 4/5），在 provider 前保留 VMO，不持 VMO lock 调用 provider。复用快照的 VMO → PFA 顺序，释放 VMO lock 后才进入 managed domain mutex。失败清理仍持整个 VMO/charge，设备只映射请求视图。普通 unmap/构造回滚先确认全部失效与 CPU sync，退休 mapping/counter；try_unmap 清空 caller 指针后退出 domain mutex，再 put buffer/VMO owner；try_unmap 最后 put 临时 domain 引用，构造回滚依靠 caller 全程保留的 domain 引用。裸 frame_put 保持原页路径；不要把 provider 回调允许重入与锁外 owner 析构混为一谈。
+
+buffer allocation owner 可与 mapping device 不同。其最后 put 可能触发设备 release；owner 回调必须看到 domain 锁已退出且 mapping 已退休，允许按自身生命周期规则重新进入 shutdown。managed provider 的 map/unmap/deactivate 仍不允许重入本 domain。调用者也不能持 owner 析构所需的其他锁跨 unmap。

@@ -6,7 +6,7 @@ native virtgpu 传输路径现在双向都发送固定的 virtio 线格式负载
 
 `SUBMIT_3D` 请求一个 host GPU fence 并等待其响应。同步后端只在该 fence 真正完成之后导出已完成的 `sync_file`。对已完成的 fence，实现了输入 `sync_file`、poll、`FILE_INFO`（含 details）、`MERGE` 与 deadline 提示。目前还没有异步 fence 生产者。一个设备互斥量对提交、CPU 同步与 fence 导出排序；操作完成时唤醒等待者。
 
-GEM backing 已使用原生固定 resident RAM 工厂；最初分配任务的 cgroup charge 和 owner pin 随 VMO 存活，导入/映射到另一文件或进程不转移 charge。创建失败、最后一个 backing 引用退出或失败清理确认后按原生 MM 契约交还。独立 DMA 页 pin 不保留预算 owner；需要预算存活的请求另持 VMO。
+GEM backing 已使用原生固定 resident RAM 工厂；最初分配任务的 cgroup charge 和 owner pin 随 VMO 存活，导入/映射到另一文件或进程不转移 charge。创建失败、最后一个 backing 引用退出或失败清理确认后按原生 MM 契约交还。独立 DMA 页 pin 与 map_vmo 不保留预算 owner；需要预算存活的请求另持 VMO，或显式通过 map_owned_vmo 保留整个固定 RAM backing。后者保持原始 charge 归属，未映射页也保留，不赋予接收文件权限或自动建立跨设备 attach。确认失效后 owner 在 domain 锁外退休，失败清理继续保留。
 
 PRIME 导出持有活跃的 GEM 对象并映射同一个 VMO，取代了 memfd 快照与 64 项描述符表。`dup` 与 `SCM_RIGHTS` 保留该文件及其对象 pin。导入的缓冲在导出方 `GEM_CLOSE` 与 fd close 之后仍然存活。最后一个描述符关闭之后映射仍保留 VMO。导出标志使用 Linux 的 `DRM_CLOEXEC=O_CLOEXEC` 与 `DRM_RDWR=O_RDWR`。
 
