@@ -64,7 +64,9 @@ int mm_pte_flags_allow_access(pte_t pte_flags) {
 pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags) {
     pte_t flags = old_flags & (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U |
                                   PTE_G | PTE_A | PTE_D | PTE_COW |
-                                  PTE_LEAF | PTE_MAT1);
+                                  PTE_LEAF | PTE_MAT1 | PTE_DEVICE);
+    /* Permission changes must preserve the CPU alias's memory type too.
+     * In particular x86 PCD/PWT must survive mprotect on device mappings. */
     /* PTE_D is the frame's dirty history, not a protection bit: a permission
      * change must not discard it.  Clearing it here made mprotect(PROT_READ)
      * drop the only dirty evidence on targets with a real D bit, and the

@@ -100,75 +100,17 @@ int udriver_match_present(uint32_t bus, uint32_t vendor, uint32_t device)
 int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
                      uint32_t prot, uint64_t *out_va)
 {
-    if (!mm || !mm->pgdir || !out_va)
-        return -1;
-    if (!size || size > UINT64_MAX - (PAGE_SIZE - 1) || (prot & ~3U))
+    if (!mm || !mm->pgdir || !out_va || !size ||
+        size > SIZE_MAX - (PAGE_SIZE - 1) || !prot || (prot & ~3U))
         return -1;
     size = (size + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    if (!udriver_mmio_allowed(phys, size)) {
-        klog(KLOG_WARN, "udriver: mmio window 0x%lx+%lu not whitelisted\n",
-             (unsigned long)phys, (unsigned long)size);
+    if ((phys & (PAGE_SIZE - 1)) || !udriver_mmio_allowed(phys, size))
         return -1;
-    }
-    if (phys & (PAGE_SIZE - 1))
-        return -1;
-
-    pte_t ptef = PTE_V | PTE_U | PTE_A | PTE_LEAF;
-    uint64_t vma_flags = VM_SHARED | VM_PFNMAP | VM_DONTFORK;
-    if (prot & 1) { ptef |= PTE_R; vma_flags |= VM_READ; }
-    if (prot & 2) { ptef |= PTE_W | PTE_D | PTE_R; vma_flags |= VM_WRITE; }
-    if (!(ptef & (PTE_R | PTE_W)))
-        return -1;
-
-    /* The VMA is allocated before mm->lock is taken.  kcalloc() reaches the
-     * reclaiming allocator, whose OOM path takes tasklist_lock, a task park_lock
-     * and mm->lock, writes swap pages to disk, waits on remote TLB IPIs and can
-     * proc_force_exit() a
-     * task; none of that may run inside a spinlock section.  The object stays
-     * unreachable until mm_insert_vma() publishes it below. */
-    mm_seg_t *vma = mm_seg_new();
-    if (!vma)
-        return -1;
-    vma->vm_flags = vma_flags;
-
-    mm_tlb_invalidate_begin(mm);
-    spin_lock(&mm->lock);
-    uint64_t mapped = 0;
-    vaddr_t va = mm_find_gap(mm, mm->mmap_base, size);
-    if (!va)
-        goto fail;
-    for (; mapped < size; mapped += PAGE_SIZE) {
-        if (pt_map(mm->pgdir, va + mapped, phys + mapped, ptef) < 0) {
-            /* Also prune a half-built empty path from the failed allocation.
-             * Clear the populated prefix before any caller can observe the
-             * failure; finish supplies the local/remote TLB fence. */
-            (void)pt_unmap(mm, va + mapped);
-            while (mapped) {
-                mapped -= PAGE_SIZE;
-                (void)pt_unmap(mm, va + mapped);
-            }
-            mm_tlb_note_change(mm, va, size);
-            goto fail;
-        }
-    }
-    vma->start = va;
-    vma->end = va + size;
-    mm_insert_vma(mm, vma);
-    mm_tlb_note_change(mm, va, size);
-    spin_unlock(&mm->lock);
-    mm_tlb_invalidate_finish(mm);
-    mm_vma_flush_deferred(mm);
-    *out_va = va;
+    vaddr_t mapped = mm_mmap_physical(mm, 0, (size_t)size, prot, MAP_SHARED,
+                                      phys, PTE_DEVICE);
+    if (mm_addr_is_error(mapped)) return -1;
+    *out_va = mapped;
     return 0;
-
-fail:
-    spin_unlock(&mm->lock);
-    mm_tlb_invalidate_finish(mm);
-    /* vma_put() takes mm->vma_ref_lock rather than mm->lock precisely so the
-     * last holder can schedule the free without the lock it just dropped. */
-    vma_put(mm, vma);
-    mm_vma_flush_deferred(mm);
-    return -1;
 }
 
 void udriver_revoke_mmio(mm_struct_t *mm, uint64_t phys)

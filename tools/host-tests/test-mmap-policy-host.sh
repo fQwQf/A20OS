@@ -13,7 +13,7 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 rustc --edition=2021 --crate-type lib --emit=obj --target x86_64-unknown-linux-gnu \
     -C panic=abort -C opt-level=1 \
     "$repo/kernel/mm/mmap_policy.rs" -o "$tmp/mmap_policy.o"
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -Wl,--gc-sections \
     "$repo/tools/tests/test_mmap_policy.c" \
     "$tmp/mmap_policy.o" -o "$tmp/test-mmap-policy"
 "$tmp/test-mmap-policy"

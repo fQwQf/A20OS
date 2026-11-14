@@ -108,6 +108,24 @@ static void fb_autoflush_kick(void) {
         g_fb_autoflush_started = 0;
 }
 
+#ifndef CONFIG_NOMMU
+/* Keep the boot scanout's CPU memory type, while the MM transaction owns
+ * placement, PTE rollback, remote TLB invalidation and VMA publication. */
+static int64_t fb_map_physical(mm_struct_t *mm, uint64_t addr, uint64_t physical,
+                               size_t len, int prot, int flags) {
+    if (!len || len > SIZE_MAX - (PAGE_SIZE - 1)) return -EINVAL;
+    if (addr != (vaddr_t)addr) return -EINVAL;
+    size_t rounded = ROUND_UP(len, PAGE_SIZE);
+    uintptr_t pte_flags;
+    int result = boot_framebuffer_user_flags(physical, rounded,
+                    mm_prot_to_pte_flags(prot) | PTE_DEVICE, &pte_flags);
+    if (result) return result;
+    vaddr_t mapped = mm_mmap_physical(mm, addr, rounded, prot, flags, physical,
+                                      pte_flags & (PTE_DEVICE | PTE_MAT1));
+    return mm_addr_is_error(mapped) ? mm_addr_error(mapped) : (int64_t)mapped;
+}
+#endif
+
 static int64_t fbdev_linux_mmap_active(struct gpu_device_access *access,
                          uint64_t addr, size_t len, int prot, int flags,
                          uint64_t off) {
@@ -128,6 +146,7 @@ static int64_t fbdev_linux_mmap_active(struct gpu_device_access *access,
     int r = ops->get_fb(dev, &fb_phys, &fb_size);
     if (r < 0)
         return r;
+    if (fb_size && fb_phys > (uintptr_t)-1 - (fb_size - 1)) return -EOVERFLOW;
 
     if (off & (PAGE_SIZE - 1))
         return -EINVAL;
@@ -148,95 +167,7 @@ static int64_t fbdev_linux_mmap_active(struct gpu_device_access *access,
 #else
     task_t *curr = proc_current();
     if (!curr || !curr->mm) return -EFAULT;
-    mm_struct_t *mm = curr->mm;
-
-    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && addr != 0 &&
-        (addr & (PAGE_SIZE - 1)))
-        return -EINVAL;
-
-    /*
-     * A physical VRAM BAR is MMIO, not ordinary RAM.  Omitting PTE_MAT1
-     * keeps the mapping at the default (Device) attribute index on
-     * AArch64; see FBIO_MAP_FB.
-     */
-    pte_t ptef = PTE_V | PTE_U | PTE_A | PTE_LEAF | PTE_DEVICE;
-    if (prot & PROT_READ) ptef |= PTE_R;
-    if (prot & PROT_WRITE) ptef |= PTE_W | PTE_D | PTE_R;
-    if (prot & PROT_EXEC) ptef |= PTE_X;
-    uintptr_t mapping_flags;
-    r = boot_framebuffer_user_flags(fb_phys + off, len, ptef, &mapping_flags);
-    if (r) return r;
-    ptef = mapping_flags;
-
-    spin_lock(&mm->lock);
-
-    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
-        for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
-            if (vma->start < addr + len && vma->end > addr) {
-                spin_unlock(&mm->lock);
-                return -EEXIST;
-            }
-            if (vma->start >= addr + len)
-                break;
-        }
-        flags |= MAP_FIXED;
-    }
-    if ((flags & MAP_FIXED) && addr != 0) {
-        mm_munmap(mm, addr, len);
-    } else if (addr != 0) {
-        mm_seg_t *existing = mm_seg_find(mm, addr);
-        if (existing && existing->start < addr + len && existing->end > addr)
-            addr = 0;
-    }
-    if (addr == 0)
-        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
-    if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
-        spin_unlock(&mm->lock);
-        return -ENOMEM;
-    }
-
-    size_t mapped = 0;
-    for (; mapped < len; mapped += PAGE_SIZE) {
-        r = pt_map(mm->pgdir, addr + mapped, fb_phys + off + mapped, ptef);
-        if (r < 0)
-            break;
-    }
-    if (r < 0) {
-        while (mapped > 0) {
-            mapped -= PAGE_SIZE;
-            pt_unmap(mm, addr + mapped);
-        }
-        spin_unlock(&mm->lock);
-        arch_tlb_flush();
-        return r;
-    }
-
-    mm_seg_t *vma = mm_seg_new();
-    if (!vma) {
-        while (mapped > 0) {
-            mapped -= PAGE_SIZE;
-            pt_unmap(mm, addr + mapped);
-        }
-        spin_unlock(&mm->lock);
-        arch_tlb_flush();
-        return -ENOMEM;
-    }
-    vma->start = addr;
-    vma->end = addr + len;
-    vma->vm_flags = VM_SHARED | VM_DONTFORK | VM_PFNMAP;
-    if (prot & PROT_READ) vma->vm_flags |= VM_READ;
-    if (prot & PROT_WRITE) vma->vm_flags |= VM_WRITE;
-    if (prot & PROT_EXEC) vma->vm_flags |= VM_EXEC;
-    vma->pte_flags = ptef;
-    vma->file = NULL;
-    mm_insert_vma(mm, vma);
-    mm->total_vm += len / PAGE_SIZE;
-    mm_rss_add(mm, len / PAGE_SIZE);
-
-    arch_tlb_flush();
-    spin_unlock(&mm->lock);
-    mm_vma_flush_deferred(mm);
-    return (int64_t)addr;
+    return fb_map_physical(curr->mm, addr, fb_phys + off, len, prot, flags);
 #endif
 }
 
@@ -356,83 +287,12 @@ static int fb_ioctl_active(struct gpu_device_access *access, vfile_t *vf,
             (void)arg;
             return 0;
 #else
-            uintptr_t va = (uintptr_t)arg;
             task_t *curr = proc_current();
             if (!curr || !curr->mm) return -EFAULT;
-            if ((va & (PAGE_SIZE - 1)) != 0 || fb_size == 0 ||
-                va >= USER_VA_LIMIT || fb_size > USER_VA_LIMIT - va)
-                return -EINVAL;
-
-            spin_lock(&curr->mm->lock);
-            for (mm_seg_t *vma = curr->mm->mmap; vma; vma = vma->next) {
-                if (vma->start < va + fb_size && vma->end > va) {
-                    spin_unlock(&curr->mm->lock);
-                    return -EEXIST;
-                }
-                if (vma->start >= va + fb_size)
-                    break;
-            }
-            for (size_t off = 0; off < fb_size; off += PAGE_SIZE) {
-                if (pt_translate(curr->mm->pgdir, va + off) != 0) {
-                    spin_unlock(&curr->mm->lock);
-                    return -EEXIST;
-                }
-            }
-
-            /*
-             * A physical VRAM BAR is MMIO, not ordinary RAM.  In particular,
-             * mapping it as cacheable Normal memory on AArch64 leaves LVGL
-             * writes in the CPU cache and produces a permanently black VBox
-             * screen.  The default attribute index is Device; architectures
-             * without memory-type bits simply ignore the omitted MAT1 flag.
-             */
-            pte_t flags = PTE_V | PTE_R | PTE_W | PTE_U |
-                          PTE_A | PTE_D | PTE_LEAF | PTE_DEVICE;
-            uintptr_t mapping_flags;
-            r = boot_framebuffer_user_flags(fb_phys, fb_size, flags, &mapping_flags);
-            if (r) { spin_unlock(&curr->mm->lock); return r; }
-            flags = mapping_flags;
-            size_t mapped = 0;
-            for (; mapped < fb_size; mapped += PAGE_SIZE) {
-                r = pt_map(curr->mm->pgdir, va + mapped,
-                           fb_phys + mapped, flags);
-                if (r < 0)
-                    break;
-            }
-            if (r < 0) {
-                while (mapped > 0) {
-                    mapped -= PAGE_SIZE;
-                    pt_unmap(curr->mm, va + mapped);
-                }
-                spin_unlock(&curr->mm->lock);
-                arch_tlb_flush();
-                return r;
-            }
-
-            mm_seg_t *vma = mm_seg_new();
-            if (!vma) {
-                while (mapped > 0) {
-                    mapped -= PAGE_SIZE;
-                    pt_unmap(curr->mm, va + mapped);
-                }
-                spin_unlock(&curr->mm->lock);
-                arch_tlb_flush();
-                return -ENOMEM;
-            }
-            vma->start = va;
-            vma->end = va + fb_size;
-            vma->vm_flags = VM_READ | VM_WRITE | VM_SHARED |
-                            VM_DONTFORK | VM_PFNMAP;
-            vma->pte_flags = flags;
-            vma->file = NULL;
-            mm_insert_vma(curr->mm, vma);
-            curr->mm->total_vm += fb_size / PAGE_SIZE;
-            mm_rss_add(curr->mm, fb_size / PAGE_SIZE);
-
-            arch_tlb_flush();
-            spin_unlock(&curr->mm->lock);
-            mm_vma_flush_deferred(curr->mm);
-            return 0;
+            int64_t mapped = fb_map_physical(curr->mm, (uintptr_t)arg, fb_phys,
+                                fb_size, PROT_READ | PROT_WRITE,
+                                MAP_SHARED | MAP_FIXED_NOREPLACE);
+            return mapped < 0 ? (int)mapped : 0;
 #endif
         }
         case FBIO_FLUSH: {

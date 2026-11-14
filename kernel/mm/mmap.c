@@ -42,6 +42,56 @@ extern vaddr_t a20_mmap_vmo_rust(mm_struct_t *mm, vaddr_t addr, size_t len,
                                  uint64_t vmo_offset, int native_cap,
                                  struct vmar *owner);
 
+extern vaddr_t a20_mmap_physical_rust(mm_struct_t *, vaddr_t, size_t, int, int,
+                                      uint64_t, pte_t);
+
+/* Physical mapping policy lives beside the other Rust creation transactions.
+ * These bridges only expose layout, architecture and lock/TLB primitives. */
+int a20_mmap_physical_supported(const mm_struct_t *mm, uint64_t physical,
+                                 size_t len, pte_t memory_flags) {
+    return mm && mm->pgdir && physical == (uint64_t)(paddr_t)physical &&
+           len && len - 1 <= (uint64_t)(paddr_t)-1 &&
+           physical <= (uint64_t)(paddr_t)-1 - (len - 1) &&
+           !(memory_flags & ~(PTE_DEVICE | PTE_MAT1));
+}
+pte_t a20_mmap_physical_pte(int prot, pte_t memory_flags) {
+    return (mm_prot_to_pte_flags(prot) & ~(PTE_DEVICE | PTE_MAT1)) | memory_flags;
+}
+uint64_t a20_mmap_physical_enter(mm_struct_t *mm) {
+    mm_tlb_invalidate_begin(mm);
+    return spin_lock_irqsave(&mm->lock);
+}
+void a20_mmap_physical_finish(mm_struct_t *mm, uint64_t irq_flags,
+                              mm_seg_t *discard) {
+    spin_unlock_irqrestore(&mm->lock, irq_flags);
+    mm_tlb_invalidate_finish(mm);
+    if (discard) vma_put(mm, discard);
+    mm_vma_flush_deferred(mm);
+}
+int a20_mmap_physical_occupied(mm_struct_t *mm, vaddr_t va) {
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    return pte && (*pte & PTE_V);
+}
+int a20_mmap_physical_install(mm_struct_t *mm, vaddr_t va, uint64_t pa, pte_t flags) {
+    return pt_map(mm->pgdir, va, (paddr_t)pa, flags);
+}
+void a20_mmap_physical_unmap(mm_struct_t *mm, vaddr_t va) { (void)pt_unmap(mm, va); }
+void a20_mmap_physical_note(mm_struct_t *mm, vaddr_t va, size_t len) {
+    mm_tlb_note_change(mm, va, len);
+}
+void a20_mmap_physical_rss(mm_struct_t *mm, size_t pages) { mm_rss_add(mm, pages); }
+
+vaddr_t mm_mmap_physical(mm_struct_t *mm, vaddr_t addr, size_t len,
+                         int prot, int flags, uint64_t physical, pte_t memory_flags) {
+#ifdef CONFIG_NOMMU
+    (void)mm; (void)addr; (void)len; (void)prot; (void)flags;
+    (void)physical; (void)memory_flags;
+    return (vaddr_t)-EOPNOTSUPP;
+#else
+    return a20_mmap_physical_rust(mm, addr, len, prot, flags, physical, memory_flags);
+#endif
+}
+
 struct a20_mmap_seg_spec {
     uintptr_t start;
     uintptr_t end;

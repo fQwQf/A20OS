@@ -39,7 +39,8 @@ struct page_cache_page;
  * in the core MM mutation paths (mm_mmap_locked / mm_mprotect_locked /
  * mm_munmap_locked / mm_mremap_locked), not in the ABI layer. */
 #define VM_SEALED    (1UL << 18)
-/* Mapping created with a Native capability ceiling, including PROT_NONE. */
+/* Explicit mapping permission ceiling: Native handles (including PROT_NONE)
+ * and borrowed CPU physical views. Independent of the caller's ABI. */
 #define VM_NATIVE_CAP (1UL << 19)
 
 /* Typical compiler processes have O(100) mappings.  Keep a compact secondary
@@ -608,6 +609,19 @@ int mm_mremap_needs_shared_write_locked(mm_struct_t *mm, vaddr_t old_addr,
 /* Native permission changes commit before the source mapping is removed. */
 int mm_mremap_native_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                      size_t new_size, vaddr_t hint, int prot, vaddr_t *out_addr);
+/* Task context, caller retains mm; no MM/spinlock held. Install an eager,
+ * shared, non-executable CPU physical mapping. Only MAP_SHARED and fixed/
+ * noreplace placement flags, and nonempty READ/WRITE protections are accepted.
+ * memory_flags contains only PTE_DEVICE/PTE_MAT1, selected by the trusted
+ * caller for the CPU alias. Returns VA or encoded negative errno.
+ * This borrows physical storage: caller must keep it valid for every VMA and
+ * outstanding TLB access, or revoke mappings before reclaim/reuse. No frame,
+ * device, resource, DMA or module reference is acquired. NOMMU -> EOPNOTSUPP.
+ * MAP_FIXED may remove old mappings even if a later install fails. */
+vaddr_t mm_mmap_physical(mm_struct_t *mm, vaddr_t addr, size_t len,
+                         int prot, int flags, uint64_t physical,
+                         pte_t memory_flags);
+
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
                 int prot, int flags);
 vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,

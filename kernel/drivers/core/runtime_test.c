@@ -14,6 +14,8 @@
 #include "drivers/gpu/gpu_core.h"
 #include "mm/frame.h"
 #include "mm/vmo.h"
+#include "mm/vm.h"
+#include "mm/mm.h"
 #include "mm/slab.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
@@ -418,6 +420,37 @@ static void exercise_gpu_access(void) {
     bus_unregister(&bus);
 }
 
+#ifndef CONFIG_NOMMU
+static void exercise_physical_mapping(void) {
+    /* The mapping borrows this VMO-owned frame. Retain its owner until all
+     * physical views are unmapped; the mapper must not pin/put it as RAM. */
+    struct vmo *source = vmo_create(VMO_ANONYMOUS, PAGE_SIZE, 0);
+    CHECK(source);
+    pfn_t page = vmo_get_page(source, 0);
+    CHECK(page != PFN_NONE);
+    mm_struct_t *mm = mm_create();
+    CHECK(mm);
+    vaddr_t va = mm_mmap_physical(mm, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                   MAP_SHARED, pfn_to_phys(page), PTE_DEVICE);
+    CHECK(!mm_addr_is_error(va) && mm_rss_get(mm) == 1 && mm->total_vm == 1);
+    CHECK(pt_translate(mm->pgdir, va) == pfn_to_phys(page));
+    CHECK(!mm_mprotect(mm, va, PAGE_SIZE, PROT_READ));
+    CHECK(!mm_mprotect(mm, va, PAGE_SIZE, PROT_READ | PROT_WRITE));
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    CHECK(pte && (arch_pte_flags(*pte) & PTE_DEVICE) == PTE_DEVICE);
+    CHECK((mm_seg_find(mm, va)->pte_flags & PTE_DEVICE) == PTE_DEVICE);
+    CHECK((intptr_t)mm_mmap_physical(mm, va, PAGE_SIZE, PROT_READ,
+              MAP_SHARED | MAP_FIXED_NOREPLACE, pfn_to_phys(page), PTE_DEVICE) == -EEXIST);
+    CHECK(mm_mmap_physical(mm, va, PAGE_SIZE, PROT_READ,
+              MAP_SHARED | MAP_FIXED, pfn_to_phys(page), PTE_DEVICE) == va);
+    CHECK(mm_rss_get(mm) == 1 && mm->total_vm == 1);
+    CHECK(mm_mprotect(mm, va, PAGE_SIZE, PROT_READ | PROT_WRITE) == -EACCES);
+    CHECK(!mm_munmap(mm, va, PAGE_SIZE) && !mm_rss_get(mm) && !mm->total_vm);
+    mm_destroy(mm);
+    vmo_release(source);
+}
+#endif
+
 static void exercise_dma_buffer(void) {
     device_t owner = {.name = "dma-buffer-selftest", .references = 1};
     CHECK(!device_register(&owner));
@@ -579,6 +612,9 @@ void driver_runtime_selftest_boot(void)
     kinfo("DRIVER_RUNTIME: START\n");
     exercise_resources();
     exercise_gpu_access();
+#ifndef CONFIG_NOMMU
+    exercise_physical_mapping();
+#endif
     exercise_dma_buffer();
     exercise_dma_buffer_mapping();
     exercise_dma_vmo();
@@ -603,7 +639,11 @@ void driver_runtime_selftest_boot(void)
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1\n"
+    kinfo("%s"
+#ifndef CONFIG_NOMMU
+          "DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1\n"
+#endif
+          "DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1\n"
           "DRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1\n"
           "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
           "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
