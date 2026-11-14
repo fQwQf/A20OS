@@ -5,6 +5,8 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/queue.h"
+#include "drivers/core/fence.h"
 #include "mm/mm.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -26,6 +28,7 @@
 
 typedef struct {
     struct driver_dma_buffer *allocation; /* owns this entire DMA-visible instance */
+    struct driver_queue *commands;
     virtio_transport_t vt;
     virtq_desc_t       desc[VIRTIO_GPU_QUEUE_SIZE] ALIGNED(64);
     virtq_avail_t      avail ALIGNED(64);
@@ -90,6 +93,13 @@ typedef struct {
 /* Each binding owns its queue, staging and synchronization. The native DMA
  * allocation also pins device metadata; only confirmed remove may release it.
  * No static slot or secondary device registry participates in this lifetime. */
+struct virtio_gpu_queue_command { uint16_t head, used_before; };
+static void virtio_gpu_queue_issue(void *, struct driver_request *);
+static int virtio_gpu_queue_stop(void *);
+static const struct driver_queue_ops virtio_gpu_queue_ops = {
+    .size = sizeof(struct driver_queue_ops),
+    .issue = virtio_gpu_queue_issue, .stop = virtio_gpu_queue_stop,
+};
 static int virtio_gpu_claim(device_t *dev) {
     if (!dev) return -EINVAL;
     if (dev->drv_priv) return -EBUSY;
@@ -102,7 +112,12 @@ static int virtio_gpu_claim(device_t *dev) {
     mutex_init(&inst->command_lock);
     wait_queue_init(&inst->waiters);
     dev->drv_priv = inst;
-    return 0;
+    const struct driver_queue_limits limits = {
+        .depth = 1, .max_active = 1,
+        .max_command = sizeof(struct virtio_gpu_queue_command),
+        .max_bytes = sizeof(*inst) + sizeof(struct virtio_gpu_queue_command),
+    };
+    return driver_queue_create(dev, &limits, &virtio_gpu_queue_ops, inst, &inst->commands);
 }
 
 static int virtio_gpu_command_begin(virtio_gpu_inst_t *inst) {
@@ -167,57 +182,39 @@ static int virtio_gpu_irq_handler(int irq, void *priv) {
     return 0;
 }
 
-static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_len, void *resp, size_t resp_len) {
-    if (!inst || !req || !resp || req_len > sizeof(inst->command_req) ||
-        resp_len > sizeof(inst->command_resp))
-        return -EINVAL;
-
-    int admission = virtio_gpu_command_begin(inst);
-    if (admission) return admission;
-    int completed = 0;
-    memcpy(inst->command_req, req, req_len);
-    memset(inst->command_resp, 0, resp_len);
-    
-    uint16_t head = inst->desc_idx % VIRTIO_GPU_QUEUE_SIZE;
-    uint16_t slot = head;
-    uint16_t resp_slot = (slot + 1) % VIRTIO_GPU_QUEUE_SIZE;
-    
-    // Descriptor for request (device-read)
-    inst->desc[slot].addr  = va_to_pa(inst->command_req);
-    inst->desc[slot].len   = (uint32_t)req_len;
-    inst->desc[slot].flags = VIRTQ_DESC_F_NEXT;
-    inst->desc[slot].next  = resp_slot;
-    
-    inst->desc[resp_slot].addr  = va_to_pa(inst->command_resp);
-    inst->desc[resp_slot].len   = (uint32_t)resp_len;
-    inst->desc[resp_slot].flags = VIRTQ_DESC_F_WRITE;
-    inst->desc[resp_slot].next  = 0;
-    
-    arch_dma_sync_for_device(&inst->desc[slot], sizeof(virtq_desc_t));
-    arch_dma_sync_for_device(&inst->desc[resp_slot], sizeof(virtq_desc_t));
-    arch_dma_sync_for_device(inst->command_req, req_len);
-    arch_dma_sync_for_device(inst->command_resp, resp_len);
-    
-    /* Snapshot completion state before publishing the new avail entry.  The
-     * device may consume an entry as soon as avail.idx becomes visible, even
-     * before the notification write.  Taking this snapshot after publishing
-     * races a fast QEMU device and then waits forever for a second completion. */
-    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
-    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
-
-    uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
-    inst->avail.ring[avail_slot] = slot;
-    wmb();
-    inst->avail.idx++;
-    wmb();
-    
+static void virtio_gpu_queue_issue(void *context, struct driver_request *request)
+{
+    virtio_gpu_inst_t *inst = context;
+    const struct virtio_gpu_queue_command *command = driver_request_command(request, NULL);
+    uint16_t slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
+    inst->avail.ring[slot] = command->head;
+    wmb(); inst->avail.idx++; wmb();
     arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
-    
-    // Notify device (queue 0 = controlq)
     inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
-    
-    // Poll until used->idx advances beyond what it was before submit
+}
+
+/* command_lock serializes the existing wire queue and its staging. All four
+ * command formats use one native admission/completion/retirement path. Boot
+ * polling and runtime IRQ-assisted waits drive the SAME queue. The native
+ * request owns the instance allocation, and a timed-out request stays pending
+ * until a confirmed transport stop; caller timeout never signals its fence. */
+static int virtio_gpu_execute(virtio_gpu_inst_t *inst, uint16_t head)
+{
+    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
+    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
+    struct virtio_gpu_queue_command command = {head, used_before};
+    struct driver_request_memory memory = {.type = DRIVER_REQUEST_DMA_BUFFER,
+        .owner.buffer = inst->allocation, .length = sizeof(*inst)};
+    struct driver_request_description description = {.command = &command,
+        .command_size = sizeof(command), .memory = &memory, .memory_count = 1};
+    struct driver_request *request;
+    int result = driver_request_create(inst->commands, &description, &request);
+    if (result) return result;
+    result = driver_request_submit(request);
+    if (result) { driver_request_put(request); return result; }
+    (void)driver_queue_run(inst->commands, 4);
+    int completed = 0;
     volatile virtq_used_t *used = &inst->used;
     uint64_t start = clock_get_ticks();
     uint64_t frequency = clock_ticks_per_sec();
@@ -279,44 +276,63 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
             }
         }
     }
-    
-    if (!completed) {
-        inst->command_failed = 1;
-        static unsigned timeout_logs;
-        if (timeout_logs++ < 4)
-            kinfo("[GPU] send_cmd TIMEOUT cmd=%x used=%u before=%u avail=%u desc=%u status=%x ready=%u\n",
-                  ((struct virtio_gpu_ctrl_hdr *)inst->command_req)->type,
-                  used->idx, used_before, inst->avail.idx, slot,
-                  inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS),
-                  inst->vt.read32(&inst->vt, VIRTIO_MMIO_QUEUE_READY));
-        virtio_gpu_command_end(inst);
-        return -ETIMEDOUT;
-    }
-    
-    arch_dma_sync_for_cpu(inst->command_resp, resp_len);
-    if (!virtio_gpu_command_completed(inst, used_before, slot)) {
-        inst->command_failed = 1;
-        virtio_gpu_command_end(inst);
-        return -EIO;
-    }
-    memcpy(resp, inst->command_resp, resp_len);
 
-    /* Polling still has to deassert the transport interrupt.  On PCI, reading
-     * ISR clears the level; on MMIO, the observed bits must be acknowledged.
-     * Leaving the first boot-time completion asserted turns into an interrupt
-     * storm as soon as the scheduler enables IRQs, starving later GUI flushes. */
-    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!inst->vt.legacy && isr)
-        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+    if (!completed || !virtio_gpu_command_completed(inst, used_before, head)) {
+        inst->command_failed = 1;
+        /* A wrong completion does not prove ownership of our chain returned. */
+        result = completed ? -EIO : -ETIMEDOUT;
+    } else {
+        (void)driver_request_complete(request, 0);
+        (void)driver_queue_run(inst->commands, 4);
+        result = driver_fence_status(driver_request_fence(request));
+        result = result > 0 ? 0 : result ? result : -EIO;
+        uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+        if (!inst->vt.legacy && isr)
+            inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+        inst->last_used = used->idx;
+        inst->desc_idx = 0;
+    }
+    driver_request_put(request);
+    return result;
+}
+
+static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_len, void *resp, size_t resp_len) {
+    if (!inst || !req || !resp || req_len > sizeof(inst->command_req) ||
+        resp_len > sizeof(inst->command_resp))
+        return -EINVAL;
+
+    int admission = virtio_gpu_command_begin(inst);
+    if (admission) return admission;
+    memcpy(inst->command_req, req, req_len);
+    memset(inst->command_resp, 0, resp_len);
+
+    uint16_t head = inst->desc_idx % VIRTIO_GPU_QUEUE_SIZE;
+    uint16_t slot = head;
+    uint16_t resp_slot = (slot + 1) % VIRTIO_GPU_QUEUE_SIZE;
+
+    // Descriptor for request (device-read)
+    inst->desc[slot].addr  = va_to_pa(inst->command_req);
+    inst->desc[slot].len   = (uint32_t)req_len;
+    inst->desc[slot].flags = VIRTQ_DESC_F_NEXT;
+    inst->desc[slot].next  = resp_slot;
+
+    inst->desc[resp_slot].addr  = va_to_pa(inst->command_resp);
+    inst->desc[resp_slot].len   = (uint32_t)resp_len;
+    inst->desc[resp_slot].flags = VIRTQ_DESC_F_WRITE;
+    inst->desc[resp_slot].next  = 0;
     
-    inst->last_used = used->idx;
-    /* This synchronous queue has one in-flight chain. Reuse descriptor 0/1
-     * only after the device has returned it; cycling through the whole table
-     * exposed a runtime-only failure in QEMU's virtio-gpu controlq path. */
-    inst->desc_idx = 0;
+    arch_dma_sync_for_device(&inst->desc[slot], sizeof(virtq_desc_t));
+    arch_dma_sync_for_device(&inst->desc[resp_slot], sizeof(virtq_desc_t));
+    arch_dma_sync_for_device(inst->command_req, req_len);
+    arch_dma_sync_for_device(inst->command_resp, resp_len);
     
+    int result = virtio_gpu_execute(inst, slot);
+    if (!result) {
+        arch_dma_sync_for_cpu(inst->command_resp, resp_len);
+        memcpy(resp, inst->command_resp, resp_len);
+    }
     virtio_gpu_command_end(inst);
-    return 0;
+    return result;
 }
 
 /*
@@ -360,82 +376,17 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
     inst->desc[resp_slot].len   = (uint32_t)resp_len;
     inst->desc[resp_slot].flags = VIRTQ_DESC_F_WRITE;
     inst->desc[resp_slot].next  = 0;
-    arch_dma_sync_for_device(inst->desc, sizeof(virtq_desc_t));
+    arch_dma_sync_for_device(inst->desc, sizeof(virtq_desc_t) * 2);
     arch_dma_sync_for_device(inst->big_req, req_len);
     arch_dma_sync_for_device(inst->big_resp, resp_len);
 
-    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
-    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
-
-    uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
-    inst->avail.ring[avail_slot] = slot;
-    wmb();
-    inst->avail.idx++;
-    wmb();
-    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-    mb();
-
-    volatile virtq_used_t *used = &inst->used;
-    uint64_t start = clock_get_ticks();
-    uint64_t frequency = clock_ticks_per_sec();
-    uint64_t deadline = (start && frequency) ? start + frequency : 0;
-    uint32_t spins = 100000000U;
-    int completed = 0;
-    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
-    while (spins--) {
-        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
-        arch_dma_sync_for_cpu((void *)used, sizeof(*used));
-        if (used->idx != used_before) { completed = 1; break; }
-        if (deadline && clock_get_ticks() >= deadline)
-            break;
-        arch_cpu_relax();
-        if ((spins & park_mask) == 0 && proc_current()) {
-            if (inst->irq_registered && deadline) {
-                uint64_t now = clock_get_ticks();
-                if (now < deadline) {
-                    uint64_t chunk = now + MS_TO_TICKS(20);
-                    if (chunk > deadline) chunk = deadline;
-                    proc_wait_token_t token =
-                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
-                    wait_queue_entry_t entry = {0};
-                    wait_queue_link(&inst->waiters, &entry, token, 0);
-                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
-                    if (used->idx != used_before) {
-                        wait_queue_unlink(&inst->waiters, &entry);
-                        (void)proc_park_cancel(token);
-                        proc_park_finish(token);
-                        completed = 1;
-                        break;
-                    }
-                    (void)proc_park_commit(token);
-                    wait_queue_unlink(&inst->waiters, &entry);
-                    proc_park_finish(token);
-                }
-            } else {
-                proc_yield();
-            }
-        }
+    int result = virtio_gpu_execute(inst, slot);
+    if (!result) {
+        arch_dma_sync_for_cpu(inst->big_resp, resp_len);
+        memcpy(resp, inst->big_resp, resp_len);
     }
-    if (!completed) {
-        inst->command_failed = 1;
-        virtio_gpu_command_end(inst);
-        return -ETIMEDOUT;
-    }
-    arch_dma_sync_for_cpu(inst->big_resp, resp_len);
-    if (!virtio_gpu_command_completed(inst, used_before, slot)) {
-        inst->command_failed = 1;
-        virtio_gpu_command_end(inst);
-        return -EIO;
-    }
-    memcpy(resp, inst->big_resp, resp_len);
-    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!inst->vt.legacy && isr)
-        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
-    inst->last_used = used->idx;
-    inst->desc_idx = 0;
     virtio_gpu_command_end(inst);
-    return 0;
+    return result;
 }
 
 /* ---- virtio-gpu 3D helpers ------------------------------------------ */
@@ -918,85 +869,13 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     arch_dma_sync_for_device(&inst->desc[1], sizeof(virtq_desc_t));
     arch_dma_sync_for_device(&inst->desc[2], sizeof(virtq_desc_t));
 
-    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
-    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
-    uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
-    inst->avail.ring[avail_slot] = s0;
-    wmb();
-    inst->avail.idx++;
-    wmb();
-    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-    mb();
-
-    volatile virtq_used_t *used = &inst->used;
-    uint64_t start = clock_get_ticks();
-    uint64_t frequency = clock_ticks_per_sec();
-    uint64_t deadline = (start && frequency) ? start + frequency : 0;
-    uint32_t spins = 100000000U;
-    int completed = 0;
-    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
-    while (spins--) {
-        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
-        arch_dma_sync_for_cpu((void *)used, sizeof(*used));
-        if (used->idx != used_before) { completed = 1; break; }
-        if (deadline && clock_get_ticks() >= deadline)
-            break;
-        arch_cpu_relax();
-        /* Parked on inst->waiters rather than spinning: a virgl submit that
-         * takes longer than one 20 ms chunk would otherwise keep a vCPU busy
-         * while holding command_lock, starving the host backend thread that
-         * has to consume this very descriptor.  Bounded chunks keep a lost
-         * completion interrupt from parking forever. */
-        if ((spins & park_mask) == 0 && proc_current()) {
-            if (inst->irq_registered && deadline) {
-                uint64_t now = clock_get_ticks();
-                if (now < deadline) {
-                    uint64_t chunk = now + MS_TO_TICKS(20);
-                    if (chunk > deadline) chunk = deadline;
-                    proc_wait_token_t token =
-                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
-                    wait_queue_entry_t entry = {0};
-                    wait_queue_link(&inst->waiters, &entry, token, 0);
-                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
-                    if (used->idx != used_before) {
-                        wait_queue_unlink(&inst->waiters, &entry);
-                        (void)proc_park_cancel(token);
-                        proc_park_finish(token);
-                        completed = 1;
-                        break;
-                    }
-                    (void)proc_park_commit(token);
-                    wait_queue_unlink(&inst->waiters, &entry);
-                    proc_park_finish(token);
-                }
-            } else {
-                proc_yield();
-            }
-        }
+    int result = virtio_gpu_execute(inst, s0);
+    if (!result) {
+        arch_dma_sync_for_cpu(&inst->submit_resp, sizeof(inst->submit_resp));
+        if (inst->submit_resp.type != VIRTIO_GPU_RESP_OK_NODATA) result = -EIO;
     }
-    if (!completed) {
-        inst->command_failed = 1;
-        virtio_gpu_command_end(inst);
-        return -ETIMEDOUT;
-    }
-    arch_dma_sync_for_cpu(&inst->submit_resp, sizeof(inst->submit_resp));
-    if (!virtio_gpu_command_completed(inst, used_before, s0)) {
-        inst->command_failed = 1;
-        virtio_gpu_command_end(inst);
-        return -EIO;
-    }
-    if (inst->submit_resp.type != VIRTIO_GPU_RESP_OK_NODATA) {
-        virtio_gpu_command_end(inst);
-        return -EIO;
-    }
-    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!inst->vt.legacy && isr)
-        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
-    inst->last_used = used->idx;
-    inst->desc_idx = 0;
     virtio_gpu_command_end(inst);
-    return 0;
+    return result;
 }
 
 /* VIRTIO_GPU_CMD_RESOURCE_UNREF */
@@ -1089,78 +968,13 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
     arch_dma_sync_for_device(inst->desc, sizeof(virtq_desc_t) * 2);
     arch_dma_sync_for_device(resp, sizeof(*resp));
 
-    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
-    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
-    uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
-    inst->avail.ring[avail_slot] = s0;
-    wmb();
-    inst->avail.idx++;
-    wmb();
-    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-    mb();
-
-    volatile virtq_used_t *used = &inst->used;
-    uint64_t start = clock_get_ticks();
-    uint64_t frequency = clock_ticks_per_sec();
-    uint64_t deadline = (start && frequency) ? start + frequency : 0;
-    uint32_t spins = 100000000U;
-    int completed = 0;
-    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
-    while (spins--) {
-        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
-        arch_dma_sync_for_cpu((void *)used, sizeof(*used));
-        if (used->idx != used_before) { completed = 1; break; }
-        /* Same one-second bound the other completion loops use: an absent
-         * deadline let a device that never returns this entry spin the full
-         * 100M iterations with command_lock held, blocking every later
-         * command outright instead of failing the call. */
-        if (deadline && clock_get_ticks() >= deadline)
-            break;
-        arch_cpu_relax();
-        if ((spins & park_mask) == 0 && proc_current()) {
-            if (inst->irq_registered && deadline) {
-                uint64_t now = clock_get_ticks();
-                if (now < deadline) {
-                    uint64_t chunk = now + MS_TO_TICKS(20);
-                    if (chunk > deadline) chunk = deadline;
-                    proc_wait_token_t token =
-                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
-                    wait_queue_entry_t entry = {0};
-                    wait_queue_link(&inst->waiters, &entry, token, 0);
-                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
-                    if (used->idx != used_before) {
-                        wait_queue_unlink(&inst->waiters, &entry);
-                        (void)proc_park_cancel(token);
-                        proc_park_finish(token);
-                        completed = 1;
-                        break;
-                    }
-                    (void)proc_park_commit(token);
-                    wait_queue_unlink(&inst->waiters, &entry);
-                    proc_park_finish(token);
-                }
-            } else {
-                proc_yield();
-            }
-        }
+    int result = virtio_gpu_execute(inst, s0);
+    if (!result) {
+        arch_dma_sync_for_cpu(resp, sizeof(*resp));
+        if (resp->type != VIRTIO_GPU_RESP_OK_NODATA) result = -EIO;
     }
-    if (!completed) {
-        inst->command_failed = 1;
-        virtio_gpu_command_end(inst);
-        return -ETIMEDOUT;
-    }
-    arch_dma_sync_for_cpu(resp, sizeof(*resp));
-    if (!virtio_gpu_command_completed(inst, used_before, s0)) inst->command_failed = 1;
-    int ok = !inst->command_failed &&
-             (resp->type == VIRTIO_GPU_RESP_OK_NODATA);
-    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!inst->vt.legacy && isr)
-        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
-    inst->last_used = used->idx;
-    inst->desc_idx = 0;
     virtio_gpu_command_end(inst);
-    return ok ? 0 : -EIO;
+    return result;
 }
 
 static int gpu_capset_info(struct device *dev, uint32_t index,
@@ -1594,34 +1408,41 @@ static void virtio_gpu_quiesce(device_t *dev) {
     if (inst) __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
 }
 
-static int virtio_gpu_remove(device_t *dev) {
-    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
-    if (!inst)
-        return 0;
-
+static int virtio_gpu_queue_stop(void *context)
+{
+    virtio_gpu_inst_t *inst = context;
     __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
-    /* Scoped callers have drained. Never wait under lifecycle for a private
-     * active issuer or reset its queue, including recursive same-task calls. */
+    /* Never block before active-call drain. The issuer observes closing and
+     * leaves; EBUSY keeps the whole binding for explicit teardown retry. */
     if (__atomic_load_n(&inst->command_active, __ATOMIC_ACQUIRE) ||
         !mutex_trylock(&inst->command_lock)) return -EBUSY;
+    int result = 0;
     if (inst->transport_live && !inst->reset_confirmed) {
-        int result = virtio_transport_reset(&inst->vt, 100);
-        if (result) {
-            mutex_unlock(&inst->command_lock);
-            return result; /* Binding, MMIO, IRQ and every DMA owner survive. */
-        }
-        inst->reset_confirmed = 1;
+        result = virtio_transport_reset(&inst->vt, 100);
+        if (!result) inst->reset_confirmed = 1;
     }
-    if (inst->irq_registered) {
+    if (!result && inst->irq_registered) {
         free_irq((uint32_t)inst->vt.irq, inst);
         inst->irq_registered = 0;
     }
+    mutex_unlock(&inst->command_lock);
+    return result;
+}
+
+static int virtio_gpu_remove(device_t *dev) {
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst) return 0;
+    int result = inst->commands ? driver_queue_stop(inst->commands) : virtio_gpu_queue_stop(inst);
+    if (result) return result;
+    if (!mutex_trylock(&inst->command_lock)) return -EBUSY;
     gpu_device_unregister(dev);
     dev->drv_priv = NULL;
     virtio_gpu_release_buffers(inst);
+    struct driver_queue *commands = inst->commands;
+    inst->commands = NULL;
     struct driver_dma_buffer *allocation = inst->allocation;
     mutex_unlock(&inst->command_lock);
-    /* Unlock before releasing the allocation containing the mutex itself. */
+    driver_queue_put(commands);
     driver_dma_buffer_put(allocation);
     return 0;
 }

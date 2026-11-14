@@ -244,17 +244,17 @@ get_scanout 必须在 scoped class access 内与 producer 模式替换协调，�
 
 ### VirtIO reset 与命令封闭
 
-原生 lifecycle 串行化 probe/remove 和静态 GPU instance owner 的交接；claim 不得覆盖保留中的实例。GPU quiesce 只原子设置 closing，核心随后 drain class 调用；不在 quiesce 等 command mutex。四个 issuer 在 mutex 内完成准入、staging、descriptor 发布和等待，command_active 标记覆盖整个持锁事务。未知 completion 先设置 command_failed，再交还 active/mutex；后续 issuer 在接触暂存区前返回错误。
+原生 lifecycle 串行化 probe/remove；每绑定独立 DMA instance，claim 不覆盖保留对象。四种命令共用 native request queue，仍在 command mutex 内建立 staging/descriptor 并驱动 IRQ/poll 等待。command_active 覆盖整个事务；未知完成封闭暂存区，不提前 signal native fence。
 
-remove 先检查 command_active（拒绝同 owner 的递归退出），再 trylock；忙返回 EBUSY 并保留所有对象。持 command mutex 执行有界 transport reset，只有 status=0 读回后才 free_irq/同步排空 handler，再交还 buffer/VMO 和默认选择，最后允许新 claim。reset helper 本身无设备锁，不用于 IRQ/spinlock 上下文；调用者负责完整排他。DRM 已使用每文件 publication 和 scoped access，不能把该 mutex 当作 class 引用或模块寿命。
+execution stop 在 class drain 前先设置 closing，检查 command_active 并 trylock；忙返回 EBUSY，不在 lifecycle 下等待 issuer 私有锁。成功持锁后有界 reset；status=0 才 free_irq/排空 handler，随后队列退休请求并在锁外 signal fence。remove 在 drain 后释放默认选择、staging、VMO 和队列引用，解锁后才 put 包含 mutex 的 allocation。队列 stop 失败保留代码/IRQ/context，既有 issuer 观察 closing 后能退出，调用者显式重试。
 
 ### VirtIO-GPU transport
 
-`inst->command_lock`（`virtio_gpu.c`）保护共享请求/响应暂存区（`big_req`/`big_resp`）、descriptor 表、avail/used ring 索引。四个提交循环都必须在它之下运行。
+`inst->command_lock`（`virtio_gpu.c`）保护共享请求/响应暂存区（`big_req`/`big_resp`）、descriptor 表、avail/used ring 索引。四种命令的 staging 和共同 execute 路径都在它之下运行。
 
 关键规则：`inst->big_req` 是**每实例一块**共享缓冲，四条路径都会增长、`kfree` 并重填它。因此 ATTACH_BACKING 与 SUBMIT_3D 的请求体必须在锁内构建，descriptor 里 `va_to_pa(inst->big_req)` 也必须在（可能的）重新分配之后计算，否则拿到的是刚被释放的指针。DRM 侧一次 EXECBUFFER 会为每个 buffer 各调一次 ATTACH_BACKING，所以这条路径天然并发。
 
-局部顺序：`inst->command_lock` 是最内层锁。它之下不得调用 VFS、MM 或任何会睡眠的路径；completion 轮询在锁内 park（`inst->waiters` + Park/Wake）， wake queue 的 flush 在释放锁之后。
+局部顺序：`inst->command_lock` 之下可进行 task allocation 和 IRQ-assisted park，不得取得 lifecycle 串行化或进入 VFS。native queue 后端 issue 不再取得该 mutex；IRQ handler 只确认中断并锁外唤醒 waiters，不等待 issuer。内部 native request fence 不暴露给外部通知回调；其他 provider 调用 queue_run/stop 时不能持有其 fence callback 需要的外锁。
 
 ### VirtIO input
 
@@ -359,7 +359,9 @@ buffer 分配不取核心 lifecycle mutex，只用既有设备引用/registry �
 
 `g_driver_core_ops` 仍是 lifecycle mutex，`g_driver_core_lock` 仅在数组/claim 变更时持有；quiesce/remove/class drain 与 bus 通知不持 registry spinlock。驱动退出和设备递归移除的意图栈只在 lifecycle mutex 下读写，不分配公开生命周期对象。正在退出的驱动拒绝新匹配，正在移除的 provider/parent 链拒绝新消费关系；递归退出同一对象返回 `-EBUSY`。
 
-quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止；错误保留离线绑定、匹配身份、依赖和资源，并释放 lifecycle mutex 让调用者修复后显式重试。重试只调用 remove。回调不能等待必须取得 lifecycle mutex 的工作；未选择 prepare 的 provider 不提前停止；显式选择者可先冻结硬件，但保留 consumer 的清理存储和所需接口。完整错误/重试契约见 [原生运行时](native-runtime.md#可失败的解绑与显式重试)。
+新异步驱动的 execution stop 先于 class drain，可失败返回，成功项 checkpoint；全部成功后才 quiesce/drain/remove。旧 void quiesce 保持兼容顺序。回调不能等待必须取得 lifecycle mutex 的工作；pre-consumer prepare 更早冻结仍被 consumer 借用的硬件存储，execution stop 不替代它。完整错误/重试契约见[原生运行时](native-runtime.md#可失败的解绑与显式重试)。
+
+native queue 的 spinlock 仅保护状态和链表，嵌套 workqueue 调度/fence status 查询，不跨 prepare/issue/retire/stop、fence signal 或 native owner 最后 put。同队列 dispatch lease 串行化任务回调；并发 pump/stop 返回 EBUSY。IRQ complete 只修改状态并调度 work，不调用后端或释放存储。signal 前释放 dispatch lease，允许通知重新查询/推动队列；不承诺通知次序。
 
 ### 提前退出准备
 

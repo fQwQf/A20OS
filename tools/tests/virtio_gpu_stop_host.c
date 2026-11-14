@@ -2,6 +2,9 @@
  * clock, IRQ, lifecycle admission and allocation/aliases are host models. */
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/gpu/gpu_core.h"
+#include "drivers/core/queue.h"
+#include "drivers/core/fence.h"
+#include "drivers/core/workqueue.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/block/virtio_blk.h"
 #define ALIGNED(n) __attribute__((aligned(n)))
@@ -48,6 +51,28 @@ static void instance_allocation_free(pfn_t,int);
 /* PRODUCTION_BUFFER */
 #undef pfa_free
 int arch_device_dma_ready(void){return architecture_ready;}
+void *kcalloc(size_t n,size_t z){void *p=kmalloc(n*z);if(p)memset(p,0,n*z);return p;}
+struct driver_fence {refcount_t references;int status;};
+struct driver_fence *driver_fence_create(void){struct driver_fence *f=kcalloc(1,sizeof(*f));if(f)refcount_set(&f->references,1);return f;}
+void driver_fence_get(struct driver_fence *f){if(f)refcount_inc(&f->references);}
+void driver_fence_put(struct driver_fence *f){if(f&&refcount_dec_and_test(&f->references))kfree(f);}
+int driver_fence_status(struct driver_fence *f){return f->status;}
+int driver_fence_signal(struct driver_fence *f,int error){if(f->status)return -EALREADY;f->status=error?error:1;return 0;}
+int driver_fence_watch_create(struct driver_fence *f,void (*cb)(void *,int),void *ctx,struct driver_fence_watch **out){(void)f;(void)cb;(void)ctx;(void)out;abort();}
+int driver_fence_watch_try_remove(struct driver_fence_watch **watch){assert(watch&&!*watch);return 0;}
+struct driver_work *driver_work_create(struct driver_workqueue *q,void (*cb)(void *),void *ctx){(void)q;(void)cb;(void)ctx;return NULL;}
+int driver_work_schedule(struct driver_work *w,uint64_t d){(void)w;(void)d;abort();}
+int driver_work_reschedule(struct driver_work *w,uint64_t d){(void)w;(void)d;abort();}
+int driver_work_cancel_sync(struct driver_work *w,uint64_t d){(void)w;(void)d;abort();}
+void driver_work_put(struct driver_work *w){(void)w;abort();}
+struct action {device_t *dev;int (*stop)(void *);void (*release)(void *);void *context;};
+static struct action actions[16];
+int device_add_execution_action(device_t *d,int (*stop)(void *),void (*release)(void *),void *context){
+ for(unsigned i=0;i<16;i++)if(!actions[i].dev){actions[i]=(struct action){d,stop,release,context};return 0;}abort();
+}
+static int fixture_vmo_fail;
+static int fixture_vmo_create_contiguous(size_t n,struct vmo **out){if(fixture_vmo_fail){fail_at=attempts+fixture_vmo_fail;fixture_vmo_fail=0;}return vmo_create_contiguous(n,out);}
+#define vmo_create_contiguous fixture_vmo_create_contiguous
 /* PRODUCTION_INSTANCE */
 /* PRODUCTION_CLAIM */
 struct hardware {unsigned resets,reads,delay,never,notify,bad_response_at,no_complete,bad_id,bad_advance,feature_select,status,irq_get,irq_put,width,height;int pci_error,opted;virtio_gpu_inst_t *instance;};
@@ -106,6 +131,12 @@ static void virtio_gpu_fetch_edid(virtio_gpu_inst_t *inst){assert(!inst->has_edi
 static int virtio_gpu_get_capset_info(virtio_gpu_inst_t *inst,uint32_t i,uint32_t *id,uint32_t *version,uint32_t *size){(void)inst;(void)i;(void)id;(void)version;(void)size;return -EOPNOTSUPP;}
 /* PRODUCTION_COMMANDS */
 /* PRODUCTION_LIFETIME */
+/* PRODUCTION_QUEUE */
+static int fixture_remove(device_t *dev){
+ struct action *action=NULL;for(unsigned i=0;i<16;i++)if(actions[i].dev==dev){action=&actions[i];break;}
+ int ret=action?action->stop(action->context):0;if(ret)return ret;
+ ret=virtio_gpu_remove(dev);if(!ret&&action){action->release(action->context);*action=(struct action){0};}return ret;
+}
 static int issue(virtio_gpu_inst_t *inst,unsigned path){
  struct virtio_gpu_ctrl_hdr req={.type=VIRTIO_GPU_CMD_RESOURCE_FLUSH},resp={0};unsigned char bytes[256]={0};struct virtio_gpu_mem_entry entry={.addr=4096,.length=4096};
  switch(path){case 0:return virtio_gpu_send_cmd(inst,&req,sizeof(req),&resp,sizeof(resp));case 1:return virtio_gpu_send_cmd_big(inst,bytes,sizeof(bytes),&resp,sizeof(resp));case 2:return virtio_gpu_submit_3d(inst,1,bytes,sizeof(bytes));default:return virtio_gpu_resource_attach_backing(inst,1,&entry,1);}
@@ -123,7 +154,7 @@ int main(int argc,char **argv){
  }else{
   strict_probe=1;
   if(!strcmp(name,"instance-oom")){
-   fail_at=1;assert(virtio_gpu_probe(&dev)==-ENOMEM&&!dev.drv_priv&&dev.references==1);fail_at=0;pfa_oom=1;assert(virtio_gpu_probe(&dev)==-ENOMEM&&!dev.drv_priv&&dev.references==1);pfa_oom=0;architecture_ready=0;assert(virtio_gpu_probe(&dev)==-EOPNOTSUPP&&!dev.drv_priv&&dev.references==1);architecture_ready=1;assert(!virtio_gpu_remove(&dev)&&!hw.resets&&!hw.irq_get);
+   fail_at=1;assert(virtio_gpu_probe(&dev)==-ENOMEM&&!dev.drv_priv&&dev.references==1);fail_at=0;pfa_oom=1;assert(virtio_gpu_probe(&dev)==-ENOMEM&&!dev.drv_priv&&dev.references==1);pfa_oom=0;architecture_ready=0;assert(virtio_gpu_probe(&dev)==-EOPNOTSUPP&&!dev.drv_priv&&dev.references==1);architecture_ready=1;assert(!fixture_remove(&dev)&&!hw.resets&&!hw.irq_get);
   }
   else if(!strncmp(name,"two-",4)){
    peer.width=96;peer.height=48;assert(!virtio_gpu_probe(&dev)&&!virtio_gpu_probe(&other));inst=dev.drv_priv;virtio_gpu_inst_t *second=other.drv_priv;
@@ -132,17 +163,17 @@ int main(int argc,char **argv){
    assert(inst->width==64&&second->width==96&&hw.irq_get==1&&peer.irq_get==1);
    struct vmo *keep=inst->fb_memory;vmo_ref(keep);pfn_t page=vmo_peek_page(keep,0);((unsigned char *)pfn_to_virt(page))[0]=0x5d;
    if(!strcmp(name,"two-command-fail")){inst->virgl=second->virgl=1;hw.no_complete=1;step=1000;assert(issue(inst,0)==-ETIMEDOUT&&inst->command_failed&&!second->command_failed);step=0;}
-   virtio_gpu_quiesce(&dev);if(!strcmp(name,"two-remove-fail")){hw.never=1;step=50;assert(virtio_gpu_remove(&dev)==-ETIMEDOUT&&dev.drv_priv==inst&&other.drv_priv==second&&dev.references==2);}
+   virtio_gpu_quiesce(&dev);if(!strcmp(name,"two-remove-fail")){hw.never=1;step=50;assert(fixture_remove(&dev)==-ETIMEDOUT&&dev.drv_priv==inst&&other.drv_priv==second&&dev.references==2);}
    unsigned resets=peer.resets,notify=peer.notify;uint16_t available=second->avail.idx;assert(!gpu_flush(&other,0,0,1,1)&&peer.notify==notify+3&&second->avail.idx==(uint16_t)(available+3)&&peer.resets==resets&&!second->closing&&!second->command_failed);
-   hw.never=0;assert(!virtio_gpu_remove(&dev)&&!dev.drv_priv&&dev.references==1&&!hw.instance&&other.drv_priv==second);
+   hw.never=0;assert(!fixture_remove(&dev)&&!dev.drv_priv&&dev.references==1&&!hw.instance&&other.drv_priv==second);
    assert(((unsigned char *)pfn_to_virt(page))[0]==0x5d&&!gpu_flush(&other,0,0,1,1)&&peer.irq_put==0);
    hw.no_complete=0; /* Repair the injected command stall before rebinding. */
    assert(!virtio_gpu_probe(&dev)&&dev.drv_priv&&dev.drv_priv!=second&&((virtio_gpu_inst_t *)dev.drv_priv)->fb_memory!=keep&&other.drv_priv==second);
-   assert(!virtio_gpu_remove(&dev)&&!virtio_gpu_remove(&other)&&dev.references==1&&other.references==1&&hw.irq_put==2&&peer.irq_put==1);vmo_release(keep);
+   assert(!fixture_remove(&dev)&&!fixture_remove(&other)&&dev.references==1&&other.references==1&&hw.irq_put==2&&peer.irq_put==1);vmo_release(keep);
   }
-  else if(!strcmp(name,"probe-pci-fail")){hw.pci_error=-ENOMEM;assert(virtio_gpu_probe(&dev)==-ENOMEM&&dev.drv_priv&&opted&&!hw.resets);virtio_gpu_quiesce(&dev);assert(!virtio_gpu_remove(&dev)&&!dev.drv_priv);}
-  else if(!strncmp(name,"probe-vmo-",10)){fail_at=!strcmp(name,"probe-vmo-slots-oom")?4:3;assert(virtio_gpu_probe(&dev)<0&&dev.drv_priv&&!((virtio_gpu_inst_t *)dev.drv_priv)->fb_memory&&hw.irq_get==1&&!hw.irq_put);virtio_gpu_quiesce(&dev);hw.never=1;step=50;assert(virtio_gpu_remove(&dev)==-ETIMEDOUT&&!hw.irq_put&&dev.drv_priv);hw.never=0;assert(!virtio_gpu_remove(&dev)&&hw.irq_put==1&&!dev.drv_priv);}
-  else if(!strcmp(name,"probe-reset-fail")){hw.never=1;step=50;assert(virtio_gpu_probe(&dev)==-ETIMEDOUT&&dev.drv_priv&&!hw.notify);inst=dev.drv_priv;assert(!virtio_gpu_probe(&other)&&other.drv_priv!=inst&&dev.drv_priv==inst);virtio_gpu_quiesce(&dev);assert(virtio_gpu_remove(&dev)==-ETIMEDOUT&&dev.drv_priv==inst&&!hw.irq_put&&!gpu_flush(&other,0,0,1,1));hw.never=0;assert(!virtio_gpu_remove(&dev)&&!dev.drv_priv&&!virtio_gpu_remove(&other));}
+  else if(!strcmp(name,"probe-pci-fail")){hw.pci_error=-ENOMEM;assert(virtio_gpu_probe(&dev)==-ENOMEM&&dev.drv_priv&&opted&&!hw.resets);virtio_gpu_quiesce(&dev);assert(!fixture_remove(&dev)&&!dev.drv_priv);}
+  else if(!strncmp(name,"probe-vmo-",10)){fixture_vmo_fail=!strcmp(name,"probe-vmo-slots-oom")?2:1;assert(virtio_gpu_probe(&dev)<0&&dev.drv_priv&&!((virtio_gpu_inst_t *)dev.drv_priv)->fb_memory&&hw.irq_get==1&&!hw.irq_put);virtio_gpu_quiesce(&dev);hw.never=1;step=50;assert(fixture_remove(&dev)==-ETIMEDOUT&&!hw.irq_put&&dev.drv_priv);hw.never=0;assert(!fixture_remove(&dev)&&hw.irq_put==1&&!dev.drv_priv);}
+  else if(!strcmp(name,"probe-reset-fail")){hw.never=1;step=50;assert(virtio_gpu_probe(&dev)==-ETIMEDOUT&&dev.drv_priv&&!hw.notify);inst=dev.drv_priv;assert(!virtio_gpu_probe(&other)&&other.drv_priv!=inst&&dev.drv_priv==inst);virtio_gpu_quiesce(&dev);assert(fixture_remove(&dev)==-ETIMEDOUT&&dev.drv_priv==inst&&!hw.irq_put&&!gpu_flush(&other,0,0,1,1));hw.never=0;assert(!fixture_remove(&dev)&&!dev.drv_priv&&!fixture_remove(&other));}
   else{
    if(!strcmp(name,"probe-partial"))hw.bad_response_at=3;
    int probed=virtio_gpu_probe(&dev);inst=dev.drv_priv;assert((!strcmp(name,"probe-partial")?probed<0:probed==0)&&dev.drv_priv&&inst->fb_memory&&hw.irq_get==1);
@@ -156,14 +187,15 @@ int main(int argc,char **argv){
     else if(strstr(name,"wrong-id")){hw.bad_id=7;assert(issue(inst,path)==-EIO&&inst->command_failed);}
     else if(strstr(name,"wrong-index")){hw.bad_advance=2;assert(issue(inst,path)==-EIO&&inst->command_failed);}
     else{assert(strstr(name,"success"));assert(!issue(inst,path)&&!inst->command_failed);}
-    if(inst->command_failed){unsigned notify=hw.notify;size_t allocs=attempts;uint16_t idx=inst->avail.idx;for(unsigned j=0;j<4;j++)assert(issue(inst,j)==-EIO);assert(hw.notify==notify&&attempts==allocs&&inst->avail.idx==idx&&!inst->command_active);}
-   }else if(!strcmp(name,"remove-active")){assert(!virtio_gpu_command_begin(inst));virtio_gpu_quiesce(&dev);assert(virtio_gpu_remove(&dev)==-EBUSY&&hw.resets==1&&!hw.irq_put&&inst->fb_memory==snapshot);virtio_gpu_command_end(inst);}
+    if(inst->command_failed){struct driver_queue_status qs;driver_queue_status(inst->commands,&qs);assert(qs.outstanding==1&&qs.active==1);unsigned notify=hw.notify;size_t allocs=attempts;uint16_t idx=inst->avail.idx;for(unsigned j=0;j<4;j++)assert(issue(inst,j)==-EIO);assert(hw.notify==notify&&attempts==allocs&&inst->avail.idx==idx&&!inst->command_active);}
+   }else if(!strcmp(name,"remove-active")){assert(!virtio_gpu_command_begin(inst));virtio_gpu_quiesce(&dev);assert(fixture_remove(&dev)==-EBUSY&&hw.resets==1&&!hw.irq_put&&inst->fb_memory==snapshot);virtio_gpu_command_end(inst);}
    else assert(!strcmp(name,"remove-retained")||!strcmp(name,"probe-partial"));
    virtio_gpu_quiesce(&dev);unsigned notify=hw.notify;inst->virgl=1;for(unsigned j=0;j<4;j++)assert(issue(inst,j)==-ENODEV);assert(hw.notify==notify);
-   hw.never=1;step=50;assert(virtio_gpu_remove(&dev)==-ETIMEDOUT&&dev.drv_priv&&inst->fb_memory==snapshot&&!hw.irq_put&&allocated_pages==pages);
-   hw.never=0;assert(!virtio_gpu_remove(&dev)&&!dev.drv_priv&&!selected&&hw.irq_put==1&&allocated_pages==pages-instance_pages);
-   assert(((unsigned char *)pfn_to_virt(page))[0]==0x7a);vmo_release(snapshot);assert(!allocated_pages);assert(!virtio_gpu_remove(&dev)&&hw.irq_put==1);
+   hw.never=1;step=50;assert(fixture_remove(&dev)==-ETIMEDOUT&&dev.drv_priv&&inst->fb_memory==snapshot&&!hw.irq_put&&allocated_pages==pages);
+   hw.never=0;assert(!fixture_remove(&dev)&&!dev.drv_priv&&!selected&&hw.irq_put==1&&allocated_pages==pages-instance_pages);
+   assert(((unsigned char *)pfn_to_virt(page))[0]==0x7a);vmo_release(snapshot);assert(!allocated_pages);assert(!fixture_remove(&dev)&&hw.irq_put==1);
   }
  }
+ for(unsigned i=0;i<16;i++)assert(!actions[i].dev);
  assert(dev.references==1&&other.references==1);assert(!heap_live&&!allocated_pages&&!g_a20_objstats.vmos&&!g_a20_objstats.vmo_pages);free(pfa.meta);free(ram);return 0;
 }

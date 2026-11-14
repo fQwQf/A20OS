@@ -193,7 +193,7 @@ guest 的 UART 代码在 `kernel/arch/riscv64/include/console.h`（内联头，�
 
 `LSR = 0x60` 是**承重值**，不是随手填的：契约（`hyp_vcpu.h` 的 v3 一节，`kernel/include/hyp/hyp_vcpu.h:250-262`）给的就是 `0x60`，并明确说**只有 DR 位是后加的**。bit `0x20`（THRE）必须常置，否则 `arch_uart_putc()` 里的`while ((uart[5] & 0x20) == 0);` 会把 guest 焊死在一个自旋里——这是启动冒烟最可能卡住的地方。bit `0x40`（TEMT）同理，`arch_uart_flush()` 会等它。bit `0x01` 从"恒 0"变成"有输入才 1"，这正是契约 v3 带来的唯一寄存器语义变化。
 
-**中断**：`arch_uart_init()` 打开了 IER bit 0，`uart_init()` 又无条件`request_irq(UART0_IRQ=10, …)`（`kernel/drivers/char/uart.c:184`）。v2 不路由中断（契约明说"interrupts are delegated, not routed"），所以 source 10 永远不会被断言。树里已经有现成的出路：`board_config_t.uart_rx_is_polled`（`kernel/drivers/core/driver_core.h:309`）正是给"UART IRQ 路由与定时器陷阱都不可用"的板子准备的，已有 LS2K1000 / VisionFive 2 / loongarch QEMU virt 三家在用。**v2 guest 板应当置这个位**，否则 guest 会挂一个永远不来的中断。
+**中断**：`arch_uart_init()` 打开了 IER bit 0，`uart_init()` 又无条件`request_irq(UART0_IRQ=10, …)`（`kernel/drivers/char/uart.c:184`）。v2 不路由中断（契约明说"interrupts are delegated, not routed"），所以 source 10 永远不会被断言。树里已经有现成的出路：`board_config_t.uart_rx_is_polled`（`kernel/drivers/core/driver_core.h:548`）正是给"UART IRQ 路由与定时器陷阱都不可用"的板子准备的，已有 LS2K1000 / VisionFive 2 / loongarch QEMU virt 三家在用。**v2 guest 板应当置这个位**，否则 guest 会挂一个永远不来的中断。
 
 ### 6.2 CLINT `[0x02000000, 0x02010000)`
 

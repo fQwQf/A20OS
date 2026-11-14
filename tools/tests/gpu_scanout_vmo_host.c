@@ -43,7 +43,7 @@ static int mutex_trylock(mutex_t *m){return !pthread_mutex_trylock(m);}
 static void mutex_unlock(mutex_t *m){assert(!pthread_mutex_unlock(m));}
 struct driver_dma_buffer { void *data; device_t *device; };
 static int virtio_transport_reset(fake_transport_t *t,uint32_t ms){assert(ms==100);t->write32(t,0x70,0);return 0;}
-typedef struct {struct driver_dma_buffer *allocation;mutex_t command_lock;int closing,command_active,transport_live,reset_confirmed;fake_transport_t vt;int valid,virgl,context_init,irq_registered;uint32_t width,height,bpp;uintptr_t fb_phys;size_t fb_size;struct vmo *fb_memory;void *big_req,*big_resp;size_t big_req_cap,big_resp_cap;uint16_t last_used;} virtio_gpu_inst_t;
+typedef struct {struct driver_dma_buffer *allocation;struct driver_queue *commands;mutex_t command_lock;int closing,command_active,transport_live,reset_confirmed;fake_transport_t vt;int valid,virgl,context_init,irq_registered;uint32_t width,height,bpp;uintptr_t fb_phys;size_t fb_size;struct vmo *fb_memory;void *big_req,*big_resp;size_t big_req_cap,big_resp_cap;uint16_t last_used;} virtio_gpu_inst_t;
 #define VIRTIO_MMIO_STATUS 0x70
 #define mb() ((void)0)
 static struct gpu_scanout *observed_snapshot;
@@ -61,6 +61,10 @@ static void driver_dma_buffer_put(struct driver_dma_buffer *allocation){
  assert(!inst->fb_memory&&!inst->valid&&inst->reset_confirmed&&resets==1&&irq_frees==1&&unregisters==1);
  assert(!pthread_mutex_destroy(&inst->command_lock));free(inst);allocation->data=NULL;instance_puts++;
 }
+/* This fixture isolates RAM scanout ownership; queue execution has its own
+ * production-core and full GPU transport fixtures. No command queue here. */
+static int driver_queue_stop(struct driver_queue *q){(void)q;abort();}
+static void driver_queue_put(struct driver_queue *q){assert(!q);}
 /* PRODUCTION_VIRTIO */
 int main(int argc,char **argv){
  assert(argc==2);const char *name=argv[1];size_t capacity=(size_t)1<<MAX_ORDER;

@@ -26,6 +26,7 @@
 #include "drivers/core/riscv_iommu.h"
 #include "drivers/core/amd_iommu.h"
 #include "drivers/core/fence.h"
+#include "drivers/core/queue.h"
 #include "drivers/core/protocol.h"
 #include "drivers/core/workqueue.h"
 #include "drivers/core/firmware.h"
@@ -380,6 +381,24 @@ const struct drv_export drv_export_table[] = {
     { "driver_protocol_begin", (void *)driver_protocol_begin },
     { "driver_protocol_end", (void *)driver_protocol_end },
     { "class_net_read_stats", (void *)class_net_read_stats },
+    { "driver_queue_create", driver_queue_create },
+    { "driver_queue_get", driver_queue_get },
+    { "driver_queue_put", driver_queue_put },
+    { "driver_queue_start", driver_queue_start },
+    { "driver_queue_run", driver_queue_run },
+    { "driver_queue_stop", driver_queue_stop },
+    { "driver_queue_status", driver_queue_status },
+    { "driver_request_create", driver_request_create },
+    { "driver_request_get", driver_request_get },
+    { "driver_request_put", driver_request_put },
+    { "driver_request_submit", driver_request_submit },
+    { "driver_request_complete", driver_request_complete },
+    { "driver_request_cancel", driver_request_cancel },
+    { "driver_request_command", driver_request_command },
+    { "driver_request_memory", driver_request_memory },
+    { "driver_request_fence", driver_request_fence },
+    { "driver_request_private", driver_request_private },
+    { "driver_request_set_private", driver_request_set_private },
     { "driver_fence_create", driver_fence_create },
     { "driver_fence_get", driver_fence_get },
     { "driver_fence_put", driver_fence_put },
@@ -481,6 +500,7 @@ const struct drv_export drv_export_table[] = {
     { "device_unregister",   (void *)device_unregister },
     { "device_probe_use_remove", (void *)device_probe_use_remove },
     { "device_add_remove_prepare", (void *)device_add_remove_prepare },
+    { "device_add_execution_action", (void *)device_add_execution_action },
     { "driver_lifecycle_begin", (void *)driver_lifecycle_begin },
     { "driver_lifecycle_try_begin", (void *)driver_lifecycle_try_begin },
     { "driver_lifecycle_end", (void *)driver_lifecycle_end },

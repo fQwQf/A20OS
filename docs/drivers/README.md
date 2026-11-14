@@ -23,6 +23,7 @@
 | [总线与平台](guide/bus-and-platform.md) | platform device、板级资源、MMIO/IRQ |
 | [PCI 与 VirtIO](guide/pci-and-virtio.md) | PCI ID、BAR、ECAM、VirtIO transport |
 | [运行时契约](guide/runtime-contracts.md) | MMIO、IRQ、DMA、锁、超时 |
+| [原生请求与队列](guide/request-queues.md) | admission、依赖、取消、IRQ 完成、任务退休、共享 worker 和可失败停止 |
 | [原生驱动运行时](guide/native-runtime.md) | quiesce、资源占用、页级 DMA、fence、工作队列、固件及验证边界 |
 | [驱动锁顺序契约](guide/lock-order.md) | 锁的嵌套规则 |
 

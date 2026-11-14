@@ -18,7 +18,7 @@ class GpuScanoutVmo(unittest.TestCase):
         extra=extra.replace('/* PRODUCTION_MAP_CAP */',extract_function((ROOT/'kernel/mm/mmap.c').read_text(),'vaddr_t mm_mmap_vmo_cap('))
         virtio=(ROOT/'kernel/drivers/gpu/virtio_gpu.c').read_text()
         body='\n'.join(extract_function(virtio,n) for n in ['static int gpu_get_scanout(',
-            'static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)\n{', 'static int virtio_gpu_remove('])
+            'static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)\n{', 'static int virtio_gpu_queue_stop(void *context)\n{', 'static int virtio_gpu_remove('])
         extra=extra.replace('/* PRODUCTION_VIRTIO */',body)
         cls.binary=build_fixture(Path(cls.temp.name),suffix=extra)
     def run_case(self,name):subprocess.run([str(self.binary),name],check=True,timeout=15)

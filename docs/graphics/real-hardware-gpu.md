@@ -34,7 +34,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 
 ## 分阶段验收
 
-1. **运行时基础**：已有 DMA 地址/生命周期、quiesce、异步完成、工作队列、固件读取和资源占用接口。AMD-Vi 被动控制器绑定与完整 aperture 占用已接入 PCI 生命周期，保留路由对象已组合 IVRS/requester/alias、PCI 路径和绑定快照，并可检查和原子占用完整固件声明集合、保留各成员身份/路径，构造包含 sibling alias 的独立 IVMD 约束用于通用映射预检。核心已在驱动报告 remove 失败时保留绑定/devres，并可在 probe 中显式选择部分初始化的受管失败清理；virtio-gpu 已接入原生失败清理、reset 读回和内部 staging 封闭，并有真实解绑/重绑验证；DRM 已保留失败清理对象并在旧绑定成功停止后退休，仍不替代厂商 GPU 的停止回调、硬件执行队列和请求/BO backing 寿命。真实 GPU 后端仍须实现安全停止回调。进入本机硬件初始化前，还需补齐其余 RAM/固件保留来源、通过各所属驱动完成全部 alias peer 的停止和归属变更协调，以及硬件权限/Unity/Exclusion、翻译与故障处理；具体后端须验证停止/失效失败时 DMA 页面与上下文不会提前释放，并补齐失败 probe 与关机/kexec 的 shutdown 硬件协议。
+1. **运行时基础**：已有原生有界请求队列、class drain 前可失败 execution stop、DMA 地址/生命周期、异步完成、共享工作队列、固件读取和资源占用接口。AMD-Vi 被动控制器绑定与完整 aperture 占用已接入 PCI 生命周期，保留路由对象已组合 IVRS/requester/alias、PCI 路径和绑定快照，并可检查和原子占用完整固件声明集合、保留各成员身份/路径，构造包含 sibling alias 的独立 IVMD 约束用于通用映射预检。核心已在驱动报告 remove 失败时保留绑定/devres，并可在 probe 中显式选择部分初始化的受管失败清理；virtio-gpu 已接入原生失败清理、reset 读回和内部 staging 封闭，并有真实解绑/重绑验证；DRM 已保留失败清理对象并在旧绑定成功停止后退休，仍不替代厂商 GPU 的停止回调、硬件执行队列和请求/BO backing 寿命。真实 GPU 后端仍须实现安全停止回调。进入本机硬件初始化前，还需补齐其余 RAM/固件保留来源、通过各所属驱动完成全部 alias peer 的停止和归属变更协调，以及硬件权限/Unity/Exclusion、翻译与故障处理；具体后端须验证停止/失效失败时 DMA 页面与上下文不会提前释放，并补齐失败 probe 与关机/kexec 的 shutdown 硬件协议。
 2. **硬件初始化**：固定上游版本及固件，识别实际 IP，完成所需 PSP/SMU、内存控制与中断初始化。共享电源/内存模块的依赖不能随意省略。
 3. **GPU 确实执行任务**：提交 SDMA copy/fill，收到真实完成，CPU 回读逐字节比对。ioctl 成功或队列被接受不足以证明执行正确。
 4. **硬件渲染**：建立 BO、GPUVM、context、GFX 提交与同步，接入现有 Mesa，离屏三角形并回读。禁止静默回落软件渲染。
@@ -57,4 +57,4 @@ FreeBSD 的 [drm-kmod](https://github.com/freebsd/drm-kmod) 使用 LinuxKPI 移�
 
 当前交付的是通用运行时与发现/资源管理基础，尚未达到本机 AMD-Vi 接管或 GPU 硬件初始化的验收条件。具体排期应在固定源码/固件版本、列出依赖并完成首个硬件初始化实验后修订；剩余基础设施的关闭条件见 [驱动缺口](../status/gaps/drivers.md#原生-gpu-与-amd-vi-基础设施)。
 
-原生服务层已采用通用 endpoint/protocol：新 GPU 扩展可声明独立版本、实际表大小和能力，复用绑定的在线准入/排空，而不要求继续扩展所有类的表。既有 DISPLAY 自动提供 primary protocol；这不把 VirtIO/DRM 协议定义为通用 GPU 执行模型，也不等于 BO/GPUVM/job 已实现。后续原生 GPU 请求与队列应在此基础上组合既有 VMO、DMA 与 fence，详见[完整驱动架构](../drivers/guide/core-model.md#架构与开发入口)。
+原生服务层已采用通用 endpoint/protocol：新 GPU 扩展可声明独立版本、实际表大小和能力，复用绑定的在线准入/排空，而不要求继续扩展所有类的表。既有 DISPLAY 自动提供 primary protocol；这不把 VirtIO/DRM 协议定义为通用 GPU 执行模型，也不等于 BO/GPUVM/job 已实现。通用原生 request/queue 已组合固定 VMO/原 charge、DMA buffer、fence 和 worker，VirtIO GPU 四种控制命令已复用同一执行路径；厂商 GPU 调度、主动 abort、BO/GPUVM 与恢复仍由上层/硬件协议实现，详见[请求与队列](../drivers/guide/request-queues.md)；详见[完整驱动架构](../drivers/guide/core-model.md#架构与开发入口)。

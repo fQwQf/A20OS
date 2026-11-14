@@ -37,3 +37,6 @@ class DriverProtocol(unittest.TestCase):
     def test_legacy_network_and_extension_share_one_endpoint(self):self.workflow('classes')
     def test_active_native_call_drains_before_instance_destruction(self):self.workflow('drain')
     def test_failed_publication_and_failed_probe_keep_correct_owners(self):self.workflow('failure')
+
+    def test_fallible_execution_stop_precedes_active_call_drain(self):self.workflow('execution')
+    def test_failed_probe_and_action_oom_use_managed_execution_rollback(self):self.workflow('execution-probe')

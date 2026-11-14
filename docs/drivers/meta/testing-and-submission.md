@@ -12,6 +12,12 @@ MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检
 
 `#ifdef CONFIG_<ARCH>` 只应包围真正架构限定的 I/O（例如 x86 port I/O）。可跨架构的 PCI/MMIO 驱动不要按板名条件编译。
 
+## 原生执行接口的验证
+
+修改 request/queue 或执行退出顺序时，运行 `python3 -m unittest tools.tests.test_driver_queue tools.tests.test_driver_protocol tools.tests.test_virtio_gpu_stop`。工作流验证并行请求、乱序完成、背压、依赖、取消、部分 prepare/retire 失败、停止重试和 class drain；不以模拟 callback=0 替代硬件停止证据。
+
+`tools/a20 test smoke-driver-gpu-stop-x86_64` 在双 CPU 上执行真实 native worker/fence/lifecycle 请求链路，并检查 DRIVER_QUEUE、真实 VirtIO GPU reset/解绑/重绑与 DRM backing 保留。generic 模块部署另运行 `make PYTHON=python3 smoke-gpu-access-x86_64`，确认新增函数经模块导出实际链接和调用。早期 poll 与 worker 模式共用同一队列后端。
+
 ## 基础门禁
 
 ```sh
