@@ -25,6 +25,7 @@
 #define VIRTIO_GPU_COMMAND_BYTES 128U
 
 typedef struct {
+    struct driver_dma_buffer *allocation; /* owns this entire DMA-visible instance */
     virtio_transport_t vt;
     virtq_desc_t       desc[VIRTIO_GPU_QUEUE_SIZE] ALIGNED(64);
     virtq_avail_t      avail ALIGNED(64);
@@ -86,19 +87,20 @@ typedef struct {
     struct virtio_gpu_ctrl_hdr submit_resp ALIGNED(64);
 } virtio_gpu_inst_t;
 
-static virtio_gpu_inst_t g_gpu_inst;
-/* This legacy transport still has one static queue instance. Native lifecycle
- * serialization protects the owner; a retained failed probe must not be
- * overwritten by another matching device. It is not a second device registry. */
-static device_t *g_gpu_owner;
-
+/* Each binding owns its queue, staging and synchronization. The native DMA
+ * allocation also pins device metadata; only confirmed remove may release it.
+ * No static slot or secondary device registry participates in this lifetime. */
 static int virtio_gpu_claim(device_t *dev) {
-    if (g_gpu_owner) return -EBUSY;
-    virtio_gpu_inst_t *inst = &g_gpu_inst;
-    memset(inst, 0, sizeof(*inst));
+    if (!dev) return -EINVAL;
+    if (dev->drv_priv) return -EBUSY;
+    struct driver_dma_buffer *allocation;
+    int result = driver_dma_buffer_create(dev, sizeof(virtio_gpu_inst_t),
+                                          __alignof__(virtio_gpu_inst_t), &allocation);
+    if (result) return result;
+    virtio_gpu_inst_t *inst = driver_dma_buffer_data(allocation);
+    inst->allocation = allocation;
     mutex_init(&inst->command_lock);
     wait_queue_init(&inst->waiters);
-    g_gpu_owner = dev;
     dev->drv_priv = inst;
     return 0;
 }
@@ -1546,8 +1548,8 @@ static int virtio_gpu_probe(device_t *dev) {
 /* Drop instance-owned storage after the caller's transport/IRQ teardown.
  * Scanout VMOs can outlive this instance through user mappings or snapshots;
  * their final release runs MM code, without a callback into this module.
- * Keeping RAM alive does not prove DMA stop, protect command-queue buffers,
- * or make the remaining legacy DRM raw operation-table users safe. */
+ * Keeping RAM alive does not prove DMA stop or protect command-queue buffers.
+ * DRM independently owns its publication and external GEM backing. */
 static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)
 {
     if (inst->big_req) {
@@ -1586,8 +1588,8 @@ static int virtio_gpu_remove(device_t *dev) {
         return 0;
 
     __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
-    /* Scoped callers have drained. A legacy raw issuer may still hold this
-     * mutex: do not wait under lifecycle for it, and never reset its queue. */
+    /* Scoped callers have drained. Never wait under lifecycle for a private
+     * active issuer or reset its queue, including recursive same-task calls. */
     if (__atomic_load_n(&inst->command_active, __ATOMIC_ACQUIRE) ||
         !mutex_trylock(&inst->command_lock)) return -EBUSY;
     if (inst->transport_live && !inst->reset_confirmed) {
@@ -1605,8 +1607,10 @@ static int virtio_gpu_remove(device_t *dev) {
     gpu_device_unregister(dev);
     dev->drv_priv = NULL;
     virtio_gpu_release_buffers(inst);
+    struct driver_dma_buffer *allocation = inst->allocation;
     mutex_unlock(&inst->command_lock);
-    if (g_gpu_owner == dev) g_gpu_owner = NULL;
+    /* Unlock before releasing the allocation containing the mutex itself. */
+    driver_dma_buffer_put(allocation);
     return 0;
 }
 

@@ -12,6 +12,7 @@
 #include "drivers/bus/pci_bus.h"
 #include "drivers/usb/usb.h"
 #include "drivers/gpu/gpu_core.h"
+#include "drivers/gpu/drm.h"
 #include "mm/frame.h"
 #include "mm/vmo.h"
 #include "mm/vm.h"
@@ -24,6 +25,7 @@
 #include "core/string.h"
 #include "core/timer.h"
 #include "core/fcntl.h"
+#include "core/poll.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
 
@@ -536,6 +538,80 @@ static void exercise_gpu_stop(void) {
     mm_destroy(mm);class_device_put(fresh);class_device_put(old);device_put(gpu);
 }
 
+/* Explicit two-device fixture: logical unregister/re-register through the
+ * native core, not a physical PCI hot-unplug or a driver-wide withdrawal. */
+static void exercise_gpu_instances(void) {
+    device_t *gpus[2] = {0};
+    unsigned count = 0;
+    for (unsigned index = 0; count < 2; index++) {
+        device_t *device = device_find_get_by_class(DEV_CLASS_DISPLAY, index);
+        if (!device) break;
+        if (device->drv && !strcmp(device->drv->name, "virtio-gpu")) gpus[count++] = device;
+        else device_put(device);
+    }
+    CHECK(count == 2 && gpus[0] != gpus[1]);
+    class_device_t *selected = gpu_device_default_get();
+    CHECK(selected && (selected->dev == gpus[0] || selected->dev == gpus[1]));
+    if (selected->dev == gpus[1]) {
+        device_t *swap = gpus[0];gpus[0] = gpus[1];gpus[1] = swap;
+    }
+    class_device_put(selected);
+    class_device_t *old = class_device_ref_for_device(gpus[0]);
+    class_device_t *peer = class_device_ref_for_device(gpus[1]);
+    CHECK(old && peer && old != peer && gpus[0]->drv_priv != gpus[1]->drv_priv);
+    void *peer_private = gpus[1]->drv_priv;
+    struct gpu_device_access access;
+    struct gpu_scanout first, second;
+    CHECK(!gpu_device_access_begin(old, &access));
+    CHECK(!gpu_device_scanout_get(&access, &first));
+    CHECK(access.ops->flush && !access.ops->flush(access.device, 0, 0, 1, 1));
+    gpu_device_access_end(&access);
+    CHECK(!gpu_device_access_begin(peer, &access));
+    CHECK(!gpu_device_scanout_get(&access, &second));
+    CHECK(access.ops->flush && !access.ops->flush(access.device, 0, 0, 1, 1));
+    gpu_device_access_end(&access);
+    CHECK(first.memory != second.memory);
+    mm_struct_t *mm = mm_create();
+    CHECK(mm);
+    vaddr_t va = mm_mmap_vmo_cap(mm, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, first.memory, first.offset, PROT_READ | PROT_WRITE);
+    CHECK(!mm_addr_is_error(va));
+    struct vmo *retained = first.memory;
+    pfn_t page = vmo_peek_page(retained, first.offset / PAGE_SIZE);
+    pfn_t peer_page = vmo_peek_page(second.memory, second.offset / PAGE_SIZE);
+    CHECK(page != PFN_NONE && peer_page != PFN_NONE && page != peer_page);
+    ((uint8_t *)pfn_to_virt(page))[0] = 0x46;
+    ((uint8_t *)pfn_to_virt(peer_page))[0] = 0x79;
+    gpu_scanout_put(&first);
+    vfile_t *old_file, *peer_file;
+    CHECK(!drm_create_vfile_for(old, &old_file) && !drm_create_vfile_for(peer, &peer_file));
+    CHECK(!device_unregister(gpus[0]) && !gpus[0]->drv && !gpus[0]->drv_priv);
+    CHECK(class_device_binding_stopped(old) && !class_device_binding_stopped(peer));
+    CHECK(old_file->ops->ioctl(old_file, DRM_IOCTL_MODE_GETRESOURCES, NULL) == -ENODEV);
+    CHECK(!(peer_file->ops->poll(peer_file, POLLIN) & (POLLHUP | POLLERR)));
+    CHECK(gpus[1]->drv_priv == peer_private && !gpu_device_access_begin(peer, &access));
+    CHECK(!access.ops->flush(access.device, 0, 0, 1, 1));
+    gpu_device_access_end(&access);
+    selected = gpu_device_default_get();
+    CHECK(selected == peer);class_device_put(selected);
+    CHECK(!device_register(gpus[0]) && gpus[0]->drv && gpus[0]->drv_priv);
+    class_device_t *fresh = class_device_ref_for_device(gpus[0]);
+    CHECK(fresh && fresh != old && !gpu_device_access_begin(fresh, &access));
+    CHECK(!gpu_device_scanout_get(&access, &first) && first.memory != retained &&
+          first.memory != second.memory);
+    CHECK(!access.ops->flush(access.device, 0, 0, 1, 1));
+    gpu_scanout_put(&first);gpu_device_access_end(&access);
+    CHECK(gpus[1]->drv_priv == peer_private && !gpu_device_access_begin(peer, &access));
+    CHECK(!access.ops->flush(access.device, 0, 0, 1, 1));
+    gpu_device_access_end(&access);
+    CHECK(((uint8_t *)pfn_to_virt(page))[0] == 0x46 &&
+          ((uint8_t *)pfn_to_virt(peer_page))[0] == 0x79 && mm_seg_find(mm, va)->vmo == retained);
+    vfs_put_file(old_file);vfs_put_file(peer_file);
+    gpu_scanout_put(&second);mm_destroy(mm);
+    class_device_put(fresh);class_device_put(peer);class_device_put(old);
+    device_put(gpus[1]);device_put(gpus[0]);
+}
+
 static void exercise_physical_mapping(void) {
     /* The mapping borrows this VMO-owned frame. Retain its owner until all
      * physical views are unmapped; the mapper must not pin/put it as RAM. */
@@ -732,6 +808,8 @@ void driver_runtime_selftest_boot(void)
     exercise_gpu_scanout();
     bool gpu_stop = boot_flag(args, "driver.gpu_stop_test=1");
     if (gpu_stop) exercise_gpu_stop();
+    bool gpu_instances = boot_flag(args, "driver.gpu_instances_test=1");
+    if (gpu_instances) exercise_gpu_instances();
     bool drm_binding = boot_flag(args, "driver.drm_binding_test=1");
     if (drm_binding) {
         class_device_t *publication = gpu_device_default_get();
@@ -767,6 +845,7 @@ void driver_runtime_selftest_boot(void)
 #ifndef CONFIG_NOMMU
           "%s"
           "%s"
+          "%s"
           "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1\n"
           "DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1\n"
 #endif
@@ -780,6 +859,7 @@ void driver_runtime_selftest_boot(void)
 #ifndef CONFIG_NOMMU
           gpu_stop ? "DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1\n" : "",
           drm_binding ? "DRIVER_DRM_BINDING: PASS file=1 stop=1 reaper=1 vma=1 rebind=1\n" : "",
+          gpu_instances ? "DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1\n" : "",
 #endif
           pci_scope ? " pci=1" : "");
     if (current_board && current_board->poweroff)

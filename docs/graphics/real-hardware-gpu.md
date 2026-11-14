@@ -10,6 +10,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 - DISPLAY 默认选择已有带引用的 publication/access，fbdev 单次调用与 sysfs GPU 内容生成捕获同一绑定；离线和重绑不会复用旧 publication。选择优先级仍按完整旧 virgl transport 表存在性，尚无通用 GPU 能力协商。RAM framebuffer 已经 owning scanout → 连续 VMO → 普通 VMA 独立保留存储，支持 fork/split；GPU vtable 扩展后当前 ABI 11。DRM 文件、状态与调用已迁移到每 publication namespace/scoped access；失败对象保留至清理成功或旧绑定停止。每文件 handle 权限、旧 get_fb 物理视图与厂商 BO/GPUVM 仍需实现，class active call 本身不保留存储或证明硬件停止。
 - CPU 物理视图已有共享 MM/Rust 安装事务，fbdev 与用户驱动复用 fixed/hint、PTE 回滚和 TLB 退休，保护 ceiling 与缓存属性保留已接入；这是借用物理存储的映射，不授予 GPU/BO 生命周期或 DMA 权限。连续 RAM scanout 已复用原生 VMO 引用；旧物理 aperture、厂商 BO/VRAM/GPUVM 与硬件停止/失败退役协议仍待实现，见 [RAM scanout](../drivers/guide/native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 - 原生 VMO 可通过 Rust 原子页保留和显式 map_vmo 接入 DMA domain，mapping 在源 resize/销毁后仍保留原帧；缺页不物化，物理 VMO 不作为普通 RAM 导入，不冻结 extent/转移 charge。真实 EDU 已验证源 VMO 销毁后的跨页 DMA；GPU BO 驻留、预算、访问权和请求同步仍待建立。
+- virtio-gpu 已采用每绑定原生 DMA 实例，两个设备拥有独立 controlq/staging/IRQ/停止状态；独立逻辑注销、旧 VMA 保留、peer 持续刷新与重新登记已有双核 QEMU 验证。仍未实现多 GPU 用户节点、厂商执行队列或跨 GPU attach。
 - 原生页级 DMA domain/mapping 提供设备地址转换、独立页面引用和失败回滚，direct domain 必须由平台显式确认恒等 DMA 后使用。
 - 原生异步 fence 可以从 IRQ 完成任务，支持错误、等待和超时；尚未接入 DRM syncobj/sync_file。
 - 可取消工作队列、IRQ 排空和有界不可变固件读取已经实现；固件目录部署、厂商格式校验、上传和启动协议仍需完成。
@@ -33,7 +34,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 
 ## 分阶段验收
 
-1. **运行时基础**：已有 DMA 地址/生命周期、quiesce、异步完成、工作队列、固件读取和资源占用接口。AMD-Vi 被动控制器绑定与完整 aperture 占用已接入 PCI 生命周期，保留路由对象已组合 IVRS/requester/alias、PCI 路径和绑定快照，并可检查和原子占用完整固件声明集合、保留各成员身份/路径，构造包含 sibling alias 的独立 IVMD 约束用于通用映射预检。核心已在驱动报告 remove 失败时保留绑定/devres，并可在 probe 中显式选择部分初始化的受管失败清理；virtio-gpu 已接入原生失败清理、reset 读回和内部 staging 封闭，并有真实解绑/重绑验证；DRM 已保留失败清理对象并在旧绑定成功停止后退休，仍不替代厂商 GPU 的停止回调、每设备队列和请求/BO backing 寿命。真实 GPU 后端仍须实现安全停止回调。进入本机硬件初始化前，还需补齐其余 RAM/固件保留来源、通过各所属驱动完成全部 alias peer 的停止和归属变更协调，以及硬件权限/Unity/Exclusion、翻译与故障处理；具体后端须验证停止/失效失败时 DMA 页面与上下文不会提前释放，并补齐失败 probe 与关机/kexec 的 shutdown 硬件协议。
+1. **运行时基础**：已有 DMA 地址/生命周期、quiesce、异步完成、工作队列、固件读取和资源占用接口。AMD-Vi 被动控制器绑定与完整 aperture 占用已接入 PCI 生命周期，保留路由对象已组合 IVRS/requester/alias、PCI 路径和绑定快照，并可检查和原子占用完整固件声明集合、保留各成员身份/路径，构造包含 sibling alias 的独立 IVMD 约束用于通用映射预检。核心已在驱动报告 remove 失败时保留绑定/devres，并可在 probe 中显式选择部分初始化的受管失败清理；virtio-gpu 已接入原生失败清理、reset 读回和内部 staging 封闭，并有真实解绑/重绑验证；DRM 已保留失败清理对象并在旧绑定成功停止后退休，仍不替代厂商 GPU 的停止回调、硬件执行队列和请求/BO backing 寿命。真实 GPU 后端仍须实现安全停止回调。进入本机硬件初始化前，还需补齐其余 RAM/固件保留来源、通过各所属驱动完成全部 alias peer 的停止和归属变更协调，以及硬件权限/Unity/Exclusion、翻译与故障处理；具体后端须验证停止/失效失败时 DMA 页面与上下文不会提前释放，并补齐失败 probe 与关机/kexec 的 shutdown 硬件协议。
 2. **硬件初始化**：固定上游版本及固件，识别实际 IP，完成所需 PSP/SMU、内存控制与中断初始化。共享电源/内存模块的依赖不能随意省略。
 3. **GPU 确实执行任务**：提交 SDMA copy/fill，收到真实完成，CPU 回读逐字节比对。ioctl 成功或队列被接受不足以证明执行正确。
 4. **硬件渲染**：建立 BO、GPUVM、context、GFX 提交与同步，接入现有 Mesa，离屏三角形并回读。禁止静默回落软件渲染。

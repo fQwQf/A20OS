@@ -41,9 +41,9 @@ typedef struct fake_transport {void (*write32)(struct fake_transport *,uint32_t,
 typedef pthread_mutex_t mutex_t;
 static int mutex_trylock(mutex_t *m){return !pthread_mutex_trylock(m);}
 static void mutex_unlock(mutex_t *m){assert(!pthread_mutex_unlock(m));}
-static device_t *g_gpu_owner;
+struct driver_dma_buffer { void *data; device_t *device; };
 static int virtio_transport_reset(fake_transport_t *t,uint32_t ms){assert(ms==100);t->write32(t,0x70,0);return 0;}
-typedef struct {mutex_t command_lock;int closing,command_active,transport_live,reset_confirmed;fake_transport_t vt;int valid,virgl,context_init,irq_registered;uint32_t width,height,bpp;uintptr_t fb_phys;size_t fb_size;struct vmo *fb_memory;void *big_req,*big_resp;size_t big_req_cap,big_resp_cap;uint16_t last_used;} virtio_gpu_inst_t;
+typedef struct {struct driver_dma_buffer *allocation;mutex_t command_lock;int closing,command_active,transport_live,reset_confirmed;fake_transport_t vt;int valid,virgl,context_init,irq_registered;uint32_t width,height,bpp;uintptr_t fb_phys;size_t fb_size;struct vmo *fb_memory;void *big_req,*big_resp;size_t big_req_cap,big_resp_cap;uint16_t last_used;} virtio_gpu_inst_t;
 #define VIRTIO_MMIO_STATUS 0x70
 #define mb() ((void)0)
 static struct gpu_scanout *observed_snapshot;
@@ -52,6 +52,15 @@ static unsigned resets,irq_frees,unregisters;
 static void reset_write(fake_transport_t *t,uint32_t reg,uint32_t value){assert(t->irq==5&&reg==0x70&&!value);resets++;}
 static void free_irq(uint32_t irq,void *arg){assert(irq==5&&((virtio_gpu_inst_t *)arg)->fb_memory);irq_frees++;}
 void gpu_device_unregister(device_t *d){assert(d&&d->drv_priv&&((virtio_gpu_inst_t *)d->drv_priv)->fb_memory);unregisters++;}
+/* Native allocation final put is a boundary model here. The complete native
+ * buffer allocator and two-device owners run in test_virtio_gpu_stop. */
+static unsigned instance_puts;
+static void driver_dma_buffer_put(struct driver_dma_buffer *allocation){
+ assert(allocation&&allocation->data&&!allocation->device->drv_priv);
+ virtio_gpu_inst_t *inst=allocation->data;
+ assert(!inst->fb_memory&&!inst->valid&&inst->reset_confirmed&&resets==1&&irq_frees==1&&unregisters==1);
+ assert(!pthread_mutex_destroy(&inst->command_lock));free(inst);allocation->data=NULL;instance_puts++;
+}
 /* PRODUCTION_VIRTIO */
 int main(int argc,char **argv){
  assert(argc==2);const char *name=argv[1];size_t capacity=(size_t)1<<MAX_ORDER;
@@ -68,10 +77,11 @@ int main(int argc,char **argv){
   virtio_gpu_inst_t *inst=calloc(1,sizeof(*inst));assert(inst);assert(!pthread_mutex_init(&inst->command_lock,NULL));inst->transport_live=1;
   assert(!vmo_create_contiguous(3*PAGE_SIZE,&inst->fb_memory));inst->valid=1;inst->fb_size=3*PAGE_SIZE;
   inst->big_req=kmalloc(16);inst->big_resp=kmalloc(16);inst->vt=(fake_transport_t){reset_write,5};inst->irq_registered=1;
+  struct driver_dma_buffer allocation={inst,&device};inst->allocation=&allocation;
   device.drv_priv=inst;ops->get_scanout=gpu_get_scanout;
   assert(!gpu_device_scanout_get(&access,&view)&&view.memory==inst->fb_memory);
-  assert(!virtio_gpu_remove(&device)&&!device.drv_priv&&!inst->fb_memory&&!inst->valid&&resets==1&&irq_frees==1&&unregisters==1);
-  assert(inst->reset_confirmed);assert(!pthread_mutex_destroy(&inst->command_lock));free(inst);free(ops);ops=NULL;uint64_t pa;size_t bytes;
+  assert(!virtio_gpu_remove(&device)&&!device.drv_priv&&!allocation.data&&instance_puts==1&&resets==1&&irq_frees==1&&unregisters==1);
+  free(ops);ops=NULL;uint64_t pa;size_t bytes;
   assert(!vmo_contiguous_info(view.memory,&pa,&bytes)&&bytes==3*PAGE_SIZE&&allocated_pages==3);
   gpu_scanout_put(&view);assert(!allocated_pages);
  }else if(!strcmp(name,"invalid")){

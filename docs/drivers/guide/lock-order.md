@@ -30,6 +30,8 @@
 | USB HID | `kernel/drivers/usb/class/usb_hid.c` | 每接口 `h->lock`；局部顺序 `h->lock -> xhci->lock`（单向） |
 | USB storage | `kernel/drivers/usb/class/usb_storage.c` | 每实例 `st->lock` 是 sleepable `mutex_t`；局部顺序 `st->lock -> xhci->lock`（单向）；`msc_command()` 跨同步 bulk wait 持有它是允许的，因为等待方不持 spinlock |
 
+virtio-gpu 的 command mutex 位于每个绑定独占的原生 DMA allocation 中，其他设备不共享锁、队列或 closing/fault 状态。remove 失败保留整块 allocation；成功退出须先确认 reset、排空 IRQ、交还 staging/framebuffer owner，再解锁，最后 put allocation，不能先释放包含 mutex 的存储。初始化 allocation 的分配/失败回滚由既有 DMA buffer 管理，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
+
 ## 用户 MMIO 映射事务
 
 `mm_mmap_physical()` 由 Rust 拥有 eager 物理映射事务，fbdev 旧 get_fb 分支与用户驱动服务共用。未发布记录在锁外分配，fixed 覆盖只能在已开启的事务内调用 mm_munmap_locked；不能持 mm->lock 调用会重新进入 TLB/MM 锁的公开 mm_munmap。整个 hint 区间及旧叶 PTE 均先检查，失败先撤销当前页空路径和映射前缀，锁外完成 TLB/退休后释放记录。mprotect 保留 Device 缓存属性。调用期间的 class lease 不延长映射 backing 的存储寿命，另见 [物理视图契约](native-runtime.md#驱动-cpu-物理映射事务)。

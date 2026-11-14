@@ -53,6 +53,8 @@ rg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
 
 DRM 修改还运行 `python3 -m unittest tools.tests.test_class_stop tools.tests.test_drm_binding tools.tests.test_drm_console_owner`。主机夹具编译生产 DRM/core/class 与实际 anonfd 安装器；VFS/MM/work/调度边界为模型，不能替代 guest。`tools/a20 test smoke-driver-gpu-stop-x86_64` 在显式 embedded 双核实例中增加 `driver.drm_binding_test=1`，验证真实 VFS close、原生 worker、旧文件离线、VMA 独立存储与重绑命名空间；普通启动不执行。`make smoke-drm-prime` 另验证用户态 PRIME/映射，generic 双核显示回归仍使用 `make smoke-gpu-access-x86_64`。
 
+`tools/a20 test smoke-driver-gpu-instances-x86_64` 使用 embedded、双 CPU、两个 virtio-gpu-pci，并只在 `driver.runtime_test=1 driver.gpu_instances_test=1` 下执行：分别取 owning scanout、实际 flush，逻辑注销默认 device 后检查旧 publication 停止、peer publication/实例/DRM 文件保持在线并继续 flush，再重新登记并检查新 publication/VMO 与旧 VMA 数据。它不执行物理 PCI 热拔出，也不注入真实硬件 reset 超时。主机 `test_virtio_gpu_stop` 保留既有四条 issuer 与失败清理测试，并用两个 transport 模型验证实例独立、native allocation OOM/拒绝、失败停止和 queue fault 隔离。
+
 ## 架构构建矩阵
 
 至少构建驱动目标平台和一个共享基础设施回归平台：
