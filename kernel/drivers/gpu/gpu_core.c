@@ -5,22 +5,14 @@
 #include "core/lock.h"
 #include "core/stdio.h"
 
-static device_t *g_default_gpu;
+static device_t *g_default_gpu; /* owns one metadata reference */
+static bool g_default_3d;
 static spinlock_t g_gpu_lock = SPINLOCK_INIT;
 
-/*
- * 3D-capable == it carries the whole virgl command set DRM dispatches.  DRM
- * NULL-checks exactly these entry points per ioctl and answers -ENODEV when
- * one is missing, so an empty 3D vtable silently strips the whole 3D path
- * while still advertising capabilities.  get_features is excluded on purpose:
- * a 2D-only driver can implement it and hardcode out_3d = 0, so it does not
- * discriminate.  Requiring the full set, not one probe like get_capset, keeps
- * a half-implemented 3D driver from winning over a complete one.
- */
-static bool gpu_dev_can_3d(const device_t *dev) {
-    if (!dev || !dev->drv)
-        return false;
-    const gpu_dev_ops_t *ops = dev->drv->class_ops;
+/* Only inspect under probe ownership or a live class call. This describes
+ * the complete virgl transport consumed by DRM, not arbitrary vendor queues
+ * or the features actually negotiated with the device. */
+static bool gpu_ops_can_3d(const gpu_dev_ops_t *ops) {
     return ops && ops->get_capset && ops->capset_info &&
            ops->resource_attach_backing && ops->ctx_create &&
            ops->ctx_destroy && ops->resource_create_3d &&
@@ -28,89 +20,119 @@ static bool gpu_dev_can_3d(const device_t *dev) {
 }
 
 int gpu_device_register(device_t *dev) {
-    if (!dev || !dev->drv || dev->drv->class_type != DEV_CLASS_DISPLAY ||
-        !dev->drv->class_ops)
-        return -EINVAL;
-
-    bool dev_3d = gpu_dev_can_3d(dev);
+    driver_lifecycle_begin();
+    int result = -EINVAL;
+    device_t *old = NULL;
+    if (!dev) goto out;
+    if (!device_is_registered(dev) || device_is_stopping(dev)) { result = -ENODEV; goto out; }
+    if (!dev->drv || dev->drv->class_type != DEV_CLASS_DISPLAY || !dev->drv->class_ops)
+        goto out;
+    bool capable = gpu_ops_can_3d(dev->drv->class_ops);
     uint64_t flags = spin_lock_irqsave(&g_gpu_lock);
-    /* Promotion only, per gpu_select_should_take(): a 3D-capable newcomer may
-     * displace a 2D-only incumbent, but two equally capable devices never trade
-     * the slot back and forth, so probe order cannot churn the DRM binding. */
-    if (gpu_select_should_take(g_default_gpu != NULL,
-                               g_default_gpu && gpu_dev_can_3d(g_default_gpu),
-                               dev_3d)) {
-        const char *why = !g_default_gpu
-                              ? "first display device"
-                              : (dev_3d ? "3D-capable displaces 2D-only incumbent"
-                                        : "no incumbent, 2D-only");
-        g_default_gpu = dev;
-        printf("[GPU] gpu_device_register: default_gpu=%p class_type=%d 3d=%d (%s)\n",
-               dev, dev->drv->class_type, dev_3d, why);
+    bool take = g_default_gpu == dev ||
+                gpu_select_should_take(g_default_gpu != NULL, g_default_3d, capable);
+    if (take && g_default_gpu != dev) {
+        device_t *owned = device_get(dev);
+        if (!owned) { spin_unlock_irqrestore(&g_gpu_lock, flags); result = -ENODEV; goto out; }
+        old = g_default_gpu;
+        g_default_gpu = owned;
     }
+    if (take) g_default_3d = capable;
     spin_unlock_irqrestore(&g_gpu_lock, flags);
-    return 0;
+    if (take)
+        printf("[GPU] gpu_device_register: default_gpu=%p class_type=%d 3d=%d\n",
+               dev, DEV_CLASS_DISPLAY, capable);
+    result = 0;
+out:
+    device_put(old); /* Publisher disposal is never under g_gpu_lock. */
+    driver_lifecycle_end();
+    return result;
 }
 
 void gpu_device_unregister(device_t *dev) {
-    /* Re-test identity under the lock: a newer 3D-capable device may already
-     * have replaced this one in the slot, and clearing it then would leave DRM
-     * with no backend at all. */
+    driver_lifecycle_begin();
     uint64_t flags = spin_lock_irqsave(&g_gpu_lock);
-    bool was_default = (g_default_gpu == dev);
-    if (was_default)
-        g_default_gpu = NULL;
+    device_t *old = g_default_gpu == dev ? g_default_gpu : NULL;
+    if (old) { g_default_gpu = NULL; g_default_3d = false; }
     spin_unlock_irqrestore(&g_gpu_lock, flags);
+    if (!old) { driver_lifecycle_end(); return; }
 
-    if (!was_default)
-        return;
-
-    /* Re-elect from the devices that are still online.  Clearing the slot
-     * alone left DRM with no backend at all whenever the incumbent went away
-     * and another display device was still present, so every ioctl answered
-     * -ENODEV until something forced a re-probe.  The promotion rule is
-     * deliberately the same one register() uses, so the outcome does not depend
-     * on which function noticed the departure.
-     *
-     * The winner is a bare device_t*, exactly as the slot has always held:
-     * class_device_get_by_type() only returns online devices, and a published
-     * device outlives this call, so the pointer is as stable here as it is in
-     * gpu_device_register().  Taking a class reference instead would leak it --
-     * nothing drops the slot's reference on a later unregister. */
+    /* Selection is policy over online DISPLAY publications, not another
+     * publication registry. Lifecycle stabilizes enumeration; class calls
+     * protect operation tables. Do not stop at an offline class rank or an
+     * arbitrary sixteen-device limit. */
     device_t *best = NULL;
     bool best_3d = false;
-    for (unsigned i = 0; i < 16; i++) {
-        class_device_t *cd = class_device_get_by_type(DEV_CLASS_DISPLAY, i);
-        if (!cd)
-            break;
-        /* Skip ourselves: unpublish() marks the departing device offline before
-         * remove() runs, so it is normally already excluded, but not when a
-         * driver tears itself down directly. */
-        if (cd->dev != dev) {
-            bool cand_3d = gpu_dev_can_3d(cd->dev);
-            if (gpu_select_better(best != NULL, best_3d, cand_3d)) {
-                best = cd->dev;
-                best_3d = cand_3d;
+    for (int index = 0;; index++) {
+        device_t *candidate = device_find_get_by_class(DEV_CLASS_DISPLAY, index);
+        if (!candidate) break;
+        struct gpu_device_access access;
+        class_device_t *publication = class_device_ref_for_device(candidate);
+        int admitted = candidate == dev ? -ENODEV : gpu_device_access_begin(publication, &access);
+        class_device_put(publication);
+        if (!admitted) {
+            bool capable = gpu_ops_can_3d(access.ops);
+            if (gpu_select_better(best != NULL, best_3d, capable)) {
+                device_put(best);
+                best = candidate; /* Transfer the enumerator's owning reference. */
+                candidate = NULL;
+                best_3d = capable;
             }
+            gpu_device_access_end(&access);
         }
-        bool stop = best_3d;   /* a 3D winner cannot be improved on */
-        class_device_put(cd);
-        if (stop)
-            break;
+        device_put(candidate);
+        if (best_3d) break;
     }
-
     flags = spin_lock_irqsave(&g_gpu_lock);
-    /* Only claim an empty slot, and never displace one filled while we were
-     * enumerating: a concurrent register() has already made its choice. */
     if (!g_default_gpu) {
         g_default_gpu = best;
-        if (best)
-            printf("[GPU] gpu_device_unregister: default_gpu=%p re-elected (%s)\n",
-                   best, best_3d ? "3D-capable" : "2D-only");
-        else
-            printf("[GPU] gpu_device_unregister: no display device remains\n");
+        g_default_3d = best_3d;
+        best = NULL;
     }
+    device_t *selected = g_default_gpu;
+    bool selected_3d = g_default_3d;
     spin_unlock_irqrestore(&g_gpu_lock, flags);
+    printf("[GPU] gpu_device_unregister: default_gpu=%p re-elected (%s)\n",
+           selected, selected_3d ? "3D-capable" : selected ? "2D-only" : "none");
+    device_put(best);
+    device_put(old);
+    driver_lifecycle_end();
+}
+
+class_device_t *gpu_device_default_get(void) {
+    uint64_t flags = spin_lock_irqsave(&g_gpu_lock);
+    device_t *dev = device_get(g_default_gpu);
+    spin_unlock_irqrestore(&g_gpu_lock, flags);
+    class_device_t *publication = class_device_ref_for_device(dev);
+    device_put(dev);
+    return publication;
+}
+
+int gpu_device_access_begin(class_device_t *publication, struct gpu_device_access *access) {
+    if (!access) return -EINVAL;
+    *access = (struct gpu_device_access){0};
+    class_device_get(publication);
+    const void *ops;
+    int result = class_device_ops_begin(publication, DEV_CLASS_DISPLAY, &ops);
+    if (result) { class_device_put(publication); return result; }
+    *access = (struct gpu_device_access){publication, publication->dev, ops};
+    return 0;
+}
+
+int gpu_device_default_begin(struct gpu_device_access *access) {
+    if (!access) return -EINVAL;
+    class_device_t *publication = gpu_device_default_get();
+    int result = gpu_device_access_begin(publication, access);
+    class_device_put(publication);
+    return result;
+}
+
+void gpu_device_access_end(struct gpu_device_access *access) {
+    if (!access) return;
+    class_device_t *publication = access->publication;
+    *access = (struct gpu_device_access){0};
+    class_device_call_end(publication);
+    class_device_put(publication);
 }
 
 device_t *gpu_device_get_default(void) {

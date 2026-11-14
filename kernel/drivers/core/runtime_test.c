@@ -11,6 +11,7 @@
 #include "drivers/core/memory.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/usb/usb.h"
+#include "drivers/gpu/gpu_core.h"
 #include "mm/frame.h"
 #include "mm/vmo.h"
 #include "mm/slab.h"
@@ -379,6 +380,44 @@ static void exercise_usb_interfaces(device_t *controller) {
     kinfo("DRIVER_USB_INTERFACE: PASS hid=1 hub=1 siblings=1 rebind=1\n");
 }
 
+static int gpu_test_match(device_t *dev, const driver_t *driver) {
+    return dev->plat_data == driver;
+}
+static int gpu_test_info(device_t *dev, uint32_t *width, uint32_t *height, uint32_t *bpp) {
+    (void)dev; *width = 9; *height = 7; *bpp = 32; return 0;
+}
+static int gpu_test_probe(device_t *dev) { return gpu_device_register(dev); }
+static int gpu_test_remove(device_t *dev) { gpu_device_unregister(dev); return 0; }
+static void exercise_gpu_access(void) {
+    bus_type_t bus = {.name = "gpu-access-selftest", .match = gpu_test_match};
+    const gpu_dev_ops_t ops = {.get_info = gpu_test_info};
+    driver_t driver = {.name = "gpu-access-selftest", .bus = &bus,
+        .probe = gpu_test_probe, .remove = gpu_test_remove,
+        .class_type = DEV_CLASS_DISPLAY, .class_ops = &ops};
+    device_t device = {.name = "gpu-access-selftest", .bus = &bus,
+        .plat_data = &driver, .references = 1};
+    CHECK(!bus_register(&bus) && !driver_register(&driver) && !device_register(&device));
+    CHECK(device.drv == &driver);
+    class_device_t *publication = class_device_ref_for_device(&device);
+    struct gpu_device_access access;
+    CHECK(publication && !gpu_device_access_begin(publication, &access));
+    CHECK(access.device == &device && access.ops == &ops && publication->active_calls == 1);
+    uint32_t width, height, bpp;
+    CHECK(!access.ops->get_info(access.device, &width, &height, &bpp));
+    CHECK(width == 9 && height == 7 && bpp == 32);
+    gpu_device_access_end(&access);
+    CHECK(!access.device && !access.ops && !access.publication);
+    CHECK(!gpu_device_default_begin(&access)); /* May select an existing real GPU. */
+    CHECK(access.publication->dev == access.device && access.ops);
+    gpu_device_access_end(&access);
+    CHECK(!driver_unregister(&driver));
+    CHECK(gpu_device_access_begin(publication, &access) == -ENODEV && !access.ops);
+    CHECK(!device_unregister(&device));device_put(&device);
+    CHECK(device.references == 1); /* Retained offline publication. */
+    class_device_put(publication);CHECK(!device.references);
+    bus_unregister(&bus);
+}
+
 static void exercise_dma_buffer(void) {
     device_t owner = {.name = "dma-buffer-selftest", .references = 1};
     CHECK(!device_register(&owner));
@@ -539,6 +578,7 @@ void driver_runtime_selftest_boot(void)
         return;
     kinfo("DRIVER_RUNTIME: START\n");
     exercise_resources();
+    exercise_gpu_access();
     exercise_dma_buffer();
     exercise_dma_buffer_mapping();
     exercise_dma_vmo();
@@ -563,7 +603,8 @@ void driver_runtime_selftest_boot(void)
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1\n"
+    kinfo("%sDRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1\n"
+          "DRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1\n"
           "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
           "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"

@@ -136,10 +136,9 @@ static const char *const loopback_attrs[] = {
 
 /* DRM exposes the selected GPU, whose identity belongs to the bus enumerator.
  * An MMIO GPU is a platform device; never invent a PCI function for it. */
-static int sysfs_gpu_names(char *root, size_t root_sz,
+static int sysfs_gpu_names_for_device(device_t *dev, char *root, size_t root_sz,
                            char *name, size_t name_sz)
 {
-    device_t *dev = gpu_device_get_default();
     unsigned bus, slot, function;
     if (!dev)
         return -ENODEV;
@@ -151,6 +150,15 @@ static int sysfs_gpu_names(char *root, size_t root_sz,
     snprintf(root, root_sz, "platform");
     snprintf(name, name_sz, "%s", dev->name);
     return 0;
+}
+
+static int sysfs_gpu_names(char *root, size_t root_sz, char *name, size_t name_sz) {
+    struct gpu_device_access access;
+    int result = gpu_device_default_begin(&access);
+    if (result) return result;
+    result = sysfs_gpu_names_for_device(access.device, root, root_sz, name, name_sz);
+    gpu_device_access_end(&access);
+    return result;
 }
 
 static int sysfs_gpu_path(char *buf, size_t size, const char *suffix)
@@ -328,16 +336,15 @@ static int sysfs_devchar_entry_at(unsigned idx, char *name, size_t name_sz)
     return -1;
 }
 
-static void sysfs_display_size(uint32_t *width, uint32_t *height)
-{
-    *width = 1024;
-    *height = 768;
-    device_t *dev = gpu_device_get_default();
-    if (!dev || !dev->drv || !dev->drv->class_ops)
-        return;
-    const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
-    uint32_t bpp;
-    (void)ops->get_info(dev, width, height, &bpp);
+static void sysfs_display_size(uint32_t *width, uint32_t *height) {
+    *width = 1024; *height = 768;
+    struct gpu_device_access access;
+    if (gpu_device_default_begin(&access)) return;
+    uint32_t w, h, bpp;
+    if (access.ops->get_info && !access.ops->get_info(access.device, &w, &h, &bpp)) {
+        *width = w; *height = h;
+    }
+    gpu_device_access_end(&access);
 }
 
 static sysfs_meta_t *sysfs_meta_create(sf_type_t type, int loop_idx)
@@ -379,6 +386,17 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
     p->height = height;
     p->devt = devt;
 
+    /* Capture one publication for both identity and driver reads. Selection
+     * may change during these callbacks; never mix its replacement into this
+     * open's immutable content snapshot. Non-GPU attributes take no GPU call. */
+    struct gpu_device_access access = {0};
+    if (type == SF_DRM_MODALIAS || type == SF_DEV_CHAR_DEVICE_ATTR ||
+        type == SF_DEV_CHAR_DEVICE_CONFIG || type == SF_DEV_CHAR_DEVICE_UEVENT ||
+        type == SF_FB_BPP || type == SF_FB_STRIDE || type == SF_FB_VSIZE)
+        (void)gpu_device_default_begin(&access);
+    device_t *dev = access.device;
+    const gpu_dev_ops_t *ops = access.ops;
+
     /* Generate content on open */
     if (type == SF_NET_LOOPBACK_ATTR) {
         unsigned up = __atomic_load_n(&net_ns->loopback_up, __ATOMIC_ACQUIRE);
@@ -410,9 +428,8 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         int n = snprintf(p->content, sizeof(p->content), "%ux%u\n", width, height);
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_DRM_MODALIAS) {
-        device_t *dev = gpu_device_get_default();
         char root[32], name[64];
-        int pci = sysfs_gpu_names(root, sizeof(root), name, sizeof(name));
+        int pci = sysfs_gpu_names_for_device(dev, root, sizeof(root), name, sizeof(name));
         int n;
         if (pci > 0) {
             unsigned cls = pci_class_code(dev);
@@ -482,8 +499,7 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
             p->content_len = 0;
         }
     } else if (type == SF_DEV_CHAR_DEVICE_ATTR) {
-        device_t *dev = gpu_device_get_default();
-        if (pci_device_location(dev, NULL, NULL, NULL) < 0) return p;
+        if (pci_device_location(dev, NULL, NULL, NULL) < 0) goto out;
         unsigned value = 0;
         switch (loop_idx) {
         case 0: value = pci_cfg_read8(dev, 0x08); break;
@@ -495,8 +511,7 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         int n = snprintf(p->content, sizeof(p->content), "0x%04x\n", value);
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_DEV_CHAR_DEVICE_CONFIG) {
-        device_t *dev = gpu_device_get_default();
-        if (pci_device_location(dev, NULL, NULL, NULL) < 0) return p;
+        if (pci_device_location(dev, NULL, NULL, NULL) < 0) goto out;
         for (unsigned offset = 0; offset < 64; offset += 4) {
             uint32_t value = pci_cfg_read32(dev, offset);
             for (unsigned byte = 0; byte < 4; byte++)
@@ -505,8 +520,7 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         p->content_len = 64;
     } else if (type == SF_DEV_CHAR_DEVICE_UEVENT) {
         char root[32], name[64];
-        device_t *dev = gpu_device_get_default();
-        int pci = sysfs_gpu_names(root, sizeof(root), name, sizeof(name));
+        int pci = sysfs_gpu_names_for_device(dev, root, sizeof(root), name, sizeof(name));
         int n;
         if (pci > 0)
             n = snprintf(p->content, sizeof(p->content),
@@ -528,19 +542,15 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         p->content_len = 9;
     } else if (type == SF_FB_BPP) {
         uint32_t w, h, bpp = 32;
-        device_t *dev = gpu_device_get_default();
-        if (dev && dev->drv && dev->drv->class_ops) {
-            const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
+        if (ops) {
             if (ops->get_info) ops->get_info(dev, &w, &h, &bpp);
         }
         int n = snprintf(p->content, sizeof(p->content), "%u\n", bpp);
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_FB_STRIDE) {
         uint32_t w, h, bpp;
-        device_t *dev = gpu_device_get_default();
         uint32_t stride = 0;
-        if (dev && dev->drv && dev->drv->class_ops) {
-            const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
+        if (ops) {
             if (ops->get_fb && ops->get_info) {
                 uintptr_t phys; size_t sz;
                 if (ops->get_fb(dev, &phys, &sz) == 0 &&
@@ -552,10 +562,8 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_FB_VSIZE) {
         uint32_t w, h, bpp;
-        device_t *dev = gpu_device_get_default();
         w = 1024; h = 768;
-        if (dev && dev->drv && dev->drv->class_ops) {
-            const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
+        if (ops) {
             if (ops->get_info) ops->get_info(dev, &w, &h, &bpp);
         }
         int n = snprintf(p->content, sizeof(p->content), "%u,%u\n", w, h);
@@ -570,6 +578,8 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         p->content_len = 0;
     }
 
+out:
+    gpu_device_access_end(&access);
     if (p->content_len >= sizeof(p->content))
         p->content_len = sizeof(p->content) - 1;
     return p;

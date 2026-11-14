@@ -47,7 +47,7 @@ static void fb_fill_var_screeninfo(struct fb_var_screeninfo *var,
     var->width = (uint32_t)-1;
 }
 
-static int fb_apply_layout(struct device *dev, gpu_dev_ops_t *ops,
+static int fb_apply_layout(struct device *dev, const gpu_dev_ops_t *ops,
                            struct fb_var_screeninfo *var, uint32_t *stride) {
     if (!ops->get_layout) return 0;
     gpu_scanout_layout_t layout;
@@ -81,17 +81,21 @@ static int fb_apply_layout(struct device *dev, gpu_dev_ops_t *ops,
  */
 static volatile int g_fb_autoflush_started;
 
+static void fb_autoflush_once(void) {
+    struct gpu_device_access access;
+    if (gpu_device_default_begin(&access)) return;
+    const gpu_dev_ops_t *ops = access.ops;
+    if (ops->get_info && ops->flush) {
+        uint32_t w = 0, h = 0, bpp = 0;
+        if (!ops->get_info(access.device, &w, &h, &bpp) && w && h)
+            (void)ops->flush(access.device, 0, 0, w, h);
+    }
+    gpu_device_access_end(&access);
+}
+
 static void fb_autoflush_thread(void) {
     for (;;) {
-        struct device *dev = gpu_device_get_default();
-        if (dev && dev->drv && dev->drv->class_ops) {
-            gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
-            if (ops->get_info && ops->flush) {
-                uint32_t w = 0, h = 0, bpp = 0;
-                if (ops->get_info(dev, &w, &h, &bpp) == 0 && w && h)
-                    (void)ops->flush(dev, 0, 0, w, h);
-            }
-        }
+        fb_autoflush_once();
         proc_sleep_until(timer_get_ticks() + TICKS_PER_SEC / 30);
     }
 }
@@ -104,18 +108,18 @@ static void fb_autoflush_kick(void) {
         g_fb_autoflush_started = 0;
 }
 
-int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
+static int64_t fbdev_linux_mmap_active(struct gpu_device_access *access,
+                         uint64_t addr, size_t len, int prot, int flags,
                          uint64_t off) {
     static int first_mmap = 1;
-    struct device *dev = gpu_device_get_default();
+    struct device *dev = access->device;
     if (first_mmap) {
         printf("[FB] fbdev_linux_mmap: dev=%p addr=0x%lx len=0x%lx prot=%d flags=0x%x off=0x%lx\n",
                dev, addr, len, prot, flags, off);
         first_mmap = 0;
     }
-    if (!dev) return -ENODEV;
-    gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
-    if (!ops) return -ENODEV;
+    const gpu_dev_ops_t *ops = access->ops;
+    if (!ops->get_fb) return -EOPNOTSUPP;
 
     fb_autoflush_kick();
 
@@ -236,6 +240,15 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
 #endif
 }
 
+int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags, uint64_t off) {
+    struct gpu_device_access access;
+    int result = gpu_device_default_begin(&access);
+    if (result) return result;
+    int64_t mapped = fbdev_linux_mmap_active(&access, addr, len, prot, flags, off);
+    gpu_device_access_end(&access);
+    return mapped;
+}
+
 static int fb_read(vfile_t *vf, char *buf, size_t count) {
     (void)vf;
     (void)buf;
@@ -250,22 +263,18 @@ static int fb_write(vfile_t *vf, const char *buf, size_t count) {
     return -ENOSYS;
 }
 
-static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
+static int fb_ioctl_active(struct gpu_device_access *access, vfile_t *vf,
+                            unsigned long req, void *arg) {
     (void)vf;
-    struct device *dev = gpu_device_get_default();
-    printf("[FB] fb_ioctl: req=0x%lx dev=%p pid=%d\n",
-           (unsigned long)req, dev, proc_current() ? proc_current()->pid : 0);
-    if (!dev) {
-        printf("[FB] fb_ioctl: no default GPU device\n");
-        return -ENODEV;
-    }
-    
-    gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
-    if (!ops) {
-        printf("[FB] fb_ioctl: no class_ops\n");
-        return -ENODEV;
-    }
-    
+    struct device *dev = access->device;
+    const gpu_dev_ops_t *ops = access->ops;
+    if ((req == FBIOGET_VSCREENINFO || req == FBIOPUT_VSCREENINFO ||
+         req == FBIOGET_FSCREENINFO || req == FBIO_FLUSH) && !ops->get_info)
+        return -EOPNOTSUPP;
+    if ((req == FBIOGET_FSCREENINFO || req == FBIO_MAP_FB) && !ops->get_fb)
+        return -EOPNOTSUPP;
+    if (req == FBIO_FLUSH && !ops->flush) return -EOPNOTSUPP;
+
     switch (req) {
         case FBIOGET_VSCREENINFO: {
             struct fb_var_screeninfo var;
@@ -491,6 +500,15 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
         default:
             return -EINVAL;
     }
+}
+
+static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
+    struct gpu_device_access access;
+    int result = gpu_device_default_begin(&access);
+    if (result) return result;
+    result = fb_ioctl_active(&access, vf, req, arg);
+    gpu_device_access_end(&access);
+    return result;
 }
 static int fb_close(vfile_t *vf) {
     (void)vf;

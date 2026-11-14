@@ -275,10 +275,13 @@ static class_device_t *class_device_get_match(const char *name,
         int match = use_name ? strcmp(candidate->name, name) == 0 :
                                (type == DEV_CLASS_NONE ||
                                 candidate->class_type == type);
-        if (!match)
+        /* Rank lookups enumerate online publications densely. An offline
+         * entry may remain registered while quiesce/drain is in progress;
+         * it must not look like end-of-list to consumers. Stable publication
+         * indices are handled separately by class_device_get_by_index(). */
+        if (!match || !__atomic_load_n(&candidate->online, __ATOMIC_ACQUIRE))
             continue;
-        if (found++ == nth &&
-            __atomic_load_n(&candidate->online, __ATOMIC_ACQUIRE)) {
+        if (found++ == nth) {
             class_device_get(candidate);
             result = candidate;
             break;
