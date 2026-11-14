@@ -46,6 +46,11 @@ typedef struct {
     
     uint16_t           desc_idx;
     uint16_t           last_used;
+    int                closing; /* atomic: quiesce closes before class drain */
+    int                command_active; /* atomic: also rejects same-owner recursive remove */
+    int                command_failed; /* command_lock: never reuse timed-out DMA */
+    int                transport_live; /* validated transport, including failed probe */
+    int                reset_confirmed;
     int                valid;
     int                virgl;   /* VIRTIO_GPU_F_VIRGL negotiated */
     int                context_init; /* VIRTIO_GPU_F_CONTEXT_INIT negotiated */
@@ -82,6 +87,43 @@ typedef struct {
 } virtio_gpu_inst_t;
 
 static virtio_gpu_inst_t g_gpu_inst;
+/* This legacy transport still has one static queue instance. Native lifecycle
+ * serialization protects the owner; a retained failed probe must not be
+ * overwritten by another matching device. It is not a second device registry. */
+static device_t *g_gpu_owner;
+
+static int virtio_gpu_claim(device_t *dev) {
+    if (g_gpu_owner) return -EBUSY;
+    virtio_gpu_inst_t *inst = &g_gpu_inst;
+    memset(inst, 0, sizeof(*inst));
+    mutex_init(&inst->command_lock);
+    wait_queue_init(&inst->waiters);
+    g_gpu_owner = dev;
+    dev->drv_priv = inst;
+    return 0;
+}
+
+static int virtio_gpu_command_begin(virtio_gpu_inst_t *inst) {
+    mutex_lock(&inst->command_lock);
+    int result = __atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ? -ENODEV :
+                 inst->command_failed ? -EIO : 0;
+    if (result) mutex_unlock(&inst->command_lock);
+    else __atomic_store_n(&inst->command_active, 1, __ATOMIC_RELEASE);
+    return result;
+}
+
+/* The synchronous queue owns exactly one published chain. A larger index
+ * jump is not proof that our chain returned, even if a stale ring id matches. */
+static bool virtio_gpu_command_completed(virtio_gpu_inst_t *inst,
+                                          uint16_t before, uint16_t head) {
+    return (uint16_t)(inst->used.idx - before) == 1 &&
+           inst->used.ring[before % VIRTIO_GPU_QUEUE_SIZE].id == head;
+}
+
+static void virtio_gpu_command_end(virtio_gpu_inst_t *inst) {
+    __atomic_store_n(&inst->command_active, 0, __ATOMIC_RELEASE);
+    mutex_unlock(&inst->command_lock);
+}
 
 /* The host copies a SUBMIT_3D payload from a fixed offset into the request
  * scatter-gather list, so the header descriptor has to be exactly the spec
@@ -128,7 +170,8 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
         resp_len > sizeof(inst->command_resp))
         return -EINVAL;
 
-    mutex_lock(&inst->command_lock);
+    int admission = virtio_gpu_command_begin(inst);
+    if (admission) return admission;
     int completed = 0;
     memcpy(inst->command_req, req, req_len);
     memset(inst->command_resp, 0, resp_len);
@@ -192,6 +235,7 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
      * to park on and the chunked poll stands. */
     uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
+        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) {
             completed = 1;
@@ -235,6 +279,7 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     }
     
     if (!completed) {
+        inst->command_failed = 1;
         static unsigned timeout_logs;
         if (timeout_logs++ < 4)
             kinfo("[GPU] send_cmd TIMEOUT cmd=%x used=%u before=%u avail=%u desc=%u status=%x ready=%u\n",
@@ -242,15 +287,15 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
                   used->idx, used_before, inst->avail.idx, slot,
                   inst->vt.read32(&inst->vt, VIRTIO_MMIO_STATUS),
                   inst->vt.read32(&inst->vt, VIRTIO_MMIO_QUEUE_READY));
-        mutex_unlock(&inst->command_lock);
-        return -1;
+        virtio_gpu_command_end(inst);
+        return -ETIMEDOUT;
     }
     
-    uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
     arch_dma_sync_for_cpu(inst->command_resp, resp_len);
-    if (used->ring[ring_idx].id != slot) {
-        mutex_unlock(&inst->command_lock);
-        return -1;
+    if (!virtio_gpu_command_completed(inst, used_before, slot)) {
+        inst->command_failed = 1;
+        virtio_gpu_command_end(inst);
+        return -EIO;
     }
     memcpy(resp, inst->command_resp, resp_len);
 
@@ -268,7 +313,7 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
      * exposed a runtime-only failure in QEMU's virtio-gpu controlq path. */
     inst->desc_idx = 0;
     
-    mutex_unlock(&inst->command_lock);
+    virtio_gpu_command_end(inst);
     return 0;
 }
 
@@ -284,17 +329,18 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
     if (!inst || !req || !resp || req_len == 0)
         return -EINVAL;
 
-    mutex_lock(&inst->command_lock);
+    int admission = virtio_gpu_command_begin(inst);
+    if (admission) return admission;
     if (req_len > inst->big_req_cap) {
         uint8_t *nr = kmalloc(req_len);
-        if (!nr) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (!nr) { virtio_gpu_command_end(inst); return -ENOMEM; }
         if (inst->big_req) kfree(inst->big_req);
         inst->big_req = nr;
         inst->big_req_cap = req_len;
     }
     if (resp_len > inst->big_resp_cap) {
         uint8_t *nr = kmalloc(resp_len);
-        if (!nr) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (!nr) { virtio_gpu_command_end(inst); return -ENOMEM; }
         if (inst->big_resp) kfree(inst->big_resp);
         inst->big_resp = nr;
         inst->big_resp_cap = resp_len;
@@ -336,6 +382,7 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
     int completed = 0;
     uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
+        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
         if (deadline && clock_get_ticks() >= deadline)
@@ -369,14 +416,15 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
         }
     }
     if (!completed) {
-        mutex_unlock(&inst->command_lock);
-        return -1;
+        inst->command_failed = 1;
+        virtio_gpu_command_end(inst);
+        return -ETIMEDOUT;
     }
-    uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
     arch_dma_sync_for_cpu(inst->big_resp, resp_len);
-    if (used->ring[ring_idx].id != slot) {
-        mutex_unlock(&inst->command_lock);
-        return -1;
+    if (!virtio_gpu_command_completed(inst, used_before, slot)) {
+        inst->command_failed = 1;
+        virtio_gpu_command_end(inst);
+        return -EIO;
     }
     memcpy(resp, inst->big_resp, resp_len);
     uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
@@ -384,7 +432,7 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
         inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
     inst->last_used = used->idx;
     inst->desc_idx = 0;
-    mutex_unlock(&inst->command_lock);
+    virtio_gpu_command_end(inst);
     return 0;
 }
 
@@ -824,10 +872,11 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     /* The command blob must be DMA-visible; stage it in the driver buffer
      * and attach it as backing.  A single mem_entry references the staging
      * buffer. */
-    mutex_lock(&inst->command_lock);
+    int admission = virtio_gpu_command_begin(inst);
+    if (admission) return admission;
     if (len > inst->big_req_cap) {
         uint8_t *nr = kmalloc(len);
-        if (!nr) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (!nr) { virtio_gpu_command_end(inst); return -ENOMEM; }
         if (inst->big_req) kfree(inst->big_req);
         inst->big_req = nr;
         inst->big_req_cap = len;
@@ -886,6 +935,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     int completed = 0;
     uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
+        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
         if (deadline && clock_get_ticks() >= deadline)
@@ -924,17 +974,18 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
         }
     }
     if (!completed) {
-        mutex_unlock(&inst->command_lock);
-        return -EIO;
+        inst->command_failed = 1;
+        virtio_gpu_command_end(inst);
+        return -ETIMEDOUT;
     }
-    uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
     arch_dma_sync_for_cpu(&inst->submit_resp, sizeof(inst->submit_resp));
-    if (used->ring[ring_idx].id != s0) {
-        mutex_unlock(&inst->command_lock);
+    if (!virtio_gpu_command_completed(inst, used_before, s0)) {
+        inst->command_failed = 1;
+        virtio_gpu_command_end(inst);
         return -EIO;
     }
     if (inst->submit_resp.type != VIRTIO_GPU_RESP_OK_NODATA) {
-        mutex_unlock(&inst->command_lock);
+        virtio_gpu_command_end(inst);
         return -EIO;
     }
     uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
@@ -942,7 +993,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
         inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
     inst->last_used = used->idx;
     inst->desc_idx = 0;
-    mutex_unlock(&inst->command_lock);
+    virtio_gpu_command_end(inst);
     return 0;
 }
 
@@ -990,10 +1041,11 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
      * before the lock let a second caller kfree() the buffer underneath the
      * first caller's memcpy, and let two mem_entry tables land in one request
      * body that a single descriptor then advertises to the device. */
-    mutex_lock(&inst->command_lock);
+    int admission = virtio_gpu_command_begin(inst);
+    if (admission) return admission;
     if (body > inst->big_req_cap) {
         uint8_t *nb = kmalloc(body);
-        if (!nb) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (!nb) { virtio_gpu_command_end(inst); return -ENOMEM; }
         if (inst->big_req)
             kfree(inst->big_req);
         inst->big_req = nb;
@@ -1014,7 +1066,7 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
 
     if (inst->big_resp_cap < sizeof(struct virtio_gpu_ctrl_hdr)) {
         uint8_t *nb = kmalloc(sizeof(struct virtio_gpu_ctrl_hdr));
-        if (!nb) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (!nb) { virtio_gpu_command_end(inst); return -ENOMEM; }
         if (inst->big_resp) kfree(inst->big_resp);
         inst->big_resp = nb;
         inst->big_resp_cap = sizeof(struct virtio_gpu_ctrl_hdr);
@@ -1054,6 +1106,7 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
     int completed = 0;
     uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
+        if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE)) break;
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
         /* Same one-second bound the other completion loops use: an absent
@@ -1091,19 +1144,20 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
         }
     }
     if (!completed) {
-        mutex_unlock(&inst->command_lock);
-        return -EIO;
+        inst->command_failed = 1;
+        virtio_gpu_command_end(inst);
+        return -ETIMEDOUT;
     }
-    uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
     arch_dma_sync_for_cpu(resp, sizeof(*resp));
-    int ok = (used->ring[ring_idx].id == s0) &&
+    if (!virtio_gpu_command_completed(inst, used_before, s0)) inst->command_failed = 1;
+    int ok = !inst->command_failed &&
              (resp->type == VIRTIO_GPU_RESP_OK_NODATA);
     uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
     if (!inst->vt.legacy && isr)
         inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
     inst->last_used = used->idx;
     inst->desc_idx = 0;
-    mutex_unlock(&inst->command_lock);
+    virtio_gpu_command_end(inst);
     return ok ? 0 : -EIO;
 }
 
@@ -1241,10 +1295,7 @@ static const gpu_dev_ops_t gpu_ops = {
 static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst);
 
 static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *transport) {
-    virtio_gpu_inst_t *inst = &g_gpu_inst;
-    memset(inst, 0, sizeof(*inst));
-    mutex_init(&inst->command_lock);
-    
+    virtio_gpu_inst_t *inst = dev->drv_priv;
     inst->vt = *transport;
     
     virtio_transport_t *vt = &inst->vt;
@@ -1255,8 +1306,9 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     if (magic != 0x74726976U || version != 2U || device_id != 16U)
         return -1;
     
-    vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
+    inst->transport_live = 1;
+    int reset = virtio_transport_reset(vt, 100);
+    if (reset) return reset; /* Core remove retains this same instance on failure. */
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
@@ -1331,7 +1383,6 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
     mb();
 
-    wait_queue_init(&inst->waiters);
     if (vt->irq >= 0) {
         unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
         if (request_irq((uint32_t)vt->irq, virtio_gpu_irq_handler,
@@ -1433,13 +1484,8 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
 
     virtio_gpu_fetch_edid(inst);
 
-    dev->drv_priv = inst;
-
     // Initial FLUSH to transfer data and trigger QEMU window resize
-    if (gpu_flush(dev, 0, 0, inst->width, inst->height) < 0) {
-        dev->drv_priv = NULL;
-        goto fail;
-    }
+    if (gpu_flush(dev, 0, 0, inst->width, inst->height) < 0) goto fail;
 
     inst->valid = 1;
     if (gpu_device_register(dev) < 0)
@@ -1462,18 +1508,20 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
 fail:
     vt->write32(vt, VIRTIO_MMIO_STATUS,
                 vt->read32(vt, VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
-    if (inst->irq_registered) {
-        free_irq((uint32_t)vt->irq, inst);
-    }
-    virtio_gpu_release_buffers(inst);
-    return -1;
+    /* FAILED is not a DMA-stop acknowledgement. The opted-in native remove
+     * pipeline resets and confirms stop before releasing any partial owner. */
+    return -EIO;
 }
 
 static int virtio_gpu_probe(device_t *dev) {
+    int result = device_probe_use_remove(dev);
+    if (result) return result;
+    result = virtio_gpu_claim(dev);
+    if (result) return result;
     if (dev->bus == &pci_bus) {
         virtio_transport_t vt;
-        if (pci_virtio_transport_init(dev, 16, &vt) != 0)
-            return -1;
+        result = pci_virtio_transport_init(dev, 16, &vt);
+        if (result) return result;
         return virtio_gpu_init_transport(dev, &vt);
     }
 
@@ -1527,19 +1575,38 @@ static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)
     inst->last_used = 0;
 }
 
+static void virtio_gpu_quiesce(device_t *dev) {
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (inst) __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
+}
+
 static int virtio_gpu_remove(device_t *dev) {
     virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (!inst)
         return 0;
 
-    /* Device reset stops all interrupt sources before the handler goes. */
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
-    if (inst->irq_registered)
+    __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
+    /* Scoped callers have drained. A legacy raw issuer may still hold this
+     * mutex: do not wait under lifecycle for it, and never reset its queue. */
+    if (__atomic_load_n(&inst->command_active, __ATOMIC_ACQUIRE) ||
+        !mutex_trylock(&inst->command_lock)) return -EBUSY;
+    if (inst->transport_live && !inst->reset_confirmed) {
+        int result = virtio_transport_reset(&inst->vt, 100);
+        if (result) {
+            mutex_unlock(&inst->command_lock);
+            return result; /* Binding, MMIO, IRQ and every DMA owner survive. */
+        }
+        inst->reset_confirmed = 1;
+    }
+    if (inst->irq_registered) {
         free_irq((uint32_t)inst->vt.irq, inst);
+        inst->irq_registered = 0;
+    }
     gpu_device_unregister(dev);
     dev->drv_priv = NULL;
     virtio_gpu_release_buffers(inst);
+    mutex_unlock(&inst->command_lock);
+    if (g_gpu_owner == dev) g_gpu_owner = NULL;
     return 0;
 }
 
@@ -1559,6 +1626,7 @@ static driver_t virtio_gpu_driver = {
     .bus        = NULL,
     .probe      = virtio_gpu_probe,
     .remove     = virtio_gpu_remove,
+    .quiesce    = virtio_gpu_quiesce,
     .class_ops  = &gpu_ops,
     .class_type = DEV_CLASS_DISPLAY,
 };

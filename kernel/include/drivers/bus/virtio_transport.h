@@ -56,4 +56,13 @@ typedef struct virtio_transport {
     int  msix_vectors;
 } virtio_transport_t;
 
+/* Task context, outside spinlocks. Caller owns the transport and excludes
+ * submissions/reinitialization for the whole call. Write status=0 and wait
+ * for status readback=0 (Virtio 1.3 sections 2.4 and 4.1.4.3.2).
+ * timeout_ms is 1..1000; an independent poll budget also bounds early boot
+ * and a stalled clock. Failure never authorizes queue/storage/IRQ release;
+ * retain the instance and retry under its native device remove protocol.
+ * Does not drain software callers, unregister IRQs, or free the transport. */
+int virtio_transport_reset(virtio_transport_t *transport, uint32_t timeout_ms);
+
 #endif /* _VIRTIO_TRANSPORT_H */

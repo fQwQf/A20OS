@@ -38,7 +38,12 @@ static int snapshot(struct device *dev,struct gpu_scanout *out){
 /* Only the producer fields consumed by the real get/release/remove bodies.
  * Transport/IRQ operations are stubs; this does not prove hardware stop. */
 typedef struct fake_transport {void (*write32)(struct fake_transport *,uint32_t,uint32_t);int irq;} fake_transport_t;
-typedef struct {fake_transport_t vt;int valid,virgl,context_init,irq_registered;uint32_t width,height,bpp;uintptr_t fb_phys;size_t fb_size;struct vmo *fb_memory;void *big_req,*big_resp;size_t big_req_cap,big_resp_cap;uint16_t last_used;} virtio_gpu_inst_t;
+typedef pthread_mutex_t mutex_t;
+static int mutex_trylock(mutex_t *m){return !pthread_mutex_trylock(m);}
+static void mutex_unlock(mutex_t *m){assert(!pthread_mutex_unlock(m));}
+static device_t *g_gpu_owner;
+static int virtio_transport_reset(fake_transport_t *t,uint32_t ms){assert(ms==100);t->write32(t,0x70,0);return 0;}
+typedef struct {mutex_t command_lock;int closing,command_active,transport_live,reset_confirmed;fake_transport_t vt;int valid,virgl,context_init,irq_registered;uint32_t width,height,bpp;uintptr_t fb_phys;size_t fb_size;struct vmo *fb_memory;void *big_req,*big_resp;size_t big_req_cap,big_resp_cap;uint16_t last_used;} virtio_gpu_inst_t;
 #define VIRTIO_MMIO_STATUS 0x70
 #define mb() ((void)0)
 static struct gpu_scanout *observed_snapshot;
@@ -60,13 +65,13 @@ int main(int argc,char **argv){
   assert(gpu_device_scanout_get(&access,NULL)==-EINVAL);access.publication=NULL;assert(gpu_device_scanout_get(&access,&view)==-ENODEV);access.publication=(void *)1;
   ops->get_scanout=NULL;assert(gpu_device_scanout_get(&access,&view)==-EOPNOTSUPP&&!view.memory);gpu_scanout_put(NULL);gpu_scanout_put(&view);gpu_scanout_put(&view);
  }else if(!strcmp(name,"virtio-provider")){
-  virtio_gpu_inst_t *inst=calloc(1,sizeof(*inst));assert(inst);
+  virtio_gpu_inst_t *inst=calloc(1,sizeof(*inst));assert(inst);assert(!pthread_mutex_init(&inst->command_lock,NULL));inst->transport_live=1;
   assert(!vmo_create_contiguous(3*PAGE_SIZE,&inst->fb_memory));inst->valid=1;inst->fb_size=3*PAGE_SIZE;
   inst->big_req=kmalloc(16);inst->big_resp=kmalloc(16);inst->vt=(fake_transport_t){reset_write,5};inst->irq_registered=1;
   device.drv_priv=inst;ops->get_scanout=gpu_get_scanout;
   assert(!gpu_device_scanout_get(&access,&view)&&view.memory==inst->fb_memory);
   assert(!virtio_gpu_remove(&device)&&!device.drv_priv&&!inst->fb_memory&&!inst->valid&&resets==1&&irq_frees==1&&unregisters==1);
-  free(inst);free(ops);ops=NULL;uint64_t pa;size_t bytes;
+  assert(inst->reset_confirmed);assert(!pthread_mutex_destroy(&inst->command_lock));free(inst);free(ops);ops=NULL;uint64_t pa;size_t bytes;
   assert(!vmo_contiguous_info(view.memory,&pa,&bytes)&&bytes==3*PAGE_SIZE&&allocated_pages==3);
   gpu_scanout_put(&view);assert(!allocated_pages);
  }else if(!strcmp(name,"invalid")){
