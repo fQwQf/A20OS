@@ -291,6 +291,8 @@ USB register/scan/enumerate/unregister 使用原生生命周期协调器串行�
 
 ### DMA buffer 与同步 bulk
 
+显式 `driver_dma_map_buffer()` 使用现有 managed domain mutex，和页数组 map、unmap、shutdown 串行。policy 在额外保留 buffer 及调用 provider 前预检完整页覆盖；map 期间调用者保留自己的引用。mapping 只取得整块 buffer 引用，不取得高阶尾页引用；全部失效确认前不交还，CPU 同步也推迟至全部成功。RISC-V native provider 借用这份存储，用户态旧入口另有 order-0 pin；两者不得混用。多个 domain 映射同一 buffer 时，CPU/device 访问的排他交接由调用方协调。
+
 buffer 分配不取核心 lifecycle mutex，只用既有设备引用/registry 查询和 PFA 锁；这允许 active class 调用分配，不会阻塞正在持生命周期锁排空自己的退出。状态核对不是提交 lease，驱动仍须协调 mask/请求。最后 put 限任务上下文，使用保存的 PFN/order，不从请求尺寸推导实际回收阶数。xHCI 在 probe 预分配并持有暂存对象；同步 bulk 用 xfer_busy 独占 copy/wait，复制和 DMA sync 在 controller spinlock 外，提交前重新查退出状态。失败保留私有暂存区，成功的 controller remove 才交还它，不会向硬件提交调用者地址。
 
 ### USB storage

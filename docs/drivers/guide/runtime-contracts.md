@@ -75,7 +75,7 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 
 ### 原生 buffer 对象
 
-`driver_dma_buffer_create(dev, size, alignment, &buffer)` 保存实际页阶数和设备引用，支持请求大小独立于强对齐，按捕获的 mask 分配和校验。用 `driver_dma_buffer_get/put` 独立交还引用，`data/address/size` 观察 CPU alias、CPU PA 和请求长度；地址不是自动生成的 IOVA。创建不等待生命周期锁，最终 put 在任务上下文执行，不能把 put 当作硬件停止或映射失效。unbind 不自动释放对象。完整错误码、限制和 xHCI 首个使用者见 [DMA buffer 所有权](native-runtime.md#独立-dma-buffer-所有权)。
+`driver_dma_buffer_create(dev, size, alignment, &buffer)` 保存实际页阶数和设备引用，支持请求大小独立于强对齐，按捕获的 mask 分配和校验。用 `driver_dma_buffer_get/put` 独立交还引用，`data/address/size` 观察 CPU alias、CPU PA 和请求长度；地址不是自动生成的 IOVA。创建不等待生命周期锁，最终 put 在任务上下文执行，不能把 put 当作硬件停止或映射失效。unbind 不自动释放对象。`driver_dma_map_buffer()` 可显式将其页覆盖范围接入目标 domain，mapping 持有整块对象而非高阶尾页引用；最后一页 padding 也须满足 policy，按页查询 IOVA。完整错误码、限制和 xHCI 首个使用者见 [DMA buffer 所有权](native-runtime.md#独立-dma-buffer-所有权)。
 
 ### DMA mask
 
@@ -89,13 +89,13 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 4. `dma_alloc_*_coherent(NULL, ...)` 表示「没有可约束的设备」，走完整 64 位窗口。普通设备驱动应传入已枚举的 `device_t`，以应用该设备的 DMA mask。
 5. 驱动自己分配的 ring/context（例如 kmalloc 出来的 xHCI controller 结构）不经过分配器，必须在把地址写进设备前用 `dma_addr_ok()` / `dma_range_ok()` 校验，否则返回失败。
 
-当前限制：帧分配器没有「给我 4 GiB 以下的内存」这类分区接口，收窄 mask 只能靠有界重试。在 RAM 全部位于 32 位窗口之上的机器上，声明 32-bit mask 的设备会 probe 失败；这比让它在运行中 DMA 到解不了的地址更接近真实行为，但确实是一个失败而不是成功。旧 coherent 分配路径中的 mask 只是窗口检查，不是地址翻译。新增页级 DMA domain/mapping 已定义 provider 翻译接口和回滚契约，但没有为旧分配器自动接入 IOMMU；现有 RISC-V 用户态隔离路径也尚未统一为该 provider 后端。
+受限物理分配已通过 `pfa_alloc_max()` 搜索窗口内的 buddy 块；窗口内没有可用 RAM 时明确失败。旧 coherent 分配路径中的 mask 仍只是物理窗口检查，不做地址翻译。原生页数组和 buffer 可显式接入 domain/provider，RISC-V 已有 managed 后端；旧分配器不会自动选择 IOMMU 或在 provider 失败时降级为物理 DMA。
 
 `dma_sync_for_device()` / `dma_sync_for_cpu()` 仍然只是把请求委托给架构 cache hook，mask 不改变同步语义。
 
 ## 静态 ring 与 `va_to_pa()`
 
-既有静态 ring/buffer 仅在平台确认恒等 DMA 时使用 `va_to_pa()` 生成设备地址，并必须在各架构线性映射范围及设备 DMA 窗口内。新原生驱动的页数组应通过 `driver_dma_map_pages()` 获取设备地址，不能假定物理地址就是 IOVA。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
+既有静态 ring/buffer 仅在平台确认恒等 DMA 时使用 `va_to_pa()` 生成设备地址，并必须在各架构线性映射范围及设备 DMA 窗口内。新原生驱动的页数组应通过 `driver_dma_map_pages()`，高阶 buffer 通过 `driver_dma_map_buffer()` 获取设备地址，不能假定物理地址就是 IOVA。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
 
 > 不要把栈上变量或临时结构传给 DMA，即使命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
 
@@ -156,7 +156,7 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 ## 可失败的 DMA 失效
 
-可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
+可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()` 或 `driver_dma_map_buffer()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
 
 ## 固件读取
 

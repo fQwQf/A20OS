@@ -183,9 +183,19 @@ hosted 启动在 PFA 和 `driver_core_init()` 完成后、发布设备前调用 
 
 create 返回一份引用，`driver_dma_buffer_get/put()` 显式交接所有权。对象保留 device 元数据引用，独立于 devres/绑定；unbind/unregister 不自动释放 buffer。最后 put 用记录的 PFN/order 回收，并交还设备引用。get 可用于 IRQ，最终 put 限任务上下文；都须已有有效引用，不能从悬空指针复活对象。put 不停 DMA、不排空请求、不撤销映射，驱动必须保留引用直到相应停止/失效证明完成，也须自己保留回调/module 代码。
 
-`driver_dma_buffer_data/address/size()` 在持引用期间返回 CPU alias、CPU 物理地址及请求字节数；size 不暴露向上取整的分配尺寸。地址 0 也可能有效，不能用它判定对象不存在。物理地址只有在显式 identity-DMA 平台上可直接作为总线地址；该对象不创建 IOVA、隔离、MMIO claim、BO 或 GPUVM，不自动接入目前只接收 order-0 页的 managed mapping。CPU/设备可见性仍须经过既有 DMA sync/barrier。
+`driver_dma_buffer_data/address/size()` 在持引用期间返回 CPU alias、CPU 物理地址及请求字节数；size 不暴露向上取整的分配尺寸。地址 0 也可能有效，不能用它判定对象不存在。物理地址只有在显式 identity-DMA 平台上可直接作为总线地址；该对象不创建 IOVA、隔离、MMIO claim、BO 或 GPUVM；需要下述显式 buffer 映射入口才能取得 domain 的设备地址。CPU/设备可见性仍须经过既有 DMA sync/barrier。
 
 分配不取得 lifecycle mutex，可从 active class 调用使用，避免与持该锁排空 class 的退出互相等待。它只构造存储所有者，不批准硬件提交。这些函数均导出给模块，公开 device/driver/HCD 布局及 ABI 10 不变。
+
+### 将 buffer 显式映射到 domain
+
+`driver_dma_map_buffer(domain, buffer, direction, &mapping)` 把请求大小向上取整到完整页，复用 domain provider、权限预检、设备地址校验、同步和可失败回滚；每个 mapping 只保留一份整块 buffer 引用，不对高阶尾页调用 frame_get/put，也不拆分原始分配。33 字节、64 KiB 对齐的对象只映射一页，PAGE_SIZE+33 字节映射两页，不暴露其余用于强对齐的 backing。最后一页的清零 padding 也属于设备可访问范围，policy 必须允许这一整页；不可用只覆盖请求字节的检查绕过 padding 限制。
+
+调用者在 map 调用期间持有 buffer 和 domain；成功后可交还原 buffer 引用，mapping 继续保留原分配及 allocation owner 元数据，直到全部失效确认成功。allocation owner 与 domain device 可以不同：存储引用不授予设备权限，准入、mask、policy 由目标 domain 决定。每页 IOVA 可能不连续，必须用 `driver_dma_page_address()` 逐页读取，不能从 buffer PA 或首个 IOVA 推算其余地址。buffer 与 order-0 数组共享 `mapping_count/sync_for_device/sync_for_cpu/try_unmap_pages`；count 是保留的页条目数，失败清理期间可能只有已发布的前缀，但 buffer 的整个高阶分配仍然保留。
+
+map 返回非零也可能交出非空清理句柄，必须继续保留并重试；unmap 开始后禁用地址/同步，部分失效成功不会提前释放 buffer 或执行 CPU invalidate。全部成功后才执行必要的 CPU 同步、交还 buffer/domain 引用并置空句柄。managed domain 的 map_buffer 与原有 map_pages/unmap/shutdown 使用同一 mutex；最后 put 和 provider 操作均限任务上下文。不替驱动停止 DMA，也不协调同一 buffer 在其他 mapping 或 CPU 中的并发访问。
+
+RISC-V native provider 已按此契约借用通用 mapping 持有的存储，私有 IOVA 的 pinned 条目为 PFN_NONE；不再二次 pin 高阶尾页。用户态正 PID API 仍保留独立 order-0 frame 引用以覆盖失败 quarantine；旧 map/unmap 拒绝负 native owner，禁止绕过通用 mapping 的计数和所有权。硬件 PTE、IOVA 和失效/关闭重试协议保持独立；这不提供 GPU 页表、BO 驻留或自动选择 provider。
 
 ### xHCI 同步 bulk 暂存
 
@@ -205,16 +215,17 @@ bulk 是精确长度同步接口，不运行 complete 回调：0 表示完整长
 - `driver_dma_domain_create_managed_policy()`：在相同生命周期中独立保留不可变物理约束，整批预检权限，并核对 provider 返回的 Unity/IOVA 要求；详见下文。
 - `driver_dma_domain_create_direct()`：仅在总线/平台已确认采用恒等 DMA 时显式使用。它不提供隔离，不能作为 IOMMU 失败时的降级，也不探测 AMD-Vi。
 - `driver_dma_map_pages()`：映射调用者已持有的 order-0 RAM 页数组。页面可以物理不连续；每页获得独立的设备 DMA 地址。
+- `driver_dma_map_buffer()`：显式保留并映射原生 buffer 的页覆盖范围；与页数组使用相同后续接口，整块分配不拆分，详见 [buffer 映射](#将-buffer-显式映射到-domain)。
 - `driver_dma_page_address()`：读取设备地址，不根据 PFN 或 CPU 地址推算。地址 0 可以合法，错误由返回值区分。
 - `driver_dma_mapping_sync_for_device/cpu()`：在 CPU 与设备停止访问的边界执行缓存同步。映射时自动执行初次 device 同步，成功映射解除时执行必要的 CPU 同步。
 - `driver_dma_try_unmap_pages(&mapping)`：硬件停止访问后，逆序解除翻译；全部成功才同步 CPU、释放页面和 domain 引用并置空指针。失败返回负 errno 并保留 mapping，必须重试。
 - `driver_dma_unmap_pages(&mapping)`：原有 infallible provider 的兼容入口；内部也保留失败对象，但不返回状态，checked provider 应使用 try 接口。
 
-映射独立保留每一页的 frame 引用。调用者可在映射成功后释放原始页面引用，设备仍使用的 RAM 不会因此回收。页映射失败会尝试回滚之前的翻译及页面引用；checked 回滚如果失败，`driver_dma_map_pages()` 返回原始映射错误，同时通过非空 `*out` 交出仅供清理的句柄。调用者必须保留并反复 try_unmap，不能只判断返回码就丢弃输出。回滚没有完成初次 device 同步的 mapping 时不执行 CPU invalidate，避免丢失尚未交给设备的 CPU 数据。
+页数组映射独立保留每一页的 frame 引用；buffer 映射独立保留整个分配对象。调用者可在映射成功后释放原始页面引用，设备仍使用的 RAM 不会因此回收。页映射失败会尝试回滚之前的翻译及页面引用；checked 回滚如果失败，`driver_dma_map_pages()` 返回原始映射错误，同时通过非空 `*out` 交出仅供清理的句柄。调用者必须保留并反复 try_unmap，不能只判断返回码就丢弃输出。回滚没有完成初次 device 同步的 mapping 时不执行 CPU invalidate，避免丢失尚未交给设备的 CPU 数据。
 
 provider 的 `map_page` 每次映射一整页，失败不得留下该页翻译或未确认的失效。旧 `unmap_page` 返回前必须完成设备地址翻译失效；checked `unmap_page` 只有返回 0 才确认失效，失败时必须保留 IOVA，且允许重试已经清除 PTE 的操作。设备地址需要页对齐且整页落在 domain 的 mask 内，违反条件时解除该页及之前映射，返回错误，绝不回退到物理地址。
 
-解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留引用的页面数量。失败时全部 frame 引用保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
+解除映射一旦开始，mapping 即进入清理状态，地址查询和 cache sync 返回 `-ESHUTDOWN`，不能恢复提交；count 仍表示保留的页条目数量。失败时全部 frame 引用或整个 buffer 保留，包括已经解除翻译的页，CPU 同步也推迟至全部成功；重试从失败页继续，不重复解除之前已成功的页。这里假定 provider 返回成功后不会再次失败地撤销该成功结果。正数错误被规范为 `-EIO`。
 
 managed provider 的 `map_page` 显式返回 `needs_unmap`：只要当前页已安装翻译或保留 IOVA，就设置 true，并交出可供 unmap 的地址，包含返回负 errno 的情况。核心将当前页也纳入回滚；失效再次失败时，清理句柄保留当前页及前序页面引用。返回成功却没有设置 needs_unmap 是 provider 契约错误，转为 `-EIO`；失败且 false 仍要求当前页没有硬件残留。旧 infallible/checked provider 的接口及回滚语义保持原样。
 
@@ -256,7 +267,7 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 
 `riscv_iommu_dma_watch_stop(&watch, deadline)` 永久关闭重排并等待在途回调返回，成功释放对象、device 引用并置空指针。deadline 是绝对 ticks，0 表示无截止；超时或中断保留整个对象和 context，应在同一 owner 上串行重试。回调内自停止返回 `-EDEADLK` 且不释放。start 的部分失败也可能交出非空清理句柄，须 stop 后再丢弃。监测器不固定硬件 domain 或驱动绑定，应在 quiesce 中先 stop，再 shutdown domain/释放设备上下文。目前采用每 watch 一个 worker，没有 IRQ 触发或共享线程池。
 
-显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。进一步的 EDU 往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录，由后台 watch 完成隔离并通过回调 signal fence；主线程等待 fence、stop 排空回调后，再检查 store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
+显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。EDU 先对 64 KiB 对齐、PAGE_SIZE+33 字节的高阶 buffer 做跨页往返：map 后先交还 allocator caller 引用，验证模式和未传输字节，再确认停止并 unmap，要求 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`。实例 manifest 显式选择 embedded，使构建与启动使用同一驱动配置。后续往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录，由后台 watch 完成隔离并通过回调 signal fence；主线程等待 fence、stop 排空回调后，再检查 store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
 
 同一 `smoke-driver-iommu-native-riscv64` 实例还验证通用占用与原生/用户 domain 的双向冲突、拒绝时 DC 不变、shutdown 后最后 put 前继续占用，以及用户正常幂等/release 后重试，新增 `DRIVER_IOMMU_REQUESTER: PASS native=1 user=1 conflict=1 release=1` 标记；普通启动不运行。失败保留与锁顺序另由主机后端验证。
 
@@ -668,3 +679,18 @@ ABI 10 generic 内核、模块和镜像由严格 USB 热插拔与 HID 实际输�
 AArch64 的 `ARCH=aarch64 ABI=linux BRINGUP=0 DRIVER_DEPLOYMENT=embedded RAMFS_USER=1 kernel-only` 构建成功；QEMU virt/cortex-a57 从该构建的 raw `kernel.bin` 启动，传入 `-append driver.runtime_test=1`，实际匹配 DMA buffer、资源和 runtime PASS 并正常关机。完整 dev-build 仍受既有 `user/external/sbase/id.c` 缺失阻断，不计为成功；先前用 ELF 启动未运行到该 runtime，亦不计入证据。raw 启动的单 CPU 结果不代表跨架构 USB 或任意 SMP 压力已验证。
 
 这些改动提供显式存储所有者及首个硬件使用者，不提供 GPU BO/驻留、GPUVM、IOMMU 高阶映射或停止证明。每 controller 的预分配占用为 64 KiB；storage 实例/独立退出、BOT 恢复、变长 bulk/多 TRB、拒绝 SET_INTERFACE 设备的恢复和可失败 shutdown 仍待推进。公开布局与 ABI 10 保持不变。文档行号检查通过 540 条；导航仍有迁移工作区既有 7 个未索引页面。实际 `docs/zh` 迁移及其他改动保留；本地证据位于 `.kernel-build/dma-buffer-review/`。
+
+
+### 高阶 buffer 的原生 domain 映射验证（2026-11-14）
+
+代码提交 `9bbd5ae1a`。新增 9 项 buffer mapping 主机测试方法、11 个命名场景，运行生产 core/registry、buffer allocator/refcount、mapper 和 policy，启用 ASan/UBSan。PFA、cache、IOVA/provider 为替代后端。覆盖物理与 IOVA 不同且各页不连续、allocation owner 与目标 device 不同、原 owner 注销后保留整块存储、33 字节强对齐对象只暴露一页、末页 padding 的预检拒绝、未映射 backing 的限制不误拒绝、TO/FROM/BIDIRECTIONAL cache 交接、分配/准入/IOVA/identity 错误、当前页残留、部分 unmap 超时及 pthread 的 map/shutdown 串行。所有高阶尾页的 frame_get/put 均会触发断言，不能以虚构尾页引用掩盖回收错误。
+
+实际 RISC-V provider 的 requester 集成新增 2 项方法、3 个场景；生产 allocator/core/PCI/provider/mapper 组合使用仅头页持引用的 order-4 PFA 模型，验证成功、map 失效失败和 unmap 失败。native IOVA 借用通用 mapping 的存储，不另 pin RAM；用户态旧 API 的独立 order-0 pin/失败 quarantine 回归继续通过。旧 map/unmap 传负 native owner 被拒绝，不改翻译或命令计数。失败时保留高阶块和 requester/domain，失效恢复后才按原 PFN/order 回收。
+
+20 个负控分别撤销 buffer 引用/最后释放、提前释放、错误地 pin/put 尾页、暴露整个对齐 backing、跳过完整页预检、错误 cache alias/物理地址、跳过 identity 校验、丢弃清理句柄、移除 managed map 锁、提前 CPU sync、遗漏 domain 计数、provider 二次 pin/错误 pinned 记录/错误 put、旧 map/unmap 允许 native owner，以及移除用户态 pin，均触发运行时断言或 ASan；编译失败不计入。恢复后的隔离导出树通过 244 个不同方法，之后 22 项 provider/buffer 定向检查通过。最终 18 个源码/测试配置路径逐一与提交核对；末次调整仅补公开契约注释、fixture 分类和门禁/实例配置。
+
+主门禁 `check-firmware-model` 现纳入通用映射、RISC-V requester/queue 和新 buffer 组合测试，通过 473 项及单独 1 项 sleep ABI；`check-pc-drivers` 通过 109 项。115 个 instance、32 个 driver component、194 个 smoke case 审计通过。双 CPU x86 embedded hub 与 USB bulk guest 均实际匹配 `DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1`，运行真实 PFA/direct domain 的两页映射、caller put、owner 注销和最后 unmap；原 endpoint/controller 退出和专用盘读写、比对、恢复也通过。USB 本身仍走 identity-DMA 私有暂存路径，不能把它记为 IOMMU 传输。
+
+`tools/a20 test smoke-driver-iommu-native-riscv64` 的最终 manifest 显式选择 embedded；构建普通 dev 内核/镜像并启动同一配置，避免 make 额外覆盖只改变构建而运行旧配置。实际 guest 匹配全部 5 个要求标记，包含 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`：64 KiB 对齐的 PAGE_SIZE+33 字节 buffer 只映射两页，先交还 allocator caller 引用，EDU 经非恒等 IOVA 跨页读入并写回，再逐字节检查传输区及其余映射页内容，确认 DMA/BME 停止后解除映射。原有物理不连续页跨页 DMA、只读 PTE/TR_REQ、unmap 后非法 IOVA fault、watch、requester 冲突/释放和 detach 仍通过。构建成功但未运行新 guest 的尝试不计入这些证据。
+
+这补齐高阶分配所有者到原生 domain 的生命周期衔接，不提供 GPU BO/驻留、GPUVM、共享访问排他、IOMMU 自动选择或硬件停止。末页 padding 是明确暴露的页覆盖；GPU/用户 ABI 若需要字节级访问限制，不能依赖这项页级接口。RISC-V provider 仍限每 domain 64 页；实体失效超时和厂商 GPU 硬件恢复未验证。ABI 10 不变。文档引用检查通过 540 条；导航仍是迁移工作区既有的 7 个未索引页面，实际 `docs/zh` 迁移和其他改动保留。本轮本地证据位于 `.kernel-build/buffer-map-review/`，成功的 RISC-V 启动记录为 `qemu-iommu-embedded.log` 与 `iommu-guest.log`。
