@@ -207,3 +207,11 @@ RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连
 16 个编译成功的负控分别破坏引用取得/交接、失败清理 owner、失败引用回收、VMO/buffer 最后 put、失效前提前退休、类型准入、多视图引用、first/count 视图、错误输出、锁外回调、临时 domain 引用顺序，以及旧快照不持 VMO 的契约，均须由运行时断言拒绝；负控改动还原后重新运行正例和广回归。检查 VMO owner 的 callback 与跨设备 buffer callback 是两条独立路径，不能只验证元数据字段。
 
 RISC-V 原生 EDU 门禁现在对 resident 分支采用 owned 视图：交还 caller VMO 引用后，仍可通过句柄保留的对象核对未映射页，再执行实际跨页 DMA/数据和 guard 比对，要求 `DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1 owner=1`。匿名与连续分支仍回归旧页快照；连续 owning 正例由主机集成覆盖。guest 的 owner 为 NULL 内核预算，真实 cgroup 保留证据来自主机 C/Rust 集成，不是实板 GPU/cgroup OOM 或物理失效超时证据。其余必跑门禁为 x86_64 lifecycle、embedded 双核 GPU stop、generic 模块显示及 RISC-V PRIME；详见原生运行时的本轮验证记录。
+
+## 原生 fence 通知验证
+
+运行 `python3 -m unittest tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_pc_module_boundary`。fence 夹具执行完整生产 fence 与 watch 代码，Park/Wake 和 spinlock 由 pthread 边界提供；17 个方法包含原来的等待/超时/80 waiters/竞争 producer 回归，以及 16 个通知契约方法。覆盖失败输出/OOM、已完成时无分配（含注入 OOM）及分配期间完成、pending/completed owner 引用、原错误传递、一次派发、128 登记的首尾/中间撤销、RUNNING 保留、terminal 后尚未选中通知的撤销、等待者先唤醒，以及各 200 次登记/撤销与 signal 竞争。模型的 IRQ 标记禁止 signal 中分配/free，callback 查询 status 验证锁外执行。RUNNING 与 waiter 进度的夹具故意暂停 callback 以暴露竞争窗口，真实 callback 不得这样等待。
+
+17 个编译成功负控分别破坏初始 terminal 无分配、fence 引用取得/交还、登记回收、RUNNING 保护与 DONE 发布、锁外 callback、成功/错误 status、terminal 准入、取消链、输出清理、通知派发、首条登记可达性、IRQ 不回收和先唤醒 waiter；必须由运行时断言/ASan 拒绝，不能把编译失败或存活变体计为通过。还原后运行完整驱动回归；firmware 与 PC 门禁均已纳入 fence 测试。
+
+`tools/a20 test smoke-driver-runtime-x86_64` 及 `tools/a20 test smoke-driver-runtime-smp2-x86_64` 要求 `DRIVER_FENCE_WATCH: PASS notify=1 cancel=1 error=1 work=1`：实际原生 fence 的成功/错误通知调度真实 kernel worker，并检查 pending 撤销和 terminal 拒绝。signal 在测试任务上下文执行，不将其称为真实硬件 IRQ 完成验证。继续运行 embedded 双核 GPU stop、generic 模块显示及 RISC-V PRIME；跨架构编译另行记录。该基础不表示已接入 GPU 请求队列、Linux pending sync-file 或实体 GPU。

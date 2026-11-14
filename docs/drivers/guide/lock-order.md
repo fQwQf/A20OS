@@ -377,3 +377,9 @@ quiesce 先结束软件请求，class drain 后再由 remove 确认硬件停止�
 `driver_dma_map_owned_vmo` 仅接受工厂固定 RAM（kind 4/5），在 provider 前保留 VMO，不持 VMO lock 调用 provider。复用快照的 VMO → PFA 顺序，释放 VMO lock 后才进入 managed domain mutex。失败清理仍持整个 VMO/charge，设备只映射请求视图。普通 unmap/构造回滚先确认全部失效与 CPU sync，退休 mapping/counter；try_unmap 清空 caller 指针后退出 domain mutex，再 put buffer/VMO owner；try_unmap 最后 put 临时 domain 引用，构造回滚依靠 caller 全程保留的 domain 引用。裸 frame_put 保持原页路径；不要把 provider 回调允许重入与锁外 owner 析构混为一谈。
 
 buffer allocation owner 可与 mapping device 不同。其最后 put 可能触发设备 release；owner 回调必须看到 domain 锁已退出且 mapping 已退休，允许按自身生命周期规则重新进入 shutdown。managed provider 的 map/unmap/deactivate 仍不允许重入本 domain。调用者也不能持 owner 析构所需的其他锁跨 unmap。
+
+### 原生 fence 通知的退休边界
+
+fence spinlock 保护 terminal status 与 watch 链和状态。create 在锁外分配，锁内重新验证 pending、取得引用并发布；try_remove 在锁内 O(1) 解除 pending 或检查 RUNNING，成功后在锁外交还 fence/watch。signal 在锁内发布 status，锁外 wake waiters，随后逐个在锁内选择/标记 RUNNING，锁外 callback，返回后再锁内发布 DONE；之后不再解引用 watch。通知与 waiters 不在 fence 锁下执行，不引入 fence → workqueue 的嵌套锁序。外层 producer 仍须避免持有通知所需的锁跨 signal；锁外只指 fence 自己的锁。
+
+producer 引用覆盖整个 signal，watch 另持 fence 引用；IRQ 不做 watch 最后 put/free。callback 必须短小、IRQ-safe、不分配或阻塞；其他任务看到 status terminal 时，try_remove 仍可能 EBUSY，必须保留代码/context 及登记对象后重试。成功 remove 只证明该 callback 不会再运行，已调度的工作由 workqueue 取消/排空协议另行管理，不能在其所需锁下等待。

@@ -12,7 +12,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 - 原生 VMO 可通过 Rust 原子页保留和显式 map_vmo 接入 DMA domain，mapping 在源 resize/销毁后仍保留原帧；缺页不物化，物理 VMO 不作为普通 RAM 导入，不冻结 extent/转移 charge。真实 EDU 已验证源 VMO 销毁后的跨页 DMA；固定 resident RAM 工厂已补充完整物化、不可变 extent 与 VMO-owned cgroup charge，DRM backing 已采用，构造与任务归属捕获分别位于 store/GPU 锁外。BO 驻留/迁移策略、GPU 专属预算、访问权和请求同步仍待建立；独立页 pin/map_vmo 不保留 VMO 的预算 owner；新增 map_owned_vmo 可为固定 kind 4/5 保留整个 backing/原始 charge，成功及失败清理均持有，确认失效后在 domain 锁外交还。它只映射所选页，不建立 GPUVM、共享权限或硬件停止证明。
 - virtio-gpu 已采用每绑定原生 DMA 实例，两个设备拥有独立 controlq/staging/IRQ/停止状态；独立逻辑注销、旧 VMA 保留、peer 持续刷新与重新登记已有双核 QEMU 验证。仍未实现多 GPU 用户节点、厂商执行队列或跨 GPU attach。
 - 原生页级 DMA domain/mapping 提供设备地址转换、独立页面引用和失败回滚，direct domain 必须由平台显式确认恒等 DMA 后使用。
-- 原生异步 fence 可以从 IRQ 完成任务，支持错误、等待和超时；尚未接入 DRM syncobj/sync_file。
+- 原生异步 fence 可以从 IRQ 发布完成，支持错误、等待和超时；新增可撤销的一次性 watch，可在 fence 锁外用 IRQ-safe 短通知调度 work，RUNNING 撤销保留 owner 重试。它只保留 fence，不保留 callback 代码/context，也不停止 DMA；尚未接入 BO/request 队列或 DRM syncobj/sync_file。
 - 可取消工作队列、IRQ 排空和有界不可变固件读取已经实现；固件目录部署、厂商格式校验、上传和启动协议仍需完成。
 - MMIO/port I/O 已有 owner 引用与受管占用；checked claim 核对已发布设备声明，并阻止后续冲突发布。独立物理存储对象已保护受管 RAM 和 ACPI 表页，阻止其作为 MMIO 使用。PCI BAR 在可能建立映射的 hook 前核对保护区，并采用全部规划通过后再提交地址与资源的事务。
 - 原生 RISC-V IOMMU provider 已有 QEMU EDU 实际 DMA、fault 隔离及 worker 通知 fence 的验证；x86 AMD-Vi 已有 IVRS 策略解析、PCI/MMIO 只读探测、保留完整 aperture 的被动 PCI 绑定、PCI 桥路径/Range 补充查询、保留路由对象、完整固件声明 alias 集合的查询、逐成员检查与原子占用，以及覆盖各成员的 IVMD policy 和通用映射入口检查，尚无翻译后端。RISC-V 的结果不代表本机 AMD GPU 已有 DMA 隔离。

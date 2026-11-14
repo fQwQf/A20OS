@@ -130,7 +130,7 @@ HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 # Reusable PC driver contracts; no block-device writes or physical reset.
 .PHONY: check-pc-drivers
 check-pc-drivers: check-component-registry
-	$(PYTHON) -m unittest tools.tests.test_i2c_transport_lifetime \
+	$(PYTHON) -m unittest tools.tests.test_driver_fence tools.tests.test_i2c_transport_lifetime \
 	  tools.tests.test_firmware_gpio_input tools.tests.test_pc_network_lifetime \
 	  tools.tests.test_pc_module_boundary \
 	  tools.tests.test_xhci_endpoint_types tools.tests.test_xhci_remove \
@@ -148,7 +148,7 @@ check-pc-drivers: check-component-registry
 
 .PHONY: check-firmware-model
 check-firmware-model:
-	$(PYTHON) -m unittest tools.tests.test_firmware_model \
+	$(PYTHON) -m unittest tools.tests.test_driver_fence tools.tests.test_firmware_model \
 	  tools.tests.test_devicetree tools.tests.test_acpi_tables \
 	  tools.tests.test_uacpi_namespace tools.tests.test_pci_resources \
 	  tools.tests.test_e1000_interrupt_setup tools.tests.test_ahci_pci_policy \

@@ -48,6 +48,8 @@ DISPLAY provider 通过 ABI 12 `get_capabilities` 声明原生 SCANOUT/RENDER/RA
 
 固定 RAM 的 DMA 请求可用 `driver_dma_map_owned_vmo` 保留原生 VMO 的整个 backing 与原始预算 owner；设备只获得选定页视图。映射、存储引用与硬件停止仍分别管理。buffer/VMO 最终 put 在 domain 锁外，失败失效保留句柄供重试，见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
 
+驱动使用原生 fence watch 通知时，登记仅保留 fence，不保留模块代码/context。quiesce/remove 必须先停止通知/工作 producer；watch try_remove 返回 EBUSY 时保留 owner 并重试，成功后仍需排空已调度的工作才能回收上下文。不能以 fence terminal 或 class offline 推断 callback 已返回，见 [一次性通知](native-runtime.md#一次性通知与显式撤销)。
+
 ## 数据结构字段
 
 ### `device_id_t`

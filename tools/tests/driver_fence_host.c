@@ -10,15 +10,26 @@
 
 _Thread_local unsigned host_lock_depth;
 static unsigned allocations, linked_count;
+static _Thread_local bool fail_allocation, irq_context;
+static struct driver_fence *complete_on_allocation;
 void *kmalloc(size_t n)
 {
-    assert(!host_lock_depth);
+    assert(!host_lock_depth && !irq_context);
+    if (fail_allocation) { fail_allocation = false; return NULL; }
     void *p = malloc(n); assert(p);
-    __atomic_add_fetch(&allocations, 1, __ATOMIC_RELAXED); return p;
+    __atomic_add_fetch(&allocations, 1, __ATOMIC_RELAXED);
+    if (complete_on_allocation) {
+        struct driver_fence *fence = complete_on_allocation;
+        complete_on_allocation = NULL;
+        irq_context = true;
+        assert(!driver_fence_signal(fence, -EIO));
+        irq_context = false;
+    }
+    return p;
 }
 void kfree(void *p)
 {
-    assert(!host_lock_depth);
+    assert(!host_lock_depth && !irq_context);
     if (p) { __atomic_sub_fetch(&allocations, 1, __ATOMIC_RELAXED); free(p); }
 }
 uint64_t clock_get_ticks(void) { return 10; }
@@ -186,8 +197,227 @@ static void competing_producers(void)
     }
     assert(!allocations);
 }
-int main(void)
+struct notice {
+    struct driver_fence *fence;
+    unsigned calls, entered, release;
+    int status;
+    bool hold;
+};
+static void notified(void *opaque, int status)
 {
+    struct notice *n = opaque;
+    assert(irq_context && !host_lock_depth && !__atomic_load_n(&linked_count, __ATOMIC_ACQUIRE));
+    assert(status && driver_fence_status(n->fence) == status);
+    assert(driver_fence_signal(n->fence, -ECANCELED) == -EALREADY);
+    n->status = status;
+    __atomic_add_fetch(&n->calls, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&n->entered, 1, __ATOMIC_RELEASE);
+    /* Test-only pause of callback execution exposes the RUNNING retirement
+     * boundary deterministically. Real IRQ notifications must never wait. */
+    while (n->hold && !__atomic_load_n(&n->release, __ATOMIC_ACQUIRE)) sched_yield();
+}
+static void irq_signal(struct driver_fence *fence, int error)
+{
+    irq_context = true;
+    assert(!driver_fence_signal(fence, error));
+    irq_context = false;
+}
+static void *irq_producer(void *opaque)
+{
+    struct signal_arg *arg = opaque;
+    irq_context = true;
+    arg->result = driver_fence_signal(arg->fence, arg->error);
+    irq_context = false;
+    return NULL;
+}
+static void wait_entered(struct notice *n)
+{ while (!__atomic_load_n(&n->entered, __ATOMIC_ACQUIRE)) sched_yield(); }
+
+struct register_race {
+    struct driver_fence *fence;
+    struct notice notice;
+    struct driver_fence_watch *watch;
+    pthread_barrier_t start;
+    int result;
+};
+static void *racing_register(void *opaque)
+{
+    struct register_race *r = opaque;
+    int b = pthread_barrier_wait(&r->start);
+    assert(b == 0 || b == PTHREAD_BARRIER_SERIAL_THREAD);
+    r->result = driver_fence_watch_create(r->fence, notified, &r->notice, &r->watch);
+    return NULL;
+}
+static void *racing_signal(void *opaque)
+{
+    struct register_race *r = opaque;
+    int b = pthread_barrier_wait(&r->start);
+    assert(b == 0 || b == PTHREAD_BARRIER_SERIAL_THREAD);
+    irq_signal(r->fence, 0);
+    return NULL;
+}
+struct remove_race {
+    struct driver_fence_watch **watch;
+    int result;
+};
+static void *racing_remove(void *opaque)
+{
+    struct remove_race *r = opaque;
+    r->result = driver_fence_watch_try_remove(r->watch);
+    return NULL;
+}
+
+static void watch_case(const char *name)
+{
+    struct driver_fence *fence = driver_fence_create(); assert(fence);
+    struct driver_fence_watch *watch = NULL;
+    struct notice n = {.fence = fence};
+    if (!strcmp(name, "arguments")) {
+        watch = (void *)1;
+        assert(driver_fence_watch_create(NULL, notified, &n, &watch) == -EINVAL && !watch);
+        watch = (void *)1;
+        assert(driver_fence_watch_create(fence, NULL, &n, &watch) == -EINVAL && !watch);
+        assert(driver_fence_watch_create(fence, notified, &n, NULL) == -EINVAL);
+        assert(driver_fence_watch_try_remove(NULL) == -EINVAL);
+        assert(!driver_fence_watch_try_remove(&watch));
+    } else if (!strcmp(name, "allocation")) {
+        watch = (void *)1; fail_allocation = true;
+        assert(driver_fence_watch_create(fence, notified, &n, &watch) == -ENOMEM && !watch);
+        assert(!driver_fence_status(fence) && allocations == 1 && !n.calls);
+    } else if (!strcmp(name, "terminal")) {
+        irq_signal(fence, -EIO);
+        watch = (void *)1; fail_allocation = true;
+        assert(driver_fence_watch_create(fence, notified, &n, &watch) == -EALREADY && !watch);
+        assert(fail_allocation); fail_allocation = false;
+        assert(!n.calls && allocations == 1 && driver_fence_status(fence) == -EIO);
+    } else if (!strcmp(name, "allocation-signal")) {
+        complete_on_allocation = fence; watch = (void *)1;
+        assert(driver_fence_watch_create(fence, notified, &n, &watch) == -EALREADY && !watch);
+        assert(!complete_on_allocation && !n.calls && allocations == 1);
+        assert(driver_fence_status(fence) == -EIO);
+    } else if (!strcmp(name, "pending-owner")) {
+        assert(!driver_fence_watch_create(fence, notified, &n, &watch));
+        driver_fence_put(fence); fence = NULL;
+        assert(allocations == 2 && !n.calls);
+        assert(!driver_fence_watch_try_remove(&watch) && !watch && !allocations);
+    } else if (!strcmp(name, "complete-owner")) {
+        assert(!driver_fence_watch_create(fence, notified, &n, &watch));
+        irq_signal(fence, 0);
+        driver_fence_put(fence); fence = NULL;
+        assert(allocations == 2 && n.calls == 1 && n.status == 1);
+        assert(!driver_fence_watch_try_remove(&watch) && !watch && !allocations);
+    } else if (!strcmp(name, "notify") || !strcmp(name, "error")) {
+        assert(!driver_fence_watch_create(fence, notified, &n, &watch));
+        assert(!n.calls && allocations == 2 && !driver_fence_status(fence));
+        assert(driver_fence_signal(fence, 1) == -EINVAL && !n.calls);
+        int error = !strcmp(name, "error") ? -EIO : 0;
+        irq_signal(fence, error);
+        assert(n.calls == 1 && n.status == (error ? error : 1) && allocations == 2);
+        assert(driver_fence_signal(fence, 0) == -EALREADY && n.calls == 1);
+        assert(!driver_fence_watch_try_remove(&watch) && !watch);
+        assert(!driver_fence_watch_try_remove(&watch));
+    } else if (!strcmp(name, "cancel")) {
+        assert(!driver_fence_watch_create(fence, notified, &n, &watch));
+        assert(!driver_fence_watch_try_remove(&watch) && !watch);
+        assert(!driver_fence_status(fence) && allocations == 1);
+        irq_signal(fence, 0); assert(!n.calls);
+    } else if (!strcmp(name, "many")) {
+        enum { COUNT = 128 };
+        struct driver_fence_watch *watches[COUNT]; struct notice notices[COUNT];
+        for (unsigned i=0;i<COUNT;i++) {
+            notices[i] = (struct notice){.fence=fence};
+            assert(!driver_fence_watch_create(fence, notified, &notices[i], &watches[i]));
+        }
+        /* Head, tail and middle removals exercise both neighbouring links. */
+        for (unsigned i=0;i<COUNT;i+=3) assert(!driver_fence_watch_try_remove(&watches[i]));
+        assert(!driver_fence_watch_try_remove(&watches[COUNT-1]));
+        irq_signal(fence, -ECANCELED);
+        for (unsigned i=0;i<COUNT;i++) {
+            assert(notices[i].calls == (i%3 && i != COUNT-1 ? 1u : 0u));
+            assert(!driver_fence_watch_try_remove(&watches[i]) && !watches[i]);
+        }
+    } else if (!strcmp(name, "running") || !strcmp(name, "cancel-terminal-pending") ||
+               !strcmp(name, "waiter-progress")) {
+        n.hold = true;
+        assert(!driver_fence_watch_create(fence, notified, &n, &watch));
+        struct notice later = {.fence=fence};struct driver_fence_watch *second=NULL;
+        if (!strcmp(name,"cancel-terminal-pending")) {
+            later.hold = true;
+            assert(!driver_fence_watch_create(fence, notified, &later, &second));
+        }
+        pthread_t waiting;
+        if (!strcmp(name,"waiter-progress")) {
+            driver_fence_get(fence);assert(!pthread_create(&waiting,NULL,waiter,fence));
+            while (!__atomic_load_n(&linked_count,__ATOMIC_ACQUIRE)) sched_yield();
+        }
+        struct signal_arg arg={fence,0,0};pthread_t producer;
+        assert(!pthread_create(&producer,NULL,irq_producer,&arg));
+        if (second) {
+            /* Either registration may be selected first: order is not part
+             * of the interface. Pause that one and cancel the other. */
+            while (!__atomic_load_n(&n.entered,__ATOMIC_ACQUIRE) &&
+                   !__atomic_load_n(&later.entered,__ATOMIC_ACQUIRE)) sched_yield();
+        } else wait_entered(&n);
+        struct notice *active=&n,*unselected=&later;
+        struct driver_fence_watch **running=&watch,**other=&second;
+        if (__atomic_load_n(&later.entered,__ATOMIC_ACQUIRE)) {
+            active=&later;unselected=&n;running=&second;other=&watch;
+        }
+        struct driver_fence_watch *saved=*running;
+        assert(driver_fence_status(fence)==1);
+        assert(driver_fence_watch_try_remove(running)==-EBUSY && *running==saved);
+        if (*other) assert(!driver_fence_watch_try_remove(other) && !*other && !unselected->calls);
+        if (!strcmp(name,"waiter-progress")) assert(!pthread_join(waiting,NULL));
+        __atomic_store_n(&active->release,1,__ATOMIC_RELEASE);
+        assert(!pthread_join(producer,NULL) && !arg.result && active->calls==1);
+        assert(!driver_fence_watch_try_remove(running) && !watch && !second);
+        assert(!unselected->calls);
+    } else if (!strcmp(name, "register-race")) {
+        for (unsigned i=0;i<200;i++) {
+            struct register_race r={.fence=fence,.notice={.fence=fence}};
+            assert(!pthread_barrier_init(&r.start,NULL,2));pthread_t a,b;
+            assert(!pthread_create(&a,NULL,racing_register,&r));
+            assert(!pthread_create(&b,NULL,racing_signal,&r));
+            assert(!pthread_join(a,NULL) && !pthread_join(b,NULL));
+            assert(r.result==0 || r.result==-EALREADY);
+            assert(r.notice.calls==(r.result==0 ? 1u : 0u));
+            assert(!driver_fence_watch_try_remove(&r.watch) && !r.watch);
+            assert(!pthread_barrier_destroy(&r.start));
+            driver_fence_put(fence);fence=driver_fence_create();assert(fence);
+        }
+    } else if (!strcmp(name, "remove-race")) {
+        for (unsigned i=0;i<200;i++) {
+            n=(struct notice){.fence=fence};
+            assert(!driver_fence_watch_create(fence,notified,&n,&watch));
+            struct signal_arg arg={fence,0,0};struct remove_race r={&watch,0};pthread_t a,b;
+            assert(!pthread_create(&a,NULL,irq_producer,&arg));
+            assert(!pthread_create(&b,NULL,racing_remove,&r));
+            assert(!pthread_join(a,NULL) && !pthread_join(b,NULL) && !arg.result);
+            assert(r.result==0 || r.result==-EBUSY);
+            assert(n.calls<=1 && (r.result!=-EBUSY || n.calls==1));
+            assert(!driver_fence_watch_try_remove(&watch) && !watch);
+            driver_fence_put(fence);fence=driver_fence_create();assert(fence);
+        }
+    } else if (!strcmp(name, "producers")) {
+        struct notice peer={.fence=fence};struct driver_fence_watch *second;
+        assert(!driver_fence_watch_create(fence,notified,&n,&watch));
+        assert(!driver_fence_watch_create(fence,notified,&peer,&second));
+        struct signal_arg a={fence,0,0},b={fence,-EIO,0};pthread_t x,y;
+        assert(!pthread_create(&x,NULL,irq_producer,&a));assert(!pthread_create(&y,NULL,irq_producer,&b));
+        assert(!pthread_join(x,NULL) && !pthread_join(y,NULL));
+        assert((a.result==0 && b.result==-EALREADY) || (b.result==0 && a.result==-EALREADY));
+        assert(n.calls==1 && peer.calls==1 && n.status==peer.status && n.status==(a.result==0 ? 1:-EIO));
+        assert(!driver_fence_watch_try_remove(&watch) && !driver_fence_watch_try_remove(&second));
+    } else assert(!"unknown watch case");
+    driver_fence_put(fence);
+    assert(!allocations && !linked_count);
+    puts("native fence notification: PASS");
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2) { watch_case(argv[1]); return 0; }
+    assert(argc == 1);
     boundary_cases(); multiple_waiters(); competing_producers();
     puts("native asynchronous fences: PASS"); return 0;
 }
