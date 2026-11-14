@@ -4,6 +4,7 @@
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/stdio.h"
+#include "mm/vmo.h"
 
 static device_t *g_default_gpu; /* owns one metadata reference */
 static bool g_default_3d;
@@ -133,6 +134,32 @@ void gpu_device_access_end(struct gpu_device_access *access) {
     *access = (struct gpu_device_access){0};
     class_device_call_end(publication);
     class_device_put(publication);
+}
+
+void gpu_scanout_put(struct gpu_scanout *scanout) {
+    if (!scanout) return;
+    struct vmo *memory = scanout->memory;
+    *scanout = (struct gpu_scanout){0};
+    vmo_release(memory);
+}
+
+int gpu_device_scanout_get(const struct gpu_device_access *access, struct gpu_scanout *out) {
+    if (!out) return -EINVAL;
+    *out = (struct gpu_scanout){0};
+    if (!access || !access->publication || !access->device || !access->ops) return -ENODEV;
+    if (!access->ops->get_scanout) return -EOPNOTSUPP;
+    struct gpu_scanout snapshot = {0};
+    int ret = access->ops->get_scanout(access->device, &snapshot);
+    uint64_t physical;
+    size_t extent;
+    if (!ret && (vmo_contiguous_info(snapshot.memory, &physical, &extent) ||
+        !snapshot.size || snapshot.size > SIZE_MAX - (PAGE_SIZE - 1) ||
+        (snapshot.offset & (PAGE_SIZE - 1)) || snapshot.offset >= extent ||
+        ((snapshot.size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1)) > extent - snapshot.offset))
+        ret = -EINVAL;
+    if (ret) { gpu_scanout_put(&snapshot); return ret < 0 ? ret : -EIO; }
+    *out = snapshot;
+    return 0;
 }
 
 device_t *gpu_device_get_default(void) {

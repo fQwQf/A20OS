@@ -18,6 +18,7 @@ struct block_write;
 struct audio_dev_ops;
 struct virtio_gpu_mem_entry;
 struct virtio_gpu_box;
+struct gpu_scanout;
 
 #define CLASS_DEVICE_NAME_MAX 32
 
@@ -341,6 +342,10 @@ typedef struct gpu_dev_ops {
                          const void *cmdbuf, size_t len);
     /* Optional: firmware scanouts may have padded pitch and RGB/BGR masks. */
     int (*get_layout)(struct device *dev, gpu_scanout_layout_t *layout);
+    /* ABI 11: owning RAM scanout snapshot. Any non-NULL memory returned,
+     * including on error, transfers one VMO reference to the caller.
+     * Capture memory/offset/size atomically against replacement. */
+    int (*get_scanout)(struct device *dev, struct gpu_scanout *out);
 } gpu_dev_ops_t;
 
 typedef struct audio_dev_ops audio_dev_ops_t;

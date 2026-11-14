@@ -12,7 +12,7 @@ class GpuAccess(unittest.TestCase):
     def setUpClass(cls):
         cls.temp=tempfile.TemporaryDirectory(prefix='a20-gpu-access-')
         cls.addClassCleanup(cls.temp.cleanup);work=Path(cls.temp.name)
-        stubs={**STUBS,'core/lock.h':'''#pragma once
+        stubs={**STUBS,'core/arch.h':'#define PAGE_OFFSET 0x100000000UL\n','core/lock.h':'''#pragma once
 #include <assert.h>
 #include <pthread.h>
 #include "core/types.h"
@@ -24,6 +24,7 @@ static inline void spin_unlock_irqrestore(spinlock_t *p,uint64_t f){(void)f;asse
 ''','core/sync.h':'''#pragma once
 #include "core/lock.h"
 typedef pthread_mutex_t mutex_t;
+typedef struct {void *head;} wait_queue_t;
 extern _Thread_local int watch_mutex;
 extern int mutex_waiting;
 #define MUTEX_INIT PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP

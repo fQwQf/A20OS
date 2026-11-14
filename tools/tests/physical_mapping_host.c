@@ -1,5 +1,6 @@
 /* Real Rust mapping policy, C bridges/consumers and PT unmap; modeled hardware. */
 #include <assert.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -102,8 +103,12 @@ static int udriver_mmio_allowed(uint64_t pa,uint64_t n){return pa>=0x100000&&n<=
 struct device {int unused;};
 static uint64_t fb_phys=0x100000;static size_t fb_size=3*PAGE_SIZE;
 static int get_fb(struct device *d,uintptr_t *p,size_t *n){(void)d;*p=fb_phys;*n=fb_size;return 0;}
-typedef struct {int (*get_fb)(struct device *,uintptr_t *,size_t *);} gpu_dev_ops_t;
+struct gpu_scanout {struct vmo *memory;uint64_t offset;size_t size;};
+typedef struct {int (*get_fb)(struct device *,uintptr_t *,size_t *);int (*get_scanout)(struct device *,struct gpu_scanout *);} gpu_dev_ops_t;
 struct gpu_device_access {struct device *device;const gpu_dev_ops_t *ops;};
+static int gpu_device_scanout_get(const struct gpu_device_access *a,struct gpu_scanout *out){(void)a;(void)out;assert(0);return -EOPNOTSUPP;}
+static void gpu_scanout_put(struct gpu_scanout *s){(void)s;assert(0);}
+static vaddr_t mm_mmap_vmo_cap(mm_struct_t *mm,vaddr_t addr,size_t len,int prot,int flags,struct vmo *vmo,uint64_t off,uint32_t cap){(void)mm;(void)addr;(void)len;(void)prot;(void)flags;(void)vmo;(void)off;(void)cap;assert(0);return (vaddr_t)-EINVAL;}
 typedef struct {mm_struct_t *mm;} task_t;static task_t task;
 static task_t *proc_current(void){return &task;}
 static void fb_autoflush_kick(void){}
@@ -182,7 +187,7 @@ int main(int argc,char **argv){
   uint64_t out=0xfeed;assert(udriver_map_mmio(&mm,0x100001,PAGE_SIZE,3,&out)==-1&&out==0xfeed);
   record_oom=1;assert(udriver_map_mmio(&mm,0x100000,PAGE_SIZE,3,&out)==-1&&out==0xfeed);record_oom=0;
   assert(!udriver_map_mmio(&mm,0x100000,PAGE_SIZE,3,&out)&&mm.rss==1&&(leaf(&mm,out)&PTE_DEVICE));
-  struct device dev={0};const gpu_dev_ops_t ops={get_fb};struct gpu_device_access access={&dev,&ops};task.mm=&mm;
+  struct device dev={0};const gpu_dev_ops_t ops={.get_fb=get_fb};struct gpu_device_access access={&dev,&ops};task.mm=&mm;
   fb_phys=UINTPTR_MAX-(PAGE_SIZE-1);
   assert(fbdev_linux_mmap_active(&access,0,PAGE_SIZE,3,MAP_SHARED,2*PAGE_SIZE)==-EOVERFLOW);
   fb_phys=0x100000;

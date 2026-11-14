@@ -421,6 +421,77 @@ static void exercise_gpu_access(void) {
 }
 
 #ifndef CONFIG_NOMMU
+static int scanout_test_probe(device_t *dev) {
+    struct vmo *memory;
+    int ret = vmo_create_contiguous(2 * PAGE_SIZE + 33, &memory);
+    if (ret) return ret;
+    dev->drv_priv = memory;
+    ret = gpu_device_register(dev);
+    if (ret) { dev->drv_priv = NULL; vmo_release(memory); }
+    return ret;
+}
+static int scanout_test_get(device_t *dev, struct gpu_scanout *out) {
+    struct vmo *memory = dev->drv_priv;
+    if (!memory) return -ENODEV;
+    vmo_ref(memory);
+    *out = (struct gpu_scanout){memory, 0, 2 * PAGE_SIZE + 33};
+    return 0;
+}
+static int scanout_test_remove(device_t *dev) {
+    gpu_device_unregister(dev);
+    struct vmo *memory = dev->drv_priv;
+    dev->drv_priv = NULL;
+    vmo_release(memory);
+    return 0;
+}
+static void exercise_gpu_scanout(void) {
+    bus_type_t bus = {.name = "scanout-vmo-selftest", .match = gpu_test_match};
+    const gpu_dev_ops_t ops = {.get_info = gpu_test_info, .get_scanout = scanout_test_get};
+    driver_t driver = {.name = "scanout-vmo-selftest", .bus = &bus,
+        .probe = scanout_test_probe, .remove = scanout_test_remove,
+        .class_type = DEV_CLASS_DISPLAY, .class_ops = &ops};
+    device_t device = {.name = "scanout-vmo-selftest", .bus = &bus,
+        .plat_data = &driver, .references = 1};
+    CHECK(!bus_register(&bus) && !driver_register(&driver) && !device_register(&device));
+    CHECK(device.drv == &driver);
+    class_device_t *publication = class_device_ref_for_device(&device);
+    struct gpu_device_access access;
+    CHECK(publication && !gpu_device_access_begin(publication, &access));
+    struct gpu_scanout scanout;
+    CHECK(!gpu_device_scanout_get(&access, &scanout));
+    gpu_device_access_end(&access); /* The snapshot outlives this call. */
+    mm_struct_t *mm = mm_create();
+    CHECK(mm);
+    vaddr_t va = mm_mmap_vmo_cap(mm, 0, 3 * PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, scanout.memory, 0, PROT_READ | PROT_WRITE);
+    CHECK(!mm_addr_is_error(va));
+    pfn_t first = vmo_peek_page(scanout.memory, 0);
+    ((uint8_t *)pfn_to_virt(first))[0] = 0x5a;
+    gpu_scanout_put(&scanout);
+    CHECK(!driver_unregister(&driver) && !device.drv_priv);
+    CHECK(gpu_device_access_begin(publication, &access) == -ENODEV);
+    CHECK(!device_unregister(&device));device_put(&device);class_device_put(publication);
+    CHECK(!device.references);bus_unregister(&bus);
+    /* Only native VMA references remain. Split and clone unpopulated VMO
+     * views here; the userspace fbdev test covers resident fault/fork too. */
+    CHECK(!mm_mprotect(mm, va + PAGE_SIZE, PAGE_SIZE, PROT_READ));
+    mm_struct_t *child = mm_fork(mm);
+    CHECK(child);
+    mm_destroy(mm);
+    CHECK(!mm_munmap(child, va, 2 * PAGE_SIZE));
+    mm_seg_t *tail = mm_seg_find(child, va + 2 * PAGE_SIZE);
+    CHECK(tail && (tail->vm_flags & VM_VMO) && tail->backing_offset == 2 * PAGE_SIZE);
+    uint64_t physical;size_t extent;
+    CHECK(!vmo_contiguous_info(tail->vmo, &physical, &extent) && extent == 3 * PAGE_SIZE);
+    CHECK(physical == pfn_to_phys(first) && ((uint8_t *)pfn_to_virt(first))[0] == 0x5a);
+    CHECK(vmo_resize(tail->vmo, 0) == -EOPNOTSUPP);
+    pfn_t pages[3];
+    CHECK(!vmo_pin_pages(tail->vmo, 0, 3, pages));
+    mm_destroy(child); /* Pins now outlive every VMO and device reference. */
+    CHECK(pages[0] == first && ((uint8_t *)pfn_to_virt(first))[0] == 0x5a);
+    frame_put_many(pages, 3);
+}
+
 static void exercise_physical_mapping(void) {
     /* The mapping borrows this VMO-owned frame. Retain its owner until all
      * physical views are unmapped; the mapper must not pin/put it as RAM. */
@@ -614,6 +685,7 @@ void driver_runtime_selftest_boot(void)
     exercise_gpu_access();
 #ifndef CONFIG_NOMMU
     exercise_physical_mapping();
+    exercise_gpu_scanout();
 #endif
     exercise_dma_buffer();
     exercise_dma_buffer_mapping();
@@ -641,6 +713,7 @@ void driver_runtime_selftest_boot(void)
      * result printed during concurrent background-thread startup. */
     kinfo("%s"
 #ifndef CONFIG_NOMMU
+          "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1\n"
           "DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1\n"
 #endif
           "DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1\n"

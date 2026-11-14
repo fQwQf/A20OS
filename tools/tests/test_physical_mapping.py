@@ -31,7 +31,7 @@ def build_fixture(work, policy_text=None, unmap_transform=None, narrow_pa=False,
     body=spec+';\n'+flags+'\nextern uintptr_t a20_mmap_physical_rust(void *,uintptr_t,size_t,int,int,uint64_t,uintptr_t);\n'+bridges
     driver=extract_function((ROOT/'kernel/drivers/core/udriver.c').read_text(),'int udriver_map_mmio(')
     fb=(ROOT/'kernel/drivers/gpu/framebuffer.c').read_text()
-    fb_body='\n'.join(extract_function(fb,n) for n in ['static int64_t fb_map_physical(', 'static int64_t fbdev_linux_mmap_active('])
+    fb_body='\n'.join(extract_function(fb,n) for n in ['static int64_t fb_map_scanout(', 'static int64_t fb_map_physical(', 'static int64_t fbdev_linux_mmap_active('])
     ioctl=extract_function(fb,'static int fb_ioctl_active(')
     branch=ioctl[ioctl.index('        case FBIO_MAP_FB: {'):ioctl.index('        case FBIO_FLUSH:')]
     fb_body+='\nstatic int fb_ioctl_map(struct gpu_device_access *access,void *arg){\nconst gpu_dev_ops_t *ops=access->ops;struct device *dev=access->device;switch(FBIO_MAP_FB){\n'+branch+'\n}return -EINVAL;}\n'
