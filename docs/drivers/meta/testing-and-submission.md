@@ -125,6 +125,10 @@ DMA buffer/bulk 变更运行 `python3 -m unittest tools.tests.test_driver_dma_bu
 
 `make smoke-usb-bulk-x86_64` 构建双 CPU embedded RAMFS 内核，创建专用 8 MiB 空白 USB 镜像；显式 `driver.usb_bulk_test=1` 只在 QEMU 控制器和 USB disk 身份/尺寸、待写范围初值均匹配时执行读写、比对并恢复，要求 `DRIVER_USB_BULK: PASS read=1 write=1 verify=1 restore=1`。通用 runtime 另执行真实 PFA 的 33 字节/64 KiB 对齐对象跨 owner 注销验证，在末尾同一条日志输出 `DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1`；hub 门禁同时要求该标记。它们不证明实体 stop 超时或任意 IOMMU/缓存后端正确。
 
+buffer/domain 衔接运行 `python3 -m unittest tools.tests.test_driver_buffer_mapping tools.tests.test_riscv_iommu_requester tools.tests.test_riscv_iommu_queue -v`：前者运行生产 allocator/core/mapper/policy，验证整块引用、末页 padding、非连续 IOVA、cache 方向、map/unmap 失败保留和并发关闭；后两者运行实际 RISC-V provider，区分用户态 frame pin 与 native mapping 所有权，模拟高阶尾页零引用及失效失败。硬件/PFA/命令完成仍为 host 后端。
+
+`tools/a20 test smoke-driver-iommu-native-riscv64` 在 manifest 中显式选择 embedded，使构建和启动使用同一驱动配置；增加真实高阶 buffer 的跨页 EDU DMA，要求 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`；释放 allocator caller 引用后仍由 mapping 保留，再确认 DMA/BME 停止并解除映射。原有不连续页 DMA、非法 IOVA fault/watch 与 detach 验证继续执行。通用 runtime 的显式 direct domain 另要求 `DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1`；USB hub/bulk 门禁纳入该标记，但 USB 读写本身仍使用原 identity-DMA 暂存路径。QEMU 正常失效不是实体失效超时的证据。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |
