@@ -169,6 +169,7 @@ int main(int argc,char **argv) {
   assert(refs[11]==1&&refs[12]==1&&gets==put_count);
  } else {
   if(!strcmp(name,"paged"))source->type=VMO_PAGED;
+  if(!strcmp(name,"contiguous"))source->type=VMO_CONTIGUOUS;
   if(!strcmp(name,"sparse"))source->type=VMO_SHARED_ANON;
   if(!strcmp(name,"resize"))resize_on_map=1;
   if(!strcmp(name,"rollback")){provider.fail_map=2;provider.pending=1;provider.fail_unmap=1;}

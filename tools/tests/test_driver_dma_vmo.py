@@ -88,3 +88,5 @@ void dma_sync_for_cpu(void *,size_t);
         result=subprocess.run([str(self.binary),'owned-lock'],capture_output=True,text=True,timeout=15)
         self.assertNotEqual(result.returncode,0)
         self.assertIn('host_owned_spinlock != &source->lock',result.stderr)
+
+    def test_contiguous_canonical_ram_import(self): self.run_cases('contiguous')

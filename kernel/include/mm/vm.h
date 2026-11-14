@@ -632,6 +632,12 @@ vaddr_t mm_mmap_vfile(mm_struct_t *mm, vaddr_t addr, size_t len,
                       uint64_t file_offset);
 vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
                     int prot, int flags, struct vmo *vmo, uint64_t vmo_offset);
+/* Task context, no MM/spinlock held; caller retains mm and VMO. The VMA
+ * acquires its own VMO reference. cap is an immutable READ/WRITE/EXEC ceiling;
+ * initial prot must fit it. No Native VMAR placement owner is installed. */
+vaddr_t mm_mmap_vmo_cap(mm_struct_t *mm, vaddr_t addr, size_t len,
+                        int prot, int flags, struct vmo *vmo,
+                        uint64_t vmo_offset, uint32_t cap);
 int     mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len);
 vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk);
 int     mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);

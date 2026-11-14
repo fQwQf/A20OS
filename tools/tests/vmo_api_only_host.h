@@ -6,5 +6,6 @@
 #define VMO_ANONYMOUS 0
 struct vmo;
 struct vmo *vmo_create(uint32_t, uint64_t, uint32_t);
+int vmo_create_contiguous(size_t, struct vmo **);
 void vmo_release(struct vmo *);
 pfn_t vmo_get_page(struct vmo *, uint32_t);

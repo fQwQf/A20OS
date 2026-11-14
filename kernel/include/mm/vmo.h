@@ -42,6 +42,9 @@
 /* Internal Linux MAP_SHARED|MAP_ANONYMOUS backing, with sparse canonical
  * slots and an immutable extent (mremap growth faults beyond it with SIGBUS). */
 #define VMO_SHARED_ANON 3
+/* Internal immutable RAM extent. Created only by vmo_create_contiguous;
+ * its initially contiguous pages are independent canonical order-0 frames. */
+#define VMO_CONTIGUOUS 4
 
 struct a20_pager;
 struct vmo_charge;
@@ -64,6 +67,17 @@ struct vmo {
 };
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options);
+/* Task context, no MM/VMO/spinlock held. Zeroed contiguous canonical RAM,
+ * page-rounded immutable extent, at most PAGE_SIZE << MAX_ORDER bytes.
+ * The PFA allocation is split into order-0 references before publication;
+ * ordinary VMO maps, page pins and final destruction own those references.
+ * Failure clears out: EINVAL parameters, E2BIG limit, ENOMEM allocation,
+ * ERANGE invalid CPU alias/range, EIO failed ownership conversion. */
+int vmo_create_contiguous(size_t bytes, struct vmo **out);
+/* Caller retains a contiguous VMO. CPU physical range remains stable until
+ * final release; not a DMA address, mapping permission or stop proof.
+ * Returns EINVAL and clears outputs for other kinds/invalid parameters. */
+int vmo_contiguous_info(const struct vmo *, uint64_t *physical, size_t *bytes);
 void        vmo_ref(struct vmo *vmo);
 void        vmo_release(struct vmo *vmo);
 pfn_t       vmo_get_page(struct vmo *vmo, uint32_t index);
@@ -77,7 +91,8 @@ pfn_t       vmo_peek_page(struct vmo *vmo, uint32_t index);
 /* Task context, no VMO/spinlock held; caller holds a VMO reference. Atomically
  * snapshot and pin existing canonical RAM pages against resize/publication.
  * No allocation, materialization or pager calls. Anonymous, paged and sparse
- * shared-anonymous VMOs are supported; physical/unknown types -> -EOPNOTSUPP.
+ * shared-anonymous and contiguous VMOs are supported; physical/unknown kinds
+ * return -EOPNOTSUPP.
  * Missing page -> -EAGAIN; invalid range/PFN/output -> -EINVAL. Errors leave
  * output unchanged and take no pins. Success writes count PFNs, each with an
  * independent reference to release via frame_put(), even if the VMO shrinks or
