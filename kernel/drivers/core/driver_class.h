@@ -19,6 +19,7 @@ struct audio_dev_ops;
 struct virtio_gpu_mem_entry;
 struct virtio_gpu_box;
 struct gpu_scanout;
+struct gpu_capabilities;
 
 #define CLASS_DEVICE_NAME_MAX 32
 
@@ -358,6 +359,12 @@ typedef struct gpu_dev_ops {
      * including on error, transfers one VMO reference to the caller.
      * Capture memory/offset/size atomically against replacement. */
     int (*get_scanout)(struct device *dev, struct gpu_scanout *out);
+    /* ABI 12: explicit native roles, not operation-table inference. Copy
+     * cached, established capabilities; no hardware I/O, lifecycle/VFS calls
+     * or waiting. Called under serialized binding ownership (including probe
+     * before publication), or within a live class access. Flags stay stable
+     * for the binding; quiesce may return ENODEV. 0=success, negative errno on failure. */
+    int (*get_capabilities)(struct device *dev, struct gpu_capabilities *out);
 } gpu_dev_ops_t;
 
 typedef struct audio_dev_ops audio_dev_ops_t;

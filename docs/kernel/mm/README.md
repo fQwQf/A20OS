@@ -54,6 +54,8 @@ GPU owning scanout 向消费者转移一份 VMO 引用。`mm_mmap_vmo_cap()` 是
 
 DRM 与 PRIME dma-buf 的 RAM mmap 同样复用 `mm_mmap_vmo_cap()`，校验共享读写、范围/溢出和 fake handle offset，拒绝执行与 private，保留权限 ceiling 和原生错误。普通 VMA 自持 VMO；旧 GPU 绑定停止后，DRM worker 可退休硬件身份和 GEM，已有 CPU 映射仍保留存储，不需要模块最终回调。dma-buf fd 另持原 GEM pin，跨 publication 导入不隐式建立 DMA attach。见 [DRM 文件与退休](../../drivers/guide/native-runtime.md#drm-文件命名空间与失败退休)。
 
+GPU 原生能力快照是内部元数据，RAM_SCANOUT 标志不取得 VMO/page 引用，也不授予 MM/DMA 权限。ABI 12 get_capabilities 与 ABI 11 引入的 owning get_scanout 分工独立；实际 snapshot 仍须验证 extent/slot，VMA 仍自行保留 VMO。见 [能力与所有权](../../drivers/guide/native-runtime.md#原生-gpu-能力与默认选择)。
+
 ## 关键代码与头文件
 
 - **核心虚拟内存定义**：[`kernel/include/mm/vm.h`](../../../kernel/include/mm/vm.h)（`mm_struct_t`、`mm_seg_t`、锁模型规则）

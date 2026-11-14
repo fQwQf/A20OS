@@ -35,7 +35,7 @@ A20OS 现在同时支持三种驱动路径：
 
 ## 模块接口
 
-驱动 ABI 当前为 11：GPU vtable 末尾新增 owning RAM `get_scanout`；ABI 10 已增加 HCD 可失败 `release_endpoint`，ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_buffer_create/get/put/data/address/size`（显式存储引用，最终 put 不能代替停止 DMA）、`driver_dma_domain_*`、`driver_dma_map_buffer`、`driver_dma_map_vmo` 和页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD 与 GPU vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 virtio-gpu、xHCI、HID、hub、storage 等包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
+驱动 ABI 当前为 12：GPU vtable 末尾新增显式原生 `get_capabilities`；ABI 11 已增加 owning RAM `get_scanout`；ABI 10 已增加 HCD 可失败 `release_endpoint`，ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_buffer_create/get/put/data/address/size`（显式存储引用，最终 put 不能代替停止 DMA）、`driver_dma_domain_*`、`driver_dma_map_buffer`、`driver_dma_map_vmo` 和页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD 与 GPU vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 virtio-gpu、xHCI、HID、hub、storage 等包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
 
 模块只能解析 `kernel/drvmod/framework.c` 中的导出表。当前导出接口包括：
 
@@ -50,12 +50,13 @@ A20OS 现在同时支持三种驱动路径：
 
 - 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
-- VirtIO GPU 实例：驱动使用既有 `driver_dma_buffer_create/data/put` 持有每绑定队列/锁/暂存，实例退出后不留下模块回调；模块边界测试实际编译包装器并核对这些 imports。私有实例不扩展 ABI 11；停止失败保留 allocation，不允许卸载代码，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
-- VirtIO transport：`virtio_transport_reset` 通过既有 read32/write32 完成有界 status 读回确认，失败不释放 queue/IRQ/存储；不扩展 transport vtable，模块 ABI 保持 11，见 [退出协议](native-runtime.md#virtio-reset-确认与-gpu-退出)。
+- VirtIO GPU 实例：驱动使用既有 `driver_dma_buffer_create/data/put` 持有每绑定队列/锁/暂存，实例退出后不留下模块回调；模块边界测试实际编译包装器并核对这些 imports。私有实例不扩展公开布局（当前模块 ABI 为 12）；停止失败保留 allocation，不允许卸载代码，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
+- VirtIO transport：`virtio_transport_reset` 通过既有 read32/write32 完成有界 status 读回确认，失败不释放 queue/IRQ/存储；不扩展 transport vtable，模块 ABI 沿用当前版本 12，见 [退出协议](native-runtime.md#virtio-reset-确认与-gpu-退出)。
 - RAM scanout：`gpu_device_scanout_get`、`gpu_scanout_put`、`vmo_create_contiguous`、`vmo_contiguous_info`、`vmo_ref`、`vmo_release` 已加入白名单。snapshot 和普通 VMA 自持 MM 存储，不需要在最终 release 时调用设备模块；不授予 DMA 权限或证明硬件停止，见 [连续 RAM VMO](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
-- 原生绑定停止：`class_device_binding_stopped` 记录旧 publication 的显式成功 remove，`device_release_resource_action` 在串行 probe/lifecycle 中精确撤销一个局部回收动作；核心私有凭据不扩展公开布局，ABI 保持 11。离线不是停止，详见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
+- 原生绑定停止：`class_device_binding_stopped` 记录旧 publication 的显式成功 remove，`device_release_resource_action` 在串行 probe/lifecycle 中精确撤销一个局部回收动作；核心私有凭据不扩展公开布局，ABI 沿用当前版本 12。离线不是停止，详见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
 - DRM adapter：文件固定 publication，active call 内取得 ops；失败清理保留旧资源身份，旧绑定停止后只进入内核 MM 回收，不调用旧模块。`drm_create_vfile_for` 是内核 adapter 接口，未增加模块导出或 ABI 版本；这不代表运行期模块卸载已完成，见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。
-- GPU publication：`gpu_device_default_get`、`gpu_device_access_begin`、`gpu_device_default_begin`、`gpu_device_access_end`。前者返回需 put 的 class 引用，begin/end 拥有独立引用与 active call；不增加第二套驱动模型；当前全局 ABI 11 的 GPU vtable 扩展见上一项。完整契约见 [GPU 调用](native-runtime.md#gpu-publication-与作用域调用)。
+- GPU 原生能力：`gpu_device_capabilities_get` 在既有 access 内复制角色，失败清零，不取得存储/硬件权限；provider 只复制缓存状态。GPU provider 必须实现 ABI 12 的尾部回调，kernel guard 与 drvctl 拒绝旧 ABI 11，所有包需重建。见 [原生能力与默认策略](native-runtime.md#原生-gpu-能力与默认选择)。
+- GPU publication：`gpu_device_default_get`、`gpu_device_access_begin`、`gpu_device_default_begin`、`gpu_device_access_end`。前者返回需 put 的 class 引用，begin/end 拥有独立引用与 active call；不增加第二套驱动模型；当前全局 ABI 12 的 GPU vtable 扩展见上一项。完整契约见 [GPU 调用](native-runtime.md#gpu-publication-与作用域调用)。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
 - 内核熵池（硬件 RNG 模块）：`random_reseed`。内核已有 `kernel/core/random.c`（xoshiro 状态 + `random_u64`/`random_fill`，消费方是 `sys_getrandom()`、ASLR 与栈保护），硬件熵设备应当把读到的字节折进这个池而不是另起一套。该符号只能从进程上下文调用：`arch_entropy_sample()` 会取 `proc_current()` 与 `frame_free_count()`，在 ISR 里调它等于在中断里读调度器状态。
 - 调度/等待原语（模块完成路径）：`proc_park_prepare/commit/cancel/finish`、`proc_wake_q_init/flush`、`wait_queue_init/link/unlink/collect_one/collect_all`、`mutex_init/lock/unlock`、`timer_get_ticks`、`mdelay/udelay`。

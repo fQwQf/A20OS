@@ -260,7 +260,16 @@ static int vmsvga_get_features(struct device *dev, uint32_t *out_3d,
     return 0;
 }
 
+static int vmsvga_get_capabilities(device_t *dev, struct gpu_capabilities *out) {
+    if (!out) return -EINVAL;
+    *out = (struct gpu_capabilities){0};
+    if (!dev || !dev->drv_priv) return -ENODEV;
+    out->flags = GPU_CAP_SCANOUT;
+    return 0;
+}
+
 static const gpu_dev_ops_t vmsvga_ops = {
+    .get_capabilities = vmsvga_get_capabilities,
     .get_info = vmsvga_get_info,
     .get_fb = vmsvga_get_fb,
     .flush = vmsvga_flush,

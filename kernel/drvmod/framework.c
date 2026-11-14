@@ -637,6 +637,7 @@ const struct drv_export drv_export_table[] = {
     { "gpu_device_get_default", (void *)gpu_device_get_default },
     { "gpu_device_default_get", (void *)gpu_device_default_get },
     { "gpu_device_access_begin", (void *)gpu_device_access_begin },
+    { "gpu_device_capabilities_get", (void *)gpu_device_capabilities_get },
     { "gpu_device_default_begin", (void *)gpu_device_default_begin },
     { "gpu_device_access_end", (void *)gpu_device_access_end },
     { "class_device_binding_stopped", (void *)class_device_binding_stopped },

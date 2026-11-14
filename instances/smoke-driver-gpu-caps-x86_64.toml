@@ -1,0 +1,19 @@
+name = "smoke-driver-gpu-caps-x86_64"
+description = "Native GPU role and firmware fallback policy without physical rendering"
+arch = "x86_64"
+abi = "both"
+
+[kernel]
+driver_deployment = "embedded"
+
+[machine]
+memory = "1G"
+smp = 2
+extra_qemu = ["-vga", "none", "-append", "driver.runtime_test=1 driver.gpu_caps_test=1"]
+
+[test]
+expect = ["DRIVER_GPU_CAPS: PASS native=1 firmware=1 headless=1 election=1", "DRIVER_RUNTIME: PASS"]
+timeout = "60s"
+
+[net]
+stack = "bsd"

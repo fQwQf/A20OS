@@ -4,7 +4,7 @@
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
-当前模块 ABI 11 在 GPU vtable 末尾增加 owning RAM get_scanout；ABI 10 已增加 HCD 的可失败 endpoint 释放。HID/hub 独立退出在 class drain 后调用 `usb_interface_release_endpoints()`，成功才交还 URB、buffer 和回调代码所有权。失败保留绑定并重试，不得清空回调指针后直接释放。Configure Endpoint 失败的 ring 由 controller 保留到可证明停止。详见 [接口独立退出](native-runtime.md#接口独立退出与-endpoint-释放)。
+当前模块 ABI 12 在 GPU vtable 末尾增加原生 get_capabilities；ABI 11 已增加 owning RAM get_scanout；ABI 10 已增加 HCD 的可失败 endpoint 释放。HID/hub 独立退出在 class drain 后调用 `usb_interface_release_endpoints()`，成功才交还 URB、buffer 和回调代码所有权。失败保留绑定并重试，不得清空回调指针后直接释放。Configure Endpoint 失败的 ring 由 controller 保留到可证明停止。详见 [接口独立退出](native-runtime.md#接口独立退出与-endpoint-释放)。
 
 ## 总线拓扑与进度
 
@@ -15,6 +15,12 @@
 `class_device_binding_stopped()` 查询持有引用的真实核心 publication 所属旧绑定，只有显式 remove 成功进入 devres 回收后才返回 true。offline、class drain、失败 remove 和缺少 remove 都不能获得凭据；重新绑定不改变旧凭据。消费者只有在仍持有 backing 引用、并满足各自 DMA/映射退休要求时才能回收存储，不能把 true 当作全部 devres 已释放。
 
 `device_release_resources()` 由核心完整退出路径调用。驱动局部回滚使用 `device_release_resource_action()`，只能在串行 probe/lifecycle 上下文精确撤销一个 callback/data 动作；它不停止硬件，也不授予提前回收权限。完整契约见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
+
+## 原生 GPU 能力
+
+`get_capabilities` 是纯缓存角色查询：不做硬件 I/O、分配、VFS、生命周期操作或等待。注册在串行绑定所有权下查询，候选重选和普通 consumer 在 active class access 内查询；均不得持选择 spinlock 执行 provider。`gpu_device_capabilities_get` 清理失败输出，拒绝未知位和角色/回调不一致，缺少 provider 返回 EOPNOTSUPP，不回退猜测 virgl 表。
+
+默认选择只允许 SCANOUT，优先 RENDER，同级优先原生管理输出而把 BOOT_SCANOUT 作为回退，等分稳定；headless 仍可发布。此模型不等于通用提交协议或硬件健康证明，也不授权固件存储接管。完整角色、errno 与 ABI 12 规则见 [原生能力](native-runtime.md#原生-gpu-能力与默认选择)。
 
 ## GPU class 调用
 

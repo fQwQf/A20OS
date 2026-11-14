@@ -13,7 +13,7 @@ if (gpu_device_register(dev) < 0)
     goto fail;
 ```
 
-默认选择保留已注册 display，并可按完整旧 virgl transport 表优先提升设备；这不是通用 GPU 能力查询。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，fbdev 仍按每次操作选默认设备；DRM 在 open 时固定 publication，并分区 GEM/CRTC/EDID/事件，跨 publication PRIME 拒绝。这不等于完整多 GPU 节点或热拔插保护。DRM 持久 backing 要求驱动显式 remove，失败不能回收设备仍可访问的存储，见 [DRM 退休](../guide/native-runtime.md#drm-文件命名空间与失败退休)。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
+默认选择保留已注册 display，并使用 ABI 12 显式原生角色：只选择 SCANOUT，优先 RENDER，同级优先非 BOOT_SCANOUT，等分保持；不再从 virgl 表推断能力。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，fbdev 仍按每次操作选默认设备；DRM 在 open 时固定 publication，并分区 GEM/CRTC/EDID/事件，跨 publication PRIME 拒绝。这不等于完整多 GPU 节点或热拔插保护。DRM 持久 backing 要求驱动显式 remove，失败不能回收设备仍可访问的存储，见 [DRM 退休](../guide/native-runtime.md#drm-文件命名空间与失败退休)。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
 
 以下是旧 get_fb 接入的简化骨架；实际驱动必须补齐部分初始化回滚及可失败硬件停止，不能照此假定 stop 一定成功。RAM framebuffer 应采用下述 owning scanout：
 
@@ -97,6 +97,29 @@ static int my_gpu_remove(device_t *dev){
     return 0;
 }
 ```
+
+## 原生能力声明
+
+probe 建立实例后、`gpu_device_register` 前，必须准备纯缓存 `get_capabilities`。以下是上述原生 2D 骨架的能力部分；设备状态与各操作定义仍由实际驱动提供：
+
+```c
+static int my_gpu_get_capabilities(device_t *dev, struct gpu_capabilities *out)
+{
+    if (!out) return -EINVAL;
+    *out = (struct gpu_capabilities){0};
+    if (!dev || !dev->drv_priv) return -ENODEV;
+    out->flags = GPU_CAP_SCANOUT;
+    return 0;
+}
+static const gpu_dev_ops_t my_gpu_ops = {
+    .get_info = my_gpu_get_info,
+    .get_fb = my_gpu_get_fb,
+    .flush = my_gpu_flush,
+    .get_capabilities = my_gpu_get_capabilities,
+};
+```
+
+固件保留输出另声明 BOOT_SCANOUT；有 owning RAM get_scanout 才声明 RAM_SCANOUT；仅在渲染后端已建立时声明 RENDER，不能据硬件型号或函数入口推断。headless RENDER 可以发布而不占默认输出。consumer 在已有 access 内调用 `gpu_device_capabilities_get`；标志不替代实际操作校验、VMO 引用或 DMA 权限。四个现有 provider 已接入，当前模块 ABI 为 12，ABI 11 的旧包必须重建；规则见 [原生能力](../guide/native-runtime.md#原生-gpu-能力与默认选择)。
 
 ## 类操作
 

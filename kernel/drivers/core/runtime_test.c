@@ -390,11 +390,83 @@ static int gpu_test_match(device_t *dev, const driver_t *driver) {
 static int gpu_test_info(device_t *dev, uint32_t *width, uint32_t *height, uint32_t *bpp) {
     (void)dev; *width = 9; *height = 7; *bpp = 32; return 0;
 }
+static int gpu_test_capabilities(device_t *dev, struct gpu_capabilities *out) {
+    (void)dev;out->flags = GPU_CAP_SCANOUT;return 0;
+}
 static int gpu_test_probe(device_t *dev) { return gpu_device_register(dev); }
 static int gpu_test_remove(device_t *dev) { gpu_device_unregister(dev); return 0; }
+/* Explicit role-policy fixture, with no hardware GPU in its instance. The
+ * declared rendering roles are synthetic; no GPU commands execute here. */
+struct gpu_caps_fixture { driver_t *driver; struct gpu_capabilities capabilities; };
+static int gpu_caps_match(device_t *dev, const driver_t *driver) {
+    return ((struct gpu_caps_fixture *)dev->plat_data)->driver == driver;
+}
+static int gpu_caps_query(device_t *dev, struct gpu_capabilities *out) {
+    *out = ((struct gpu_caps_fixture *)dev->plat_data)->capabilities;
+    return 0;
+}
+static void gpu_caps_expect(device_t *expected) {
+    class_device_t *publication = gpu_device_default_get();
+    if (!expected) { CHECK(!publication); return; }
+    CHECK(publication && publication->dev == expected);
+    struct gpu_device_access access;
+    struct gpu_capabilities capabilities;
+    CHECK(!gpu_device_access_begin(publication, &access));
+    CHECK(!gpu_device_capabilities_get(&access, &capabilities) &&
+          capabilities.flags == ((struct gpu_caps_fixture *)expected->plat_data)->capabilities.flags);
+    CHECK(!access.ops->get_capset && !access.ops->submit_3d);
+    gpu_device_access_end(&access);class_device_put(publication);
+}
+static void exercise_gpu_capabilities(void) {
+    gpu_caps_expect(NULL);
+    bus_type_t bus = {.name = "gpu-caps-selftest", .match = gpu_caps_match};
+    const gpu_dev_ops_t ops = {.get_info = gpu_test_info, .get_capabilities = gpu_caps_query};
+    driver_t driver = {.name = "gpu-caps-selftest", .bus = &bus,
+        .probe = gpu_test_probe, .remove = gpu_test_remove,
+        .class_type = DEV_CLASS_DISPLAY, .class_ops = &ops};
+    uint64_t roles[] = {
+        GPU_CAP_SCANOUT | GPU_CAP_BOOT_SCANOUT, GPU_CAP_RENDER,
+        GPU_CAP_SCANOUT, GPU_CAP_SCANOUT,
+        GPU_CAP_SCANOUT | GPU_CAP_RENDER | GPU_CAP_BOOT_SCANOUT,
+        GPU_CAP_SCANOUT | GPU_CAP_RENDER, GPU_CAP_SCANOUT | GPU_CAP_RENDER,
+        GPU_CAP_RAM_SCANOUT, /* Invalid role/callback combination. */
+    };
+    const char *names[] = {"gpu-caps-boot", "gpu-caps-headless", "gpu-caps-managed",
+        "gpu-caps-managed-peer", "gpu-caps-boot-render", "gpu-caps-render",
+        "gpu-caps-render-peer", "gpu-caps-invalid"};
+    struct gpu_caps_fixture cases[8];
+    device_t devices[8];
+    CHECK(!bus_register(&bus) && !driver_register(&driver));
+    for (unsigned i = 0; i < 8; i++) {
+        cases[i] = (struct gpu_caps_fixture){&driver, {roles[i]}};
+        devices[i] = (device_t){.name = names[i], .bus = &bus,
+            .plat_data = &cases[i], .references = 1};
+        CHECK(!device_register(&devices[i]));
+        if (i == 7) CHECK(!devices[i].drv && !devices[i].class_dev &&
+                          devices[i].probe_error == -EINVAL);
+        else CHECK(devices[i].drv == &driver);
+        unsigned expected = i < 2 ? 0 : i < 4 ? 2 : i == 4 ? 4 : 5;
+        gpu_caps_expect(&devices[expected]);
+    }
+    /* Re-election must pass a firmware renderer to find a managed renderer,
+     * then recover every lower priority without selecting the headless GPU. */
+    CHECK(!device_unregister(&devices[5]));gpu_caps_expect(&devices[6]);
+    CHECK(!device_unregister(&devices[6]));gpu_caps_expect(&devices[4]);
+    CHECK(!device_unregister(&devices[4]));
+    CHECK(!device_unregister(&devices[2]));gpu_caps_expect(&devices[3]);
+    CHECK(!device_unregister(&devices[3]));gpu_caps_expect(&devices[0]);
+    CHECK(!device_unregister(&devices[0]));gpu_caps_expect(NULL);
+    CHECK(!device_unregister(&devices[1]) && !device_unregister(&devices[7]));
+    for (unsigned i = 0; i < 8; i++) {
+        CHECK(devices[i].references == 1);
+        device_put(&devices[i]);CHECK(!devices[i].references);
+    }
+    CHECK(!driver_unregister(&driver));bus_unregister(&bus);
+}
+
 static void exercise_gpu_access(void) {
     bus_type_t bus = {.name = "gpu-access-selftest", .match = gpu_test_match};
-    const gpu_dev_ops_t ops = {.get_info = gpu_test_info};
+    const gpu_dev_ops_t ops = {.get_info = gpu_test_info, .get_capabilities = gpu_test_capabilities};
     driver_t driver = {.name = "gpu-access-selftest", .bus = &bus,
         .probe = gpu_test_probe, .remove = gpu_test_remove,
         .class_type = DEV_CLASS_DISPLAY, .class_ops = &ops};
@@ -409,7 +481,11 @@ static void exercise_gpu_access(void) {
     uint32_t width, height, bpp;
     CHECK(!access.ops->get_info(access.device, &width, &height, &bpp));
     CHECK(width == 9 && height == 7 && bpp == 32);
+    struct gpu_capabilities capabilities;
+    CHECK(!gpu_device_capabilities_get(&access, &capabilities) && capabilities.flags == GPU_CAP_SCANOUT);
     gpu_device_access_end(&access);
+    capabilities.flags = GPU_CAP_KNOWN;
+    CHECK(gpu_device_capabilities_get(&access, &capabilities) == -ENODEV && !capabilities.flags);
     CHECK(!access.device && !access.ops && !access.publication);
     CHECK(!gpu_device_default_begin(&access)); /* May select an existing real GPU. */
     CHECK(access.publication->dev == access.device && access.ops);
@@ -439,6 +515,9 @@ static int scanout_test_get(device_t *dev, struct gpu_scanout *out) {
     *out = (struct gpu_scanout){memory, 0, 2 * PAGE_SIZE + 33};
     return 0;
 }
+static int scanout_test_capabilities(device_t *dev, struct gpu_capabilities *out) {
+    (void)dev;out->flags = GPU_CAP_SCANOUT | GPU_CAP_RAM_SCANOUT;return 0;
+}
 static int scanout_test_remove(device_t *dev) {
     gpu_device_unregister(dev);
     struct vmo *memory = dev->drv_priv;
@@ -448,7 +527,7 @@ static int scanout_test_remove(device_t *dev) {
 }
 static void exercise_gpu_scanout(void) {
     bus_type_t bus = {.name = "scanout-vmo-selftest", .match = gpu_test_match};
-    const gpu_dev_ops_t ops = {.get_info = gpu_test_info, .get_scanout = scanout_test_get};
+    const gpu_dev_ops_t ops = {.get_info = gpu_test_info, .get_scanout = scanout_test_get, .get_capabilities = scanout_test_capabilities};
     driver_t driver = {.name = "scanout-vmo-selftest", .bus = &bus,
         .probe = scanout_test_probe, .remove = scanout_test_remove,
         .class_type = DEV_CLASS_DISPLAY, .class_ops = &ops};
@@ -564,10 +643,22 @@ static void exercise_gpu_instances(void) {
     struct gpu_scanout first, second;
     CHECK(!gpu_device_access_begin(old, &access));
     CHECK(!gpu_device_scanout_get(&access, &first));
+    struct gpu_capabilities capabilities;
+    uint32_t negotiated, context_init;
+    CHECK(!gpu_device_capabilities_get(&access, &capabilities) &&
+          (capabilities.flags & (GPU_CAP_SCANOUT | GPU_CAP_RAM_SCANOUT)) ==
+          (GPU_CAP_SCANOUT | GPU_CAP_RAM_SCANOUT));
+    CHECK(access.ops->get_features && !access.ops->get_features(access.device, &negotiated, &context_init));
+    CHECK(!!(capabilities.flags & GPU_CAP_RENDER) == !!negotiated);
     CHECK(access.ops->flush && !access.ops->flush(access.device, 0, 0, 1, 1));
     gpu_device_access_end(&access);
     CHECK(!gpu_device_access_begin(peer, &access));
     CHECK(!gpu_device_scanout_get(&access, &second));
+    CHECK(!gpu_device_capabilities_get(&access, &capabilities) &&
+          (capabilities.flags & (GPU_CAP_SCANOUT | GPU_CAP_RAM_SCANOUT)) ==
+          (GPU_CAP_SCANOUT | GPU_CAP_RAM_SCANOUT));
+    CHECK(access.ops->get_features && !access.ops->get_features(access.device, &negotiated, &context_init));
+    CHECK(!!(capabilities.flags & GPU_CAP_RENDER) == !!negotiated);
     CHECK(access.ops->flush && !access.ops->flush(access.device, 0, 0, 1, 1));
     gpu_device_access_end(&access);
     CHECK(first.memory != second.memory);
@@ -803,6 +894,8 @@ void driver_runtime_selftest_boot(void)
     kinfo("DRIVER_RUNTIME: START\n");
     exercise_resources();
     exercise_gpu_access();
+    bool gpu_caps_test = boot_flag(args, "driver.gpu_caps_test=1");
+    if (gpu_caps_test) exercise_gpu_capabilities();
 #ifndef CONFIG_NOMMU
     exercise_physical_mapping();
     exercise_gpu_scanout();
@@ -842,6 +935,7 @@ void driver_runtime_selftest_boot(void)
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
     kinfo("%s"
+          "%s"
 #ifndef CONFIG_NOMMU
           "%s"
           "%s"
@@ -849,17 +943,18 @@ void driver_runtime_selftest_boot(void)
           "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1\n"
           "DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1\n"
 #endif
-          "DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1\n"
+          "DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1 caps=1\n"
           "DRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1\n"
           "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
           "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",
+          gpu_caps_test ? "DRIVER_GPU_CAPS: PASS native=1 firmware=1 headless=1 election=1\n" : "",
 #ifndef CONFIG_NOMMU
           gpu_stop ? "DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1\n" : "",
           drm_binding ? "DRIVER_DRM_BINDING: PASS file=1 stop=1 reaper=1 vma=1 rebind=1\n" : "",
-          gpu_instances ? "DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1\n" : "",
+          gpu_instances ? "DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1 caps=1\n" : "",
 #endif
           pci_scope ? " pci=1" : "");
     if (current_board && current_board->poweroff)
