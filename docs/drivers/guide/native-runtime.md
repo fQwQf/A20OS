@@ -216,6 +216,7 @@ bulk 是精确长度同步接口，不运行 complete 回调：0 表示完整长
 - `driver_dma_domain_create_direct()`：仅在总线/平台已确认采用恒等 DMA 时显式使用。它不提供隔离，不能作为 IOMMU 失败时的降级，也不探测 AMD-Vi。
 - `driver_dma_map_pages()`：映射调用者已持有的 order-0 RAM 页数组。页面可以物理不连续；每页获得独立的设备 DMA 地址。
 - `driver_dma_map_buffer()`：显式保留并映射原生 buffer 的页覆盖范围；与页数组使用相同后续接口，整块分配不拆分，详见 [buffer 映射](#将-buffer-显式映射到-domain)。
+- `driver_dma_map_vmo()`：按 first/count 页索引导入已物化的原生 VMO RAM，先取得稳定页引用，再交给页映射；不建立活的 VMO 大小/驻留租约，详见 [VMO 页快照](#从原生-vmo-保留页并映射)。
 - `driver_dma_page_address()`：读取设备地址，不根据 PFN 或 CPU 地址推算。地址 0 可以合法，错误由返回值区分。
 - `driver_dma_mapping_sync_for_device/cpu()`：在 CPU 与设备停止访问的边界执行缓存同步。映射时自动执行初次 device 同步，成功映射解除时执行必要的 CPU 同步。
 - `driver_dma_try_unmap_pages(&mapping)`：硬件停止访问后，逆序解除翻译；全部成功才同步 CPU、释放页面和 domain 引用并置空指针。失败返回负 errno 并保留 mapping，必须重试。
@@ -267,11 +268,23 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 
 `riscv_iommu_dma_watch_stop(&watch, deadline)` 永久关闭重排并等待在途回调返回，成功释放对象、device 引用并置空指针。deadline 是绝对 ticks，0 表示无截止；超时或中断保留整个对象和 context，应在同一 owner 上串行重试。回调内自停止返回 `-EDEADLK` 且不释放。start 的部分失败也可能交出非空清理句柄，须 stop 后再丢弃。监测器不固定硬件 domain 或驱动绑定，应在 quiesce 中先 stop，再 shutdown domain/释放设备上下文。目前采用每 watch 一个 worker，没有 IRQ 触发或共享线程池。
 
-显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。EDU 先对 64 KiB 对齐、PAGE_SIZE+33 字节的高阶 buffer 做跨页往返：map 后先交还 allocator caller 引用，验证模式和未传输字节，再确认停止并 unmap，要求 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`。实例 manifest 显式选择 embedded，使构建与启动使用同一驱动配置。后续往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录，由后台 watch 完成隔离并通过回调 signal fence；主线程等待 fence、stop 排空回调后，再检查 store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
+显式 `driver.runtime_test=1 driver.iommu_native_test=1` 自检需要额外 QEMU EDU fixture，普通启动不运行。测试从已枚举、未绑定的 EDU 找到真实 device，建立原生 domain、映射两个 RAM 页，通过 IOMMU TR_REQ 验证设备地址翻译和只读权限，再检查 unmap 与 detach 后翻译故障。该路径使用 [QEMU 的寄存器定义](https://raw.githubusercontent.com/qemu/qemu/master/hw/riscv/riscv-iommu-bits.h)中 TR_REQ 的 DID/GO/NW 字段；高半部 DID 在低半部 GO 前写入，并有 busy 等待上限。启用 legacy PPN 编码兼容时，TR_REQ 响应校验只能比较旧编码保留的地址字段。EDU 先对 64 KiB 对齐、PAGE_SIZE+33 字节的高阶 buffer 做跨页往返：map 后先交还 allocator caller 引用，验证模式和未传输字节，再确认停止并 unmap，要求 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`。实例 manifest 显式选择 embedded，使构建与启动使用同一驱动配置。随后还将原生 VMO 的页 1–2 映射到相邻 IOVA，先销毁原 VMO，再由 EDU 跨页读入/写回并核对模式与未传输区域，要求 `DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1`；确认 DMA/BME 停止后才解除映射。后续往返测试将两个物理不连续 RAM 页映射成相邻 IOVA，以 128 字节传输跨越页边界：先读入 EDU 内部缓冲，再清零 RAM 传输区并写回，逐字节验证模式以及两页非传输区域和额外 guard 页。测试传给 EDU 的是通用 mapping 返回的 IOVA，原始 RAM owner 引用在 DMA 前已经释放，页面由 mapping/backend 持有。两次传输之间依次执行 for-CPU 与 for-device 同步，确认 DMA_RUN 清除后才读回、关闭 bus mastering 和 unmap。等待同时有时钟期限和迭代上限；超时 panic 保留活跃资源。之后在持有独立 guard 引用的原 RAM 页上保留哨兵，unmap 后让 EDU 再尝试写原 IOVA；检查 FQ 新记录，由后台 watch 完成隔离并通过回调 signal fence；主线程等待 fence、stop 排空回调后，再检查 store page fault、BME 清除、隔离状态和新 map 拒绝，并验证哨兵未变。保留 guard 引用使失效回归也不会写坏已重新分配的内核 RAM。该数据路径补充了旧 TR_REQ 编码的校验缺口，但仍不代表实体硬件恢复或端到端用户态 DMA 已验证。
 
 同一 `smoke-driver-iommu-native-riscv64` 实例还验证通用占用与原生/用户 domain 的双向冲突、拒绝时 DC 不变、shutdown 后最后 put 前继续占用，以及用户正常幂等/release 后重试，新增 `DRIVER_IOMMU_REQUESTER: PASS native=1 user=1 conflict=1 release=1` 标记；普通启动不运行。失败保留与锁顺序另由主机后端验证。
 
 限制：仅支持完整的、已分配的 order-0 RAM 页。不是任意物理地址映射接口，不接收 GOP/VRAM、未物化 VMO 页或高阶分配的尾页。没有部分页、segment 合并、bounce、通用 IOMMU 硬件后端或缓存一致性新后端。缓存维护复用已有架构 hook，架构声明未就绪时拒绝创建/映射。旧 `dma_alloc_coherent()` 不自动加入 managed 页映射；用户态映射继续使用既有接口，共享 requester 接管与失败保留按上述协议执行。
+
+### 从原生 VMO 保留页并映射
+
+`vmo_peek_page()` 返回借用 PFN，不能在解锁后用它推导稍后 frame_get 仍安全。新增 MM 接口 `vmo_pin_pages(vmo, first, count, pages)` 在调用者持 VMO 引用的任务上下文，使用同一 VMO lock 排除 resize/publication，先验证整个范围及 canonical PFN，再发布输出并通过 PFA 批量保留各帧。Rust `vmo_lifecycle.rs` 拥有这项事务，C 只提供锁/字段访问和 batch pin 原语。错误不改输出数组、不取得部分 pin。
+
+支持 ANONYMOUS、PAGED 和稀疏 SHARED_ANON 已物化 RAM；缺页返回 `-EAGAIN`，不分配页、不调用 pager，不用缺页异常隐式完成导入。物理/未知 VMO 返回 `-EOPNOTSUPP`，参数/范围/无效 PFN 返回 `-EINVAL`。单次上限 `VMO_PIN_MAX_PAGES=4096`，超过返回 `-E2BIG`；上限由 C 头文件定义，Rust 经窄查询取得同一值，用于约束 IRQ-off 遍历。更大对象分范围导入，调用者须协调跨批次 resize，不保证多个批次是同一快照。成功写出的每页都有独立 owning reference，最后由 frame_put 交还；不能把高阶尾页、VRAM 或任意物理 VMO 当作这类 canonical 页。
+
+驱动入口 `driver_dma_map_vmo(domain, vmo, first, count, direction, &mapping)` 定义在 `dma_mapping.h`，由 `dma_vmo.c` 实现并导出给模块。调用者在整个调用期间持有 VMO/domain 引用；first/count 是页索引/页数，末个逻辑页的 padding 也会被映射。adapter 在 VMO lock 外分配临时 PFN 数组，取得上述稳定页快照，随后调用原有 map_pages，最后在所有返回路径归还临时 pin/数组。policy 检查完整页且先于 provider 调用；它发生在 MM 快照之后，拒绝时临时 pin 也会撤销，不留下翻译。分配失败返回 `-ENOMEM`，其他 mapper 错误原样传播；错误清空输出，除既有可失败回滚交出的非空清理句柄。
+
+mapping 独立持有所需 frame 引用，调用者在成功返回后可释放 VMO；也可缩小源 VMO，而设备仍引用取得快照时的原页面。新的 CPU fault/重新增长可能选用不同页面，不能把这解释为自动跟踪源地址。若映射失败只发布了一个前缀，清理句柄只保留那些可能被硬件访问的帧，未发布后缀的临时 pin 正常交还。失效失败仍按既有协议保留 mapping，只有全部确认成功后才进行必要 CPU sync 和最后释放。
+
+所有 provider/cache 调用均不持 VMO lock；锁顺序只在快照期间是 VMO → PFA，释放 VMO lock 后才取得 managed domain mutex。该接口只保证帧存活，不冻结 VMO extent，不转移 cgroup charge，也不授予源对象访问权或硬件 DMA 权限。GPU BO/request 层仍须管理访问权、驻留/预算、CPU/device 排他和提交/完成；VMO resize/销毁释放其原有预算不代表 DMA pin 已经消失。这里不增加用户态 UAPI、Linux GEM 结构依赖或 GPUVM。
 
 ### 不可变物理约束与映射入口检查
 
@@ -694,3 +707,18 @@ AArch64 的 `ARCH=aarch64 ABI=linux BRINGUP=0 DRIVER_DEPLOYMENT=embedded RAMFS_U
 `tools/a20 test smoke-driver-iommu-native-riscv64` 的最终 manifest 显式选择 embedded；构建普通 dev 内核/镜像并启动同一配置，避免 make 额外覆盖只改变构建而运行旧配置。实际 guest 匹配全部 5 个要求标记，包含 `DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1`：64 KiB 对齐的 PAGE_SIZE+33 字节 buffer 只映射两页，先交还 allocator caller 引用，EDU 经非恒等 IOVA 跨页读入并写回，再逐字节检查传输区及其余映射页内容，确认 DMA/BME 停止后解除映射。原有物理不连续页跨页 DMA、只读 PTE/TR_REQ、unmap 后非法 IOVA fault、watch、requester 冲突/释放和 detach 仍通过。构建成功但未运行新 guest 的尝试不计入这些证据。
 
 这补齐高阶分配所有者到原生 domain 的生命周期衔接，不提供 GPU BO/驻留、GPUVM、共享访问排他、IOMMU 自动选择或硬件停止。末页 padding 是明确暴露的页覆盖；GPU/用户 ABI 若需要字节级访问限制，不能依赖这项页级接口。RISC-V provider 仍限每 domain 64 页；实体失效超时和厂商 GPU 硬件恢复未验证。ABI 10 不变。文档引用检查通过 540 条；导航仍是迁移工作区既有的 7 个未索引页面，实际 `docs/zh` 迁移和其他改动保留。本轮本地证据位于 `.kernel-build/buffer-map-review/`，成功的 RISC-V 启动记录为 `qemu-iommu-embedded.log` 与 `iommu-guest.log`。
+
+
+### VMO 页快照与 DMA 导入验证（2026-11-14）
+
+MM 提交 `3c6f93fcc`，驱动/首个使用者提交 `1f981757b`。VMO 生命周期 Rust 单测共 7 项，新增 4 项覆盖整批验证后发布、第二页缺失或非法 PFN 时输出/引用不变、ANONYMOUS/PAGED/SHARED_ANON、physical/unknown 拒绝、零/空/越界参数、4096 页上限及合法 PFN 0。另运行既有 VMO page/materialize/resize/destructor 的 14 项 Rust 事务回归。snapshot 的上限来自 C 定义的窄查询，Rust 不维护另一份生产上限。
+
+新增 `test_driver_dma_vmo` 共 12 个方法，包含上述 7 项 Rust 单测入口及 14 个命名 C 场景。C fixture 链接生产 Rust lifecycle 对象，提取生产 MM 锁/slot/PFA 原语，编译实际 DMA adapter/mapper/policy；C 部分启用 ASan/UBSan，Rust lifecycle 原样编译。源 resize/destructor 副作用、PFA、provider/cache 是模型，不把它们记为执行了实际 Rust resize/destructor。覆盖 source 元数据/原始页引用退出后的 mapping 存活、页 1–2 的非恒等且不连续 IOVA、稀疏/分页源、OOM/policy/closed/架构拒绝后的临时引用回收、当前失败页的清理句柄、部分 unmap 保留与 cache 时机。pthread 在 batch pin 内暂停，另一线程尝试 resize，验证 VMO lock 排斥；释放该锁后 provider 等待 resize 完成仍能映射原帧。模型帧引用计数为原子，避免测试自身引入 PFA 竞争。
+
+14 个负控撤销 snapshot pin、遗漏临时 put、允许 physical、越过范围尾、错误缺页结果、失败前写部分输出、在 pin 前解锁、接受非法 PFN、丢弃清理句柄、错用 first=0、持 VMO lock 调 provider、把 map 错误当成功、失败快照仍 put 及遗漏 paged/sparse 支持，全部触发断言、ASan 或 Rust panic；编译失败不计入。恢复后隔离导出树通过 256 个不同 unittest 方法。最终 16 个源码/测试配置路径逐一与提交核对，两次代码提交合成的树与导出树一致；最后仅修正了 peek 的借用语义说明。
+
+`check-firmware-model` 通过 485 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 121 项；115 个 instance、32 个 driver component、194 个 smoke case 审计通过。双 CPU embedded 的 USB bulk/hub guest 实际匹配 `DRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1`：原生 VMO 缺页先返回 EAGAIN，物化后导入 direct domain 的页 1–2，再执行真实 resize(0) 和原 VMO 销毁，独立帧仍可访问并在最后 unmap 释放。旧高阶 buffer、USB 读写/比对/恢复、接口及 controller 退出/重绑均通过。generic 内核/模块/镜像的严格热插拔也通过；没有把这些 USB 传输记作使用了 VMO IOMMU 地址。
+
+`tools/a20 test smoke-driver-iommu-native-riscv64` 在实际 guest 匹配全部 6 个要求标记，并另有通用 VMO resize PASS。新增 `DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1` 验证真实原生 VMO 的页 1–2 导入 IOVA，先销毁源 VMO，再由 EDU 跨页读入/写回，核对模式及未传输区域，确认 DMA/BME 停止后解除映射。原高阶 buffer DMA、不连续页、只读权限、unmap 后 fault/watch、requester 归属与 detach 检查继续通过。这里使用实际 MM/Rust/PFA 和硬件翻译模拟器，不等于在实体设备注入了停止/失效超时。
+
+这些接口只提供稳定 RAM 帧和通用映射所有权，不建立 BO 驻留、cgroup charge 转移、VMO extent/CPU 关联租约、GPUVM、进程 context 或任务调度。现有 DRM/GEM/virgl 路径没有因此自动改用原生 domain；未来 GPU 提交须另保留请求/fence、访问权和预算，协调源变动及硬件停止。ABI 10 不变。文档引用检查通过 540 条，导航仍为工作区迁移既有 7 个未索引页面。实际 `docs/zh` 迁移及其他改动保留；本轮本地证据在 `.kernel-build/vmo-dma-review/`，RISC-V 完整 guest 在 `iommu-guest.log`，双 CPU guest 在 `usb-bulk-guest.log` 与 `usb-hub-guest.log`。

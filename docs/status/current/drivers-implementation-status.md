@@ -40,6 +40,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | 提前退出准备 | 基础可用 | 当前 probe 显式登记可失败 prepare，先于 consumer unbind；LIFO/逐项完成记录，错误保留 PREPARING/绑定/图/资源。xHCI 已接入失败 probe 和已确认停机后的软件 slot 清理，device/driver 布局沿用既有模型，当前 ABI 10。HID/hub 独立退出已接入可失败 endpoint 释放，storage 及额外 DMA 错误路径仍需完善；USB 拓扑已串行协调，xHCI 锁外回调已计数保留 |
 | USB endpoint 交还 | 基础可用 | ABI 10 HCD release_endpoint；HID/hub 的独立退出和失败 probe 保留 URB/ring，xHCI Stop/Drop 分段读回确认，回调在途返回 EBUSY，重试与同控制器其他 endpoint 隔离；storage 实例仍待迁移，xHCI bulk 的调用者存储已由独立 DMA 暂存对象保护 |
 | 可失败解绑 | 基础可用 | remove 非零保留离线绑定/匹配/devres/依赖和注册引用，device/platform/driver unregister 传播错误并支持显式重试；仅执行一次 quiesce，注销期间拒绝新绑定/消费关系与递归退出。发布失败清理同样保留；PCI 槽、已发布 USB 端口/slot/address 保留已接入。C/Rust 主机失败注入与合成 QEMU 门禁通过；实际硬件停止、失败 probe、关机/kexec shutdown 仍由 provider 负责 |
+| 原生 VMO DMA 导入 | 基础可用 | Rust 原子保留已物化 canonical RAM，缺页不物化、物理 VMO 拒绝、4096 页批次；显式 map_vmo 交还临时 pin，mapping/清理句柄跨源 resize/销毁保留原帧；不转移预算/权限或建立驻留租约，真实 EDU 在源 VMO 销毁后 DMA 已验证 |
 | 独立 DMA buffer | 基础可用 | 记录实际 PFN/分配阶数，支持大小独立于强对齐，捕获 mask，显式引用跨 unbind/owner 注销保留存储；可显式 map_buffer 接入 domain，覆盖请求页及末页 padding，失败清理保留整块对象；RISC-V native 不再二次 pin 尾页；无隐式隔离/停止证明，xHCI bulk 已使用，ABI 10 不变 |
 | 原生异步驱动运行时 | 基础可用 | `quiesce`、页级 DMA domain/mapping、fence、可取消工作队列、IRQ 全分发排空、有界固件来源/image。失败保留与回收契约及 hosted 限制见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；尚未接入实体 GPU |
 | 资源占用与清单核对 | 基础可用 | owner-pinned MMIO/port claim、受管映射先 unmap 后释放占用；checked claim 核对未绑定设备声明并阻止后续冲突发布。已导入受管 RAM 与 ACPI 表页；PFA 之外的 RAM/其他固件保留区尚不完整，也不拦截 raw MMIO/PIO；主机竞争/失败注入与 QEMU 元数据自检记录见运行时文档 |

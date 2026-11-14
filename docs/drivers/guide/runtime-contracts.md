@@ -95,7 +95,7 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 
 ## 静态 ring 与 `va_to_pa()`
 
-既有静态 ring/buffer 仅在平台确认恒等 DMA 时使用 `va_to_pa()` 生成设备地址，并必须在各架构线性映射范围及设备 DMA 窗口内。新原生驱动的页数组应通过 `driver_dma_map_pages()`，高阶 buffer 通过 `driver_dma_map_buffer()` 获取设备地址，不能假定物理地址就是 IOVA。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
+既有静态 ring/buffer 仅在平台确认恒等 DMA 时使用 `va_to_pa()` 生成设备地址，并必须在各架构线性映射范围及设备 DMA 窗口内。新原生驱动的页数组应通过 `driver_dma_map_pages()`，高阶 buffer 通过 `driver_dma_map_buffer()`、已物化的原生 VMO 页通过 `driver_dma_map_vmo()` 获取设备地址，不能假定物理地址就是 IOVA。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
 
 > 不要把栈上变量或临时结构传给 DMA，即使命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
 
@@ -154,9 +154,13 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing-gates.md)。
 
+## VMO 页快照导入
+
+不要把 `vmo_peek_page()` 的借用 PFN 留到稍后再 pin；并发 resize 可以先释放它。MM 的 `vmo_pin_pages()` 原子验证/保留 canonical RAM，不物化缺页；驱动的 `driver_dma_map_vmo(domain, vmo, first, count, direction, &mapping)` 管理临时快照并交给页级 mapper。缺页 `-EAGAIN`，物理 VMO `-EOPNOTSUPP`，单次最多 4096 页；最后逻辑页 padding 也在 policy/DMA 范围内。provider 不持 VMO lock，映射和失败清理句柄保留独立帧引用，因此可在返回后释放源 VMO；它们不随 resize 改用新页，不接管 cgroup charge、权限或 BO 驻留。完整协议见 [VMO 快照](native-runtime.md#从原生-vmo-保留页并映射)。
+
 ## 可失败的 DMA 失效
 
-可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()` 或 `driver_dma_map_buffer()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
+可能超时的 IOMMU provider 使用 `driver_dma_checked_ops` 和 `driver_dma_domain_create_checked()`。必须检查 `driver_dma_try_unmap_pages()` 的状态：失败后 mapping 指针、页引用和 domain 均保留，禁止继续提交或查询地址，应在硬件停止期间重试。映射失败的回滚也可能失败，此时 `driver_dma_map_pages()`、`driver_dma_map_buffer()` 或 `driver_dma_map_vmo()` 会在负返回码之外交出非空清理句柄，调用者仍负责保留和重试。不能只按负返回码直接退出 probe 并释放 provider 资源；完整的生命周期规则见 [原生驱动运行时](native-runtime.md#原生-dma-domain-与页映射)。
 
 ## 固件读取
 

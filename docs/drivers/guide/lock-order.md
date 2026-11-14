@@ -289,6 +289,10 @@ USB register/scan/enumerate/unregister 使用原生生命周期协调器串行�
 - `usb_hid_read()`/`usb_hid_poll()` 在取 `h->lock` **之前**调用 `usb_device_poll()`；该入口尝试生命周期协调，忙时直接返回，不阻塞 teardown 排空当前 class 调用。成功后验证注册表、端口归属和全部祖先仍可使用，再在协调域内调用 HCD poll。class 活动调用另保留接口存储。
 - 端口退出先确认 slot 停止且相关锁外回调计数归零，再解绑 HID；同一物理控制器的 pending 端口在彻底清理前阻止新 slot 分配，避免编号提前复用。HID/hub 独立 remove 使用 `usb_interface_release_endpoints()`，后端单向关闭收集/提交，相关回调仍在途则返回 `-EBUSY`；不能清空回调字段后直接释放 URB。失败保留绑定/存储，重试不重复已确认的停止阶段，其他 endpoint 继续运行。
 
+### VMO 快照到 DMA
+
+Rust VMO 生命周期层持 VMO lock 验证全部 canonical slot，再由 frame_get_many 在 PFA 锁下保留整批引用；不在锁下分配、物化缺页或访问 pager。单批最多 4096 页，输出数组不与 VMO 元数据别名。DMA adapter 在锁外分配数组，快照返回后才取得 managed domain mutex、检查 policy/调用 provider/sync，最后归还临时 pin。provider 可以在事务后协调 source resize，不能要求自己仍持 VMO lock；页快照与源对象后续 extent/charge 独立，跨 mapping 的访问排他仍由调用方负责。
+
 ### DMA buffer 与同步 bulk
 
 显式 `driver_dma_map_buffer()` 使用现有 managed domain mutex，和页数组 map、unmap、shutdown 串行。policy 在额外保留 buffer 及调用 provider 前预检完整页覆盖；map 期间调用者保留自己的引用。mapping 只取得整块 buffer 引用，不取得高阶尾页引用；全部失效确认前不交还，CPU 同步也推迟至全部成功。RISC-V native provider 借用这份存储，用户态旧入口另有 order-0 pin；两者不得混用。多个 domain 映射同一 buffer 时，CPU/device 访问的排他交接由调用方协调。

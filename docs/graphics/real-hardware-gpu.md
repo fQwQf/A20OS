@@ -7,6 +7,7 @@ A20OS 能通过固件保留的 framebuffer 裸机显示，不等于能提交实�
 ## 当前实现
 
 - 设备核心已有总线匹配、引用、依赖、延迟 probe 和资源回收；新增 quiesce 可以在排空在途 class 调用前停止硬件并结束请求。
+- 原生 VMO 可通过 Rust 原子页保留和显式 map_vmo 接入 DMA domain，mapping 在源 resize/销毁后仍保留原帧；缺页不物化，物理 VMO 不作为普通 RAM 导入，不冻结 extent/转移 charge。真实 EDU 已验证源 VMO 销毁后的跨页 DMA；GPU BO 驻留、预算、访问权和请求同步仍待建立。
 - 原生页级 DMA domain/mapping 提供设备地址转换、独立页面引用和失败回滚，direct domain 必须由平台显式确认恒等 DMA 后使用。
 - 原生异步 fence 可以从 IRQ 完成任务，支持错误、等待和超时；尚未接入 DRM syncobj/sync_file。
 - 可取消工作队列、IRQ 排空和有界不可变固件读取已经实现；固件目录部署、厂商格式校验、上传和启动协议仍需完成。
