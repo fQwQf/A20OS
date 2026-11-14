@@ -18,6 +18,8 @@ class RiscvIommuRequester(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix='a20-iommu-requester-')
         cls.addClassCleanup(cls.temp.cleanup)
         work = Path(cls.temp.name)
+        (work / 'mm').mkdir()
+        (work / 'mm/vmo.h').write_text((ROOT / 'tools/tests/vmo_api_only_host.h').read_text())
         source = LOCKS + C_FIXTURE[C_FIXTURE.index('#include "drivers/core/driver_core.c"'):]
         source = source.replace('struct task_t *proc_current(void) {return NULL;}',
                                 'static _Thread_local char task;\nstruct task_t *proc_current(void) {return (struct task_t *)&task;}')
@@ -38,6 +40,7 @@ class RiscvIommuRequester(unittest.TestCase):
             '-fno-builtin', '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
             '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
             '-DCONFIG_X86_64', '-DCONFIG_IOMMU_TRRESP_LEGACY_PPN', '-DCONFIG_NR_CPUS=1', '-DCONFIG_DRIVER_LIFECYCLE_TEST',
+            '-I' + str(work),
             '-I' + str(ROOT / 'kernel/arch/x86_64/include'),
             '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'kernel'),
             str(path), '-o', str(cls.binary),

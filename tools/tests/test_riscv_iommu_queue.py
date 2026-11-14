@@ -15,6 +15,7 @@ class RiscvIommuQueue(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="a20-iommu-queue-") as temp:
             work = Path(temp)
             stubs = {**STUBS,
+                     "mm/vmo.h": (ROOT / "tools/tests/vmo_api_only_host.h").read_text(),
                      "core/arch.h": "#define PAGE_OFFSET 0x100000000UL\n",
                      "core/defs.h": '''#pragma once
 #include "core/types.h"

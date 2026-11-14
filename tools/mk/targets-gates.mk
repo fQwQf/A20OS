@@ -32,7 +32,8 @@ HOST_TESTS_PROBES := \
 # not a standalone harness.
 HOST_TESTS_FIXTURES := \
     tools/tests/anon_child_mapper_host.c \
-    tools/tests/driver_buffer_mapping_host.c
+    tools/tests/driver_buffer_mapping_host.c \
+    tools/tests/driver_dma_vmo_host.c
 
 # Harnesses that need a dedicated runner, or that still need updating after the
 # net/SSI refactor.  They are excluded from the generic pattern rule; several
@@ -126,7 +127,7 @@ check-pc-drivers: check-component-registry
 	  tools.tests.test_firmware_gpio_input tools.tests.test_pc_network_lifetime \
 	  tools.tests.test_pc_module_boundary \
 	  tools.tests.test_xhci_endpoint_types tools.tests.test_xhci_remove \
-	  tools.tests.test_usb_concurrency tools.tests.test_xhci_callback_lifetime tools.tests.test_usb_endpoint_release tools.tests.test_driver_dma_buffer tools.tests.test_xhci_bulk_lifetime tools.tests.test_driver_buffer_mapping \
+	  tools.tests.test_usb_concurrency tools.tests.test_xhci_callback_lifetime tools.tests.test_usb_endpoint_release tools.tests.test_driver_dma_buffer tools.tests.test_xhci_bulk_lifetime tools.tests.test_driver_buffer_mapping tools.tests.test_driver_dma_vmo \
 	  tools.tests.test_xhci_event_owner_race tools.tests.test_xhci_firmware_policy \
 	  tools.tests.test_usb_enumeration_cleanup tools.tests.test_smoke_qmp \
 	  tools.tests.test_usb_hid_protocol tools.tests.test_usb_hid_readiness \
@@ -147,7 +148,7 @@ check-firmware-model:
 	  tools.tests.test_xhci_firmware_policy tools.tests.test_usb_enumeration_cleanup \
 	  tools.tests.test_usb_hid_readiness \
 	  tools.tests.test_xhci_endpoint_types tools.tests.test_xhci_remove \
-	  tools.tests.test_usb_concurrency tools.tests.test_xhci_callback_lifetime tools.tests.test_usb_endpoint_release tools.tests.test_driver_dma_buffer tools.tests.test_xhci_bulk_lifetime tools.tests.test_driver_buffer_mapping \
+	  tools.tests.test_usb_concurrency tools.tests.test_xhci_callback_lifetime tools.tests.test_usb_endpoint_release tools.tests.test_driver_dma_buffer tools.tests.test_xhci_bulk_lifetime tools.tests.test_driver_buffer_mapping tools.tests.test_driver_dma_vmo \
 	  tools.tests.test_driver_dma_mapping tools.tests.test_riscv_iommu_requester \
 	  tools.tests.test_riscv_iommu_queue \
 	  tools.tests.test_alsa_lib_protocol \
