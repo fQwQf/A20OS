@@ -8,6 +8,7 @@
 struct device;
 struct driver_dma_domain;
 struct driver_dma_mapping;
+struct driver_dma_buffer;
 
 enum driver_dma_direction {
     DRIVER_DMA_TO_DEVICE,
@@ -48,7 +49,9 @@ int driver_dma_policy_check(const struct driver_dma_policy *, uint64_t physical,
  * synchronously invalidate device translations before returning. Providers
  * must permit concurrent calls for independent mappings. The ops and their
  * module, if any, must remain resident until release(context) returns.
- * release owns provider-context disposal, not the device or RAM pages. */
+ * RAM is borrowed from the mapping until confirmed unmap. A physical page may
+ * be an order-N allocation tail: providers must not infer order-0 ownership or
+ * frame_get/put it. release owns context disposal, not the device or RAM. */
 struct driver_dma_ops {
     int (*map_page)(void *context, uint64_t physical,
                     enum driver_dma_direction direction, uint64_t *address);
@@ -138,7 +141,20 @@ void driver_dma_domain_put(struct driver_dma_domain *domain);
 int driver_dma_map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
                           size_t count, enum driver_dma_direction direction,
                           struct driver_dma_mapping **out);
-/* Number of pinned pages, including while a failed cleanup is retained. */
+/* Maps the requested buffer span, rounded up to whole pages. The final page's
+ * zeroed allocation padding is also exposed; stronger-alignment backing beyond
+ * that span is not mapped. Holds ONE buffer reference, never frame_get/put on
+ * higher-order tails. Caller holds the buffer throughout this call. Allocation
+ * owner and domain device may differ: allocation is storage, not DMA permission.
+ * Domain policy checks every exposed physical byte before provider calls.
+ * Returned addresses need not be contiguous; query each page. Uses the same
+ * sync/address/try_unmap APIs and fallible cleanup contract as map_pages.
+ * Caller coordinates CPU/device access across ALL mappings of this buffer.
+ * Unmap failure retains the entire buffer, including unexposed backing. */
+int driver_dma_map_buffer(struct driver_dma_domain *, struct driver_dma_buffer *,
+                           enum driver_dma_direction, struct driver_dma_mapping **out);
+/* Number of retained page entries, including during failed cleanup. A buffer
+ * mapping retains its whole allocation regardless of this count. */
 size_t driver_dma_mapping_count(const struct driver_dma_mapping *mapping);
 int driver_dma_page_address(const struct driver_dma_mapping *mapping,
                              size_t index, uint64_t *out);
@@ -147,12 +163,13 @@ int driver_dma_page_address(const struct driver_dma_mapping *mapping,
 int driver_dma_mapping_sync_for_device(struct driver_dma_mapping *mapping);
 int driver_dma_mapping_sync_for_cpu(struct driver_dma_mapping *mapping);
 /* Task context, after DMA has stopped. Invalidates translations, syncs writes
- * back to the CPU and drops pins on success, consuming *mapping to NULL.
+ * back to the CPU and drops frame pins or the buffer on success, consuming
+ * *mapping to NULL.
  * A mapping is single-owner; serialize sync/address/unmap against each other.
  * No automatic devres release: a timeout must never free active DMA memory. */
 void driver_dma_unmap_pages(struct driver_dma_mapping **mapping);
 /* Required for checked providers. Success consumes *mapping. Failure retains
- * all page pins, domain and the pointer, and disables address/sync operations
+ * all frame pins or the whole buffer, domain and pointer, disabling address/sync
  * with -ESHUTDOWN. Retry resumes at the failed page; previously invalidated
  * pages are not unmapped twice. Caller must keep hardware stopped throughout.
  * NULL pointer argument is -EINVAL; an already NULL mapping succeeds.

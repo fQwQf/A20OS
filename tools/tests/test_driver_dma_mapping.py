@@ -57,6 +57,7 @@ static inline void mutex_unlock(mutex_t *m) { assert(!pthread_mutex_unlock(m)); 
                 "-I" + str(work), "-I" + str(ROOT / "kernel/include"),
                 "-I" + str(ROOT / "kernel"),
                 str(ROOT / "tools/tests" / harness),
+                str(ROOT / "tools/tests/dma_buffer_unused_host.c"),
                 str(ROOT / "kernel/drivers/core/dma_mapping.c"), "-o", str(binary),
                 str(ROOT / "kernel/drivers/core/dma_policy.c"),
             ], check=True)

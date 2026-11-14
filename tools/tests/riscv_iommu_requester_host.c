@@ -2,12 +2,25 @@
  * frames and scheduler are substituted by the including Python fixture. */
 #include "mm/frame.h"
 #include "drivers/core/dma_mapping.h"
+#include "drivers/core/dma_buffer.h"
+extern int arch_device_dma_ready(void) __attribute__((weak));
 static uint8_t host_pages[96][PAGE_SIZE] __attribute__((aligned(4096)));
 static unsigned host_refs[96], page_attempts, fail_page;
 static unsigned regs[1024], commands, fail_commands_after, transient_errors;
+static unsigned buffer_reserved, buffer_frees;
+/* Mimic an order-4 allocation: only the head has a frame reference. */
+pfn_t pfa_alloc(int order) {
+ assert(order==4&&!buffer_reserved);buffer_reserved=1;host_refs[80]=1;return 80;
+}
+pfn_t pfa_alloc_max(int order,uint64_t limit) {assert(limit>=0x15ffff);return pfa_alloc(order);}
+void pfa_free(pfn_t pfn,int order) {
+ assert(pfn==80&&order==4&&buffer_reserved&&host_refs[80]==1);
+ for(unsigned i=81;i<96;i++)assert(!host_refs[i]);
+ buffer_frees++;host_refs[80]=0;buffer_reserved=0;
+}
 static pfn_t host_alloc_page(void) {
  if(++page_attempts==fail_page)return PFN_NONE;
- for(unsigned i=0;i<96;i++)if(!host_refs[i]){host_refs[i]=1;return i;}
+ for(unsigned i=0;i<80;i++)if(!host_refs[i]){host_refs[i]=1;return i;}
  return PFN_NONE;
 }
 static void host_frame_get(pfn_t p) {assert(p<96&&host_refs[p]);host_refs[p]++;}
@@ -31,7 +44,6 @@ static void host_writel(uint32_t value,volatile void *address) {
  assert(offset<sizeof(regs)&&!(offset&3));regs[offset/4]=value;
  if(offset==0x24){commands++;regs[0x20/4]=value;}
 }
-uint64_t dma_get_mask(const device_t *d) {(void)d;return ~(uint64_t)0;}
 void dma_sync_for_cpu(void *p,size_t n) {(void)p;(void)n;}
 void dma_sync_for_device(void *p,size_t n) {(void)p;(void)n;}
 #define pfa_alloc_page host_alloc_page
@@ -44,6 +56,7 @@ void dma_sync_for_device(void *p,size_t n) {(void)p;(void)n;}
 #define frame_put host_frame_put
 #define readl host_readl
 #define writel host_writel
+/* PRODUCTION_BUFFER */
 #include "drivers/core/riscv_iommu.c"
 #undef readl
 #undef writel
@@ -213,15 +226,41 @@ static void requester_iommu_case(const char *name) {
   assert(!riscv_iommu_dma_domain_create(device,&domain));
   pfn_t page=host_alloc_page();struct driver_dma_mapping *mapping=NULL;
   assert(!driver_dma_map_pages(domain,&page,1,DRIVER_DMA_BIDIRECTIONAL,&mapping));
-  host_frame_put(page);assert(host_refs[page]==2);
+  host_frame_put(page);assert(host_refs[page]==1);
   fail_commands_after=commands;
   assert(driver_dma_try_unmap_pages(&mapping)==-EIO&&mapping);busy(&external);
-  assert(driver_dma_domain_shutdown(domain)==-EBUSY);assert(host_refs[page]==2);
+  assert(driver_dma_domain_shutdown(domain)==-EBUSY);assert(host_refs[page]==1);
   fail_commands_after=0;assert(!driver_dma_try_unmap_pages(&mapping));
   assert(!host_refs[page]);fail_commands_after=commands;
   assert(driver_dma_domain_shutdown(domain)==-EIO);busy(&external);
   assert(live_frames()==3);fail_commands_after=0;
   assert(!driver_dma_domain_shutdown(domain));busy(&external);driver_dma_domain_put(domain);vacant(&external);
+ } else if(!strncmp(name,"buffer-",7)) {
+  assert(!riscv_iommu_dma_domain_create(device,&domain));
+  struct driver_dma_buffer *buffer;struct driver_dma_mapping *mapping=NULL;
+  assert(!driver_dma_buffer_create(device,8193,65536,&buffer));
+  assert(driver_dma_buffer_address(buffer)==0x150000&&host_refs[80]==1);
+  if(!strcmp(name,"buffer-map-failure"))fail_commands_after=commands;
+  int ret=driver_dma_map_buffer(domain,buffer,DRIVER_DMA_BIDIRECTIONAL,&mapping);
+  assert(mapping&&((!strcmp(name,"buffer-map-failure"))?ret==-EIO:!ret));
+  assert(driver_dma_mapping_count(mapping)==(!ret?3U:1U));
+  for(unsigned i=80;i<96;i++)assert(host_refs[i]==(i==80?1U:0U));
+  iommu_user_domain_t *hardware=&g_user_domains[0];
+  for(unsigned i=0;i<driver_dma_mapping_count(mapping);i++)assert(hardware->pinned[i]==PFN_NONE);
+  uint64_t rejected=1;unsigned before=commands;
+  assert(riscv_iommu_domain_map(0,hardware->owner_pid,0x150000,1,&rejected)==-1&&!rejected);
+  assert(riscv_iommu_domain_unmap(0,hardware->owner_pid,IOMMU_USER_IOVA,1)==-1&&commands==before);
+  driver_dma_buffer_put(buffer);assert(buffer_reserved&&!buffer_frees);
+  if(strcmp(name,"buffer-success")) {
+   fail_commands_after=commands;
+   assert(driver_dma_try_unmap_pages(&mapping)==-EIO&&mapping&&buffer_reserved);
+   assert(driver_dma_domain_shutdown(domain)==-EBUSY);busy(&external);
+   host_pages[80][0]=0x5c;host_pages[82][0]=0x6d;
+   assert(!buffer_frees&&host_refs[80]==1);fail_commands_after=0;
+  }
+  assert(!driver_dma_try_unmap_pages(&mapping)&&!mapping&&!buffer_reserved&&buffer_frees==1);
+  assert(live_frames()==3&&!host_refs[80]);
+  assert(!driver_dma_domain_shutdown(domain));driver_dma_domain_put(domain);vacant(&external);
  } else if(!strcmp(name,"replacement")) {
   assert(!riscv_iommu_domain_claim(0,42));
   cfg[0]=0x43211234;pci_rescan();assert(pci_current()!=device);

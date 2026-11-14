@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #ifndef CONFIG_MCU
 #include "drivers/core/dma_mapping.h"
+#include "drivers/core/dma_buffer.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/errno.h"
@@ -29,6 +30,7 @@ struct driver_dma_page {
 
 struct driver_dma_mapping {
     struct driver_dma_domain *domain;
+    struct driver_dma_buffer *buffer;
     size_t count, mapped;
     bool usable, sync_cpu;
     enum driver_dma_direction direction;
@@ -200,6 +202,12 @@ void driver_dma_domain_put(struct driver_dma_domain *domain)
     kfree(domain);
 }
 
+static void *mapping_page_data(const struct driver_dma_mapping *mapping, size_t index)
+{
+    return mapping->buffer ? (char *)driver_dma_buffer_data(mapping->buffer) + index * PAGE_SIZE
+                           : pfn_to_virt(mapping->pages[index].pfn);
+}
+
 int driver_dma_mapping_sync_for_device(struct driver_dma_mapping *mapping)
 {
     if (!mapping)
@@ -207,7 +215,7 @@ int driver_dma_mapping_sync_for_device(struct driver_dma_mapping *mapping)
     if (!mapping->usable)
         return -ESHUTDOWN;
     for (size_t i = 0; i < mapping->count; i++)
-        dma_sync_for_device(pfn_to_virt(mapping->pages[i].pfn), PAGE_SIZE);
+        dma_sync_for_device(mapping_page_data(mapping, i), PAGE_SIZE);
     return 0;
 }
 
@@ -219,7 +227,7 @@ int driver_dma_mapping_sync_for_cpu(struct driver_dma_mapping *mapping)
         return -ESHUTDOWN;
     if (mapping->direction != DRIVER_DMA_TO_DEVICE)
         for (size_t i = 0; i < mapping->count; i++)
-            dma_sync_for_cpu(pfn_to_virt(mapping->pages[i].pfn), PAGE_SIZE);
+            dma_sync_for_cpu(mapping_page_data(mapping, i), PAGE_SIZE);
     return 0;
 }
 
@@ -241,9 +249,12 @@ static int release_mapping(struct driver_dma_mapping *mapping)
     }
     if (mapping->sync_cpu && mapping->direction != DRIVER_DMA_TO_DEVICE)
         for (size_t i = 0; i < mapping->count; i++)
-            dma_sync_for_cpu(pfn_to_virt(mapping->pages[i].pfn), PAGE_SIZE);
-    for (size_t i = 0; i < mapping->count; i++)
-        frame_put(mapping->pages[i].pfn);
+            dma_sync_for_cpu(mapping_page_data(mapping, i), PAGE_SIZE);
+    if (mapping->buffer)
+        driver_dma_buffer_put(mapping->buffer);
+    else
+        for (size_t i = 0; i < mapping->count; i++)
+            frame_put(mapping->pages[i].pfn);
     if (domain->is_managed)
         domain->mappings--;
     driver_dma_domain_put(domain);
@@ -277,14 +288,15 @@ void driver_dma_unmap_pages(struct driver_dma_mapping **pointer)
     (void)driver_dma_try_unmap_pages(pointer);
 }
 
-static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
+static int map_storage(struct driver_dma_domain *domain, const pfn_t *pages,
+                          struct driver_dma_buffer *buffer,
                           size_t count, enum driver_dma_direction direction,
                           struct driver_dma_mapping **out)
 {
     if (!out)
         return -EINVAL;
     *out = NULL;
-    if (!domain || !pages || !count ||
+    if (!domain || (!pages && !buffer) || !count ||
         (direction != DRIVER_DMA_TO_DEVICE &&
          direction != DRIVER_DMA_FROM_DEVICE &&
          direction != DRIVER_DMA_BIDIRECTIONAL))
@@ -297,13 +309,18 @@ static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
     if (device_is_stopping(domain->device) ||
         domain->device->state == DEV_STATE_REMOVED)
         return -ENODEV;
+    uint64_t physical = buffer ? driver_dma_buffer_address(buffer) : 0;
+    if (buffer && ((physical & (PAGE_SIZE - 1U)) ||
+                   (count - 1U) > (~(uint64_t)0 - physical) / PAGE_SIZE))
+        return -ERANGE;
     for (size_t i = 0; i < count; i++) {
-        if (!pfn_valid(pages[i]))
+        if (!buffer && !pfn_valid(pages[i]))
             return -EINVAL;
         if (domain->policy) {
             bool identity;
             int ret = driver_dma_policy_check(domain->policy,
-                           pfn_to_phys(pages[i]), PAGE_SIZE, direction, &identity);
+                           buffer ? physical + i * PAGE_SIZE : pfn_to_phys(pages[i]),
+                           PAGE_SIZE, direction, &identity);
             if (ret)
                 return ret;
         }
@@ -313,26 +330,29 @@ static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
     if (!mapping)
         return -ENOMEM;
     mapping->domain = domain;
+    mapping->buffer = buffer;
     mapping->count = mapping->mapped = 0;
     mapping->usable = true;
     mapping->sync_cpu = false;
     mapping->direction = direction;
+    driver_dma_buffer_get(buffer);
     driver_dma_domain_get(domain);
     if (domain->is_managed)
         domain->mappings++;
     for (size_t i = 0; i < count; i++) {
-        pfn_t pfn = pages[i];
-        frame_get(pfn);
+        pfn_t pfn = buffer ? PFN_NONE : pages[i];
+        uint64_t page_physical = buffer ? physical + i * PAGE_SIZE : pfn_to_phys(pfn);
+        if (!buffer) frame_get(pfn);
         uint64_t address = 0;
         bool needs_unmap = false;
         int rc;
         if (domain->is_managed) {
-            rc = domain->managed.map_page(domain->context, pfn_to_phys(pfn),
+            rc = domain->managed.map_page(domain->context, page_physical,
                                             direction, &address, &needs_unmap);
             if (!rc && !needs_unmap)
                 rc = -EIO;
         } else {
-            rc = domain->ops.map_page(domain->context, pfn_to_phys(pfn),
+            rc = domain->ops.map_page(domain->context, page_physical,
                                        direction, &address);
             needs_unmap = !rc;
         }
@@ -344,12 +364,12 @@ static int map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
                 rc = -ERANGE;
             if (!rc && domain->policy) {
                 bool identity;
-                rc = driver_dma_policy_check(domain->policy, pfn_to_phys(pfn),
+                rc = driver_dma_policy_check(domain->policy, page_physical,
                                                PAGE_SIZE, direction, &identity);
-                if (!rc && identity && address != pfn_to_phys(pfn))
+                if (!rc && identity && address != page_physical)
                     rc = -ERANGE;
             }
-        } else {
+        } else if (!buffer) {
             frame_put(pfn);
         }
         if (rc) {
@@ -371,13 +391,30 @@ int driver_dma_map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
                           struct driver_dma_mapping **out)
 {
     if (!domain || !domain->is_managed)
-        return map_pages(domain, pages, count, direction, out);
+        return map_storage(domain, pages, NULL, count, direction, out);
     if (!out)
         return -EINVAL;
     *out = NULL;
     mutex_lock(&domain->lock);
     int ret = domain->closed ? -ESHUTDOWN :
-              map_pages(domain, pages, count, direction, out);
+              map_storage(domain, pages, NULL, count, direction, out);
+    mutex_unlock(&domain->lock);
+    return ret;
+}
+
+int driver_dma_map_buffer(struct driver_dma_domain *domain, struct driver_dma_buffer *buffer,
+                           enum driver_dma_direction direction, struct driver_dma_mapping **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    size_t size = driver_dma_buffer_size(buffer);
+    if (!buffer || !size) return -EINVAL;
+    size_t count = (size - 1U) / PAGE_SIZE + 1U;
+    if (!domain || !domain->is_managed)
+        return map_storage(domain, NULL, buffer, count, direction, out);
+    mutex_lock(&domain->lock);
+    int ret = domain->closed ? -ESHUTDOWN :
+              map_storage(domain, NULL, buffer, count, direction, out);
     mutex_unlock(&domain->lock);
     return ret;
 }

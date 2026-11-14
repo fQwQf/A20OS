@@ -217,12 +217,12 @@ static void native_domains(void)
             ret = driver_dma_map_pages(domain, pages, 2, DRIVER_DMA_TO_DEVICE, &mapping);
             assert(mapping);
             if (failure == 1) {
-                assert(ret < 0 && refs[110] == 3 && refs[111] == 1);
-                assert(driver_dma_try_unmap_pages(&mapping) < 0 && refs[110] == 3);
+                assert(ret < 0 && refs[110] == 2 && refs[111] == 1);
+                assert(driver_dma_try_unmap_pages(&mapping) < 0 && refs[110] == 2);
                 registers[IOMMU_REG_CQCSR / 4] = 0; fail_publish_at = 0;
             } else {
                 uint64_t address;
-                assert(!ret && refs[110] == 3 && refs[111] == 3);
+                assert(!ret && refs[110] == 2 && refs[111] == 2);
                 assert(!driver_dma_page_address(mapping, 0, &address));
                 assert(address == IOMMU_USER_IOVA && address != pfn_to_phys(110));
                 assert(!(g_user_domains[0].l0[0] & IOMMU_PTE_W));

@@ -7,6 +7,7 @@ import unittest
 
 from .test_native_bus_lifetime import ROOT, C_FIXTURE
 from .test_pci_requester import LOCKS
+from .test_driver_dma_buffer import native_buffer_implementation
 
 
 class RiscvIommuRequester(unittest.TestCase):
@@ -24,7 +25,9 @@ class RiscvIommuRequester(unittest.TestCase):
         assert source.count(config_write) == 1
         source = source.replace(config_write, 'static int reject_user_bme;\n' + config_write + '\n if(reg==4&&reject_user_bme)return;')
         marker = 'int main(int argc,char **argv) {'
-        source = source.replace(marker, (ROOT / 'tools/tests/riscv_iommu_requester_host.c').read_text() + '\n' + marker)
+        model = (ROOT / 'tools/tests/riscv_iommu_requester_host.c').read_text()
+        model = model.replace('/* PRODUCTION_BUFFER */', native_buffer_implementation())
+        source = source.replace(marker, model + '\n' + marker)
         source = source.replace('if(!strcmp(argv[1],"pci-retired"))',
                                 'if(!strncmp(argv[1],"iommu-",6))requester_iommu_case(argv[1]+6);\n else if(!strcmp(argv[1],"pci-retired"))')
         path = work / 'fixture.c'
@@ -65,6 +68,12 @@ class RiscvIommuRequester(unittest.TestCase):
 
     def test_failed_unmap_and_detach_preserve_frames_and_requester(self):
         self.run_cases('failed-release')
+
+    def test_high_order_buffer_mapping_uses_owner_reference_without_tail_pins(self):
+        self.run_cases('buffer-success')
+
+    def test_high_order_storage_survives_real_provider_map_and_unmap_failures(self):
+        self.run_cases('buffer-map-failure', 'buffer-unmap-failure')
 
     def test_shutdown_avoids_discovery_and_managed_mutex_inversion(self):
         self.run_cases('lock-order')

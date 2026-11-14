@@ -9,7 +9,7 @@ from .test_usb_concurrency import LOCKS
 from .test_drv_dma_phys_host import extract_function
 
 
-def native_buffer_source():
+def native_buffer_implementation():
     production = (ROOT / 'kernel/drivers/core/driver_hwapi.c').read_text()
     start = production.index('struct driver_dma_buffer {')
     shape = production[start:production.index('};', start)+2]
@@ -19,7 +19,11 @@ def native_buffer_source():
         'int driver_dma_buffer_create(', 'void driver_dma_buffer_get(',
         'void driver_dma_buffer_put(', 'void *driver_dma_buffer_data(',
         'uint64_t driver_dma_buffer_address(', 'size_t driver_dma_buffer_size('))
-    model = (ROOT / 'tools/tests/driver_dma_buffer_host.c').read_text().replace('/* PRODUCTION_BUFFER */', shape+'\n'+bodies)
+    return shape+'\n'+bodies
+
+
+def native_buffer_source():
+    model = (ROOT / 'tools/tests/driver_dma_buffer_host.c').read_text().replace('/* PRODUCTION_BUFFER */', native_buffer_implementation())
     source = LOCKS + C_FIXTURE[C_FIXTURE.index('#include "drivers/core/driver_core.c"'):]
     source = source.replace('struct task_t *proc_current(void) {return NULL;}',
                             '_Thread_local char buffer_task;\nstruct task_t *proc_current(void) {return (void *)&buffer_task;}')

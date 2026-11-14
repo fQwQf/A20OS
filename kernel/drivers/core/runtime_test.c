@@ -402,6 +402,32 @@ static void exercise_dma_buffer(void) {
     CHECK(!owner.references);
 }
 
+static void exercise_dma_buffer_mapping(void) {
+    device_t owner = {.name = "dma-buffer-map-selftest", .references = 1};
+    CHECK(!device_register(&owner));
+    struct driver_dma_buffer *buffer;
+    struct driver_dma_domain *domain;
+    struct driver_dma_mapping *mapping;
+    CHECK(!driver_dma_buffer_create(&owner, PAGE_SIZE + 33, 65536, &buffer));
+    CHECK(!driver_dma_domain_create_direct(&owner, &domain)); /* Explicit identity fixture. */
+    CHECK(!driver_dma_map_buffer(domain, buffer, DRIVER_DMA_BIDIRECTIONAL, &mapping));
+    CHECK(driver_dma_mapping_count(mapping) == 2);
+    uint64_t physical = driver_dma_buffer_address(buffer), address;
+    CHECK(!driver_dma_page_address(mapping, 0, &address) && address == physical);
+    CHECK(!driver_dma_page_address(mapping, 1, &address) && address == physical + PAGE_SIZE);
+    uint8_t *data = driver_dma_buffer_data(buffer);
+    data[PAGE_SIZE + 32] = 0xb3;
+    driver_dma_buffer_put(buffer);
+    CHECK(!device_unregister(&owner));
+    device_put(&owner);
+    CHECK(owner.references == 2 && data[PAGE_SIZE + 32] == 0xb3);
+    CHECK(!driver_dma_mapping_sync_for_device(mapping));
+    CHECK(!driver_dma_mapping_sync_for_cpu(mapping));
+    CHECK(!driver_dma_try_unmap_pages(&mapping) && !mapping && owner.references == 1);
+    driver_dma_domain_put(domain);
+    CHECK(!owner.references);
+}
+
 /* Explicit scratch-disk fixture only: QEMU xHCI + blank 8 MiB USB disk. */
 static void exercise_usb_bulk(void) {
     pci_user_device_info_t info;
@@ -485,6 +511,7 @@ void driver_runtime_selftest_boot(void)
     kinfo("DRIVER_RUNTIME: START\n");
     exercise_resources();
     exercise_dma_buffer();
+    exercise_dma_buffer_mapping();
     exercise();
     exercise_firmware();
     if (boot_flag(args, "driver.usb_bulk_test=1"))
@@ -506,7 +533,8 @@ void driver_runtime_selftest_boot(void)
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
+    kinfo("%sDRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
+          "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",

@@ -17,6 +17,9 @@ struct driver_dma_domain;
  * domain put releases it outside the mapping mutex. Keep failed cleanup handles.
  * On creation error, non-NULL *out is a closed cleanup handle: retry shutdown,
  * then put. Never discard it or release provider hardware/module resources.
+ * Generic mappings retain RAM (order-0 refs or an entire DMA buffer). This
+ * native backend borrows that storage until confirmed unmap, without taking
+ * additional per-page refs. Negative owners cannot use the legacy map/unmap.
  * Hardware currently provides 8 domains, 64 pages/domain and a one-level DDT;
  * unsupported requesters are rejected. Caller uses generic mapping APIs. */
 int riscv_iommu_dma_domain_create(struct device *device,
