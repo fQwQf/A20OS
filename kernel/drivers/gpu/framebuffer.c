@@ -109,6 +109,40 @@ static void fb_autoflush_kick(void) {
 }
 
 #ifndef CONFIG_NOMMU
+/* Owning RAM snapshots use the existing VMO/VMA reference chain. The caller
+ * still owns the class call, but the installed VMA owns storage independently. */
+static int64_t fb_map_scanout(struct gpu_device_access *access, uint64_t addr,
+                              size_t len, int prot, int flags, uint64_t off,
+                              bool whole) {
+    if (!prot || (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) ||
+        !(flags & MAP_SHARED) || (flags & ~(MAP_SHARED | MAP_FIXED | MAP_FIXED_NOREPLACE)) ||
+        (off & (PAGE_SIZE - 1)) || addr != (vaddr_t)addr) return -EINVAL;
+    if (prot & PROT_EXEC) return -EACCES;
+    struct gpu_scanout scanout;
+    int result = gpu_device_scanout_get(access, &scanout);
+    if (result) return result;
+    size_t cover = ROUND_UP(scanout.size, PAGE_SIZE);
+    if (whole) len = cover;
+    int64_t mapped;
+    if (!len || len > SIZE_MAX - (PAGE_SIZE - 1)) { mapped = -EINVAL; goto out; }
+    len = ROUND_UP(len, PAGE_SIZE);
+    if (off >= cover || len > cover - off) { mapped = -ENXIO; goto out; }
+    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) &&
+        (!addr || (addr & (PAGE_SIZE - 1)) || addr >= USER_VA_LIMIT || len > USER_VA_LIMIT - addr)) {
+        mapped = -EINVAL; goto out;
+    }
+    task_t *curr = proc_current();
+    if (!curr || !curr->mm) { mapped = -EFAULT; goto out; }
+    int effective = mm_pte_flags_to_prot(mm_prot_to_pte_flags(prot));
+    vaddr_t va = mm_mmap_vmo_cap(curr->mm, (vaddr_t)addr, len, effective, flags,
+                                scanout.memory, scanout.offset + off, effective);
+    mapped = mm_addr_is_error(va) ? mm_addr_error(va) : (int64_t)va;
+    if (!mm_addr_is_error(va)) fb_autoflush_kick();
+out:
+    gpu_scanout_put(&scanout);
+    return mapped;
+}
+
 /* Keep the boot scanout's CPU memory type, while the MM transaction owns
  * placement, PTE rollback, remote TLB invalidation and VMA publication. */
 static int64_t fb_map_physical(mm_struct_t *mm, uint64_t addr, uint64_t physical,
@@ -137,6 +171,9 @@ static int64_t fbdev_linux_mmap_active(struct gpu_device_access *access,
         first_mmap = 0;
     }
     const gpu_dev_ops_t *ops = access->ops;
+#ifndef CONFIG_NOMMU
+    if (ops->get_scanout) return fb_map_scanout(access, addr, len, prot, flags, off, false);
+#endif
     if (!ops->get_fb) return -EOPNOTSUPP;
 
     fb_autoflush_kick();
@@ -202,8 +239,8 @@ static int fb_ioctl_active(struct gpu_device_access *access, vfile_t *vf,
     if ((req == FBIOGET_VSCREENINFO || req == FBIOPUT_VSCREENINFO ||
          req == FBIOGET_FSCREENINFO || req == FBIO_FLUSH) && !ops->get_info)
         return -EOPNOTSUPP;
-    if ((req == FBIOGET_FSCREENINFO || req == FBIO_MAP_FB) && !ops->get_fb)
-        return -EOPNOTSUPP;
+    if (req == FBIOGET_FSCREENINFO && !ops->get_fb) return -EOPNOTSUPP;
+    if (req == FBIO_MAP_FB && !ops->get_fb && !ops->get_scanout) return -EOPNOTSUPP;
     if (req == FBIO_FLUSH && !ops->flush) return -EOPNOTSUPP;
 
     switch (req) {
@@ -271,6 +308,14 @@ static int fb_ioctl_active(struct gpu_device_access *access, vfile_t *vf,
             return copy_to_user(arg, &fix, sizeof(fix)) < 0 ? -EFAULT : 0;
         }
         case FBIO_MAP_FB: {
+#ifndef CONFIG_NOMMU
+            if (ops->get_scanout) {
+                int64_t mapped = fb_map_scanout(access, (uintptr_t)arg, 0,
+                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED_NOREPLACE, 0, true);
+                return mapped < 0 ? (int)mapped : 0;
+            }
+#endif
+            if (!ops->get_fb) return -EOPNOTSUPP;
             uintptr_t fb_phys;
             size_t fb_size;
             int r = ops->get_fb(dev, &fb_phys, &fb_size);

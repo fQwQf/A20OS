@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <string.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -10,7 +12,9 @@
 
 #define CHECK(x) do { if (!(x)) { printf("FBDEV_MAP: FAIL line=%d errno=%d %s\n", __LINE__, errno, #x); return 1; } } while (0)
 
-int main(void) {
+int main(int argc, char **argv) {
+    int retained = argc == 2 && !strcmp(argv[1], "--retained");
+    CHECK(argc == 1 || retained);
     int fd = open("/dev/fb0", O_RDWR);
     CHECK(fd >= 0);
     struct fb_fix_screeninfo fix;
@@ -35,6 +39,15 @@ int main(void) {
     *pixel = saved;
     CHECK(!mprotect(base, p, PROT_READ));
     CHECK(!mprotect(base, p, PROT_READ | PROT_WRITE));
+    if (retained) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) { *pixel = saved ^ 0x33; _exit(0); }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+        CHECK(*pixel == (unsigned char)(saved ^ 0x33));
+        *pixel = saved;
+    }
     CHECK(!munmap(base, 2 * p));
 
     base = mmap(NULL, 3 * p, PROT_READ | PROT_WRITE,
@@ -62,6 +75,6 @@ int main(void) {
     errno = 0;
     CHECK(ioctl(fd, FBIO_MAP_FB, legacy) < 0 && errno == EEXIST);
     CHECK(!munmap(legacy, rounded) && !close(fd));
-    printf("FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1\n");
+    printf("FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1%s\n", retained ? " fork=1" : "");
     return 0;
 }

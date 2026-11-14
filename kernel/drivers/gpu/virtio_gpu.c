@@ -17,6 +17,7 @@
 
 #include "mm/mm.h"
 #include "mm/frame.h"
+#include "mm/vmo.h"
 #include "drivers/block/virtio_blk.h"
 #include "sys/usercopy.h"
 
@@ -41,7 +42,7 @@ typedef struct {
     uint32_t           bpp;
     uintptr_t          fb_phys;
     size_t             fb_size;
-    int                fb_order;
+    struct vmo         *fb_memory;
     
     uint16_t           desc_idx;
     uint16_t           last_used;
@@ -508,6 +509,17 @@ static int gpu_get_fb(struct device *dev, uintptr_t *fb_paddr, size_t *fb_size) 
     virtio_gpu_inst_t *inst = dev->drv_priv;
     *fb_paddr = inst->fb_phys;
     *fb_size = inst->fb_size;
+    return 0;
+}
+
+/* Capture one owning immutable RAM extent while a class call protects this
+ * instance. This driver has no live scanout-replacement operation. */
+static int gpu_get_scanout(struct device *dev, struct gpu_scanout *out) {
+    *out = (struct gpu_scanout){0};
+    virtio_gpu_inst_t *inst = dev->drv_priv;
+    if (!inst || !inst->valid || !inst->fb_memory) return -ENODEV;
+    vmo_ref(inst->fb_memory);
+    *out = (struct gpu_scanout){inst->fb_memory, 0, inst->fb_size};
     return 0;
 }
 
@@ -1209,6 +1221,7 @@ static int gpu_transfer_3d(struct device *dev, uint32_t ctx_id,
 static const gpu_dev_ops_t gpu_ops = {
     .get_info = gpu_get_info,
     .get_fb   = gpu_get_fb,
+    .get_scanout = gpu_get_scanout,
     .flush    = gpu_flush,
     .get_edid = gpu_get_edid,
     .get_capset = gpu_get_capset,
@@ -1229,8 +1242,6 @@ static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst);
 
 static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *transport) {
     virtio_gpu_inst_t *inst = &g_gpu_inst;
-    int order = 0;
-    pfn_t fb_pfn = PFN_NONE;
     memset(inst, 0, sizeof(*inst));
     mutex_init(&inst->command_lock);
     
@@ -1363,22 +1374,18 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
             kfree(resp);
         }
     }
-    inst->fb_size = inst->width * inst->height * (inst->bpp / 8);
-    
-    // Allocate framebuffer as continuous physical memory
-    size_t req_pages = inst->fb_size / PAGE_SIZE + ((inst->fb_size % PAGE_SIZE) ? 1 : 0);
-    while ((1UL << order) < req_pages) {
-        order++;
-    }
-    fb_pfn = pfa_alloc(order);
-    if (fb_pfn == PFN_NONE) {
-        goto fail;
-    }
-    inst->fb_phys = pfn_to_phys(fb_pfn);
-    inst->fb_order = order;
-    memset(pfn_to_virt(fb_pfn), 0, (size_t)PAGE_SIZE << order);
-    arch_dma_sync_for_device(pfn_to_virt(fb_pfn), inst->fb_size);
-    
+    size_t pixel_bytes = inst->bpp / 8;
+    if (!pixel_bytes || !inst->width || !inst->height ||
+        inst->width > SIZE_MAX / inst->height / pixel_bytes) goto fail;
+    inst->fb_size = (size_t)inst->width * inst->height * pixel_bytes;
+    if (vmo_create_contiguous(inst->fb_size, &inst->fb_memory)) goto fail;
+    uint64_t fb_physical;
+    size_t fb_extent;
+    if (vmo_contiguous_info(inst->fb_memory, &fb_physical, &fb_extent) ||
+        fb_physical > (uintptr_t)-1) goto fail;
+    inst->fb_phys = (uintptr_t)fb_physical;
+    arch_dma_sync_for_device(pfn_to_virt(phys_to_pfn(inst->fb_phys)), inst->fb_size);
+
     struct virtio_gpu_resource_create_2d create ALIGNED(64);
     memset(&create, 0, sizeof(create));
     create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
@@ -1458,8 +1465,6 @@ fail:
     if (inst->irq_registered) {
         free_irq((uint32_t)vt->irq, inst);
     }
-    if (fb_pfn != PFN_NONE)
-        pfa_free(fb_pfn, order);
     virtio_gpu_release_buffers(inst);
     return -1;
 }
@@ -1490,36 +1495,11 @@ static int virtio_gpu_probe(device_t *dev) {
     return virtio_gpu_init_transport(dev, &vt);
 }
 
-/* Release what init_transport allocated, without touching the parts of the
- * instance that other CPUs can be inside.
- *
- * This deliberately does not memset the instance.  command_lock is a mutex that
- * a concurrent transfer or submit may be blocked inside, and waiters is a queue
- * with entries already linked onto it; zeroing either destroys a lock a thread
- * is parked on and a wait chain it is waiting to be woken from.  The instance
- * lives in static storage, so leaving those two initialised is both safe and
- * correct -- this is a teardown, not a reinitialisation.
- *
- * An earlier revision of this comment claimed an in-flight reference count was
- * still needed, on the grounds that a caller already inside the command path
- * would keep running against a reset transport.  Investigated, that is not what
- * happens, and the refcount would have protected against nothing:
- *
- *   - the instance is the file-static g_gpu_inst, so its storage outlives every
- *     caller; "reset transport" cannot be a use-after-free;
- *   - every command entry point re-reads dev->drv_priv, which remove() clears,
- *     and the wrappers answer -ENODEV when it is NULL;
- *   - the ops table is a static const, so the function pointers a racing caller
- *     already loaded stay valid;
- *   - reaching the driver at all requires the device to be the current default,
- *     and unregister() clears that slot first, so drm_gpu_ops() returns NULL and
- *     the ioctl answers -ENODEV before touching the instance.
- *
- * So the ordering that makes this safe is: unregister() (slot) -> unpublish()
- * (which drains class_device_call_begin users) -> release_buffers().  A future
- * change that caches dev or ops across an ioctl, or that calls the driver
- * without going through the default-device slot, would invalidate this and
- * would then need the reference count. */
+/* Drop instance-owned storage after the caller's transport/IRQ teardown.
+ * Scanout VMOs can outlive this instance through user mappings or snapshots;
+ * their final release runs MM code, without a callback into this module.
+ * Keeping RAM alive does not prove DMA stop, protect command-queue buffers,
+ * or make the remaining legacy DRM raw operation-table users safe. */
 static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)
 {
     if (inst->big_req) {
@@ -1539,7 +1519,10 @@ static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)
     inst->bpp = 0;
     inst->fb_phys = 0;
     inst->fb_size = 0;
-    inst->fb_order = 0;
+    inst->valid = 0;
+    struct vmo *memory = inst->fb_memory;
+    inst->fb_memory = NULL;
+    vmo_release(memory);
     inst->irq_registered = 0;
     inst->last_used = 0;
 }
@@ -1555,8 +1538,6 @@ static int virtio_gpu_remove(device_t *dev) {
     if (inst->irq_registered)
         free_irq((uint32_t)inst->vt.irq, inst);
     gpu_device_unregister(dev);
-    if (inst->fb_phys)
-        pfa_free(phys_to_pfn(inst->fb_phys), inst->fb_order);
     dev->drv_priv = NULL;
     virtio_gpu_release_buffers(inst);
     return 0;

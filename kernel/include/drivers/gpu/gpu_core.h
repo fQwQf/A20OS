@@ -4,6 +4,7 @@
 #include "drivers/core/driver_core.h"
 struct class_device;
 struct gpu_dev_ops;
+struct vmo;
 
 /* A 3D-capable display device is preferred as the /dev/fb0 and DRM backend;
  * see gpu_device_register() in gpu_core.c for the promotion rule. */
@@ -30,6 +31,20 @@ struct gpu_device_access {
 int gpu_device_access_begin(struct class_device *, struct gpu_device_access *);
 int gpu_device_default_begin(struct gpu_device_access *);
 void gpu_device_access_end(struct gpu_device_access *);
+/* Owning snapshot of immutable canonical RAM. offset is page aligned; size
+ * describes visible bytes, whose rounded page coverage fits memory. The
+ * snapshot is independent of the device, binding and module after get. Do
+ * not copy an owning snapshot or overwrite a live output; pair it with put. */
+struct gpu_scanout {
+    struct vmo *memory;
+    uint64_t offset;
+    size_t size;
+};
+/* Caller holds a live access; get takes the callback's owning reference.
+ * Only the contiguous immutable RAM kind is accepted initially. Failure
+ * clears out; no silent fallback from a present but failing provider. */
+int gpu_device_scanout_get(const struct gpu_device_access *, struct gpu_scanout *);
+void gpu_scanout_put(struct gpu_scanout *);
 /* Legacy borrowed snapshot: caller must hold lifecycle coordination through
  * use. Does not pin binding/ops. New consumers use retained/scoped access. */
 device_t *gpu_device_get_default(void);

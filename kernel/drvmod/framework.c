@@ -22,6 +22,7 @@
 
 #include "drvmod/export.h"
 #include "drivers/core/dma_mapping.h"
+#include "mm/vmo.h"
 #include "drivers/core/riscv_iommu.h"
 #include "drivers/core/amd_iommu.h"
 #include "drivers/core/fence.h"
@@ -637,6 +638,12 @@ const struct drv_export drv_export_table[] = {
     { "gpu_device_access_begin", (void *)gpu_device_access_begin },
     { "gpu_device_default_begin", (void *)gpu_device_default_begin },
     { "gpu_device_access_end", (void *)gpu_device_access_end },
+    { "gpu_device_scanout_get", (void *)gpu_device_scanout_get },
+    { "gpu_scanout_put", (void *)gpu_scanout_put },
+    { "vmo_create_contiguous", (void *)vmo_create_contiguous },
+    { "vmo_contiguous_info", (void *)vmo_contiguous_info },
+    { "vmo_ref", (void *)vmo_ref },
+    { "vmo_release", (void *)vmo_release },
     /* user copy helpers (virtio-gpu 3D ioctl passthrough) */
     { "copy_from_user",        (void *)copy_from_user },
     { "copy_to_user",          (void *)copy_to_user },

@@ -1246,37 +1246,45 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
     DMA_CHECK(!driver_dma_try_unmap_pages(&buffer_mapping) && !buffer_mapping);
     kinfo("DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1\n");
 
-    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, 3 * PAGE_SIZE, 0);
-    DMA_CHECK(vmo);
-    pfn_t vmo_first = vmo_get_page(vmo, 1), vmo_second = vmo_get_page(vmo, 2);
-    DMA_CHECK(vmo_first != PFN_NONE && vmo_second != PFN_NONE);
-    uint8_t *vmo_data[2] = {pfn_to_virt(vmo_first), pfn_to_virt(vmo_second)};
-    memset(vmo_data[0], 0xcc, PAGE_SIZE);memset(vmo_data[1], 0xcc, PAGE_SIZE);
-    for (unsigned i = 0; i < 128; i++)
-        vmo_data[i < 64 ? 0 : 1][i < 64 ? PAGE_SIZE - 64 + i : i - 64] = (uint8_t)(i * 19U + 3U);
-    struct driver_dma_mapping *vmo_mapping;
-    DMA_CHECK(!driver_dma_map_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &vmo_mapping));
-    uint64_t vmo_address, vmo_next;
-    DMA_CHECK(!driver_dma_page_address(vmo_mapping, 0, &vmo_address));
-    DMA_CHECK(!driver_dma_page_address(vmo_mapping, 1, &vmo_next) && vmo_next == vmo_address + PAGE_SIZE);
-    DMA_CHECK(vmo_address != pfn_to_phys(vmo_first) && vmo_next != pfn_to_phys(vmo_second));
-    vmo_release(vmo); /* The original storage owner dies before real DMA. */
-    uint16_t vmo_command = pci_cfg_read16(device, 4);
-    pci_cfg_write16(device, 4, vmo_command | 4U);
-    native_test_edu_transfer(bar, vmo_address + PAGE_SIZE - 64, 0x40000, false);
-    DMA_CHECK(!driver_dma_mapping_sync_for_cpu(vmo_mapping));
-    memset(vmo_data[0] + PAGE_SIZE - 64, 0, 64);memset(vmo_data[1], 0, 64);
-    DMA_CHECK(!driver_dma_mapping_sync_for_device(vmo_mapping));
-    native_test_edu_transfer(bar, 0x40000, vmo_address + PAGE_SIZE - 64, true);
-    DMA_CHECK(!driver_dma_mapping_sync_for_cpu(vmo_mapping));
-    for (unsigned i = 0; i < 128; i++)
-        DMA_CHECK(vmo_data[i < 64 ? 0 : 1][i < 64 ? PAGE_SIZE - 64 + i : i - 64] == (uint8_t)(i * 19U + 3U));
-    for (unsigned i = 0; i < PAGE_SIZE - 64; i++) DMA_CHECK(vmo_data[0][i] == 0xcc);
-    for (unsigned i = 64; i < PAGE_SIZE; i++) DMA_CHECK(vmo_data[1][i] == 0xcc);
-    pci_cfg_write16(device, 4, vmo_command & ~4U);
-    DMA_CHECK(!(pci_cfg_read16(device, 4) & 4U));
-    DMA_CHECK(!driver_dma_try_unmap_pages(&vmo_mapping) && !vmo_mapping);
-    kinfo("DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1\n");
+    for (unsigned contiguous = 0; contiguous < 2; contiguous++) {
+        struct vmo *vmo;
+        if (contiguous) DMA_CHECK(!vmo_create_contiguous(3 * PAGE_SIZE, &vmo));
+        else vmo = vmo_create(VMO_ANONYMOUS, 3 * PAGE_SIZE, 0);
+        DMA_CHECK(vmo);
+        pfn_t vmo_first = vmo_get_page(vmo, 1), vmo_second = vmo_get_page(vmo, 2);
+        DMA_CHECK(vmo_first != PFN_NONE && vmo_second != PFN_NONE);
+        uint8_t *vmo_data[2] = {pfn_to_virt(vmo_first), pfn_to_virt(vmo_second)};
+        memset(vmo_data[0], 0xcc, PAGE_SIZE);memset(vmo_data[1], 0xcc, PAGE_SIZE);
+        for (unsigned i = 0; i < 128; i++)
+            vmo_data[i < 64 ? 0 : 1][i < 64 ? PAGE_SIZE - 64 + i : i - 64] = (uint8_t)(i * 19U + 3U);
+        struct driver_dma_mapping *vmo_mapping;
+        DMA_CHECK(!driver_dma_map_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &vmo_mapping));
+        uint64_t vmo_address, vmo_next;
+        DMA_CHECK(!driver_dma_page_address(vmo_mapping, 0, &vmo_address));
+        DMA_CHECK(!driver_dma_page_address(vmo_mapping, 1, &vmo_next) && vmo_next == vmo_address + PAGE_SIZE);
+        DMA_CHECK(vmo_address != pfn_to_phys(vmo_first) && vmo_next != pfn_to_phys(vmo_second));
+        vmo_release(vmo); /* The original storage owner dies before real DMA. */
+        uint16_t vmo_command = pci_cfg_read16(device, 4);
+        pci_cfg_write16(device, 4, vmo_command | 4U);
+        native_test_edu_transfer(bar, vmo_address + PAGE_SIZE - 64, 0x40000, false);
+        DMA_CHECK(!driver_dma_mapping_sync_for_cpu(vmo_mapping));
+        memset(vmo_data[0] + PAGE_SIZE - 64, 0, 64);memset(vmo_data[1], 0, 64);
+        DMA_CHECK(!driver_dma_mapping_sync_for_device(vmo_mapping));
+        native_test_edu_transfer(bar, 0x40000, vmo_address + PAGE_SIZE - 64, true);
+        DMA_CHECK(!driver_dma_mapping_sync_for_cpu(vmo_mapping));
+        for (unsigned i = 0; i < 128; i++)
+            DMA_CHECK(vmo_data[i < 64 ? 0 : 1][i < 64 ? PAGE_SIZE - 64 + i : i - 64] == (uint8_t)(i * 19U + 3U));
+        for (unsigned i = 0; i < PAGE_SIZE - 64; i++) DMA_CHECK(vmo_data[0][i] == 0xcc);
+        for (unsigned i = 64; i < PAGE_SIZE; i++) DMA_CHECK(vmo_data[1][i] == 0xcc);
+        pci_cfg_write16(device, 4, vmo_command & ~4U);
+        DMA_CHECK(!(pci_cfg_read16(device, 4) & 4U));
+        DMA_CHECK(!driver_dma_try_unmap_pages(&vmo_mapping) && !vmo_mapping);
+        if (contiguous)
+            kinfo("DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1\n");
+        else
+            kinfo("DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1\n");
+    }
+
 
     pfn_t pages[2], gap;
     pages[0] = pfa_alloc_page(); gap = pfa_alloc_page(); pages[1] = pfa_alloc_page();
