@@ -146,7 +146,8 @@ typedef struct iommu_user_domain {
     pfn_t l0_pfn;
     uint64_t *l0;
     uint64_t mapped_pages;
-    pfn_t pinned[IOMMU_USER_MAX_PAGES]; /* independent RAM refs per IOVA */
+    /* User refs per IOVA; PFN_NONE for RAM retained by a native mapping. */
+    pfn_t pinned[IOMMU_USER_MAX_PAGES];
     uint64_t fault_count;
     uint32_t last_cause;
     uint64_t last_iova;
@@ -732,8 +733,11 @@ static int domain_map(uint16_t devid, int owner_pid, uint64_t phys,
         return -1;
     }
     for (uint32_t i = 0; i < npages; i++) {
-        frame_get(pages[i]);
-        d->pinned[first + i] = pages[i];
+        /* Native mapping owns either frame refs or an entire order-N buffer.
+         * Never frame_get its allocation tails. User quarantine owns its own
+         * order-0 refs because that API has no returned cleanup handle. */
+        if (!d->native_device) frame_get(pages[i]);
+        d->pinned[first + i] = d->native_device ? PFN_NONE : pages[i];
         d->l0[first + i] = ((phys + (uint64_t)i * PAGE_SIZE) >> 12)
                            << IOMMU_PTE_PPN_SHIFT |
                            IOMMU_PTE_V | IOMMU_PTE_R | IOMMU_PTE_U | IOMMU_PTE_A |
@@ -764,6 +768,10 @@ static int domain_map(uint16_t devid, int owner_pid, uint64_t phys,
 int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
                            uint32_t npages, uint64_t *out_iova)
 {
+    if (owner_pid <= 0) {
+        if (out_iova) *out_iova = 0;
+        return -1; /* Native translations belong to their mapping handles. */
+    }
     bool pending;
     int ret = domain_map(devid, owner_pid, phys, npages, out_iova, &pending,
                            DRIVER_DMA_BIDIRECTIONAL);
@@ -772,7 +780,7 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
     return ret;
 }
 
-int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
+static int domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
                              uint32_t npages)
 {
     if (!npages || npages > IOMMU_USER_MAX_PAGES || iova < IOMMU_USER_IOVA ||
@@ -799,10 +807,17 @@ int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
         g_iommu_stats.unmaps++;
         g_iommu_stats.mapped_pages -= npages;
         for (uint32_t i = 0; i < npages; i++)
-            frame_put(d->pinned[first + i]);
+            if (d->pinned[first + i] != PFN_NONE)
+                frame_put(d->pinned[first + i]);
     }
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return r;
+}
+
+int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
+                             uint32_t npages)
+{
+    return owner_pid > 0 ? domain_unmap(devid, owner_pid, iova, npages) : -1;
 }
 
 /* Drain the shared fault queue and attribute each record to the domain that
@@ -934,7 +949,7 @@ static int domain_detach(uint16_t devid, int owner_pid,
         return -1;
     }
     for (unsigned i = 0; i < IOMMU_USER_MAX_PAGES; i++)
-        if (mapped & (1ull << i))
+        if ((mapped & (1ull << i)) && d->pinned[i] != PFN_NONE)
             frame_put(d->pinned[i]);
     pfa_free_page(root_pfn);
     pfa_free_page(l1_pfn);
@@ -982,7 +997,7 @@ static int native_unmap(void *opaque, uint64_t address,
 {
     (void)direction;
     struct native_iommu_context *context = opaque;
-    return riscv_iommu_domain_unmap(context->devid, context->owner, address, 1)
+    return domain_unmap(context->devid, context->owner, address, 1)
            ? -EIO : 0;
 }
 
@@ -1195,6 +1210,41 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
     panic("DRIVER_IOMMU_NATIVE: DMA FAIL line=%d: %s", __LINE__, #test); } while (0)
     volatile uint8_t *bar = pci_map_bar(device, 0);
     DMA_CHECK(bar);
+    /* Keep the actual order-4 allocation through the mapping, without ever
+     * treating its tails as independent frames. EDU crosses the IOVA page
+     * boundary after the allocator caller has dropped its buffer reference. */
+    struct driver_dma_buffer *buffer;
+    struct driver_dma_mapping *buffer_mapping;
+    DMA_CHECK(!driver_dma_buffer_create(device, PAGE_SIZE + 33, 65536, &buffer));
+    uint8_t *bytes = driver_dma_buffer_data(buffer);
+    uint64_t physical = driver_dma_buffer_address(buffer), buffer_address, buffer_next;
+    DMA_CHECK(!(physical & 65535U));
+    memset(bytes, 0xcc, 2 * PAGE_SIZE); /* Includes the explicitly exposed final-page padding. */
+    for (unsigned i = 0; i < 128; i++) bytes[PAGE_SIZE - 64 + i] = (uint8_t)(i * 31U + 7U);
+    DMA_CHECK(!driver_dma_map_buffer(domain, buffer, DRIVER_DMA_BIDIRECTIONAL, &buffer_mapping));
+    DMA_CHECK(driver_dma_mapping_count(buffer_mapping) == 2);
+    DMA_CHECK(!driver_dma_page_address(buffer_mapping, 0, &buffer_address));
+    DMA_CHECK(!driver_dma_page_address(buffer_mapping, 1, &buffer_next));
+    DMA_CHECK(buffer_next == buffer_address + PAGE_SIZE && buffer_address != physical);
+    driver_dma_buffer_put(buffer);
+    uint16_t saved_command = pci_cfg_read16(device, 4);
+    pci_cfg_write16(device, 4, saved_command | 4U);
+    native_test_edu_transfer(bar, buffer_address + PAGE_SIZE - 64, 0x40000, false);
+    DMA_CHECK(!driver_dma_mapping_sync_for_cpu(buffer_mapping));
+    memset(bytes + PAGE_SIZE - 64, 0, 128);
+    DMA_CHECK(!driver_dma_mapping_sync_for_device(buffer_mapping));
+    native_test_edu_transfer(bar, 0x40000, buffer_address + PAGE_SIZE - 64, true);
+    DMA_CHECK(!driver_dma_mapping_sync_for_cpu(buffer_mapping));
+    for (unsigned i = 0; i < 2 * PAGE_SIZE; i++) {
+        uint8_t expected = i >= PAGE_SIZE - 64 && i < PAGE_SIZE + 64
+                           ? (uint8_t)((i - (PAGE_SIZE - 64)) * 31U + 7U) : 0xcc;
+        DMA_CHECK(bytes[i] == expected);
+    }
+    pci_cfg_write16(device, 4, saved_command & ~4U);
+    DMA_CHECK(!(pci_cfg_read16(device, 4) & 4U));
+    DMA_CHECK(!driver_dma_try_unmap_pages(&buffer_mapping) && !buffer_mapping);
+    kinfo("DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1\n");
+
     pfn_t pages[2], gap;
     pages[0] = pfa_alloc_page(); gap = pfa_alloc_page(); pages[1] = pfa_alloc_page();
     DMA_CHECK(pages[0] != PFN_NONE && pages[1] != PFN_NONE && gap != PFN_NONE);
@@ -1217,7 +1267,7 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
     DMA_CHECK(!driver_dma_page_address(mapping, 0, &address));
     DMA_CHECK(!driver_dma_page_address(mapping, 1, &next) && next == address + PAGE_SIZE);
     DMA_CHECK(address != pfn_to_phys(pages[0]) && next != pfn_to_phys(pages[1]));
-    frame_put(pages[0]); frame_put(pages[1]); /* Mapping and backend own all pins. */
+    frame_put(pages[0]); frame_put(pages[1]); /* Mapping owns the RAM refs. */
     uint16_t command = pci_cfg_read16(device, 4);
     pci_cfg_write16(device, 4, command | 4);
     native_test_edu_transfer(bar, address + PAGE_SIZE - 64, 0x40000, false);
