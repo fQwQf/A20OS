@@ -8,6 +8,24 @@
 进一步验证了带源码构建 fastfetch 的镜像和正常重启。
 
 
+## 第19轮实机检查（2026-11-14）
+
+用户确认整体可用但卡顿。实际EFI与0.20交付哈希一致，内置ESP保存1668条连续JSONL，
+state clean；宿主只读fsck=0，RECOVER=0、last_orphan=0。16/16配置CPU上线，
+I²C-HID收到9157个有效报告，驱动传输errors/drops/recoveries均0，未见USB超时或内核panic。
+WHU-WLAN关联、DHCP及永久MAC发布成功；日志不能单独验收网页门户认证。
+
+这不是完整桌面通过：libinput至少5次跳点后限流（第18轮也有），Firefox有8次IBus按键
+请求超时，LibreOffice在空Java配置XML告警后抛异常并自发SIGABRT，udev的两个ethtool
+辅助管道有重复超时终止记录。后两者根因尚未确定，不先归咎介质或应用配置。
+桌面使用Pixman，Xwayland回退软件渲染；不能把所有卡顿等同于U盘的正常表现。
+重启请求至最终系统调用114.199 s，最终sync 101295 ms，根分区100932 ms；最后JBD2
+ordered=88043 ms、finish=12716 ms，全部sync返回0。慢写回仍未解决。
+
+本轮仅只读采集并分析，未改测试EFI、未修盘或回放journal。后续应定位输入法/udev阻塞、
+写回与flush时延，并单独回归LibreOffice及触控板事件质量。原始证据和可复算摘要见
+`build/evidence/lenovo-83eg-2026-11-14/boot-19-analysis/README.md`、`acceptance.json`。
+
 ## 第19轮交付（2026-11-14，待实机验收）
 
 用户授权更新测试U盘。已从提交 `388197124dc6909906a8c9d739a394217dc87fa9` 独立构建0.20版，
