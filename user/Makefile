@@ -853,6 +853,9 @@ $(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJ_DIR)/cmds/stress/fbdev_map_test.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/stress/fbdev_map_test.o: ../kernel/include/uapi/a20/framebuffer.h
+
 $(OBJ_DIR)/cmds/core/videoplay.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/videoplay.o: ../kernel/include/uapi/a20/framebuffer.h
 

@@ -25,8 +25,9 @@
 //! this file cannot see (`USER_VA_LIMIT`, `MMAP_BASE_ADDR`).  Those are
 //! ABI/layout/hardware bridges, not policy.
 //!
-//! The caller already holds `mm->lock` and the TLB-invalidate window is open;
-//! nothing here takes a lock or blocks.
+//! Lazy entries require the caller's `mm->lock` and open TLB window. The eager
+//! physical entry instead allocates outside locks and owns its MM/TLB window;
+//! its fixed/hint policy still uses the same helpers as the lazy entries.
 
 use core::ffi::{c_char, c_void};
 
@@ -36,6 +37,7 @@ const EINVAL: i32 = -22;
 const ENOMEM: i32 = -12;
 const EEXIST: i32 = -17;
 const EOPNOTSUPP: i32 = -95;
+const EACCES: i32 = -13;
 
 const PROT_READ: i32 = 1;
 const PROT_WRITE: i32 = 2;
@@ -56,6 +58,8 @@ const VM_FILE: u64 = 1 << 13;
 const VM_VMO: u64 = 1 << 14;
 const VM_LOCKED: u64 = 1 << 15;
 const VM_NATIVE_CAP: u64 = 1 << 19;
+const VM_DONTFORK: u64 = 1 << 9;
+const VM_PFNMAP: u64 = 1 << 17;
 
 /// The `mm_seg_t` fields the creation transaction sets, in the order the C
 /// bridge copies them.  The record is filled only once every fallible step
@@ -123,6 +127,87 @@ unsafe extern "C" {
     fn a20_mmap_shared_anon_create(len: usize) -> *mut c_void;
     fn vmo_release(vmo: *mut c_void);
     fn a20_mmap_nommu_alloc(len: usize, addr_out: *mut usize) -> *mut c_void;
+    fn a20_mmap_physical_supported(mm: *mut c_void, physical: u64, len: usize, memory: usize) -> i32;
+    fn a20_mmap_physical_pte(prot: i32, memory: usize) -> usize;
+    fn a20_mmap_physical_enter(mm: *mut c_void) -> u64;
+    fn a20_mmap_physical_finish(mm: *mut c_void, irq: u64, discard: *mut c_void);
+    fn a20_mmap_physical_occupied(mm: *mut c_void, va: usize) -> i32;
+    fn a20_mmap_physical_install(mm: *mut c_void, va: usize, physical: u64, pte: usize) -> i32;
+    fn a20_mmap_physical_unmap(mm: *mut c_void, va: usize);
+    fn a20_mmap_physical_note(mm: *mut c_void, va: usize, len: usize);
+    fn a20_mmap_physical_rss(mm: *mut c_void, pages: usize);
+}
+
+/// Eager CPU physical mappings share the ordinary placement policy, but own
+/// no RAM frames. Unlike the locked lazy entry points this task-context entry
+/// allocates its record BEFORE entering the MM/TLB transaction and always
+/// finishes that transaction before releasing unpublished metadata.
+#[no_mangle]
+pub unsafe extern "C" fn a20_mmap_physical_rust(
+    mm: *mut c_void, addr: usize, len: usize, prot: i32, flags: i32,
+    physical: u64, memory: usize,
+) -> usize {
+    if mm.is_null() || physical & (PAGE_SIZE as u64 - 1) != 0 ||
+        prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 || prot == 0 ||
+        flags & !(MAP_SHARED | MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 ||
+        flags & MAP_SHARED == 0 {
+        return errno(EINVAL);
+    }
+    if prot & PROT_EXEC != 0 { return errno(EACCES); }
+    if unsafe { a20_mmap_is_nommu() } != 0 { return errno(EOPNOTSUPP); }
+    let len = match round_up_len(len) { Ok(n) => n, Err(e) => return errno(e) };
+    if physical.checked_add(len as u64 - 1).is_none() ||
+        unsafe { a20_mmap_physical_supported(mm, physical, len, memory) } == 0 {
+        return errno(EINVAL);
+    }
+    let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
+    let limit = unsafe { a20_mmap_user_va_limit() };
+    if fixed && (addr == 0 || addr & (PAGE_SIZE - 1) != 0 ||
+        addr.checked_add(len).map_or(true, |end| end > limit)) {
+        return errno(EINVAL);
+    }
+    let pte = unsafe { a20_mmap_physical_pte(prot, memory) };
+    let effective = unsafe { mm_pte_flags_to_prot(pte) };
+    let vma = unsafe { mm_seg_new() };
+    if vma.is_null() { return errno(ENOMEM); }
+    let irq = unsafe { a20_mmap_physical_enter(mm) };
+    let result = unsafe { (|| -> Result<usize, i32> {
+        let addr = apply_fixed_and_hint(mm, addr & !(PAGE_SIZE - 1), len, flags)?;
+        let placed = finish_address(mm, addr, len)?;
+        let va = placed.addr;
+        // An orphan/huge PTE is still an occupied address, even at physical
+        // address zero. Never overwrite it merely because the VMA list is empty.
+        for off in (0..len).step_by(PAGE_SIZE) {
+            if a20_mmap_physical_occupied(mm, va + off) != 0 { return Err(EEXIST); }
+        }
+        for off in (0..len).step_by(PAGE_SIZE) {
+            let ret = a20_mmap_physical_install(mm, va + off, physical + off as u64, pte);
+            if ret < 0 {
+                // The failed page may have allocated an empty intermediate path.
+                a20_mmap_physical_unmap(mm, va + off);
+                for done in (0..off).step_by(PAGE_SIZE).rev() {
+                    a20_mmap_physical_unmap(mm, va + done);
+                }
+                a20_mmap_physical_note(mm, va, len);
+                return Err(ret);
+            }
+        }
+        let spec = SegSpec {
+            start: va, end: va + len,
+            vm_flags: VM_SHARED | VM_PFNMAP | VM_DONTFORK | VM_NATIVE_CAP | prot_vm_flags(effective),
+            pte_flags: pte, vmar_cap: effective as u32, backing_offset: physical,
+            ..SegSpec::default()
+        };
+        a20_mmap_seg_fill(vma, &spec, core::ptr::null_mut());
+        mm_insert_vma(mm, vma);
+        a20_mmap_total_vm_add(mm, len / PAGE_SIZE);
+        a20_mmap_physical_rss(mm, len / PAGE_SIZE);
+        a20_mmap_physical_note(mm, va, len);
+        Ok(va)
+    })() };
+    let discard = if result.is_err() { vma } else { core::ptr::null_mut() };
+    unsafe { a20_mmap_physical_finish(mm, irq, discard) };
+    match result { Ok(va) => va, Err(e) => errno(e) }
 }
 
 /// The address a mapping will be published at, plus the flat allocation it
