@@ -156,6 +156,20 @@ fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属�
 
 `gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。现有 DRM/GEM/virgl 路径仍有该旧入口和全局对象表，尚未整体迁移；需要每设备 BO/context/request/fence、文件绑定及映射退役协议。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项新函数已导出，既有 device/driver/vtable 布局与 ABI 10 不变。
 
+## 驱动 CPU 物理映射事务
+
+`mm_mmap_physical(mm, addr, len, prot, flags, physical, memory_flags)` 位于原生 MM 层，供内核 class adapter 和用户驱动服务安装 CPU 物理视图。调用者在任务上下文持有 mm 引用，不持 MM/spinlock。它复用 `mmap_policy.rs` 的 fixed/hint 地址策略，不在 fbdev 或用户驱动各维护一套 VMA/PTE 事务；C 只提供字段、CPU 页表、锁与 TLB 桥接。
+
+物理起点须页对齐，长度向页取整，整段不得越过 uint64 或目标 paddr_t 的可表示范围；物理地址 0 有效。只接受非空 READ/WRITE、MAP_SHARED 及可选 FIXED/NOREPLACE；未知/私有映射返回 `-EINVAL`，EXEC 返回 `-EACCES`，NOMMU 返回 `-EOPNOTSUPP`。memory_flags 只能包含 `PTE_DEVICE`/`PTE_MAT1`，由可信调用者按 CPU 别名选择；该函数不核准任意物理区间，也不检查设备资源所有权。用户驱动仍先检查白名单，fbdev 仍先取得 class access 并核对 scanout 范围和 boot framebuffer 的 CPU 属性。不能用 DMA/IOVA 地址代替 physical。
+
+固定地址须非零、页对齐且全范围合法；NOREPLACE 对任何 VMA 重叠返回 `-EEXIST`，FIXED 调用同一 MM 事务中的 `mm_munmap_locked()` 并传播失败。hint 检查整个目标区间，碰撞或越界时重新找 gap，不再只检查起始点。安装前还检查整段现存叶 PTE，包括物理地址 0 和大页，拒绝覆盖没有 VMA 描述的旧映射。MAP_FIXED 不是保存旧映射的回滚事务：旧映射移除后发生分配/安装失败，不恢复旧内容。
+
+先在锁外分配未发布 VMA，再开启 `mm->tlb_lock` 失效事务并取得 `mm->lock`。全部 PTE 安装成功才发布一个 `VM_SHARED|VM_PFNMAP|VM_DONTFORK` 记录，记录物理 backing_offset 并更新 total_vm/RSS；以 `VM_NATIVE_CAP` 及实际 READ/WRITE 权限记录不可扩大的 mprotect ceiling。失败清理当前页的半建空路径，再逆序撤销已安装前缀；锁外完成本地/远端 TLB 失效和页表退休，随后交还未发布记录并执行 deferred release。保护变更保留原 memory type 与 dirty 历史，不能把 x86 设备 PCD/PWT 丢成普通 RAM 类型。
+
+fbdev mmap 和旧 `FBIO_MAP_FB` 已委托此事务，后者使用固定 NOREPLACE；用户驱动 `udriver_map_mmio()` 保留原 0/-1 与失败不改 out_va 的接口，内部同样使用这条 MM 路径及 Device 类型。旧 NOMMU framebuffer 直接地址接口保持原有语义，不由此获得 MMU 权限或撤销能力。模块 ABI 10、device/driver/class vtable 布局不变；用户地址空间操作由内核 adapter 承担，没有为设备模块新增用户映射入口。
+
+这是**借用物理存储的视图**：不取得 PFA frame、VMO、device、resource 或模块引用，不做 IOMMU/DMA 隔离。调用者须使 backing 在全部 VMA 和旧 TLB 访问结束前有效，或在回收/复用前撤销所有视图。fbdev 当前尚无跨解绑的 BO/scanout 租约和映射撤销协议，不能据此安全释放持久用户映射的 backing；现有驱动退出仍需独立推进。这条事务关闭安装/回滚问题，不关闭存储所有权缺口。
+
 ## 资源占用与受管映射
 
 `kernel/drivers/core/driver_core.h` / `driver_core.c` 提供 owner 绑定的地址区间申请，并通过模块导出表供 `.a20drv` 使用，没有修改 `device_t` / `driver_t` 布局。
@@ -760,3 +774,18 @@ MM 提交 `3c6f93fcc`，驱动/首个使用者提交 `1f981757b`。VMO 生命周
 新增 `make smoke-gpu-access-x86_64` 固定 generic 配置，实际双 CPU 2/2 online，加载真实 virtio-gpu 模块并匹配 `DRM_SYSFS: PASS` 与 `videoplay: presented 10 frames`，覆盖 MMU 的 framebuffer 安装/ioctl/2D 刷新。双 CPU embedded hub guest 匹配 `DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1`，保留旧 endpoint/controller 退出与重新枚举及 VMO/buffer runtime 标记。假 GPU 总线仅匹配本地 driver 身份；最初通配匹配导致其他驱动抢占的失败尝试已修正，不计为成功证据。最终两次 guest 均在共享 QEMU 资源串行协调下运行，成功日志保存在 `.kernel-build/gpu-access-review/gpu-guest.log` 与 `hub-guest.log`。
 
 这些结果证明调用准入、引用和现有 2D 消费者回归，不是图像视觉核验、实体 GPU 加速或设备停止/复位证明。fbdev mmap 返回后仍是裸物理 VMA，文件不固定 GPU；DRM/GEM/virgl 全局对象与旧借用 getter 尚未整体迁移。每设备 BO/context、GPUVM、请求/fence 及映射退役仍为后续工作。文档引用检查通过 540 条；导航仍是迁移工作区既有 7 个未索引页面。文档迁移及其他会话修改保留，本轮完整本地证据位于 `.kernel-build/gpu-access-review/`。
+
+
+### 驱动 CPU 物理映射事务验证（2026-11-14）
+
+主代码提交 `2f7070da5`。fbdev mmap、旧 `FBIO_MAP_FB` 和原生用户驱动服务已共用 MM 的 eager CPU 物理映射事务：Rust 复用既有 fixed/hint 策略并拥有准入/回滚，C 暴露记录/架构/锁/TLB 原语。修正了 fbdev 持 mm->lock 调用公开 mm_munmap 的递归锁问题、只检查 hint 起点的碰撞遗漏、失败页空路径清理与 TLB 退休，以及用户驱动物理映射的 total_vm/RSS 记账。新视图用既有 VM_NATIVE_CAP 表达独立于 ABI 的 READ/WRITE ceiling；保护变更保留 Device 缓存类型与 dirty 历史。scanout 地址相加前拒绝整体物理范围溢出，fbdev 经 mm_addr_error 解码窄 VA 的负返回，不把它零扩展为成功地址。
+
+新增 12 项方法运行实际 Rust mmap policy、提取的生产 C 桥接、PTE 转换/保护 helper、PT unmap、fbdev MMU mapper/旧 ioctl 分支与 udriver adapter；C 启用 ASan/UBSan，Rust 按生产策略普通编译。CPU 页表安装、分配故障、锁、区间和 munmap 副作用为模型。覆盖物理 0 的旧叶不可覆盖、长度/PA/VA 取值与溢出、32-bit PA/VA 收窄模型、完整 hint 区间、固定覆盖与旧映射删除后安装失败、NOREPLACE、CPU Device/Normal 属性、权限 ceiling 和记账。窄类型模型不等于完整 ILP32 ABI 或 32-bit guest 验证。测试内 3 个负控破坏当前失败页、映射前缀和空路径清理，均须编译成功后触发运行时失败；旧 MMIO rollback 脚本改为同一套测试的兼容入口。既有 lazy mmap 主机脚本仍通过 106 项检查。
+
+另在隔离导出树分别破坏完整 hint 检查、fixed 错误传播、旧叶保护、失败页/前缀清理、TLB finish、RSS/total_vm、ceiling、保护时 Device 属性保留、初始 CPU 属性、目标 PA 宽度、未知属性拒绝及锁外记录分配，共 14 项控制全部触发断言或 ASan/UBSan；编译失败不计入。最终导出树通过 281 个不同 unittest 方法，15 个主代码/配置路径逐一与提交核对；相较负控执行树，只有下述独立测试 oracle 提交的两个文件发生变化，14 项控制所使用的策略、mapper、桥接与消费者源码一致。
+
+独立测试修正提交 `a8cc065bd`：此前 VMO provider/cache hook 用 trylock 判断“任何线程持有 source lock”，在合法并发 resize 时误报。fixture 改为按当前线程记录锁所有权；另一个线程持锁时回调允许通过，本线程持锁则必须在指定 ownership assertion 失败，不能用无条件失败代替该负控。13 项 VMO 方法通过；完整门禁中的那次误判不计为成功。最终 `check-firmware-model` 通过 510 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 146 项。115 个 instance、32 个 driver component、195 个 smoke case 的表审计通过。
+
+双 CPU generic virtio-gpu 2D guest 实际 2/2 online，新增 `fbdev_map_test` 匹配 `FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1`：匿名邻页内容在 fixed 替换后保留，跨 gap 的 hint 不覆盖邻页，RO view 不扩权，旧 ioctl 使用 NOREPLACE；同时继续匹配 sysfs PASS 和 videoplay 10 帧。embedded 双 CPU hub guest 匹配 `DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1`，实际 MM/Rust/PFA/VMO 组合检查叶和 VMA 的 PCD/PWT 保留、固定覆盖/权限拒绝及计数，销毁视图后才交还源 VMO；旧 GPU publication、USB endpoint/controller 退出/重绑及 VMO/buffer 标记继续通过。这些启动串行使用共享 QEMU 资源；成功日志在 `.kernel-build/physical-map-review/gpu-guest.log` 与 `hub-guest.log`。
+
+本接口借用存储，不取得 frame/backing/device/resource/module 引用，不提供 DMA/IOMMU、停止证明或映射撤销。持久 framebuffer backing、DRM 每设备 BO/context/request、GPUVM 和失败退役仍待实现；没有增加设备模块的用户映射导出或改变 ABI 10。上述模拟器结果不证明实体 GPU 加速、完整 ILP32 运行或远端 TLB 的并发压力。文档引用检查通过 540 条；导航仍为迁移工作区既有 7 项缺失。实际 docs/zh 迁移与其他会话修改保留；本轮完整证据在 `.kernel-build/physical-map-review/`。

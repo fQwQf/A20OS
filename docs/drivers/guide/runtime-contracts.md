@@ -46,6 +46,12 @@ while (!(readl(status) & READY)) {
 
 迭代上限对 VirtualBox ARM 软件 timer 和早期启动尤其重要。
 
+### 用户地址空间中的 CPU 物理视图
+
+内核 adapter 使用 `mm_mmap_physical()` 共用 Rust/MM 的放置、固定覆盖、PTE 回滚和 TLB 事务，不要持 mm->lock 调用公开 mm_munmap 或自行安装一串 PTE。接口只接受 shared、非执行 READ/WRITE 映射，memory_flags 是 CPU Device/Normal 属性；物理地址与 IOVA 必须分开。成功视图带 mprotect ceiling，修改权限保留缓存类型。用户驱动仍先核对白名单，fbdev 仍先保留 scoped class access 和 scanout 范围。
+
+该接口借用物理存储，不取得 backing/device/模块引用；MAP_FIXED 已移除的旧映射不会因后续失败而恢复。调用者另行保证全部 VMA/TLB 访问期间的存储或撤销协议。完整限制见 [物理映射事务](native-runtime.md#驱动-cpu-物理映射事务)。
+
 ## 内存屏障和设备所有权
 
 CPU 写 descriptor/buffer 后，先执行 DMA for-device 同步，再用 `wmb()` 保证 descriptor 和索引顺序，最后敲 doorbell。设备完成后，先观察完成索引，再执行 for-CPU 同步，之后才能读取 response/data。
