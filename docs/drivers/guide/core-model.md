@@ -40,7 +40,7 @@ res[] ------> MMIO/IRQ/DMA/MEM resources
 matched_id --> matched id_table entry
 ```
 
-`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止新提交并结束软件请求，再等待已进入驱动的 class 调用退出，最后调用可失败的 `remove`：仅返回 0 后才释放受管存储、依赖和绑定；非零保留 `REMOVING` 绑定及注册引用，旧 class 句柄保持离线，调用者显式重试。已打开的文件随后返回 `-ENODEV`。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
+`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止新提交并结束软件请求，再等待已进入驱动的 class 调用退出，最后调用可失败的 `remove`：仅返回 0 后才释放受管存储、依赖和绑定；非零保留 `REMOVING` 绑定及注册引用，旧 class 句柄保持离线，调用者显式重试。经该 publication 准入的后续调用返回 `-ENODEV`；仍绕过 class 的旧消费者须单独迁移。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
 
 ## 数据结构字段
 
@@ -77,6 +77,10 @@ uint64_t size = res->end - res->start + 1;
 需要核对未绑定设备的地址声明时，使用 `driver_resource_request_checked()`：owner 必须已注册，核心在生命周期锁内核对其他已发布设备的 MMIO/`RES_MEM`/port 声明及 active claims，再建立句柄。句柄存续时，新设备不能发布冲突声明；owner 注销后保留的句柄仍然生效。此接口不推断 parent/window 的共享例外，资源归属歧义须显式解决。
 
 `device_is_registered(dev)` 仅观察核心注册表成员关系，不增加引用，也不表示驱动在线。失败解绑仍保留注册关系，但 class 已离线；持有 device 引用只保护对象存储，不能绕过注销；需要把检查与后续操作协调时，调用者须持有生命周期事务。
+
+`class_device_get_by_type/get_nth` 按在线 publication 稠密枚举；离线但尚未撤销的条目不占 rank。`class_device_get_by_index` 查询稳定 publication index，离线项返回 NULL，不随 rank 压缩改指其他对象。
+
+DISPLAY 默认选择复用 class publication：选择保留 device 元数据，消费者用 `gpu_device_default_begin/end()` 捕获一个绑定的 device/ops 和 active call；离线旧 publication 不会跟随重绑。它不保留返回的 framebuffer 内存；fbdev 持久 VMA 和 DRM 每设备对象仍待迁移，见 [GPU 调用所有权](native-runtime.md#gpu-publication-与作用域调用)。
 
 PCI 作用域通过 `pci_device_scope_get()` 返回带引用的 client/上游桥观察结果，不另建 Linux group 或隐式修改设备 parent。身份替换、窗口重叠、缺失桥和循环不会被当成有效路径；device 引用不固定硬件或绑定。详见 [PCI 桥路径与 AMD Range 补充查询](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
 

@@ -50,6 +50,7 @@ A20OS 现在同时支持三种驱动路径：
 
 - 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
+- GPU publication：`gpu_device_default_get`、`gpu_device_access_begin`、`gpu_device_default_begin`、`gpu_device_access_end`。前者返回需 put 的 class 引用，begin/end 拥有独立引用与 active call；不增加第二套驱动模型或修改既有 vtable/ABI 10。完整契约见 [GPU 调用](native-runtime.md#gpu-publication-与作用域调用)。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
 - 内核熵池（硬件 RNG 模块）：`random_reseed`。内核已有 `kernel/core/random.c`（xoshiro 状态 + `random_u64`/`random_fill`，消费方是 `sys_getrandom()`、ASLR 与栈保护），硬件熵设备应当把读到的字节折进这个池而不是另起一套。该符号只能从进程上下文调用：`arch_entropy_sample()` 会取 `proc_current()` 与 `frame_free_count()`，在 ISR 里调它等于在中断里读调度器状态。
 - 调度/等待原语（模块完成路径）：`proc_park_prepare/commit/cancel/finish`、`proc_wake_q_init/flush`、`wait_queue_init/link/unlink/collect_one/collect_all`、`mutex_init/lock/unlock`、`timer_get_ticks`、`mdelay/udelay`。

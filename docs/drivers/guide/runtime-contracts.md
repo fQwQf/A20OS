@@ -10,6 +10,12 @@
 
 总线任务可用 `driver_lifecycle_begin/end()` 协调私有拓扑和核心绑定，所属上下文允许嵌套且不压制 probe。`driver_lifecycle_try_begin()` 只接受最外层入口，忙或同上下文重入均返回 `-EAGAIN`；成功后才 end。持 active class 调用时不能阻塞等待正在排空自己的 teardown，USB HID 使用 `usb_device_poll()` 尝试进度。这些 API 不用于 IRQ、不固定存储或模块代码，成功进入后的硬件操作仍可能等待。完整规则见 [原生拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。
 
+## GPU class 调用
+
+新消费者使用 `gpu_device_default_begin/end()`，或先以 `gpu_device_default_get()` 保留 publication，再用 `gpu_device_access_begin/end()`。一次 access 的 device/const ops 来自同一个 DISPLAY 绑定；成功 begin 自持 class 引用与 active call，旧 publication 离线后返回 `-ENODEV`，不跟随重绑。选择读取不取 lifecycle mutex，不能在 active call 内等待需要自己退出的生命周期动作。每条成功返回路径配对 end，不能复制或覆盖 live access。
+
+fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议；它不保留返回的 framebuffer 存储，也不固定后续操作的默认设备。持久 VMA 与 DRM 全局对象表仍需后续迁移。旧 `gpu_device_get_default()` 只是借用快照。完整所有权与限制见 [GPU publication](native-runtime.md#gpu-publication-与作用域调用)。
+
 ## MMIO
 
 `resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在已安全回滚的 probe 失败或成功解除绑定时回收；remove 失败则继续保留，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
