@@ -492,6 +492,49 @@ static void exercise_gpu_scanout(void) {
     frame_put_many(pages, 3);
 }
 
+/* Explicit embedded virtio-gpu fixture: real reset/readback, IRQ teardown,
+ * native unbind/rebind and VMA-owned RAM. No userspace PTE faults here. */
+static void exercise_gpu_stop(void) {
+    device_t *gpu = NULL;
+    for (int index = 0;; index++) {
+        device_t *candidate = device_find_get_by_class(DEV_CLASS_DISPLAY, index);
+        if (!candidate) break;
+        if (candidate->drv && !strcmp(candidate->drv->name, "virtio-gpu")) {
+            gpu = candidate; break;
+        }
+        device_put(candidate);
+    }
+    CHECK(gpu);
+    class_device_t *old = class_device_ref_for_device(gpu);
+    struct gpu_device_access access;
+    CHECK(old && !gpu_device_access_begin(old, &access));
+    driver_t *driver = gpu->drv; /* Embedded static code, no module unload. */
+    struct gpu_scanout scanout;
+    CHECK(!gpu_device_scanout_get(&access, &scanout) && scanout.size >= PAGE_SIZE);
+    struct vmo *memory = scanout.memory;
+    mm_struct_t *mm = mm_create();
+    CHECK(mm);
+    vaddr_t va = mm_mmap_vmo_cap(mm, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, memory, scanout.offset, PROT_READ | PROT_WRITE);
+    CHECK(!mm_addr_is_error(va));
+    pfn_t page = vmo_peek_page(memory, scanout.offset / PAGE_SIZE);
+    CHECK(page != PFN_NONE);
+    ((uint8_t *)pfn_to_virt(page))[0] = 0x69;
+    gpu_scanout_put(&scanout);
+    gpu_device_access_end(&access);
+    CHECK(!driver_unregister(driver) && !gpu->drv && !gpu->drv_priv);
+    CHECK(gpu_device_access_begin(old, &access) == -ENODEV);
+    CHECK(mm_seg_find(mm, va)->vmo == memory && ((uint8_t *)pfn_to_virt(page))[0] == 0x69);
+    CHECK(!driver_register(driver) && gpu->drv == driver && gpu->drv_priv);
+    class_device_t *fresh = class_device_ref_for_device(gpu);
+    CHECK(fresh && fresh != old && !gpu_device_access_begin(fresh, &access));
+    CHECK(!gpu_device_scanout_get(&access, &scanout) && scanout.memory != memory);
+    CHECK(access.ops->flush && !access.ops->flush(access.device, 0, 0, 1, 1));
+    CHECK(((uint8_t *)pfn_to_virt(page))[0] == 0x69);
+    gpu_scanout_put(&scanout);gpu_device_access_end(&access);
+    mm_destroy(mm);class_device_put(fresh);class_device_put(old);device_put(gpu);
+}
+
 static void exercise_physical_mapping(void) {
     /* The mapping borrows this VMO-owned frame. Retain its owner until all
      * physical views are unmapped; the mapper must not pin/put it as RAM. */
@@ -686,6 +729,8 @@ void driver_runtime_selftest_boot(void)
 #ifndef CONFIG_NOMMU
     exercise_physical_mapping();
     exercise_gpu_scanout();
+    bool gpu_stop = boot_flag(args, "driver.gpu_stop_test=1");
+    if (gpu_stop) exercise_gpu_stop();
 #endif
     exercise_dma_buffer();
     exercise_dma_buffer_mapping();
@@ -713,6 +758,7 @@ void driver_runtime_selftest_boot(void)
      * result printed during concurrent background-thread startup. */
     kinfo("%s"
 #ifndef CONFIG_NOMMU
+          "%s"
           "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1\n"
           "DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1\n"
 #endif
@@ -723,6 +769,9 @@ void driver_runtime_selftest_boot(void)
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",
+#ifndef CONFIG_NOMMU
+          gpu_stop ? "DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1\n" : "",
+#endif
           pci_scope ? " pci=1" : "");
     if (current_board && current_board->poweroff)
         current_board->poweroff();

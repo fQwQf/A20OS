@@ -583,6 +583,7 @@ const struct drv_export drv_export_table[] = {
     { "input_mux_wake",      (void *)input_mux_wake },
     /* virtio PCI transport setup (vinput module PCI path) */
     { "pci_virtio_transport_init", (void *)pci_virtio_transport_init },
+    { "virtio_transport_reset", (void *)virtio_transport_reset },
     { "timekeeping_wallclock_set_hw", (void *)timekeeping_wallclock_set_hw },
     { "timekeeping_wallclock_from_hw", (void *)timekeeping_wallclock_from_hw },
     /* lock / scheduler primitives used by inline spinlock helpers

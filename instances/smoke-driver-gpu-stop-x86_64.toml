@@ -1,0 +1,19 @@
+name = "smoke-driver-gpu-stop-x86_64"
+description = "Native virtio-gpu confirmed reset, retained VMA storage and rebind on two CPUs"
+arch = "x86_64"
+abi = "both"
+
+[kernel]
+driver_deployment = "embedded"
+
+[machine]
+memory = "1G"
+smp = 2
+extra_qemu = ["-vga", "none", "-device", "virtio-gpu-pci", "-append", "driver.runtime_test=1 driver.gpu_stop_test=1"]
+
+[test]
+expect = ["DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1", "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1", "DRIVER_RUNTIME: PASS"]
+timeout = "60s"
+
+[net]
+stack = "bsd"
