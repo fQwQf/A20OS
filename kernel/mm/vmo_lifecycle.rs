@@ -1,16 +1,18 @@
 #![no_std]
 
-//! Rust-owned VMO reference and canonical-slot lookup entrypoints.
+//! Rust-owned VMO references, canonical lookup and atomic RAM snapshots.
 //!
 //! The reference-count atomics and VMO lock remain narrow C primitives. The
 //! Rust entrypoints own null handling, the final-reference decision, destroy
-//! dispatch, and the locked slot lookup bounds check.
+//! dispatch, locked range validation and complete snapshot pin acquisition.
 
 use core::ffi::c_void;
 #[cfg(test)]
 use core::ptr;
 
 const PFN_NONE: u32 = u32::MAX;
+#[cfg(test)]
+const PIN_MAX_PAGES: u32 = 4096;
 
 unsafe extern "C" {
     fn a20_vmo_lifecycle_ref_inc(vmo: *mut c_void);
@@ -20,6 +22,45 @@ unsafe extern "C" {
     fn a20_vmo_lifecycle_unlock(vmo: *mut c_void, flags: u64);
     fn a20_vmo_lifecycle_page_count_locked(vmo: *mut c_void) -> u32;
     fn a20_vmo_lifecycle_slot_locked(vmo: *mut c_void, index: u32) -> u32;
+    fn a20_vmo_lifecycle_type_locked(vmo: *mut c_void) -> u32;
+    fn a20_vmo_lifecycle_pin_limit() -> u32;
+    fn a20_vmo_lifecycle_frame_valid(pfn: u32) -> i32;
+    fn a20_vmo_lifecycle_pin_frames(pages: *const u32, count: u32);
+}
+
+/// Pin one atomic snapshot without faulting or leaving a partially filled output.
+#[no_mangle]
+pub unsafe extern "C" fn a20_vmo_pin_pages_rust(
+    vmo: *mut c_void, first: u32, count: u32, out: *mut u32,
+) -> i32 {
+    if vmo.is_null() || out.is_null() || count == 0 { return -22; }
+    if count > unsafe { a20_vmo_lifecycle_pin_limit() } { return -7; }
+    let mut flags = 0u64;
+    let ret = unsafe { a20_vmo_lifecycle_lock(vmo, &mut flags) };
+    if ret != 0 { return ret; }
+    // All exits after this closure release the same VMO lock.
+    let ret = (|| {
+        // 0=anonymous, 2=paged, 3=shared-anonymous; never physical/MMIO.
+        let kind = unsafe { a20_vmo_lifecycle_type_locked(vmo) };
+        if !matches!(kind, 0 | 2 | 3) { return -95; }
+        let total = unsafe { a20_vmo_lifecycle_page_count_locked(vmo) };
+        if first > total || count > total - first { return -22; }
+        for i in 0..count {
+            let pfn = unsafe { a20_vmo_lifecycle_slot_locked(vmo, first + i) };
+            if pfn == PFN_NONE { return -11; }
+            if unsafe { a20_vmo_lifecycle_frame_valid(pfn) } == 0 { return -22; }
+        }
+        for i in 0..count {
+            let pfn = unsafe { a20_vmo_lifecycle_slot_locked(vmo, first + i) };
+            // SAFETY: count output slots are caller-owned, disjoint from the VMO.
+            unsafe { out.add(i as usize).write(pfn); }
+        }
+        // The VMO still owns these canonical frames while PFA takes the pins.
+        unsafe { a20_vmo_lifecycle_pin_frames(out, count); }
+        0
+    })();
+    unsafe { a20_vmo_lifecycle_unlock(vmo, flags); }
+    ret
 }
 
 /// Increment a live VMO reference using the same relaxed ordering as the C
@@ -81,6 +122,9 @@ mod tests {
     static LOCKED: AtomicUsize = AtomicUsize::new(0);
     static COUNT: AtomicU32 = AtomicU32::new(0);
     static SLOT: AtomicU32 = AtomicU32::new(PFN_NONE);
+    static KIND: AtomicU32 = AtomicU32::new(0);
+    static HOLE: AtomicU32 = AtomicU32::new(PFN_NONE);
+    static PINS: AtomicUsize = AtomicUsize::new(0);
 
     #[no_mangle]
     unsafe extern "C" fn a20_vmo_lifecycle_ref_inc(_: *mut c_void) {
@@ -112,8 +156,25 @@ mod tests {
     #[no_mangle]
     unsafe extern "C" fn a20_vmo_lifecycle_slot_locked(_: *mut c_void, index: u32) -> u32 {
         assert_eq!(LOCKED.load(Ordering::SeqCst), 1);
-        assert_eq!(index, 0);
-        SLOT.load(Ordering::Relaxed)
+        if index == HOLE.load(Ordering::Relaxed) { PFN_NONE }
+        else { SLOT.load(Ordering::Relaxed).saturating_add(index) }
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_vmo_lifecycle_type_locked(_: *mut c_void) -> u32 {
+        assert_eq!(LOCKED.load(Ordering::SeqCst), 1);
+        KIND.load(Ordering::Relaxed)
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_vmo_lifecycle_pin_limit() -> u32 { PIN_MAX_PAGES }
+    #[no_mangle]
+    unsafe extern "C" fn a20_vmo_lifecycle_frame_valid(pfn: u32) -> i32 {
+        (pfn < 4096) as i32
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_vmo_lifecycle_pin_frames(pages: *const u32, count: u32) {
+        assert_eq!(LOCKED.load(Ordering::SeqCst), 1);
+        for i in 0..count { assert!(unsafe { pages.add(i as usize).read() } < 4096); }
+        PINS.fetch_add(count as usize, Ordering::Relaxed);
     }
 
     fn reset() {
@@ -122,6 +183,9 @@ mod tests {
         LOCKED.store(0, Ordering::Relaxed);
         COUNT.store(1, Ordering::Relaxed);
         SLOT.store(17, Ordering::Relaxed);
+        KIND.store(0, Ordering::Relaxed);
+        HOLE.store(PFN_NONE, Ordering::Relaxed);
+        PINS.store(0, Ordering::Relaxed);
     }
     fn obj() -> *mut c_void { 1usize as *mut c_void }
 
@@ -154,5 +218,55 @@ mod tests {
         assert_eq!(LOCKED.load(Ordering::SeqCst), 0);
         SLOT.store(PFN_NONE, Ordering::Relaxed);
         assert_eq!(unsafe { a20_vmo_peek_page_rust(obj(), 0) }, PFN_NONE);
+    }
+
+    #[test]
+    fn pin_is_all_or_nothing_and_keeps_output_unchanged_on_missing_or_bad_pages() {
+        reset(); COUNT.store(3, Ordering::Relaxed);
+        let mut pages = [0xdead; 2];
+        HOLE.store(2, Ordering::Relaxed);
+        assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 1, 2, pages.as_mut_ptr()) }, -11);
+        assert_eq!(pages, [0xdead; 2]); assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        HOLE.store(PFN_NONE, Ordering::Relaxed); SLOT.store(4095, Ordering::Relaxed);
+        assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 0, 2, pages.as_mut_ptr()) }, -22);
+        assert_eq!(pages, [0xdead; 2]); assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert_eq!(LOCKED.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pin_range_supports_each_ram_kind_without_changing_vmo_refs() {
+        for kind in [0, 2, 3] {
+            reset(); COUNT.store(3, Ordering::Relaxed); KIND.store(kind, Ordering::Relaxed);
+            let mut pages = [0; 2];
+            assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 1, 2, pages.as_mut_ptr()) }, 0);
+            assert_eq!(pages, [18, 19]); assert_eq!(PINS.load(Ordering::Relaxed), 2);
+            assert_eq!(REFS.load(Ordering::Relaxed), 1); assert_eq!(LOCKED.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn pin_rejects_physical_unknown_types_invalid_ranges_and_arguments() {
+        reset(); let mut page = 0xdead;
+        for kind in [1, 99] {
+            KIND.store(kind, Ordering::Relaxed);
+            assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 0, 1, &mut page) }, -95);
+        }
+        KIND.store(0, Ordering::Relaxed);
+        for (first, count, error) in [(0, 0, -22), (1, 1, -22), (u32::MAX, 2, -22), (0, PIN_MAX_PAGES+1, -7)] {
+            assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), first, count, &mut page) }, error);
+        }
+        assert_eq!(unsafe { a20_vmo_pin_pages_rust(ptr::null_mut(), 0, 1, &mut page) }, -22);
+        assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 0, 1, ptr::null_mut()) }, -22);
+        assert_eq!(page, 0xdead); assert_eq!(PINS.load(Ordering::Relaxed), 0);
+        assert_eq!(LOCKED.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pin_maximum_batch_includes_valid_physical_frame_zero() {
+        reset(); COUNT.store(PIN_MAX_PAGES, Ordering::Relaxed); SLOT.store(0, Ordering::Relaxed);
+        let mut pages = [PFN_NONE; PIN_MAX_PAGES as usize];
+        assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 0, PIN_MAX_PAGES, pages.as_mut_ptr()) }, 0);
+        assert_eq!(pages[0], 0); assert_eq!(pages[pages.len()-1], PIN_MAX_PAGES-1);
+        assert_eq!(PINS.load(Ordering::Relaxed), PIN_MAX_PAGES as usize);
     }
 }

@@ -30,6 +30,7 @@ extern void a20_vmo_destroy_rust(struct vmo *vmo);
 extern void a20_vmo_ref_rust(struct vmo *vmo);
 extern void a20_vmo_release_rust(struct vmo *vmo);
 extern pfn_t a20_vmo_peek_page_rust(struct vmo *vmo, uint32_t index);
+extern int a20_vmo_pin_pages_rust(struct vmo *, uint32_t, uint32_t, pfn_t *);
 extern pfn_t a20_vmo_sparse_peek(void *root, uint32_t index);
 extern int a20_vmo_sparse_reserve(void **root, uint32_t index);
 extern int a20_vmo_sparse_publish(void *root, uint32_t index, pfn_t pfn);
@@ -111,18 +112,28 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     return a20_vmo_get_page_rust(vmo, index);
 }
 
-/*
- * Demand-fault page source with cgroup accounting: materializes page @index * and charges the new frame to @cg.  Returns 0 with *out set, or -ENOMEM if
- * the charge or frame allocation fails.  The charge is recorded per-VMO and
- * released on destroy.
- */
+/* Non-materializing borrowed lookup. A caller needing the frame after resize
+ * must obtain an independent reference through vmo_pin_pages instead. */
 pfn_t vmo_peek_page(struct vmo *vmo, uint32_t index)
 {
     return a20_vmo_peek_page_rust(vmo, index);
 }
 
-/* Small C atomic/lock/slot primitives. Rust owns public ref/release/peek
+int vmo_pin_pages(struct vmo *vmo, uint32_t first, uint32_t count, pfn_t *out)
+{
+    return a20_vmo_pin_pages_rust(vmo, first, count, out);
+}
+
+/* Narrow C atomic/lock/slot/PFA primitives. Rust owns ref/release/peek/pin
  * policy and the final-reference dispatch into the page destruction owner. */
+uint32_t a20_vmo_lifecycle_type_locked(struct vmo *vmo) { return vmo->type; }
+uint32_t a20_vmo_lifecycle_pin_limit(void) { return VMO_PIN_MAX_PAGES; }
+int a20_vmo_lifecycle_frame_valid(pfn_t pfn) { return pfn_valid(pfn); }
+void a20_vmo_lifecycle_pin_frames(const pfn_t *pages, uint32_t count)
+{
+    frame_get_many(pages, count);
+}
+
 void a20_vmo_lifecycle_ref_inc(struct vmo *vmo)
 {
     refcount_inc(&vmo->refcount);

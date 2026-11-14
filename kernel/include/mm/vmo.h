@@ -70,8 +70,23 @@ pfn_t       vmo_get_page(struct vmo *vmo, uint32_t index);
 int64_t     vmo_resize(struct vmo *vmo, uint64_t new_size);
 
 /* Non-materializing page lookup (M4 DMA contract): returns the canonical
- * frame for @index or PFN_NONE when not yet allocated. */
+ * frame for @index or PFN_NONE when not yet allocated. This is a borrowed PFN,
+ * not protected against resize after return; use vmo_pin_pages for retention. */
 pfn_t       vmo_peek_page(struct vmo *vmo, uint32_t index);
+
+/* Task context, no VMO/spinlock held; caller holds a VMO reference. Atomically
+ * snapshot and pin existing canonical RAM pages against resize/publication.
+ * No allocation, materialization or pager calls. Anonymous, paged and sparse
+ * shared-anonymous VMOs are supported; physical/unknown types -> -EOPNOTSUPP.
+ * Missing page -> -EAGAIN; invalid range/PFN/output -> -EINVAL. Errors leave
+ * output unchanged and take no pins. Success writes count PFNs, each with an
+ * independent reference to release via frame_put(), even if the VMO shrinks or
+ * dies. Output storage must not alias VMO-owned metadata. Final-page padding
+ * belongs to the page span. This is a snapshot, not a VMO extent/access lease.
+ * Oversized count -> -E2BIG. Limit bounds IRQ-off traversal; larger imports
+ * use page ranges. */
+#define VMO_PIN_MAX_PAGES 4096U
+int vmo_pin_pages(struct vmo *vmo, uint32_t first, uint32_t count, pfn_t *out);
 
 /* Like vmo_get_page, but charges the frame to @cg on first materialization.
  * Returns 0 on success (pfn in *out), -ENOMEM on charge/alloc failure. */
@@ -140,6 +155,11 @@ void        a20_vmo_destroy_free_object(struct vmo *vmo);
 void        a20_vmo_ref_rust(struct vmo *vmo);
 void        a20_vmo_release_rust(struct vmo *vmo);
 pfn_t       a20_vmo_peek_page_rust(struct vmo *vmo, uint32_t index);
+int         a20_vmo_pin_pages_rust(struct vmo *, uint32_t, uint32_t, pfn_t *);
+uint32_t    a20_vmo_lifecycle_type_locked(struct vmo *);
+uint32_t    a20_vmo_lifecycle_pin_limit(void);
+int         a20_vmo_lifecycle_frame_valid(pfn_t);
+void        a20_vmo_lifecycle_pin_frames(const pfn_t *, uint32_t);
 void        a20_vmo_lifecycle_ref_inc(struct vmo *vmo);
 int         a20_vmo_lifecycle_ref_dec_last(struct vmo *vmo);
 int         a20_vmo_lifecycle_lock(struct vmo *vmo, uint64_t *flags_out);
