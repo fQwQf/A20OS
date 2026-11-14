@@ -40,6 +40,12 @@ A20OS 内存管理子系统负责物理内存分配、虚拟地址空间管理�
 
 ---
 
+## 驱动物理视图
+
+`mm_mmap_physical()` 由同一 Rust mmap policy 拥有 eager 物理映射的放置、准入和回滚，C 暴露字段/架构/锁/TLB 原语；fbdev 与用户驱动不再自行维护安装循环。记录在锁外分配，全部叶安装成功才发布 PFNMAP 记录并记账，失败连同当前页的空路径和已映射前缀一起撤销，在 TLB 事务结束后退休元数据。权限 ceiling 复用 VM_NATIVE_CAP，mprotect 保留原 CPU 缓存类型。
+
+此视图不拥有 frame/backing 引用，不改变 PFA、VMO 或 DMA domain 的存储所有权。调用者须持有存储，或在释放前完成全部映射撤销；现有 framebuffer 持久映射的退役仍待实现。固定覆盖、允许属性及 hosted/NOMMU 边界见 [驱动物理映射契约](../../drivers/guide/native-runtime.md#驱动-cpu-物理映射事务)。
+
 ## 关键代码与头文件
 
 - **核心虚拟内存定义**：[`kernel/include/mm/vm.h`](../../../kernel/include/mm/vm.h)（`mm_struct_t`、`mm_seg_t`、锁模型规则）

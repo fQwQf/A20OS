@@ -80,6 +80,8 @@ uint64_t size = res->end - res->start + 1;
 
 `class_device_get_by_type/get_nth` 按在线 publication 稠密枚举；离线但尚未撤销的条目不占 rank。`class_device_get_by_index` 查询稳定 publication index，离线项返回 NULL，不随 rank 压缩改指其他对象。
 
+CPU 物理视图通过 MM 的 `mm_mmap_physical()` 统一安装/回滚；它借用物理存储，不增加 device/resource 或 backing 引用。fbdev 和用户驱动 adapter 仍须各自核对可映射范围、保留存储或在回收前撤销映射，见 [原生物理视图](native-runtime.md#驱动-cpu-物理映射事务)。
+
 DISPLAY 默认选择复用 class publication：选择保留 device 元数据，消费者用 `gpu_device_default_begin/end()` 捕获一个绑定的 device/ops 和 active call；离线旧 publication 不会跟随重绑。它不保留返回的 framebuffer 内存；fbdev 持久 VMA 和 DRM 每设备对象仍待迁移，见 [GPU 调用所有权](native-runtime.md#gpu-publication-与作用域调用)。
 
 PCI 作用域通过 `pci_device_scope_get()` 返回带引用的 client/上游桥观察结果，不另建 Linux group 或隐式修改设备 parent。身份替换、窗口重叠、缺失桥和循环不会被当成有效路径；device 引用不固定硬件或绑定。详见 [PCI 桥路径与 AMD Range 补充查询](native-runtime.md#pci-桥路径与-amd-range-补充查询)。

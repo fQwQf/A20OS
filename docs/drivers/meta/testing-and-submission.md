@@ -137,6 +137,10 @@ GPU publication/消费者变更运行 `python3 -m unittest tools.tests.test_gpu_
 
 `make smoke-gpu-access-x86_64` 使用双 CPU generic 内核、真实 `.a20drv` 与 virtio-gpu 2D，执行 `drm_sysfs_test` 和 `videoplay --test 32 32 1`，要求 `DRM_SYSFS: PASS` 与 `videoplay: presented 10 frames`；这是 MMU 的 framebuffer 安装/ioctl/刷新回归，不是图像视觉核验或硬件 3D 加速。embedded hub/bulk 的 runtime 另要求 `DRIVER_GPU_ACCESS: PASS publication=1 offline=1 refs=1`，验证实际 class publication 引用与离线，不把假 GPU 当成真实 framebuffer。fixture 总线按本地 driver 身份匹配，不能通配抢占其他驱动。
 
+CPU 物理映射变更运行 `python3 -m unittest tools.tests.test_physical_mapping -v`，纳入主驱动及 PC 门禁。12 项方法运行实际 Rust mmap policy、提取的生产 C MM 桥接/PTE helper、PT unmap、fbdev MMU 分支和 udriver adapter；页表分配/CPU/锁/区间和 munmap 副作用是 host 模型。覆盖参数/地址宽度、窄 VA 错误解码、scanout 地址相加溢出、PFN 0、完整 hint 重叠、fixed 错误传播、noreplace、计数/ceiling、缓存类型与失败分配边界，ASan/UBSan 用于 C 部分；Rust 正常编译。测试内另破坏失败页清理、前缀撤销与空路径退休，必须在编译成功后触发运行时失败。旧 `python3 tools/tests/test_udriver_mmio_rollback_host.py` 委托同一套测试；`tools/host-tests/test-mmap-policy-host.sh` 保留 106 项既有 lazy mmap 检查。
+
+`smoke-gpu-access-x86_64` 新增 `fbdev_map_test`，要求 `FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1`；在真实匿名邻接映射中替换一个 framebuffer 页，核对相邻内容、跨 gap hint 不覆盖、保护 ceiling 和旧 ioctl 的 NOREPLACE。原 sysfs/videoplay 验证继续保留。embedded hub/bulk 的 runtime 在 MMU 下另要求 `DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1`，使用真实 VMO-owned frame 和独立 MM，检查实际叶/VMA 缓存属性、保护、固定覆盖和 total_vm/RSS，销毁全部视图后才交还源 VMO。它们不证明 framebuffer backing 跨设备解绑安全，也不代替实体 GPU DMA 或远端 TLB 并发压力。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

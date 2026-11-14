@@ -32,7 +32,9 @@
 
 ## 用户 MMIO 映射事务
 
-`udriver_map_mmio()` 在锁外分配临时 VMA，再按 `mm->tlb_lock`（可睡眠）→ `mm->lock` → 页表节点锁执行映射。全部 PTE 成功才发布 VMA；失败时先清理失败页的空页表路径，再逆序撤销已映射前缀，登记 TLB 失效范围。释放 `mm->lock` 后完成本地/远端 TLB fence，再释放临时 VMA 和 deferred 对象。MMIO 不拥有设备数据帧引用，回滚仅回收中间页表。页表退休复用既有 reader grace period，不引入驱动私有锁。
+`mm_mmap_physical()` 由 Rust 拥有 eager 物理映射事务，fbdev mmap/旧 ioctl 与用户驱动服务共用。未发布记录在锁外分配，fixed 覆盖只能在已开启的事务内调用 mm_munmap_locked；不能持 mm->lock 调用会重新进入 TLB/MM 锁的公开 mm_munmap。整个 hint 区间及旧叶 PTE 均先检查，失败先撤销当前页空路径和映射前缀，锁外完成 TLB/退休后释放记录。mprotect 保留 Device 缓存属性。调用期间的 class lease 不延长映射 backing 的存储寿命，另见 [物理视图契约](native-runtime.md#驱动-cpu-物理映射事务)。
+
+`udriver_map_mmio()` 在白名单检查后委托共享 MM 接口，在锁外分配临时 VMA，再按 `mm->tlb_lock`（可睡眠）→ `mm->lock` → 页表节点锁执行映射。全部 PTE 成功才发布 VMA；失败时先清理失败页的空页表路径，再逆序撤销已映射前缀，登记 TLB 失效范围。释放 `mm->lock` 后完成本地/远端 TLB fence，再释放临时 VMA 和 deferred 对象。MMIO 不拥有设备数据帧引用，回滚仅回收中间页表。页表退休复用既有 reader grace period，不引入驱动私有锁。
 
 Landlock 的 `g_landlock_policy_lock` 是叶锁，仅保护有界的策略增补、冻结和匹配；不得持有它做 VFS、usercopy、分配、引用释放或任务发布。fd/task 引用计数独立使用原子操作；fork 在子任务发布前取得策略引用，安装规则后才能原子发布任务指针。
 
