@@ -19,10 +19,11 @@ class DriverDmaVmo(unittest.TestCase):
 #include <pthread.h>
 #include "core/types.h"
 typedef struct {pthread_mutex_t native;} spinlock_t;
+extern _Thread_local spinlock_t *host_owned_spinlock;
 #define SPINLOCK_INIT {PTHREAD_MUTEX_INITIALIZER}
 static inline void spin_init(spinlock_t *l){assert(!pthread_mutex_init(&l->native,NULL));}
-static inline uint64_t spin_lock_irqsave(spinlock_t *l){assert(!pthread_mutex_lock(&l->native));return 0;}
-static inline void spin_unlock_irqrestore(spinlock_t *l,uint64_t f){(void)f;assert(!pthread_mutex_unlock(&l->native));}
+static inline uint64_t spin_lock_irqsave(spinlock_t *l){assert(!host_owned_spinlock);assert(!pthread_mutex_lock(&l->native));host_owned_spinlock=l;return 0;}
+static inline void spin_unlock_irqrestore(spinlock_t *l,uint64_t f){(void)f;assert(host_owned_spinlock==l);host_owned_spinlock=NULL;assert(!pthread_mutex_unlock(&l->native));}
 ''', 'core/sync.h': '''#pragma once
 #include "core/lock.h"
 typedef pthread_mutex_t mutex_t;
@@ -81,3 +82,9 @@ void dma_sync_for_cpu(void *,size_t);
         binary=Path(self.temp.name)/'rust-tests'
         subprocess.run(['rustc','--edition=2021','--test',str(ROOT/'kernel/mm/vmo_lifecycle.rs'),'-o',str(binary)],check=True)
         subprocess.run([str(binary),'--test-threads=1'],check=True,timeout=15)
+
+    def test_callback_lock_check_distinguishes_current_thread(self):
+        self.run_cases('observer')
+        result=subprocess.run([str(self.binary),'owned-lock'],capture_output=True,text=True,timeout=15)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('host_owned_spinlock != &source->lock',result.stderr)

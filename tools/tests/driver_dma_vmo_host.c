@@ -10,6 +10,7 @@
 #include "core/errno.h"
 
 pfa_t pfa;
+_Thread_local spinlock_t *host_owned_spinlock;
 static _Atomic unsigned refs[256], frees[256], gets, put_count, cpu_syncs, device_syncs;
 static unsigned allocations, attempts, fail_at, destroys;
 static unsigned char contents[256];
@@ -39,7 +40,9 @@ void frame_get_many(const pfn_t *pages,size_t count) {
 }
 void frame_put_many(const pfn_t *pages,size_t count) {for(size_t i=0;i<count;i++)frame_put(pages[i]);}
 static void unlocked(void) {
- assert(!pthread_mutex_trylock(&source->lock.native));assert(!pthread_mutex_unlock(&source->lock.native));
+ /* Another thread may resize concurrently. Only this callback's lock
+  * ownership would violate the provider/cache contract. */
+ assert(host_owned_spinlock != &source->lock);
 }
 void dma_sync_for_cpu(void *p,size_t n) {assert(p&&n==PAGE_SIZE);unlocked();cpu_syncs++;}
 void dma_sync_for_device(void *p,size_t n) {assert(p&&n==PAGE_SIZE);unlocked();device_syncs++;}
@@ -105,6 +108,13 @@ static void *resizer(void *arg) {
  assert(!pthread_mutex_unlock(&rendezvous));return NULL;
 }
 
+static void *hold_source_lock(void *arg) {
+ (void)arg;uint64_t flags=spin_lock_irqsave(&source->lock);
+ assert(!pthread_mutex_lock(&rendezvous));pin_entered=1;assert(!pthread_cond_broadcast(&changed));
+ while(!pin_proceed)assert(!pthread_cond_wait(&changed,&rendezvous));
+ assert(!pthread_mutex_unlock(&rendezvous));spin_unlock_irqrestore(&source->lock,flags);return NULL;
+}
+
 int main(int argc,char **argv) {
  assert(argc==2);const char *name=argv[1];
  pfa.nr_ranges=1;pfa.ranges[0]=(pfa_range_t){.base=0x400000,.end=0x500000,.start_pfn=0,.end_pfn=256};
@@ -115,7 +125,16 @@ int main(int argc,char **argv) {
   assert(!driver_dma_policy_create(&rule,1,&policy));
   assert(!driver_dma_domain_create_managed_policy(&device,&ops,&provider,policy,&domain));driver_dma_policy_put(policy);
  } else assert(!driver_dma_domain_create_managed(&device,&ops,&provider,&domain));
- if(!strcmp(name,"parameters")) {
+ if(!strcmp(name,"observer")) {
+  pthread_t holder;assert(!pthread_create(&holder,NULL,hold_source_lock,NULL));
+  assert(!pthread_mutex_lock(&rendezvous));while(!pin_entered)assert(!pthread_cond_wait(&changed,&rendezvous));
+  assert(!pthread_mutex_unlock(&rendezvous));
+  dma_sync_for_device((void *)1,PAGE_SIZE);dma_sync_for_cpu((void *)1,PAGE_SIZE);
+  assert(!pthread_mutex_lock(&rendezvous));pin_proceed=1;assert(!pthread_cond_broadcast(&changed));
+  assert(!pthread_mutex_unlock(&rendezvous));assert(!pthread_join(holder,NULL));
+ } else if(!strcmp(name,"owned-lock")) {
+  uint64_t flags=spin_lock_irqsave(&source->lock);unlocked();spin_unlock_irqrestore(&source->lock,flags);
+ } else if(!strcmp(name,"parameters")) {
   unsigned before=attempts;
   assert(driver_dma_map_vmo(NULL,source,1,2,2,&mapping)==-EINVAL&&!mapping);
   assert(driver_dma_map_vmo(domain,NULL,1,2,2,&mapping)==-EINVAL&&!mapping);
