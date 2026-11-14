@@ -53,6 +53,7 @@ A20OS 现在同时支持三种驱动路径：
 - VirtIO transport：`virtio_transport_reset` 通过既有 read32/write32 完成有界 status 读回确认，失败不释放 queue/IRQ/存储；不扩展 transport vtable，模块 ABI 保持 11，见 [退出协议](native-runtime.md#virtio-reset-确认与-gpu-退出)。
 - RAM scanout：`gpu_device_scanout_get`、`gpu_scanout_put`、`vmo_create_contiguous`、`vmo_contiguous_info`、`vmo_ref`、`vmo_release` 已加入白名单。snapshot 和普通 VMA 自持 MM 存储，不需要在最终 release 时调用设备模块；不授予 DMA 权限或证明硬件停止，见 [连续 RAM VMO](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 - 原生绑定停止：`class_device_binding_stopped` 记录旧 publication 的显式成功 remove，`device_release_resource_action` 在串行 probe/lifecycle 中精确撤销一个局部回收动作；核心私有凭据不扩展公开布局，ABI 保持 11。离线不是停止，详见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
+- DRM adapter：文件固定 publication，active call 内取得 ops；失败清理保留旧资源身份，旧绑定停止后只进入内核 MM 回收，不调用旧模块。`drm_create_vfile_for` 是内核 adapter 接口，未增加模块导出或 ABI 版本；这不代表运行期模块卸载已完成，见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。
 - GPU publication：`gpu_device_default_get`、`gpu_device_access_begin`、`gpu_device_default_begin`、`gpu_device_access_end`。前者返回需 put 的 class 引用，begin/end 拥有独立引用与 active call；不增加第二套驱动模型；当前全局 ABI 11 的 GPU vtable 扩展见上一项。完整契约见 [GPU 调用](native-runtime.md#gpu-publication-与作用域调用)。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
 - 内核熵池（硬件 RNG 模块）：`random_reseed`。内核已有 `kernel/core/random.c`（xoshiro 状态 + `random_u64`/`random_fill`，消费方是 `sys_getrandom()`、ASLR 与栈保护），硬件熵设备应当把读到的字节折进这个池而不是另起一套。该符号只能从进程上下文调用：`arch_entropy_sample()` 会取 `proc_current()` 与 `frame_free_count()`，在 ISR 里调它等于在中断里读调度器状态。

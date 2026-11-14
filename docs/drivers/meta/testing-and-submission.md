@@ -51,6 +51,8 @@ rg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
 
 常量可能是协议寄存器或 ID，需要逐项解释，不是机械删除。
 
+DRM 修改还运行 `python3 -m unittest tools.tests.test_class_stop tools.tests.test_drm_binding tools.tests.test_drm_console_owner`。主机夹具编译生产 DRM/core/class 与实际 anonfd 安装器；VFS/MM/work/调度边界为模型，不能替代 guest。`tools/a20 test smoke-driver-gpu-stop-x86_64` 在显式 embedded 双核实例中增加 `driver.drm_binding_test=1`，验证真实 VFS close、原生 worker、旧文件离线、VMA 独立存储与重绑命名空间；普通启动不执行。`make smoke-drm-prime` 另验证用户态 PRIME/映射，generic 双核显示回归仍使用 `make smoke-gpu-access-x86_64`。
+
 ## 架构构建矩阵
 
 至少构建驱动目标平台和一个共享基础设施回归平台：

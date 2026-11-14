@@ -523,6 +523,7 @@ static void exercise_gpu_stop(void) {
     gpu_scanout_put(&scanout);
     gpu_device_access_end(&access);
     CHECK(!driver_unregister(driver) && !gpu->drv && !gpu->drv_priv);
+    CHECK(class_device_binding_stopped(old));
     CHECK(gpu_device_access_begin(old, &access) == -ENODEV);
     CHECK(mm_seg_find(mm, va)->vmo == memory && ((uint8_t *)pfn_to_virt(page))[0] == 0x69);
     CHECK(!driver_register(driver) && gpu->drv == driver && gpu->drv_priv);
@@ -731,6 +732,12 @@ void driver_runtime_selftest_boot(void)
     exercise_gpu_scanout();
     bool gpu_stop = boot_flag(args, "driver.gpu_stop_test=1");
     if (gpu_stop) exercise_gpu_stop();
+    bool drm_binding = boot_flag(args, "driver.drm_binding_test=1");
+    if (drm_binding) {
+        class_device_t *publication = gpu_device_default_get();
+        CHECK(publication && !drm_native_binding_selftest(publication));
+        class_device_put(publication);
+    }
 #endif
     exercise_dma_buffer();
     exercise_dma_buffer_mapping();
@@ -759,6 +766,7 @@ void driver_runtime_selftest_boot(void)
     kinfo("%s"
 #ifndef CONFIG_NOMMU
           "%s"
+          "%s"
           "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1\n"
           "DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1\n"
 #endif
@@ -771,6 +779,7 @@ void driver_runtime_selftest_boot(void)
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",
 #ifndef CONFIG_NOMMU
           gpu_stop ? "DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1\n" : "",
+          drm_binding ? "DRIVER_DRM_BINDING: PASS file=1 stop=1 reaper=1 vma=1 rebind=1\n" : "",
 #endif
           pci_scope ? " pci=1" : "");
     if (current_board && current_board->poweroff)
