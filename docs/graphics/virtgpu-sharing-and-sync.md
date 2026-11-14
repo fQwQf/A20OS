@@ -6,6 +6,8 @@ native virtgpu 传输路径现在双向都发送固定的 virtio 线格式负载
 
 `SUBMIT_3D` 请求一个 host GPU fence 并等待其响应。同步后端只在该 fence 真正完成之后导出已完成的 `sync_file`。对已完成的 fence，实现了输入 `sync_file`、poll、`FILE_INFO`（含 details）、`MERGE` 与 deadline 提示。目前还没有异步 fence 生产者。一个设备互斥量对提交、CPU 同步与 fence 导出排序；操作完成时唤醒等待者。
 
+GEM backing 已使用原生固定 resident RAM 工厂；最初分配任务的 cgroup charge 和 owner pin 随 VMO 存活，导入/映射到另一文件或进程不转移 charge。创建失败、最后一个 backing 引用退出或失败清理确认后按原生 MM 契约交还。独立 DMA 页 pin 不保留预算 owner；需要预算存活的请求另持 VMO。
+
 PRIME 导出持有活跃的 GEM 对象并映射同一个 VMO，取代了 memfd 快照与 64 项描述符表。`dup` 与 `SCM_RIGHTS` 保留该文件及其对象 pin。导入的缓冲在导出方 `GEM_CLOSE` 与 fd close 之后仍然存活。最后一个描述符关闭之后映射仍保留 VMO。导出标志使用 Linux 的 `DRM_CLOEXEC=O_CLOEXEC` 与 `DRM_RDWR=O_RDWR`。
 
 `DMA_BUF_IOCTL_SYNC` 在 START READ 时下载 host 数据，在 END WRITE 时上传 CPU 数据。该同步后端支持 sync-file 的导出/导入与 poll。CPU 同步目前覆盖线性的 level-zero 资源；压缩格式、mip 链与数组布局需要进一步的布局跟踪。GEM 的 ID 在每 publication 内分配，handle owner 属于每个 open file；通过 PRIME/GEM_OPEN 才能建立另一文件的引用，同一文件重复导入幂等。正常最后 close 回收本文件 GEM/FB，保留其他文件、dma-buf 与 VMA 的独立存储引用。完整 master/auth、只读共享权限与命令流隔离仍未实现。不导入任意外部 DMA-BUF exporter。

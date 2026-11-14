@@ -45,9 +45,13 @@
 /* Internal immutable RAM extent. Created only by vmo_create_contiguous;
  * its initially contiguous pages are independent canonical order-0 frames. */
 #define VMO_CONTIGUOUS 4
+/* Internal immutable, fully materialized canonical RAM, without a physical
+ * contiguity guarantee. Construct only through vmo_create_resident(). */
+#define VMO_RESIDENT 5
 
 struct a20_pager;
 struct vmo_charge;
+struct cg_node;
 
 struct vmo {
     refcount_t  refcount;
@@ -74,6 +78,19 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options);
  * Failure clears out: EINVAL parameters, E2BIG limit, ENOMEM allocation,
  * ERANGE invalid CPU alias/range, EIO failed ownership conversion. */
 int vmo_create_contiguous(size_t bytes, struct vmo **out);
+/* Task context, no MM/VMO/spinlock or driver store lock held. Allocates and
+ * zeros every canonical order-0 RAM page, including final-page padding, before
+ * publication. The page-rounded extent/slots cannot resize or acquire holes;
+ * bytes remain writable. No contiguity, device address, DMA or GPU permission.
+ * owner is borrowed through this call, then pinned/charged until final VMO
+ * release; NULL explicitly selects kernel-owned, uncharged storage. Uses the
+ * existing shared-anonymous backing charge, protected from legacy task RSS
+ * teardown. Page pins alone neither preserve this VMO nor transfer its charge;
+ * requests needing the budget owner must also retain the VMO.
+ * Failure clears out and rolls back every page/charge/pin: EINVAL zero size or
+ * NULL output, E2BIG unrepresentable rounded extent/table, ENOMEM charge/alloc,
+ * ERANGE invalid CPU alias. Factory-only kind, not a new user ABI. */
+int vmo_create_resident(size_t bytes, struct cg_node *owner, struct vmo **out);
 /* Caller retains a contiguous VMO. CPU physical range remains stable until
  * final release; not a DMA address, mapping permission or stop proof.
  * Returns EINVAL and clears outputs for other kinds/invalid parameters. */
@@ -91,7 +108,7 @@ pfn_t       vmo_peek_page(struct vmo *vmo, uint32_t index);
 /* Task context, no VMO/spinlock held; caller holds a VMO reference. Atomically
  * snapshot and pin existing canonical RAM pages against resize/publication.
  * No allocation, materialization or pager calls. Anonymous, paged and sparse
- * shared-anonymous and contiguous VMOs are supported; physical/unknown kinds
+ * shared-anonymous, contiguous and resident VMOs are supported; physical/unknown kinds
  * return -EOPNOTSUPP.
  * Missing page -> -EAGAIN; invalid range/PFN/output -> -EINVAL. Errors leave
  * output unchanged and take no pins. Success writes count PFNs, each with an

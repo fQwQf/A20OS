@@ -6,7 +6,7 @@ import unittest
 from .test_firmware_model import ROOT, STUBS
 from .test_drv_dma_phys_host import extract_function
 
-def build_fixture(work, suffix=None):
+def build_fixture(work, suffix=None, extra_vmo=(), transform=None):
     stubs={**STUBS,'core/sync.h':'#pragma once\ntypedef struct {void *head;} wait_queue_t;\nstatic inline void wait_queue_init(wait_queue_t *q){q->head=0;}\n', 'core/arch.h':'extern uintptr_t host_page_offset;\n#define PAGE_OFFSET host_page_offset\n',
       'core/lock.h':'''#pragma once
 #include <assert.h>
@@ -42,9 +42,10 @@ static inline void spin_unlock_irqrestore(spinlock_t *p,uint64_t flags){(void)fl
       'pfn_t a20_vmo_destroy_page(', 'uint64_t a20_vmo_destroy_phys_size(', 'uint64_t a20_vmo_destroy_charged_pages(',
       'void a20_vmo_destroy_stats(', 'void a20_vmo_destroy_flush_tlb(', 'void a20_vmo_destroy_release_page(',
       'void a20_vmo_destroy_uncharge(', 'void a20_vmo_destroy_free_pages(', 'void a20_vmo_destroy_free_object(']
-    functions='\n'.join(extract_function(c,n) for n in names)
+    functions='\n'.join(extract_function(c,n) for n in [*names,*extra_vmo])
     split=extract_function((ROOT/'kernel/mm/frame.c').read_text(),'int pfa_split_allocated(')
     model=(ROOT/'tools/tests/vmo_contiguous_host.c').read_text()
+    if transform is not None: model=transform(model)
     if suffix is not None: model=model[:model.index('static void *ref_worker(')]+suffix
     fixture=work/'fixture.c';fixture.write_text(model.replace('/* PRODUCTION_SPLIT */',split).replace('/* PRODUCTION_VMO */',functions));binary=work/'test'
     subprocess.run(['cc','-std=gnu11','-pthread','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',

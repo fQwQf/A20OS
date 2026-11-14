@@ -89,3 +89,8 @@ int copy_to_user(void *,const void *,size_t);
     def test_file_stop_entries(self):self.run_case("file-stop-entries")
     def test_file_names_expire_with_the_last_handle_even_if_export_pins_storage(self):self.run_case("file-name-expiry")
     def test_online_close_reclaims_a_mixed_batch_while_import_and_vma_survive(self):self.run_case("file-close-many")
+    def test_resident_budget(self):self.run_case("resident-budget")
+    def test_resident_errors(self):self.run_case("resident-errors")
+    def test_resident_capture(self):self.run_case("resident-capture")
+    def test_resident_offline(self):self.run_case("resident-offline")
+    def test_resident_retained(self):self.run_case("resident-retained")

@@ -38,8 +38,8 @@ static struct mutex_back *mutexes;
 static pthread_mutex_t mutex_map=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local mutex_t *observed_mutex;
 static _Thread_local unsigned observed_depth;
-static _Thread_local mutex_t *observed_store;
 static _Thread_local unsigned store_depth;
+static _Thread_local unsigned gpu_depth;
 static int close_import_fd;
 static struct mutex_back *get_mutex(mutex_t *m){
  assert(!pthread_mutex_lock(&mutex_map));struct mutex_back *b=mutexes;
@@ -47,10 +47,12 @@ static struct mutex_back *get_mutex(mutex_t *m){
  if(!b){b=calloc(1,sizeof(*b));assert(b);b->key=m;pthread_mutexattr_t a;assert(!pthread_mutexattr_init(&a));assert(!pthread_mutexattr_settype(&a,PTHREAD_MUTEX_RECURSIVE));assert(!pthread_mutex_init(&b->native,&a));assert(!pthread_mutexattr_destroy(&a));b->next=mutexes;mutexes=b;}
  assert(!pthread_mutex_unlock(&mutex_map));return b;
 }
+static int gpu_mutex(mutex_t *m){for(drm_device_t *d=g_drm_devices;d;d=d->next)if(m==&d->gpu_lock)return 1;return 0;}
+static int store_mutex(mutex_t *m){for(drm_device_t *d=g_drm_devices;d;d=d->next)if(m==&d->store_lock)return 1;return 0;}
 void mutex_init(mutex_t *m){(void)get_mutex(m);}
-void mutex_lock(mutex_t *m){assert(!pthread_mutex_lock(&get_mutex(m)->native));if(m==observed_mutex)observed_depth++;if(m==observed_store)store_depth++;}
-void mutex_unlock(mutex_t *m){if(m==observed_store){assert(store_depth);store_depth--;}if(m==observed_mutex){assert(observed_depth);observed_depth--;}assert(!pthread_mutex_unlock(&get_mutex(m)->native));}
-int mutex_trylock(mutex_t *m){return !pthread_mutex_trylock(&get_mutex(m)->native);}
+void mutex_lock(mutex_t *m){assert(!pthread_mutex_lock(&get_mutex(m)->native));if(m==observed_mutex)observed_depth++;if(store_mutex(m))store_depth++;if(gpu_mutex(m))gpu_depth++;}
+void mutex_unlock(mutex_t *m){if(gpu_mutex(m)){assert(gpu_depth);gpu_depth--;}if(store_mutex(m)){assert(store_depth);store_depth--;}if(m==observed_mutex){assert(observed_depth);observed_depth--;}assert(!pthread_mutex_unlock(&get_mutex(m)->native));}
+int mutex_trylock(mutex_t *m){int acquired=!pthread_mutex_trylock(&get_mutex(m)->native);if(acquired&&gpu_mutex(m))gpu_depth++;if(acquired&&store_mutex(m))store_depth++;return acquired;}
 void wait_queue_init(wait_queue_t *q){memset(q,0,sizeof(*q));spin_init(&q->lock);}
 unsigned wait_queue_wake_all(wait_queue_t *q,uintptr_t key,proc_wake_reason_t r){(void)q;(void)key;(void)r;return 0;}
 static void (*on_link)(void);
@@ -84,6 +86,12 @@ pfa_t pfa;
 static unsigned char page_used[HOST_PAGES];
 static unsigned vmo_live, page_live;
 static unsigned char *host_ram;
+struct cg_node {unsigned refs;size_t charge,limit;};
+static struct cg_node *host_group;
+static int resident_error;
+void cg_group_pin(struct cg_node *cg){if(cg)cg->refs++;}
+void cg_group_unpin(struct cg_node *cg){if(cg){assert(cg->refs);cg->refs--;}}
+struct cg_node *cg_task_group_pin(task_t *t){(void)t;assert(!gpu_depth&&!store_depth);cg_group_pin(host_group);return host_group;}
 struct vmo *vmo_create(uint32_t type,uint64_t size,uint32_t options){struct vmo *v=kcalloc(1,sizeof(*v));if(!v)return NULL;vmo_live++;v->type=type;v->size=size;v->options=options;refcount_set(&v->refcount,1);v->page_count=(size+PAGE_SIZE-1)/PAGE_SIZE;v->pages=kmalloc(v->page_count*sizeof(pfn_t));if(!v->pages){vmo_live--;kfree(v);return NULL;}for(uint32_t i=0;i<v->page_count;i++)v->pages[i]=PFN_NONE;return v;}
 void vmo_ref(struct vmo *v){if(v)refcount_inc(&v->refcount);}
 static int device_references_page(pfn_t);
@@ -91,6 +99,7 @@ void vmo_release(struct vmo *v){
  assert(!store_depth);
  if(!v||!refcount_dec_and_test(&v->refcount))return;
  for(uint32_t i=0;i<v->page_count;i++)if(v->pages[i]!=PFN_NONE){assert(page_used[v->pages[i]]==1&&!device_references_page(v->pages[i]));page_used[v->pages[i]]=0;page_live--;}
+ if(v->type==VMO_RESIDENT&&v->charge_cg){assert(v->charge_cg->charge>=v->charged_pages);v->charge_cg->charge-=v->charged_pages;cg_group_unpin(v->charge_cg);}
  kfree(v->pages);vmo_live--;kfree(v);
 }
 pfn_t vmo_peek_page(struct vmo *v,uint32_t i){return i<v->page_count?v->pages[i]:PFN_NONE;}
@@ -98,6 +107,17 @@ int vmo_get_page_charged(struct vmo *v,uint32_t i,struct cg_node *cg,pfn_t *out)
  (void)cg;if(i>=v->page_count)return -EINVAL;
  if(v->pages[i]==PFN_NONE){for(pfn_t p=0;p<HOST_PAGES;p++)if(!page_used[p]){page_used[p]=1;page_live++;v->pages[i]=p;memset(host_ram+p*PAGE_SIZE,0,PAGE_SIZE);break;}}
  if(v->pages[i]==PFN_NONE)return -ENOMEM;*out=v->pages[i];return 0;
+}
+/* The DRM fixture models the factory boundary. Separate resident tests run
+ * the production factory, real cgroup charge primitives and Rust destructor. */
+int vmo_create_resident(size_t bytes,struct cg_node *owner,struct vmo **out){
+ assert(!store_depth);*out=NULL;if(resident_error)return resident_error;
+ size_t count=(bytes+PAGE_SIZE-1)/PAGE_SIZE;
+ if(owner&&count>owner->limit-owner->charge)return -ENOMEM;
+ struct vmo *v=vmo_create(VMO_ANONYMOUS,count*PAGE_SIZE,0);if(!v)return -ENOMEM;
+ v->type=VMO_RESIDENT;v->charge_cg=owner;if(owner){cg_group_pin(owner);owner->charge+=count;v->charged_pages=count;}
+ for(uint32_t i=0;i<count;i++){pfn_t page;if(vmo_get_page_charged(v,i,NULL,&page)){vmo_release(v);return -ENOMEM;}}
+ *out=v;return 0;
 }
 int vmo_contiguous_info(const struct vmo *v,uint64_t *p,size_t *n){(void)v;(void)p;(void)n;return -EINVAL;}
 static struct {struct vmo *memory;int prot,flags;uint32_t cap;size_t size;uint64_t offset;} maps[32];
@@ -193,8 +213,48 @@ static void dimensions(vfile_t *v,unsigned id){struct drm_mode_card_res res={0};
 static int map_handle(vfile_t *v,uint32_t h){struct drm_mode_map_dumb m={.handle=h};return v->ops->ioctl(v,DRM_IOCTL_MODE_MAP_DUMB,&m);}
 static unsigned file_handles(vfile_t *v){unsigned n=0;for(drm_handle_t *h=((drm_context_t *)v->priv)->handles;h;h=h->next)n++;return n;}
 static uint32_t add_fb(vfile_t *v,uint32_t h){struct drm_mode_fb_cmd f={.handle=h};assert(!v->ops->ioctl(v,DRM_IOCTL_MODE_ADDFB,&f)&&f.fb_id);return f.fb_id;}
+static struct cg_node *next_group;
+static void move_group(void){on_copy=NULL;host_group=next_group;}
+static void resident_case(struct sample *s,vfile_t **first,const char *name){
+ vfile_t *a=*first;
+ struct cg_node group={.refs=1,.limit=2},other={.refs=1,.limit=2};host_group=&group;
+ if(!strcmp(name,"resident-errors")){
+  resident_error=-ERANGE;
+  assert(a->ops->ioctl(a,DRM_IOCTL_MODE_CREATE_DUMB,&(struct drm_mode_create_dumb){.width=32,.height=32,.bpp=32})==-ERANGE);
+  assert(a->ops->ioctl(a,A20_GPU_IOCTL_GEM_CREATE,&(struct drm_gem_create){.size=PAGE_SIZE})==-ERANGE);
+  resource(a,-ERANGE);resident_error=0;assert(!vmo_live&&!group.charge&&group.refs==1);
+  copyout_fault=1;
+  assert(a->ops->ioctl(a,DRM_IOCTL_MODE_CREATE_DUMB,&(struct drm_mode_create_dumb){.width=32,.height=32,.bpp=32})==-EFAULT);
+  assert(a->ops->ioctl(a,A20_GPU_IOCTL_GEM_CREATE,&(struct drm_gem_create){.size=PAGE_SIZE})==-EFAULT);
+  resource(a,-EFAULT);copyout_fault=0;
+  assert(!vmo_live&&!group.charge&&group.refs==1&&!file_handles(a));
+ }else if(!strcmp(name,"resident-offline")){
+  assert(!driver_unregister(&s->driver));
+  assert(a->ops->ioctl(a,DRM_IOCTL_MODE_CREATE_DUMB,&(struct drm_mode_create_dumb){.width=32,.height=32,.bpp=32})==-ENODEV);
+  assert(!vmo_live&&!group.charge&&group.refs==1);
+ }else if(!strcmp(name,"resident-retained")){
+  resource(a,0);assert(group.charge==1&&group.refs==2);s->unref_error=-ETIMEDOUT;
+  vfs_put_file(a);*first=NULL;assert(group.charge==1&&group.refs==2&&g_drm_devices->retained);
+  pump();assert(group.charge==1);s->unref_error=0;pump();assert(!group.charge&&group.refs==1);
+ }else if(!strcmp(name,"resident-capture")){
+  next_group=&other;on_copy=move_group;uint32_t h=dumb(a);assert(host_group==&other&&!on_copy);
+  assert(group.charge==1&&group.refs==2&&!other.charge&&other.refs==1);
+  close_gem(a,h);assert(!group.charge&&group.refs==1);
+ }else{
+  assert(!strcmp(name,"resident-budget"));uint32_t h=dumb(a),second=dumb(a);
+  assert(group.charge==2&&group.refs==3);
+  struct drm_mode_create_dumb failed={.width=32,.height=32,.bpp=32};assert(a->ops->ioctl(a,DRM_IOCTL_MODE_CREATE_DUMB,&failed)==-ENOMEM&&file_handles(a)==2&&group.charge==2&&group.refs==3);
+  close_gem(a,second);int fd=prime(a,h);vfile_t *b=open_sample(s);host_group=&other;
+  struct drm_prime_handle p={.fd=fd};assert(!b->ops->ioctl(b,DRM_IOCTL_PRIME_FD_TO_HANDLE,&p));
+  static mm_struct_t mm;current_task.mm=&mm;assert(b->ops->mmap(b,0,PAGE_SIZE,PROT_READ,MAP_SHARED,(uint64_t)h*PAGE_SIZE)>0);
+  vfs_put_file(a);*first=NULL;assert(!fdtable_close_current(fd));vfs_put_file(b);
+  assert(group.charge==1&&group.refs==2&&!other.charge&&other.refs==1&&vmo_live==1);
+  unmap_all();assert(!group.charge&&group.refs==1&&!vmo_live);
+ }
+ assert(!other.charge&&other.refs==1);host_group=NULL;
+}
 static void file_case(struct sample *s,vfile_t **first,const char *name){
- vfile_t *a=*first,*b=open_sample(s);drm_device_t *d=((drm_context_t *)a->priv)->device;observed_store=&d->store_lock;
+ vfile_t *a=*first,*b=open_sample(s);drm_device_t *d=((drm_context_t *)a->priv)->device;
  if(!strcmp(name,"file-create-oom")){
   long heap=heap_live;for(int at=0;at<4;at++){fail_after=at;struct drm_mode_create_dumb c={.width=32,.height=32,.bpp=32};assert(a->ops->ioctl(a,DRM_IOCTL_MODE_CREATE_DUMB,&c)==-ENOMEM);fail_after=-1;assert(!file_handles(a)&&!vmo_live&&heap_live==heap);}
  }else if(!strcmp(name,"file-close-failure")){
@@ -301,7 +361,7 @@ static void file_case(struct sample *s,vfile_t **first,const char *name){
   }else assert(0);
  }
  if(b)vfs_put_file(b);
- assert(!store_depth);observed_store=NULL;
+ assert(!store_depth);
 }
 
 static struct sample *hook_sample;
@@ -331,7 +391,8 @@ int main(int argc,char **argv){
    assert(heap_live==before+(g_drm_reaper_work?2:0));fa=open_sample(&a);
   }else{
    fa=open_sample(&a);
-   if(!strncmp(name,"file-",5)){file_case(&a,&fa,name);}
+   if(!strncmp(name,"resident-",9)){resident_case(&a,&fa,name);}
+   else if(!strncmp(name,"file-",5)){file_case(&a,&fa,name);}
    else if(!strcmp(name,"binding")||!strcmp(name,"namespaces")||!strcmp(name,"prime")||!strcmp(name,"prime-boundaries")||!strcmp(name,"edid")){
     fa2=open_sample(&a);create_sample(&b,2);fb=open_sample(&b);assert(((drm_context_t *)fa->priv)->device==((drm_context_t *)fa2->priv)->device&&((drm_context_t *)fa->priv)->device!=((drm_context_t *)fb->priv)->device);
     gpu_device_unregister(&a.device);dimensions(fa,1);dimensions(fb,2);

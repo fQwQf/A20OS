@@ -2,6 +2,8 @@
 
 `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE` 现在分配一个全新的 GEM 与 host 资源，并把 `bo_handle` 与 `res_handle` 作为输出返回。它忽略这两个字段的输入值，把后端存储向上取整到页，并把 `size=0` 当作一页。创建、挂载后端或拷贝输出任一步失败都会撤销未交付 handle，并尝试清理 host 对象；未知完成或清理失败时保留原 ID 和 backing，等待重试成功或旧绑定停止，不能把失败当作硬件未创建。实现遵循 [Linux virtgpu_ioctl.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/virtio/virtgpu_ioctl.c) 的分配契约。
 
+GEM backing 已改用原生 `vmo_create_resident`：在 store mutex 外完整预分配并清零 canonical order-0 RAM，固定 extent/slot，物理连续性不保证。原始分配任务的 cgroup 在 GPU mutex 前捕获，backing charge 随 VMO 保留；失败传播原生 errno，不能降级成无 charge 分配。attach_backing 只查询已物化页，不再延迟补页。不是 VRAM/GPUVM 或 BO 迁移策略。
+
 GEM store 改用哈希桶中的动态分配对象，取代原先 64 项的固定数组。既有的 pin 与 framebuffer 引用会推迟销毁；对象与后端存储在 store 互斥量之外释放。单对象 256 MiB 上限不变。对象按 publication 分区，handle/FB owner 已按 open file 记账；正常最后 close 自动交还，跨文件通过 PRIME/GEM_OPEN 显式共享。仍未实现完整 master/auth、共享访问权、厂商 BO/GPUVM 或预算。
 
 旧测试会预分配一个私有的 A20 GEM，从而掩盖了不兼容的资源创建契约。`gpu3d_test` 现在只用 native 分配，并检查：

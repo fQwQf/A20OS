@@ -191,3 +191,11 @@ RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连
 - [ ] 文档、[实现状态](../../status/current/drivers-implementation-status.md)、构建和目标硬件日志一同更新。
 
 提交前按上面的命令矩阵跑完相关门禁，并把日志贴到 PR 描述或提交说明里。
+
+## Resident RAM 与预算验证
+
+原生 resident 工厂修改运行 `python3 -m unittest tools.tests.test_vmo_resident tools.tests.test_vmo_contiguous tools.tests.test_driver_dma_vmo tools.tests.test_drm_binding`；resident 夹具执行生产工厂、cgroup charge/uncharge/pin 与 Rust 生命周期/析构，覆盖碎片页、大于最大 buddy 块的范围、padding 清零、任意部分失败、不可变 slot/extent、预算拒绝及 task RSS teardown。DRM 夹具的 factory/VMO 边界为模型，检查 caller cgroup 捕获、预算耗尽/原生 errno、输出失败、失败硬件清理期间保留 charge、VMA/PRIME 的原始 owner；不能把它单独当成真实物化证据。
+
+另运行 `python3 tools/tests/test_shared_anon_host.py`、`python3 tools/tests/test_vmo_page_host.py` 与 vmo_lifecycle Rust 单测；共享匿名集成执行完整生产 C VMO/Rust 物化/resize/析构及真实 cgroup 记账，resident fault 不重复向映射任务 charge，失败 resize 不改变范围，页 pin 和预算寿命各按自身契约。
+
+`tools/a20 test smoke-driver-iommu-native-riscv64` 增加 resident VMO，通过已物化页查询与拒绝 resize、源对象销毁后的实际 EDU 跨页 DMA 及数据/guard 比对，要求 `DRIVER_IOMMU_RESIDENT_VMO` 成功标记。该 fixture 使用无 cgroup charge 的内核 owner，不是实板 GPU 或真实 cgroup OOM 验证。`smoke-driver-gpu-stop-x86_64` 的 DRM 自检检查新 GEM 的 kind/已物化页与真实 VMA 唯一 backing owner；generic 显示及 RISC-V PRIME 仍回归。当前模块 ABI 12 与公开结构不变，新增工厂及测试不表示 GPUVM/job 或 BO 迁移已实现。

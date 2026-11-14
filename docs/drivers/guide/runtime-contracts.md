@@ -182,6 +182,10 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing-gates.md)。
 
+## 固定 resident RAM
+
+原生 `vmo_create_resident` 在发布前预分配并清零全部 order-0 RAM；kind 5 的 extent/slot 不可 resize/补洞，物理连续性不保证。owner charge 和 cgroup pin 随 VMO 保留，NULL 明确表示内核无 charge 存储；预算或部分分配失败完整回滚。DRM 已在 store 锁外采用它，在 GPU mutex 前捕获预算 owner。页 pin/映射仍不保留 VMO 或转移 charge，需要预算 owner 的请求另持 VMO；不授予 DMA 地址、设备访问或停止证明。详见[resident RAM](native-runtime.md#固定-resident-ram-vmo-与预算-owner)。
+
 ## VMO 页快照导入
 
 不要把 `vmo_peek_page()` 的借用 PFN 留到稍后再 pin；并发 resize 可以先释放它。MM 的 `vmo_pin_pages()` 原子验证/保留 canonical RAM，不物化缺页；驱动的 `driver_dma_map_vmo(domain, vmo, first, count, direction, &mapping)` 管理临时快照并交给页级 mapper。工厂发布的连续 RAM VMO 也支持 canonical pin，且其 extent/slot 固定、内容仍可写；缺页 `-EAGAIN`，物理 VMO `-EOPNOTSUPP`，单次最多 4096 页；最后逻辑页 padding 也在 policy/DMA 范围内。provider 不持 VMO lock，映射和失败清理句柄保留独立帧引用，因此可在返回后释放源 VMO；它们不随 resize 改用新页，不接管 cgroup charge、权限或 BO 驻留。完整协议见 [VMO 快照](native-runtime.md#从原生-vmo-保留页并映射)。

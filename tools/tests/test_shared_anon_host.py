@@ -60,13 +60,14 @@ static void *kcalloc_atomic(size_t n,size_t bytes) {
 }
 static void kfree(void *p) { if(p){assert(atomic_fetch_sub(&live_allocs,1)>0);free(p);} }
 static void *frames[8192];
+static _Atomic unsigned frame_refs[8192];
 static int allocation_flush[8192];
 static _Atomic unsigned next_frame;
 static pfn_t pfa_alloc_page(void) {
     if(atomic_load(&frame_fail))return PFN_NONE;
     pfn_t p=atomic_fetch_add(&next_frame,1);assert(p<8192);
     frames[p]=malloc(PAGE_SIZE);assert(frames[p]);memset(frames[p],0xa5,PAGE_SIZE);
-    allocation_flush[p]=atomic_load(&flushes);atomic_fetch_add(&live_frames,1);return p;
+    atomic_store(&frame_refs[p],1);allocation_flush[p]=atomic_load(&flushes);atomic_fetch_add(&live_frames,1);return p;
 }
 static void *pfn_to_virt(pfn_t p) { assert(p<8192&&frames[p]);return frames[p]; }
 static int pfn_valid(pfn_t p) { return p<8192&&frames[p]!=NULL; }
@@ -74,6 +75,18 @@ static void pfa_free_page(pfn_t p) {
     assert(pfn_valid(p));assert(atomic_load(&flushes)>allocation_flush[p]);
     free(frames[p]);frames[p]=NULL;assert(atomic_fetch_sub(&live_frames,1)>0);
 }
+/* Order-0 allocation and canonical pins are the model boundary. High-order
+ * construction is tested separately, not executed by this shmem fixture. */
+#define MAX_ORDER 11
+static void frame_get(pfn_t p){assert(pfn_valid(p));assert(atomic_fetch_add(&frame_refs[p],1)>0);}
+static void frame_put(pfn_t p){assert(pfn_valid(p));unsigned n=atomic_fetch_sub(&frame_refs[p],1);assert(n);if(n==1)pfa_free_page(p);}
+static void frame_get_many(const pfn_t *p,size_t n){for(size_t i=0;i<n;i++)frame_get(p[i]);}
+static void frame_put_many(const pfn_t *p,size_t n){for(size_t i=0;i<n;i++)frame_put(p[i]);}
+static pfn_t pfa_alloc(int order){assert(order==0);return pfa_alloc_page();}
+static void pfa_free(pfn_t p,int order){assert(order==0);frame_put(p);}
+static int pfa_split_allocated(pfn_t p,int order){assert(order==0&&pfn_valid(p));return 0;}
+static uint64_t pfn_to_phys(pfn_t p){return (uint64_t)p*PAGE_SIZE;}
+void vmo_release(struct vmo *);
 static void arch_tlb_flush(void) { atomic_fetch_add(&flushes,1); }
 static void a20_eventq_on_object_destroy(void *v,int type) { assert(v&&type==A20_OBJ_MEMORY); }
 static void a20_pager_detach_vmo(struct vmo *v) { (void)v;abort(); }
@@ -156,6 +169,18 @@ static void sparse_extent_and_charge_owners(void) {
     vmo_ref(v);vmo_release(v);assert(atomic_load(&live_frames)==2);
     vmo_release(v);check_empty();
 }
+static void resident_backing_charge(void) {
+    struct vmo *v=NULL;assert(vmo_create_resident(PAGE_SIZE+33,&groups[0],&v)==0);
+    assert(v->type==VMO_RESIDENT&&v->phys_size==2*PAGE_SIZE&&v->charged_pages==2);
+    assert(groups[0].res.mem.rss==2&&groups[0].res.mem.shared_anon_rss==2&&atomic_load(&groups[0].namespace_refs)==1);
+    pfn_t p=PFN_NONE;assert(vmo_get_page_charged(v,0,&groups[1],&p)==0);
+    assert(p!=PFN_NONE&&!groups[1].res.mem.rss&&atomic_load(&live_frames)==2);
+    assert(vmo_resize(v,0)==-EOPNOTSUPP&&a20_vmo_resize_rust(v,4*PAGE_SIZE)<0&&v->size==2*PAGE_SIZE);
+    cg_mem_uncharge(&groups[0],SIZE_MAX);assert(groups[0].res.mem.rss==2);
+    pfn_t pages[2];assert(vmo_pin_pages(v,0,2,pages)==0);vmo_release(v);
+    assert(!groups[0].res.mem.rss&&!groups[0].res.mem.shared_anon_rss&&atomic_load(&live_frames)==2);
+    frame_put_many(pages,2);check_empty();
+}
 static void remap_backing_transfer(void) {
     for(int fail=0;fail<3;fail++) {
         struct vmo *source=vmo_create(VMO_SHARED_ANON,4*PAGE_SIZE,0);
@@ -212,9 +237,9 @@ static void competing_first_touch(void) {
 }
 int main(void) {
     for(int i=0;i<2;i++){spin_init(&groups[i].lock);cg_mem_init(&groups[i].res.mem);}
-    allocation_and_accounting_failures();sparse_extent_and_charge_owners();remap_backing_transfer();
+    allocation_and_accounting_failures();sparse_extent_and_charge_owners();resident_backing_charge();remap_backing_transfer();
     for(int i=0;i<32;i++)competing_first_touch();
-    puts("SHARED_ANON_HOST: PASS real C/Rust, sparse ownership, OOM, cgroup limits/refs, 256 concurrent faulters");
+    puts("SHARED_ANON_HOST: PASS real C/Rust, sparse/resident ownership, OOM, cgroup limits/refs, 256 concurrent faulters");
     return 0;
 }
 '''

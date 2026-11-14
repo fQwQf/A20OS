@@ -1246,11 +1246,16 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
     DMA_CHECK(!driver_dma_try_unmap_pages(&buffer_mapping) && !buffer_mapping);
     kinfo("DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1\n");
 
-    for (unsigned contiguous = 0; contiguous < 2; contiguous++) {
+    for (unsigned kind = 0; kind < 3; kind++) {
         struct vmo *vmo;
-        if (contiguous) DMA_CHECK(!vmo_create_contiguous(3 * PAGE_SIZE, &vmo));
+        if (kind == 2) DMA_CHECK(!vmo_create_resident(3 * PAGE_SIZE, NULL, &vmo));
+        else if (kind == 1) DMA_CHECK(!vmo_create_contiguous(3 * PAGE_SIZE, &vmo));
         else vmo = vmo_create(VMO_ANONYMOUS, 3 * PAGE_SIZE, 0);
         DMA_CHECK(vmo);
+        if (kind == 2) {
+            DMA_CHECK(vmo_peek_page(vmo, 1) != PFN_NONE && vmo_peek_page(vmo, 2) != PFN_NONE);
+            DMA_CHECK(vmo_resize(vmo, 0) == -EOPNOTSUPP);
+        }
         pfn_t vmo_first = vmo_get_page(vmo, 1), vmo_second = vmo_get_page(vmo, 2);
         DMA_CHECK(vmo_first != PFN_NONE && vmo_second != PFN_NONE);
         uint8_t *vmo_data[2] = {pfn_to_virt(vmo_first), pfn_to_virt(vmo_second)};
@@ -1279,7 +1284,9 @@ static void native_test_edu_roundtrip(device_t *device, struct driver_dma_domain
         pci_cfg_write16(device, 4, vmo_command & ~4U);
         DMA_CHECK(!(pci_cfg_read16(device, 4) & 4U));
         DMA_CHECK(!driver_dma_try_unmap_pages(&vmo_mapping) && !vmo_mapping);
-        if (contiguous)
+        if (kind == 2)
+            kinfo("DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1\n");
+        else if (kind == 1)
             kinfo("DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1\n");
         else
             kinfo("DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1\n");

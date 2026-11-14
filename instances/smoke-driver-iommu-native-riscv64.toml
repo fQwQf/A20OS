@@ -1,5 +1,5 @@
 name = "smoke-driver-iommu-native-riscv64"
-description = "Native IOMMU translation, permissions and EDU DMA across RAM pages, retained high-order buffers and contiguous VMOs"
+description = "Native IOMMU translation, permissions and EDU DMA across RAM pages, retained high-order buffers, contiguous and resident VMOs"
 arch = "riscv64"
 abi = "both"
 
@@ -14,7 +14,7 @@ smp = 1
 extra_qemu = ["-device", "riscv-iommu-pci,bus=pcie.0", "-device", "edu", "-append", "driver.runtime_test=1 driver.iommu_native_test=1"]
 
 [test]
-expect = ["DRIVER_IOMMU_REQUESTER: PASS native=1 user=1 conflict=1 release=1", "DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1", "DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1", "DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1", "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1", "DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1 fault=1 watch=1", "DRIVER_RUNTIME: PASS"]
+expect = ["DRIVER_IOMMU_REQUESTER: PASS native=1 user=1 conflict=1 release=1", "DRIVER_IOMMU_BUFFER: PASS high_order=1 iova=1 dma=1 retained=1", "DRIVER_IOMMU_VMO: PASS snapshot=1 offset=1 dma=1 lifetime=1", "DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1", "DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1", "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1", "DRIVER_IOMMU_NATIVE: PASS map=1 translation=1 readonly=1 unmap=1 detach=1 dma=1 cross_page=1 fault=1 watch=1", "DRIVER_RUNTIME: PASS"]
 timeout = "60s"
 
 [net]

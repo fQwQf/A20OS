@@ -42,7 +42,7 @@ pub unsafe extern "C" fn a20_vmo_pin_pages_rust(
     let ret = (|| {
         // Canonical RAM; contiguous allocations are split before publication.
         let kind = unsafe { a20_vmo_lifecycle_type_locked(vmo) };
-        if !matches!(kind, 0 | 2 | 3 | 4) { return -95; }
+        if !matches!(kind, 0 | 2 | 3 | 4 | 5) { return -95; }
         let total = unsafe { a20_vmo_lifecycle_page_count_locked(vmo) };
         if first > total || count > total - first { return -22; }
         for i in 0..count {
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn pin_range_supports_each_ram_kind_without_changing_vmo_refs() {
-        for kind in [0, 2, 3, 4] {
+        for kind in [0, 2, 3, 4, 5] {
             reset(); COUNT.store(3, Ordering::Relaxed); KIND.store(kind, Ordering::Relaxed);
             let mut pages = [0; 2];
             assert_eq!(unsafe { a20_vmo_pin_pages_rust(obj(), 1, 2, pages.as_mut_ptr()) }, 0);

@@ -52,6 +52,7 @@ A20OS 现在同时支持三种驱动路径：
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
 - VirtIO GPU 实例：驱动使用既有 `driver_dma_buffer_create/data/put` 持有每绑定队列/锁/暂存，实例退出后不留下模块回调；模块边界测试实际编译包装器并核对这些 imports。私有实例不扩展公开布局（当前模块 ABI 为 12）；停止失败保留 allocation，不允许卸载代码，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
 - VirtIO transport：`virtio_transport_reset` 通过既有 read32/write32 完成有界 status 读回确认，失败不释放 queue/IRQ/存储；不扩展 transport vtable，模块 ABI 沿用当前版本 12，见 [退出协议](native-runtime.md#virtio-reset-确认与-gpu-退出)。
+- Resident RAM：新增导出 `vmo_create_resident`，参数/错误、预算 owner 与回滚由原生 MM 定义。只增加函数和内部 kind 5，不改公开 VMO/driver/class 布局或 ABI 12；普通 VMA 自持 backing，页 pin 不保留预算 owner，不授予 DMA 权限，见[resident RAM](native-runtime.md#固定-resident-ram-vmo-与预算-owner)。
 - RAM scanout：`gpu_device_scanout_get`、`gpu_scanout_put`、`vmo_create_contiguous`、`vmo_contiguous_info`、`vmo_ref`、`vmo_release` 已加入白名单。snapshot 和普通 VMA 自持 MM 存储，不需要在最终 release 时调用设备模块；不授予 DMA 权限或证明硬件停止，见 [连续 RAM VMO](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 - 原生绑定停止：`class_device_binding_stopped` 记录旧 publication 的显式成功 remove，`device_release_resource_action` 在串行 probe/lifecycle 中精确撤销一个局部回收动作；核心私有凭据不扩展公开布局，ABI 沿用当前版本 12。离线不是停止，详见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
 - DRM adapter：文件固定 publication，active call 内取得 ops；失败清理保留旧资源身份，旧绑定停止后只进入内核 MM 回收，不调用旧模块。`drm_create_vfile_for` 是内核 adapter 接口，未增加模块导出或 ABI 版本；这不代表运行期模块卸载已完成，见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。
