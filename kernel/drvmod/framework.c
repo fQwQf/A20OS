@@ -376,6 +376,8 @@ const struct drv_export drv_export_table[] = {
     { "driver_fence_signal", driver_fence_signal },
     { "driver_fence_status", driver_fence_status },
     { "driver_fence_wait", driver_fence_wait },
+    { "driver_fence_watch_create", driver_fence_watch_create },
+    { "driver_fence_watch_try_remove", driver_fence_watch_try_remove },
     { "driver_workqueue_create", driver_workqueue_create },
     { "driver_work_create", driver_work_create },
     { "driver_work_get", driver_work_get },

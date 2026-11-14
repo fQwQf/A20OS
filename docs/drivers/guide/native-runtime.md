@@ -583,6 +583,18 @@ policy 是不含借用指针的值快照，其引用不保留 route、设备或�
 
 这是原生内核同步基础，不是 Linux `dma_fence` 的结构兼容实现；没有接入 DRM syncobj、timeline、sync_file 或用户态等待 ABI。现有 DRM 能力位不会因此自动改变。
 
+### 一次性通知与显式撤销
+
+`driver_fence_watch_create(fence, notify, context, &watch)` 在可分配的任务上下文为 pending fence 登记一次性通知，调用者全程持有 fence 引用。成功交出一个显式 owner，额外保留 fence；notify/context 不由登记对象管理，调用者必须保留代码、模块及上下文，直到 try_remove 成功。它不是新用户 handle、第二个完成对象或 Linux dma_fence 结构；没有新全局注册表。
+
+有效输出在失败时清空：无 fence/callback/out 返回 `-EINVAL`，分配失败返回 `-ENOMEM`；若登记准入时 fence 已终止，返回 `-EALREADY`，不安装也不重放 callback，调用者随后查询不可变 status 即可推进依赖。初次观察已终止时无需分配登记存储，注入 heap OOM 也不阻断这个快速路径；分配期间发生完成则在发布锁内重新核对并释放临时登记存储。成功登记与 signal 竞争时不会丢失通知；callback 可能早于 create 返回，因此 context 必须预先初始化，不能依赖注册调用后的补充赋值。
+
+获胜 signal 先发布原有 terminal status 并唤醒阻塞等待者，再在锁内逐个选择登记、标记 RUNNING，退出 fence spinlock 后调用 notify(context, status)。status 为 1 或 producer 的负 errno。只有获胜 producer 派发；同 fence 的通知由该 producer 串行执行，其他 fence 可以并发。callback 继承 producer 的任务或 IRQ 上下文；signal 调用者不得持有通知所需的外层锁。callback 必须短小、IRQ-safe、不阻塞，不做分配/VFS/等待或最终对象回收；典型用途是 driver_work_schedule。signal 不分配、不释放 watch，也不交还 watch 的 fence 引用。producer 自己的引用必须覆盖整个 signal（包括全部 callback），不能因 status 已终止就先交还。
+
+`driver_fence_watch_try_remove(&watch)` 限任务上下文、单 owner 串行调用，始终不等待：pending 时 O(1) 撤销，callback 已返回时确认退休；成功清空指针，在锁外交还 fence 引用和登记存储。若已选中 callback 且尚未返回，返回 `-EBUSY` 并保留指针、引用及代码/context，调用者显式重试。NULL 参数返回 `-EINVAL`，已清空指针成功。terminal status 不等于 callback 已返回；即使 status 已终止，尚未选中的 pending 通知仍可被撤销。成功通知后也必须 remove，不能让 IRQ 路径执行最终 put。撤销不会改变 fence、停止 GPU/DMA、取消已排入的 work 或释放 callback context；这些由各自 owner 协调。callback 已调度的工作须另行 cancel/flush 后才可销毁上下文。
+
+fence spinlock 只保护 status、登记链及 PENDING/RUNNING/DONE 交接，回调、wait queue wake、最终 put/free 均在锁外；callback 返回后发布 DONE，producer 不再读取该 watch，避免 owner 随即释放造成 UAF。signal 对登记数量线性遍历；大量依赖宜通过短通知调度后台工作处理，不在 IRQ callback 中展开任务提交或资源退休。这里只提供异步依赖的通知底座，BO/GPUVM、请求提交/恢复和 DRM 同步 UAPI 仍需独立接入。
+
 ## 后台工作、延迟任务与销毁
 
 头文件：`kernel/include/drivers/core/workqueue.h`；实现：`kernel/drivers/core/workqueue.c`。
@@ -1027,3 +1039,15 @@ RISC-V 原生 IOMMU/EDU 标准门禁最终通过，新增 `DRIVER_IOMMU_RESIDENT
 EDU 的 budget owner 为 NULL；真实 charge/namespace pin 生命周期由生产 C/Rust 主机集成验证。匿名/连续 EDU 分支仍使用旧快照，连续 owning 正例由主机集成覆盖。没有运行本轮 virgl/厂商 GPU、真实硬件停止超时或实板 cgroup OOM；本接口不是 BO 迁移、GPUVM、共享权限或 job 调度器。源码快照、负控与日志位于 .kernel-build/resident-map-review/。
 
 十二篇文档同步 owning 视图、预算与锁外退休契约。工作区与 canonical 行号引用检查通过；导航检查各自保留本轮前已有的 7 项未编目条目，错误列表完全相同，没有增加链接/锚点错误。共享 docs/zh 迁移仅投影本轮内容，其他工作区改动保留。
+
+### 原生 fence 一次性通知验证（2026-11-14）
+
+新增 driver_fence_watch_create/try_remove，在现有 fence 内以独立单 owner 登记保留 fence 引用，不建全局注册表或新用户 handle；不保留 callback 代码/context。只接受 pending，初次观察 terminal 无分配返回 EALREADY，分配后锁内重验；不重放 callback。获胜 signal 先发布 status/唤醒 waiters，随后锁外逐个通知；IRQ 不分配/回收登记，RUNNING 撤销返回 EBUSY 保留 owner，callback 返回后才发布 DONE，任务 remove 成功后锁外 put/free。producer 引用贯穿所有通知，成功移除也不取消已调度 work。新增两个模块导出，不改变公开结构或 ABI 12。
+
+test_driver_fence 共 17 个 unittest 方法，运行完整生产 fence/watch，模型边界是 pthread spin/Park/Wake、clock 与 heap。保留原来的等待/超时、80 waiter 和竞争 signal 回归；16 个新方法覆盖参数/OOM/失败输出、terminal/分配期间完成、pending/completed owner、成功/错误通知、取消与 128 登记首尾/中间链、RUNNING 保留/重试、terminal 后未选中通知取消、waiter 先唤醒，以及各 200 次登记/取消与 signal 的真实线程竞争。回调查询 status 验证锁外，IRQ 标记禁止分配/free；为竞争窗口故意暂停的测试 callback 不是可供生产照搬的 IRQ 等待。
+
+17 个编译成功的负控全部被运行时断言/ASan 拒绝，覆盖初始 terminal 无分配、引用取得/回收、登记内存、提前完成退休、锁内 callback、错误 status、terminal 准入、取消链/输出、丢通知、丢首条登记、IRQ 回收和 waiter 唤醒次序。首次丢首条登记负控在先撤销 head 的用例中存活；改用已有单条通知用例后检出，未把存活变体计为通过。通知顺序没有接口承诺，测试按实际选中者验证撤销；有效的逆序派发变体也通过全部 17 个方法。还原后九个导出源码文件与 staged source tree 逐文件相同，最终隔离驱动回归 426 个不同 unittest 方法通过；firmware 门禁 652 项加独立 sleep ABI 1 项、PC 门禁 288 项，118 个 instance 与 32 个 component 清单审计通过。
+
+五条标准 guest 门禁最终返回 0：x86_64 单核/双核 runtime 均观察 DRIVER_FENCE_WATCH 的 notify/cancel/error/work 标记，成功与错误 source fence 的短通知调度真实 kernel worker，并验证撤销与 terminal 拒绝；embedded 双核 GPU stop 同时保留 DRM reaper、旧 VMA、重绑及新通知标记；generic 模块显示保留 DRM_SYSFS、FBDEV_MAP/fork 与 videoplay 10 帧；RISC-V PRIME 保留 DRM_FILE、共享映射、SCM_RIGHTS、80 exports 与 sync-file。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行该架构 guest。
+
+runtime guest 的 source signal 在测试任务上下文，不能据此宣称实体设备 IRQ 通知已验证。双核任务曾因 disk 低于既有 8192 MiB 门槛等待；仅清理已完成旧自检的可重建缓存/镜像、保留内核/日志/审计后，同一活跃进程继续并通过，未降低资源门槛。没有运行本轮 virgl/厂商 GPU、真实硬件停止超时、BO/GPUVM/job 调度或 Linux pending sync-file；当前 DRM adapter 仍为同步后端。源树、负控和日志位于 .kernel-build/fence-watch-review/。

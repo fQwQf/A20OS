@@ -236,3 +236,5 @@ generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Ea
 因此 generic 的内核只保留显式服务账本，设备能力取决于目标架构实际列出的包；embedded 只静态链接 `EMBEDDED_DEVICE_DRIVER_SRCS` 当前列出的共享驱动，不与 generic 模块清单自动保持能力对等。RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 及 vinput-probe 等 module-only 实现当前不在 embedded 静态账本。详见[驱动部署 Profile](deployment-profiles.md)。
 
 `driver_dma_map_owned_vmo` 为固定 kind 4/5 的 RAM 显式保留整个 VMO/预算 owner，成功与失败清理句柄同样持有；完整回滚不发布 owner。buffer/VMO 最终 put 在 domain 锁外，try_unmap 的临时 domain 引用跨 owner 回调；构造回滚依靠 caller 全程持有的 domain 引用。内部 adopt helper 不导出，公开布局与 ABI 12 不变；旧 map_vmo 的裸帧快照语义保持不变。详见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
+
+原生 `driver_fence_watch_create` / `driver_fence_watch_try_remove` 已加入模块导出；公开结构与 ABI 12 不变。登记仅持 fence，不替模块保留 callback 代码或上下文。IRQ-safe callback 只能执行短操作；最终 watch 回收在任务上下文，RUNNING 返回 EBUSY 时必须保留模块/实例供重试。成功 remove 后还须停止/排空它已调度的 work；这不使模块运行期卸载自动可用。见 [一次性通知](native-runtime.md#一次性通知与显式撤销)。

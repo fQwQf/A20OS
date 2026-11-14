@@ -213,3 +213,9 @@ RISC-V 原生 PCI 驱动可显式使用 `riscv_iommu_dma_domain_create()`。创�
 ## DMA owner 的锁外退休
 
 owned VMO 视图在 provider 调用前取得引用，成功或失败清理句柄均保留整个固定对象与 charge，包括未映射页。完整回滚不发布 owner；unmap 失败不交还 owner。确认失效、CPU sync、mapping 计数退休和调用者指针清空后，buffer/VMO 最终 put 在 domain 锁外执行，try_unmap 的临时 domain 引用跨越 owner 回调，构造回滚依靠 caller 全程持有的 domain 引用。provider 回调仍禁止重入自身 domain；此规则不授权在 DMA 未停止时 unmap。完整协议见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
+
+## 原生 fence 一次性通知
+
+`driver_fence_watch_create` 仅为 pending fence 建立显式通知 owner；完成竞争由发布锁核对，初次观察已完成则无分配返回 EALREADY，分配期间完成仍在发布锁内重验，且不重放 callback。context 必须在登记前初始化，通知可能早于 create 返回。callback 在 signal producer 的上下文、fence 锁外执行，必须 IRQ-safe、不阻塞，通常只调度 work。获胜 signal 先唤醒 waiters，再派发通知；错误 status 保持原负 errno。
+
+watch 保留 fence，不保留代码/context。任务上下文的 try_remove 不等待：pending 撤销或已返回 callback 可成功清空，RUNNING 返回 EBUSY 并保留全部 owner；通知成功后也必须 remove。terminal status 不证明 callback 已返回；成功 remove 不取消先前调度的工作。驱动退出还须停止 producer、排空 work，失败时保留绑定/代码/上下文。细节见 [一次性通知](native-runtime.md#一次性通知与显式撤销)。

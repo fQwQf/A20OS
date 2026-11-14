@@ -127,6 +127,62 @@ static void exercise(void)
     driver_fence_put(test.release);
 }
 
+struct notification_case {
+    struct driver_work *work;
+    struct driver_fence *done;
+    unsigned notified, cancelled;
+    int status;
+};
+
+static void notification_work(void *opaque)
+{
+    struct notification_case *test = opaque;
+    CHECK(!driver_fence_signal(test->done, 0));
+}
+
+static void fence_notification(void *opaque, int status)
+{
+    struct notification_case *test = opaque;
+    test->status = status;
+    test->notified++;
+    CHECK(driver_work_schedule(test->work, 0) == 1);
+}
+
+static void cancelled_notification(void *opaque, int status)
+{
+    (void)status;
+    ((struct notification_case *)opaque)->cancelled++;
+}
+
+static void exercise_fence_notifications(void)
+{
+    struct driver_workqueue *queue = driver_workqueue_create();
+    CHECK(queue);
+    for (unsigned failed = 0; failed < 2; failed++) {
+        struct notification_case test = {0};
+        struct driver_fence *source = driver_fence_create();
+        test.done = driver_fence_create();
+        test.work = driver_work_create(queue, notification_work, &test);
+        CHECK(source && test.done && test.work);
+        struct driver_fence_watch *watch, *cancelled;
+        CHECK(!driver_fence_watch_create(source, cancelled_notification, &test, &cancelled));
+        CHECK(!driver_fence_watch_create(source, fence_notification, &test, &watch));
+        CHECK(!driver_fence_watch_try_remove(&cancelled) && !cancelled);
+        CHECK(!driver_fence_status(source) && !test.notified);
+        CHECK(!driver_fence_signal(source, failed ? -EIO : 0));
+        CHECK(test.notified == 1 && !test.cancelled && test.status == (failed ? -EIO : 1));
+        CHECK(!driver_fence_watch_try_remove(&watch) && !watch);
+        CHECK(driver_fence_watch_create(source, fence_notification, &test, &watch) == -EALREADY);
+        CHECK(!watch);
+        CHECK(!driver_fence_wait(test.done, deadline(), false));
+        CHECK(!driver_workqueue_flush(queue, deadline()));
+        driver_work_put(test.work);
+        driver_fence_put(test.done);
+        driver_fence_put(source);
+    }
+    CHECK(!driver_workqueue_destroy(&queue, deadline()) && !queue);
+}
+
 static void exercise_firmware(void)
 {
     const char bytes[] = {'A', '2', '0', '\0', 1, 2, 3};
@@ -914,6 +970,7 @@ void driver_runtime_selftest_boot(void)
     exercise_dma_buffer_mapping();
     exercise_dma_vmo();
     exercise();
+    exercise_fence_notifications();
     exercise_firmware();
     if (boot_flag(args, "driver.usb_bulk_test=1"))
         exercise_usb_bulk();
@@ -948,6 +1005,7 @@ void driver_runtime_selftest_boot(void)
           "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
           "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
+          "DRIVER_FENCE_WATCH: PASS notify=1 cancel=1 error=1 work=1\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",
           gpu_caps_test ? "DRIVER_GPU_CAPS: PASS native=1 firmware=1 headless=1 election=1\n" : "",
