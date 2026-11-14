@@ -46,6 +46,13 @@ int class_device_publish(struct device *dev);
  * calls. Lifecycle owner then quiesces hardware before unpublish drains. */
 void class_device_mark_offline(struct device *dev);
 void class_device_unpublish(struct device *dev);
+/* Caller holds a genuine core publication reference. False while online,
+ * while unpublish merely drains calls, or while remove fails. True after the
+ * old binding's explicit successful remove reaches devres release; remains
+ * true across rebinding the device. Bindings without remove never obtain this
+ * receipt. This records the driver's stop contract, not a hardware probe.
+ * Never infer the same fact from dev->drv/default selection changes. */
+bool class_device_binding_stopped(const class_device_t *cdev);
 class_device_t *class_device_get_by_name(const char *name);
 /* Dense rank among online publications, not a persistent identity. Registry
  * changes can reorder ranks; callers retain each returned reference. */
@@ -313,6 +320,11 @@ typedef struct gpu_dev_ops {
     int     (*resource_attach_backing)(struct device *dev, uint32_t resource_id,
                                        const struct virtio_gpu_mem_entry *entries,
                                        uint32_t nr_entries);
+    /* Object mutation callbacks use 0=confirmed success, negative errno on
+     * failure. Chosen ids remain cleanup identities after unknown completion.
+     * Successful ctx_destroy/resource_unref confirm no further device access
+     * through that object; errors do not authorize backing release. These
+     * calls still require the publication's active call, never a raw vtable. */
     int     (*ctx_create)(struct device *dev, uint32_t ctx_id, uint32_t context_init,
                           const char *name, size_t nlen);
     int     (*ctx_destroy)(struct device *dev, uint32_t ctx_id);

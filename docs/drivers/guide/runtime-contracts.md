@@ -10,6 +10,12 @@
 
 总线任务可用 `driver_lifecycle_begin/end()` 协调私有拓扑和核心绑定，所属上下文允许嵌套且不压制 probe。`driver_lifecycle_try_begin()` 只接受最外层入口，忙或同上下文重入均返回 `-EAGAIN`；成功后才 end。持 active class 调用时不能阻塞等待正在排空自己的 teardown，USB HID 使用 `usb_device_poll()` 尝试进度。这些 API 不用于 IRQ、不固定存储或模块代码，成功进入后的硬件操作仍可能等待。完整规则见 [原生拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。
 
+## 绑定停止与 devres 回收
+
+`class_device_binding_stopped()` 查询持有引用的真实核心 publication 所属旧绑定，只有显式 remove 成功进入 devres 回收后才返回 true。offline、class drain、失败 remove 和缺少 remove 都不能获得凭据；重新绑定不改变旧凭据。消费者只有在仍持有 backing 引用、并满足各自 DMA/映射退休要求时才能回收存储，不能把 true 当作全部 devres 已释放。
+
+`device_release_resources()` 由核心完整退出路径调用。驱动局部回滚使用 `device_release_resource_action()`，只能在串行 probe/lifecycle 上下文精确撤销一个 callback/data 动作；它不停止硬件，也不授予提前回收权限。完整契约见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
+
 ## GPU class 调用
 
 新消费者使用 `gpu_device_default_begin/end()`，或先以 `gpu_device_default_get()` 保留 publication，再用 `gpu_device_access_begin/end()`。一次 access 的 device/const ops 来自同一个 DISPLAY 绑定；成功 begin 自持 class 引用与 active call，旧 publication 离线后返回 `-ENODEV`，不跟随重绑。选择读取不取 lifecycle mutex，不能在 active call 内等待需要自己退出的生命周期动作。每条成功返回路径配对 end，不能复制或覆盖 live access。

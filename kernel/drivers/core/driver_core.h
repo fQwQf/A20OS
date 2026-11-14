@@ -360,6 +360,16 @@ int device_map_resource_exclusive(device_t *dev, const resource_t *, void **out)
 void *device_map_mmio(device_t *dev, int index);
 void *device_map_resource(device_t *dev, const resource_t *resource);
 int device_add_resource_action(device_t *dev, void (*release)(void *), void *data);
+/* Probe/lifecycle context with exclusive access to this device's devres list.
+ * Detach and execute the newest exact callback/data match once. No new
+ * allocation, no implicit hardware stop. Unknown match -> ENOENT; invalid
+ * device/callback -> EINVAL. Callback runs after detaching its action, and
+ * remaining actions keep their order. Not for active class/IRQ contexts. */
+int device_release_resource_action(device_t *dev, void (*release)(void *), void *data);
+/* Core-owned full binding teardown, after accepted remove (or legacy failed
+ * probe rollback). Drivers must not drain this list on a live/offline binding:
+ * it also owns core publication receipts. Release a driver's individual
+ * action with device_release_resource_action() when rolling back a local step. */
 void device_release_resources(device_t *dev);
 /* Registration, child-parent topology and progress snapshots retain device
  * objects. Dynamically allocated buses provide release(); the creator drops
