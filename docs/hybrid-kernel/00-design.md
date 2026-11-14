@@ -33,7 +33,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 ```
 
 - 用户态服务层：以 Native ABI 编写的服务进程，通过 Channel/EventQ 与内核及其他服务通信。服务崩溃由 svcmgr 检测并重启，资源由内核按对象模型回收。
-- 混合内核层：`kernel/ipc`、`kernel/mm`、`kernel/proc` 与 `kernel/include/core` 按自包含内部层组织，ABI 层原则上只把用户 syscall 线格式翻译成内部 API。当前 `kernel/drivers/core/driver_manager.c` 是明确例外：它直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，尚待改为 core-owned 类型/API。
+- 混合内核层：`kernel/ipc`、`kernel/mm`、`kernel/proc` 与 `kernel/include/core` 按自包含内部层组织，ABI 层原则上只把用户 syscall 线格式翻译成内部 API。`kernel/drivers/core/driver_manager.c` 已直接使用内部 `ipc/ipc.h` 与 handle table 安装服务启动句柄，不再通过 Native ABI 重导出头获取内核类型。
 - 兼容层：Linux ABI 与 vDSO，让未修改的 musl 程序直接受益于内核机制（唤醒快路径、时间读取等）。
 
 ## 核心机制总览
@@ -50,7 +50,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 | 统一驱动框架 | `kernel/drivers/core/driver_core.c` | `driver_t` 模块模型、class 设备、DriverStore 扫描 |
 | drvmod 模块加载 | `kernel/drvmod/loader.c` | ELF ET_REL 装载 + `.a20drv` 描述段 + DriverEntry |
 | 双态部署环境层 | `kernel/include/drivers/dual/drv_env.h` | 提供 `KERNEL/USER/DRVMOD` 三后端；当前样板实际使用 USER 与 DRVMOD，尚非完整同源双态驱动 |
-| IOMMU bring-up | `kernel/drivers/core/riscv_iommu.c` | RISC-V IOMMU DDT/CQ/FQ 初始化和 devid 0 静态 SV39 翻译探测；未接入动态 per-device DMA map/fault 消费 |
+| IOMMU bring-up | `kernel/drivers/core/riscv_iommu.c` | RISC-V IOMMU DDT/CQ/FQ、动态原生/用户 per-device domain、map/unmap 与 fault 消费；已有 QEMU EDU DMA/隔离验证，AMD-Vi 翻译后端仍未实现 |
 | 对象统计与配额 | `/proc/a20/objects` | 七项实时对象计数 + 累计计数审计 + 句柄硬配额 |
 | vDSO | `kernel/vdso/riscv64/vdso.S` | `clock_gettime` 等零陷入读取 |
 | 用户态文件系统层 | `kernel/fs/uxfs/` + `user/svc/ufsd.c` | uxfs 代理把 vnode ops 经 Channel 转发给 ufsd 多人格宿主（fat/ext4/iso9660/ntfs-ro）；块 IO 经受控 fs_block_io 进入内核块层 |
@@ -67,7 +67,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
 ```
 
-当前尚未完全达到该目标：`kernel/drivers/core/driver_manager.c` 直接依赖 `abi/native/types.h` 与 `abi/native/rights.h`。它为服务启动任务安装 Native 类型句柄，是已记录的分层债务；在改为 core-owned 对象类型/rights 或专用安装 API 前，不能把“内部实现对 ABI 零依赖”描述为现状。其余薄包装方向仍用于约束新代码，避免继续扩大该例外。
+设备管理器目前直接消费内部 IPC 类型、rights 与 handle table；Native 类型头只是相同内核定义的重导出，原先记录的该处反向包含已消除。这不代表所有子系统都经过零 ABI 依赖审计；新增驱动机制仍应自持对象/类型，Linux DRM 等线格式在 adapter 中转换，不把专用 ABI 或 VirtIO 协议扩展为所有原生驱动的依赖。
 
 ### 资源是类型化对象，生命周期显式
 

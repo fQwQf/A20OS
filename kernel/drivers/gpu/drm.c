@@ -37,8 +37,9 @@
  * Minimal DRM/KMS backend.
  *
  * Each vfile captures one immutable DISPLAY publication. Compatibility GEM
- * handles and KMS state are shared within that publication; other bindings
- * have independent namespaces. KMS describes one scanout per publication.
+ * object ids and KMS state belong to that publication; each file owns its
+ * handle references and framebuffers. Sharing requires PRIME or GEM_OPEN.
+ * Other bindings have independent namespaces. KMS describes one scanout.
  * Buffers use native VMOs, with storage ownership independent of class calls.
  */
 
@@ -79,7 +80,7 @@ typedef struct drm_gem {
     uint32_t ctx_attached_for;
     uint32_t virgl_res_id;
     int fb_refs;         /* live framebuffers referencing this GEM */
-    int dumb_live;       /* userspace still holds the dumb-buffer handle */
+    unsigned handle_refs; /* files holding this object's handle */
     /* Temporary operations and exported dma-bufs retain one pin each. Pins
      * keep CPU storage alive after the last handle/framebuffer or binding;
      * they do not authorize hardware access after the publication goes offline. */
@@ -89,15 +90,26 @@ typedef struct drm_gem {
 /* A framebuffer is its own object, not an alias of the GEM handle.  Linux lets
  * userspace destroy the dumb buffer right after ADDFB2, so the fb must keep the
  * backing storage alive independently. */
+struct drm_context;
 typedef struct drm_fb {
     int used;
     uint32_t fb_id;
     uint32_t gem_handle;
+    struct drm_context *owner;
 } drm_fb_t;
+
+/* Adapter-local ids are globally unique within a publication, but knowing an
+ * id grants no access. Entries contain ids rather than pointers: confirmed
+ * binding stop may retire storage before an offline file is finally closed. */
+typedef struct drm_handle {
+    struct drm_handle *next;
+    uint32_t id;
+} drm_handle_t;
 
 typedef struct drm_context {
     struct drm_context *retained_next;
     drm_device_t *device;
+    drm_handle_t *handles; /* protected by device store_lock and gpu_lock */
     uint32_t magic;
     int is_master;
     int render_only;   /* opened via /dev/dri/renderD128: no master, no KMS */
@@ -825,12 +837,43 @@ struct drm_mode_atomic {
  * call->device->fbs[] unless the caller is documented to be holding the lock or a pin.
  */
 
-static drm_gem_t *drm_find_gem_locked(drm_call_t *call, uint32_t handle)
+static drm_gem_t *drm_find_object_locked(drm_call_t *call, uint32_t handle)
 {
     for (drm_gem_t *g = call->device->gems[handle % DRM_GEM_BUCKETS]; g; g = g->next)
         if (g->handle == handle)
             return g;
     return NULL;
+}
+
+static bool drm_handle_owned_locked(drm_call_t *call, uint32_t handle)
+{
+    for (drm_handle_t *entry = call->context ? call->context->handles : NULL;
+         entry; entry = entry->next)
+        if (entry->id == handle) return true;
+    return false;
+}
+
+static drm_gem_t *drm_find_gem_locked(drm_call_t *call, uint32_t handle)
+{
+    return drm_handle_owned_locked(call, handle) ?
+        drm_find_object_locked(call, handle) : NULL;
+}
+
+/* One owner per open file, including repeated imports. All callers run in a
+ * serialized device operation. On failure no reference has been installed. */
+static int drm_handle_add_locked(drm_call_t *call, drm_gem_t *gem, bool *added)
+{
+    *added = false;
+    if (!call->context) return -EINVAL;
+    if (drm_handle_owned_locked(call, gem->handle)) return 0;
+    drm_handle_t *entry = kmalloc(sizeof(*entry));
+    if (!entry) return -ENOMEM;
+    entry->id = gem->handle;
+    entry->next = call->context->handles;
+    call->context->handles = entry;
+    gem->handle_refs++;
+    *added = true;
+    return 0;
 }
 
 /* Pin a GEM so its storage survives the caller dropping the lock.  Returns NULL
@@ -847,6 +890,17 @@ static drm_gem_t *drm_gem_pin(drm_call_t *call, uint32_t handle)
     }
     drm_unlock(call);
     return b;
+}
+
+/* Only for a framebuffer already authorized by its owning file. Its reference
+ * survives GEM_CLOSE, so presentation must not require a live wire handle. */
+static drm_gem_t *drm_fb_gem_pin(drm_call_t *call, uint32_t handle)
+{
+    drm_lock(call);
+    drm_gem_t *gem = drm_find_object_locked(call, handle);
+    if (gem) gem->pins++;
+    drm_unlock(call);
+    return gem;
 }
 
 /* The storage a detached GEM still owns: releasing it can allocate, enter the
@@ -896,18 +950,24 @@ static void drm_retry_retained(drm_call_t *call)
     }
 }
 
+/* Names do not own storage and expire with the final file handle. */
+static void drm_gem_name_drop_locked(drm_call_t *call, uint32_t handle)
+{
+    for (int i = 0; i < call->device->gem_name_count; i++) {
+        if (call->device->gem_names[i].handle == handle) {
+            call->device->gem_names[i] = call->device->gem_names[--call->device->gem_name_count];
+            break;
+        }
+    }
+}
+
 /* Take the GEM out of the tables and hand its storage back to the caller.
  * Requires the lock and that no pin is outstanding. */
 static void drm_gem_detach_locked(drm_call_t *call, drm_gem_t *b, drm_gem_storage_t *out)
 {
     out->vmo = b->vmo;
     out->virgl_res_id = b->is_virgl ? b->virgl_res_id : 0;
-    for (int i = 0; i < call->device->gem_name_count; i++) {
-        if (call->device->gem_names[i].handle == b->handle) {
-            call->device->gem_names[i] = call->device->gem_names[--call->device->gem_name_count];
-            break;
-        }
-    }
+    drm_gem_name_drop_locked(call, b->handle);
     drm_gem_t **link = &call->device->gems[b->handle % DRM_GEM_BUCKETS];
     while (*link && *link != b)
         link = &(*link)->next;
@@ -961,7 +1021,7 @@ static void drm_reap(void *unused)
                     drm_gem_t *next = gem->next;
                     gem->is_virgl = 0;gem->virgl_res_id = 0;
                     gem->backing_attached = 0;gem->ctx_attached_for = 0;
-                    gem->fb_refs = 0;gem->dumb_live = 0;
+                    gem->fb_refs = 0;gem->handle_refs = 0;
                     if (!gem->pins) {
                         drm_gem_storage_t storage = {0};
                         drm_gem_detach_locked(&call, gem, &storage);
@@ -1023,26 +1083,37 @@ static void drm_gem_unpin(drm_call_t *call, drm_gem_t *b)
         return;
     }
     b->pins--;
-    if (b->pins == 0 && b->fb_refs == 0 && !b->dumb_live)
+    if (b->pins == 0 && b->fb_refs == 0 && !b->handle_refs)
         drm_gem_detach_locked(call, b, &s);
     drm_unlock(call);
     drm_gem_drop_storage(call, &s);
 }
 
-/* Userspace dropping the dumb-buffer handle does not free storage that a live
- * framebuffer still displays; the VMO is reclaimed by drm_fb_release(). */
-static void drm_free_gem(drm_call_t *call, uint32_t handle)
+/* Drop only this file's owner. dma-buf, framebuffer and VMA references are
+ * independent. Offline close also drains revoked ids whose object was reaped. */
+static int drm_free_gem(drm_call_t *call, uint32_t handle)
 {
     drm_gem_storage_t s = { 0 };
     drm_lock(call);
-    drm_gem_t *b = drm_find_gem_locked(call, handle);
+    drm_handle_t **link = call->context ? &call->context->handles : NULL;
+    while (link && *link && (*link)->id != handle) link = &(*link)->next;
+    if (!link || !*link) {
+        drm_unlock(call);
+        return -ENOENT;
+    }
+    drm_handle_t *entry = *link;
+    *link = entry->next;
+    drm_gem_t *b = drm_find_object_locked(call, handle);
     if (b) {
-        b->dumb_live = 0;
-        if (b->fb_refs == 0 && b->pins == 0)
+        if (b->handle_refs) b->handle_refs--;
+        if (!b->handle_refs) drm_gem_name_drop_locked(call, handle);
+        if (!b->handle_refs && b->fb_refs == 0 && b->pins == 0)
             drm_gem_detach_locked(call, b, &s);
     }
     drm_unlock(call);
+    kfree(entry);
     drm_gem_drop_storage(call, &s);
+    return 0;
 }
 
 static drm_fb_t *drm_find_fb_locked(drm_call_t *call, uint32_t fb_id)
@@ -1053,6 +1124,30 @@ static drm_fb_t *drm_find_fb_locked(drm_call_t *call, uint32_t fb_id)
     return NULL;
 }
 
+static drm_fb_t *drm_owned_fb_locked(drm_call_t *call, uint32_t fb_id)
+{
+    drm_fb_t *fb = drm_find_fb_locked(call, fb_id);
+    return fb && fb->owner == call->context ? fb : NULL;
+}
+
+/* GETFB may recover the owner's closed handle. Metadata queries by another
+ * file reveal no new backing access, even if its unchecked master flag is set.
+ * An explicit PRIME/GEM_OPEN owner may see its already-held handle. */
+static int drm_fb_handle_locked(drm_call_t *call, drm_fb_t *fb, drm_gem_t *gem,
+                                 uint32_t *handle, bool *added)
+{
+    *handle = 0;
+    *added = false;
+    if (fb->owner == call->context) {
+        int result = drm_handle_add_locked(call, gem, added);
+        if (result) return result;
+        *handle = gem->handle;
+    } else if (drm_handle_owned_locked(call, gem->handle)) {
+        *handle = gem->handle;
+    }
+    return 0;
+}
+
 static drm_fb_t *drm_fb_alloc_locked(drm_call_t *call, uint32_t gem_handle)
 {
     for (int i = 0; i < DRM_MAX_FBS; i++) {
@@ -1061,19 +1156,20 @@ static drm_fb_t *drm_fb_alloc_locked(drm_call_t *call, uint32_t gem_handle)
         call->device->fbs[i].used = 1;
         call->device->fbs[i].fb_id = call->device->fb_next_id++;
         call->device->fbs[i].gem_handle = gem_handle;
+        call->device->fbs[i].owner = call->context;
         return &call->device->fbs[i];
     }
     return NULL;
 }
 
-static void drm_fb_release(drm_call_t *call, uint32_t fb_id)
+static int drm_fb_release(drm_call_t *call, uint32_t fb_id)
 {
     drm_gem_storage_t s = { 0 };
     drm_lock(call);
     drm_fb_t *f = drm_find_fb_locked(call, fb_id);
-    if (!f) {
+    if (!f || f->owner != call->context) {
         drm_unlock(call);
-        return;
+        return -ENOENT;
     }
     uint32_t h = f->gem_handle;
     memset(f, 0, sizeof(*f));
@@ -1087,14 +1183,15 @@ static void drm_fb_release(drm_call_t *call, uint32_t fb_id)
         call->device->crtc.x = 0;
         call->device->crtc.y = 0;
     }
-    drm_gem_t *b = drm_find_gem_locked(call, h);
+    drm_gem_t *b = drm_find_object_locked(call, h);
     if (b && b->fb_refs > 0) {
         b->fb_refs--;
-        if (b->fb_refs == 0 && !b->dumb_live && b->pins == 0)
+        if (b->fb_refs == 0 && !b->handle_refs && b->pins == 0)
             drm_gem_detach_locked(call, b, &s);
     }
     drm_unlock(call);
     drm_gem_drop_storage(call, &s);
+    return 0;
 }
 
 /*
@@ -1108,22 +1205,30 @@ static drm_gem_t *drm_gem_alloc_locked(drm_call_t *call, uint32_t width, uint32_
                                        uint64_t size)
 {
     /* Bound each backing VMO independently of resource format and import path. */
-    if (size == 0 || size > DRM_MAX_BUFFER_BYTES)
+    if (!call->context || size == 0 || size > DRM_MAX_BUFFER_BYTES)
         return NULL;
     drm_gem_t *g = kmalloc(sizeof(*g));
     if (!g)
         return NULL;
     memset(g, 0, sizeof(*g));
     g->device = call->device;
+    /* Reserve the only remaining fallible adapter allocation before VMO
+     * construction. A successful VMO must never be released under store_lock. */
+    drm_handle_t *entry = kmalloc(sizeof(*entry));
+    if (!entry) {
+        kfree(g);
+        return NULL;
+    }
     g->vmo = vmo_create(VMO_ANONYMOUS, size, 0);
     if (!g->vmo) {
+        kfree(entry);
         kfree(g);
         return NULL;
     }
     uint32_t h;
     do {
         h = call->device->gem_next_handle++;
-    } while (h == 0 || drm_find_gem_locked(call, h));
+    } while (h == 0 || drm_find_object_locked(call, h));
     g->handle = h;
     g->width = width;
     g->height = height;
@@ -1132,7 +1237,10 @@ static drm_gem_t *drm_gem_alloc_locked(drm_call_t *call, uint32_t width, uint32_
     g->format = format;
     g->usage = usage;
     g->size = size;
-    g->dumb_live = 1;
+    entry->id = h;
+    entry->next = call->context->handles;
+    call->context->handles = entry;
+    g->handle_refs = 1;
     g->next = call->device->gems[h % DRM_GEM_BUCKETS];
     call->device->gems[h % DRM_GEM_BUCKETS] = g;
     return g;
@@ -1665,7 +1773,7 @@ static int drm_mode_setcrtc(drm_call_t *call, void *arg)
 
     uint32_t gem_handle;
     drm_lock(call);
-    drm_fb_t *f = drm_find_fb_locked(call, c.fb_id);
+    drm_fb_t *f = drm_owned_fb_locked(call, c.fb_id);
     if (f)
         gem_handle = f->gem_handle;
     else
@@ -1676,7 +1784,7 @@ static int drm_mode_setcrtc(drm_call_t *call, void *arg)
 
     /* Present with the lock dropped -- it copies a whole framebuffer and talks
      * to the device -- so the GEM is pinned for the duration. */
-    drm_gem_t *b = drm_gem_pin(call, gem_handle);
+    drm_gem_t *b = drm_fb_gem_pin(call, gem_handle);
     if (!b)
         return -ENOENT;
     /* The minimal KMS implementation presents by copying into the GPU's
@@ -1805,19 +1913,23 @@ static int drm_mode_getfb(drm_call_t *call, void *arg)
         return -EFAULT;
     drm_lock(call);
     drm_fb_t *f = drm_find_fb_locked(call, fb.fb_id);
-    drm_gem_t *b = f ? drm_find_gem_locked(call, f->gem_handle) : NULL;
+    drm_gem_t *b = f ? drm_find_object_locked(call, f->gem_handle) : NULL;
+    bool added = false;
+    int result = b ? drm_fb_handle_locked(call, f, b, &fb.handle, &added) : -ENOENT;
     if (b) {
         fb.width = b->width;
         fb.height = b->height;
         fb.pitch = b->pitch;
         fb.bpp = b->bpp;
-        fb.handle = b->handle;
     }
     drm_unlock(call);
-    if (!b)
-        return -ENOENT;
+    if (result) return result;
     fb.depth = 24;
-    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &fb, sizeof(fb)) < 0) {
+        if (added) (void)drm_free_gem(call, fb.handle);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_mode_addfb(drm_call_t *call, void *arg)
@@ -1886,8 +1998,7 @@ static int drm_mode_rmfb(drm_call_t *call, void *arg)
     uint32_t fb_id = 0;
     if (copy_from_user(&fb_id, arg, sizeof(fb_id)) < 0)
         return -EFAULT;
-    drm_fb_release(call, fb_id);
-    return 0;
+    return drm_fb_release(call, fb_id);
 }
 
 static int drm_mode_pageflip(drm_call_t *call, void *arg)
@@ -1902,7 +2013,7 @@ static int drm_mode_pageflip(drm_call_t *call, void *arg)
      * the wrong buffer.  Go through the framebuffer like SETCRTC does. */
     uint32_t gem_handle, px, py;
     drm_lock(call);
-    drm_fb_t *f = drm_find_fb_locked(call, pf.fb_id);
+    drm_fb_t *f = drm_owned_fb_locked(call, pf.fb_id);
     gem_handle = f ? f->gem_handle : 0;
     px = call->device->crtc.x;
     py = call->device->crtc.y;
@@ -1926,7 +2037,7 @@ static int drm_mode_pageflip(drm_call_t *call, void *arg)
         mutex_unlock(&call->device->vblank.lock);
     }
 
-    drm_gem_t *b = drm_gem_pin(call, gem_handle);
+    drm_gem_t *b = drm_fb_gem_pin(call, gem_handle);
     if (!b) {
         if (wants_event) {
             mutex_lock(&call->device->vblank.lock);
@@ -2201,16 +2312,32 @@ static int drm_gem_flink(drm_call_t *call, void *arg)
         drm_unlock(call);
         return -ENOENT;
     }
-    h.handle = g->handle;
-    /* A full table used to be swallowed, so the export returned success and the
-     * name was simply never bound -- the failure then surfaced much later as a
-     * GEM_OPEN -ENOENT with nothing to connect it to. */
-    if (drm_gem_name_bind_locked(call, h.name, g->handle) < 0) {
+    /* Names are allocated by this adapter, never supplied by the exporter.
+     * Repeated FLINK returns the same name without rebinding another object. */
+    h.name = 0;
+    for (int i = 0; i < call->device->gem_name_count; i++)
+        if (call->device->gem_names[i].handle == g->handle)
+            h.name = call->device->gem_names[i].name;
+    bool bound = !h.name;
+    if (bound) {
+        h.name = 1;
+        uint32_t ignored;
+        while (!drm_gem_name_lookup_locked(call, h.name, &ignored)) h.name++;
+    }
+    if (bound && drm_gem_name_bind_locked(call, h.name, g->handle) < 0) {
         drm_unlock(call);
         return -ENOSPC;
     }
     drm_unlock(call);
-    return copy_to_user(arg, &h, sizeof(h)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &h, sizeof(h)) < 0) {
+        if (bound) {
+            drm_lock(call);
+            drm_gem_name_drop_locked(call, h.handle);
+            drm_unlock(call);
+        }
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_gem_open(drm_call_t *call, void *arg)
@@ -2221,16 +2348,23 @@ static int drm_gem_open(drm_call_t *call, void *arg)
     drm_lock(call);
     uint32_t handle = 0;
     int rc = drm_gem_name_lookup_locked(call, o.name, &handle);
-    drm_gem_t *g = rc == 0 ? drm_find_gem_locked(call, handle) : NULL;
-    if (g)
+    drm_gem_t *g = rc == 0 ? drm_find_object_locked(call, handle) : NULL;
+    bool added = false;
+    if (g) {
+        rc = drm_handle_add_locked(call, g, &added);
         o.size = g->size;
+    }
     drm_unlock(call);
     if (rc < 0)
         return rc;
     if (!g)
         return -ENOENT;
     o.handle = handle;
-    return copy_to_user(arg, &o, sizeof(o)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &o, sizeof(o)) < 0) {
+        if (added) (void)drm_free_gem(call, handle);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_mode_getfb2(drm_call_t *call, void *arg)
@@ -2243,23 +2377,27 @@ static int drm_mode_getfb2(drm_call_t *call, void *arg)
      * geometry.  Answer it from the backing GEM like GETFB does. */
     drm_lock(call);
     drm_fb_t *f = drm_find_fb_locked(call, fb.fb_id);
-    drm_gem_t *b = f ? drm_find_gem_locked(call, f->gem_handle) : NULL;
+    drm_gem_t *b = f ? drm_find_object_locked(call, f->gem_handle) : NULL;
     memset(&fb, 0, sizeof(fb));
+    bool added = false;
+    int result = b ? drm_fb_handle_locked(call, f, b, &fb.handles[0], &added) : -ENOENT;
     if (b) {
         fb.fb_id = f->fb_id;
         fb.width = b->width;
         fb.height = b->height;
         fb.pixel_format = b->format;
         fb.pitches[0] = b->pitch;
-        fb.handles[0] = b->handle;
     }
     drm_unlock(call);
-    if (!b)
-        return -ENOENT;
+    if (result) return result;
     /* One GEM object, linear layout, no modifier.  ADDFB2 does not accept a
      * modifier today, so reporting one here would be a lie; leave it 0. */
     fb.modifier[0] = 0;
-    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &fb, sizeof(fb)) < 0) {
+        if (added) (void)drm_free_gem(call, fb.handles[0]);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_mode_create_dumb(drm_call_t *call, void *arg)
@@ -2594,14 +2732,13 @@ static int drm_prime_fd_to_handle(drm_call_t *call, void *arg, vfile_t *vf,
     drm_gem_t *g = vf->priv;
     if (g->device != call->device) return -EXDEV;
     drm_lock(call);
-    int was_live = g->dumb_live;
-    g->dumb_live = 1;
+    bool added = false;
+    int result = drm_handle_add_locked(call, g, &added);
     p.handle = g->handle;
     drm_unlock(call);
+    if (result) return result;
     if (copy_to_user(arg, &p, sizeof(p)) < 0) {
-        drm_lock(call);
-        g->dumb_live = was_live;
-        drm_unlock(call);
+        if (added) (void)drm_free_gem(call, p.handle);
         return -EFAULT;
     }
     return 0;
@@ -3301,10 +3438,16 @@ static int drm_close_active(drm_call_t *call, vfile_t *vf)
 {
     drm_context_t *ctx = vf ? vf->priv : NULL;
     if (ctx) {
-        /* Buffers are shared within this publication; they are reclaimed by DESTROY_DUMB / GEM_CLOSE.
-         * Do not free them on close (a compositor may close the allocator fd
-         * while buffers are still referenced by the backend). */
-            mutex_lock(&call->device->vblank.lock);
+        /* Drop this file's adapters, never another file's imported handles.
+         * Shared VMOs and exported dma-bufs keep their independent owners. */
+        for (unsigned i = 0; i < DRM_MAX_FBS; i++) {
+            drm_fb_t *fb = &call->device->fbs[i];
+            if (fb->used && fb->owner == ctx)
+                (void)drm_fb_release(call, fb->fb_id);
+        }
+        while (ctx->handles)
+            (void)drm_free_gem(call, ctx->handles->id);
+        mutex_lock(&call->device->vblank.lock);
         if (call->device->vblank.flip_ctx == ctx) {
             call->device->vblank.flip_pending = 0;
             call->device->vblank.flip_ctx = NULL;
@@ -3741,11 +3884,22 @@ int drm_native_binding_selftest(class_device_t *publication)
     drm_gem_t *fresh_gem = drm_gem_alloc_locked(&call, 32, 32, 128, 32, 0, 0, PAGE_SIZE);
     drm_unlock(&call);
     DRM_TEST_CHECK(fresh_gem && fresh_gem->handle == old_handle && fresh_gem->vmo != memory);
+    struct vmo *fresh_memory = fresh_gem->vmo;
+    pfn_t fresh_page;
+    DRM_TEST_CHECK(!vmo_get_page_charged(fresh_memory, 0, NULL, &fresh_page));
+    vaddr_t fresh_va = mm_mmap_vmo_cap(mm, 0, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED, fresh_memory, 0, PROT_READ | PROT_WRITE);
+    DRM_TEST_CHECK(!mm_addr_is_error(fresh_va));
+    ((uint8_t *)pfn_to_virt(fresh_page))[0] = 0xc7;
     DRM_TEST_CHECK(call.access.ops->flush && !call.access.ops->flush(gpu, 0, 0, 1, 1));
     DRM_TEST_CHECK(class_device_binding_stopped(publication));
-    drm_free_gem(&call, fresh_gem->handle);
     drm_call_end(&call);
     vfs_put_file(fresh_file);
+    /* Normal close, without GEM_CLOSE or stopping the new device, drops its
+     * handle. The real VMA remains the sole backing owner. */
+    DRM_TEST_CHECK(mm_seg_find(mm, fresh_va)->vmo == fresh_memory &&
+                   refcount_read(&fresh_memory->refcount) == 1);
+    DRM_TEST_CHECK(((uint8_t *)pfn_to_virt(fresh_page))[0] == 0xc7);
     class_device_put(fresh);
     vfs_put_file(old_file);
     DRM_TEST_CHECK(!driver_workqueue_flush(g_drm_reaper_queue,

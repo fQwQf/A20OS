@@ -232,7 +232,7 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 普通入口仅短暂取 registry mutex 增减 operations，GPU mutex 释放后才唤醒等待者并归还 operation；worker 持 registry mutex 遍历，但只能 trylock GPU mutex，忙则延迟重试，不能阻塞等待反向持有者。offline observer 不取 registry mutex，只唤醒和调度。持 active call 不得等待自己的 lifecycle drain。
 
-store mutex 保护 GEM/FB/name/CRTC 与清理列表。detach 在锁内，VMO release、resource_unref 和 context destroy 在 store 锁外；GEM pin 可跨锁保留存储，导出 dma-buf 也持 pin。store 与 vblank mutex 不同时持有；vblank 只保护 pending flip/FIFO，read 不持它或 class call 进入 park。单控制台 owner mutex 继续串行化实际 present 与 console 恢复。
+store mutex 保护 GEM/FB/name/CRTC、每文件 handle 集合/对象 handle_refs 与清理列表。owner 安装、失败输出回滚和 close 都在同一 device GPU 操作中串行，不能先发布到用户再补引用；framebuffer owner 在 close 的对象释放前清除，已停止文件仅持 ID 条目。新对象先分配 handle 条目再构造 VMO，失败路径不在 store 锁内释放一个成功创建的 VMO。detach 在锁内，VMO release、resource_unref 和 context destroy 在 store 锁外；GEM pin 可跨锁保留存储，导出 dma-buf 也持 pin。store 与 vblank mutex 不同时持有；vblank 只保护 pending flip/FIFO，read 不持它或 class call 进入 park。单控制台 owner mutex 继续串行化实际 present 与 console 恢复。
 
 PRIME 导入的 fd lookup/ref 和最终 put、导出的 fd 安装与错误 close 在 GPU 操作作用域之外。即使并发 fd close 使 put 成为最后一次引用，也不能在 GPU A mutex 内调用 GPU B 的 close。成功停止后的 reaper 不进入任何旧驱动回调；已有 VMA/导出 fd 自持 CPU backing。完整语义见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。
 

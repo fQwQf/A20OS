@@ -51,7 +51,7 @@ rg -n "CONFIG_BOARD_" kernel/drivers/<class>/my_driver.c
 
 常量可能是协议寄存器或 ID，需要逐项解释，不是机械删除。
 
-DRM 修改还运行 `python3 -m unittest tools.tests.test_class_stop tools.tests.test_drm_binding tools.tests.test_drm_console_owner`。主机夹具编译生产 DRM/core/class 与实际 anonfd 安装器；VFS/MM/work/调度边界为模型，不能替代 guest。`tools/a20 test smoke-driver-gpu-stop-x86_64` 在显式 embedded 双核实例中增加 `driver.drm_binding_test=1`，验证真实 VFS close、原生 worker、旧文件离线、VMA 独立存储与重绑命名空间；普通启动不执行。`make smoke-drm-prime` 另验证用户态 PRIME/映射，generic 双核显示回归仍使用 `make smoke-gpu-access-x86_64`。
+DRM 修改还运行 `python3 -m unittest tools.tests.test_class_stop tools.tests.test_drm_binding tools.tests.test_drm_console_owner`。主机夹具编译生产 DRM/core/class 与实际 anonfd 安装器；VFS/MM/work/调度边界为模型，不能替代 guest。`tools/a20 test smoke-driver-gpu-stop-x86_64` 在显式 embedded 双核实例中增加 `driver.drm_binding_test=1`，验证真实 VFS close、原生 worker、旧文件离线、VMA 独立存储与重绑命名空间；普通启动不执行。`test_drm_binding` 另覆盖每文件 handle/FB owner、未导入访问拒绝、重复导入、分配与输出失败回滚、正常 close、停止后的 ID 条目及 host 清理失败保留。原生 DRM 自检还确认在线新文件不调用 GEM_CLOSE 而直接 close 后，真实 VMA 成为 backing 唯一 owner。`make smoke-drm-prime` 同时要求 DRM_FILE 标记，验证用户态独立 open/显式导入/close/FB/保留映射及既有 PRIME/映射，generic 双核显示回归仍使用 `make smoke-gpu-access-x86_64`。
 
 `tools/a20 test smoke-driver-gpu-instances-x86_64` 使用 embedded、双 CPU、两个 virtio-gpu-pci，并只在 `driver.runtime_test=1 driver.gpu_instances_test=1` 下执行：分别取 owning scanout、实际 flush，逻辑注销默认 device 后检查旧 publication 停止、peer publication/实例/DRM 文件保持在线并继续 flush，再重新登记并检查新 publication/VMO 与旧 VMA 数据。它不执行物理 PCI 热拔出，也不注入真实硬件 reset 超时。主机 `test_virtio_gpu_stop` 保留既有四条 issuer 与失败清理测试，并用两个 transport 模型验证实例独立、native allocation OOM/拒绝、失败停止和 queue fault 隔离。
 

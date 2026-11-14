@@ -12,7 +12,7 @@
 
 需要在 class 调用结束后保留存储的 adapter，必须分别持有 publication 和 backing 引用。`class_device_binding_stopped()` 只记录该旧 publication 的显式成功 remove 契约，offline/排空本身不成立，缺少 remove 永不成立；旧对象不会跟随设备重新绑定。完整条件见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
 
-DISPLAY 的 DRM adapter 在 open 时固定 publication，并使用显式 scoped access；每 publication 管理兼容 GEM、CRTC/EDID 与事件。失败清理依赖原生停止凭据，不能用新绑定清理旧 ID；同 publication 的 handle 仍共享，跨 publication PRIME 导入拒绝。见 [DRM 文件与退休](native-runtime.md#drm-文件命名空间与失败退休)。
+DISPLAY 的 DRM adapter 在 open 时固定 publication，并使用显式 scoped access；每 publication 管理兼容 GEM、CRTC/EDID 与事件。失败清理依赖原生停止凭据，不能用新绑定清理旧 ID；每文件持有 GEM handle 和 framebuffer，最后 close 交还；同 publication 通过 PRIME/GEM_OPEN 显式共享，重复导入幂等，跨 publication PRIME 导入拒绝。GETFB 元数据不向未持有者授予 backing，完整 master/auth 仍待实现。见 [DRM 文件与退休](native-runtime.md#drm-文件命名空间与失败退休)。
 
 ## Block：`DEV_CLASS_BLOCK`
 
