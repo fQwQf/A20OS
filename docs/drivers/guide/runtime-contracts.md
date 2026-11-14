@@ -4,7 +4,7 @@
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
-当前模块 ABI 10 增加 HCD 的可失败 endpoint 释放；HID/hub 独立退出在 class drain 后调用 `usb_interface_release_endpoints()`，成功才交还 URB、buffer 和回调代码所有权。失败保留绑定并重试，不得清空回调指针后直接释放。Configure Endpoint 失败的 ring 由 controller 保留到可证明停止。详见 [接口独立退出](native-runtime.md#接口独立退出与-endpoint-释放)。
+当前模块 ABI 11 在 GPU vtable 末尾增加 owning RAM get_scanout；ABI 10 已增加 HCD 的可失败 endpoint 释放。HID/hub 独立退出在 class drain 后调用 `usb_interface_release_endpoints()`，成功才交还 URB、buffer 和回调代码所有权。失败保留绑定并重试，不得清空回调指针后直接释放。Configure Endpoint 失败的 ring 由 controller 保留到可证明停止。详见 [接口独立退出](native-runtime.md#接口独立退出与-endpoint-释放)。
 
 ## 总线拓扑与进度
 
@@ -14,7 +14,7 @@
 
 新消费者使用 `gpu_device_default_begin/end()`，或先以 `gpu_device_default_get()` 保留 publication，再用 `gpu_device_access_begin/end()`。一次 access 的 device/const ops 来自同一个 DISPLAY 绑定；成功 begin 自持 class 引用与 active call，旧 publication 离线后返回 `-ENODEV`，不跟随重绑。选择读取不取 lifecycle mutex，不能在 active call 内等待需要自己退出的生命周期动作。每条成功返回路径配对 end，不能复制或覆盖 live access。
 
-fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议；它不保留返回的 framebuffer 存储，也不固定后续操作的默认设备。持久 VMA 与 DRM 全局对象表仍需后续迁移。旧 `gpu_device_get_default()` 只是借用快照。完整所有权与限制见 [GPU publication](native-runtime.md#gpu-publication-与作用域调用)。
+fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议。active call 只保护调用；有 get_scanout 的 RAM 映射另经拥有引用的 snapshot 进入普通 VMO VMA，因此在 class 调用和 producer 解绑后仍可保留存储。旧 get_fb 物理路径仍借用 backing，fbdev open 尚不固定设备，DRM 全局对象表仍需迁移。完整所有权与限制见 [GPU publication](native-runtime.md#gpu-publication-与作用域调用) 和 [连续 RAM scanout](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 
 ## MMIO
 
@@ -168,7 +168,7 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 ## VMO 页快照导入
 
-不要把 `vmo_peek_page()` 的借用 PFN 留到稍后再 pin；并发 resize 可以先释放它。MM 的 `vmo_pin_pages()` 原子验证/保留 canonical RAM，不物化缺页；驱动的 `driver_dma_map_vmo(domain, vmo, first, count, direction, &mapping)` 管理临时快照并交给页级 mapper。缺页 `-EAGAIN`，物理 VMO `-EOPNOTSUPP`，单次最多 4096 页；最后逻辑页 padding 也在 policy/DMA 范围内。provider 不持 VMO lock，映射和失败清理句柄保留独立帧引用，因此可在返回后释放源 VMO；它们不随 resize 改用新页，不接管 cgroup charge、权限或 BO 驻留。完整协议见 [VMO 快照](native-runtime.md#从原生-vmo-保留页并映射)。
+不要把 `vmo_peek_page()` 的借用 PFN 留到稍后再 pin；并发 resize 可以先释放它。MM 的 `vmo_pin_pages()` 原子验证/保留 canonical RAM，不物化缺页；驱动的 `driver_dma_map_vmo(domain, vmo, first, count, direction, &mapping)` 管理临时快照并交给页级 mapper。工厂发布的连续 RAM VMO 也支持 canonical pin，且其 extent/slot 固定、内容仍可写；缺页 `-EAGAIN`，物理 VMO `-EOPNOTSUPP`，单次最多 4096 页；最后逻辑页 padding 也在 policy/DMA 范围内。provider 不持 VMO lock，映射和失败清理句柄保留独立帧引用，因此可在返回后释放源 VMO；它们不随 resize 改用新页，不接管 cgroup charge、权限或 BO 驻留。完整协议见 [VMO 快照](native-runtime.md#从原生-vmo-保留页并映射)。
 
 ## 可失败的 DMA 失效
 

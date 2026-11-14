@@ -146,7 +146,7 @@ typedef struct usb_hcd {
 
 `class/usb_hub.c` 已实现 class=9 hub：通过父 HCD 转发 slot/control/abort，发布下游端口并保留相同的部分 slot 交还契约。递归枚举由 HCD 列表扫描推进；QEMU 门禁为 `make smoke-usb-hub-x86_64`，实体 hub/拓扑边界仍需对应平台证据。
 
-`usb_interface_release_endpoints()` 供当前 remove 回调在 class drain 后逐项释放非 EP0 endpoint。HCD 的 `release_endpoint` 返回 0 才交还 URB/buffer 和 ring 所有权，错误保留未完成项并可重试。xHCI 先确认 Stopped，再 Drop Context/确认 Disabled；HID/hub probe/独立退出均使用可失败清理，其他 endpoint 继续工作。该 vtable 字段使当前模块 ABI 升为 10，旧模块必须重建。完整契约见 [接口独立退出](../guide/native-runtime.md#接口独立退出与-endpoint-释放)。
+`usb_interface_release_endpoints()` 供当前 remove 回调在 class drain 后逐项释放非 EP0 endpoint。HCD 的 `release_endpoint` 返回 0 才交还 URB/buffer 和 ring 所有权，错误保留未完成项并可重试。xHCI 先确认 Stopped，再 Drop Context/确认 Disabled；HID/hub probe/独立退出均使用可失败清理，其他 endpoint 继续工作。该 HCD 字段始于 ABI 10；GPU vtable 后续扩展后当前模块 ABI 为 11，旧模块必须重建。完整契约见 [接口独立退出](../guide/native-runtime.md#接口独立退出与-endpoint-释放)。
 
 同步 bulk 当前是精确长度请求：xHCI 每控制器预留 64 KiB、64 KiB 对齐的原生 DMA buffer，xfer_busy 串行使用；硬件只访问暂存区，完整成功的 IN 才拷回。短包/过长请求返回 `-EMSGSIZE`，错误不交付部分输入，任意返回后 HCD 不再引用调用者 URB/buffer。对象等 controller 停止及 USB 图清理成功后才释放；变长 actual_length/多 TRB 链仍未提供。`make smoke-usb-bulk-x86_64` 在专用空白镜像上执行真实读/写/比对/恢复，详见 [暂存协议](../guide/native-runtime.md#xhci-同步-bulk-暂存)。
 

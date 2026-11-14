@@ -328,6 +328,7 @@ ring 满时不能直接覆盖旧事件，这会让用户态看到乱序按键；
 ## Display：`DEV_CLASS_DISPLAY`
 
 ```c
+/* 仅列出基础操作；完整布局以 driver_class.h 为准。 */
 typedef struct gpu_dev_ops {
     int (*get_info)(device_t *, uint32_t *width, uint32_t *height, uint32_t *bpp);
     int (*get_fb)(device_t *, uintptr_t *paddr, size_t *size);
@@ -337,7 +338,7 @@ typedef struct gpu_dev_ops {
 } gpu_dev_ops_t;
 ```
 
-Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调用 `gpu_device_unregister(dev)`。首个成功注册的设备拥有 `/dev/fb0`。操作与映射规则详见 [Display/Framebuffer](../classes/display.md)。
+Display 驱动在 probe 完成实例初始化后、返回成功前调用 `gpu_device_register(dev)`；随后由核心发布 class。remove 中撤销默认选择。默认策略会优先完整旧 virgl transport 表，不能视为通用 GPU 能力协商。ABI 11 在完整 GPU vtable 末尾追加 `get_scanout(device, struct gpu_scanout *)`；它交出连续 RAM VMO 引用，不能将示意结构当作完整二进制布局。操作与映射规则详见 [Display/Framebuffer](../classes/display.md)。
 
 display 类的对应骨架：
 

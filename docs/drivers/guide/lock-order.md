@@ -32,7 +32,7 @@
 
 ## 用户 MMIO 映射事务
 
-`mm_mmap_physical()` 由 Rust 拥有 eager 物理映射事务，fbdev mmap/旧 ioctl 与用户驱动服务共用。未发布记录在锁外分配，fixed 覆盖只能在已开启的事务内调用 mm_munmap_locked；不能持 mm->lock 调用会重新进入 TLB/MM 锁的公开 mm_munmap。整个 hint 区间及旧叶 PTE 均先检查，失败先撤销当前页空路径和映射前缀，锁外完成 TLB/退休后释放记录。mprotect 保留 Device 缓存属性。调用期间的 class lease 不延长映射 backing 的存储寿命，另见 [物理视图契约](native-runtime.md#驱动-cpu-物理映射事务)。
+`mm_mmap_physical()` 由 Rust 拥有 eager 物理映射事务，fbdev 旧 get_fb 分支与用户驱动服务共用。未发布记录在锁外分配，fixed 覆盖只能在已开启的事务内调用 mm_munmap_locked；不能持 mm->lock 调用会重新进入 TLB/MM 锁的公开 mm_munmap。整个 hint 区间及旧叶 PTE 均先检查，失败先撤销当前页空路径和映射前缀，锁外完成 TLB/退休后释放记录。mprotect 保留 Device 缓存属性。调用期间的 class lease 不延长映射 backing 的存储寿命，另见 [物理视图契约](native-runtime.md#驱动-cpu-物理映射事务)。
 
 `udriver_map_mmio()` 在白名单检查后委托共享 MM 接口，在锁外分配临时 VMA，再按 `mm->tlb_lock`（可睡眠）→ `mm->lock` → 页表节点锁执行映射。全部 PTE 成功才发布 VMA；失败时先清理失败页的空页表路径，再逆序撤销已映射前缀，登记 TLB 失效范围。释放 `mm->lock` 后完成本地/远端 TLB fence，再释放临时 VMA 和 deferred 对象。MMIO 不拥有设备数据帧引用，回滚仅回收中间页表。页表退休复用既有 reader grace period，不引入驱动私有锁。
 
@@ -220,7 +220,7 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 默认选择修改在 lifecycle 协调域内完成；`g_gpu_lock` 只保护所选 device 元数据引用与缓存的旧 virgl transport 能力。锁内允许 device_get 保留快照，不能解引用可撤销的驱动 ops、调用驱动、分配、日志或做最后 put。被替换 device 在锁外交还。重新选择在 lifecycle 域内枚举在线 class，使用短 active call 检查候选 ops。
 
-默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序没有给持久 VMA 或现有 DRM 全局对象建立存储租约。
+默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序本身不建立存储租约；RAM scanout 另以 VMO 引用交接给 VMA，旧物理分支和 DRM 全局对象仍需迁移。
 
 ### DRM/KMS/virtio-gpu 3D
 
@@ -235,6 +235,12 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 - **不得在 `g_drm_store.lock` 内调用 VFS。**`vfs_get_file_ref()` 可以一路走到 file close op，而 `file_close_prepare()` 是在持有 `g_file_lock` 的情况下调用它的。所以 fd→对象、对象→fd 的解析都在锁外完成，锁内只比较解析出来的 `vfile.identity` 数值。
 - `g_drm_store.lock` 与 `g_vblank.lock` **不得同时持有**。`drm_close()` 目前只取 `g_vblank.lock`：它在锁下清掉可能指向本 context 的 pending flip，然后释放锁，再做 host 侧的 `ctx_destroy`。这条规则在它**将来**需要清理表项时才变成硬约束——那时必须先放掉 `g_vblank.lock` 再取 `g_drm_store.lock`。
 - `g_vblank.lock`（既有）保护单槽 pending flip 与 per-file 事件 FIFO。
+
+### 连续 RAM 与 scanout 交接
+
+连续 VMO 工厂的对象/页表分配和清零不持 MM 或外层 spinlock；已有 PFA split 在内部短暂锁住元数据，将高阶独占块转换为 canonical 页引用，成功后只用 frame_put 交还尾部。发布后的 extent/slot 不再变化，info 在调用者保留 VMO 的前提下读取。
+
+get_scanout 必须在 scoped class access 内与 producer 模式替换协调，先取得 VMO 引用再交出一致描述符。fbdev 持临时 snapshot 调用 unlocked mm_mmap_vmo_cap；wrapper 开启 TLB window、取得 MM lock、调用既有 locked mapper，解锁后 finish/deferred release。VMA 自持 VMO，不把驱动 release callback 带入 MM。临时 snapshot 先清描述符再 put，producer remove 只交还自己的引用；最终 MM 释放不需要 class/lifecycle 锁或设备代码。引用存活不能替代硬件停止。
 
 ### VirtIO-GPU transport
 

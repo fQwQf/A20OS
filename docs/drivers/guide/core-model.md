@@ -82,7 +82,7 @@ uint64_t size = res->end - res->start + 1;
 
 CPU 物理视图通过 MM 的 `mm_mmap_physical()` 统一安装/回滚；它借用物理存储，不增加 device/resource 或 backing 引用。fbdev 和用户驱动 adapter 仍须各自核对可映射范围、保留存储或在回收前撤销映射，见 [原生物理视图](native-runtime.md#驱动-cpu-物理映射事务)。
 
-DISPLAY 默认选择复用 class publication：选择保留 device 元数据，消费者用 `gpu_device_default_begin/end()` 捕获一个绑定的 device/ops 和 active call；离线旧 publication 不会跟随重绑。它不保留返回的 framebuffer 内存；fbdev 持久 VMA 和 DRM 每设备对象仍待迁移，见 [GPU 调用所有权](native-runtime.md#gpu-publication-与作用域调用)。
+DISPLAY 默认选择复用 class publication：选择保留 device 元数据，消费者用 `gpu_device_default_begin/end()` 捕获一个绑定的 device/ops 和 active call；离线旧 publication 不会跟随重绑。active call 本身不保留返回内存；RAM scanout 另交出 owning VMO，由 fbdev 普通 VMA 保留。旧 get_fb 物理视图、DRM 每设备对象与每文件身份仍待迁移，见 [GPU 调用所有权](native-runtime.md#gpu-publication-与作用域调用)。
 
 PCI 作用域通过 `pci_device_scope_get()` 返回带引用的 client/上游桥观察结果，不另建 Linux group 或隐式修改设备 parent。身份替换、窗口重叠、缺失桥和循环不会被当成有效路径；device 引用不固定硬件或绑定。详见 [PCI 桥路径与 AMD Range 补充查询](native-runtime.md#pci-桥路径与-amd-range-补充查询)。
 
@@ -98,7 +98,7 @@ DMA 内存约束使用独立的 `driver_dma_policy` 不可变对象，不借用 
 
 ### `driver_t`
 
-platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。新驱动可在硬件初始化前显式 `device_probe_use_remove()`，让失败 probe 使用可失败 remove 管线；部分初始化回调、保留/重试与 PROBE_CLEANUP 状态见 [原生运行时](native-runtime.md#显式选择失败-probe-的清理所有权)。remove 失败必须保留实例和硬件可达存储；`device_unregister()`/`driver_unregister()` 返回错误，不能忽略后继续释放设备或模块。quiesce 每次退出只执行一次，之后仅重试 remove。需要先冻结控制器再释放 child 存储的驱动可显式登记 `device_add_remove_prepare()`；PREPARING 保留图和资源，成功的准备动作会被记住，详见 [提前准备协议](native-runtime.md#在-consumer-解绑前准备退出)。USB HID/hub 在 remove 中进一步逐项交还 endpoint，失败保留 URB 和绑定；当前 USB vtable 扩展需要模块 ABI 10。DMA buffer 可作为独立存储所有者保留实际分配阶数与设备元数据引用；它与绑定、IOVA 映射和请求完成分开，不随 unbind 自动销毁；显式 map_buffer 由 mapping 保留整块存储直到失效确认；原生 VMO 通过锁内页快照接入 map_vmo，mapping 保留独立帧而非冻结 VMO 大小/预算，见 [原生存储契约](native-runtime.md#独立-dma-buffer-所有权)。总线私有拓扑通过 `driver_lifecycle_begin/end` 与核心绑定协调，进度使用 `driver_lifecycle_try_begin` 忙时返回；普通协调不抑制 probe，也不固定对象引用，见 [拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
+platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。新驱动可在硬件初始化前显式 `device_probe_use_remove()`，让失败 probe 使用可失败 remove 管线；部分初始化回调、保留/重试与 PROBE_CLEANUP 状态见 [原生运行时](native-runtime.md#显式选择失败-probe-的清理所有权)。remove 失败必须保留实例和硬件可达存储；`device_unregister()`/`driver_unregister()` 返回错误，不能忽略后继续释放设备或模块。quiesce 每次退出只执行一次，之后仅重试 remove。需要先冻结控制器再释放 child 存储的驱动可显式登记 `device_add_remove_prepare()`；PREPARING 保留图和资源，成功的准备动作会被记住，详见 [提前准备协议](native-runtime.md#在-consumer-解绑前准备退出)。USB HID/hub 在 remove 中进一步逐项交还 endpoint，失败保留 URB 和绑定；USB vtable 的该扩展始于 ABI 10；当前 GPU 扩展后全局模块 ABI 为 11。DMA buffer 可作为独立存储所有者保留实际分配阶数与设备元数据引用；它与绑定、IOVA 映射和请求完成分开，不随 unbind 自动销毁；显式 map_buffer 由 mapping 保留整块存储直到失效确认；原生 VMO 通过锁内页快照接入 map_vmo，mapping 保留独立帧而非冻结 VMO 大小/预算，见 [原生存储契约](native-runtime.md#独立-dma-buffer-所有权)。总线私有拓扑通过 `driver_lifecycle_begin/end` 与核心绑定协调，进度使用 `driver_lifecycle_try_begin` 忙时返回；普通协调不抑制 probe，也不固定对象引用，见 [拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
 
 匹配分两阶段完成：总线 `bus_type_t.match(dev, drv)` 先按 transport identity 匹配并设置 `dev->matched_id`；可选的 `driver_t.match(dev)` 再按协议字段缩小范围。例如 HDA 检查 `04:03:00`，NVMe 检查 `01:08:02`。第二阶段只能读取已经枚举的身份信息，不得访问设备寄存器、分配 BAR/DMA 或改变硬件；拒绝时核心清除 `matched_id`，不会调用 probe。
 

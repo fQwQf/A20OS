@@ -35,7 +35,7 @@ A20OS 现在同时支持三种驱动路径：
 
 ## 模块接口
 
-驱动 ABI 当前为 10：`usb_hcd_ops_t` 新增可失败 `release_endpoint`；ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_buffer_create/get/put/data/address/size`（显式存储引用，最终 put 不能代替停止 DMA）、`driver_dma_domain_*`、`driver_dma_map_buffer`、`driver_dma_map_vmo` 和页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 xHCI、HID、hub、storage 包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
+驱动 ABI 当前为 11：GPU vtable 末尾新增 owning RAM `get_scanout`；ABI 10 已增加 HCD 可失败 `release_endpoint`，ABI 9 已有 `driver_t.quiesce`。所有旧模块必须重建，loader/`drvctl` 会拒绝不匹配版本。模块可使用导出的 `driver_dma_buffer_create/get/put/data/address/size`（显式存储引用，最终 put 不能代替停止 DMA）、`driver_dma_domain_*`、`driver_dma_map_buffer`、`driver_dma_map_vmo` 和页级 DMA mapping 和 `driver_fence_*`；provider 模块必须保持驻留直到 domain 释放，完成中断的 producer 必须保留 fence 引用。`device_t`/`driver_t` 本轮不改布局，USB HCD 与 GPU vtable 已扩展；`device_unregister` 已导出并返回 int，`drv_driver_unregister` 传播失败。非零 remove 保留登记/实例/devres，源码调用方须处理错误，直到成功注销才可释放设备或驱动代码；这不表示模块运行期卸载已经可用。USB HID 的既有控制台桥通过导出的只读 `fbcon_active()` 查询当前 scanout 所有者；模块不取得 fbcon 内部状态。PC 模块边界测试实际编译 xHCI、HID、hub、storage 包装器并核对全部未定义符号可解析。详细约束见 [原生驱动运行时](native-runtime.md)。
 
 模块只能解析 `kernel/drvmod/framework.c` 中的导出表。当前导出接口包括：
 
@@ -50,7 +50,8 @@ A20OS 现在同时支持三种驱动路径：
 
 - 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
-- GPU publication：`gpu_device_default_get`、`gpu_device_access_begin`、`gpu_device_default_begin`、`gpu_device_access_end`。前者返回需 put 的 class 引用，begin/end 拥有独立引用与 active call；不增加第二套驱动模型或修改既有 vtable/ABI 10。完整契约见 [GPU 调用](native-runtime.md#gpu-publication-与作用域调用)。
+- RAM scanout：`gpu_device_scanout_get`、`gpu_scanout_put`、`vmo_create_contiguous`、`vmo_contiguous_info`、`vmo_ref`、`vmo_release` 已加入白名单。snapshot 和普通 VMA 自持 MM 存储，不需要在最终 release 时调用设备模块；不授予 DMA 权限或证明硬件停止，见 [连续 RAM VMO](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
+- GPU publication：`gpu_device_default_get`、`gpu_device_access_begin`、`gpu_device_default_begin`、`gpu_device_access_end`。前者返回需 put 的 class 引用，begin/end 拥有独立引用与 active call；不增加第二套驱动模型；当前全局 ABI 11 的 GPU vtable 扩展见上一项。完整契约见 [GPU 调用](native-runtime.md#gpu-publication-与作用域调用)。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
 - 内核熵池（硬件 RNG 模块）：`random_reseed`。内核已有 `kernel/core/random.c`（xoshiro 状态 + `random_u64`/`random_fill`，消费方是 `sys_getrandom()`、ASLR 与栈保护），硬件熵设备应当把读到的字节折进这个池而不是另起一套。该符号只能从进程上下文调用：`arch_entropy_sample()` 会取 `proc_current()` 与 `frame_free_count()`，在 ISR 里调它等于在中断里读调度器状态。
 - 调度/等待原语（模块完成路径）：`proc_park_prepare/commit/cancel/finish`、`proc_wake_q_init/flush`、`wait_queue_init/link/unlink/collect_one/collect_all`、`mutex_init/lock/unlock`、`timer_get_ticks`、`mdelay/udelay`。
@@ -201,7 +202,7 @@ make smoke-net-rtl8139                               # rtl8139.a20drv + hostfwd 
 | DW SDIO | `kernel/drivers/block/dw_sdio.c`（generic 不再内建）| `kernel/drvmod/examples/dw_sdio.c` | riscv64（Early）| 已迁移；platform bus + `hardware_id` 绑定 VF2 SDIO |
 | virtio-net | `kernel/drivers/net/virtio_net.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_net.c` | riscv64/aarch64/loongarch64 | 已迁移；lwIP 桥接符号导出，loongarch64 QEMU 实测绑定；x86_64 generic 清单当前未列出 |
 | E1000 | `kernel/drivers/net/e1000.c`（generic 不再内建）| `kernel/drvmod/examples/e1000.c` | x86_64 | 已迁移；PCI 8086:100e |
-| virtio-gpu | `kernel/drivers/gpu/virtio_gpu.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_gpu.c` | riscv64/aarch64/loongarch64 | 已迁移；GPU class registry + frame 导出；x86_64 generic 清单当前未列出 |
+| virtio-gpu | `kernel/drivers/gpu/virtio_gpu.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_gpu.c` | 四架构 | 已迁移；GPU class 与 owning RAM scanout；x86_64 generic 的双核 2D 门禁实际加载 virtio-gpu 模块 |
 | VMSVGA | `kernel/drivers/gpu/vmsvga.c`（generic 不再内建）| `kernel/drvmod/examples/vmsvga.c` | x86_64 | 已迁移 |
 | virtio-snd | `kernel/drivers/audio/virtio_snd.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_snd.c` | riscv64/aarch64/loongarch64 | 已迁移；x86_64 generic 清单当前未列出 |
 | xHCI | `kernel/drivers/usb/host/xhci.c`（generic 不再内建）| `kernel/drvmod/examples/xhci.c` | x86_64/aarch64/loongarch64 | 已迁移；USB core 桥接符号导出；riscv64 generic 清单当前未列出 |

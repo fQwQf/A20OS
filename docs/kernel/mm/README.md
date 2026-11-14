@@ -44,7 +44,13 @@ A20OS 内存管理子系统负责物理内存分配、虚拟地址空间管理�
 
 `mm_mmap_physical()` 由同一 Rust mmap policy 拥有 eager 物理映射的放置、准入和回滚，C 暴露字段/架构/锁/TLB 原语；fbdev 与用户驱动不再自行维护安装循环。记录在锁外分配，全部叶安装成功才发布 PFNMAP 记录并记账，失败连同当前页的空路径和已映射前缀一起撤销，在 TLB 事务结束后退休元数据。权限 ceiling 复用 VM_NATIVE_CAP，mprotect 保留原 CPU 缓存类型。
 
-此视图不拥有 frame/backing 引用，不改变 PFA、VMO 或 DMA domain 的存储所有权。调用者须持有存储，或在释放前完成全部映射撤销；现有 framebuffer 持久映射的退役仍待实现。固定覆盖、允许属性及 hosted/NOMMU 边界见 [驱动物理映射契约](../../drivers/guide/native-runtime.md#驱动-cpu-物理映射事务)。
+此视图不拥有 frame/backing 引用，不改变 PFA、VMO 或 DMA domain 的存储所有权。调用者须持有存储，或在释放前完成全部映射撤销；旧 get_fb framebuffer 持久物理映射的退役仍待实现；拥有 RAM 的路径见下文。固定覆盖、允许属性及 hosted/NOMMU 边界见 [驱动物理映射契约](../../drivers/guide/native-runtime.md#驱动-cpu-物理映射事务)。
+
+## 驱动 RAM 使用普通 VMO
+
+`vmo_create_contiguous()` 在发布前把独占高阶 PFA 块转换为 canonical order-0 引用，保留页取整逻辑前缀、交还多余尾部并清零全部暴露 padding。内部 CONTIGUOUS kind 固定 extent 和 slot，拒绝 resize/补洞，内容仍可写；`vmo_contiguous_info()` 只查询稳定 CPU PA/extent，不授予设备 DMA 权限。canonical pin 与 Rust destroy 继续使用原有引用和 TLB 后 frame_put，没有新增 VMO/VMA 布局或 backing 注册表。
+
+GPU owning scanout 向消费者转移一份 VMO 引用。`mm_mmap_vmo_cap()` 是既有 locked VMO mapper 的 unlocked TLB/MM 事务入口，先校验初始权限 ceiling，成功 VMA 自持 VMO。virtio-gpu/fbdev 复用普通 VMO fault、共享 fork、split、mprotect 与销毁，release 不调用设备代码；旧 raw 物理路径仍不拥有存储。详见 [RAM scanout 契约](../../drivers/guide/native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 
 ## 关键代码与头文件
 
