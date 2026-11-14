@@ -160,13 +160,14 @@ static int sample_submit(device_t *d,uint32_t ctx,const void *buf,size_t n){stru
 static int sample_transfer(device_t *d,uint32_t ctx,uint32_t id,const struct virtio_gpu_box *box,uint32_t l,uint32_t stride,uint32_t layer,uint64_t off,int upload){struct sample *s=get_sample(d);(void)ctx;(void)box;(void)l;(void)stride;(void)layer;(void)off;(void)upload;assert(id<128&&s->resource_live[id]);s->transfers++;return 0;}
 static int sample_match(device_t *d,const driver_t *r){return &((struct sample *)d->plat_data)->driver==r;}
 static bus_type_t sample_bus={.name="drm-native-test",.match=sample_match};
+static int sample_native_capabilities(device_t *d,struct gpu_capabilities *out){(void)d;out->flags=GPU_CAP_SCANOUT|GPU_CAP_RENDER;return 0;}
 static int sample_probe(device_t *d){struct sample *s=d->plat_data;memset(s->ctx_live,0,sizeof(s->ctx_live));memset(s->resource_live,0,sizeof(s->resource_live));memset(s->backing_count,0,sizeof(s->backing_count));s->stopped=0;return gpu_device_register(d);}
 static int sample_remove(device_t *d){struct sample *s=d->plat_data;assert(!class_device_binding_stopped(s->publication));if(s->remove_error)return s->remove_error;s->stopped=1;gpu_device_unregister(d);return 0;}
 static int omit_remove;
 static int plain_sample_probe(device_t *d){(void)d;return 0;}
 static void create_sample(struct sample *s,unsigned id){
  memset(s,0,sizeof(*s));s->id=id;s->ops=calloc(1,sizeof(*s->ops));assert(s->ops);
- *s->ops=(gpu_dev_ops_t){.get_info=sample_info,.get_fb=sample_fb,.flush=sample_flush,.get_edid=sample_edid,.get_features=sample_features,.get_capset=sample_caps,.capset_info=sample_capset,.resource_attach_backing=sample_backing,.ctx_create=sample_ctx_create,.ctx_destroy=sample_ctx_destroy,.resource_create_3d=sample_create,.resource_unref=sample_unref,.ctx_attach_resource=sample_ctx_attach,.submit_3d=sample_submit,.transfer_3d=sample_transfer};
+ *s->ops=(gpu_dev_ops_t){.get_capabilities=sample_native_capabilities,.get_info=sample_info,.get_fb=sample_fb,.flush=sample_flush,.get_edid=sample_edid,.get_features=sample_features,.get_capset=sample_caps,.capset_info=sample_capset,.resource_attach_backing=sample_backing,.ctx_create=sample_ctx_create,.ctx_destroy=sample_ctx_destroy,.resource_create_3d=sample_create,.resource_unref=sample_unref,.ctx_attach_resource=sample_ctx_attach,.submit_3d=sample_submit,.transfer_3d=sample_transfer};
  s->driver=(driver_t){.name="drm-test",.bus=&sample_bus,.probe=omit_remove?plain_sample_probe:sample_probe,.remove=omit_remove?NULL:sample_remove,.class_ops=s->ops,.class_type=DEV_CLASS_DISPLAY};
  s->device=(device_t){.name="drm-test",.bus=&sample_bus,.plat_data=s,.references=1};
  samples[id]=s;page_used[id]=2;assert(!driver_register(&s->driver)&&!device_register(&s->device)&&s->device.drv==&s->driver);s->publication=class_device_ref_for_device(&s->device);assert(s->publication&&!class_device_binding_stopped(s->publication));

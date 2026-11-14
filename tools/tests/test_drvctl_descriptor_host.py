@@ -113,6 +113,31 @@ int main(int argc, char **argv) {
 
 
 class DrvctlDescriptorHostTests(unittest.TestCase):
+    def test_kernel_descriptor_guard_rejects_stale_and_future_abi(self):
+        cc=shutil.which("cc")
+        if not cc:self.skipTest("cc is required")
+        with tempfile.TemporaryDirectory(prefix="a20-kernel-driver-abi-") as tmp:
+            source=pathlib.Path(tmp)/"test.c";exe=pathlib.Path(tmp)/"test"
+            source.write_text(r"""
+#include <assert.h>
+#include "drivers/driver_descriptor.h"
+int main(void) {
+    a20_driver_descriptor_t descriptor = {
+        .magic=A20_DRIVER_DESCRIPTOR_MAGIC, .version=A20_DRIVER_DESCRIPTOR_VERSION,
+        .placement=A20_DRIVER_PLACEMENT_KERNEL_MODULE,
+        .type=A20_DRIVER_TYPE_DISPLAY, .name="gpu-host", .abi=A20_DRIVER_ABI
+    };
+    assert(a20_driver_descriptor_sane(&descriptor));
+    descriptor.abi=A20_DRIVER_ABI-1;
+    assert(!a20_driver_descriptor_sane(&descriptor));
+    descriptor.abi=A20_DRIVER_ABI+1;
+    assert(!a20_driver_descriptor_sane(&descriptor));
+    return 0;
+}
+""")
+            subprocess.run([cc,"-std=c11","-Wall","-Wextra","-Werror","-I"+str(ROOT/"kernel/include"),str(source),"-o",str(exe)],check=True)
+            subprocess.run([str(exe)],check=True)
+
     def test_real_parser_accepts_only_kernel_abi_descriptor(self):
         cc = shutil.which("cc")
         if not cc:

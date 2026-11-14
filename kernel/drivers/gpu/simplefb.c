@@ -134,7 +134,16 @@ static int remove_device(device_t *dev) {
 }
 static const firmware_device_id_t ids[] = {{.id = "a20,boot-framebuffer"},
                                             {.id = "simple-framebuffer"}, {0}};
+static int simplefb_get_capabilities(device_t *dev, struct gpu_capabilities *out) {
+    if (!out) return -EINVAL;
+    *out = (struct gpu_capabilities){0};
+    if (!dev || !dev->drv_priv) return -ENODEV;
+    out->flags = GPU_CAP_SCANOUT | GPU_CAP_BOOT_SCANOUT;
+    return 0;
+}
+
 static const gpu_dev_ops_t ops = {
+    .get_capabilities = simplefb_get_capabilities,
     .get_info = info,
     .get_fb = framebuffer,
     .flush = flush,

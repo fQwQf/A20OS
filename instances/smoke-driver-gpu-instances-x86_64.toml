@@ -12,7 +12,7 @@ smp = 2
 extra_qemu = ["-vga", "none", "-device", "virtio-gpu-pci", "-device", "virtio-gpu-pci", "-append", "driver.runtime_test=1 driver.gpu_instances_test=1"]
 
 [test]
-expect = ["DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1", "DRIVER_RUNTIME: PASS"]
+expect = ["DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1 caps=1", "DRIVER_RUNTIME: PASS"]
 timeout = "60s"
 
 [net]

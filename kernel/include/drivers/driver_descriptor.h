@@ -41,7 +41,10 @@
 /* 8: USB host-controller operations and hub topology metadata changed. */
 /* 9: driver_t adds quiesce, called before draining active class calls. */
 /* 10: usb_hcd_ops_t appends fallible endpoint release. Rebuild all modules. */
-#define A20_DRIVER_ABI 11U
+/* 11: gpu_dev_ops_t appends owning RAM scanout capture. */
+/* 12: gpu_dev_ops_t appends explicit native capability discovery. Old GPU
+ * tables are shorter; all module/service descriptors must be rebuilt. */
+#define A20_DRIVER_ABI 12U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,

@@ -38,7 +38,7 @@ __asm__(".global __driver_init_start\n.global __driver_init_end\n__driver_init_s
 
 struct sample {
  device_t device;driver_t driver;gpu_dev_ops_t *ops;
- unsigned id;_Atomic unsigned reads,flushes,removes;int info_error,fb_error,platform;
+ unsigned id;_Atomic unsigned reads,flushes,removes;int info_error,fb_error,platform,caps_error;uint64_t caps_flags;unsigned caps_reads;
 };
 static _Atomic unsigned destroyed,created;
 static pthread_mutex_t rendezvous=PTHREAD_MUTEX_INITIALIZER;
@@ -65,21 +65,34 @@ static void destroy(device_t *d) {
  struct sample *s=d->plat_data;destroyed++;free(s->ops);free(s);
 }
 static int match(device_t *d,const driver_t *r){return &((struct sample *)d->plat_data)->driver==r;}
+static int native_capabilities(device_t *d,struct gpu_capabilities *out){
+ struct sample *s=d->plat_data;assert(d->drv==&s->driver);s->caps_reads++;
+ assert(!pthread_mutex_trylock(&g_gpu_lock.native));assert(!pthread_mutex_unlock(&g_gpu_lock.native));
+ out->flags=s->caps_flags;return s->caps_error;
+}
 static int probe(device_t *d){return gpu_device_register(d);}
 static int plain_probe(device_t *d){(void)d;return 0;}
 static int remove_gpu(device_t *d){((struct sample *)d->plat_data)->removes++;gpu_device_unregister(d);return 0;}
 static bus_type_t bus={.name="gpu-test",.match=match};
 static struct sample *create(unsigned id,int capable) {
- struct sample *s=calloc(1,sizeof(*s));assert(s);s->id=id;created++;s->ops=calloc(1,sizeof(*s->ops));assert(s->ops);
- *s->ops=(gpu_dev_ops_t){.get_info=info,.get_fb=framebuffer,.flush=flush};
- /* Only presence is inspected; these 3D transport entries are never called. */
- if(capable>0){s->ops->get_capset=(void *)1;s->ops->capset_info=(void *)1;s->ops->resource_attach_backing=(void *)1;
+ struct sample *s=calloc(1,sizeof(*s));assert(s);s->id=id;s->caps_flags=capable==2?GPU_CAP_RENDER:GPU_CAP_SCANOUT|((capable==1||capable==4)?GPU_CAP_RENDER:0);created++;s->ops=calloc(1,sizeof(*s->ops));assert(s->ops);
+ *s->ops=(gpu_dev_ops_t){.get_capabilities=native_capabilities,.get_info=info,.get_fb=framebuffer,.flush=flush};
+ /* Legacy callback presence must not determine native rendering capability. */
+ if(capable==1||capable==3){s->ops->get_capset=(void *)1;s->ops->capset_info=(void *)1;s->ops->resource_attach_backing=(void *)1;
   s->ops->ctx_create=(void *)1;s->ops->ctx_destroy=(void *)1;s->ops->resource_create_3d=(void *)1;
   s->ops->resource_unref=(void *)1;s->ops->submit_3d=(void *)1;}
+ if(capable==2){s->ops->get_info=NULL;s->ops->get_fb=NULL;s->ops->flush=NULL;}
+ if(capable==5)s->ops->get_capabilities=NULL;
+ if(capable==6)s->caps_error=-ETIMEDOUT;
+ if(capable==7)s->caps_error=1;
+ if(capable==8)s->caps_flags=1ULL<<63;
+ if(capable==9)s->caps_flags=GPU_CAP_RAM_SCANOUT;
+ if(capable==10)s->caps_flags=GPU_CAP_SCANOUT|GPU_CAP_BOOT_SCANOUT;
+ if(capable==11)s->caps_flags=GPU_CAP_SCANOUT|GPU_CAP_RENDER|GPU_CAP_BOOT_SCANOUT;
  s->driver=(driver_t){.name="gpu-test",.bus=&bus,.probe=capable<0?plain_probe:probe,
   .remove=remove_gpu,.class_type=capable<0?DEV_CLASS_NET:DEV_CLASS_DISPLAY,.class_ops=s->ops};
  s->device=(device_t){.name="display-test",.bus=&bus,.references=1,.release=destroy,.plat_data=s};
- assert(!driver_register(&s->driver)&&!device_register(&s->device)&&s->device.drv==&s->driver);return s;
+ assert(!driver_register(&s->driver)&&!device_register(&s->device));assert((capable>=5&&capable<=9)?!s->device.drv:s->device.drv==&s->driver);return s;
 }
 static void dispose(struct sample *s) {
  assert(!driver_unregister(&s->driver));assert(!device_unregister(&s->device));device_put(&s->device);
@@ -220,6 +233,65 @@ int main(int argc,char **argv) {
   char root[32],node[64];assert(!sysfs_gpu_names(root,sizeof(root),node,sizeof(node))&&!strcmp(root,"platform")&&!c->active_calls);
   uint32_t w,h;sysfs_display_size(&w,&h);assert(w==641&&h==481&&!c->active_calls);
   class_device_put(c);dispose(s);
+ } else if(!strcmp(name,"cap-probe-error")) {
+  struct sample *selected=create(1,0);unsigned references=selected->device.references;
+  for(int mode=5;mode<=9;mode++){struct sample *failed=create(mode,mode);int error=mode==5?-EOPNOTSUPP:mode==6?-ETIMEDOUT:mode==7?-EIO:-EINVAL;assert(!failed->device.drv&&!failed->device.class_dev&&failed->device.probe_error==error&&selected->device.references==references);class_device_t *c=gpu_device_default_get();assert(c&&c->dev==&selected->device);class_device_put(c);dispose(failed);}
+  dispose(selected);
+ } else if(!strcmp(name,"cap-arguments")) {
+  struct gpu_capabilities out={GPU_CAP_KNOWN};
+  assert(gpu_device_capabilities_get(NULL,&out)==-ENODEV&&!out.flags);
+  assert(gpu_device_capabilities_get(NULL,NULL)==-EINVAL);
+  struct gpu_device_access empty={0};out.flags=GPU_CAP_KNOWN;
+  assert(gpu_device_capabilities_get(&empty,&out)==-ENODEV&&!out.flags);
+ } else if(!strcmp(name,"cap-errors")) {
+  struct sample *a=create(1,0),*b=create(2,0);struct gpu_device_access access;
+  class_device_t *c=class_device_ref_for_device(&b->device);assert(!gpu_device_access_begin(c,&access));
+  struct gpu_capabilities out={0};
+  int errors[]={-ENOMEM,-ETIMEDOUT,1};
+  for(unsigned i=0;i<3;i++){b->caps_error=errors[i];out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==(errors[i]<0?errors[i]:-EIO)&&!out.flags);gpu_device_access_end(&access);unsigned refs=b->device.references;assert(gpu_device_register(&b->device)==(errors[i]<0?errors[i]:-EIO)&&b->device.references==refs);assert(!gpu_device_access_begin(c,&access));}
+  b->caps_error=0;b->ops->get_capabilities=NULL;out.flags=GPU_CAP_KNOWN;
+  assert(gpu_device_capabilities_get(&access,&out)==-EOPNOTSUPP&&!out.flags);gpu_device_access_end(&access);assert(gpu_device_register(&b->device)==-EOPNOTSUPP);
+  class_device_t *selected=gpu_device_default_get();assert(selected->dev==&a->device);class_device_put(selected);
+  b->ops->get_capabilities=native_capabilities;assert(!gpu_device_access_begin(c,&access));assert(!gpu_device_capabilities_get(&access,&out)&&out.flags==GPU_CAP_SCANOUT);gpu_device_access_end(&access);assert(!c->active_calls);class_device_put(c);dispose(b);dispose(a);
+ } else if(!strcmp(name,"cap-validation")) {
+  struct sample *s=create(1,0);class_device_t *c=gpu_device_default_get();struct gpu_device_access access;assert(!gpu_device_access_begin(c,&access));struct gpu_capabilities out;
+  s->caps_flags=(1ULL<<63)|GPU_CAP_SCANOUT;out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==-EINVAL&&!out.flags);
+  s->caps_flags=GPU_CAP_SCANOUT|GPU_CAP_RAM_SCANOUT;out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==-EINVAL&&!out.flags);
+  s->ops->get_scanout=(void *)1;s->caps_flags=GPU_CAP_RAM_SCANOUT;out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==-EINVAL&&!out.flags);
+  s->caps_flags=GPU_CAP_BOOT_SCANOUT;out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==-EINVAL&&!out.flags);
+  s->caps_flags=GPU_CAP_SCANOUT;s->ops->get_info=NULL;out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==-EINVAL&&!out.flags);
+  s->ops->get_info=info;s->caps_flags=GPU_CAP_SCANOUT|GPU_CAP_RAM_SCANOUT;assert(!gpu_device_capabilities_get(&access,&out)&&out.flags==s->caps_flags);
+  s->caps_flags=0;assert(!gpu_device_capabilities_get(&access,&out)&&!out.flags);
+  s->caps_flags=GPU_CAP_SCANOUT;s->ops->get_scanout=NULL;assert(!gpu_device_capabilities_get(&access,&out)&&out.flags==GPU_CAP_SCANOUT);
+  gpu_device_access_end(&access);class_device_put(c);dispose(s);
+ } else if(!strcmp(name,"cap-policy")) {
+  struct sample *legacy=create(1,3),*native=create(2,4),*same=create(3,4);struct gpu_device_access access;
+  assert(legacy->ops->get_capset&&!native->ops->get_capset&&!native->ops->ctx_create);
+  assert(!gpu_device_default_begin(&access)&&access.device==&native->device);struct gpu_capabilities out;assert(!gpu_device_capabilities_get(&access,&out)&&out.flags==(GPU_CAP_SCANOUT|GPU_CAP_RENDER));gpu_device_access_end(&access);
+  dispose(native);assert(!gpu_device_default_begin(&access)&&access.device==&same->device);gpu_device_access_end(&access);
+  dispose(same);assert(!gpu_device_default_begin(&access)&&access.device==&legacy->device);gpu_device_access_end(&access);dispose(legacy);
+ } else if(!strcmp(name,"cap-firmware-priority")) {
+  struct sample *boot=create(1,10);class_device_t *old=gpu_device_default_get();assert(old&&old->dev==&boot->device);
+  struct sample *native=create(2,0),*peer=create(3,0);class_device_t *selected=gpu_device_default_get();assert(selected->dev==&native->device);class_device_put(selected);
+  struct sample *boot_render=create(4,11),*render=create(5,4),*render_peer=create(6,4);
+  selected=gpu_device_default_get();assert(selected->dev==&render->device);class_device_put(selected);
+  struct gpu_device_access access;struct gpu_capabilities out;assert(!gpu_device_access_begin(old,&access)&&!gpu_device_capabilities_get(&access,&out)&&out.flags==(GPU_CAP_SCANOUT|GPU_CAP_BOOT_SCANOUT));gpu_device_access_end(&access);class_device_put(old);
+  dispose(render);selected=gpu_device_default_get();assert(selected->dev==&render_peer->device);class_device_put(selected);
+  dispose(render_peer);selected=gpu_device_default_get();assert(selected->dev==&boot_render->device);class_device_put(selected);
+  dispose(boot_render);dispose(native);selected=gpu_device_default_get();assert(selected->dev==&peer->device);class_device_put(selected);
+  dispose(peer);selected=gpu_device_default_get();assert(selected->dev==&boot->device);class_device_put(selected);dispose(boot);
+ } else if(!strcmp(name,"cap-headless")) {
+  struct sample *headless=create(1,2);assert(!gpu_device_default_get());class_device_t *c=class_device_ref_for_device(&headless->device);struct gpu_device_access access;assert(c&&!gpu_device_access_begin(c,&access));struct gpu_capabilities out;assert(!gpu_device_capabilities_get(&access,&out)&&out.flags==GPU_CAP_RENDER);gpu_device_access_end(&access);class_device_put(c);
+  struct sample *display=create(2,0);assert(!gpu_device_default_begin(&access)&&access.device==&display->device);gpu_device_access_end(&access);dispose(display);assert(!gpu_device_default_get());dispose(headless);
+ } else if(!strcmp(name,"cap-election-error")) {
+  struct sample *a=create(1,1),*bad=create(2,1),*fallback=create(3,0);bad->caps_error=1;
+  dispose(a);struct gpu_device_access access;assert(!gpu_device_default_begin(&access)&&access.device==&fallback->device);gpu_device_access_end(&access);assert(!bad->device.class_dev->active_calls);dispose(bad);dispose(fallback);
+ } else if(!strcmp(name,"cap-providers")) {
+  struct sample *s=create(1,0);class_device_t *c=gpu_device_default_get();struct gpu_device_access access;assert(!gpu_device_access_begin(c,&access));
+  int (*providers[])(device_t *,struct gpu_capabilities *)={simplefb_get_capabilities,vmsvga_get_capabilities,lsdc_boot_get_capabilities};
+  uint64_t expected[]={GPU_CAP_SCANOUT|GPU_CAP_BOOT_SCANOUT,GPU_CAP_SCANOUT,GPU_CAP_SCANOUT|GPU_CAP_BOOT_SCANOUT};
+  for(unsigned i=0;i<3;i++){struct gpu_capabilities out={GPU_CAP_KNOWN};assert(providers[i](NULL,&out)==-ENODEV&&!out.flags);assert(providers[i](&s->device,NULL)==-EINVAL);s->device.drv_priv=(void *)1;s->ops->get_capabilities=providers[i];assert(!gpu_device_capabilities_get(&access,&out)&&out.flags==expected[i]);s->device.drv_priv=NULL;out.flags=GPU_CAP_KNOWN;assert(gpu_device_capabilities_get(&access,&out)==-ENODEV&&!out.flags);}
+  s->ops->get_capabilities=native_capabilities;gpu_device_access_end(&access);class_device_put(c);dispose(s);
  } else assert(0);
  assert(!gpu_device_default_get()&&destroyed==created);bus_unregister(&bus);return 0;
 }

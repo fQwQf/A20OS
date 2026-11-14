@@ -6,6 +6,8 @@ DRM class 条目、字符设备条目与总线设备条目现在链接到同一�
 
 GPU 名字、PCI 配置/uevent/modalias 和 framebuffer 属性的内容生成使用一次带引用的 DISPLAY class access；身份与 ops 来自同一绑定，promotion 不会在同一次生成中混用设备。生成完成即交还 active call/class 引用，文件只保存复制的内容；不同属性的独立 open 不保证观察同一 GPU。离线读取不能通过旧 publication 跳到新绑定。它不提供完整热拔插语义，RAM framebuffer 持久 VMA 已独立保留 VMO；DRM 文件已在 open 时固定 publication，兼容 GEM/virgl/CRTC/EDID 状态按 publication 分区，旧文件不随默认选择或重绑切换；发现节点仍为默认聚合入口，尚非多 GPU 枚举。旧 get_fb 物理视图与厂商 BO/GPUVM 仍需进一步协议，见 [GPU publication 契约](../drivers/guide/native-runtime.md#gpu-publication-与作用域调用)。
 
+默认扫描输出现按 ABI 12 原生角色选择：headless 不占默认，渲染同级时原生管理输出优先于保留固件输出。角色查询是内部元数据，不直接变成 Linux 属性或授权，Mesa/virgl 仍查询各自协议；这些规则不增加多 GPU 用户节点。见 [原生能力](../drivers/guide/native-runtime.md#原生-gpu-能力与默认选择)。
+
 通用 VFS 现在对普通 lookup 与 openat2 使用同一个挂载感知的符号链接遍历器：绝对链接从进程根重新开始并保留剩余分量；`RESOLVE_IN_ROOT` 锚定在传入目录上；`RESOLVE_BENEATH` 拒绝绝对链接。显式传入所选挂载点还能保持 bind mount 身份。
 
 覆盖范围（四 CPU、启用抢占）：

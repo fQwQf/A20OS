@@ -17,6 +17,7 @@ STUB = r'''
 #include <stdio.h>
 #include <assert.h>
 #include <errno.h>
+#include "NATIVE_GPU_CAPABILITIES"
 #define RES_MMIO 1
 #define DEV_CLASS_DISPLAY 3
 #define DRIVER_REGISTER(d) static const void *registered_driver=&d
@@ -26,7 +27,7 @@ typedef struct {uint64_t start,end;unsigned flags;} resource_t;
 typedef struct device {void *drv_priv,*plat_data;fw_node_t firmware_node;resource_t resource;} device_t;
 typedef struct {const char *id;} firmware_device_id_t;
 typedef struct {unsigned stride,red_mask,green_mask,blue_mask,reserved_mask;} gpu_scanout_layout_t;
-typedef struct {int(*get_info)(device_t*,uint32_t*,uint32_t*,uint32_t*);int(*get_fb)(device_t*,uintptr_t*,size_t*);int(*get_layout)(device_t*,gpu_scanout_layout_t*);int(*flush)(device_t*,uint32_t,uint32_t,uint32_t,uint32_t);} gpu_dev_ops_t;
+typedef struct {int(*get_info)(device_t*,uint32_t*,uint32_t*,uint32_t*);int(*get_fb)(device_t*,uintptr_t*,size_t*);int(*get_layout)(device_t*,gpu_scanout_layout_t*);int(*flush)(device_t*,uint32_t,uint32_t,uint32_t,uint32_t);int(*get_capabilities)(device_t*,struct gpu_capabilities*);} gpu_dev_ops_t;
 typedef struct {const char*name;void*bus;const firmware_device_id_t*firmware_ids;int(*probe)(device_t*);int(*remove)(device_t*);int class_type;const gpu_dev_ops_t*class_ops;} driver_t;
 static unsigned allocations,frees,maps,unmaps,registrations,unregisters,barriers;
 static int fail_alloc,fail_map,register_result,property_result;
@@ -42,6 +43,7 @@ int gpu_device_register(device_t*);
 void gpu_device_unregister(device_t*);
 #endif
 '''
+STUB = STUB.replace("NATIVE_GPU_CAPABILITIES", str(ROOT / "kernel/include/drivers/gpu/capabilities.h"))
 HARNESS = r'''
 #include "stub.h"
 #include "PRODUCTION"
@@ -77,7 +79,7 @@ int fw_node_read_u64_array(const fw_node_t*n,const char*name,uint64_t*out,size_t
  (void)n;assert(!strcmp(name,"a20,scanout-aperture")&&count==2);
  memcpy(out,aperture,sizeof(aperture));return property_result;
 }
-int gpu_device_register(device_t*d){assert(d->drv_priv);registrations++;return register_result;}
+int gpu_device_register(device_t*d){assert(d->drv_priv);struct gpu_capabilities caps={0};assert(ops.get_capabilities&&!ops.get_capabilities(d,&caps)&&caps.flags==(GPU_CAP_SCANOUT|GPU_CAP_BOOT_SCANOUT));registrations++;return register_result;}
 void gpu_device_unregister(device_t*d){assert(d->drv_priv);unregisters++;}
 static void defaults(void){
  assert(!device.drv_priv);device.plat_data=NULL;memset(registers,0,sizeof(registers));

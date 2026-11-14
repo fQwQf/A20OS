@@ -1172,6 +1172,17 @@ static int gpu_capset_info(struct device *dev, uint32_t index,
     return virtio_gpu_get_capset_info(inst, index, id, max_version, max_size);
 }
 
+static int gpu_get_capabilities(device_t *dev, struct gpu_capabilities *out) {
+    if (!out) return -EINVAL;
+    *out = (struct gpu_capabilities){0};
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst || !inst->valid || __atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
+    out->flags = GPU_CAP_SCANOUT | GPU_CAP_RAM_SCANOUT;
+    if (inst->virgl) out->flags |= GPU_CAP_RENDER;
+    return 0;
+}
+
 static int gpu_get_features(struct device *dev, uint32_t *out_3d,
                             uint32_t *out_context_init)
 {
@@ -1275,6 +1286,7 @@ static int gpu_transfer_3d(struct device *dev, uint32_t ctx_id,
 }
 
 static const gpu_dev_ops_t gpu_ops = {
+    .get_capabilities = gpu_get_capabilities,
     .get_info = gpu_get_info,
     .get_fb   = gpu_get_fb,
     .get_scanout = gpu_get_scanout,

@@ -12,7 +12,7 @@
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
 
-内置驱动与 `.a20drv` 使用同一 `driver_t`。ABI 9 增加了 `driver_t.quiesce`；当前 ABI 为 **11**，在 GPU vtable 末尾增加 owning RAM `get_scanout`；ABI 10 已扩展 `usb_hcd_ops_t.release_endpoint`，所有旧模块必须重建。后文带日期的验证保留当时 ABI，不表示当前接受旧模块。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
+内置驱动与 `.a20drv` 使用同一 `driver_t`。ABI 9 增加了 `driver_t.quiesce`；当前 ABI 为 **12**，在 GPU vtable 末尾增加显式原生 `get_capabilities`；ABI 11 已增加 owning RAM `get_scanout`；ABI 10 已扩展 `usb_hcd_ops_t.release_endpoint`，所有旧模块必须重建。后文带日期的验证保留当时 ABI，不表示当前接受旧模块。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
 
 ## 下线与资源生命周期
 
@@ -49,7 +49,7 @@ REMOVE 仅在成功后发出 bus notification，核心为通知另持一份 devi
 
 持有真实核心 publication 引用的消费者可调用 `class_device_binding_stopped(cdev)`。它记录这个 publication 所属旧绑定的显式成功 remove 契约：在线、仅 offline、调用已排空或 remove 返回错误时均为 false；没有 remove 的绑定也永远为 false。只有核心接受 remove 成功并开始 devres 回收，才发布 true。设备重新绑定后旧凭据保持 true，新 publication 从 false 开始。NULL 返回 false，不能传入栈上仿造的 class 对象。
 
-该状态存放在核心 allocation 的私有尾部，没有新增公开 class/device/driver 字段，模块 ABI 保持 11。绑定持有一个 devres action 引用；unpublish 不会提前销毁凭据。发布过程发生分配、编号或名称冲突错误时，精确撤销该 action 并归还引用，失败不留下额外设备 pin 或 devres 项。消费者自行保留 publication 引用，查询不会固定或重新进入驱动代码。
+该状态存放在核心 allocation 的私有尾部，没有新增公开 class/device/driver 字段，模块 ABI 沿用当前版本 12。绑定持有一个 devres action 引用；unpublish 不会提前销毁凭据。发布过程发生分配、编号或名称冲突错误时，精确撤销该 action 并归还引用，失败不留下额外设备 pin 或 devres 项。消费者自行保留 publication 引用，查询不会固定或重新进入驱动代码。
 
 true 表示驱动已经履行 remove 停止契约，不是对硬件寄存器的探测，也不证明全部 devres 已执行完。它不替代 DMA 失效、CPU/TLB 退休或存储引用。禁止从 `dev->drv`、默认设备变化、class 离线或设备注册状态推导相同结论；旧对象的清理身份不能用于重绑后的新设备。驱动必须在 remove 返回 0 前确认不再访问由消费者准备回收的存储。
 
@@ -74,11 +74,11 @@ static int gpu_probe(device_t *dev) {
 
 子设备/consumer 停止失败可能阻止父设备执行 quiesce。此时失败 probe 保持 `DEV_STATE_PROBE_CLEANUP`，其 class 先 offline，恢复后重试仍须执行首次 quiesce；进入自己的 remove 后才变为 REMOVING，后续仅重试 remove。`device_is_stopping()` 同时观察两种状态；checked resource、PCI 查找/范围观察、managed DMA 创建/新映射及 class 发布均拒绝它们。旧引用和旧资源保留供停止，不授予新使用权限。该 helper 只观察元数据，调用者仍须持有引用并按需使用 discovery 事务协调绑定/配置。
 
-probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（当前为 11）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
+probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布局字段或 ABI 版本（当前为 12）。嵌套 probe 各自选择、返回后恢复上一帧；构造尚未返回时对自己或祖先递归注销返回 `-EBUSY`。新 API 已导出给模块。旧驱动不会自动接入；迁移前必须逐一审查部分初始化的 quiesce/remove、错误传播和硬件停止证明。
 
 ### 在 consumer 解绑前准备退出
 
-控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，该接口不改 device/driver 布局；当前全局模块 ABI 为 11。
+控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，该接口不改 device/driver 布局；当前全局模块 ABI 为 12。
 
 ```c
 int ret = device_probe_use_remove(dev);
@@ -99,7 +99,7 @@ USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 
 
 `driver_lifecycle_begin/end()` 复用核心现有的生命周期 mutex，供任务上下文把总线私有拓扑、注册和绑定操作放入同一个协调域。阻塞入口可在所属任务或启动上下文嵌套；它不增加 discovery 深度，不压制同步 probe。需要批量发现后再 probe 的总线仍使用 `driver_discovery_begin/end()`，不能用它代替普通进度协调。两组 API 均不固定设备、绑定或模块代码，调用者另持有效引用。
 
-`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，这三项函数不改公开布局；当前全局模块 ABI 为 11。
+`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，这三项函数不改公开布局；当前全局模块 ABI 为 12。
 
 USB register/enumerate/scan/unregister 全程使用这个协调域，保护 HCD 注册表、端口状态和协议所有权。`usb_core_poll()` 忙时清除防重入标记并跳过，不推进轮询时间；class 持有协议存储期间通过 `usb_device_poll()` 尝试进度。后者忙返回 `-EAGAIN`，端口不再归属该设备、待移除或任一上游 HCD 正在退出返回 `-ENODEV`，均不进入 HCD。HID read/poll 在自身 spinlock 外使用此入口；不能阻塞等候 teardown 所持的生命周期锁。
 
@@ -117,7 +117,7 @@ xHCI 在 controller 锁下收集 completion，并在解锁前增加 controller�
 
 `usb_interface_release_endpoints(iface)` 从当前接口的 remove 回调调用，先由核心 quiesce/offline 并排空 class 调用。接口/协议存储由调用者保留；helper 在生命周期协调域内核对 stopping owner、plat_data 和端口归属，再逐个调用 `release_endpoint(hcd, dev, addr)`。在线或错误 owner 返回 `-EINVAL`，协议不再属于已登记 HCD 返回 `-ENODEV`，非空 endpoint 清单缺少回调返回 `-EOPNOTSUPP`；正数后端错误规范化为 `-EIO`。已证明整个 slot 停止时无需再次向硬件发 endpoint 命令。
 
-HCD 回调返回 0 才证明该非 EP0 endpoint 不再 DMA/回调访问 URB 和 buffer，并释放其 controller 侧记录；之后同地址的再次释放无操作。失败保留仍存续的全部所有权，已释放的前序 endpoint 不回滚，重试只清理剩余项。此操作永久关闭当前 endpoint，不是单 URB 的取消/恢复 API；其他 endpoint 和 EP0 保持可用。HCD 字段最初在 ABI 10 扩展；当前 loader 和 drvctl 只接受 ABI 11，拒绝其他版本，不能通过强制读取短 vtable 兼容旧模块。
+HCD 回调返回 0 才证明该非 EP0 endpoint 不再 DMA/回调访问 URB 和 buffer，并释放其 controller 侧记录；之后同地址的再次释放无操作。失败保留仍存续的全部所有权，已释放的前序 endpoint 不回滚，重试只清理剩余项。此操作永久关闭当前 endpoint，不是单 URB 的取消/恢复 API；其他 endpoint 和 EP0 保持可用。HCD 字段最初在 ABI 10 扩展；当前 loader 和 drvctl 只接受 ABI 12，拒绝其他版本，不能通过强制读取短 vtable 兼容旧模块。
 
 xHCI 在锁下设置单向 closing，阻止新提交和 completion 收集。该 endpoint 回调或同步传输仍在途时返回 `-EBUSY`，不持生命周期锁等待。Running 用 Stop Endpoint，Halted 用 Reset Endpoint，Error 用 Set TR Dequeue Pointer 转为 Stopped；已有 Stopped 不重发停止命令。只有输出 context 读回 Stopped 才登记停止，再用 Configure Endpoint 的 Drop Context 移除该 endpoint，保留 Slot/EP0 和其他 endpoint 的 Context Entries；Disabled 读回确认后才摘链释放。停止成功、Drop 失败会记住进度。fatal 软件标志不等于硬件停止，只有已确认 controller halt 或 slot 停止才允许软件回收。规则参照 [Intel xHCI 1.2b](https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf) 的 4.6.6、4.6.8–4.6.10。
 
@@ -139,11 +139,32 @@ EP0 MPS、descriptor/configuration、解析/分配或部分 interface 发布失�
 
 扫描总在新枚举前重试 pending 清理；HCD 注销也可重试。slot 已停止但 interface remove 失败时保留该阶段，之后不重复 abort。普通重新连接也必须等待旧清理完成。清理重试不增加枚举次数，也不清零失败预算；扫描对同一次连接最多尝试三次枚举，只有观察到物理断开才重新计数。`port_state` 的计数/阶段位是核心私有实现，HCD 不解释它。
 
-这些 USB 清理变更保持其公开结构布局；当前全局模块 ABI 11 另由 GPU vtable 扩展。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
+这些 USB 清理变更保持其公开结构布局；当前全局模块 ABI 12 另由 GPU vtable 扩展。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
+
+## 原生 GPU 能力与默认选择
+
+`gpu_dev_ops_t.get_capabilities(dev, &out)` 在模块 ABI 12 末尾追加，返回内核内部 `struct gpu_capabilities { uint64_t flags; }`，定义在 `drivers/gpu/capabilities.h`。它声明当前绑定已建立的实现角色，不推断寄存器潜在功能、驱动名或 virgl 回调表；不是用户 ABI，也不是 MM/DMA 访问授权。
+
+| 标志 | 含义与约束 |
+|---|---|
+| `GPU_CAP_SCANOUT` | 有显示输出实现和 get_info；不表示连接状态，也不承诺 CPU 可映射 framebuffer |
+| `GPU_CAP_RENDER` | 已实现的设备渲染后端；不要求 virgl 表，也不代表 Mesa/某个用户协议必然可用 |
+| `GPU_CAP_RAM_SCANOUT` | 提供 owning RAM get_scanout，必须同时声明 SCANOUT 并提供该回调；获取时仍独立校验 VMO/范围/引用 |
+| `GPU_CAP_BOOT_SCANOUT` | 保留固件建立的输出模式，必须有 SCANOUT；同等渲染能力时作为原生管理输出的回退，不表示仍调用固件 |
+
+回调只复制缓存的已建立状态，不做硬件 I/O、分配、VFS、生命周期调用或等待。注册在串行绑定所有权中查询，可早于 class publication；重新选择在候选的 active class call 内查询。两处均在 `g_gpu_lock` 外执行。标志在同一绑定内保持稳定，改变角色需退出/重新绑定；quiesce 可以返回 `-ENODEV`。simplefb 与 lsdc-boot 声明 SCANOUT/BOOT_SCANOUT，VMSVGA 声明 SCANOUT；virtio-gpu 在有效且未 closing 时声明 SCANOUT/RAM_SCANOUT，只有 VIRGL 实际协商成功才声明 RENDER。旧 `get_features`/capset 继续服务具体 virgl 协议，不能代替原生角色模型。
+
+消费者在已有 `gpu_device_access` 内调用导出的 `gpu_device_capabilities_get(&access, &out)`，不新增 lease、存储引用或生命周期锁。成功后可保留复制的标志，不能因此在 access 结束后继续使用 ops。有效 out 在所有失败路径清零：无有效 access 返回 `-ENODEV`，缺少回调返回 `-EOPNOTSUPP`，未知位、SCANOUT 缺少 get_info、RAM_SCANOUT 缺少 SCANOUT/get_scanout 或 BOOT_SCANOUT 缺少 SCANOUT 返回 `-EINVAL`；正数 provider 错误规范化为 `-EIO`，负 errno 保留。NULL out 返回 `-EINVAL`。空角色集合允许发布元数据，但不进入默认输出。
+
+`gpu_device_register()` 要求这个显式回调；缺少/畸形/失败声明不改变默认选择或取得其额外 device pin，probe 必须检查失败并完成自己的清理。只有 SCANOUT 有资格进入默认输出，headless RENDER 仍可作为 DISPLAY class 元数据发布。核心先比较 RENDER，再在同级偏好非 BOOT_SCANOUT，等分保持已有选择；注册与重新选择使用同一规则，遍历只有找到最高等级才提前结束。这样原生 2D 初始化后不会因未实现 3D 而继续让旧 GOP 视图占据默认输出，也不会把仅提供 virgl 函数表的 2D 设备当成渲染后端。优先级由核心从角色计算，不允许驱动提供任意数字。
+
+上述是默认策略和能力发现，不证明硬件健康、授权接管固件存储或撤销旧物理 VMA；不建立通用 job/BO/GPUVM、格式/队列限制协商或多 GPU 用户节点。card0/renderD128 仍是默认聚合入口，headless 内部发布不等于用户态已能选择它。各次操作仍须取得 class access，持久 backing 仍需独立 owning VMO/DMA 引用及停止契约。
+
+当前所有 `.a20drv` 与用户驱动描述符必须按 ABI 12 重建。kernel descriptor guard、loader 入口与 `drvctl` 均拒绝旧 ABI 11，不能通过强制读取短表兼容。RAM `get_scanout` 引入于 ABI 11，device/driver/public class 布局未在此扩展；本次版本变化来自 GPU vtable 的新尾部回调。
 
 ## GPU publication 与作用域调用
 
-GPU 的默认选择是既有 DISPLAY class 上的策略，不另建发布注册表。`gpu_device_register/unregister()` 在原生 lifecycle 协调域内更新选择；普通 probe 仍同步执行。选择持有一个 device 元数据引用，替换/撤销后在选择 spinlock 外交还。它不持有绑定、模块或硬件使用权。当前优先级仍是旧 DRM 所需的完整 virgl transport 函数集合是否存在：在 probe 所有权或有效 class 调用内计算并缓存；不在选择锁下解引用旧驱动表。这不是通用 GPU 能力协商，也不表示设备已协商出 3D 特性。
+GPU 的默认选择是既有 DISPLAY class 上的策略，不另建发布注册表。`gpu_device_register/unregister()` 在原生 lifecycle 协调域内更新选择；普通 probe 仍同步执行。选择持有一个 device 元数据引用，替换/撤销后在选择 spinlock 外交还，不持有绑定、模块或硬件使用权。优先级来自上节显式原生角色：只选择 SCANOUT，先比较 RENDER，同级优先原生管理输出而保留固件输出作为回退。不再检查旧 virgl 函数表存在性，也不在选择锁下调用或解引用可撤销的驱动实现。
 
 `gpu_device_default_get()` 在锁内临时保留所选 device，锁外取得其 class publication 引用，再交还临时 device 引用；调用者最终 `class_device_put()`。返回值可能已经 offline；probe 尚未发布 class、publication 已撤销或无选择时返回 NULL。该读取入口不等待 lifecycle mutex，避免与持该锁排空 active call 的退出路径互相等待。重新选择遍历在线 DISPLAY publication，不受旧的 16 项限制。共享 class rank 枚举先过滤 offline 再计序号，get_by_type/get_nth 不会因仍在 quiesce/drain 的离线项而提前返回 NULL；get_by_index 仍是独立的稳定 publication index 查询，离线 index 不会转指其他 publication。
 
@@ -164,7 +185,7 @@ return ret;
 
 fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属性的一次内容生成，已捕获同一 publication/device/ops 并在结束时交还。sysfs 只保存复制后的内容，不在读取期间借用已结束的驱动调用；不同 open 的属性仍可观察到不同默认 GPU。fbdev 文件尚不固定到某设备，下一次操作可能选择新默认设备。mmap 安装返回后 active call 已结束；有 get_scanout 的 RAM 路径由普通 VMA 保留 VMO，旧 get_fb 物理路径仍借用 backing。
 
-`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。DRM 已按下述协议迁移到固定文件 publication、每 publication 状态及显式 scoped access；厂商 BO/context/request/fence 与旧物理映射退役仍需后续实现。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项 access 函数已导出，device/driver 布局不变；下述 scanout 回调扩展 GPU vtable，当前模块 ABI 11。
+`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。DRM 已按下述协议迁移到固定文件 publication、每 publication 状态及显式 scoped access；厂商 BO/context/request/fence 与旧物理映射退役仍需后续实现。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项 access 函数已导出，device/driver 布局不变；RAM scanout 回调引入于 ABI 11；当前模块 ABI 12 新增上述原生能力回调。
 
 ## 连续 RAM VMO 与 owning scanout
 
@@ -174,7 +195,7 @@ fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属�
 
 该工厂不捕获设备 mask、不建立 IOVA、不授予 DMA 权限，也不转移 cgroup charge。它适合可信内核 RAM backing；有 DMA 地址/权限要求时继续通过 domain 和 `driver_dma_map_vmo()` 检查。kind 4 已加入 canonical pin 白名单；这些页在转换后具有真实 order-0 引用，并非把高阶尾页伪装成可 pin 页。普通可变 VMO 的页快照仍不冻结 extent，连续 VMO 的 extent 固定来自其自身类型约束。
 
-GPU vtable **末尾**新增 `get_scanout(device, &snapshot)`，因此当前模块 ABI 为 **11**，旧模块必须重建。`struct gpu_scanout { struct vmo *memory; uint64_t offset; size_t size; }` 持有一份 VMO 引用；offset 页对齐，size 是正的可见字节长度，向页取整的覆盖范围必须完全落在上述不可变 RAM extent 中。提供者须在有效 class 调用内、与模式替换协调地捕获同一 backing/offset/size；即使返回错误，只要 memory 非空，也向 helper 交出该份引用。没有回调返回 `-EOPNOTSUPP`；存在回调但失败不能降级成借用物理映射。当前只接受连续 RAM，不把 VRAM/MMIO 当作普通 VMO。
+GPU vtable 的 `get_scanout(device, &snapshot)` 引入于 ABI 11；当前模块 ABI **12** 另追加原生能力查询，旧模块必须重建。`struct gpu_scanout { struct vmo *memory; uint64_t offset; size_t size; }` 持有一份 VMO 引用；offset 页对齐，size 是正的可见字节长度，向页取整的覆盖范围必须完全落在上述不可变 RAM extent 中。提供者须在有效 class 调用内、与模式替换协调地捕获同一 backing/offset/size；即使返回错误，只要 memory 非空，也向 helper 交出该份引用。没有回调返回 `-EOPNOTSUPP`；存在回调但失败不能降级成借用物理映射。当前只接受连续 RAM，不把 VRAM/MMIO 当作普通 VMO。
 
 消费者在有效 `gpu_device_access` 内调用 `gpu_device_scanout_get()`，helper 验证类型、对齐、溢出和整页覆盖；错误清理部分输出，正数错误规范化为 `-EIO`。成功后 snapshot 独立于 class/设备/模块存活，可立即结束 access；最后在任务上下文 `gpu_scanout_put()`，该函数先清空描述符再交还 VMO 引用，NULL/已 put 描述符无操作。不能复制 live snapshot 或覆盖尚未 put 的输出。最终存储回收只进入内核 MM，不回调已经解绑的驱动。
 
@@ -184,7 +205,7 @@ virtio-gpu 的 RAM framebuffer 已由该工厂创建；producer、临时 snapsho
 
 ## VirtIO reset 确认与 GPU 退出
 
-`virtio_transport_reset(transport, timeout_ms)` 位于原生 bus 层并导出给模块，不改变 transport vtable 或当前 ABI 11。任务上下文、不持 spinlock，调用者持有 transport/MMIO/代码和设备所有权，并排除新提交、并发 reset 及重新初始化。参数要求完整 read32/write32、1–1000 ms，否则 `-EINVAL` 且不访问寄存器。函数写 status=0、执行 barrier 后反复读回，只有读到 0 才成功。规则依据 [OASIS VirtIO 1.3 的 2.4、4.1.4.3.2](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)：设备在报告 reset 完成后停止队列交互和通知，PCI 重新初始化须等 status 读回 0。
+`virtio_transport_reset(transport, timeout_ms)` 位于原生 bus 层并导出给模块，不改变 transport vtable 或当前 ABI 12。任务上下文、不持 spinlock，调用者持有 transport/MMIO/代码和设备所有权，并排除新提交、并发 reset 及重新初始化。参数要求完整 read32/write32、1–1000 ms，否则 `-EINVAL` 且不访问寄存器。函数写 status=0、执行 barrier 后反复读回，只有读到 0 才成功。规则依据 [OASIS VirtIO 1.3 的 2.4、4.1.4.3.2](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)：设备在报告 reset 完成后停止队列交互和通知，PCI 重新初始化须等 status 读回 0。
 
 时间预算以频率分解计算 ceil，避免毫秒乘法溢出；elapsed 差值允许计数器回绕，起点 0 也是有效时钟。另有 100 万次读取上限，保护早期启动、频率未知或停滞时钟；因此 poll 预算可能先于时间预算耗尽，并非保证等待足额毫秒。任务存在时每 256 次尝试 yield；无任务时有界 poll。耗尽返回 `-ETIMEDOUT`，不隐式清理任何资源。它只确认合规 transport 的状态，不排空软件调用、不注销 IRQ、不解除 IOMMU 或回收存储，也不证明恶意/损坏硬件或物理拔除安全。
 
@@ -200,7 +221,7 @@ virtio-gpu 不再使用全局静态实例或 owner 槽。每次 probe 在选择�
 
 分配失败保留原生 errno，不访问 transport、不发布 drv_priv，也不留下设备 pin；同一 device 已有 drv_priv 返回 `-EBUSY`，其他 device 不受影响。probe 后续失败交给既有 quiesce/remove，保留这一个部分实例。关闭、未知完成和 reset 失败只封闭该设备；不覆盖或重置另一设备的队列。成功 remove 先确认 reset、排空 IRQ，再注销默认选择并清 drv_priv、交还动态 staging/framebuffer producer 引用；最后释放 command mutex，才 put 包含 mutex 本身的实例 allocation。失败则完整保留 allocation、设备 pin、IRQ 和 backing，显式重试同一绑定。
 
-这复用已有 DMA buffer 的分配与所有权，不扩展 device/driver/GPU vtable 或 ABI 11。allocation 地址是 CPU 物理地址，现有队列仍使用平台恒等 DMA 假设；没有由此建立 IOMMU domain、GPUVM、厂商任务/fence 或安全物理拔除协议。旧 scanout 的 VMO/VMA 和 DRM 的 publication/GEM 各自持有独立所有权，实例释放不撤销这些 CPU 存储引用。两个 VirtIO 设备能独立运行，不表示 card0/renderD128 默认聚合入口已变成多 GPU 节点枚举或跨 GPU PRIME attach。
+这复用已有 DMA buffer 的分配与所有权，实例化不扩展 device/driver/GPU vtable；当前 ABI 12 的能力回调见上文。allocation 地址是 CPU 物理地址，现有队列仍使用平台恒等 DMA 假设；没有由此建立 IOMMU domain、GPUVM、厂商任务/fence 或安全物理拔除协议。旧 scanout 的 VMO/VMA 和 DRM 的 publication/GEM 各自持有独立所有权，实例释放不撤销这些 CPU 存储引用。两个 VirtIO 设备能独立运行，不表示 card0/renderD128 默认聚合入口已变成多 GPU 节点枚举或跨 GPU PRIME attach。
 
 ## DRM 文件、命名空间与失败退休
 
@@ -218,7 +239,7 @@ resource/context 的所选 ID 在发命令前成为清理身份，未知完成�
 
 DRM 和 dma-buf mmap 复用 `mm_mmap_vmo_cap()`：只允许共享非空读写及可选 FIXED/NOREPLACE，拒绝 EXEC、private、未知 flags、溢出/越界和未对齐 offset，保留原生 errno 与创建权限 ceiling。DRM 假 offset 仍编码 handle，拒绝高位截断 alias，不是 GPUVM 或完整 mmap-offset 区间分配器。GEM_CREATE/CREATE_DUMB 输出复制失败撤销未交付 handle。PRIME 导入输出复制失败恢复原 handle 存活状态，不能凭空增加存储所有权。原生 VMA 自持 VMO，既有用户映射不需要在最终回收时进入驱动模块。
 
-这些更改保持 ABI 11，不实现厂商 BO/VRAM、驻留/预算、GPUVM、通用 job scheduler、DRM 同步 UAPI、完整模块卸载或实体 GPU 加速。fbdev open 仍按操作选择默认设备，旧 get_fb 持久物理视图仍借用存储。
+这些消费者更改不扩展公开布局，当前模块 ABI 为 12，不实现厂商 BO/VRAM、驻留/预算、GPUVM、通用 job scheduler、DRM 同步 UAPI、完整模块卸载或实体 GPU 加速。fbdev open 仍按操作选择默认设备，旧 get_fb 持久物理视图仍借用存储。
 
 ## 驱动 CPU 物理映射事务
 
@@ -230,7 +251,7 @@ DRM 和 dma-buf mmap 复用 `mm_mmap_vmo_cap()`：只允许共享非空读写及
 
 先在锁外分配未发布 VMA，再开启 `mm->tlb_lock` 失效事务并取得 `mm->lock`。全部 PTE 安装成功才发布一个 `VM_SHARED|VM_PFNMAP|VM_DONTFORK` 记录，记录物理 backing_offset 并更新 total_vm/RSS；以 `VM_NATIVE_CAP` 及实际 READ/WRITE 权限记录不可扩大的 mprotect ceiling。失败清理当前页的半建空路径，再逆序撤销已安装前缀；锁外完成本地/远端 TLB 失效和页表退休，随后交还未发布记录并执行 deferred release。保护变更保留原 memory type 与 dirty 历史，不能把 x86 设备 PCD/PWT 丢成普通 RAM 类型。
 
-fbdev 的旧 get_fb mmap 和 `FBIO_MAP_FB` 分支委托此事务，后者使用固定 NOREPLACE；用户驱动 `udriver_map_mmio()` 保留原 0/-1 与失败不改 out_va 的接口，内部同样使用这条 MM 路径及 Device 类型。旧 NOMMU framebuffer 直接地址接口保持原有语义，不由此获得 MMU 权限或撤销能力。此物理 mapper 不改变 device/driver 布局；当前 GPU vtable 的 ABI 11 扩展见上文。用户地址空间操作由内核 adapter 承担，没有为设备模块新增用户映射入口。
+fbdev 的旧 get_fb mmap 和 `FBIO_MAP_FB` 分支委托此事务，后者使用固定 NOREPLACE；用户驱动 `udriver_map_mmio()` 保留原 0/-1 与失败不改 out_va 的接口，内部同样使用这条 MM 路径及 Device 类型。旧 NOMMU framebuffer 直接地址接口保持原有语义，不由此获得 MMU 权限或撤销能力。此物理 mapper 不改变 device/driver 布局；当前 GPU vtable 的 ABI 12 扩展见上文。用户地址空间操作由内核 adapter 承担，没有为设备模块新增用户映射入口。
 
 这是**借用物理存储的视图**：不取得 PFA frame、VMO、device、resource 或模块引用，不做 IOMMU/DMA 隔离。调用者须使 backing 在全部 VMA 和旧 TLB 访问结束前有效，或在回收/复用前撤销所有视图。fbdev 的旧 get_fb 物理分支仍无跨解绑的 backing 引用和映射撤销协议，不能据此安全释放持久用户映射的 backing；现有驱动退出仍需独立推进。这条事务关闭安装/回滚问题，不关闭存储所有权缺口。
 
@@ -288,7 +309,7 @@ create 返回一份引用，`driver_dma_buffer_get/put()` 显式交接所有权�
 
 `driver_dma_buffer_data/address/size()` 在持引用期间返回 CPU alias、CPU 物理地址及请求字节数；size 不暴露向上取整的分配尺寸。地址 0 也可能有效，不能用它判定对象不存在。物理地址只有在显式 identity-DMA 平台上可直接作为总线地址；该对象不创建 IOVA、隔离、MMIO claim、BO 或 GPUVM；需要下述显式 buffer 映射入口才能取得 domain 的设备地址。CPU/设备可见性仍须经过既有 DMA sync/barrier。
 
-分配不取得 lifecycle mutex，可从 active class 调用使用，避免与持该锁排空 class 的退出互相等待。它只构造存储所有者，不批准硬件提交。这些函数均导出给模块，这些 buffer 函数不改 device/driver/HCD 布局；当前全局模块 ABI 为 11。
+分配不取得 lifecycle mutex，可从 active class 调用使用，避免与持该锁排空 class 的退出互相等待。它只构造存储所有者，不批准硬件提交。这些函数均导出给模块，这些 buffer 函数不改 device/driver/HCD 布局；当前全局模块 ABI 为 12。
 
 ### 将 buffer 显式映射到 domain
 
@@ -917,3 +938,19 @@ virtio-gpu 已移除静态实例/全局 owner，改为每绑定原生 DMA buffer
 另串行完成既有 embedded 双核 stop/DRM reaper 门禁、generic 模块双核 2D 门禁和 RISC-V PRIME 用户态门禁；保留旧 VMA/重绑、resident framebuffer fork、DRM_SYSFS、videoplay 10 帧、shared mapping/SCM_RIGHTS/80 exports/sync-file 结果。完整成功 guest 日志位于 `.kernel-build/gpu-instance-review/guest-instances-serial.log`、`guest-stop-serial.log`、`guest-generic-serial.log`、`guest-prime-serial.log`。旧实例的退出没有使外部 scanout/DRM 引用重新依赖驱动模块。
 
 九篇文档仅将本轮内容投影到 canonical 路径，保留共享 docs/zh 迁移和其他改动。工作区引用检查通过 540 条；导航仍报告既有 7 篇未编目文档，没有新增链接/锚点错误。本轮本地证据在 `.kernel-build/gpu-instance-review/`。多 GPU 用户节点/显示拓扑、跨 GPU PRIME attach、每文件 handle 权限、厂商 BO/GPUVM/任务与可失败关机/恢复仍需继续实现。
+
+### 原生 GPU 角色、固件回退与 ABI 12 验证（2026-11-14）
+
+GPU vtable 末尾追加 get_capabilities，kernel 与 drvctl 的驱动 ABI 同步为 12。四个现有 provider 均按已建立状态声明角色；普通查询复用 active access，注册/重新选择不再扫描 virgl 回调表。原始两级策略审查发现，仅比较渲染会让原生 2D 初始化后仍保留旧 GOP 默认视图，因此增加显式 BOOT_SCANOUT：先比较 RENDER，同级优先原生管理输出，等分稳定。此标志不是固件存储接管或撤销授权，输出连接状态/拓扑仍需独立协议。
+
+GPU access 主机夹具执行生产核心/class/能力 helper，以及 simplefb、VMSVGA、lsdc 的实际缓存回调；新增参数/错误清零、未知位/角色依赖、初次 probe 拒绝无 publication/pin、native renderer 无 virgl 表仍优先、legacy 表完整却不虚报渲染、headless 排除、失败重选与四级固件回退。VirtIO fixture 检查实际缓存回调在 valid/closing/virgl 状态下的声明；正向 RENDER 状态由模型设置，真实 QEMU 本轮只运行 2D 协商。kernel header guard 与真实 ELF drvctl parser 分别拒绝旧 11/未来 ABI；PC module boundary 编译实际包装器/imports。LSdc 保留平面模型同步了新字段及真实能力头，不代表物理面板验证。
+
+隔离导出的最终源码树通过 360 个不同驱动 unittest 方法，另有独立 gpu_select_test 通过。16 个编译成功负控分别引入缺 provider 回退、失败输出残留、正数错误泄漏、未知位/角色依赖遗漏、headless 抢占/重选、旧表推断、选择锁内执行 provider、忽略固件优先级、过早停止重选、优先级截断为 bool、未协商即报告渲染和接受旧 ABI，均由运行时断言/ASan 拒绝；还原源码后执行完整隔离回归。首次广门禁发现 LSdc 测试的精简 vtable 未增加新回调而编译失败，不计成功；更新模型后重新执行全部最终门禁。
+
+最终 check-firmware-model 通过 585 项及独立 1 项 sleep ABI，check-pc-drivers 通过 221 项；118 个 instance、32 个 component 清单审计通过。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行 AArch64 guest。
+
+新增 smoke-driver-gpu-caps-x86_64 使用无硬件 GPU 的 embedded 双核实例，真实内核依次发布合成固件输出、headless、原生输出、保留固件输出的 renderer 和原生 renderer，检查稳定 tie、逐级重选、无旧 virgl 表的 native 声明、畸形 probe 拒绝及最终设备引用归还。实际 2/2 CPU online，匹配 `DRIVER_GPU_CAPS: PASS native=1 firmware=1 headless=1 election=1`；角色本身是合成声明，没有执行硬件渲染或固件接管。
+
+另串行运行最终双 VirtIO 设备实例、generic 模块双核显示、embedded stop/DRM reaper 和 RISC-V PRIME 用户态门禁。真实两个 VirtIO 2D 设备的原生 RENDER 与实际 get_features 协商位一致，且仍保留独立 stop/rebind/旧 VMA；generic ABI 12 包实际加载并完成 DRM_SYSFS、resident framebuffer fork 和 videoplay 10 帧；PRIME 仍通过 shared mapping/SCM_RIGHTS/export lifetime/80 exports/sync-file。成功日志在 `.kernel-build/gpu-caps-review/guest-caps-serial.log` 与 `guest-{instances,generic,stop,prime}-final-serial.log`。没有在 guest 中注入旧包、硬件停止超时或运行 virgl/厂商 GPU 加速。
+
+十四篇文档仅将本轮内容投影到 canonical 路径，保留共享 docs/zh 迁移及其他改动。工作区引用检查通过 540 条；导航仍是既有 7 篇未编目文档，无新增链接/锚点错误。完整本地证据在 `.kernel-build/gpu-caps-review/`。本轮关闭默认策略的旧表推断；通用 BO/GPUVM/job、完整权限/格式/队列限制、多 GPU 用户节点、显示拓扑/固件安全交接和厂商硬件仍需继续实现。

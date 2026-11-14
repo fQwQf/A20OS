@@ -2,17 +2,19 @@
 #define _GPU_CORE_H
 
 #include "drivers/core/driver_core.h"
+#include "drivers/gpu/capabilities.h"
 struct class_device;
 struct gpu_dev_ops;
 struct vmo;
 
-/* A 3D-capable display device is preferred as the /dev/fb0 and DRM backend;
- * see gpu_device_register() in gpu_core.c for the promotion rule. */
+/* Default scanout policy over native class publications. Only SCANOUT roles
+ * are eligible; prefer RENDER, then managed over BOOT_SCANOUT, with stable ties.
+ * Missing/invalid capability providers fail registration without changing it. */
 int gpu_device_register(device_t *dev);
 void gpu_device_unregister(device_t *dev);
 /* Selection updates belong to serialized probe/remove. The selection owns
- * device metadata, not a driver binding; 3D transport support is captured at
- * registration, never read from a departing module under the selection lock. */
+ * device metadata, not a driver binding. Native rendering capability is
+ * captured at registration, never inferred from a backend-specific vtable. */
 /* Task context. Owns a class reference, possibly already offline. Admission
  * requires access_begin/ops_begin. Caller puts it with class_device_put.
  * NULL includes probe before class publication. No lifecycle mutex is taken;
@@ -30,6 +32,10 @@ struct gpu_device_access {
 };
 int gpu_device_access_begin(struct class_device *, struct gpu_device_access *);
 int gpu_device_default_begin(struct gpu_device_access *);
+/* Live access required. Copies a native capability snapshot; clears out on
+ * failure. Missing provider -> EOPNOTSUPP; malformed flags/role dependencies
+ * -> EINVAL; positive provider errors -> EIO. No new lease or storage pin. */
+int gpu_device_capabilities_get(const struct gpu_device_access *, struct gpu_capabilities *);
 void gpu_device_access_end(struct gpu_device_access *);
 /* Owning snapshot of immutable canonical RAM. offset is page aligned; size
  * describes visible bytes, whose rounded page coverage fits memory. The

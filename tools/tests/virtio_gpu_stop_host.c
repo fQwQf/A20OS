@@ -148,7 +148,8 @@ int main(int argc,char **argv){
    int probed=virtio_gpu_probe(&dev);inst=dev.drv_priv;assert((!strcmp(name,"probe-partial")?probed<0:probed==0)&&dev.drv_priv&&inst->fb_memory&&hw.irq_get==1);
    struct vmo *snapshot=inst->fb_memory;vmo_ref(snapshot);pfn_t page=vmo_peek_page(snapshot,0);((unsigned char *)pfn_to_virt(page))[0]=0x7a;size_t pages=allocated_pages,instance_pages=(size_t)1<<inst->allocation->order;
    assert(virtio_gpu_probe(&dev)==-EBUSY&&dev.drv_priv==inst&&inst->fb_memory==snapshot);
-   if(!strncmp(name,"command-",8)){
+   if(!strcmp(name,"capabilities")){struct gpu_capabilities capabilities={GPU_CAP_KNOWN};assert(gpu_get_capabilities(NULL,&capabilities)==-ENODEV&&!capabilities.flags);assert(gpu_get_capabilities(&dev,NULL)==-EINVAL);assert(!gpu_get_capabilities(&dev,&capabilities)&&capabilities.flags==(GPU_CAP_SCANOUT|GPU_CAP_RAM_SCANOUT));inst->virgl=1;assert(!gpu_get_capabilities(&dev,&capabilities)&&capabilities.flags==(GPU_CAP_SCANOUT|GPU_CAP_RAM_SCANOUT|GPU_CAP_RENDER));inst->valid=0;capabilities.flags=GPU_CAP_KNOWN;assert(gpu_get_capabilities(&dev,&capabilities)==-ENODEV&&!capabilities.flags);inst->valid=1;virtio_gpu_quiesce(&dev);capabilities.flags=GPU_CAP_KNOWN;assert(gpu_get_capabilities(&dev,&capabilities)==-ENODEV&&!capabilities.flags);}
+   else if(!strncmp(name,"command-",8)){
     unsigned path=(unsigned)(name[strlen(name)-1]-'0');inst->virgl=1;
     if(strstr(name,"oom")){unsigned notify=hw.notify;uint16_t idx=inst->avail.idx;fail_at=attempts+1;assert(issue(inst,path)==-ENOMEM&&!inst->command_failed&&!inst->command_active&&hw.notify==notify&&inst->avail.idx==idx);fail_at=0;assert(!issue(inst,path));}
     else if(strstr(name,"timeout")){hw.no_complete=1;step=1000;assert(issue(inst,path)==-ETIMEDOUT&&inst->command_failed);}

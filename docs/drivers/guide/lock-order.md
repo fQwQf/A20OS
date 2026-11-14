@@ -220,9 +220,11 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 ### GPU 默认选择与 class 调用
 
-默认选择修改在 lifecycle 协调域内完成；`g_gpu_lock` 只保护所选 device 元数据引用与缓存的旧 virgl transport 能力。锁内允许 device_get 保留快照，不能解引用可撤销的驱动 ops、调用驱动、分配、日志或做最后 put。被替换 device 在锁外交还。重新选择在 lifecycle 域内枚举在线 class，使用短 active call 检查候选 ops。
+默认选择修改在 lifecycle 协调域内完成；`g_gpu_lock` 只保护所选 device 元数据引用与缓存的原生角色优先级。锁内允许 device_get 保留快照，不能解引用可撤销的驱动 ops、调用驱动、分配、日志或做最后 put。被替换 device 在锁外交还。重新选择在 lifecycle 域内枚举在线 class，使用短 active call 查询候选角色，排除 headless；渲染同级时原生输出优先于保留固件输出。
 
 默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序本身不建立存储租约；RAM scanout 另以 VMO 引用交接给 VMA，旧物理分支仍需存储协议，DRM 已使用下述每 publication namespace。
+
+能力 provider 只复制缓存，不做 I/O、分配、VFS 或等待，不能重入 lifecycle。注册在串行绑定所有权内调用，普通 `gpu_device_capabilities_get` 复用已有 class access，不获取 lifecycle mutex。provider 总在 `g_gpu_lock` 外执行，失败声明不修改选择。核心优先级须保留全部等级，不能截断为 bool 或找到保留固件输出的 renderer 就提前停止重选；它只是策略元数据，不是资源引用，见 [原生能力](native-runtime.md#原生-gpu-能力与默认选择)。
 
 ### DRM/KMS/virtio-gpu 3D
 

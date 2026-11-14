@@ -1,17 +1,5 @@
-/*
- * Host test for the display-device selection rule.
- *
- * Both failure modes here are silent from the caller. If a 3D-capable device
- * fails to win, every DRM_IOCTL_VIRTGPU_* answers -ENODEV while GETPARAM still
- * advertises the capability. If an empty slot is not refilled when the incumbent
- * leaves, every DRM ioctl answers -ENODEV until something forces a re-probe.
- * Neither shows up as an error, so the rule needs cases that a revert breaks.
- *
- * The re-election cases are the ones that were wrong: clearing the slot without
- * looking for a replacement, and stopping the scan at the first candidate, which
- * silently downgrades a 3D binding to 2D when a 2D-only device has a lower
- * enumeration index.
- */
+/* Pure priority policy: the two-level cases exercise promotion/re-election;
+ * native roles below additionally cover managed/firmware rendering priorities. */
 #include <assert.h>
 #include <stdio.h>
 
@@ -79,8 +67,28 @@ static void test_rescan_with_no_survivor(void)
     assert(gpu_select_better(have_best, false, false) == true);
 }
 
+static void test_native_role_priorities(void)
+{
+    unsigned firmware = gpu_select_rank(false, true);
+    unsigned managed = gpu_select_rank(false, false);
+    unsigned firmware_render = gpu_select_rank(true, true);
+    unsigned managed_render = gpu_select_rank(true, false);
+    assert(gpu_select_should_take(true, firmware, managed));
+    assert(!gpu_select_should_take(true, managed, firmware));
+    assert(gpu_select_should_take(true, managed, firmware_render));
+    assert(gpu_select_better(true, firmware_render, managed_render));
+    assert(!gpu_select_better(true, managed_render, firmware_render));
+    assert(managed_render == GPU_SELECT_MAX_RANK);
+    for (unsigned rank = firmware; rank <= managed_render; rank++) {
+        assert(!gpu_select_should_take(true, rank, rank));
+        assert(!gpu_select_better(true, rank, rank));
+        assert(gpu_select_should_take(false, 0, rank));
+    }
+}
+
 int main(void)
 {
+    test_native_role_priorities();
     test_empty_slot_always_takes();
     test_promotion_only();
     test_rescan_prefers_3d_over_a_lower_index_2d();

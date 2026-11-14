@@ -50,6 +50,8 @@ int printf(const char *,...);int snprintf(char *,size_t,const char *,...);
         bodies+='\n'+enum+'\n'+shape+'\n#define LOOP_MAJOR 7\n'
         bodies+='\n'.join(extract_function(sysfs,name) for name in ['static int sysfs_gpu_names_for_device(',
             'static int sysfs_gpu_names(', 'static void sysfs_display_size(', 'static sysfs_priv_t *sysfs_priv_create('])
+        for file,prefix in [('simplefb.c','simplefb'),('vmsvga.c','vmsvga'),('lsdc_boot.c','lsdc_boot')]:
+            bodies+='\n'+extract_function((ROOT/'kernel/drivers/gpu'/file).read_text(),'static int '+prefix+'_get_capabilities(')
         model=(ROOT/'tools/tests/gpu_access_host.c').read_text().replace('/* PRODUCTION_CONSUMERS */',bodies)
         fixture=work/'fixture.c';fixture.write_text(model);cls.binary=work/'test'
         subprocess.run(['cc','-std=gnu11','-D_GNU_SOURCE','-DCONFIG_NOMMU','-pthread','-O1','-g','-Wall','-Wextra','-Werror',
@@ -72,3 +74,15 @@ int printf(const char *,...);int snprintf(char *,size_t,const char *,...);
     def test_sysfs_snapshot_keeps_one_identity_across_default_promotion(self):self.run_case('promotion-sysfs')
     def test_fb_ioctl_and_mmap_returns_release_calls(self):self.run_case('fb')
     def test_sysfs_gpu_attributes_and_early_exits_release_calls(self):self.run_case('sysfs')
+
+    def test_capability_arguments_clear_outputs(self):self.run_case('cap-arguments')
+    def test_provider_errors_preserve_selection_refs_and_clear_partial_results(self):self.run_case('cap-errors')
+    def test_unknown_flags_and_role_dependencies_are_rejected(self):self.run_case('cap-validation')
+    def test_native_roles_replace_backend_vtable_inference(self):self.run_case('cap-policy')
+    def test_headless_rendering_never_takes_the_default_scanout(self):self.run_case('cap-headless')
+    def test_reelection_skips_failed_capability_queries_and_releases_calls(self):self.run_case('cap-election-error')
+    def test_real_firmware_svga_and_lsdc_providers_declare_only_implemented_roles(self):self.run_case('cap-providers')
+
+    def test_failed_initial_capability_probe_has_no_publication_or_selection_pin(self):self.run_case('cap-probe-error')
+
+    def test_managed_scanout_replaces_firmware_and_election_uses_all_priority_levels(self):self.run_case('cap-firmware-priority')

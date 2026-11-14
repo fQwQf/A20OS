@@ -21,7 +21,7 @@ class VirtioGpuStop(unittest.TestCase):
         def body(name):
             signature=re.search(re.escape(name.split('(')[0]+'(')+r'[^;{]*\{',source).group()[:-1]
             return extract_function(source,signature)
-        names=['static int virtio_gpu_send_cmd(', 'static int virtio_gpu_send_cmd_big(', 'static int gpu_flush(', 'static int virtio_gpu_submit_3d(', 'static int virtio_gpu_resource_attach_backing(']
+        names=['static int gpu_get_capabilities(', 'static int virtio_gpu_send_cmd(', 'static int virtio_gpu_send_cmd_big(', 'static int gpu_flush(', 'static int virtio_gpu_submit_3d(', 'static int virtio_gpu_resource_attach_backing(']
         extra=extra.replace('/* PRODUCTION_COMMANDS */','\n'.join(body(n) for n in names))
         names=['static int virtio_gpu_init_transport(', 'static int virtio_gpu_probe(', 'static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)\n{','static void virtio_gpu_quiesce(', 'static int virtio_gpu_remove(']
         extra=extra.replace('/* PRODUCTION_LIFETIME */','\n'.join(body(n) for n in names))
@@ -60,3 +60,5 @@ class VirtioGpuStop(unittest.TestCase):
     def test_two_devices_have_distinct_dma_queues_and_framebuffers(self):self.run_case('two-devices')
     def test_failed_remove_does_not_stop_the_other_device(self):self.run_case('two-remove-fail')
     def test_failed_command_does_not_poison_the_other_queue(self):self.run_case('two-command-fail')
+
+    def test_rendering_capability_requires_negotiation_and_live_instance(self):self.run_case('capabilities')

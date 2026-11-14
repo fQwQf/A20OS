@@ -7,17 +7,38 @@
 #include "mm/vmo.h"
 
 static device_t *g_default_gpu; /* owns one metadata reference */
-static bool g_default_3d;
+static unsigned g_default_rank;
 static spinlock_t g_gpu_lock = SPINLOCK_INIT;
 
-/* Only inspect under probe ownership or a live class call. This describes
- * the complete virgl transport consumed by DRM, not arbitrary vendor queues
- * or the features actually negotiated with the device. */
-static bool gpu_ops_can_3d(const gpu_dev_ops_t *ops) {
-    return ops && ops->get_capset && ops->capset_info &&
-           ops->resource_attach_backing && ops->ctx_create &&
-           ops->ctx_destroy && ops->resource_create_3d &&
-           ops->resource_unref && ops->submit_3d;
+/* Serialized binding ownership or an active class access protects state/code.
+ * Keep provider execution outside the selection lock. The result is native
+ * role discovery; it does not infer an implementation from virgl callbacks. */
+static int gpu_capabilities_read(device_t *device, const gpu_dev_ops_t *ops,
+                                  struct gpu_capabilities *out)
+{
+    *out = (struct gpu_capabilities){0};
+    if (!ops->get_capabilities) return -EOPNOTSUPP;
+    struct gpu_capabilities capabilities = {0};
+    int result = ops->get_capabilities(device, &capabilities);
+    if (result) return result < 0 ? result : -EIO;
+    if ((capabilities.flags & ~GPU_CAP_KNOWN) ||
+        ((capabilities.flags & GPU_CAP_SCANOUT) && !ops->get_info) ||
+        ((capabilities.flags & GPU_CAP_BOOT_SCANOUT) && !(capabilities.flags & GPU_CAP_SCANOUT)) ||
+        ((capabilities.flags & GPU_CAP_RAM_SCANOUT) &&
+         (!(capabilities.flags & GPU_CAP_SCANOUT) || !ops->get_scanout)))
+        return -EINVAL;
+    *out = capabilities;
+    return 0;
+}
+
+int gpu_device_capabilities_get(const struct gpu_device_access *access,
+                                 struct gpu_capabilities *out)
+{
+    if (!out) return -EINVAL;
+    *out = (struct gpu_capabilities){0};
+    if (!access || !access->publication || !access->device || !access->ops)
+        return -ENODEV;
+    return gpu_capabilities_read(access->device, access->ops, out);
 }
 
 int gpu_device_register(device_t *dev) {
@@ -28,21 +49,26 @@ int gpu_device_register(device_t *dev) {
     if (!device_is_registered(dev) || device_is_stopping(dev)) { result = -ENODEV; goto out; }
     if (!dev->drv || dev->drv->class_type != DEV_CLASS_DISPLAY || !dev->drv->class_ops)
         goto out;
-    bool capable = gpu_ops_can_3d(dev->drv->class_ops);
+    struct gpu_capabilities capabilities;
+    result = gpu_capabilities_read(dev, dev->drv->class_ops, &capabilities);
+    if (result) goto out;
+    if (!(capabilities.flags & GPU_CAP_SCANOUT)) goto out;
+    unsigned rank = gpu_select_rank(capabilities.flags & GPU_CAP_RENDER,
+                                    capabilities.flags & GPU_CAP_BOOT_SCANOUT);
     uint64_t flags = spin_lock_irqsave(&g_gpu_lock);
     bool take = g_default_gpu == dev ||
-                gpu_select_should_take(g_default_gpu != NULL, g_default_3d, capable);
+                gpu_select_should_take(g_default_gpu != NULL, g_default_rank, rank);
     if (take && g_default_gpu != dev) {
         device_t *owned = device_get(dev);
         if (!owned) { spin_unlock_irqrestore(&g_gpu_lock, flags); result = -ENODEV; goto out; }
         old = g_default_gpu;
         g_default_gpu = owned;
     }
-    if (take) g_default_3d = capable;
+    if (take) g_default_rank = rank;
     spin_unlock_irqrestore(&g_gpu_lock, flags);
     if (take)
-        printf("[GPU] gpu_device_register: default_gpu=%p class_type=%d 3d=%d\n",
-               dev, DEV_CLASS_DISPLAY, capable);
+        printf("[GPU] gpu_device_register: default_gpu=%p class_type=%d priority=%u\n",
+               dev, DEV_CLASS_DISPLAY, rank);
     result = 0;
 out:
     device_put(old); /* Publisher disposal is never under g_gpu_lock. */
@@ -54,7 +80,7 @@ void gpu_device_unregister(device_t *dev) {
     driver_lifecycle_begin();
     uint64_t flags = spin_lock_irqsave(&g_gpu_lock);
     device_t *old = g_default_gpu == dev ? g_default_gpu : NULL;
-    if (old) { g_default_gpu = NULL; g_default_3d = false; }
+    if (old) { g_default_gpu = NULL; g_default_rank = 0; }
     spin_unlock_irqrestore(&g_gpu_lock, flags);
     if (!old) { driver_lifecycle_end(); return; }
 
@@ -63,7 +89,7 @@ void gpu_device_unregister(device_t *dev) {
      * protect operation tables. Do not stop at an offline class rank or an
      * arbitrary sixteen-device limit. */
     device_t *best = NULL;
-    bool best_3d = false;
+    unsigned best_rank = 0;
     for (int index = 0;; index++) {
         device_t *candidate = device_find_get_by_class(DEV_CLASS_DISPLAY, index);
         if (!candidate) break;
@@ -72,29 +98,34 @@ void gpu_device_unregister(device_t *dev) {
         int admitted = candidate == dev ? -ENODEV : gpu_device_access_begin(publication, &access);
         class_device_put(publication);
         if (!admitted) {
-            bool capable = gpu_ops_can_3d(access.ops);
-            if (gpu_select_better(best != NULL, best_3d, capable)) {
+            struct gpu_capabilities capabilities;
+            int queried = gpu_device_capabilities_get(&access, &capabilities);
+            bool eligible = !queried && (capabilities.flags & GPU_CAP_SCANOUT);
+            unsigned rank = gpu_select_rank(capabilities.flags & GPU_CAP_RENDER,
+                                            capabilities.flags & GPU_CAP_BOOT_SCANOUT);
+            if (eligible && gpu_select_better(best != NULL, best_rank, rank)) {
                 device_put(best);
                 best = candidate; /* Transfer the enumerator's owning reference. */
                 candidate = NULL;
-                best_3d = capable;
+                best_rank = rank;
             }
             gpu_device_access_end(&access);
         }
         device_put(candidate);
-        if (best_3d) break;
+        if (best_rank == GPU_SELECT_MAX_RANK) break;
     }
     flags = spin_lock_irqsave(&g_gpu_lock);
     if (!g_default_gpu) {
         g_default_gpu = best;
-        g_default_3d = best_3d;
+        g_default_rank = best_rank;
         best = NULL;
     }
     device_t *selected = g_default_gpu;
-    bool selected_3d = g_default_3d;
+    unsigned selected_rank = g_default_rank;
     spin_unlock_irqrestore(&g_gpu_lock, flags);
     printf("[GPU] gpu_device_unregister: default_gpu=%p re-elected (%s)\n",
-           selected, selected_3d ? "3D-capable" : selected ? "2D-only" : "none");
+           selected, selected_rank >= 2 ? "render-capable" : selected ?
+           (selected_rank ? "managed scanout" : "firmware scanout") : "none");
     device_put(best);
     device_put(old);
     driver_lifecycle_end();

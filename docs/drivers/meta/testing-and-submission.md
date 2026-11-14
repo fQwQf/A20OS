@@ -55,6 +55,8 @@ DRM 修改还运行 `python3 -m unittest tools.tests.test_class_stop tools.tests
 
 `tools/a20 test smoke-driver-gpu-instances-x86_64` 使用 embedded、双 CPU、两个 virtio-gpu-pci，并只在 `driver.runtime_test=1 driver.gpu_instances_test=1` 下执行：分别取 owning scanout、实际 flush，逻辑注销默认 device 后检查旧 publication 停止、peer publication/实例/DRM 文件保持在线并继续 flush，再重新登记并检查新 publication/VMO 与旧 VMA 数据。它不执行物理 PCI 热拔出，也不注入真实硬件 reset 超时。主机 `test_virtio_gpu_stop` 保留既有四条 issuer 与失败清理测试，并用两个 transport 模型验证实例独立、native allocation OOM/拒绝、失败停止和 queue fault 隔离。
 
+ABI 12 GPU 能力修改运行 `python3 -m unittest tools.tests.test_gpu_access tools.tests.test_virtio_gpu_stop tools.tests.test_lsdc_boot tools.tests.test_drvctl_descriptor_host tools.tests.test_pc_module_boundary`，分别检查原生角色/默认策略、实际 provider 的声明、kernel descriptor guard/真实 ELF drvctl parser 与模块 imports。新增 `tools/a20 test smoke-driver-gpu-caps-x86_64` 无硬件 GPU，使用显式 runtime 参数在真实内核注册合成角色、验证固件/原生优先级、headless 排除和重新选择；它不证明 GPU 渲染或固件存储接管。双设备 `smoke-driver-gpu-instances-x86_64` 另比较真实 VirtIO 协商位与原生声明。generic 显示和 RISC-V PRIME 仍须回归，以验证 ABI 12 包实际加载。
+
 ## 架构构建矩阵
 
 至少构建驱动目标平台和一个共享基础设施回归平台：
