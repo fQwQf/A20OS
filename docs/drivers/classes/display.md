@@ -11,9 +11,9 @@ if (gpu_device_register(dev) < 0)
     goto fail;
 ```
 
-第一个成功注册的 display 成为 `/dev/fb0` 默认设备。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，但 framebuffer/DRM 仍依赖单个默认设备，不等于完整的多 GPU 或热拔插保护。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
+默认选择保留已注册 display，并可按完整旧 virgl transport 表优先提升设备；这不是通用 GPU 能力查询。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，但 framebuffer/DRM 仍依赖单个默认设备，不等于完整的多 GPU 或热拔插保护。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
 
-典型的注册、probe、使用与 remove 顺序：
+以下是旧 get_fb 接入的简化骨架；实际驱动必须补齐部分初始化回滚及可失败硬件停止，不能照此假定 stop 一定成功。RAM framebuffer 应采用下述 owning scanout：
 
 ```c
 /* 1. 注册驱动 */
@@ -79,12 +79,18 @@ static int my_gpu_flush(device_t *dev, uint32_t x, uint32_t y,
     return 0;
 }
 
-/* 4. remove：先注销，再释放资源 */
+/* 4. remove：下列两步为设备/平台相关协议，失败必须保留实例。
+ * retire_fb_views 是骨架占位，当前 raw fbdev 没有通用撤销 helper；
+ * 尚不能撤销时不能 free_fb。RAM VMO 路径改为只 put producer 引用。 */
 static int my_gpu_remove(device_t *dev){
     my_gpu_t *g = dev->drv_priv;
+    int ret = stop_scanout(g);
+    if (ret) return ret;
+    ret = retire_fb_views(g);
+    if (ret) return ret;
     gpu_device_unregister(dev);
-    stop_scanout(g);
     free_fb(g);
+    dev->drv_priv = NULL;
     kfree(g);
     return 0;
 }
@@ -92,7 +98,7 @@ static int my_gpu_remove(device_t *dev){
 
 ## 类操作
 
-`get_info` 返回当前可见宽、高和 bpp，输出指针无效返回 `-EINVAL`。`get_fb` 返回 framebuffer 的物理地址和可见 backing 长度，不是完整 VRAM aperture。只有映射层需要物理地址，驱动的寄存器访问继续使用内核虚拟 MMIO 地址。
+`get_info` 返回当前可见宽、高和 bpp，输出指针无效返回 `-EINVAL`。`get_fb` 只返回借用的 CPU 物理地址和可见 backing 长度，不是完整 VRAM aperture，也不保留存储。只有映射层需要物理地址，驱动的寄存器访问继续使用内核虚拟 MMIO 地址。
 
 `flush(x, y, width, height)` 提交矩形。当前实现把零宽或零高解释为全屏。先验证起点，再用减法裁剪，避免 `x + width` 溢出：
 
@@ -104,6 +110,12 @@ if (width > fb_width - x)
 ```
 
 如果设备从普通 RAM backing 读取像素，提交命令前对覆盖区域执行 DMA for-device 同步。stride 可能大于 `width * bytes_per_pixel`，同步长度和用户 ABI 的 `line_length` 都必须使用实际 pitch。
+
+## RAM scanout 的原生所有权
+
+ABI 11 在 GPU vtable 末尾增加可选 `get_scanout`。RAM producer 用 `vmo_create_contiguous()` 创建 backing，记录一份 owner；在有效 class 调用内与模式替换协调，vmo_ref 后返回 `struct gpu_scanout {memory, offset, size}`。extent 和 slot 固定，像素内容可写；offset 页对齐、可见 size 为正，整页覆盖必须落在 backing 内。producer 退出只交还自己的 VMO 引用，不能原阶 pfa_free。只有确认硬件不再访问后才允许释放其硬件 owner。
+
+消费者用 `gpu_device_scanout_get(&access, &snapshot)`，成功后可结束 class access；VMA 或调用者保留 RAM，最后 `gpu_scanout_put()`。helper 验证类型/范围并清理错误输出；回调即使失败，也交出非空 memory 的一份引用。缺少回调才选旧物理分支，已有回调失败则返回错误。最终 put 只依赖内核 MM，不调用已解绑模块。该接口未覆盖 VRAM、每文件设备身份或硬件停止确认，完整错误与锁契约见 [连续 RAM VMO](../guide/native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 
 ## `/dev/fb0` ABI
 
@@ -117,13 +129,13 @@ if (width > fb_width - x)
 | `FBIO_MAP_FB` | 把 framebuffer 映射到参数指定的用户虚拟地址（A20OS 专有）|
 | `FBIO_FLUSH` | 当前提交全屏刷新（A20OS 专有）|
 
-`/dev/fb0` 同时支持标准 `mmap(2)`（`kernel/drivers/gpu/framebuffer.c` 的 `fbdev_linux_mmap`）：偏移页对齐且范围不超过 `smem_len`，地址为 0 时由 `mm_find_gap` 选址；VMA 标记 `VM_PFNMAP|VM_SHARED|VM_DONTFORK`。PTE 不带 `PTE_MAT1`，在 AArch64 上保持 Device memory 属性。标准 fbdev 用户态（Xfbdev、weston fbdev 后端）因此可以不加修改地映射 scanout。
+`/dev/fb0` 同时支持标准 `mmap(2)`。MMU 上有 get_scanout 的 RAM 路径由普通 `VM_VMO|VM_SHARED|VM_NATIVE_CAP` VMA 保留 VMO，采用 Normal RAM 属性、支持 fork/split，mprotect 不可超过创建时有效硬件权限。偏移页对齐，覆盖不超过可见长度的页取整范围，末页 padding 已清零。旧 get_fb 分支通过共享 MM/Rust 物理事务安装 `VM_PFNMAP|VM_SHARED|VM_DONTFORK`；CPU 缓存类型按 boot framebuffer 别名策略核准，不能统一假设为 Device 或 Normal。hint 检查整个区间，fixed/NOREPLACE 与回滚复用原生 MM。
 
-FBIO_MAP_FB 映射要求用户地址页对齐、范围不溢出 `USER_VA_LIMIT`、不与已有 VMA/PTE 重叠；失败撤销已映射页。NOMMU 不建页表，应用从 fixed info 使用物理地址。物理地址暴露是现有兼容 ABI，不应复制到其他类。
+FBIO_MAP_FB 同样优先 owning RAM 路径，映射完整 scanout 页覆盖并使用固定 NOREPLACE；旧 get_fb 分支继续借用物理存储。用户地址须非零、页对齐且整段不超过 USER_VA_LIMIT。NOMMU 不建 VMA，保留 fixed info 的直接地址兼容行为。物理地址暴露是现有兼容 ABI，不应复制到其他类。
 
 ## VirtIO GPU 范例
 
-`virtio_gpu.c` 支持 MMIO/PCI transport。probe 顺序为 modern feature negotiation、controlq、分配连续 framebuffer、`RESOURCE_CREATE_2D`、`ATTACH_BACKING`、`SET_SCANOUT`、首次 flush、注册 display。flush 依次执行 cache clean、`TRANSFER_TO_HOST_2D`、`RESOURCE_FLUSH`。remove 复位 transport、注销 display、释放 framebuffer 页。
+`virtio_gpu.c` 支持 MMIO/PCI transport。probe 顺序为 modern feature negotiation、controlq、分配连续 framebuffer、`RESOURCE_CREATE_2D`、`ATTACH_BACKING`、`SET_SCANOUT`、首次 flush、注册 display。flush 依次执行 cache clean、`TRANSFER_TO_HOST_2D`、`RESOURCE_FLUSH`。framebuffer 已用连续 VMO 工厂创建，remove 复位 transport、注销 display 并交还 producer 的 VMO 引用；尚存 VMA/snapshot 独立保留 RAM。现有 reset 写入与失败初始化路径尚未形成完整的硬件停止/确认协议，此改动只落实存储引用。
 
 当前模式固定 1024x768x32，controlq 使用实例 mutex 串行化同步命令；请求和响应先复制到实例内稳定 DMA staging，等待期间保持中断开启。不得把调用者栈对象直接写入 descriptor，也不得用 `spin_lock_irqsave` 包围设备完成等待。
 

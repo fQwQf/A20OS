@@ -141,6 +141,14 @@ CPU 物理映射变更运行 `python3 -m unittest tools.tests.test_physical_mapp
 
 `smoke-gpu-access-x86_64` 新增 `fbdev_map_test`，要求 `FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1`；在真实匿名邻接映射中替换一个 framebuffer 页，核对相邻内容、跨 gap hint 不覆盖、保护 ceiling 和旧 ioctl 的 NOREPLACE。原 sysfs/videoplay 验证继续保留。embedded hub/bulk 的 runtime 在 MMU 下另要求 `DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1`，使用真实 VMO-owned frame 和独立 MM，检查实际叶/VMA 缓存属性、保护、固定覆盖和 total_vm/RSS，销毁全部视图后才交还源 VMO。它们不证明 framebuffer backing 跨设备解绑安全，也不代替实体 GPU DMA 或远端 TLB 并发压力。
 
+## RAM scanout 与连续 VMO 回归
+
+`test_vmo_contiguous.py` 的 7 项方法执行真实 C 工厂、PFA split、Rust 生命周期/最终销毁，验证专用构造、失败回滚、canonical 引用、清零 padding/多余尾部、不可变 extent/slot、pin 后销毁及并发引用。分配器、地址别名和通知为主机模型，C 开启 ASan/UBSan。`test_gpu_scanout_vmo.py` 的 7 项方法执行真实 snapshot helper、fbdev adapter、unlocked MM cap wrapper 和 virtio get/remove/release，覆盖错误输出引用、模块 ops/producer 销毁后存储存活、映射失败归还和 ceiling。locked VMO mapper、class admission、transport/IRQ 为模型，不将 stub reset 解释为停止证明。真实 class admission 与 DMA VMO 导入另有既有回归，新增 kind 4 导入方法。
+
+双核 embedded hub 自检要求 `DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1`：真实 class/VMO/MM/PFA 链在 producer 解绑后只靠 VMA 存活，再 split、fork、部分 unmap、交还页引用；该合成映射尚未 fault 用户 PTE。双核 generic GPU 2D 则运行 `fbdev_map_test --retained`，要求旧 fixed/NOREPLACE/hint/ceiling/ioctl 标记加 `fork=1`，实际访问 resident framebuffer 共享页并 fork；保留 sysfs/videoplay 验证。程序默认模式继续支持旧 raw DONTFORK 路径。
+
+RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连续 VMO 页 1–2 建立 IOVA，先销毁源对象再执行实际跨页 DMA；新增 `DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1`，原有 high-order buffer、不连续页、权限/故障/watch 标记继续保留。运行显式 embedded instance，仍为单核；停止/BME 清除后才解除映射。上述结果验证 RAM 所有权基础，不表示实体 GPU、厂商固件或完整 virtio 停止/恢复已经验证。
+
 ## 门禁失败时怎么办
 
 | 失败门禁 | 先检查什么 | 下一步 |

@@ -12,7 +12,7 @@
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
 
-内置驱动与 `.a20drv` 使用同一 `driver_t`。ABI 9 增加了 `driver_t.quiesce`；当前 ABI 为 **10**，扩展 `usb_hcd_ops_t.release_endpoint`，所有旧模块必须重建。后文带日期的验证保留当时 ABI，不表示当前接受旧模块。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
+内置驱动与 `.a20drv` 使用同一 `driver_t`。ABI 9 增加了 `driver_t.quiesce`；当前 ABI 为 **11**，在 GPU vtable 末尾增加 owning RAM `get_scanout`；ABI 10 已扩展 `usb_hcd_ops_t.release_endpoint`，所有旧模块必须重建。后文带日期的验证保留当时 ABI，不表示当前接受旧模块。新增 DMA/fence/workqueue/firmware 函数已加入模块导出表。此处没有承诺跨内核版本稳定的二进制 ABI。
 
 ## 下线与资源生命周期
 
@@ -68,7 +68,7 @@ probe 意图保存在 lifecycle mutex 下的私有调用栈，不增加公开布
 
 ### 在 consumer 解绑前准备退出
 
-控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，ABI 当前为 10。
+控制器的 IRQ/ring 可能继续访问 child/consumer 存储，等到 provider remove 才停止会太晚。`device_add_remove_prepare(dev, callback, context)` 让驱动显式选择提前准备：只能从该设备当前 probe、且 `device_probe_use_remove()` 已成功后登记。记录在 probe 中分配，失败返回 `-ENOMEM`，不安装动作；错误参数或阶段返回 `-EINVAL`，未注册的合法当前实例返回 `-ENODEV`。公开 device/driver 布局不增加字段，模块导出此函数，该接口不改 device/driver 布局；当前全局模块 ABI 为 11。
 
 ```c
 int ret = device_probe_use_remove(dev);
@@ -89,7 +89,7 @@ USB 的拓扑协调与锁外回调保留另按下述协议实现，不能仅凭 
 
 `driver_lifecycle_begin/end()` 复用核心现有的生命周期 mutex，供任务上下文把总线私有拓扑、注册和绑定操作放入同一个协调域。阻塞入口可在所属任务或启动上下文嵌套；它不增加 discovery 深度，不压制同步 probe。需要批量发现后再 probe 的总线仍使用 `driver_discovery_begin/end()`，不能用它代替普通进度协调。两组 API 均不固定设备、绑定或模块代码，调用者另持有效引用。
 
-`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，公开布局/ABI 10 不变。
+`driver_lifecycle_try_begin()` 只尝试新的最外层入口：成功返回 0，忙（包括本上下文已经持有）返回 `-EAGAIN`；只有成功后才配对 end。它避免进度轮询等候正在排空 class 调用的 teardown，也避免在部分修改的图中重入。成功取得协调权后的驱动操作仍可能进行有界硬件等待；这不是整个函数无等待的保证。三项接口均导出给模块，不用于 IRQ 或持有 spinlock 的路径，这三项函数不改公开布局；当前全局模块 ABI 为 11。
 
 USB register/enumerate/scan/unregister 全程使用这个协调域，保护 HCD 注册表、端口状态和协议所有权。`usb_core_poll()` 忙时清除防重入标记并跳过，不推进轮询时间；class 持有协议存储期间通过 `usb_device_poll()` 尝试进度。后者忙返回 `-EAGAIN`，端口不再归属该设备、待移除或任一上游 HCD 正在退出返回 `-ENODEV`，均不进入 HCD。HID read/poll 在自身 spinlock 外使用此入口；不能阻塞等候 teardown 所持的生命周期锁。
 
@@ -107,7 +107,7 @@ xHCI 在 controller 锁下收集 completion，并在解锁前增加 controller�
 
 `usb_interface_release_endpoints(iface)` 从当前接口的 remove 回调调用，先由核心 quiesce/offline 并排空 class 调用。接口/协议存储由调用者保留；helper 在生命周期协调域内核对 stopping owner、plat_data 和端口归属，再逐个调用 `release_endpoint(hcd, dev, addr)`。在线或错误 owner 返回 `-EINVAL`，协议不再属于已登记 HCD 返回 `-ENODEV`，非空 endpoint 清单缺少回调返回 `-EOPNOTSUPP`；正数后端错误规范化为 `-EIO`。已证明整个 slot 停止时无需再次向硬件发 endpoint 命令。
 
-HCD 回调返回 0 才证明该非 EP0 endpoint 不再 DMA/回调访问 URB 和 buffer，并释放其 controller 侧记录；之后同地址的再次释放无操作。失败保留仍存续的全部所有权，已释放的前序 endpoint 不回滚，重试只清理剩余项。此操作永久关闭当前 endpoint，不是单 URB 的取消/恢复 API；其他 endpoint 和 EP0 保持可用。vtable 新增字段要求 ABI 10，loader 和 drvctl 拒绝 ABI 9 及其他不匹配版本，不能通过强制读取短 vtable 兼容旧模块。
+HCD 回调返回 0 才证明该非 EP0 endpoint 不再 DMA/回调访问 URB 和 buffer，并释放其 controller 侧记录；之后同地址的再次释放无操作。失败保留仍存续的全部所有权，已释放的前序 endpoint 不回滚，重试只清理剩余项。此操作永久关闭当前 endpoint，不是单 URB 的取消/恢复 API；其他 endpoint 和 EP0 保持可用。HCD 字段最初在 ABI 10 扩展；当前 loader 和 drvctl 只接受 ABI 11，拒绝其他版本，不能通过强制读取短 vtable 兼容旧模块。
 
 xHCI 在锁下设置单向 closing，阻止新提交和 completion 收集。该 endpoint 回调或同步传输仍在途时返回 `-EBUSY`，不持生命周期锁等待。Running 用 Stop Endpoint，Halted 用 Reset Endpoint，Error 用 Set TR Dequeue Pointer 转为 Stopped；已有 Stopped 不重发停止命令。只有输出 context 读回 Stopped 才登记停止，再用 Configure Endpoint 的 Drop Context 移除该 endpoint，保留 Slot/EP0 和其他 endpoint 的 Context Entries；Disabled 读回确认后才摘链释放。停止成功、Drop 失败会记住进度。fatal 软件标志不等于硬件停止，只有已确认 controller halt 或 slot 停止才允许软件回收。规则参照 [Intel xHCI 1.2b](https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf) 的 4.6.6、4.6.8–4.6.10。
 
@@ -129,7 +129,7 @@ EP0 MPS、descriptor/configuration、解析/分配或部分 interface 发布失�
 
 扫描总在新枚举前重试 pending 清理；HCD 注销也可重试。slot 已停止但 interface remove 失败时保留该阶段，之后不重复 abort。普通重新连接也必须等待旧清理完成。清理重试不增加枚举次数，也不清零失败预算；扫描对同一次连接最多尝试三次枚举，只有观察到物理断开才重新计数。`port_state` 的计数/阶段位是核心私有实现，HCD 不解释它。
 
-这些变更保持公开结构布局和 ABI 10。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
+这些 USB 清理变更保持其公开结构布局；当前全局模块 ABI 11 另由 GPU vtable 扩展。它们保证已交还的已知 slot 不会因错误码而丢失所有权，不证明未知 Enable Slot 结果、HCD 自身 start/probe、致命控制器恢复或硬件停止超时已经解决；控制器必须在 `abort_slot` 返回 0 前确认不再访问相关存储。同步 control/descriptor 回调也必须在返回前解除对调用者临时缓冲区的访问，不能靠保留端口代替该回调契约。
 
 ## GPU publication 与作用域调用
 
@@ -152,23 +152,39 @@ return ret;
 
 这些入口用于任务上下文。成功 begin 必须在所有返回路径配对 end；不能复制 live access 或覆盖尚未 end 的输出，也不能等待需要该 active call 排空的生命周期修改。end 先清零输出，再结束 active call、交还独立 class 引用，允许最后 put 在锁外回收 publication/device；NULL 或已 end 的对象可再次 end。active call 保护调用期间的绑定、实例和操作表，quiesce 仍可封闭硬件提交并使调用报错；它不保证硬件持续运行，不提供 DMA 停止证明，也不保留方法返回的 framebuffer 存储。
 
-fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属性的一次内容生成，已捕获同一 publication/device/ops 并在结束时交还。sysfs 只保存复制后的内容，不在读取期间借用已结束的驱动调用；不同 open 的属性仍可观察到不同默认 GPU。fbdev 文件尚不固定到某设备，下一次操作可能选择新默认设备。mmap 安装返回后 active call 已结束，现有 VMA 仍映射裸物理地址，尚无跨解绑的 framebuffer/BO 存储租约。
+fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属性的一次内容生成，已捕获同一 publication/device/ops 并在结束时交还。sysfs 只保存复制后的内容，不在读取期间借用已结束的驱动调用；不同 open 的属性仍可观察到不同默认 GPU。fbdev 文件尚不固定到某设备，下一次操作可能选择新默认设备。mmap 安装返回后 active call 已结束；有 get_scanout 的 RAM 路径由普通 VMA 保留 VMO，旧 get_fb 物理路径仍借用 backing。
 
-`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。现有 DRM/GEM/virgl 路径仍有该旧入口和全局对象表，尚未整体迁移；需要每设备 BO/context/request/fence、文件绑定及映射退役协议。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项新函数已导出，既有 device/driver/vtable 布局与 ABI 10 不变。
+`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。现有 DRM/GEM/virgl 路径仍有该旧入口和全局对象表，尚未整体迁移；需要每设备 BO/context/request/fence、文件绑定及映射退役协议。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项 access 函数已导出，device/driver 布局不变；下述 scanout 回调扩展 GPU vtable，当前模块 ABI 11。
+
+## 连续 RAM VMO 与 owning scanout
+
+`vmo_create_contiguous(bytes, &memory)` 是内核 MM 的专用 RAM 工厂，不是新用户态对象类型或设备 DMA 分配接口。调用者在可分配的任务上下文、不持 MM/spinlock；零长度/NULL 输出返回 `-EINVAL`，超出 `PAGE_SIZE << MAX_ORDER` 返回 `-E2BIG`，分配失败返回 `-ENOMEM`，地址/CPU alias 范围异常返回 `-ERANGE`，PFA 转换失败返回 `-EIO`。错误清空有效输出且不遗留 owner。长度向页取整，物理地址 0 有效，全部暴露字节包括末页 padding 先清零。
+
+工厂在发布前分配高阶块，经已有 `pfa_split_allocated()` 一次转换为各有独立引用的 canonical order-0 页；逻辑范围只保留所需前缀，未用的幂次尾部通过 frame_put 交还。转换前的失败按原 order 释放，转换后不再原阶释放。随后发布内部 `VMO_CONTIGUOUS` 类型，沿用 VMO 原有结构、Rust ref/pin/destroy 和 TLB 后 frame_put 路径。`vmo_contiguous_info(memory, &physical, &bytes)` 要求调用者持有 VMO 引用，返回稳定的 CPU 物理基址和页取整 extent；输出在失败时清零。不可变指 extent 与 canonical slot，不是像素内容只读：resize（包括直接 Rust 桥接）返回 `-EOPNOTSUPP`，缺失 slot 返回 `-EIO`，不能 demand fault 出新页填洞。
+
+该工厂不捕获设备 mask、不建立 IOVA、不授予 DMA 权限，也不转移 cgroup charge。它适合可信内核 RAM backing；有 DMA 地址/权限要求时继续通过 domain 和 `driver_dma_map_vmo()` 检查。kind 4 已加入 canonical pin 白名单；这些页在转换后具有真实 order-0 引用，并非把高阶尾页伪装成可 pin 页。普通可变 VMO 的页快照仍不冻结 extent，连续 VMO 的 extent 固定来自其自身类型约束。
+
+GPU vtable **末尾**新增 `get_scanout(device, &snapshot)`，因此当前模块 ABI 为 **11**，旧模块必须重建。`struct gpu_scanout { struct vmo *memory; uint64_t offset; size_t size; }` 持有一份 VMO 引用；offset 页对齐，size 是正的可见字节长度，向页取整的覆盖范围必须完全落在上述不可变 RAM extent 中。提供者须在有效 class 调用内、与模式替换协调地捕获同一 backing/offset/size；即使返回错误，只要 memory 非空，也向 helper 交出该份引用。没有回调返回 `-EOPNOTSUPP`；存在回调但失败不能降级成借用物理映射。当前只接受连续 RAM，不把 VRAM/MMIO 当作普通 VMO。
+
+消费者在有效 `gpu_device_access` 内调用 `gpu_device_scanout_get()`，helper 验证类型、对齐、溢出和整页覆盖；错误清理部分输出，正数错误规范化为 `-EIO`。成功后 snapshot 独立于 class/设备/模块存活，可立即结束 access；最后在任务上下文 `gpu_scanout_put()`，该函数先清空描述符再交还 VMO 引用，NULL/已 put 描述符无操作。不能复制 live snapshot 或覆盖尚未 put 的输出。最终存储回收只进入内核 MM，不回调已经解绑的驱动。
+
+virtio-gpu 的 RAM framebuffer 已由该工厂创建；producer、临时 snapshot 和 VMA 分别持有 VMO 引用。MMU fbdev mmap/旧 `FBIO_MAP_FB` 优先走 `get_scanout`，内核 adapter 以 `mm_mmap_vmo_cap()` 接入既有 Rust VMO 放置/权限事务。wrapper 检查初始权限不超 ceiling，负责锁外 TLB begin、MM lock、locked mapper、锁外 finish/deferred release；VMA 自持 VMO，未新增 backing 注册表、VMA 字段或模块释放回调。映射使用 Normal RAM 属性、共享写入并支持 fork/split；mprotect 不得超过创建时有效硬件权限。末页 padding 可见且已清零。旧 ioctl 仍用固定 NOREPLACE。
+
+`get_fb` 继续是借用 CPU PA/可见长度的兼容查询；没有 owning 回调的 simplefb/VRAM 路径继续走下述物理视图，NOMMU 也保留旧直接地址行为。fbdev 的每次操作仍重新选择默认设备，尚未绑定每个 open 的 GPU 身份。RAM VMO 存活不证明 transport 已停止：virtio-gpu 仍需另行完善 reset 确认、失败初始化与 DMA/IRQ 退役；当前 DRM/GEM/virgl 全局对象和裸 ops、厂商 BO/VRAM/GPUVM/请求队列也未由此完成迁移。
 
 ## 驱动 CPU 物理映射事务
 
 `mm_mmap_physical(mm, addr, len, prot, flags, physical, memory_flags)` 位于原生 MM 层，供内核 class adapter 和用户驱动服务安装 CPU 物理视图。调用者在任务上下文持有 mm 引用，不持 MM/spinlock。它复用 `mmap_policy.rs` 的 fixed/hint 地址策略，不在 fbdev 或用户驱动各维护一套 VMA/PTE 事务；C 只提供字段、CPU 页表、锁与 TLB 桥接。
 
-物理起点须页对齐，长度向页取整，整段不得越过 uint64 或目标 paddr_t 的可表示范围；物理地址 0 有效。只接受非空 READ/WRITE、MAP_SHARED 及可选 FIXED/NOREPLACE；未知/私有映射返回 `-EINVAL`，EXEC 返回 `-EACCES`，NOMMU 返回 `-EOPNOTSUPP`。memory_flags 只能包含 `PTE_DEVICE`/`PTE_MAT1`，由可信调用者按 CPU 别名选择；该函数不核准任意物理区间，也不检查设备资源所有权。用户驱动仍先检查白名单，fbdev 仍先取得 class access 并核对 scanout 范围和 boot framebuffer 的 CPU 属性。不能用 DMA/IOVA 地址代替 physical。
+物理起点须页对齐，长度向页取整，整段不得越过 uint64 或目标 paddr_t 的可表示范围；物理地址 0 有效。只接受非空 READ/WRITE、MAP_SHARED 及可选 FIXED/NOREPLACE；未知/私有映射返回 `-EINVAL`，EXEC 返回 `-EACCES`，NOMMU 返回 `-EOPNOTSUPP`。memory_flags 只能包含 `PTE_DEVICE`/`PTE_MAT1`，由可信调用者按 CPU 别名选择；该函数不核准任意物理区间，也不检查设备资源所有权。用户驱动仍先检查白名单，fbdev 的旧 get_fb 路径仍先取得 class access 并核对 scanout 范围和 boot framebuffer 的 CPU 属性。不能用 DMA/IOVA 地址代替 physical。
 
 固定地址须非零、页对齐且全范围合法；NOREPLACE 对任何 VMA 重叠返回 `-EEXIST`，FIXED 调用同一 MM 事务中的 `mm_munmap_locked()` 并传播失败。hint 检查整个目标区间，碰撞或越界时重新找 gap，不再只检查起始点。安装前还检查整段现存叶 PTE，包括物理地址 0 和大页，拒绝覆盖没有 VMA 描述的旧映射。MAP_FIXED 不是保存旧映射的回滚事务：旧映射移除后发生分配/安装失败，不恢复旧内容。
 
 先在锁外分配未发布 VMA，再开启 `mm->tlb_lock` 失效事务并取得 `mm->lock`。全部 PTE 安装成功才发布一个 `VM_SHARED|VM_PFNMAP|VM_DONTFORK` 记录，记录物理 backing_offset 并更新 total_vm/RSS；以 `VM_NATIVE_CAP` 及实际 READ/WRITE 权限记录不可扩大的 mprotect ceiling。失败清理当前页的半建空路径，再逆序撤销已安装前缀；锁外完成本地/远端 TLB 失效和页表退休，随后交还未发布记录并执行 deferred release。保护变更保留原 memory type 与 dirty 历史，不能把 x86 设备 PCD/PWT 丢成普通 RAM 类型。
 
-fbdev mmap 和旧 `FBIO_MAP_FB` 已委托此事务，后者使用固定 NOREPLACE；用户驱动 `udriver_map_mmio()` 保留原 0/-1 与失败不改 out_va 的接口，内部同样使用这条 MM 路径及 Device 类型。旧 NOMMU framebuffer 直接地址接口保持原有语义，不由此获得 MMU 权限或撤销能力。模块 ABI 10、device/driver/class vtable 布局不变；用户地址空间操作由内核 adapter 承担，没有为设备模块新增用户映射入口。
+fbdev 的旧 get_fb mmap 和 `FBIO_MAP_FB` 分支委托此事务，后者使用固定 NOREPLACE；用户驱动 `udriver_map_mmio()` 保留原 0/-1 与失败不改 out_va 的接口，内部同样使用这条 MM 路径及 Device 类型。旧 NOMMU framebuffer 直接地址接口保持原有语义，不由此获得 MMU 权限或撤销能力。此物理 mapper 不改变 device/driver 布局；当前 GPU vtable 的 ABI 11 扩展见上文。用户地址空间操作由内核 adapter 承担，没有为设备模块新增用户映射入口。
 
-这是**借用物理存储的视图**：不取得 PFA frame、VMO、device、resource 或模块引用，不做 IOMMU/DMA 隔离。调用者须使 backing 在全部 VMA 和旧 TLB 访问结束前有效，或在回收/复用前撤销所有视图。fbdev 当前尚无跨解绑的 BO/scanout 租约和映射撤销协议，不能据此安全释放持久用户映射的 backing；现有驱动退出仍需独立推进。这条事务关闭安装/回滚问题，不关闭存储所有权缺口。
+这是**借用物理存储的视图**：不取得 PFA frame、VMO、device、resource 或模块引用，不做 IOMMU/DMA 隔离。调用者须使 backing 在全部 VMA 和旧 TLB 访问结束前有效，或在回收/复用前撤销所有视图。fbdev 的旧 get_fb 物理分支仍无跨解绑的 backing 引用和映射撤销协议，不能据此安全释放持久用户映射的 backing；现有驱动退出仍需独立推进。这条事务关闭安装/回滚问题，不关闭存储所有权缺口。
 
 ## 资源占用与受管映射
 
@@ -224,7 +240,7 @@ create 返回一份引用，`driver_dma_buffer_get/put()` 显式交接所有权�
 
 `driver_dma_buffer_data/address/size()` 在持引用期间返回 CPU alias、CPU 物理地址及请求字节数；size 不暴露向上取整的分配尺寸。地址 0 也可能有效，不能用它判定对象不存在。物理地址只有在显式 identity-DMA 平台上可直接作为总线地址；该对象不创建 IOVA、隔离、MMIO claim、BO 或 GPUVM；需要下述显式 buffer 映射入口才能取得 domain 的设备地址。CPU/设备可见性仍须经过既有 DMA sync/barrier。
 
-分配不取得 lifecycle mutex，可从 active class 调用使用，避免与持该锁排空 class 的退出互相等待。它只构造存储所有者，不批准硬件提交。这些函数均导出给模块，公开 device/driver/HCD 布局及 ABI 10 不变。
+分配不取得 lifecycle mutex，可从 active class 调用使用，避免与持该锁排空 class 的退出互相等待。它只构造存储所有者，不批准硬件提交。这些函数均导出给模块，这些 buffer 函数不改 device/driver/HCD 布局；当前全局模块 ABI 为 11。
 
 ### 将 buffer 显式映射到 domain
 
@@ -317,11 +333,11 @@ callback 在该 worker 上且不持有 IOMMU/queue 锁，可 signal 原生 fence
 
 `vmo_peek_page()` 返回借用 PFN，不能在解锁后用它推导稍后 frame_get 仍安全。新增 MM 接口 `vmo_pin_pages(vmo, first, count, pages)` 在调用者持 VMO 引用的任务上下文，使用同一 VMO lock 排除 resize/publication，先验证整个范围及 canonical PFN，再发布输出并通过 PFA 批量保留各帧。Rust `vmo_lifecycle.rs` 拥有这项事务，C 只提供锁/字段访问和 batch pin 原语。错误不改输出数组、不取得部分 pin。
 
-支持 ANONYMOUS、PAGED 和稀疏 SHARED_ANON 已物化 RAM；缺页返回 `-EAGAIN`，不分配页、不调用 pager，不用缺页异常隐式完成导入。物理/未知 VMO 返回 `-EOPNOTSUPP`，参数/范围/无效 PFN 返回 `-EINVAL`。单次上限 `VMO_PIN_MAX_PAGES=4096`，超过返回 `-E2BIG`；上限由 C 头文件定义，Rust 经窄查询取得同一值，用于约束 IRQ-off 遍历。更大对象分范围导入，调用者须协调跨批次 resize，不保证多个批次是同一快照。成功写出的每页都有独立 owning reference，最后由 frame_put 交还；不能把高阶尾页、VRAM 或任意物理 VMO 当作这类 canonical 页。
+支持 ANONYMOUS、PAGED、稀疏 SHARED_ANON 已物化 RAM，以及工厂发布的 CONTIGUOUS canonical RAM；缺页返回 `-EAGAIN`，不分配页、不调用 pager，不用缺页异常隐式完成导入。物理/未知 VMO 返回 `-EOPNOTSUPP`，参数/范围/无效 PFN 返回 `-EINVAL`。单次上限 `VMO_PIN_MAX_PAGES=4096`，超过返回 `-E2BIG`；上限由 C 头文件定义，Rust 经窄查询取得同一值，用于约束 IRQ-off 遍历。更大对象分范围导入，调用者须协调跨批次 resize，不保证多个批次是同一快照。成功写出的每页都有独立 owning reference，最后由 frame_put 交还；不能把高阶尾页、VRAM 或任意物理 VMO 当作这类 canonical 页。
 
 驱动入口 `driver_dma_map_vmo(domain, vmo, first, count, direction, &mapping)` 定义在 `dma_mapping.h`，由 `dma_vmo.c` 实现并导出给模块。调用者在整个调用期间持有 VMO/domain 引用；first/count 是页索引/页数，末个逻辑页的 padding 也会被映射。adapter 在 VMO lock 外分配临时 PFN 数组，取得上述稳定页快照，随后调用原有 map_pages，最后在所有返回路径归还临时 pin/数组。policy 检查完整页且先于 provider 调用；它发生在 MM 快照之后，拒绝时临时 pin 也会撤销，不留下翻译。分配失败返回 `-ENOMEM`，其他 mapper 错误原样传播；错误清空输出，除既有可失败回滚交出的非空清理句柄。
 
-mapping 独立持有所需 frame 引用，调用者在成功返回后可释放 VMO；也可缩小源 VMO，而设备仍引用取得快照时的原页面。新的 CPU fault/重新增长可能选用不同页面，不能把这解释为自动跟踪源地址。若映射失败只发布了一个前缀，清理句柄只保留那些可能被硬件访问的帧，未发布后缀的临时 pin 正常交还。失效失败仍按既有协议保留 mapping，只有全部确认成功后才进行必要 CPU sync 和最后释放。
+mapping 独立持有所需 frame 引用，调用者在成功返回后可释放 VMO；对可变源也可缩小 VMO，而设备仍引用取得快照时的原页面。新的 CPU fault/重新增长可能选用不同页面，不能把这解释为自动跟踪源地址。若映射失败只发布了一个前缀，清理句柄只保留那些可能被硬件访问的帧，未发布后缀的临时 pin 正常交还。失效失败仍按既有协议保留 mapping，只有全部确认成功后才进行必要 CPU sync 和最后释放。
 
 所有 provider/cache 调用均不持 VMO lock；锁顺序只在快照期间是 VMO → PFA，释放 VMO lock 后才取得 managed domain mutex。该接口只保证帧存活，不冻结 VMO extent，不转移 cgroup charge，也不授予源对象访问权或硬件 DMA 权限。GPU BO/request 层仍须管理访问权、驻留/预算、CPU/device 排他和提交/完成；VMO resize/销毁释放其原有预算不代表 DMA pin 已经消失。这里不增加用户态 UAPI、Linux GEM 结构依赖或 GPUVM。
 
@@ -789,3 +805,17 @@ MM 提交 `3c6f93fcc`，驱动/首个使用者提交 `1f981757b`。VMO 生命周
 双 CPU generic virtio-gpu 2D guest 实际 2/2 online，新增 `fbdev_map_test` 匹配 `FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1`：匿名邻页内容在 fixed 替换后保留，跨 gap 的 hint 不覆盖邻页，RO view 不扩权，旧 ioctl 使用 NOREPLACE；同时继续匹配 sysfs PASS 和 videoplay 10 帧。embedded 双 CPU hub guest 匹配 `DRIVER_PHYSICAL_MAP: PASS placement=1 protect=1 accounting=1`，实际 MM/Rust/PFA/VMO 组合检查叶和 VMA 的 PCD/PWT 保留、固定覆盖/权限拒绝及计数，销毁视图后才交还源 VMO；旧 GPU publication、USB endpoint/controller 退出/重绑及 VMO/buffer 标记继续通过。这些启动串行使用共享 QEMU 资源；成功日志在 `.kernel-build/physical-map-review/gpu-guest.log` 与 `hub-guest.log`。
 
 本接口借用存储，不取得 frame/backing/device/resource/module 引用，不提供 DMA/IOMMU、停止证明或映射撤销。持久 framebuffer backing、DRM 每设备 BO/context/request、GPUVM 和失败退役仍待实现；没有增加设备模块的用户映射导出或改变 ABI 10。上述模拟器结果不证明实体 GPU 加速、完整 ILP32 运行或远端 TLB 的并发压力。文档引用检查通过 540 条；导航仍为迁移工作区既有 7 项缺失。实际 docs/zh 迁移与其他会话修改保留；本轮完整证据在 `.kernel-build/physical-map-review/`。
+
+### 连续 RAM VMO 与 owning scanout 验证（2026-11-14）
+
+MM 提交 `1c5172d60`，GPU/fbdev 与 ABI 11 提交 `3f150e766`。先分别导出 MM 中间树和最终完整树：前者通过 45 个驱动 unittest 方法及既有 Rust mmap policy 106 项检查，后者通过 296 个不同驱动 unittest 方法。7 项连续工厂与 7 项 GPU snapshot 方法包括实际 PFA split、Rust 引用/最终销毁、virtio producer 的 get/remove/release、fbdev adapter 与 unlocked MM ceiling wrapper；分配/地址、locked mapper、transport/IRQ 等边界仍为模型。独立 PFA geometry/split 脚本和完整 VMO page host 的 14 项 Rust 测试通过；直接 rustc --test 但没有测试体的运行不计入证据。
+
+在隔离完整树逐项破坏 PFA split、清零、尾部交还、专用构造、两层 resize 拒绝、禁止补洞、producer 引用/释放、snapshot 释放及先清零时序、错误引用回收、不可变 kind 检查、offset 对齐、size 溢出、fbdev 临时引用/offset 和初始权限 ceiling，共 18 项负控均编译成功并在运行时失败。首个对齐输入也被范围检查拦截，不能独立证明对齐；fixture 收紧为仍在 extent 内的非对齐小范围后重新验证全部负控，并在恢复后运行上述 296 项回归。29 个代码/配置路径与恢复后导出树及提交逐一核对。
+
+完整 `check-firmware-model` 通过 525 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 161 项；这两次门禁运行于对齐 fixture 收紧前，最终收紧由隔离回归/负控覆盖。初次 firmware gate 因 requester/queue fixture 缺少新工厂声明而失败，不计成功；补齐共同头后，两项完整门禁及相关 fixture 均通过。115 个 instance、32 个 driver component、195 个 smoke case 清单审计通过。
+
+实际 generic virtio-gpu 2D guest 为双 CPU、2/2 online，要求 `FBDEV_MAP: PASS fixed=1 noreplace=1 hint=1 ceiling=1 legacy=1 fork=1`，检查 resident framebuffer 页在 fork 后共享写入，sysfs PASS 与 videoplay 10 帧继续通过。embedded hub guest 也是 2/2 online，新增 `DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1`，生产者完整解绑后以真实 VMO/VMA 引用完成 split、fork、部分 unmap 和 pin 交还；这个合成内核视图尚未 fault 用户 PTE，resident 路径由前一用户程序覆盖。旧 GPU access、物理视图及 USB 生命周期标记保留。
+
+RISC-V embedded 单核 native IOMMU/EDU guest 匹配全部 7 项预期，新增 `DRIVER_IOMMU_CONTIGUOUS_VMO: PASS canonical=1 offset=1 dma=1 lifetime=1`；源 VMO 先销毁，真实 EDU 随后对页 1–2 的 IOVA 跨页往返，确认停止/BME 清除后 unmap。旧 ANONYMOUS VMO、高阶 buffer、不连续页、权限和故障/watch 用例同时保留。三个启动串行运行并观察到最终退出，成功 guest 日志保存在 `.kernel-build/scanout-vmo-review/guest-gpu-retained.log`、`guest-hub.log`、`guest-iommu.log`。
+
+当前文档引用检查通过 540 条；导航检查仍报告共享迁移工作区既有 7 篇未编目文档，本轮没有新增导航/锚点错误。14 篇文档仅投影本轮内容到 canonical 路径提交，保留其他会话的 docs/zh 迁移。完整日志及负控在 `.kernel-build/scanout-vmo-review/`。此证据验证 RAM 引用链，未执行实体 GPU 加速或实际 virtio 解绑后的停止确认；raw 物理视图、DRM 全局对象/每文件身份和厂商 BO/GPUVM 仍需后续开发。
