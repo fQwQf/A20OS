@@ -12,6 +12,7 @@
 #include "drivers/bus/pci_bus.h"
 #include "drivers/usb/usb.h"
 #include "mm/frame.h"
+#include "mm/vmo.h"
 #include "mm/slab.h"
 #include "core/bootargs.h"
 #include "core/errno.h"
@@ -402,6 +403,34 @@ static void exercise_dma_buffer(void) {
     CHECK(!owner.references);
 }
 
+static void exercise_dma_vmo(void) {
+    device_t owner = {.name = "dma-vmo-selftest", .references = 1};
+    CHECK(!device_register(&owner));
+    struct driver_dma_domain *domain;
+    struct driver_dma_mapping *mapping;
+    CHECK(!driver_dma_domain_create_direct(&owner, &domain)); /* Explicit identity fixture. */
+    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, 2 * PAGE_SIZE + 33, 0);
+    CHECK(vmo);
+    CHECK(driver_dma_map_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &mapping) == -EAGAIN && !mapping);
+    CHECK(vmo_peek_page(vmo, 1) == PFN_NONE && vmo_peek_page(vmo, 2) == PFN_NONE);
+    pfn_t first = vmo_get_page(vmo, 1), second = vmo_get_page(vmo, 2);
+    CHECK(first != PFN_NONE && second != PFN_NONE);
+    CHECK(!driver_dma_map_vmo(domain, vmo, 1, 2, DRIVER_DMA_BIDIRECTIONAL, &mapping));
+    uint64_t address;
+    CHECK(driver_dma_mapping_count(mapping) == 2);
+    CHECK(!driver_dma_page_address(mapping, 0, &address) && address == pfn_to_phys(first));
+    CHECK(!driver_dma_page_address(mapping, 1, &address) && address == pfn_to_phys(second));
+    CHECK(!vmo_resize(vmo, 0));
+    vmo_release(vmo);
+    uint8_t *data = pfn_to_virt(second);
+    data[32] = 0xc4;
+    CHECK(!device_unregister(&owner));device_put(&owner);
+    CHECK(owner.references == 1 && !driver_dma_mapping_sync_for_device(mapping));
+    CHECK(!driver_dma_mapping_sync_for_cpu(mapping) && data[32] == 0xc4);
+    CHECK(!driver_dma_try_unmap_pages(&mapping) && !mapping);
+    driver_dma_domain_put(domain);CHECK(!owner.references);
+}
+
 static void exercise_dma_buffer_mapping(void) {
     device_t owner = {.name = "dma-buffer-map-selftest", .references = 1};
     CHECK(!device_register(&owner));
@@ -512,6 +541,7 @@ void driver_runtime_selftest_boot(void)
     exercise_resources();
     exercise_dma_buffer();
     exercise_dma_buffer_mapping();
+    exercise_dma_vmo();
     exercise();
     exercise_firmware();
     if (boot_flag(args, "driver.usb_bulk_test=1"))
@@ -533,7 +563,8 @@ void driver_runtime_selftest_boot(void)
     /* Keep all witnesses in one end-of-test console record. A best-effort
      * SMP console must not show overall PASS while dropping only the resource
      * result printed during concurrent background-thread startup. */
-    kinfo("%sDRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
+    kinfo("%sDRIVER_DMA_VMO: PASS snapshot=1 resize=1 lifetime=1\n"
+          "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
           "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",

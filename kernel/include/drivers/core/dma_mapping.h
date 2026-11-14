@@ -9,6 +9,7 @@ struct device;
 struct driver_dma_domain;
 struct driver_dma_mapping;
 struct driver_dma_buffer;
+struct vmo;
 
 enum driver_dma_direction {
     DRIVER_DMA_TO_DEVICE,
@@ -153,6 +154,18 @@ int driver_dma_map_pages(struct driver_dma_domain *domain, const pfn_t *pages,
  * Unmap failure retains the entire buffer, including unexposed backing. */
 int driver_dma_map_buffer(struct driver_dma_domain *, struct driver_dma_buffer *,
                            enum driver_dma_direction, struct driver_dma_mapping **out);
+/* Page-indexed import of existing VMO RAM. Caller holds VMO/domain references.
+ * Takes a stable, nonfaulting vmo_pin_pages snapshot, then maps those order-0
+ * frames. Missing pages -> -EAGAIN, physical VMOs -> -EOPNOTSUPP; count is
+ * bounded by VMO_PIN_MAX_PAGES. Includes the last logical page's padding.
+ * No VMO lock is held during allocation, provider calls or cache sync.
+ * Temporary snapshot pins are returned on every path; usable/cleanup mappings
+ * retain their own frame refs, independent of later VMO resize/destruction.
+ * Same non-NULL error cleanup contract and try_unmap API as map_pages. Not a
+ * residency/extent lease: coordinate CPU access and resizing before submission. */
+int driver_dma_map_vmo(struct driver_dma_domain *, struct vmo *, uint32_t first,
+                        uint32_t count, enum driver_dma_direction,
+                        struct driver_dma_mapping **out);
 /* Number of retained page entries, including during failed cleanup. A buffer
  * mapping retains its whole allocation regardless of this count. */
 size_t driver_dma_mapping_count(const struct driver_dma_mapping *mapping);
