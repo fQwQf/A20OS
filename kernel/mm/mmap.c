@@ -560,3 +560,20 @@ vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
     mm_tlb_invalidate_finish(mm);
     return r;
 }
+
+vaddr_t mm_mmap_vmo_cap(mm_struct_t *mm, vaddr_t addr, size_t len,
+                        int prot, int flags, struct vmo *vmo,
+                        uint64_t offset, uint32_t cap)
+{
+    if (!mm || !vmo || (cap & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) ||
+        (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))) return (vaddr_t)-EINVAL;
+    if ((uint32_t)prot & ~cap) return (vaddr_t)-EACCES;
+    mm_tlb_invalidate_begin(mm);
+    uint64_t irq = spin_lock_irqsave(&mm->lock);
+    vaddr_t result = mm_mmap_vmo_cap_locked(mm, addr, len, prot, flags, vmo,
+                                           offset, cap, NULL);
+    spin_unlock_irqrestore(&mm->lock, irq);
+    mm_tlb_invalidate_finish(mm);
+    mm_vma_flush_deferred(mm);
+    return result;
+}

@@ -47,6 +47,8 @@ void a20_vmo_sparse_free_node(void *node) { kfree(node); }
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
+    /* This kind must never be published with missing/mutable pages. */
+    if (type == VMO_CONTIGUOUS) return NULL;
     /* page_count is u32; reject rounding and allocation-size overflow before
      * a truncated page array can be indexed by a later demand fault. */
     if (size > (uint64_t)-1 - (PAGE_SIZE - 1))
@@ -91,6 +93,57 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
     return vmo;
 }
 
+int vmo_create_contiguous(size_t bytes, struct vmo **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!bytes) return -EINVAL;
+    if (bytes > ((size_t)PAGE_SIZE << MAX_ORDER)) return -E2BIG;
+    size_t rounded = (bytes + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, rounded, 0);
+    if (!vmo) return -ENOMEM;
+    int order = 0;
+    while (((size_t)PAGE_SIZE << order) < rounded) order++;
+    pfn_t head = pfa_alloc(order);
+    if (head == PFN_NONE) { vmo_release(vmo); return -ENOMEM; }
+    pfn_t last = head + (pfn_t)(rounded / PAGE_SIZE - 1);
+    if (last < head || !pfn_valid(head) || !pfn_valid(last)) {
+        pfa_free(head, order); vmo_release(vmo); return -ERANGE;
+    }
+    uint64_t physical = pfn_to_phys(head);
+    void *data = pfn_to_virt(head);
+    if (!data || (uintptr_t)data > (uintptr_t)-1 - (rounded - 1) ||
+        (physical & (PAGE_SIZE - 1)) || physical > (uint64_t)-1 - (rounded - 1) ||
+        pfn_to_phys(last) != physical + rounded - PAGE_SIZE ||
+        (uintptr_t)pfn_to_virt(last) != (uintptr_t)data + rounded - PAGE_SIZE) {
+        pfa_free(head, order); vmo_release(vmo); return -ERANGE;
+    }
+    memset(data, 0, rounded); /* Includes the exposed final-page padding. */
+    if (pfa_split_allocated(head, order)) {
+        pfa_free(head, order); vmo_release(vmo); return -EIO;
+    }
+    /* No failure after transfer. Never free the original block after split. */
+    for (uint32_t i = 0; i < vmo->page_count; i++) vmo->pages[i] = head + i;
+    for (size_t i = vmo->page_count; i < ((size_t)1 << order); i++)
+        frame_put(head + (pfn_t)i);
+    vmo->type = VMO_CONTIGUOUS;
+    vmo->phys_size = rounded;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, rounded / PAGE_SIZE);
+    *out = vmo;
+    return 0;
+}
+
+int vmo_contiguous_info(const struct vmo *vmo, uint64_t *physical, size_t *bytes)
+{
+    if (physical) *physical = 0;
+    if (bytes) *bytes = 0;
+    if (!vmo || !physical || !bytes || vmo->type != VMO_CONTIGUOUS ||
+        !vmo->page_count || !vmo->pages || vmo->pages[0] == PFN_NONE)
+        return -EINVAL;
+    *physical = pfn_to_phys(vmo->pages[0]);
+    *bytes = (size_t)vmo->size;
+    return 0;
+}
 
 void vmo_release(struct vmo *vmo)
 {
@@ -273,6 +326,10 @@ int a20_vmo_page_lock(struct vmo *vmo, uint32_t index, uint64_t *flags_out)
         spin_unlock_irqrestore(&vmo->lock, flags);
         return -EINVAL;
     }
+    if (vmo->type == VMO_CONTIGUOUS && vmo->pages[index] == PFN_NONE) {
+        spin_unlock_irqrestore(&vmo->lock, flags);
+        return -EIO; /* Never materialize a hole in a fixed physical extent. */
+    }
     *flags_out = flags;
     return 0;
 }
@@ -377,6 +434,7 @@ void a20_vmo_page_publish_locked(struct vmo *vmo, uint32_t index,
 
 int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 {
+    if (vmo && vmo->type == VMO_CONTIGUOUS) return -EOPNOTSUPP;
     if (vmo && vmo->type == VMO_SHARED_ANON)
         return -EPERM;
     return a20_vmo_resize_rust(vmo, new_size);
@@ -386,6 +444,7 @@ int a20_vmo_resize_lock(struct vmo *vmo, uint64_t *flags_out)
 {
     if (!vmo || !flags_out)
         return -EINVAL;
+    if (vmo->type == VMO_CONTIGUOUS) return -EOPNOTSUPP;
     *flags_out = spin_lock_irqsave(&vmo->lock);
     return 0;
 }
