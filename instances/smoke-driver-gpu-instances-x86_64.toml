@@ -1,0 +1,19 @@
+name = "smoke-driver-gpu-instances-x86_64"
+description = "Two native virtio-gpu queues survive independent device stop and rebind"
+arch = "x86_64"
+abi = "both"
+
+[kernel]
+driver_deployment = "embedded"
+
+[machine]
+memory = "1G"
+smp = 2
+extra_qemu = ["-vga", "none", "-device", "virtio-gpu-pci", "-device", "virtio-gpu-pci", "-append", "driver.runtime_test=1 driver.gpu_instances_test=1"]
+
+[test]
+expect = ["DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1", "DRIVER_RUNTIME: PASS"]
+timeout = "60s"
+
+[net]
+stack = "bsd"

@@ -194,7 +194,13 @@ quiesce 原子关闭提交，先于 class drain，不等待 command mutex。四�
 
 remove 先拒绝 command_active，再 trylock；这同时防止原生递归 mutex 把同上下文的活动命令误当成可退出。忙返回 `-EBUSY`，不在 lifecycle 锁下等候 issuer。所有合法 class 调用已由核心排空，随后在 mutex 内执行可失败 reset；确认成功后才 free_irq 排空 handler、撤销默认选择并交还命令/framebuffer owner。reset 失败保留全部状态，既不清 drv_priv，也不释放 RAM 或 IRQ。snapshot/VMA 引用可在 producer 成功退出后继续保留旧 RAM。
 
-该旧驱动仍为单静态 controlq 实例，尚未实现每设备队列。实例有生命周期域内的 owner 守卫：已绑定或失败清理保留时，其他匹配设备返回 `-EBUSY`，绝不 memset 覆盖其 DMA 存储；仅成功 remove 才允许后续 claim。它复用原生绑定所有权，不是另建公开设备注册表。DRM 已使用文件 publication 和 scoped access，并按旧绑定停止凭据保留/退休外部 GEM backing；此处队列防护仍不能替代厂商请求/fence 引用、GPU 多实例或一般热拔插协议。
+### VirtIO GPU 的每设备实例
+
+virtio-gpu 不再使用全局静态实例或 owner 槽。每次 probe 在选择原生失败清理后，先以 `driver_dma_buffer_create(dev, sizeof(virtio_gpu_inst_t), __alignof__(virtio_gpu_inst_t), &allocation)` 分配独立的零填充、物理连续且满足当前 mask 的实例。该 owner 保留设备元数据，覆盖内嵌 controlq、固定命令暂存、mutex 和等待队列；transport、EDID、feature、fence 序号、动态 staging 与 framebuffer VMO 引用也都在同一 `dev->drv_priv` 中。每个绑定仍只有一个同步 controlq，不是每请求或每进程队列。驱动无需另建实例注册表。
+
+分配失败保留原生 errno，不访问 transport、不发布 drv_priv，也不留下设备 pin；同一 device 已有 drv_priv 返回 `-EBUSY`，其他 device 不受影响。probe 后续失败交给既有 quiesce/remove，保留这一个部分实例。关闭、未知完成和 reset 失败只封闭该设备；不覆盖或重置另一设备的队列。成功 remove 先确认 reset、排空 IRQ，再注销默认选择并清 drv_priv、交还动态 staging/framebuffer producer 引用；最后释放 command mutex，才 put 包含 mutex 本身的实例 allocation。失败则完整保留 allocation、设备 pin、IRQ 和 backing，显式重试同一绑定。
+
+这复用已有 DMA buffer 的分配与所有权，不扩展 device/driver/GPU vtable 或 ABI 11。allocation 地址是 CPU 物理地址，现有队列仍使用平台恒等 DMA 假设；没有由此建立 IOMMU domain、GPUVM、厂商任务/fence 或安全物理拔除协议。旧 scanout 的 VMO/VMA 和 DRM 的 publication/GEM 各自持有独立所有权，实例释放不撤销这些 CPU 存储引用。两个 VirtIO 设备能独立运行，不表示 card0/renderD128 默认聚合入口已变成多 GPU 节点枚举或跨 GPU PRIME attach。
 
 ## DRM 文件、命名空间与失败退休
 
@@ -897,3 +903,17 @@ DRM 文件现在固定一次 open 捕获的 publication，GEM/FB/CRTC/EDID/事�
 另串行运行 generic 模块双核 2D 显示门禁，保留 resident framebuffer fork、DRM_SYSFS 与 videoplay 10 帧；RISC-V `smoke-drm-prime` 用户态门禁通过 shared mapping、SCM_RIGHTS、export lifetime、80 exports 和 sync-file。成功日志分别保存在 `.kernel-build/drm-binding-review/guest-stop-final-serial.log`、`guest-generic-final-serial.log`、`guest-prime-final-serial.log`。x86 生命周期 guest 另通过 class 发布/解绑、失败 remove 保留/重试、受管失败 probe、remove prepare 和三类 registry 扩容标记；日志在 `guest-lifecycle-final-serial.log`。
 
 当前文档引用检查通过 540 条，导航仍报告共享迁移工作区既有 7 篇未编目文档，没有新增链接/锚点错误。13 篇文档仅把本轮内容投影到 canonical 路径，保留 docs/zh 迁移及其他会话修改。完整本地证据在 `.kernel-build/drm-binding-review/`。同 publication 每文件 handle/auth、旧物理 framebuffer 视图、virtio 每设备队列、厂商 BO/VRAM/GPUVM、请求/fence 与模块 unload 仍是后续工作。
+
+### VirtIO GPU 每设备 DMA 实例验证（2026-11-14）
+
+virtio-gpu 已移除静态实例/全局 owner，改为每绑定原生 DMA buffer，队列、暂存、mutex/等待队列和失败状态独立。buffer 同时保留设备元数据；失败 probe/停止保留该实例，成功停止在 IRQ drain、producer 存储交还和 mutex 解锁后才 put allocation。公开结构和模块 ABI 11 不变；仍沿用原有恒等 DMA 假设，不自动创建 domain。此前历史记录中的单静态 controlq 限制由本轮关闭，每设备仍只有一个同步 controlq。
+
+`test_virtio_gpu_stop` 现有 20 个 unittest 方法：保留既有 reset/四条 issuer/失败 probe/停止重试，新增实例分配 OOM/架构拒绝不发布私有状态、两设备 queue/framebuffer 独立、失败 remove 与 command fault 不影响 peer，并检查成功销毁释放 allocation 和设备 pin。fixture 执行实际 native DMA buffer create/data/put、GPU claim/init/command/remove、PFA split 与 Rust VMO 引用/最终回收；寄存器、clock、IRQ、核心注册状态、页分配和 CPU alias 仍为模型。旧 scanout fixture 也改为在 allocation put 时销毁 host 实例，再检查 owning VMO 可继续存在，不能在 remove 后读取已释放实例。第一次广门禁因旧 fixture 缺少 allocation 字段而编译失败，不计成功；同步其模型边界后重新执行下述最终回归。
+
+隔离导出的最终源码树通过 347 个不同驱动 unittest 方法。7 个编译成功负控分别引入共享实例、覆盖已有绑定、丢失 allocation 所有权、漏 final put、保留悬空 drv_priv、先 put 再解锁和 reset 失败即释放，均被运行时断言/ASan 拒绝；还原后执行完整隔离回归。原生 buffer 的既有 7 项独立测试与 PC 模块包装器 imports 检查一并保留。最终 `check-firmware-model` 通过 575 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 211 项；117 个 instance、32 个 component 的清单审计通过。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行 AArch64 guest。
+
+新增 `smoke-driver-gpu-instances-x86_64` 是 embedded、双 CPU、两个真实 QEMU virtio-gpu-pci；日志观察到两个独立 1024×768 framebuffer 和实际 2/2 CPU online。fixture 通过 owning scanout、真实 transfer/set-scanout/flush、独立 DRM publication，逻辑注销默认 device 后确认旧凭据成立、peer 实例/文件仍在线并继续 flush、默认 promotion 到 peer；重新登记后新 publication/VMO 不同，peer 指针和两个 RAM canary 不变，旧 VMA 仍持有旧 VMO。成功标记为 `DRIVER_GPU_INSTANCES: PASS devices=2 independent=1 stop=1 retained=1 rebind=1`。这是原生 device unregister/register，不是物理 PCI 热拔出、真实 reset 超时注入、virgl 或厂商 GPU 加速；内核 fixture 不 fault 用户 PTE。
+
+另串行完成既有 embedded 双核 stop/DRM reaper 门禁、generic 模块双核 2D 门禁和 RISC-V PRIME 用户态门禁；保留旧 VMA/重绑、resident framebuffer fork、DRM_SYSFS、videoplay 10 帧、shared mapping/SCM_RIGHTS/80 exports/sync-file 结果。完整成功 guest 日志位于 `.kernel-build/gpu-instance-review/guest-instances-serial.log`、`guest-stop-serial.log`、`guest-generic-serial.log`、`guest-prime-serial.log`。旧实例的退出没有使外部 scanout/DRM 引用重新依赖驱动模块。
+
+九篇文档仅将本轮内容投影到 canonical 路径，保留共享 docs/zh 迁移和其他改动。工作区引用检查通过 540 条；导航仍报告既有 7 篇未编目文档，没有新增链接/锚点错误。本轮本地证据在 `.kernel-build/gpu-instance-review/`。多 GPU 用户节点/显示拓扑、跨 GPU PRIME attach、每文件 handle 权限、厂商 BO/GPUVM/任务与可失败关机/恢复仍需继续实现。

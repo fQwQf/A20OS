@@ -50,6 +50,7 @@ A20OS 现在同时支持三种驱动路径：
 
 - 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
+- VirtIO GPU 实例：驱动使用既有 `driver_dma_buffer_create/data/put` 持有每绑定队列/锁/暂存，实例退出后不留下模块回调；模块边界测试实际编译包装器并核对这些 imports。私有实例不扩展 ABI 11；停止失败保留 allocation，不允许卸载代码，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
 - VirtIO transport：`virtio_transport_reset` 通过既有 read32/write32 完成有界 status 读回确认，失败不释放 queue/IRQ/存储；不扩展 transport vtable，模块 ABI 保持 11，见 [退出协议](native-runtime.md#virtio-reset-确认与-gpu-退出)。
 - RAM scanout：`gpu_device_scanout_get`、`gpu_scanout_put`、`vmo_create_contiguous`、`vmo_contiguous_info`、`vmo_ref`、`vmo_release` 已加入白名单。snapshot 和普通 VMA 自持 MM 存储，不需要在最终 release 时调用设备模块；不授予 DMA 权限或证明硬件停止，见 [连续 RAM VMO](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 - 原生绑定停止：`class_device_binding_stopped` 记录旧 publication 的显式成功 remove，`device_release_resource_action` 在串行 probe/lifecycle 中精确撤销一个局部回收动作；核心私有凭据不扩展公开布局，ABI 保持 11。离线不是停止，详见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。

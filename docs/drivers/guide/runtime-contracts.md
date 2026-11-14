@@ -24,7 +24,7 @@ fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议
 
 ## VirtIO 停止与失败保留
 
-VirtIO driver 可用导出的 `virtio_transport_reset(t, timeout_ms)` 在排除提交/重初始化、保留 transport/存储时写 0 并等待读回 0。时间和 poll 双预算，失败返回 `-ETIMEDOUT`，不交还任何硬件可达资源。virtio-gpu 已选择原生失败 probe 清理：quiesce 封闭四个 issuer，超时/异常 completion 封闭共享暂存区，remove 在 reset 确认后才排空 IRQ 和交还 owner；失败保留绑定、存储与重试入口。单静态实例有明确 owner 守卫，不能覆盖尚未退出的设备。调用/错误/限制见 [VirtIO reset](native-runtime.md#virtio-reset-确认与-gpu-退出)。
+VirtIO driver 可用导出的 `virtio_transport_reset(t, timeout_ms)` 在排除提交/重初始化、保留 transport/存储时写 0 并等待读回 0。时间和 poll 双预算，失败返回 `-ETIMEDOUT`，不交还任何硬件可达资源。virtio-gpu 已选择原生失败 probe 清理：quiesce 封闭四个 issuer，超时/异常 completion 封闭共享暂存区，remove 在 reset 确认后才排空 IRQ 和交还 owner；失败保留绑定、存储与重试入口。每个 device 以原生 DMA buffer 持有独立队列/暂存/锁，分配失败不发布 drv_priv；停止失败只保留该实例，成功退出在释放 command mutex 后才 put 实例 allocation。其他设备可继续提交，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。调用/错误/限制见 [VirtIO reset](native-runtime.md#virtio-reset-确认与-gpu-退出)。
 
 ## MMIO
 

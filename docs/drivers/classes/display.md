@@ -2,6 +2,8 @@
 
 A20OS 的 display 类（`DEV_CLASS_DISPLAY`，`gpu_dev_ops_t`）包含两层：2D 扫描输出与 framebuffer（本文件主题），以及 virtio-gpu 3D (virgl) 透传（[3D 图形加速栈](../../graphics/3d-graphics.md)）。2D 层只承诺扫描输出；3D 层通过 virtio-gpu 的 `SUBMIT_3D` 把 virgl 命令流转发到 host 端 GL 上下文。
 
+virtio-gpu 已按每个 device 独立分配原生 DMA 实例，内嵌 controlq、锁、等待队列和暂存均由该绑定持有；停止失败保留本实例，不影响其他设备。双设备的逻辑注销/重绑和默认 promotion 已有 QEMU 验证。当前 fbdev/DRM devfs 仍是默认聚合入口，内部实例化不等于多 GPU 节点、跨 GPU PRIME 或显示拓扑管理，详见 [每设备实例](../guide/native-runtime.md#virtio-gpu-的每设备实例)。
+
 ## 驱动接入
 
 probe 初始化完成并设置 `dev->drv_priv` 后调用：
