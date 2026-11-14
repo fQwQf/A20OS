@@ -31,6 +31,7 @@
 #include "mm/vm.h"
 #include "mm/vmo.h"
 #include "proc/proc.h"
+#include "cg/cgroup.h"
 #include "sys/usercopy.h"
 
 /*
@@ -183,6 +184,7 @@ typedef struct drm_call {
     drm_device_t *device;
     drm_context_t *context;
     struct gpu_device_access access; /* owning, stack scoped; never cached */
+    struct cg_node *allocation_group; /* borrowed outer ioctl pin, not a field owner */
 } drm_call_t;
 
 static mutex_t g_drm_devices_lock = MUTEX_INIT;
@@ -225,7 +227,7 @@ static int drm_device_online(drm_device_t *device)
     return __atomic_load_n(&device->publication->online, __ATOMIC_ACQUIRE);
 }
 
-/* The registry retains a namespace while legacy shared handles or failed
+/* The registry retains a namespace while file owners, exported pins or failed
  * hardware cleanup may still own storage. Teardown retirement is separate
  * from class offline: never infer DMA stop from the absence of a binding. */
 static int drm_device_get(class_device_t *publication, drm_device_t **out)
@@ -1195,36 +1197,38 @@ static int drm_fb_release(drm_call_t *call, uint32_t fb_id)
 }
 
 /*
- * Allocate a GEM object backed by a fresh anonymous VMO.  Both the GEM and the
+ * Allocate a GEM object backed by a fresh resident RAM VMO.  Both the GEM and the
  * dumb-buffer paths funnel through here so there is exactly one place that
  * hands out handles and VMOs.
  */
-static drm_gem_t *drm_gem_alloc_locked(drm_call_t *call, uint32_t width, uint32_t height,
+static int drm_gem_alloc(drm_call_t *call, uint32_t width, uint32_t height,
                                        uint32_t pitch, uint32_t bpp,
                                        uint32_t format, uint32_t usage,
-                                       uint64_t size)
+                                       uint64_t size, drm_gem_t **out)
 {
+    *out = NULL;
     /* Bound each backing VMO independently of resource format and import path. */
     if (!call->context || size == 0 || size > DRM_MAX_BUFFER_BYTES)
-        return NULL;
+        return -EINVAL;
     drm_gem_t *g = kmalloc(sizeof(*g));
     if (!g)
-        return NULL;
+        return -ENOMEM;
     memset(g, 0, sizeof(*g));
     g->device = call->device;
-    /* Reserve the only remaining fallible adapter allocation before VMO
-     * construction. A successful VMO must never be released under store_lock. */
+    /* Build the entire backing outside store_lock. The outer device operation
+     * serializes publication; reclaim/charging must not run under this lock. */
     drm_handle_t *entry = kmalloc(sizeof(*entry));
     if (!entry) {
         kfree(g);
-        return NULL;
+        return -ENOMEM;
     }
-    g->vmo = vmo_create(VMO_ANONYMOUS, size, 0);
-    if (!g->vmo) {
+    int result = vmo_create_resident((size_t)size, call->allocation_group, &g->vmo);
+    if (result) {
         kfree(entry);
         kfree(g);
-        return NULL;
+        return result;
     }
+    drm_lock(call);
     uint32_t h;
     do {
         h = call->device->gem_next_handle++;
@@ -1243,7 +1247,9 @@ static drm_gem_t *drm_gem_alloc_locked(drm_call_t *call, uint32_t width, uint32_
     g->handle_refs = 1;
     g->next = call->device->gems[h % DRM_GEM_BUCKETS];
     call->device->gems[h % DRM_GEM_BUCKETS] = g;
-    return g;
+    drm_unlock(call);
+    *out = g;
+    return 0;
 }
 
 static int drm_gem_name_bind_locked(drm_call_t *call, uint32_t name, uint32_t handle)
@@ -2270,14 +2276,11 @@ static int drm_gem_create(drm_call_t *call, void *arg)
     if (c.size == 0 || c.size > DRM_MAX_BUFFER_BYTES)
         return -EINVAL;
 
-    drm_lock(call);
-    drm_gem_t *g = drm_gem_alloc_locked(call, c.width, c.height, 0, c.bpp, c.format,
-                                        0, c.size);
-    if (g)
-        c.handle = g->handle;
-    drm_unlock(call);
-    if (!g)
-        return -ENOMEM;
+    drm_gem_t *g;
+    int result = drm_gem_alloc(call, c.width, c.height, 0, c.bpp, c.format,
+                                0, c.size, &g);
+    if (result) return result;
+    c.handle = g->handle;
     if (copy_to_user(arg, &c, sizeof(c)) < 0) {
         drm_free_gem(call, c.handle);
         return -EFAULT;
@@ -2415,14 +2418,11 @@ static int drm_mode_create_dumb(drm_call_t *call, void *arg)
     if (drm_dumb_layout(d.width, d.height, d.bpp, &pitch, &size) < 0)
         return -EINVAL;
 
-    drm_lock(call);
-    drm_gem_t *b = drm_gem_alloc_locked(call, d.width, d.height, pitch, d.bpp, 0,
-                                        DRM_BO_USE_LINEAR, size);
-    if (b)
-        d.handle = b->handle;
-    drm_unlock(call);
-    if (!b)
-        return -ENOMEM;
+    drm_gem_t *b;
+    int result = drm_gem_alloc(call, d.width, d.height, pitch, d.bpp, 0,
+                                DRM_BO_USE_LINEAR, size, &b);
+    if (result) return result;
+    d.handle = b->handle;
 
     d.pitch = pitch;
     d.size = size;
@@ -2976,16 +2976,14 @@ static int drm_gem_attach_backing(drm_call_t *call, drm_gem_t *g)
     if (!entries)
         return -ENOMEM;
 
-    /* The host places entry n at offset n * PAGE_SIZE, so an entry list with a
-     * hole in it maps the wrong frames: if page 3 of 8 cannot be materialised
-     * and the survivors are compacted, entry 3 becomes page 4's frame and the
-     * renderer draws into a buffer it was never given, with no error anywhere.
-     * A partial set is therefore a failure, not something to publish. */
+    /* Resident backing is already complete and immutable. Preserve page index
+     * order; a hole is a broken storage invariant, never a request to allocate
+     * or compact entries while publishing backing to the device. */
     int rc = 0;
     for (uint32_t i = 0; i < npages; i++) {
-        pfn_t pfn = PFN_NONE;
-        if (vmo_get_page_charged(gvmo, i, NULL, &pfn) < 0) {
-            rc = -ENOMEM;
+        pfn_t pfn = vmo_peek_page(gvmo, i);
+        if (pfn == PFN_NONE) {
+            rc = -EIO;
             break;
         }
         uint64_t off = (uint64_t)i * PAGE_SIZE;
@@ -3032,12 +3030,10 @@ static int drm_virtgpu_resource_create(drm_call_t *call, void *arg)
 
     /* Linux RESOURCE_CREATE allocates a new GEM. Both handles are outputs;
      * Mesa does not preallocate one through an A20-specific ioctl. */
+    drm_gem_t *g;
+    int rc = drm_gem_alloc(call, r.width, r.height, r.stride, 0, 0, 0, size, &g);
+    if (rc) return rc;
     drm_lock(call);
-    drm_gem_t *g = drm_gem_alloc_locked(call, r.width, r.height, r.stride, 0, 0, 0, size);
-    if (!g) {
-        drm_unlock(call);
-        return -ENOMEM;
-    }
     g->pins++;
     uint32_t handle = g->handle;
     uint32_t res_id = call->device->virtgpu_next_res++;
@@ -3049,7 +3045,7 @@ static int drm_virtgpu_resource_create(drm_call_t *call, void *arg)
     g->virgl_res_id = res_id;
     g->is_virgl = 1; /* Keep the cleanup identity even if creation times out. */
     drm_unlock(call);
-    int rc = ops->resource_create_3d(drm_gpu_device(call), (uint32_t)cid, res_id,
+    rc = ops->resource_create_3d(drm_gpu_device(call), (uint32_t)cid, res_id,
                                      r.target, r.format, r.bind, r.width,
                                      r.height, r.depth, r.array_size,
                                      r.last_level, r.nr_samples, r.flags);
@@ -3659,9 +3655,16 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         import = fdtable_get_current_file_ref(prime.fd);
         if (!import) return -EBADF;
     }
+    /* cg_task_group_pin takes task park_lock. Capture before the GPU mutex,
+     * keep it valid through allocation, and unpin after the operation ends. */
+    struct cg_node *allocation_group = NULL;
+    if (req == A20_GPU_IOCTL_GEM_CREATE || req == DRM_IOCTL_MODE_CREATE_DUMB ||
+        req == DRM_IOCTL_VIRTGPU_RESOURCE_CREATE)
+        allocation_group = cg_task_group_pin(proc_current());
     drm_call_t call;
     int result = drm_call_begin(ctx->device, ctx, &call, true);
     if (!result) {
+        call.allocation_group = allocation_group;
         drm_retry_retained(&call);
         if (import)
             result = drm_prime_fd_to_handle(&call, arg, import, prime);
@@ -3671,6 +3674,7 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
             result = drm_ioctl_locked(&call, vf, req, arg);
         drm_call_end(&call);
     }
+    cg_group_unpin(allocation_group);
     if (import) vfs_put_file(import);
     if (export) result = drm_prime_export_finish(arg, prime, export);
     return result;
@@ -3847,10 +3851,11 @@ int drm_native_binding_selftest(class_device_t *publication)
     device_t *gpu = call.access.device;
     driver_t *driver = gpu->drv;
     DRM_TEST_CHECK(driver && !driver->module && driver->remove);
-    drm_lock(&call);
-    drm_gem_t *old_gem = drm_gem_alloc_locked(&call, 32, 32, 128, 32, 0, 0, PAGE_SIZE);
-    drm_unlock(&call);
-    DRM_TEST_CHECK(old_gem);
+    drm_gem_t *old_gem;
+    DRM_TEST_CHECK(!drm_gem_alloc(&call, 32, 32, 128, 32, 0, 0, PAGE_SIZE, &old_gem));
+    DRM_TEST_CHECK(old_gem && old_gem->vmo->type == VMO_RESIDENT);
+    DRM_TEST_CHECK(vmo_peek_page(old_gem->vmo, 0) != PFN_NONE &&
+                   vmo_resize(old_gem->vmo, 0) == -EOPNOTSUPP);
     uint32_t old_handle = old_gem->handle;
     struct vmo *memory = old_gem->vmo;
     pfn_t page;
@@ -3880,9 +3885,8 @@ int drm_native_binding_selftest(class_device_t *publication)
     drm_context_t *fresh_context = fresh_file->priv;
     DRM_TEST_CHECK(fresh_context->device != old_device);
     DRM_TEST_CHECK(!drm_call_begin(fresh_context->device, fresh_context, &call, true));
-    drm_lock(&call);
-    drm_gem_t *fresh_gem = drm_gem_alloc_locked(&call, 32, 32, 128, 32, 0, 0, PAGE_SIZE);
-    drm_unlock(&call);
+    drm_gem_t *fresh_gem;
+    DRM_TEST_CHECK(!drm_gem_alloc(&call, 32, 32, 128, 32, 0, 0, PAGE_SIZE, &fresh_gem));
     DRM_TEST_CHECK(fresh_gem && fresh_gem->handle == old_handle && fresh_gem->vmo != memory);
     struct vmo *fresh_memory = fresh_gem->vmo;
     pfn_t fresh_page;

@@ -48,7 +48,7 @@ void a20_vmo_sparse_free_node(void *node) { kfree(node); }
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
     /* This kind must never be published with missing/mutable pages. */
-    if (type == VMO_CONTIGUOUS) return NULL;
+    if (type == VMO_CONTIGUOUS || type == VMO_RESIDENT) return NULL;
     /* page_count is u32; reject rounding and allocation-size overflow before
      * a truncated page array can be indexed by a later demand fault. */
     if (size > (uint64_t)-1 - (PAGE_SIZE - 1))
@@ -129,6 +129,53 @@ int vmo_create_contiguous(size_t bytes, struct vmo **out)
     vmo->type = VMO_CONTIGUOUS;
     vmo->phys_size = rounded;
     a20_objstat_add(&g_a20_objstats.vmo_pages, rounded / PAGE_SIZE);
+    *out = vmo;
+    return 0;
+}
+
+int vmo_create_resident(size_t bytes, struct cg_node *owner, struct vmo **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!bytes) return -EINVAL;
+    if (bytes > SIZE_MAX - (PAGE_SIZE - 1)) return -E2BIG;
+    size_t rounded = (bytes + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    size_t count = rounded / PAGE_SIZE;
+    if (count > (uint32_t)-1 || count > SIZE_MAX / sizeof(pfn_t)) return -E2BIG;
+    if (owner) {
+        cg_group_pin(owner);
+        if (cg_mem_charge_shared_anon(owner, count)) {
+            cg_group_unpin(owner);
+            return -ENOMEM;
+        }
+    }
+    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, rounded, 0);
+    if (!vmo) {
+        if (owner) {
+            cg_mem_uncharge_shared_anon(owner, count);
+            cg_group_unpin(owner);
+        }
+        return -ENOMEM;
+    }
+    /* Private construction. The ordinary Rust destructor owns rollback from
+     * here, including a whole-object charge and any partially acquired pages. */
+    vmo->type = VMO_RESIDENT;
+    vmo->charge_cg = owner;
+    vmo->charged_pages = owner ? count : 0;
+    for (uint32_t i = 0; i < vmo->page_count; i++) {
+        pfn_t page = pfa_alloc_page();
+        if (page == PFN_NONE) { vmo_release(vmo); return -ENOMEM; }
+        void *data = pfn_to_virt(page);
+        if (!data || (uintptr_t)data > (uintptr_t)-1 - (PAGE_SIZE - 1)) {
+            frame_put(page);
+            vmo_release(vmo);
+            return -ERANGE;
+        }
+        memset(data, 0, PAGE_SIZE);
+        vmo->pages[i] = page;
+        vmo->phys_size += PAGE_SIZE;
+        a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
+    }
     *out = vmo;
     return 0;
 }
@@ -326,9 +373,10 @@ int a20_vmo_page_lock(struct vmo *vmo, uint32_t index, uint64_t *flags_out)
         spin_unlock_irqrestore(&vmo->lock, flags);
         return -EINVAL;
     }
-    if (vmo->type == VMO_CONTIGUOUS && vmo->pages[index] == PFN_NONE) {
+    if ((vmo->type == VMO_CONTIGUOUS || vmo->type == VMO_RESIDENT) &&
+        vmo->pages[index] == PFN_NONE) {
         spin_unlock_irqrestore(&vmo->lock, flags);
-        return -EIO; /* Never materialize a hole in a fixed physical extent. */
+        return -EIO; /* Never materialize a hole in a fixed resident extent. */
     }
     *flags_out = flags;
     return 0;
@@ -434,7 +482,8 @@ void a20_vmo_page_publish_locked(struct vmo *vmo, uint32_t index,
 
 int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 {
-    if (vmo && vmo->type == VMO_CONTIGUOUS) return -EOPNOTSUPP;
+    if (vmo && (vmo->type == VMO_CONTIGUOUS || vmo->type == VMO_RESIDENT))
+        return -EOPNOTSUPP;
     if (vmo && vmo->type == VMO_SHARED_ANON)
         return -EPERM;
     return a20_vmo_resize_rust(vmo, new_size);
@@ -444,7 +493,8 @@ int a20_vmo_resize_lock(struct vmo *vmo, uint64_t *flags_out)
 {
     if (!vmo || !flags_out)
         return -EINVAL;
-    if (vmo->type == VMO_CONTIGUOUS) return -EOPNOTSUPP;
+    if (vmo->type == VMO_CONTIGUOUS || vmo->type == VMO_RESIDENT)
+        return -EOPNOTSUPP;
     *flags_out = spin_lock_irqsave(&vmo->lock);
     return 0;
 }
@@ -586,6 +636,10 @@ void a20_vmo_destroy_release_page(struct vmo *vmo, uint32_t index, pfn_t pfn)
 
 void a20_vmo_destroy_uncharge(struct vmo *vmo, uint64_t pages)
 {
+    if (vmo->type == VMO_RESIDENT) {
+        if (vmo->charge_cg) cg_mem_uncharge_shared_anon(vmo->charge_cg, pages);
+        return;
+    }
     if (vmo->type == VMO_SHARED_ANON) {
         for (struct vmo_charge *c = vmo->shared_charges; c; c = c->next)
             if (c->pages) cg_mem_uncharge_shared_anon(c->cg, c->pages);
@@ -606,6 +660,8 @@ void a20_vmo_destroy_free_pages(struct vmo *vmo)
 
 void a20_vmo_destroy_free_object(struct vmo *vmo)
 {
+    if (vmo->type == VMO_RESIDENT && vmo->charge_cg)
+        cg_group_unpin(vmo->charge_cg);
     struct vmo_charge *c = vmo->shared_charges;
     while (c) {
         struct vmo_charge *next = c->next;

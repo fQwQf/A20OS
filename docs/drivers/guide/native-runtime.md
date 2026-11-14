@@ -191,7 +191,7 @@ fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属�
 
 `vmo_create_contiguous(bytes, &memory)` 是内核 MM 的专用 RAM 工厂，不是新用户态对象类型或设备 DMA 分配接口。调用者在可分配的任务上下文、不持 MM/spinlock；零长度/NULL 输出返回 `-EINVAL`，超出 `PAGE_SIZE << MAX_ORDER` 返回 `-E2BIG`，分配失败返回 `-ENOMEM`，地址/CPU alias 范围异常返回 `-ERANGE`，PFA 转换失败返回 `-EIO`。错误清空有效输出且不遗留 owner。长度向页取整，物理地址 0 有效，全部暴露字节包括末页 padding 先清零。
 
-工厂在发布前分配高阶块，经已有 `pfa_split_allocated()` 一次转换为各有独立引用的 canonical order-0 页；逻辑范围只保留所需前缀，未用的幂次尾部通过 frame_put 交还。转换前的失败按原 order 释放，转换后不再原阶释放。随后发布内部 `VMO_CONTIGUOUS` 类型，沿用 VMO 原有结构、Rust ref/pin/destroy 和 TLB 后 frame_put 路径。`vmo_contiguous_info(memory, &physical, &bytes)` 要求调用者持有 VMO 引用，返回稳定的 CPU 物理基址和页取整 extent；输出在失败时清零。不可变指 extent 与 canonical slot，不是像素内容只读：resize（包括直接 Rust 桥接）返回 `-EOPNOTSUPP`，缺失 slot 返回 `-EIO`，不能 demand fault 出新页填洞。
+工厂在发布前分配高阶块，经已有 `pfa_split_allocated()` 一次转换为各有独立引用的 canonical order-0 页；逻辑范围只保留所需前缀，未用的幂次尾部通过 frame_put 交还。转换前的失败按原 order 释放，转换后不再原阶释放。随后发布内部 `VMO_CONTIGUOUS` 类型，沿用 VMO 原有结构、Rust ref/pin/destroy 和 TLB 后 frame_put 路径。`vmo_contiguous_info(memory, &physical, &bytes)` 要求调用者持有 VMO 引用，返回稳定的 CPU 物理基址和页取整 extent；输出在失败时清零。不可变指 extent 与 canonical slot，不是像素内容只读：公开 resize 返回 `-EOPNOTSUPP`，直接 Rust resize 的锁边界也拒绝修改（错误返回沿用旧约定），缺失 slot 返回 `-EIO`，不能 demand fault 出新页填洞。
 
 该工厂不捕获设备 mask、不建立 IOVA、不授予 DMA 权限，也不转移 cgroup charge。它适合可信内核 RAM backing；有 DMA 地址/权限要求时继续通过 domain 和 `driver_dma_map_vmo()` 检查。kind 4 已加入 canonical pin 白名单；这些页在转换后具有真实 order-0 引用，并非把高阶尾页伪装成可 pin 页。普通可变 VMO 的页快照仍不冻结 extent，连续 VMO 的 extent 固定来自其自身类型约束。
 
@@ -202,6 +202,18 @@ GPU vtable 的 `get_scanout(device, &snapshot)` 引入于 ABI 11；当前模块 
 virtio-gpu 的 RAM framebuffer 已由该工厂创建；producer、临时 snapshot 和 VMA 分别持有 VMO 引用。MMU fbdev mmap/旧 `FBIO_MAP_FB` 优先走 `get_scanout`，内核 adapter 以 `mm_mmap_vmo_cap()` 接入既有 Rust VMO 放置/权限事务。wrapper 检查初始权限不超 ceiling，负责锁外 TLB begin、MM lock、locked mapper、锁外 finish/deferred release；VMA 自持 VMO，未新增 backing 注册表、VMA 字段或模块释放回调。映射使用 Normal RAM 属性、共享写入并支持 fork/split；mprotect 不得超过创建时有效硬件权限。末页 padding 可见且已清零。旧 ioctl 仍用固定 NOREPLACE。
 
 `get_fb` 继续是借用 CPU PA/可见长度的兼容查询；没有 owning 回调的 simplefb/VRAM 路径继续走下述物理视图，NOMMU 也保留旧直接地址行为。fbdev 的每次操作仍重新选择默认设备，尚未绑定每个 open 的 GPU 身份。RAM VMO 存活不证明 transport 已停止：virtio-gpu 的 reset 读回、失败初始化保留与内部 DMA/IRQ 退役已接入下述协议；DRM 已另按下述协议迁移文件、状态和调用；厂商 BO/VRAM/GPUVM/请求队列仍待实现。
+
+## 固定 resident RAM VMO 与预算 owner
+
+`vmo_create_resident(bytes, owner, &memory)` 是内核 MM 的 RAM 工厂，返回内部 `VMO_RESIDENT`（kind 5），不是 Linux BO 类型或新用户 ABI。它在发布前以 order-0 页完整物化并清零页取整范围，包括末页 padding；不需要高阶连续块，也不承诺物理连续性。extent 与 canonical slot 固定、数据可写。公开 vmo_create 拒绝直接创建 kind 5；resize（含同大小、增长和收缩）由公开 C 入口返回 `-EOPNOTSUPP`，直接 Rust resize 的锁边界同样拒绝修改，但沿用其旧错误返回约定。物化入口遇到 resident 空 slot 返回 `-EIO`，不再补页。vmo_contiguous_info 拒绝这种对象；owning scanout 目前仍只接受 kind 4，不把 scatter RAM 当成连续 framebuffer。
+
+调用限可分配的任务上下文，不持 MM/VMO/spinlock 或 driver store mutex。owner 指向调用期间有效的内部 cgroup；工厂 pin owner 并预先为全部页取整容量 charge，VMO 最后 release 才 uncharge/unpin。该 charge 使用现有共享匿名 backing 记账，避免 legacy task RSS teardown 扣掉仍由 VMO/VMA 持有的物理内存；不是按每个映射重复计费，也不是 GPU/VRAM 专属预算。NULL 明确选择无 cgroup charge 的内核存储，charge 失败不能降级成 NULL。不因共享到另一文件/进程而转移 owner。页表/对象元数据仍遵循现有 heap 记账。
+
+失败清空有效输出：零长度/NULL 输出返回 `-EINVAL`，页取整或 dense table 无法表示返回 `-E2BIG`，预算/元数据/页面分配失败返回 `-ENOMEM`，CPU alias 异常返回 `-ERANGE`。参数预检在 charge 前；预算拒绝在分配前。对象构造中途失败复用原有 Rust destructor，交还已获得的每个 canonical 页、全部预收 charge 与 owner pin；没有发布半成品、第二套页注册表或 driver 回调。VMO/VMA 引用、页 pin、DMA 地址和硬件停止继续是不同契约。
+
+canonical snapshot 与 driver_dma_map_vmo 已接受 kind 5；mapping 仍只持独立帧引用，不保留源 VMO、预算或访问 lease。resident 的固定 extent 来自工厂。需要预算 owner 在请求期间存活时，请求必须另持 VMO 引用；不能把完成 fence、page pin 或 metadata 离线解释为该引用或硬件停止。工厂不检查设备 mask、不建立 IOVA、不授予 DMA 权限；缓存同步、页地址查询、可失败 unmap/停止仍由既有 domain 协议负责。
+
+DRM 的 GEM_CREATE、CREATE_DUMB 与 VIRTGPU_RESOURCE_CREATE 已使用该工厂。adapter 在 GPU mutex 前通过 cg_task_group_pin 捕获当前分配任务的 cgroup，操作结束后交还临时 pin；工厂为 VMO 保留自己的引用。GEM/handle 元数据和 RAM 构造位于 store mutex 外，仅最终 ID/handle/对象发布进入 store mutex；没有在硬件命令路径延迟物化 backing。创建失败传播原生 errno，输出失败或正常 close 沿用每文件 owner/失败退休；framebuffer、导出 pin 和普通 VMA 仍各自保留 VMO，因此 backing 的原始 charge 随 VMO 一起存活。该 RAM 底座不提供 BO 迁移/回收策略、VRAM、GPUVM、任务/请求调度或共享访问权。
 
 ## VirtIO reset 确认与 GPU 退出
 
@@ -227,7 +239,7 @@ virtio-gpu 不再使用全局静态实例或 owner 槽。每次 probe 在选择�
 
 `drm_create_vfile_for(publication, &file)` 是内核 adapter 的显式构造接口：在 DISPLAY class access 内捕获这个 publication，并要求其驱动提供显式 remove；缺少停止契约返回 `-EOPNOTSUPP`，离线返回 `-ENODEV`，失败清空输出。`drm_open_vfile(&file)` 只在 open 时读取一次默认 publication；旧指针包装 `drm_create_vfile()` 仍以 NULL 表示错误。这些入口不新增用户 ABI 或模块导出。
 
-每个 DRM 文件固定一个 publication。同一 publication 的对象 ID、legacy name、CRTC、EDID、virgl ID 与 vblank 状态属于同一 namespace，不同 publication 分区；同一 device 重新绑定也创建新 namespace。每个 open file 独立持有 handle 集合与 framebuffer；数值 ID 在 namespace 内分配，但只有该文件拥有 handle 才能用于 GEM、mmap、PRIME 导出、virtgpu 操作和 ADDFB。猜中另一文件的 ID 返回 `-ENOENT`。dup/fork 共享同一 vfile，最后一个文件引用关闭才交还这些 owner。私有 namespace 是 class 的消费者状态，没有第二个设备发布入口；当前仍为 card0/renderD128 聚合入口，没有多 GPU 节点枚举。
+每个 DRM 文件固定一个 publication。GEM 的 backing 已由上述固定 resident RAM 工厂构造，预算 owner 捕获与物化都不在 store 锁内。同一 publication 的对象 ID、legacy name、CRTC、EDID、virgl ID 与 vblank 状态属于同一 namespace，不同 publication 分区；同一 device 重新绑定也创建新 namespace。每个 open file 独立持有 handle 集合与 framebuffer；数值 ID 在 namespace 内分配，但只有该文件拥有 handle 才能用于 GEM、mmap、PRIME 导出、virtgpu 操作和 ADDFB。猜中另一文件的 ID 返回 `-ENOENT`。dup/fork 共享同一 vfile，最后一个文件引用关闭才交还这些 owner。私有 namespace 是 class 的消费者状态，没有第二个设备发布入口；当前仍为 card0/renderD128 聚合入口，没有多 GPU 节点枚举。
 
 DRM ioctl/mmap 与需要设备访问的 dma-buf sync，显式携带栈上 `drm_call`，从文件或 GEM 的原始 publication 取得同一 device/ops。先等每设备操作 mutex，再取得 active class call，避免持租约排队阻塞退出。操作另持 CPU namespace 使用计数，直到解锁、唤醒及最终收尾结束，最后一个 dma-buf close 不能让 worker 提前释放 namespace。read/poll 只访问本文件事件，不持硬件租约睡眠；离线 observer 唤醒等待者，read 在排空已有事件后返回 `-ENODEV`，poll 报 HUP/ERR，并在连接等待队列后重查事件和离线条件以防丢失唤醒。
 
@@ -630,7 +642,7 @@ QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束�
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
 2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，基于显式 PCI 集合占用和 IVMD 约束补齐全部 alias peer 的停止/归属协调、硬件 PTE/Unity/Exclusion 策略，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
-3. 在已有每设备实例和每文件 adapter 所有权上实现 BO 驻留/预算、GPUVM、上下文与请求队列，明确与原生 fence 的引用关系；补齐 master/auth 和共享访问权。
+3. 在已有每设备实例、每文件 adapter 所有权和固定 resident RAM 底座上实现 BO 预算/迁移/驻留策略、GPUVM、上下文与请求队列，明确 VMO/请求/原生 fence 的引用关系；补齐 master/auth 和共享访问权。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
 以上是待实现工作，不能以头文件预留或本阶段测试代替实现证据。
@@ -970,3 +982,19 @@ GEM 的对象 ID 仍在每 publication 内分配，每文件 handle 集合只保
 三项标准 guest 门禁最终完整通过：embedded 双核 stop/DRM reaper 门禁保留旧 VMA/重绑检查，并增加在线新文件不调用 GEM_CLOSE 而直接 close 后，真实 VMA 成为 VMO 唯一 owner 的断言；generic 模块双核显示保留 DRM_SYSFS、FBDEV_MAP/fork 与 videoplay 10 帧；RISC-V PRIME 新增两个独立 open 的未导入拒绝、显式共享、producer 正常 close 自动移除 FB/handle 与既有 VMA 保留，输出 `DRM_FILE: PASS ownership+close+framebuffer+prime+retained-vma`，并继续通过 SCM_RIGHTS、80 exports 和 sync-file。初次 PRIME guest 已输出成功标记，但门禁正则未转义加号，不能记为标准门禁通过；修复后重新执行目标，最终 exit 0。没有运行本轮 virgl 或厂商 GPU 渲染，也没有完成 master/auth、DMA-BUF 只读权限传播、命令流验证、预算或 GPUVM。
 
 十二篇文档同步所有权/限制，并修正总览中已过期的 driver_manager ABI 包含与 RISC-V 动态 IOMMU 描述。共享 docs/zh 迁移及其他修改保留；canonical 文档仅投影本轮变更。工作区 540 条、canonical 653 条行号引用检查通过；两侧导航均保留各自既有的 7 个未编目项，列表与本轮前完全一致。源码快照、负控及最终日志位于 `.kernel-build/drm-file-review/`。
+
+### 固定 resident RAM 与分配预算验证（2026-11-14）
+
+新增内部 kind 5 与原生 vmo_create_resident，复用既有 VMO 结构/Rust 生命周期/析构；公开 vmo_create 拒绝直接构造该 kind，物化与 resize 的 C/Rust 锁边界保持固定 extent/slot。全部 order-0 页与页取整 padding 在发布前清零，支持超过最大 buddy 块的范围和非连续 PFN；无连续地址查询或 DMA 授权。owner 采用现有共享匿名 backing charge 与 cgroup namespace pin，随 VMO 交还，部分失败复用原生析构。DRM 三种分配入口已采用，外层在 GPU mutex 前捕获分配任务的 cgroup，RAM 构造在 store 锁外；attach 只读取既有页，正常 close/失败退休/VMA/导出沿用原来的引用。新增模块导出不改公开布局或 ABI 12。
+
+新增 test_vmo_resident 的 12 个 unittest 方法运行生产工厂、真实 C cgroup 原语、Rust ref/pin/destroy，模型边界为 order-0 分配、CPU alias、TLB 与通知；覆盖碎片页、超过 8 MiB 的范围、padding、参数、预算/元数据/每一页失败、每一页 alias 错误、不可变范围、task RSS teardown、owner namespace 引用及独立页 pin。DRM fixture 共 44 个方法，factory/VMO 为模型，新增预算耗尽、原生 errno/输出失败退款、归属捕获、离线准入失败与失败 host 清理期间 charge 保留；全部 GPU/store mutex 都参与锁边界断言。独立页 pin 可跨源销毁保留 RAM，但不转移 charge，不能当作预算 lease。
+
+16 个编译成功负控分别破坏工厂专用 kind、清零、输出清理、共享 backing 记账/padding charge、owner pin/失败回滚/最终 unpin、部分页释放、extent/slot 冻结、resident pin 白名单，以及 DRM 预算 owner、锁外物化和锁前任务归属捕获，均被运行时断言拒绝；还原后最终隔离源码树通过 393 个不同驱动 unittest 方法。另执行完整生产 C VMO 与 Rust materialize/resize/destructor 的共享匿名集成：resident fault 不向另一组重复 charge，legacy task RSS teardown 不扣对象 charge，拒绝 resize，独立 page pin 按其契约保留存储；保留原来的 256 个并发 first-touch 样本。VMO page Rust 测试 14 项、lifecycle Rust 测试 7 项通过。
+
+第一次广回归发现两个 IOMMU 夹具的 API-only VMO 头缺少新声明，自检同时不应依赖 opaque 对象布局；改用 peek/resize 接口检查并补充声明，未把编译失败计为通过。共享匿名完整 C 夹具还缺少此前 contiguous/PFN 生命周期加入后的原语声明，已补齐 canonical order-0 引用模型，高阶构造仍由独立 contiguous fixture 验证。直接 Rust resize 拒绝时沿用旧负错误值，公开 C resize 才提供 `-EOPNOTSUPP`，同步修正相关文档，未改变旧 Rust 桥接返回协议。
+
+最终 check-firmware-model 通过 618 项及独立 1 项 sleep ABI，check-pc-drivers 通过 254 项；118 个 instance、32 个 component 的清单审计通过。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行 AArch64 guest。
+
+RISC-V 原生 IOMMU/EDU 标准门禁最终通过，新增 `DRIVER_IOMMU_RESIDENT_VMO: PASS canonical=1 fixed=1 dma=1 lifetime=1`：新对象全部页已物化且拒绝 resize，源 VMO 销毁后真实设备通过非恒等 IOVA 跨页读写，并逐字节比对数据及 guard。使用内核 NULL budget owner，不表示实际 cgroup OOM 或实体 GPU 验证。x86_64 embedded 双核 stop/DRM/VMA 门禁检查真实 kind/预分配页、旧 VMA 保留与在线 close 后唯一 VMA owner；generic 模块双核显示完成 DRM_SYSFS、FBDEV_MAP/fork 和 videoplay 10 帧；RISC-V PRIME 保留 DRM_FILE、共享映射、SCM_RIGHTS、80 exports 和 sync-file。上述标准目标均返回 0；没有运行本轮 virgl/厂商 GPU 加速、真实硬件超时或完整 BO/GPUVM/job。
+
+十二篇文档同步工厂、预算与锁边界；共享 docs/zh 迁移及其他工作区改动保留，canonical 路径仅投影本轮内容。工作区/canonical 行号引用检查通过，导航保留各自本轮前已有的 7 项未编目条目，没有增加链接/锚点错误。源码树、负控及最终主机/guest 日志位于 `.kernel-build/resident-vmo-review/`。

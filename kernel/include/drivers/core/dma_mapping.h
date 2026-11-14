@@ -161,6 +161,9 @@ int driver_dma_map_buffer(struct driver_dma_domain *, struct driver_dma_buffer *
  * No VMO lock is held during allocation, provider calls or cache sync.
  * Temporary snapshot pins are returned on every path; usable/cleanup mappings
  * retain their own frame refs, independent of later VMO resize/destruction.
+ * A resident VMO's fixed extent is its factory contract, not a mapping lease.
+ * Pins do not retain the VMO or its cgroup charge; a request needing that
+ * accounting owner must also keep a VMO reference until it is retired.
  * Same non-NULL error cleanup contract and try_unmap API as map_pages. Not a
  * residency/extent lease: coordinate CPU access and resizing before submission. */
 int driver_dma_map_vmo(struct driver_dma_domain *, struct vmo *, uint32_t first,

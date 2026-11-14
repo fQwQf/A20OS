@@ -645,6 +645,7 @@ const struct drv_export drv_export_table[] = {
     { "gpu_device_scanout_get", (void *)gpu_device_scanout_get },
     { "gpu_scanout_put", (void *)gpu_scanout_put },
     { "vmo_create_contiguous", (void *)vmo_create_contiguous },
+    { "vmo_create_resident", (void *)vmo_create_resident },
     { "vmo_contiguous_info", (void *)vmo_contiguous_info },
     { "vmo_ref", (void *)vmo_ref },
     { "vmo_release", (void *)vmo_release },
