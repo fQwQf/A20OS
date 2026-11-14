@@ -32,7 +32,8 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 
 | 范围 | 状态 | 说明 |
 |---|---|---|
-| 原生组合协议 | 基础可用 | 每绑定 endpoint 复用 class publication，六类 primary 自动发布，其他服务无需 class；版本/实际表大小/能力匹配，不可变元数据可跨 offline，调用按同一 active count 排空，旧 endpoint 不跟随重绑。完整/MCU 共用核心；VirtIO-net、RTL8139、lwIP 与模块导入已接入，ABI 12 不变；请求/队列与恢复仍需整合 |
+| 原生组合协议 | 基础可用 | 每绑定 endpoint 复用 class publication，六类 primary 自动发布，其他服务无需 class；版本/实际表大小/能力匹配，不可变元数据可跨 offline，调用按同一 active count 排空，旧 endpoint 不跟随重绑。完整/MCU 共用核心；VirtIO-net、RTL8139、lwIP 与模块导入已接入，ABI 12 不变；原生请求/队列已接入，硬件特有调度与恢复由设备协议实现 |
+| 原生请求/队列 | 已实现并接入 VirtIO GPU | 有界 depth/active/bytes、FIFO dependency、排队取消、乱序硬件完成与任务退休；保留固定 VMO/charge 或 DMA buffer；共享 worker/早期 polling；自动 execution stop 先于 call drain，失败保留并重试。实际 controlq 仍一个 active chain；厂商 BO/GPUVM、主动 abort/抢占、动态队列和公平调度尚需上层实现，见[请求队列](../../drivers/guide/request-queues.md) |
 | driver core | 符合 | 动态 registry；bus ID 后可执行无副作用的 driver protocol match；操作 mutex 串行化注册、probe/remove 与遍历；数组 spinlock 不跨回调；probe 失败完整解绑；增长失败注入在 riscv64（单 hart 与 `-smp 2`）、x86_64、aarch64、loongarch64 上都实跑，driver/device/bus 三条路径均为 `-ENOMEM` → 旧条目保留 → 重试成功 → 计数与 capacity 恢复（`smoke-driver-lifecycle-{x86_64,aarch64,loongarch64,smp2}`） |
 | 固件设备模型 | 已实现 | DT、ACPI/uACPI、静态 provider 共用节点/物理资源/IRQ domain/依赖接口；未知设备独立保留，失败事务回滚，probe 可延后。交接、保留区和架构边界见 [启动模型](../../dev/boot-model.md)；不代表任意板卡已完成实机验证。 |
 | PCI bus | 已扩展 | ECAM、ID/subsystem match、零值未分配 BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id`。BAR 规划在 discovery 事务内核对资源声明/占用，全部通过后提交新地址与资源；规划失败保留原 BAR/command/资源，调用者仍须先 quiesce；已持有 function 的用户查询仅读现有 BAR/IRQ 清单，不重写 BAR/BME 或资源 |

@@ -10,6 +10,8 @@ A20OS 现在同时支持三种驱动路径：
 
 `drvmod` 是 A20OS 的可加载内核模块机制：模块是 ELF64 `ET_REL` 可重定位对象，由内核加载进 direct-map，运行时只允许解析驱动框架（`kernel/drvmod/framework.c`）的导出符号白名单。加载器、框架与示例位于 `kernel/drvmod/`，模块 ABI 定义在 `kernel/include/drvmod/drvmod.h`。
 
+原生 `queue.h` 的 request/queue 与 `device_add_execution_action` 通过 framework 导出；generic 模块与 embedded 共用相同的 admission、完成、退休和可失败停止。新增导出未改变既有 device/driver/class 布局，ABI 12 不变；queue ops 自带实际 size。开发流程见[原生请求与队列](request-queues.md)。
+
 ## 统一 `.a20drv` 格式与统一驱动管理器
 
 所有可加载驱动文件（内核模块与用户态驱动）都必须使用 `.a20drv` 后缀，并带有只读 ELF `.a20drv` 段。该段的 `a20_driver_descriptor_t` 由 `kernel/include/drivers/driver_descriptor.h` 定义，是**唯一的驱动元数据来源**（没有 `.a20inf` 等旁车清单），包含：

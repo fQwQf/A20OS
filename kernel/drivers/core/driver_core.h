@@ -5,8 +5,8 @@
  * abstraction.  All driver code includes only this header (plus
  * driver_class.h and driver_hwapi.h) — never any arch/ headers.
  *
- * Design inspired by Linux platform_driver / RT-Thread rt_device,
- * simplified for a teaching/reference kernel.
+ * Native per-binding protocols, explicit resource ownership and fallible
+ * execution shutdown. Bus and ABI adapters share this lifecycle.
  */
 #ifndef _DRIVER_CORE_H
 #define _DRIVER_CORE_H
@@ -298,6 +298,24 @@ int device_probe_use_remove(device_t *dev);
  * release; arrange its release separately. NULL callback/wrong phase ->
  * -EINVAL; unpublished device -> -ENODEV; allocation failure -> -ENOMEM. */
 int device_add_remove_prepare(device_t *dev, int (*prepare)(void *), void *context);
+
+/* Probe-only managed execution owner. Registers a fallible stop AFTER child /
+ * consumer teardown and BEFORE quiesce and active-call drain. Install before
+ * enabling request producers/hardware. Automatically opts into managed probe
+ * rollback, including when metadata allocation fails. All unfinished actions
+ * are attempted on each teardown; successful stops are checkpointed. Failure
+ * returns with publication offline and binding/code/resources intact, without
+ * waiting for active calls. A successful stop must leave no future DMA or
+ * callbacks using its execution context, and resolve accepted requests after
+ * their storage can safely retire. release (optional) runs only after remove
+ * succeeds, in normal LIFO devres order. Context ownership transfers only on
+ * success; on failure the caller still owns it. No allocation during stop.
+ * Stops/release are task context under lifecycle serialization; never acquire
+ * that serialization from request completion paths. Return 0 or negative
+ * errno (positive errors normalize to EIO). No remove -> EOPNOTSUPP.
+ * This phase is not the pre-consumer hardware freeze of remove_prepare. */
+int device_add_execution_action(device_t *, int (*stop)(void *),
+                                 void (*release)(void *), void *context);
 
 /* Synchronous, task context. Commit unregister only after successful remove.
  * Failure keeps the registry pin/binding/resources for retry; some consumers

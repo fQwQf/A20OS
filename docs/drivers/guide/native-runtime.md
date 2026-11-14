@@ -1,6 +1,6 @@
 # 原生驱动运行时
 
-本文区分已经接入源码的接口和后续工作。已提供设备 quiesce、资源占用与物理存储保留、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。DMA/fence/workqueue/firmware 和本页运行时自检面向 hosted 内核；资源占用接口随完整 driver core 编入，相应 MCU 配置不包含 hosted 异步运行时。
+本文区分已经接入源码的接口和后续工作。已提供原生请求/队列、可失败 execution stop、设备 quiesce、资源占用与物理存储保留、页级 DMA mapping、原生异步 fence、可取消的工作队列、IRQ 排空和有界固件读取接口；不表示 AMD/NVIDIA 硬件加速已经可用。request/queue、DMA/fence/workqueue/firmware 和本页运行时自检面向 hosted 内核；资源占用接口随完整 driver core 编入，相应 MCU 配置不包含 hosted 异步运行时。
 
 ## 服务发现与调用边界
 
@@ -13,7 +13,7 @@ protocol access 借用 caller 的 endpoint 引用，caller 必须持有到 end�
 | 层次 | 职责 |
 |---|---|
 | 设备核心 | device/driver/bus/class、绑定、引用、依赖、资源回收、下线顺序 |
-| 通用运行时 | DMA mapping/domain、IRQ 排空、工作队列、等待与原生 fence、固件读取 |
+| 通用运行时 | 有界 request/queue、DMA mapping/domain、IRQ 排空、共享工作队列、原生 fence、固件读取 |
 | GPU 子系统 | 已有 DISPLAY 默认选择与带引用的调用入口；后续实现每设备 BO、GPUVM、上下文、任务队列和同步 UAPI |
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
@@ -26,16 +26,16 @@ protocol access 借用 caller 的 endpoint 引用，caller 必须持有到 end�
 
 1. 若 probe 已显式注册 remove prepare，先 offline provider class 并执行准备动作；失败即返回，尚不解绑 consumer。
 2. 准备成功（或未选择准备）后，先解除 consumer/child，再处理 provider/parent。
-3. 状态变为 `REMOVING`，`class_device_mark_offline()` 拒绝新类调用，并执行一次 offline observer。
-4. 调用可选 `driver_t.quiesce(dev)`。此时既有 class 调用可能尚未返回，`drv_priv`、IRQ、DMA 和受管资源仍然有效。
-5. `class_device_unpublish()` 撤销 registry publication，等待在途 class 调用结束。
+3. 对登记了 execution action 的设备先 offline，在 active-call drain 前执行所有未成功的 fallible stop；成功 checkpoint，失败返回并保留 PREPARING/PROBE_CLEANUP、代码、实例、IRQ 和存储。
+4. 所有 stop 成功后状态变为 `REMOVING`，执行一次可选 `driver_t.quiesce(dev)`；旧的同步驱动可以不登记 execution action。
+5. `class_device_unpublish()` 撤销 registry publication，等待在途调用结束。
 6. 调用 `remove()`；只有返回 0，核心才逆序释放受管资源及依赖并清空绑定。
 
-`quiesce` 必须先禁止新的硬件提交并停止软件生产者，唤醒未完成请求使其成功结束或以错误结束，并尝试排空/停止硬件。无法确认停止时，记录私有失败状态并由 remove 继续确认或返回错误；软件请求以错误结束不授予 DMA 页回收权限。驱动负责同步中断和取消其后台工作；`remove` 只有确认安全后才释放请求队列、DMA mapping 和实例存储。驱动私有入口也必须检查自己的 stopping 状态，class offline 不会自动保护绕过 class adapter 的调用。
+新异步驱动使用[原生请求与队列](request-queues.md)：每请求保留 native owner，IRQ complete 只记录硬件完成，任务 retire 成功后才发布 fence；队列自动登记 execution action。硬件 stop 失败直接返回，不会卡在尚未解决请求的调用排空中。各 stop 都会尝试，成功项在重试时跳过。provider context 仍须保留到调用排空和 remove 成功。
 
-不能依赖 `remove()` 唤醒所有在途请求：核心在进入 `remove` 前已经等待这些调用。没有异步操作的现有驱动可以保持 `quiesce=NULL`。
+已有 void quiesce 仅用于兼容退出。它必须关闭软件生产者，但不能把未确认的硬件停止伪装成请求存储可回收。新驱动不把可失败的停止工作推迟到 call drain 之后；remove 也不能成为唯一的请求唤醒入口。驱动私有入口必须检查 stopping，class offline 不保护绕过 adapter 的调用。
 
-成功 probe 后 class 发布失败也会执行 `quiesce -> drain -> remove`，只有 remove 成功才进入 devres 回收。未选择失败清理的旧 probe 仍自行撤销已经启动的硬件，再返回错误；选择了 `device_probe_use_remove()` 的实例使用下述可失败管线，核心不推测硬件阶段。
+probe 成功后 publication 失败同样走 execution stop → quiesce → drain → remove。`driver_queue_create` 与 `device_add_execution_action` 自动选择受管 failed-probe 清理；`device_probe_use_remove` 可用于其他自有执行模型。未选择者仍自行安全回滚硬件，核心不从普通错误码推断硬件已停。
 
 ### 可失败的解绑与显式重试
 
@@ -74,7 +74,7 @@ static int gpu_probe(device_t *dev) {
 }
 ```
 
-选定后，probe 非零返回会交给既有 consumer-first、quiesce、class drain、可失败 remove 管线。回调须能处理部分初始化乃至 NULL `drv_priv`；probe 不再自行释放交给 remove 的存储。remove 返回 0 才允许 devres/依赖回收及清空绑定。若 provider 构造失败同时返回非 NULL DMA 清理句柄，应保存在实例中；remove 重试 shutdown，成功后才 put。不能因为初始化返回错误就丢弃清理句柄、页表或 requester 租约。
+选定后，probe 非零返回会交给 consumer-first、已登记 execution stop、quiesce、class drain、可失败 remove 管线。回调须能处理部分初始化乃至 NULL `drv_priv`；probe 不再自行释放交给 remove 的存储。remove 返回 0 才允许 devres/依赖回收及清空绑定。若 provider 构造失败同时返回非 NULL DMA 清理句柄，应保存在实例中；remove 重试 shutdown，成功后才 put。不能因为初始化返回错误就丢弃清理句柄、页表或 requester 租约。
 
 核心保存原 probe 错误于 `probe_error`（正数规范化为 `-EIO`）。清理成功时 probe 调用路径仍返回原错误，设备转为 UNINIT 或原错误为 `-EPROBE_DEFER` 时的 DEFERRED；清理失败则返回清理错误，保留原 `probe_error`、绑定、匹配身份、私有状态、devres 和依赖。device_register/driver_register 接受登记不表示 probe 成功，仍须观察绑定结果。保留的失败绑定不进入下一候选或自动 deferred reprobe，只能显式注销重试清理；这不是硬件恢复/重新初始化接口。
 
@@ -93,7 +93,7 @@ if (ret) return ret;
 /* Initialize drv_priv, then activate hardware. Prepare handles NULL too. */
 ```
 
-准备动作按登记的逆序执行，先于任何 consumer/child unbind；只返回 0 才记为完成。正数错误按 `-EIO` 处理，失败保留绑定、匹配身份、依赖、devres、上下文和未动的消费图；之前成功动作的硬件副作用不回滚。显式注销重试从未完成的动作继续，已成功的动作不会因之后的 consumer 或 remove 失败而重复。普通退出停在 `DEV_STATE_PREPARING`；失败 probe 保持 `PROBE_CLEANUP` 及原 `probe_error`。`device_is_stopping()` 包含新状态，阻止新 class 发布、checked claim、PCI lookup/scope 与 DMA 创建/映射，已有映射仍可关闭回收。准备完成后才进入原来的 consumer-first、quiesce、class drain、remove、devres 流程；未选择者保持旧顺序。
+准备动作按登记的逆序执行，先于任何 consumer/child unbind；只返回 0 才记为完成。正数错误按 `-EIO` 处理，失败保留绑定、匹配身份、依赖、devres、上下文和未动的消费图；之前成功动作的硬件副作用不回滚。显式注销重试从未完成的动作继续，已成功的动作不会因之后的 consumer 或 remove 失败而重复。普通退出停在 `DEV_STATE_PREPARING`；失败 probe 保持 `PROBE_CLEANUP` 及原 `probe_error`。`device_is_stopping()` 包含新状态，阻止新 class 发布、checked claim、PCI lookup/scope 与 DMA 创建/映射，已有映射仍可关闭回收。准备完成后进入 consumer-first、execution stop、quiesce、class drain、remove、devres；未登记 execution action 的旧驱动保持原有顺序。
 
 prepare 必须容忍部分初始化，冻结新提交并排空可能访问 consumer 存储的回调/硬件；可以撤销 IRQ，但不能释放 consumer/remove 仍需的存储。callback/context 有效至最终回收，context 的销毁另行安排；完成的准备是单向退出，不能恢复硬件后期待核心重复它。回调在 lifecycle mutex 下、不持 registry spinlock；不能等待需要该锁的 consumer，也不能递归移除自己。未结束的传输可返回 `-EBUSY` 让核心释放锁、保留图后显式重试。准备不是通用并发隔离或超时后的强制释放授权。
 
@@ -227,17 +227,17 @@ DRM 的 GEM_CREATE、CREATE_DUMB 与 VIRTGPU_RESOURCE_CREATE 已使用该工厂�
 
 时间预算以频率分解计算 ceil，避免毫秒乘法溢出；elapsed 差值允许计数器回绕，起点 0 也是有效时钟。另有 100 万次读取上限，保护早期启动、频率未知或停滞时钟；因此 poll 预算可能先于时间预算耗尽，并非保证等待足额毫秒。任务存在时每 256 次尝试 yield；无任务时有界 poll。耗尽返回 `-ETIMEDOUT`，不隐式清理任何资源。它只确认合规 transport 的状态，不排空软件调用、不注销 IRQ、不解除 IOMMU 或回收存储，也不证明恶意/损坏硬件或物理拔除安全。
 
-virtio-gpu 在任何 PCI/MMIO 初始化前选择 `device_probe_use_remove()`，并把已初始化 mutex/wait queue 的部分实例交给 dev->drv_priv。验证 transport 身份后，首次 reset 也必须读回确认，再协商特性/发布 controlq。失败仍可设置 FAILED，但由原生 offline/quiesce/drain/remove 管线清理；FAILED 本身不授权释放 DMA。reset 不完成时返回错误，核心保留绑定、原 probe_error、MMIO/devres、IRQ、命令暂存和 framebuffer owner，后续显式重试同一个 remove。
+virtio-gpu 在任何 PCI/MMIO 初始化前选择 `device_probe_use_remove()`，并把已初始化 mutex/wait queue 的部分实例交给 dev->drv_priv。验证 transport 身份后，首次 reset 也必须读回确认，再协商特性/发布 controlq。失败仍可设置 FAILED，但由原生 offline/stop/quiesce/drain/remove 管线清理；FAILED 本身不授权释放 DMA。reset 不完成时返回错误，核心保留绑定、原 probe_error、MMIO/devres、IRQ、命令暂存和 framebuffer owner，后续显式重试同一个 remove。
 
-quiesce 原子关闭提交，先于 class drain，不等待 command mutex。四条 controlq issuer 在同一 mutex 内检查 closing/command_failed，再分配、填充和发布 descriptor；closing 返回 `-ENODEV`，已故障队列返回 `-EIO`。等待发现 closing 可结束本次调用。未确认完成返回 `-ETIMEDOUT` 并封闭整个共享 queue，不能只封闭该 ioctl；错误 used id 或 used index 增量不等于 1 同样封闭，不再复用、扩容或释放设备仍可能访问的暂存区。已确认返回链的设备错误响应本身不等于 DMA 未结束。未发布的 staging OOM 返回 `-ENOMEM`，交还软件锁，不凭空将队列判为故障。
+四种 controlq 命令共用 native queue/request 执行路径；该 wire queue 仍仅一个 active chain，command mutex 保护 staging 和 descriptor。closing 返回 ENODEV，故障队列返回 EIO；启动 polling 与运行时 IRQ-assisted wait 复用同一 publication 后端。超时、错误 used id 或 index 增量不等于 1 都封闭 staging，保留未退休 request/fence 与实例 owner，不再扩容/复用潜在硬件可达存储。未发布的分配失败不把队列判为故障；已确认返回链的设备错误响应可以正常退休。
 
-remove 先拒绝 command_active，再 trylock；这同时防止原生递归 mutex 把同上下文的活动命令误当成可退出。忙返回 `-EBUSY`，不在 lifecycle 锁下等候 issuer。所有合法 class 调用已由核心排空，随后在 mutex 内执行可失败 reset；确认成功后才 free_irq 排空 handler、撤销默认选择并交还命令/framebuffer owner。reset 失败保留全部状态，既不清 drv_priv，也不释放 RAM 或 IRQ。snapshot/VMA 引用可在 producer 成功退出后继续保留旧 RAM。
+原生 execution stop 在 class drain 前关闭 admission/closing，检查 command_active 并 trylock；忙返回 EBUSY，既有 issuer 观察 closing 后退出，调用者再重试。持锁执行有界 reset，确认 status=0 后 free_irq 排空 handler，队列随后退休未完成请求。reset 失败保留整个离线绑定、IRQ、staging、backing 与 pending fence。所有请求安全退休后才进入 class drain 和 remove，remove 交还默认选择、动态 staging/framebuffer owner 及队列 caller 引用；最后解开实例 mutex 再 put allocation。snapshot/VMA 可继续保留旧 RAM。
 
 ### VirtIO GPU 的每设备实例
 
 virtio-gpu 不再使用全局静态实例或 owner 槽。每次 probe 在选择原生失败清理后，先以 `driver_dma_buffer_create(dev, sizeof(virtio_gpu_inst_t), __alignof__(virtio_gpu_inst_t), &allocation)` 分配独立的零填充、物理连续且满足当前 mask 的实例。该 owner 保留设备元数据，覆盖内嵌 controlq、固定命令暂存、mutex 和等待队列；transport、EDID、feature、fence 序号、动态 staging 与 framebuffer VMO 引用也都在同一 `dev->drv_priv` 中。每个绑定仍只有一个同步 controlq，不是每请求或每进程队列。驱动无需另建实例注册表。
 
-分配失败保留原生 errno，不访问 transport、不发布 drv_priv，也不留下设备 pin；同一 device 已有 drv_priv 返回 `-EBUSY`，其他 device 不受影响。probe 后续失败交给既有 quiesce/remove，保留这一个部分实例。关闭、未知完成和 reset 失败只封闭该设备；不覆盖或重置另一设备的队列。成功 remove 先确认 reset、排空 IRQ，再注销默认选择并清 drv_priv、交还动态 staging/framebuffer producer 引用；最后释放 command mutex，才 put 包含 mutex 本身的实例 allocation。失败则完整保留 allocation、设备 pin、IRQ 和 backing，显式重试同一绑定。
+原生 instance allocation 分配失败保留 errno，不访问 transport、不发布 drv_priv，也不留下设备 pin；后续 queue 分配失败由已选择的 managed failed-probe 清理回收部分实例；同一 device 已有 drv_priv 返回 `-EBUSY`，其他 device 不受影响。probe 后续失败交给 execution stop/quiesce/remove，保留这一个部分实例。关闭、未知完成和 reset 失败只封闭该设备；不覆盖或重置另一设备的队列。退出先经 execution stop 确认 reset、排空 IRQ，再由 remove 注销默认选择并清 drv_priv、交还动态 staging/framebuffer producer 引用；最后释放 command mutex，才 put 包含 mutex 本身的实例 allocation。失败则完整保留 allocation、设备 pin、IRQ 和 backing，显式重试同一绑定。
 
 这复用已有 DMA buffer 的分配与所有权，实例化不扩展 device/driver/GPU vtable；当前 ABI 12 的能力回调见上文。allocation 地址是 CPU 物理地址，现有队列仍使用平台恒等 DMA 假设；没有由此建立 IOMMU domain、GPUVM、厂商任务/fence 或安全物理拔除协议。旧 scanout 的 VMO/VMA 和 DRM 的 publication/GEM 各自持有独立所有权，实例释放不撤销这些 CPU 存储引用。两个 VirtIO 设备能独立运行，不表示 card0/renderD128 默认聚合入口已变成多 GPU 节点枚举或跨 GPU PRIME attach。
 

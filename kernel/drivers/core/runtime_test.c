@@ -4,6 +4,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/fence.h"
+#include "drivers/core/queue.h"
 #include "drivers/core/protocol.h"
 #include "drivers/net/interface.h"
 #include "drivers/core/workqueue.h"
@@ -30,6 +31,7 @@
 #include "core/poll.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
+#include "proc/proc.h"
 
 #define CHECK(test) do { if (!(test)) \
     panic("DRIVER_RUNTIME: FAIL line=%d: %s", __LINE__, #test); } while (0)
@@ -127,6 +129,123 @@ static void exercise(void)
     driver_work_put(test.work);
     driver_fence_put(test.entered);
     driver_fence_put(test.release);
+}
+
+/* Actual native workers/fences and lifecycle; delayed work models a device
+ * completion producer. VirtIO GPU exercises the real transport separately. */
+struct request_case {
+    struct driver_queue *commands;
+    struct driver_workqueue *worker;
+    struct driver_work *completion;
+    struct driver_request *inflight[4];
+    spinlock_t lock;
+    unsigned count, issued;
+    int stop_error;
+};
+static void request_completion(void *context)
+{
+    struct request_case *test = context;
+    struct driver_request *requests[4];
+    uint64_t flags = spin_lock_irqsave(&test->lock);
+    unsigned count = test->count;
+    for (unsigned i = 0; i < count; i++) requests[i] = test->inflight[i];
+    test->count = 0;
+    spin_unlock_irqrestore(&test->lock, flags);
+    /* Hardware may finish independent requests in reverse order. */
+    while (count) CHECK(!driver_request_complete(requests[--count], 0));
+}
+static void request_issue(void *context, struct driver_request *request)
+{
+    struct request_case *test = context;
+    uint64_t flags = spin_lock_irqsave(&test->lock);
+    CHECK(test->count < 4);
+    test->inflight[test->count++] = request;
+    test->issued++;
+    spin_unlock_irqrestore(&test->lock, flags);
+    CHECK(driver_work_schedule(test->completion, clock_get_ticks() + MS_TO_TICKS(5)) >= 0);
+}
+static int request_stop(void *context)
+{
+    struct request_case *test = context;
+    if (test->stop_error) return test->stop_error;
+    return driver_work_cancel_sync(test->completion, deadline());
+}
+static int request_ready(device_t *dev)
+{ return ((struct request_case *)dev->plat_data)->commands != NULL; }
+static const struct { int (*ready)(device_t *); } request_protocol = {request_ready};
+static int request_probe(device_t *dev)
+{
+    struct request_case *test = dev->plat_data;
+    const struct driver_protocol_descriptor protocol = {
+        .info = {0x800000000000a200ULL, 1, sizeof(request_protocol), 0}, .ops = &request_protocol,
+    };
+    int result = device_add_protocol(dev, &protocol);
+    if (result) return result;
+    const struct driver_queue_limits limits = {3, 2, 4, 12};
+    const struct driver_queue_ops ops = {.size = sizeof(ops), .issue = request_issue, .stop = request_stop};
+    return driver_queue_create(dev, &limits, &ops, test, &test->commands);
+}
+static int request_remove(device_t *dev)
+{
+    struct request_case *test = dev->plat_data;
+    driver_queue_put(test->commands); test->commands = NULL;
+    return 0;
+}
+static int request_match(device_t *dev) { return !strcmp(dev->name, "native-request-selftest"); }
+static void request_release_call(void *context, int status)
+{
+    CHECK(status == -ESHUTDOWN);
+    class_device_call_end(context);
+}
+static int request_unregister(driver_t *driver)
+{
+    uint64_t end = deadline();
+    int result;
+    do { result = driver_unregister(driver); if (result == -EBUSY) proc_yield(); }
+    while (result == -EBUSY && clock_get_ticks() < end);
+    return result;
+}
+static void exercise_requests(void)
+{
+    struct request_case test = {0}; spin_init(&test.lock);
+    test.worker = driver_workqueue_create(); CHECK(test.worker);
+    test.completion = driver_work_create(test.worker, request_completion, &test); CHECK(test.completion);
+    driver_t driver = {.name = "native-request-selftest", .match = request_match,
+        .probe = request_probe, .remove = request_remove};
+    device_t dev = {.name = "native-request-selftest", .plat_data = &test};
+    CHECK(!driver_register(&driver) && !device_register(&dev) && test.commands);
+    CHECK(!driver_queue_start(test.commands, test.worker));
+    struct driver_request *requests[3];
+    for (unsigned i = 0; i < 3; i++) {
+        struct driver_request_description description = {.command = &i, .command_size = sizeof(i)};
+        CHECK(!driver_request_create(test.commands, &description, &requests[i]));
+        CHECK(!driver_request_submit(requests[i]));
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        CHECK(!driver_fence_wait(driver_request_fence(requests[i]), deadline(), false));
+        driver_request_put(requests[i]);
+    }
+    CHECK(test.issued == 3);
+    class_device_t *endpoint = class_device_ref_for_device(&dev); CHECK(endpoint);
+    CHECK(!class_device_call_begin(endpoint));
+    struct driver_fence *dependency = driver_fence_create(); CHECK(dependency);
+    struct driver_request_description description = {.dependency = dependency};
+    struct driver_request *pending; CHECK(!driver_request_create(test.commands, &description, &pending));
+    CHECK(!driver_request_submit(pending));
+    struct driver_fence_watch *watch;
+    CHECK(!driver_fence_watch_create(driver_request_fence(pending), request_release_call, endpoint, &watch));
+    test.stop_error = -ETIMEDOUT;
+    CHECK(request_unregister(&driver) == -ETIMEDOUT && dev.drv == &driver && test.commands);
+    CHECK(!driver_fence_status(driver_request_fence(pending)));
+    test.stop_error = 0;
+    CHECK(!request_unregister(&driver) && !test.commands);
+    CHECK(driver_fence_status(driver_request_fence(pending)) == -ESHUTDOWN);
+    CHECK(!driver_fence_watch_try_remove(&watch));
+    driver_request_put(pending); driver_fence_put(dependency);
+    class_device_put(endpoint);
+    CHECK(!device_unregister(&dev)); device_put(&dev);
+    driver_work_put(test.completion);
+    CHECK(!driver_workqueue_destroy(&test.worker, deadline()));
 }
 
 struct notification_case {
@@ -1013,6 +1132,7 @@ void driver_runtime_selftest_boot(void)
     exercise_dma_vmo();
     exercise();
     exercise_fence_notifications();
+    exercise_requests();
     exercise_firmware();
     if (boot_flag(args, "driver.usb_bulk_test=1"))
         exercise_usb_bulk();
@@ -1047,6 +1167,7 @@ void driver_runtime_selftest_boot(void)
           "DRIVER_DMA_BUFFER_MAP: PASS pages=2 retained=1 unmap=1\n"
           "DRIVER_DMA_BUFFER: PASS align=1 owner_refs=1 lifetime=1\n"
           "DRIVER_RESOURCES: PASS claims=1 conflicts=1 owner_refs=1 devres=1 inventory=1 memory=1%s\n"
+          "DRIVER_QUEUE: PASS parallel=1 worker=1 completion=1 stop_retry=1 drain=1\n"
           "DRIVER_FENCE_WATCH: PASS notify=1 cancel=1 error=1 work=1\n"
           "DRIVER_RUNTIME: PASS delayed=1 retime=1 cancel=1 requeue=1 destroy_timeout=1 park_wake=1 firmware=1\n",
           amdvi_owner ? "AMDVI_OWNER: PASS claim=1 rebind=1 writes=0\n" : "",

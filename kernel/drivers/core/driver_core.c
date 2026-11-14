@@ -286,6 +286,8 @@ struct device_resource_action {
     struct device_resource_action *next;
     int (*prepare)(void *);
     bool prepared;
+    int (*stop)(void *);
+    bool stopped;
 };
 struct protocol_action {
     struct device_resource_action action;
@@ -696,6 +698,32 @@ int device_add_remove_prepare(device_t *dev, int (*prepare)(void *), void *conte
     return ret;
 }
 
+int device_add_execution_action(device_t *dev, int (*stop)(void *),
+                                void (*release)(void *), void *context) {
+    if (!dev || !stop) return -EINVAL;
+    driver_ops_lock();
+    struct device_probe *probe = device_probes;
+    int ret = -EINVAL;
+    if (probe && probe->device == dev && probe->driver == dev->drv) {
+        ret = !device_is_registered(dev) ? -ENODEV :
+              !probe->driver->remove ? -EOPNOTSUPP : 0;
+        if (!ret) {
+            /* Arm rollback before allocation: OOM must not select legacy
+             * failed-probe resource release after hardware initialization. */
+            probe->remove_on_error = true;
+            struct device_resource_action *action = kmalloc(sizeof(*action));
+            if (!action) ret = -ENOMEM;
+            else {
+                *action = (struct device_resource_action){.stop = stop,
+                    .release = release, .data = context, .next = dev->resource_actions};
+                dev->resource_actions = action;
+            }
+        }
+    }
+    driver_ops_unlock();
+    return ret;
+}
+
 int driver_resource_request_checked(device_t *owner, const resource_t *res,
                                     driver_resource_claim_t **out) {
     if (!out)
@@ -916,6 +944,21 @@ static int device_unbind(device_t *dev) {
         dependent->state = DEV_STATE_DEFERRED;
         device_put(dependent);
     }
+    /* Execution must stop before a synchronous class call can be drained:
+     * it may be waiting for one of these requests. Attempt every independent
+     * action, checkpoint successes and return failures without entering the
+     * legacy unbounded call drain. Never release storage in this phase. */
+    for (struct device_resource_action *action = dev->resource_actions;
+         action; action = action->next) {
+        if (!action->stop || action->stopped) continue;
+        if (dev->state != DEV_STATE_REMOVING && dev->state != DEV_STATE_PROBE_CLEANUP)
+            dev->state = DEV_STATE_PREPARING;
+        class_device_mark_offline(dev);
+        int ret = action->stop(action->data);
+        if (!ret) action->stopped = true;
+        else if (!result) result = ret < 0 ? ret : -EIO;
+    }
+    if (result) goto done;
     driver_t *drv = dev->drv;
     if (dev->state != DEV_STATE_REMOVING) {
         dev->state = DEV_STATE_REMOVING;

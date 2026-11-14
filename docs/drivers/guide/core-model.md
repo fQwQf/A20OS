@@ -16,7 +16,7 @@ flowchart TD
     P --> N[无传统 class 的原生服务]
     C --> A[Native / Linux ABI 适配]
     E --> R[MMIO / IRQ / DMA / 固件 / VMO]
-    E --> X[请求 / fence / workqueue / quiesce 与可失败 remove]
+    E --> X[有界请求队列 / fence / workqueue / 可失败 stop 与 remove]
 ```
 
 | 部分 | 驱动作者依赖的接口 | 框架保证与作者责任 |
@@ -25,7 +25,7 @@ flowchart TD
 | 绑定与服务 | device_add_protocol、device_endpoint_get、driver_protocol_begin/end | 每次绑定有独立不可变协议快照；离线拒绝新调用，排空后才能回收实例/代码 |
 | 传统设备类 | class_ops、原生 primary protocol、class adapter | 六类既有驱动自动提供协议；扩展能力无需修改所有类的公共 vtable |
 | CPU/设备资源 | checked MMIO/port claim、IRQ、DMA domain/mapping、原生 buffer/VMO | 地址空间、访问许可、缓存交接、存储引用和硬件停止分别管理；错误不得静默退化成裸物理 DMA |
-| 执行与完成 | IRQ、fence、watch、workqueue、驱动自己的硬件队列 | IRQ 路径短且不分配；请求必须保留 backing，完成和退出必须确认硬件状态；通用执行队列仍需后续整合 |
+| 执行与完成 | queue/request、IRQ、fence、watch、共享 workqueue | 有界 admission 与并行 active、FIFO 依赖、排队取消；IRQ complete 后任务退休成功才 signal fence，stop 失败保留绑定与请求 |
 | 部署与用户边界 | 同一 driver_t、.a20drv、用户态服务代理 | 内建和模块同一生命周期；用户服务还要经过 Native 权限/资源仲裁，协议 ID 本身不授权硬件访问 |
 
 四类所有权不能混用：device 引用保留硬件元数据；endpoint 引用保留当次绑定的服务身份；access 保留一次正在执行的调用；VMO/buffer/mapping 保留存储与地址。前三者都不自动保留方法返回的缓冲区。引用计数、DMA 失效、producer 停止和用户权限各自有明确条件。
@@ -86,11 +86,11 @@ return ret;
 2. probe 在硬件启动前建立失败清理所有权、协议元数据和实例；所有可失败分配预先完成，再申请 MMIO/IRQ/DMA 并启动 producer。
 3. 控制面使用有界同步操作；数据面围绕每设备/队列组织，批处理与 SG 由对应协议显式协商，不在每包路径分配框架对象。硬件队列格式属于驱动。
 4. 对异步 DMA，请求保留 owning backing/mapping 和 producer fence，IRQ 只发布已确认的完成并调度任务工作；超时不提前交还硬件仍可访问的存储。
-5. 退出遵循 consumer/child → offline → quiesce → active call drain → remove → devres。remove 无法确认停止/失效时返回错误并保留实例/队列/代码，显式重试；不能通过释放资源制造“成功”。
+5. 退出遵循可选 prepare → consumer/child → offline → execution stop → quiesce → active call drain → remove → devres。remove 无法确认停止/失效时返回错误并保留实例/队列/代码，显式重试；不能通过释放资源制造“成功”。
 6. 将驱动打包为内建、模块或已有受支持的用户服务形态；ABI 适配检查用户权限，不能把内核协议描述符直接暴露成不受约束的用户调用。
 7. 验证正常 I/O、多实例、进程/消费者退出、并发调用与解绑，以及初始化/停止失败。测试匹配实际改动范围；硬件或平台未验证的能力保持明确的支持边界。
 
-通用协议与生命周期可服务不同驱动，但不替具体设备实现复位、IOMMU 后端、GPUVM 或固件协议；这些能力按后端声明支持。后续基础设施的重点是统一可组合的请求/队列与恢复路径，使作者不必自行拼接所有异步原语。
+通用协议与生命周期可服务不同驱动，但不替具体设备实现复位、IOMMU 后端、GPUVM 或固件协议；这些能力按后端声明支持。异步驱动以[原生请求与队列](request-queues.md)统一 admission、完成、退休和停止；硬件专有调度、主动 abort 与恢复策略仍通过设备协议实现。
 
 ## 三个核心对象
 
