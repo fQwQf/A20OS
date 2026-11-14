@@ -20,7 +20,7 @@
 
 新消费者使用 `gpu_device_default_begin/end()`，或先以 `gpu_device_default_get()` 保留 publication，再用 `gpu_device_access_begin/end()`。一次 access 的 device/const ops 来自同一个 DISPLAY 绑定；成功 begin 自持 class 引用与 active call，旧 publication 离线后返回 `-ENODEV`，不跟随重绑。选择读取不取 lifecycle mutex，不能在 active call 内等待需要自己退出的生命周期动作。每条成功返回路径配对 end，不能复制或覆盖 live access。
 
-fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议。active call 只保护调用；有 get_scanout 的 RAM 映射另经拥有引用的 snapshot 进入普通 VMO VMA，因此在 class 调用和 producer 解绑后仍可保留存储。旧 get_fb 物理路径仍借用 backing，fbdev open 尚不固定设备，DRM 全局对象表仍需迁移。完整所有权与限制见 [GPU publication](native-runtime.md#gpu-publication-与作用域调用) 和 [连续 RAM scanout](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
+fbdev ioctl/mmap 安装/后台刷新及 sysfs GPU 内容生成已使用该协议。active call 只保护调用；有 get_scanout 的 RAM 映射另经拥有引用的 snapshot 进入普通 VMO VMA，因此在 class 调用和 producer 解绑后仍可保留存储。DRM 文件已固定 publication、命名空间按 publication 分区，操作使用显式 class access；失败对象保留到清理成功或旧绑定停止，详见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。旧 get_fb 物理路径仍借用 backing，fbdev open 尚不固定设备。完整所有权与限制见 [GPU publication](native-runtime.md#gpu-publication-与作用域调用) 和 [连续 RAM scanout](native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 
 ## VirtIO 停止与失败保留
 

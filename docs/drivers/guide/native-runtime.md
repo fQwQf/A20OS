@@ -164,7 +164,7 @@ return ret;
 
 fbdev 的一次 ioctl、mmap 安装及后台一次刷新，以及 sysfs GPU 属性的一次内容生成，已捕获同一 publication/device/ops 并在结束时交还。sysfs 只保存复制后的内容，不在读取期间借用已结束的驱动调用；不同 open 的属性仍可观察到不同默认 GPU。fbdev 文件尚不固定到某设备，下一次操作可能选择新默认设备。mmap 安装返回后 active call 已结束；有 get_scanout 的 RAM 路径由普通 VMA 保留 VMO，旧 get_fb 物理路径仍借用 backing。
 
-`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。现有 DRM/GEM/virgl 路径仍有该旧入口和全局对象表，尚未整体迁移；需要每设备 BO/context/request/fence、文件绑定及映射退役协议。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项 access 函数已导出，device/driver 布局不变；下述 scanout 回调扩展 GPU vtable，当前模块 ABI 11。
+`gpu_device_get_default()` 保留为旧的借用快照，使用它必须由外层协调整个使用期间的生命周期，不能据此读取可失效的 ops。DRM 已按下述协议迁移到固定文件 publication、每 publication 状态及显式 scoped access；厂商 BO/context/request/fence 与旧物理映射退役仍需后续实现。上述消费者改造不等于 GPU 热拔插或持久资源生命周期已经完成。四项 access 函数已导出，device/driver 布局不变；下述 scanout 回调扩展 GPU vtable，当前模块 ABI 11。
 
 ## 连续 RAM VMO 与 owning scanout
 
@@ -180,7 +180,7 @@ GPU vtable **末尾**新增 `get_scanout(device, &snapshot)`，因此当前模�
 
 virtio-gpu 的 RAM framebuffer 已由该工厂创建；producer、临时 snapshot 和 VMA 分别持有 VMO 引用。MMU fbdev mmap/旧 `FBIO_MAP_FB` 优先走 `get_scanout`，内核 adapter 以 `mm_mmap_vmo_cap()` 接入既有 Rust VMO 放置/权限事务。wrapper 检查初始权限不超 ceiling，负责锁外 TLB begin、MM lock、locked mapper、锁外 finish/deferred release；VMA 自持 VMO，未新增 backing 注册表、VMA 字段或模块释放回调。映射使用 Normal RAM 属性、共享写入并支持 fork/split；mprotect 不得超过创建时有效硬件权限。末页 padding 可见且已清零。旧 ioctl 仍用固定 NOREPLACE。
 
-`get_fb` 继续是借用 CPU PA/可见长度的兼容查询；没有 owning 回调的 simplefb/VRAM 路径继续走下述物理视图，NOMMU 也保留旧直接地址行为。fbdev 的每次操作仍重新选择默认设备，尚未绑定每个 open 的 GPU 身份。RAM VMO 存活不证明 transport 已停止：virtio-gpu 的 reset 读回、失败初始化保留与内部 DMA/IRQ 退役已接入下述协议；当前 DRM/GEM/virgl 全局对象和裸 ops、厂商 BO/VRAM/GPUVM/请求队列也未由此完成迁移。
+`get_fb` 继续是借用 CPU PA/可见长度的兼容查询；没有 owning 回调的 simplefb/VRAM 路径继续走下述物理视图，NOMMU 也保留旧直接地址行为。fbdev 的每次操作仍重新选择默认设备，尚未绑定每个 open 的 GPU 身份。RAM VMO 存活不证明 transport 已停止：virtio-gpu 的 reset 读回、失败初始化保留与内部 DMA/IRQ 退役已接入下述协议；DRM 已另按下述协议迁移文件、状态和调用；厂商 BO/VRAM/GPUVM/请求队列仍待实现。
 
 ## VirtIO reset 确认与 GPU 退出
 
@@ -194,7 +194,25 @@ quiesce 原子关闭提交，先于 class drain，不等待 command mutex。四�
 
 remove 先拒绝 command_active，再 trylock；这同时防止原生递归 mutex 把同上下文的活动命令误当成可退出。忙返回 `-EBUSY`，不在 lifecycle 锁下等候 issuer。所有合法 class 调用已由核心排空，随后在 mutex 内执行可失败 reset；确认成功后才 free_irq 排空 handler、撤销默认选择并交还命令/framebuffer owner。reset 失败保留全部状态，既不清 drv_priv，也不释放 RAM 或 IRQ。snapshot/VMA 引用可在 producer 成功退出后继续保留旧 RAM。
 
-该旧驱动仍为单静态 controlq 实例，尚未实现每设备队列。实例有生命周期域内的 owner 守卫：已绑定或失败清理保留时，其他匹配设备返回 `-EBUSY`，绝不 memset 覆盖其 DMA 存储；仅成功 remove 才允许后续 claim。它复用原生绑定所有权，不是另建公开设备注册表。旧 DRM 裸 ops/全局对象仍要求外层生命周期协调；此处的队列防护不能给未持 class access 的调用补发绑定租约，也不能解决外部 GEM backing 提前释放、GPU 多实例或一般热拔插。
+该旧驱动仍为单静态 controlq 实例，尚未实现每设备队列。实例有生命周期域内的 owner 守卫：已绑定或失败清理保留时，其他匹配设备返回 `-EBUSY`，绝不 memset 覆盖其 DMA 存储；仅成功 remove 才允许后续 claim。它复用原生绑定所有权，不是另建公开设备注册表。DRM 已使用文件 publication 和 scoped access，并按旧绑定停止凭据保留/退休外部 GEM backing；此处队列防护仍不能替代厂商请求/fence 引用、GPU 多实例或一般热拔插协议。
+
+## DRM 文件、命名空间与失败退休
+
+`drm_create_vfile_for(publication, &file)` 是内核 adapter 的显式构造接口：在 DISPLAY class access 内捕获这个 publication，并要求其驱动提供显式 remove；缺少停止契约返回 `-EOPNOTSUPP`，离线返回 `-ENODEV`，失败清空输出。`drm_open_vfile(&file)` 只在 open 时读取一次默认 publication；旧指针包装 `drm_create_vfile()` 仍以 NULL 表示错误。这些入口不新增用户 ABI 或模块导出。
+
+每个 DRM 文件固定一个 publication。同一 publication 的文件共享兼容 GEM handle/name、framebuffer、CRTC、EDID、virgl ID 和 vblank 状态，不同 publication 分区；同一 device 重新绑定也创建新命名空间。私有 namespace 列表是 class 的消费者状态，没有第二个设备发布入口。当前节点仍是 card0/renderD128 默认聚合入口，未实现多 GPU 节点枚举；同 publication 的 handle 仍是历史共享语义，不等于已经实现每文件 handle 所有权、DRM master/auth 或完整进程隔离。
+
+DRM ioctl/mmap 与需要设备访问的 dma-buf sync，显式携带栈上 `drm_call`，从文件或 GEM 的原始 publication 取得同一 device/ops。先等每设备操作 mutex，再取得 active class call，避免持租约排队阻塞退出。操作另持 CPU namespace 使用计数，直到解锁、唤醒及最终收尾结束，最后一个 dma-buf close 不能让 worker 提前释放 namespace。read/poll 只访问本文件事件，不持硬件租约睡眠；离线 observer 唤醒等待者，read 在排空已有事件后返回 `-ENODEV`，poll 报 HUP/ERR，并在连接等待队列后重查事件和离线条件以防丢失唤醒。
+
+PRIME dma-buf pin 固定原 GEM 和 CPU 存储；同 publication 导入沿用兼容 handle，不同 publication 返回 `-EXDEV`，没有隐式跨 GPU DMA attach。fd 引用解析和最终 put，以及导出文件的 fd 安装/失败 close，位于 GPU 操作作用域之外，不能在持 GPU A mutex 时触发 GPU B 的最后一次 close。持有 dma-buf 的 CPU VMO 映射可在设备离线后继续存在；sync/DRM 新操作不因此获得离线硬件访问权。
+
+resource/context 的所选 ID 在发命令前成为清理身份，未知完成不能解释为对象不存在或 ready。成功 resource_unref/ctx_destroy 才确认该对象不再被设备访问；非零结果或缺少在线 ops 将原对象和 VMO 放入每设备失败列表，保留身份重试，正数错误规范化为 `-EIO`。在线下一次操作或原生 worker 做一次重试，不忙循环；offline 不授权释放。停止凭据成立后，worker 不再调用旧驱动代码，清空显示/host 身份并释放无 pin 的 GEM 和失败 context；dma-buf pin 与普通 VMA 的 VMO 引用继续保留 CPU 存储。无文件、操作、GEM 或失败清理对象时，才移除离线 namespace 并交还 publication 引用。
+
+在线 namespace 保留兼容共享状态；全局 reaper 服务随内核运行。离线未确认停止或失败清理按 100 ms 延迟重试；已经停止但仍有文件/dma-buf 的 namespace 不持续轮询，最终 close 重新调度回收。该协议依赖驱动诚实履行 remove，不是硬件故障后的强制释放。
+
+DRM 和 dma-buf mmap 复用 `mm_mmap_vmo_cap()`：只允许共享非空读写及可选 FIXED/NOREPLACE，拒绝 EXEC、private、未知 flags、溢出/越界和未对齐 offset，保留原生 errno 与创建权限 ceiling。DRM 假 offset 仍编码 handle，拒绝高位截断 alias，不是 GPUVM 或完整 mmap-offset 区间分配器。GEM_CREATE/CREATE_DUMB 输出复制失败撤销未交付 handle。PRIME 导入输出复制失败恢复原 handle 存活状态，不能凭空增加存储所有权。原生 VMA 自持 VMO，既有用户映射不需要在最终回收时进入驱动模块。
+
+这些更改保持 ABI 11，不实现厂商 BO/VRAM、驻留/预算、GPUVM、通用 job scheduler、DRM 同步 UAPI、完整模块卸载或实体 GPU 加速。fbdev open 仍按操作选择默认设备，旧 get_fb 持久物理视图仍借用存储。
 
 ## 驱动 CPU 物理映射事务
 
@@ -863,3 +881,19 @@ RISC-V embedded 单核 native IOMMU/EDU guest 匹配全部 7 项预期，新增 
 新增 `test_class_stop` 的 7 个主机方法编译生产 driver core/class 代码，覆盖显式成功 remove、失败保留与重试、offline/调用排空不等于停止、旧凭据跨重绑稳定、缺少 remove、publication/action 分配失败，以及精确 action 回滚。分配和同步使用模型，ASan/UBSan 检查引用与存储归还；不声称已观察厂商硬件停止。
 
 停止凭据、GPU access、class binding、可失败 remove 和 PC module boundary 在独立导出的源码树共通过 41 个 unittest 方法。5 个编译成功的负控分别破坏凭据发布、把 offline 当停止、忽略 remove 契约、漏撤销发布失败 action、放宽 callback/data 匹配，均由运行时断言拒绝；恢复源码后再执行回归。两个新 API 已导出，公开 class/device/driver 布局与 ABI 11 不变。证据在 `.kernel-build/drm-binding-review/stop-isolated.log` 和 `negative-stop*.log`。DRM 的每 publication 状态和自动退休仍是后续消费者迁移，不能由本凭据单独推导完成。
+
+### DRM publication 绑定与失败退休验证（2026-11-14）
+
+DRM 文件现在固定一次 open 捕获的 publication，GEM/FB/CRTC/EDID/事件与 virgl 身份按 publication 分区，硬件调用显式携带 scoped access。新增 `test_drm_binding` 的 23 个方法运行完整生产 DRM/core/class/GPU core 与实际 anonfd 安装器，覆盖默认 promotion、同 publication 共享/跨 publication 隔离、PRIME 拒绝、EDID 缓存、文件离线、重绑 ID 复用、未知 resource/context 创建、失败销毁保留与重试、导出 fd backing、缺少 remove、分配失败、原生 mmap 参数/错误、输出复制回滚和读等待丢失唤醒。在途调用排空使用 pthread 竞争；VFS/MM/PFA/worker/Park 边界仍是模型，不代表实体硬件故障注入。
+
+审查还发现跨 GPU PRIME 拒绝时最后一次 VFS put 可能在另一个 GPU mutex 内关闭原 dma-buf。导入 fd 的 lookup/ref/put 与导出 fd 安装/失败 close 已移到 GPU 操作作用域外，wire request 只捕获一次；专门夹具模拟 fd 已并发关闭和最后一次 put，检查这些边界未持设备 mutex，并验证导入 copyout 失败不增加 handle 存活状态。
+
+隔离导出的最终源码树通过 343 个不同驱动 unittest 方法。停止凭据的 5 个负控与 DRM 的 12 个编译成功负控均被运行时断言/ASan 拒绝；后者包括默认漂移、跨 publication 表/PRIME 混用、提前释放失败 unref、以 offline 当停止、未知 context 当 ready、扩大 mmap ceiling、copyout 泄漏、fd put/install 移回 GPU 锁内、导入 copyout 所有权泄漏和丢失唤醒。全部恢复源码后再次执行完整隔离回归。
+
+最终 `check-firmware-model` 通过 571 项及单独 1 项 sleep ABI，`check-pc-drivers` 通过 207 项；116 个 instance、32 个 component 清单审计通过。AArch64 embedded、Linux ABI、BRINGUP kernel-only 构建通过，未运行 AArch64 guest。
+
+扩展的 `smoke-driver-gpu-stop-x86_64` 为显式 embedded 双核实例，实际 2/2 CPU online；`driver.drm_binding_test=1` 执行真实 VFS、原生 worker、VMO/VMA 退出，观察旧文件 ioctl 返回 ENODEV/poll HUP，成功 remove 后旧 GEM 退出而 VMA 独占保留 VMO，新绑定命名空间与 VMO 不同、handle 可同号，真实 virtio flush 成功，最后旧 namespace 被回收，匹配 `DRIVER_DRM_BINDING: PASS file=1 stop=1 reaper=1 vma=1 rebind=1`。该内核 fixture 没有 fault 用户 PTE 或执行 virgl/厂商 GPU DMA。
+
+另串行运行 generic 模块双核 2D 显示门禁，保留 resident framebuffer fork、DRM_SYSFS 与 videoplay 10 帧；RISC-V `smoke-drm-prime` 用户态门禁通过 shared mapping、SCM_RIGHTS、export lifetime、80 exports 和 sync-file。成功日志分别保存在 `.kernel-build/drm-binding-review/guest-stop-final-serial.log`、`guest-generic-final-serial.log`、`guest-prime-final-serial.log`。x86 生命周期 guest 另通过 class 发布/解绑、失败 remove 保留/重试、受管失败 probe、remove prepare 和三类 registry 扩容标记；日志在 `guest-lifecycle-final-serial.log`。
+
+当前文档引用检查通过 540 条，导航仍报告共享迁移工作区既有 7 篇未编目文档，没有新增链接/锚点错误。13 篇文档仅把本轮内容投影到 canonical 路径，保留 docs/zh 迁移及其他会话修改。完整本地证据在 `.kernel-build/drm-binding-review/`。同 publication 每文件 handle/auth、旧物理 framebuffer 视图、virtio 每设备队列、厂商 BO/VRAM/GPUVM、请求/fence 与模块 unload 仍是后续工作。

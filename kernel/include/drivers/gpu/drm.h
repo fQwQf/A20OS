@@ -189,6 +189,13 @@ int drm_create_file(void);
 /* Create a DRM vfile (used by the /dev/dri/card0 devfs open path). */
 struct vfile *drm_create_vfile(void);
 
+struct class_device;
+/* Caller owns publication. Captures that DISPLAY binding; failures clear out.
+ * No later operation follows default promotion or rebinding. */
+int drm_create_vfile_for(struct class_device *publication, struct vfile **out);
+/* Same operation, capturing the current default publication once. */
+int drm_open_vfile(struct vfile **out);
+
 /* Wire the DRM backend to the GPU driver at device probe time. */
 void drm_device_bind(void);
 

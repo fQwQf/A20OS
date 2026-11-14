@@ -52,6 +52,8 @@ A20OS 内存管理子系统负责物理内存分配、虚拟地址空间管理�
 
 GPU owning scanout 向消费者转移一份 VMO 引用。`mm_mmap_vmo_cap()` 是既有 locked VMO mapper 的 unlocked TLB/MM 事务入口，先校验初始权限 ceiling，成功 VMA 自持 VMO。virtio-gpu/fbdev 复用普通 VMO fault、共享 fork、split、mprotect 与销毁，release 不调用设备代码；旧 raw 物理路径仍不拥有存储。详见 [RAM scanout 契约](../../drivers/guide/native-runtime.md#连续-ram-vmo-与-owning-scanout)。
 
+DRM 与 PRIME dma-buf 的 RAM mmap 同样复用 `mm_mmap_vmo_cap()`，校验共享读写、范围/溢出和 fake handle offset，拒绝执行与 private，保留权限 ceiling 和原生错误。普通 VMA 自持 VMO；旧 GPU 绑定停止后，DRM worker 可退休硬件身份和 GEM，已有 CPU 映射仍保留存储，不需要模块最终回调。dma-buf fd 另持原 GEM pin，跨 publication 导入不隐式建立 DMA attach。见 [DRM 文件与退休](../../drivers/guide/native-runtime.md#drm-文件命名空间与失败退休)。
+
 ## 关键代码与头文件
 
 - **核心虚拟内存定义**：[`kernel/include/mm/vm.h`](../../../kernel/include/mm/vm.h)（`mm_struct_t`、`mm_seg_t`、锁模型规则）

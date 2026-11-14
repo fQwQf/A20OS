@@ -11,7 +11,7 @@ if (gpu_device_register(dev) < 0)
     goto fail;
 ```
 
-默认选择保留已注册 display，并可按完整旧 virgl transport 表优先提升设备；这不是通用 GPU 能力查询。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，但 framebuffer/DRM 仍依赖单个默认设备，不等于完整的多 GPU 或热拔插保护。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
+默认选择保留已注册 display，并可按完整旧 virgl transport 表优先提升设备；这不是通用 GPU 能力查询。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，fbdev 仍按每次操作选默认设备；DRM 在 open 时固定 publication，并分区 GEM/CRTC/EDID/事件，跨 publication PRIME 拒绝。这不等于完整多 GPU 节点或热拔插保护。DRM 持久 backing 要求驱动显式 remove，失败不能回收设备仍可访问的存储，见 [DRM 退休](../guide/native-runtime.md#drm-文件命名空间与失败退休)。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
 
 以下是旧 get_fb 接入的简化骨架；实际驱动必须补齐部分初始化回滚及可失败硬件停止，不能照此假定 stop 一定成功。RAM framebuffer 应采用下述 owning scanout：
 

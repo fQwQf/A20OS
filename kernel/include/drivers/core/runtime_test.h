@@ -7,6 +7,11 @@
 void driver_runtime_selftest_boot(void);
 /* Explicit native IOMMU test, called only by the runtime boot gate. */
 void driver_iommu_native_selftest(void);
+#ifndef CONFIG_NOMMU
+struct class_device;
+/* Internal DRM fixture; explicit boot gate, embedded GPU code only. */
+int drm_native_binding_selftest(struct class_device *publication);
+#endif
 #else
 static inline void driver_runtime_selftest_boot(void) {}
 #endif

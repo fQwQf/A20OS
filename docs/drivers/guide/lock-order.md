@@ -21,7 +21,7 @@
 | E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
 | RTL8139 | `kernel/drivers/net/rtl8139.c` | `nic->lock`：RX/TX ring、描述符、游标与统计；无局部顺序（lwIP 投递在锁外，见 `rtl8139.c:242` 的 `LOCK_ORDER` 注释） |
 | VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
-| DRM/KMS/virtio-gpu 3D | `kernel/drivers/gpu/drm.c` | `g_drm_store.lock`；`g_vblank.lock` |
+| DRM/KMS/virtio-gpu 3D | `kernel/drivers/gpu/drm.c` | 每 publication 的 `store_lock`、`gpu_lock`、`vblank.lock`；namespace registry 与单控制台 owner mutex |
 | VirtIO-GPU transport | `kernel/drivers/gpu/virtio_gpu.c` | `inst->command_lock`（另有 `gpu_core.c` 的 `g_gpu_lock`，spinlock） |
 | VirtIO input | `kernel/drvmod/examples/vinput.c (inst->lock 在模块内)` | `inst->lock` |
 | virtio-console | `kernel/drivers/char/virtio_console.c`（generic 模块 `virtio-console.a20drv`，锁在模块内） | `g_vport.lock`：字节环、控制台镜像缓冲、两个 last_used 游标与计数器；无局部顺序（镜像投递在锁外） |
@@ -220,21 +220,17 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 
 默认选择修改在 lifecycle 协调域内完成；`g_gpu_lock` 只保护所选 device 元数据引用与缓存的旧 virgl transport 能力。锁内允许 device_get 保留快照，不能解引用可撤销的驱动 ops、调用驱动、分配、日志或做最后 put。被替换 device 在锁外交还。重新选择在 lifecycle 域内枚举在线 class，使用短 active call 检查候选 ops。
 
-默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序本身不建立存储租约；RAM scanout 另以 VMO 引用交接给 VMA，旧物理分支和 DRM 全局对象仍需迁移。
+默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序本身不建立存储租约；RAM scanout 另以 VMO 引用交接给 VMA，旧物理分支仍需存储协议，DRM 已使用下述每 publication namespace。
 
 ### DRM/KMS/virtio-gpu 3D
 
-`g_drm_store.lock`（`drm.c`）保护全部 device-global 状态：GEM 表`g_gems[]`、framebuffer 表 `g_fbs[]`、CRTC 绑定 `g_crtc`、GEM name 表、 PRIME 表、virgl 资源/上下文 id 计数器，以及 EDID 的一次性缓存。这些表当前是单一全局集合，尚未按 GPU 绑定分区；一个 open 建立的 buffer 对另一个 open 可见，因此 wlroots backend 与 renderD128 上的 GBM client 会并发访问它们。
+每个 publication 有独立 `gpu_lock`、`store_lock`、vblank mutex/等待队列。GPU mutex 串行化该 namespace 的命令和状态操作；等待 mutex 时尚未取得 active class call。文件、dma-buf pin 和临时 operations 计数分别保护 CPU namespace，不能将 active call 当存储引用。
 
-局部顺序：
+普通入口仅短暂取 registry mutex 增减 operations，GPU mutex 释放后才唤醒等待者并归还 operation；worker 持 registry mutex 遍历，但只能 trylock GPU mutex，忙则延迟重试，不能阻塞等待反向持有者。offline observer 不取 registry mutex，只唤醒和调度。持 active call 不得等待自己的 lifecycle drain。
 
-- `g_drm_store.lock` 是设备私有锁，永远是最内层锁。
-- **锁只保护表，不保护任何可能阻塞的调用。**凡是需要睡眠、分配、进入 VFS 或下发 virtio 命令的操作（`drm_present_buffer_at()`、present 用的`ops->flush()`、`vmo_release()`、`ops->resource_unref()`、`memfd_*`、`vfs_*`）都在释放锁之后执行。
-- 因此拆函数的 teardown 是两段的：`drm_gem_detach_locked()` 在锁内把对象移出表，`drm_gem_drop_storage()` 在锁外释放 VMO 与 host resource。
-- 跨锁的长操作由 **pin** 兜底：`drm_gem_pin()` 使 `pins++`，让对象在调用者放下锁期间不被回收，`drm_gem_unpin()` 归还。`pins` 不是 owner 计数：它不会让 buffer 活过最后一个持有者，只保证操作中途不被拆掉。
-- **不得在 `g_drm_store.lock` 内调用 VFS。**`vfs_get_file_ref()` 可以一路走到 file close op，而 `file_close_prepare()` 是在持有 `g_file_lock` 的情况下调用它的。所以 fd→对象、对象→fd 的解析都在锁外完成，锁内只比较解析出来的 `vfile.identity` 数值。
-- `g_drm_store.lock` 与 `g_vblank.lock` **不得同时持有**。`drm_close()` 目前只取 `g_vblank.lock`：它在锁下清掉可能指向本 context 的 pending flip，然后释放锁，再做 host 侧的 `ctx_destroy`。这条规则在它**将来**需要清理表项时才变成硬约束——那时必须先放掉 `g_vblank.lock` 再取 `g_drm_store.lock`。
-- `g_vblank.lock`（既有）保护单槽 pending flip 与 per-file 事件 FIFO。
+store mutex 保护 GEM/FB/name/CRTC 与清理列表。detach 在锁内，VMO release、resource_unref 和 context destroy 在 store 锁外；GEM pin 可跨锁保留存储，导出 dma-buf 也持 pin。store 与 vblank mutex 不同时持有；vblank 只保护 pending flip/FIFO，read 不持它或 class call 进入 park。单控制台 owner mutex 继续串行化实际 present 与 console 恢复。
+
+PRIME 导入的 fd lookup/ref 和最终 put、导出的 fd 安装与错误 close 在 GPU 操作作用域之外。即使并发 fd close 使 put 成为最后一次引用，也不能在 GPU A mutex 内调用 GPU B 的 close。成功停止后的 reaper 不进入任何旧驱动回调；已有 VMA/导出 fd 自持 CPU backing。完整语义见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。
 
 ### 连续 RAM 与 scanout 交接
 
@@ -246,7 +242,7 @@ get_scanout 必须在 scoped class access 内与 producer 模式替换协调，�
 
 原生 lifecycle 串行化 probe/remove 和静态 GPU instance owner 的交接；claim 不得覆盖保留中的实例。GPU quiesce 只原子设置 closing，核心随后 drain class 调用；不在 quiesce 等 command mutex。四个 issuer 在 mutex 内完成准入、staging、descriptor 发布和等待，command_active 标记覆盖整个持锁事务。未知 completion 先设置 command_failed，再交还 active/mutex；后续 issuer 在接触暂存区前返回错误。
 
-remove 先检查 command_active（拒绝同 owner 的递归退出），再 trylock；忙返回 EBUSY 并保留所有对象。持 command mutex 执行有界 transport reset，只有 status=0 读回后才 free_irq/同步排空 handler，再交还 buffer/VMO 和默认选择，最后允许新 claim。reset helper 本身无设备锁，不用于 IRQ/spinlock 上下文；调用者负责完整排他。旧 raw DRM 使用仍须外层协调，不能把该 mutex 当作 class 引用或模块寿命。
+remove 先检查 command_active（拒绝同 owner 的递归退出），再 trylock；忙返回 EBUSY 并保留所有对象。持 command mutex 执行有界 transport reset，只有 status=0 读回后才 free_irq/同步排空 handler，再交还 buffer/VMO 和默认选择，最后允许新 claim。reset helper 本身无设备锁，不用于 IRQ/spinlock 上下文；调用者负责完整排他。DRM 已使用每文件 publication 和 scoped access，不能把该 mutex 当作 class 引用或模块寿命。
 
 ### VirtIO-GPU transport
 

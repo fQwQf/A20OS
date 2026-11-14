@@ -9,10 +9,10 @@ driver_deployment = "embedded"
 [machine]
 memory = "1G"
 smp = 2
-extra_qemu = ["-vga", "none", "-device", "virtio-gpu-pci", "-append", "driver.runtime_test=1 driver.gpu_stop_test=1"]
+extra_qemu = ["-vga", "none", "-device", "virtio-gpu-pci", "-append", "driver.runtime_test=1 driver.gpu_stop_test=1 driver.drm_binding_test=1"]
 
 [test]
-expect = ["DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1", "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1", "DRIVER_RUNTIME: PASS"]
+expect = ["DRIVER_DRM_BINDING: PASS file=1 stop=1 reaper=1 vma=1 rebind=1", "DRIVER_GPU_STOP: PASS reset=1 unbind=1 retained=1 rebind=1", "DRIVER_GPU_SCANOUT: PASS vmo=1 unbind=1 split=1 fork=1 pins=1", "DRIVER_RUNTIME: PASS"]
 timeout = "60s"
 
 [net]
