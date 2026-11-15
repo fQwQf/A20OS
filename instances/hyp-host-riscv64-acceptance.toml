@@ -1,0 +1,13 @@
+name = "hyp-host-riscv64-acceptance"
+description = "RISC-V H SMP2 lifecycle gate with opt-in 5 ms supervisor timer audit"
+arch = "riscv64"
+abi = "both"
+[machine]
+vm_manager = true
+smp = 2
+memory = "2G"
+accel = "tcg"
+extra_qemu = ["-cpu", "rv64,h=true,sstc=true", "-append", "a20.vmd.timer_audit=1"]
+
+[net]
+stack = "bsd"

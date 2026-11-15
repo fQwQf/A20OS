@@ -33,6 +33,20 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
     answered_queries = dict.fromkeys(names, 0)
     evidence = dict(host=host, names=names, profile=profile_name, passed=[], status="running")
 
+    def rpc(*args, **kwargs):
+        started = time.monotonic()
+        result = _rpc(*args, **kwargs)
+        elapsed = (time.monotonic() - started) * 1000
+        key = str(args[1])
+        maxima = evidence.setdefault("rpc_max_ms", {})
+        maxima[key] = max(maxima.get(key, 0), round(elapsed, 3))
+        evidence["rpc_calls"] = evidence.get("rpc_calls", 0) + 1
+        # Initial STATS may wait for host boot. Once READY was observed,
+        # accepting a retry after the 3 s socket deadline would hide the bug.
+        if "baseline_stats" in evidence and elapsed >= 3000:
+            raise A20Error(f"management RPC {key} exceeded 3 s: {elapsed:.3f} ms")
+        return result
+
     def save():
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
@@ -41,12 +55,12 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
 
     def action(name: str, op: int):
         epoch, generation = identities[name]
-        return _rpc(host, op, _name(name) + struct.pack("<Q", generation), expected_epoch=epoch)
+        return rpc(host, op, _name(name) + struct.pack("<Q", generation), expected_epoch=epoch)
 
     def pump():
         for name in names:
             epoch, generation = identities[name]
-            data, _ = _rpc(host, READ, _name(name) + struct.pack("<QQI", generation, cursors[name], 2048),
+            data, _ = rpc(host, READ, _name(name) + struct.pack("<QQI", generation, cursors[name], 2048),
                            expected_epoch=epoch)
             if len(data) < 20:
                 raise A20Error("truncated console reply")
@@ -73,6 +87,9 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
             if any(item[0] != epoch for item in identities.values()):
                 raise A20Error("manager restarted during probe")
             by_name = {g["name"]: g for g in records}
+            for name in names:
+                if name in by_name and by_name[name]["state"] == 4 and by_name[name]["code"] != 0:
+                    raise A20Error(f"{name}: VMM exited with code {by_name[name]['code']}")
             if predicate(by_name):
                 evidence["passed"].append(label); save(); return
             time.sleep(0.03)
@@ -83,7 +100,7 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         epoch, generation = identities[name]
         deadline = time.monotonic() + timeout
         while data and time.monotonic() < deadline:
-            reply, _ = _rpc(host, WRITE, _name(name) + struct.pack("<Q", generation) + data[:256],
+            reply, _ = rpc(host, WRITE, _name(name) + struct.pack("<Q", generation) + data[:256],
                             expected_epoch=epoch)
             if len(reply) != 4: raise A20Error("truncated input acknowledgement")
             count, = struct.unpack("<I", reply)
@@ -93,12 +110,12 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         if data: raise A20Error(f"{name}: input remained backpressured")
 
     try:
-        baseline, stats_epoch = _rpc(host, STATS)
+        baseline, stats_epoch = rpc(host, STATS)
         if len(baseline) != 40: raise A20Error("stats layout mismatch")
         evidence["baseline_stats"] = list(struct.unpack("<5Q", baseline))
         for name in names:
             kernel = profile["boot"]["kernel"].encode().ljust(256, b"\0")
-            result, epoch = _rpc(host, START, _name(name) + struct.pack("<II", profile["memory_mb"], profile["vcpus"]) + kernel)
+            result, epoch = rpc(host, START, _name(name) + struct.pack("<II", profile["memory_mb"], profile["vcpus"]) + kernel)
             if len(result) != 8: raise A20Error("truncated start acknowledgement")
             generation, = struct.unpack("<Q", result)
             identities[name] = epoch, generation
@@ -123,13 +140,16 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         fresh = f"RECONNECTED_{nonce}".encode()
         send(names[0], f'echo "RECONNECTED_"\'{nonce}\'\n'.encode())
         wait_for(lambda _: fresh in output[names[0]], "console reconnect retained guest state")
-        action(names[0], PAUSE)
-        wait_for(lambda state: state[names[0]]["state"] == 2, "first VMM observed stopped")
-        alive = f"OTHER_ALIVE_{nonce}".encode()
-        send(names[1], f'echo "OTHER_ALIVE_"\'{nonce}\'\n'.encode())
-        wait_for(lambda _: alive in output[names[1]], "second guest executes while first paused")
-        action(names[0], RESUME)
-        wait_for(lambda state: state[names[0]]["state"] == 1, "first VMM resumed")
+        for index, name in enumerate(names):
+            peer = names[1 - index]
+            label = "first" if index == 0 else "second"
+            action(name, PAUSE)
+            wait_for(lambda state: state[name]["state"] == 2, f"{label} VMM observed stopped")
+            alive = f"OTHER_ALIVE_{nonce}_{index}".encode()
+            send(peer, f'echo "OTHER_ALIVE_"\'{nonce}_{index}\'\n'.encode())
+            wait_for(lambda _: alive in output[peer], f"peer executes while {label} guest paused")
+            action(name, RESUME)
+            wait_for(lambda state: state[name]["state"] == 1, f"{label} VMM resumed")
         # PID 1 respawns the RAMFS shell after exit. Ask BusyBox init to
         # shut down so EXITED proves the kernel completed its teardown.
         for name in names: send(name, b"/bin/poweroff\n")
@@ -140,13 +160,14 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         records, _ = list_guests(host)
         if any(g["name"] in names for g in records): raise A20Error("destroy left guest records")
         evidence["passed"].append("guest identities destroyed")
-        after, after_epoch = _rpc(host, STATS)
+        after, after_epoch = rpc(host, STATS)
         if after_epoch != stats_epoch or len(after) != 40:
             raise A20Error("stats identity/layout changed")
         evidence["final_stats"] = list(struct.unpack("<5Q", after))
         if evidence["baseline_stats"][:4] != evidence["final_stats"][:4]:
             raise A20Error("VM/vCPU/mapping/table counters did not return to baseline")
         evidence["passed"].append("VM resource counters returned to baseline")
+        evidence["completed_lifecycles"] = len(names)
         evidence["status"] = "pass"
     except BaseException as exc:
         evidence["status"] = "fail"; evidence["error"] = str(exc)
