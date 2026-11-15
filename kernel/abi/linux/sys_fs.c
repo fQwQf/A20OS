@@ -809,12 +809,7 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
          * like ttys and trips Node.js's PlatformInit tcgetattr check. */
         return vfs_ioctl((int)gfd, req, arg);
     }
-    if (req == TIOCGPTN) {
-        int pty_number = 0;
-        return copy_to_user(arg, &pty_number, sizeof(pty_number)) < 0 ?
-            -EFAULT : 0;
-    }
-    if (req == TIOCSPTLCK || req == TIOCSCTTY)
+    if (req == TIOCSCTTY)
         return 0;
     if (req == FIONBIO) {
         /* A socket blocks in the net data path, so "non-blocking" has to be

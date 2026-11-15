@@ -1282,6 +1282,16 @@ static void devfs_release(vnode_t *vn) {
     kfree(vn);
 }
 
+/* A backend open failure is not necessarily an allocation failure. The
+ * VFS consumes this per-task errno after a NULL vnode->open result. */
+static vfile_t *devfs_open_failed(vfile_t *vf, int error) {
+    task_t *task = proc_current();
+    if (task) task->vfs_open_errno = error;
+    vnode_put(vf->vnode);
+    vfile_free(vf);
+    return NULL;
+}
+
 static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     devfs_node_t *node = vn ? (devfs_node_t *)vn->fs_data : NULL;
     if (!node)
@@ -1356,10 +1366,8 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
         break;
     case DEVFS_PTMX: {
         int pty_idx = pty_alloc_and_open();
-        if (pty_idx < 0) {
-            vfile_free(vf);
-            return NULL;
-        }
+        if (pty_idx < 0)
+            return devfs_open_failed(vf, pty_idx);
         vf->ops = &g_devfs_ptm_ops;
         vf->priv = (void *)(intptr_t)pty_idx;
         break;
@@ -1436,11 +1444,8 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_PTS: {
         int pts_idx = (int)(node->rdev & 0xFF);
         int result = pty_slave_open(pts_idx);
-        if (result < 0) {
-            vnode_put(vf->vnode);
-            vfile_free(vf);
-            return NULL;
-        }
+        if (result < 0)
+            return devfs_open_failed(vf, result);
         vf->ops = &g_devfs_pts_ops;
         vf->priv = (void *)(intptr_t)pts_idx;
         break;
