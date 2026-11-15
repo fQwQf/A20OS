@@ -85,6 +85,7 @@ task_t *proc_task_alloc_storage(void)
     spin_init(&t->park_lock);
     t->park_lock.counter_sink = &park_counters;
     spin_init(&t->eevdf_deadline_lock);
+    spin_init(&t->jobctl_lock);
     return t;
 }
 
@@ -101,6 +102,7 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
     spin_init(&t->park_lock);
     t->park_lock.counter_sink = &park_counters;
     spin_init(&t->eevdf_deadline_lock);
+    spin_init(&t->jobctl_lock);
     refcount_set(&t->refs, 1);
     proc_lifetime_note_task_init(0);
     t->destroy_started = 0;

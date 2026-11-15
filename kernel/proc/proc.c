@@ -164,7 +164,9 @@ void proc_reparent_task_locked(task_t *new_parent, task_t *t)
 
 int proc_tg_link_locked(task_t *t)
 {
-    return a20_tasklist_tg_link_locked(t);
+    int rc = a20_tasklist_tg_link_locked(t);
+    if (!rc) signal_group_stop_inherit(t);
+    return rc;
 }
 
 void proc_tg_unlink_locked(task_t *t)

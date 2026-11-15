@@ -673,6 +673,12 @@ typedef struct task_t {
      * and parent wait status cannot resume a CMSIS-suspended thread. */
     uint32_t           suspend_pending;
     uint32_t           cmsis_suspend;
+    /* Group leader: generation serialization outside tasklist_lock; state
+     * writes hold tasklist_lock and publish atomically to stop safe points.
+     * state: bit 0 active, bit 1 reported, upper bits SIGCONT generation. */
+    spinlock_t         jobctl_lock;
+    uint32_t           jobctl_state;
+    uint32_t           jobctl_stop_epoch; /* member's queued stop generation */
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&

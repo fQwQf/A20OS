@@ -1103,6 +1103,10 @@ smoke-cpuinfo:
 smoke-sigchld-group:
 	$(PYTHON) tools/smoke.py smoke-sigchld-group
 
+.PHONY: smoke-sigstop-group-smp2
+smoke-sigstop-group-smp2:
+	$(PYTHON) tools/smoke.py smoke-sigstop-group-smp2
+
 smoke-child-exit-matrix:
 	$(PYTHON) tools/smoke.py smoke-child-exit-matrix
 

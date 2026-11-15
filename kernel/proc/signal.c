@@ -187,7 +187,7 @@ static int signal_action_fatal_locked(task_t *t, signal_state_t *ss,
 }
 
 
-static int signal_queue_task(task_t *t, int signum, const void *info,
+static int signal_queue_one(task_t *t, int signum, const void *info,
                              size_t info_size, int thread_directed)
 {
     if (!t || !t->signals)
@@ -241,6 +241,9 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
         __atomic_store_n(&t->thread_signal_info, candidate, __ATOMIC_RELEASE);
         candidate = NULL;
     }
+    if (signum == SIGSTOP)
+        t->jobctl_stop_epoch = __atomic_load_n(
+            &(t->tg_leader ? t->tg_leader : t)->jobctl_state, __ATOMIC_ACQUIRE) & ~3u;
     a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
     a20_signal_queue_result_t result;
     a20_signal_queue_locked(&st, signum, (const uint8_t *)info, info_size,
@@ -279,6 +282,160 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     if (!is_user && t == proc_current())
         signal_deliver();
     return 0;
+}
+
+/* SIGSTOP is process-wide even when a sibling takes the shared occurrence.
+ * Queue a private unmaskable stop for every member. SIGCONT resumes all of
+ * them, but publishes only the original single catchable signal occurrence.
+ * jobctl_lock serializes generations; tasklist_lock pins a member snapshot;
+ * no signal-state lock is held while a scheduler wake takes park_lock. */
+static int signal_queue_task(task_t *t, int signum, const void *info,
+                             size_t info_size, int thread_directed)
+{
+    if (!t || !t->signals || !t->pgdir ||
+        (signum != SIGSTOP && signum != SIGCONT))
+        return signal_queue_one(t, signum, info, info_size, thread_directed);
+
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    task_t *local[16], **members = local;
+    size_t capacity = 16, count;
+    uint64_t control_flags;
+    for (;;) {
+        control_flags = spin_lock_irqsave(&leader->jobctl_lock);
+        uint64_t list_flags = spin_lock_irqsave(&tasklist_lock);
+        count = 0;
+        int overflow = 0;
+        for (task_t *member = leader; member; member = member->tg_next) {
+            int state = proc_task_state_get(member);
+            if (state == PROC_UNUSED || state == PROC_ZOMBIE || !member->signals)
+                continue;
+            if (count == capacity) { overflow = 1; break; }
+            task_t *ref = proc_get(member);
+            if (ref) members[count++] = ref;
+        }
+        if (!overflow) {
+            /* Publish the generation while clone publication is excluded.
+             * A later sibling inherits this state before it can run. */
+            uint32_t state = __atomic_load_n(&leader->jobctl_state, __ATOMIC_RELAXED);
+            if (signum == SIGCONT) state = (state + 4u) & ~3u;
+            else if (!(state & 1u)) state = (state & ~2u) | 1u;
+            __atomic_store_n(&leader->jobctl_state, state, __ATOMIC_RELEASE);
+            spin_unlock_irqrestore(&tasklist_lock, list_flags);
+            break;
+        }
+        spin_unlock_irqrestore(&tasklist_lock, list_flags);
+        spin_unlock_irqrestore(&leader->jobctl_lock, control_flags);
+        for (size_t i = 0; i < count; i++) proc_put(members[i]);
+        if (members != local) kfree(members);
+        if (capacity > ((size_t)-1) / 2 / sizeof(*members)) return -ENOMEM;
+        capacity *= 2;
+        members = kcalloc(capacity, sizeof(*members));
+        if (!members) return -ENOMEM;
+    }
+    /* Scheduler resume emits parent notifications which may walk the task
+     * list. Keep only referenced members and the generation lock here. */
+    int ret = 0;
+    for (size_t i = 0; i < count; i++) {
+        task_t *member = members[i];
+        uint64_t sf;
+        if (signum == SIGSTOP) {
+            int rc = signal_queue_one(member, signum, info, info_size, 1);
+            if (rc < 0 && !ret) ret = rc;
+        } else {
+            signal_state_t *ms = (signal_state_t *)member->signals;
+            sf = spin_lock_irqsave(&ms->lock);
+            a20_signal_queue_state_t st = signal_queue_state_fill(member, ms);
+            uint64_t cancel = a20_signal_generation_cancel_mask(SIGCONT);
+            /* The Rust consume operation clears pending bits and siginfo
+             * together. Each signum has at most one occurrence per scope. */
+            for (int sig = 1; sig < NSIG; sig++) {
+                if (!(cancel & signal_mask_bit(sig))) continue;
+                (void)a20_signal_consume_locked(&st, sig, NULL, 0);
+                (void)a20_signal_consume_locked(&st, sig, NULL, 0);
+            }
+            spin_unlock_irqrestore(&ms->lock, sf);
+            (void)proc_sched_resume_stopped(member, 1);
+        }
+    }
+    if (signum == SIGCONT)
+        ret = signal_queue_one(t, signum, info, info_size, thread_directed);
+    spin_unlock_irqrestore(&leader->jobctl_lock, control_flags);
+    for (size_t i = 0; i < count; i++) proc_put(members[i]);
+    if (members != local) kfree(members);
+    return ret;
+}
+
+/* A new sibling or exec image joins an already-stopped process. Clone holds
+ * tasklist_lock; exec holds jobctl_lock, before its first user instruction. */
+void signal_group_stop_inherit(void *task)
+{
+    task_t *t = task;
+    if (!t || !t->signals) return;
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    uint32_t state = __atomic_load_n(&leader->jobctl_state, __ATOMIC_ACQUIRE);
+    if (!(state & 1u)) return;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    t->jobctl_stop_epoch = state & ~3u;
+    a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+    a20_signal_queue_result_t result;
+    a20_signal_queue_locked(&st, SIGSTOP, NULL, 0, 0, 0, 1, 0, 0, &result);
+    spin_unlock_irqrestore(&ss->lock, flags);
+}
+
+int signal_task_group_stop_cancelled(void *task)
+{
+    task_t *t = task;
+    if (!t) return 0;
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    return t->jobctl_stop_epoch !=
+        (__atomic_load_n(&leader->jobctl_state, __ATOMIC_ACQUIRE) & ~3u);
+}
+
+int signal_task_group_stop_active(void *task)
+{
+    task_t *t = task;
+    if (!t) return 0;
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    return (__atomic_load_n(&leader->jobctl_state, __ATOMIC_ACQUIRE) & 1u) != 0;
+}
+
+/* A parent must not observe a process stop while another thread still runs.
+ * Each member calls this after publishing STOPPED and releasing park_lock.
+ * Membership and signal generations are stable under tasklist_lock; inspect
+ * one park_lock at a time, and emit one leader wait report per generation. */
+void signal_group_stop_completed(void *task, int sig)
+{
+    task_t *t = task;
+    if (!t || !t->signals) return;
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    uint32_t state = __atomic_load_n(&leader->jobctl_state, __ATOMIC_ACQUIRE);
+    int report = (state & 3u) == 1u && t->jobctl_stop_epoch == (state & ~3u);
+    if (!report) goto out;
+    for (task_t *member = leader; member; member = member->tg_next) {
+        int state = proc_task_state_get(member);
+        if (state != PROC_UNUSED && state != PROC_ZOMBIE && state != PROC_STOPPED)
+            goto out;
+    }
+    if (proc_task_state_get(leader) != PROC_STOPPED) goto out;
+    __atomic_store_n(&leader->jobctl_state, state | 2u, __ATOMIC_RELEASE);
+    uint64_t lf = spin_lock_irqsave(&leader->park_lock);
+    leader->exit_code = sig;
+    leader->stop_report_pending = 1;
+    leader->continue_report_pending = 0;
+    spin_unlock_irqrestore(&leader->park_lock, lf);
+    task_t *parent = leader->parent ? proc_get(leader->parent) : NULL;
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+    if (parent) {
+        proc_wake_child_waiters(parent);
+        if (!signal_task_sigchld_no_cldstop(parent))
+            (void)signal_send(parent->pid, SIGCHLD);
+        proc_put(parent);
+    }
+    return;
+out:
+    spin_unlock_irqrestore(&tasklist_lock, flags);
 }
 
 int signal_send_task_info(void *task, int signum, const void *info,
@@ -592,9 +749,14 @@ int signal_exec_unshare(void *task)
     if (!copy)
         return -ENOMEM;
     signal_copy(old, copy);
+    /* Group control keeps referenced tasks, then accesses their current
+     * signal state. Serialize replacement so it cannot retain a freed SS. */
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    uint64_t control_flags = spin_lock_irqsave(&leader->jobctl_lock);
     t->signals = copy;
     if (refcount_dec_and_test(&old->refcount))
         kfree(old);
+    spin_unlock_irqrestore(&leader->jobctl_lock, control_flags);
     return 0;
 }
 
@@ -603,6 +765,8 @@ void signal_exec_reset(void *task)
     task_t *t = (task_t *)task;
     if (!t || !t->signals)
         return;
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    uint64_t control_flags = spin_lock_irqsave(&leader->jobctl_lock);
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
     /* One Rust transaction: disposition reset (SIG_IGN survives, flags and
@@ -625,6 +789,8 @@ void signal_exec_reset(void *task)
      * per-task field protected by the same signal-state lock. */
     t->sig_blocked = 0;
     spin_unlock_irqrestore(&ss->lock, flags);
+    signal_group_stop_inherit(t);
+    spin_unlock_irqrestore(&leader->jobctl_lock, control_flags);
 }
 
 uint64_t signal_task_pending_blocked(void *task)
@@ -843,6 +1009,9 @@ void signal_deliver_user(trap_context_t *ctx) {
             offsetof(sigaction_t, sa_handler), sizeof(ss->actions[0].sa_handler),
             offsetof(sigaction_t, sa_mask), offsetof(sigaction_t, sa_flags),
             &txn, (uint8_t *)&queued_info, sizeof(queued_info));
+        if (txn.outcome == A20_DELIVERY_STOP && txn.sig != SIGSTOP)
+            t->jobctl_stop_epoch = __atomic_load_n(
+                &(t->tg_leader ? t->tg_leader : t)->jobctl_state, __ATOMIC_ACQUIRE) & ~3u;
         t->sig_blocked = txn.blocked;
         t->sigsuspend_active = txn.sigsuspend_active;
         t->ptrace_deliver_sig = txn.ptrace_deliver_sig;
