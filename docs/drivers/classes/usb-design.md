@@ -2,6 +2,10 @@
 
 > 状态：已实现（HID + Mass Storage + xHCI）。当前共享实现为 `kernel/drivers/usb/`（`core/usb_core.c`、`host/xhci.c`、`class/usb_hid.c`、`class/usb_storage.c`）。generic 在 `tools/mk/driver-modules.mk` 实际列出的 x86_64/aarch64/loongarch64 上通过 `xhci.a20drv`、`usb-hid.a20drv`、`usb-storage.a20drv` 部署；embedded 静态链接这些共享源码。
 
+## 与原生驱动模型的关系
+
+HCD、hub 和 interface driver 使用同一设备绑定/发布/退出模型；USB 的 URB、slot 和 endpoint 仍是子系统协议，不因 native queue 出现而自动替换。consumer 借用硬件可达 URB/ring 时，先通过 slot abort、endpoint release 或 pre-consumer prepare 确认停止，再允许相应存储交还。通用 execution stop 位于 consumer 解绑之后、call drain 之前，不能代替更早的借用解除。普通 ready 检查也不能代替在途 callback/code/context 的排空。完整共同顺序见[核心生命周期](../guide/core-model.md#生命周期的精确语义)。
+
 ## 1. 背景与目标
 
 A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11 boot protocol 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。该文件已随通用 USB 子系统落地而移除，HID 事件面迁入 `kernel/drivers/usb/class/usb_hid.c`（经 `/dev/event0` mux `kernel/drivers/input/input_mux.c` 与 virtio-input 等输入源聚合）。
@@ -12,7 +16,7 @@ A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（11
 
 | 已有能力 | 位置 | 说明 |
 |----------|------|------|
-| 驱动模型 | `kernel/drivers/core/` | `driver_t`/`device_t`/`bus_type_t`，`match`/`probe`/`remove` |
+| 驱动模型 | `kernel/drivers/core/` | device/driver/bus、publication/protocol、managed failed-probe 与可失败执行停止 |
 | 总线热插拔钩子 | `device_hotplug(dev, BUS_EVENT_ADD/REMOVE)` | USB core 已用于 interface 发布和移除 |
 | PCI 枚举 | `kernel/drivers/bus/pci_bus.c` | 宿主控制器可作为 PCI 设备绑定 |
 | 输入类接口 | `input_dev_ops_t`（read/ioctl/poll）+ `DEV_CLASS_INPUT` | HID 接入点，已存在 |

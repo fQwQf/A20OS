@@ -169,7 +169,7 @@ RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连
 
 ## VirtIO reset 与 GPU 失败退出回归
 
-`test_virtio_gpu_stop.py` 运行真实 GPU instance/claim、四条命令路径、init/probe/quiesce/remove/release 和 bus reset；RAM 使用既有真实 VMO/PFA split/Rust 回收 fixture。16 项方法覆盖参数、延迟 ACK、超时/重试、停滞/未知频率和时钟回绕，失败 probe、framebuffer OOM、第二设备拒绝、失败 remove 保留 IRQ/暂存/RAM、递归 active 拒绝，以及四条命令的成功、超时、错误 used id/增量、三条可增长 staging 的 OOM。故障后必须独立断言 command_failed，再验证全队列拒绝继续提交；不能用生产字段决定是否执行该断言。
+`test_virtio_gpu_stop.py` 运行生产 GPU 的 native queue/instance、四种格式、probe/stop/remove 和 reset；RAM 复用实际 VMO/PFA/Rust 回收夹具。覆盖 status 读回、超时/重试、错误 used id/index、暂存 OOM、活动 issuer 拒绝退出、每设备隔离和双设备失败停止。`test_driver_queue` 使用真实 fence，覆盖背压、多 active、乱序完成、依赖通知与撤销、取消、retire 失败和 owner 保留；`test_driver_protocol` 覆盖 hosted/MCU publication、失败执行停止先于 call drain 及 managed probe。测试数量以当前运行输出为准，不把旧阶段的“第二设备拒绝”当作 VirtIO GPU 的现状。
 
 寄存器、时钟、IRQ 和 core probe admission 在这个 fixture 中为模型，未测试真实 IRQ 排空或硬件超时；native core 的失败 probe/remove 保留另有既有测试。`test_pc_module_boundary` 同时实际编译 virtio-gpu 包装器并核对 loader 导出，防止仅 host 提取函数通过。
 
@@ -182,7 +182,7 @@ RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连
 | `git diff --check` 报错 | 行尾空格、tab 混用、文件尾空行 | 修复并重新 `git diff --check` |
 | `make check-firmware-model` | driver core 头文件、ID 表、class ops 是否匹配规范 | 对照 [drivers/core-model.md](../guide/core-model.md) 和 `kernel/include/drivers/` 修正 |
 | `make check-component-registry` | 文档与代码中注册表、生成清单与真实模块构建规则不一致 | 同步文档和实现，确保命令矩阵和真实 Makefile 目标一致 |
-| `make smoke-driver-lifecycle` 失败 | 合成 bus/device 注册、probe 失败清理、unregister 路径 | 加 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 日志，确认失败点是否释放资源 |
+| `make smoke-driver-lifecycle` 失败 | 合成 bus/device 注册、probe 失败清理、unregister 路径 | 加 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 日志，核对清理成功后的回收与未确认停止时的保留/重试 |
 | `make smoke-platform-irq-fallback` 失败 | `platform_device_irq()` 的四种返回、`request_irq`/`free_irq` 往返、`a20.dw-sdio.poll=1` 解析 | 加 `CONFIG_PLATFORM_IRQ_TEST=y` 日志，看是哪个断言行打印了 FAIL |
 | 构建矩阵中某一架构失败 | 是否用了 `#ifdef CONFIG_BOARD_` 或架构私有头 | 把板级常量移到 platform，把可跨架构代码改成通用 PCI/MMIO |
 | 块/网络/input/display I/O 失败 | 是否用了唯一数据镜像、是否满足类接口语义 | 用可丢弃镜像复跑，按设备类规范逐个检查返回值 |
@@ -195,7 +195,7 @@ RISC-V native IOMMU/EDU 门禁保留普通可变 VMO 的数据往返，另以连
 - [ ] ID、资源大小、DMA 地址宽度来自硬件手册并已验证。
 - [ ] 驱动不依赖板级地址或架构私有 include。
 - [ ] class 返回值符合 [device-classes.md](../guide/device-classes.md)。
-- [ ] probe 每个失败点有逆序清理，remove 可重复。
+- [ ] probe 已明确 managed 或局部回滚所有权；stop/retire/remove 失败保留资源可重试，成功后才逆序回收。
 - [ ] IRQ、DMA、barrier、cache ownership 正确。
 - [ ] 多实例状态不错误地放在单全局对象；若暂限单实例已记录。
 - [ ] 新锁已加入 `lock-order.md`。

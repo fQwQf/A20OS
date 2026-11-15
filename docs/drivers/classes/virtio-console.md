@@ -2,6 +2,10 @@
 
 `virtio-console.a20drv` 提供 raw `/dev/vport0` 和带背压的批量 TTY。队列、DMA 缓冲区及来客接收字节环均可在构建时配置。默认 `throughput` 保持当前 CLI 吞吐配置；内存紧张的目标可选择 `compact`。
 
+## 架构边界
+
+该设备通过 CHAR primary protocol 和既有专用 virtqueue 提供字节流；下述 TX 槽背压/完成所有权没有被通用 request queue 自动替换。调用者的字节只借用到方法约定的范围，设备仍持有的 DMA 槽须由后端继续保留。绑定、active call 和存储 owner 的通用规则见[核心模型](../guide/core-model.md)，新增执行机制见[请求队列](../guide/request-queues.md)。配置只改变容量，不授予提前复用或停止失败后释放 DMA 的权限。
+
 ## 实例配置
 
 在目标 `instances/<名字>.toml` 的现有 `[kernel]` 段加入：

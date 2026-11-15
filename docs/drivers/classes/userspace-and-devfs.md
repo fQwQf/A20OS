@@ -8,12 +8,12 @@ A20OS 的 driver class 是内核内部接口，但 class publication 同时驱�
 userspace read/ioctl
   -> VFS vfile_ops
   -> devfs 动态 class 节点或固定聚合节点
-  -> class_device_t 引用和 online 检查
+  -> endpoint/class 引用和 active-call 准入
   -> typed class_ops(device_t *, kernel buffer)
   -> drv_priv / hardware
 ```
 
-`kernel/fs/devfs/devfs.c` 的 `g_nodes[]` 仍定义 `/dev/fb0`、`/dev/event0`、tty、loop 等固定服务节点。除此之外，根目录 lookup/readdir 会查询 class registry，为在线的 char、block、audio 实例动态构造 `/dev/charN`、`/dev/diskN`、`/dev/audioN`。打开文件持有 `class_device_t` 引用；remove 把它置为 offline 并排空在途调用，后续操作返回 `-ENODEV`。
+`kernel/fs/devfs/devfs.c` 的 `g_nodes[]` 仍定义 `/dev/fb0`、`/dev/event0`、tty、loop 等固定服务节点。除此之外，根目录 lookup/readdir 会查询 class registry，为在线的 char、block、audio 实例动态构造 `/dev/charN`、`/dev/diskN`、`/dev/audioN`。打开文件持有 publication 引用；核心先 offline，已登记的 execution stop 在排空前安全解决请求，随后 quiesce/drain/remove。后续操作返回 ENODEV，旧文件不跟随重绑。
 
 所有 class 还动态出现在 `/sys/class/{char,block,net,input,display,audio}/<name>/dev`；`dev` 内容是该 class device 的 major:minor。既有 `/sys/class/drm` 和 `/sys/block/loopN` 兼容视图独立保留。
 
@@ -28,18 +28,18 @@ read/write 的 VFS/ABI 路径负责用户地址检查和复制，class ops 接�
 1. char、block、audio 注册 class 后直接获得动态通用节点。
 2. input/display 注册 class 后由固定 `/dev/event0`、`/dev/fb0` 聚合或选择。
 3. 若是内核子系统消费者，例如 network，注册 class 后由 lwIP 消费，不需要 `/dev`。
-4. 若确实需要新通用用户接口，先设计 class 与 ABI，再在 devfs 增加与硬件无关的适配器。
+4. 无合适 class 的内核服务可发布独立原生协议；确需用户入口时，在 Native broker/通用 ABI adapter 中定义权限、封送和等待，再决定 devfs 或 handle 的表达，不为每个可选功能增加 class。
 5. 单一厂商调试接口应优先放 debug/proc 通道，不要把不稳定寄存器操作发布为长期 ioctl ABI。
 
 新增 devfs ABI 必须规定节点命名、多实例编号、open 时如何绑定 `device_t`、权限、read/write 单位、阻塞、poll、ioctl 结构版本和 remove 后已打开 fd 的行为。
 
 ## Display
 
-`/dev/fb0` 的 open 当前不绑定独立引用，而每次 ioctl 获取默认 display。驱动 probe 需 `gpu_device_register`，remove 需 unregister。映射由 framebuffer 适配层完成，驱动只报告物理 backing 和刷新操作。
+`/dev/fb0` 每次 ioctl/mmap/刷新捕获默认 GPU 的一次 scoped access，身份与 ops 属于同一绑定；open 不固定一个专属设备。RAM scanout 优先由 owning VMO snapshot/VMA 保留，支持 fork/split；旧 get_fb 物理分支仍借用 backing，没有通用撤销协议。DRM open 则固定 publication，GEM/FB/上下文按 publication 与文件归属管理；退出在安全 stop/退休和 call drain 之后交还实例。详见 [Display](display.md) 与[请求执行](../guide/request-queues.md)。
 
 ## Input
 
-`/dev/event0` 是聚合器，不是严格的一设备一节点 evdev。它枚举 `DEV_CLASS_INPUT`（例如 xHCI）并合并 VirtIO input 事件。新 input 类驱动实现 `read/poll` 即可被发现。事件必须是完整 `struct input_event`；class read 在无事件时返回 `-EAGAIN`，不得让适配器依赖硬件私有 getter。
+`/dev/event0` 是聚合器，不是严格的一设备一节点 evdev。它枚举 `DEV_CLASS_INPUT`（例如 USB HID class）并合并 VirtIO input 事件。新 input 类驱动实现 `read/poll` 即可被发现。事件必须是完整 `struct input_event`；class read 在无事件时返回 `-EAGAIN`，不得让适配器依赖硬件私有 getter。
 
 ## Audio
 

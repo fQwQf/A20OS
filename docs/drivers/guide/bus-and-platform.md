@@ -61,7 +61,7 @@ if (!regs)
     return -ENODEV;
 ```
 
-映射 helper 为设备登记回收动作，probe 失败和 remove 后自动释放。架构层验证映射属性与可达性；驱动不加减 `PAGE_OFFSET`。
+映射 helper 为设备登记回收动作，在已安全清理的 probe 失败或成功 remove 后逆序回收；停止/失效失败则随绑定保留。架构层验证映射属性与可达性；驱动不加减 `PAGE_OFFSET`。
 
 PCI BAR 使用 `pci_get_bar_resource(dev, physical_bar_number)` 和 `pci_map_bar()`，不能按资源数组下标猜 BAR 编号。host 配置访问、可达性及分配窗口由架构接口提供；普通驱动不扫描 ECAM 或修改其他设备的 BAR。具体规则见 [PCI 与 VirtIO](pci-and-virtio.md)。
 
@@ -80,7 +80,7 @@ provider 未就绪在进入 probe 前返回 `-EPROBE_DEFER`；有轮询实现的
 
 时钟、复位等依赖通过 `device_dependency_get()` 获取并建立 consumer/provider 关系，调用者归还返回的设备引用。核心在 provider 到达后重试，在 provider 撤销前先解除 consumer 绑定，并拒绝依赖环。
 
-架构 IRQ 入口负责 ack/EOI，普通 handler 不直接写 GIC 或 APIC。只有共享线上的所有 handler 都使用 `IRQF_SHARED` 时才允许共享。请求 IRQ 后，驱动必须在 remove 和失败回滚中撤销它。
+架构 IRQ 入口负责 ack/EOI，普通 handler 不直接写 GIC 或 APIC。只有共享线上的所有 handler 都使用 `IRQF_SHARED` 时才允许共享。请求 IRQ 后，退出路径必须先按设备协议处理生产者和在途请求，再排空/撤销 handler；新异步驱动把可失败停止登记到 call drain 前的 execution 阶段。只有确认不再使用 priv、ring 和 MMIO，才能在 remove/devres 交还存储。
 
 ## 时间与早期控制台
 

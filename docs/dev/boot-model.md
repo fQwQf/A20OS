@@ -76,13 +76,15 @@ platform 驱动使用 `driver_t.firmware_ids` 声明稳定硬件 ID；DT compati
 
 核心在 discovery 完成、驱动到达或显式重试时，对 deferred 设备执行有界的进展重试。永久 probe 错误保存在 `probe_error`，不会当成依赖未就绪而无限循环。
 
-注册表、父子设备关系、类设备、依赖和进度快照分别持有对象引用。`device_unregister()` 撤销注册与绑定；最终 `device_put()` 才调用动态设备的 `release()`。lookup 中名字带 `find_get` 的接口返回引用，调用者必须归还。
+注册表、父子设备关系、类设备、依赖和进度快照分别持有对象引用。device_unregister 成功才撤销注册/绑定；非零时保留记录及资源，显式重试。最终 device_put 才调用动态设备的 release。lookup 中名字带 `find_get` 的接口返回引用，调用者必须归还。
 
 块类索引和借用的 block adapter 各有 256 个启动期身份预算，绑定撤销后不将旧索引分配给另一块盘。旧句柄永久返回 `-ENODEV`，离线 adapter 立即释放其设备引用；耗尽预算明确拒绝新绑定。
 
-probe 可以通过 `device_add_resource_action()` 登记回收动作。映射 helper 已自动登记；probe 失败或 remove 后，核心逆序释放受管资源和依赖。驱动仍须停止 DMA、撤销 IRQ、释放未登记的分配；不能在硬件仍活动时依赖回收器直接释放内存。
+probe 可以通过 `device_add_resource_action()` 登记回收动作。映射 helper 已自动登记；已确认安全的 probe 清理或成功 remove 后，核心才逆序释放受管资源和依赖；managed 清理/停止失败保留部分实例和原 probe_error。驱动仍须停止 DMA、撤销 IRQ、释放未登记的分配；不能在硬件仍活动时依赖回收器直接释放内存。
 
-内核模块驱动 ABI 为 **7**，包含显式 framebuffer 布局接口和 terminal shutdown 回调；旧 ABI 包会被拒绝，必须与当前内核一起重建。没有保留按旧 compatible 查找驱动再反向创建设备的路径。
+绑定后服务采用按版本/前缀/功能协商的原生协议；queue/request 在调用返回后独立保留执行与 backing。退出在 active-call drain 前尝试已登记的可失败 execution stop，成功后才 quiesce/drain/remove/devres；需要提前冻结 child 借用存储时使用 prepare。详细规则见[核心生命周期](../drivers/guide/core-model.md#生命周期的精确语义)。
+
+模块 ABI 由源码 A20_DRIVER_ABI 与 loader/描述符共同校验，旧共享布局的包须重建；协议版本和模块 ABI 分别演进。当前接口见[内核模块](../drivers/guide/kernel-modules.md)，不再把旧 ABI 7 写成启动规范。
 
 设备发现完全由固件和原生总线发布。旧的 `arch_virtio_blk_probe`、`arch_virtio_net_probe` 以及驱动内自行扫描并发布已初始化实例的入口均已移除。
 

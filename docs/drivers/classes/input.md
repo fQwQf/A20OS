@@ -40,7 +40,7 @@ udriver 白名单（`kernel/drivers/core/udriver.c` 的 `g_mmio_windows`）把 v
 ## 用户接口
 
 - `/dev/event0` 是 transport-independent evdev mux（devfs 静态节点，`g_devfs_input_ops` 在 `input_mux.c`）；
-- 事件格式 `struct input_event`（64 位时间戳变体），读取按整事件返回；
+- 事件格式为当前 input header 的 struct input_event（CONFIG_64BIT 下为 64 位时间字段，否则 32 位），读取按整事件返回；
 - ioctl 面：EVIOCGVERSION/EVIOCGID/EVIOCGNAME/EVIOCGBIT/EVIOCGKEY/EVIOCGABS/EVIOCGRAB 等；key/ABS 状态由 mux 跟踪（跨设备聚合）；
 - 非阻塞空读返回 -EAGAIN。
 
@@ -49,3 +49,7 @@ udriver 白名单（`kernel/drivers/core/udriver.c` 的 `g_mmio_windows`）把 v
 - `smoke-dual-input`（riscv64）：uinputd 两次运行（user placement）与 vinput-probe（kernel placement）读到同一设备身份 + sendkey 注入按键事件；
 - `evdev_stress`（`smoke-evdev-stress`）：/dev/event0 的 ioctl 面与空读语义；
 - QEMU 手动验证事件流：`cat /dev/event0 &` + monitor `sendkey a` → 内核日志 `[INPUT] event type=1 code=30 value=1`（EV_KEY/KEY_A/press）与 EV_SYN。
+
+## 绑定与执行边界
+
+input class 自动成为原生 primary protocol，mux 通过受保护的 publication 调用设备；device 引用不等于在线许可。事件 ring 的专用 IRQ/poll 路径仍由输入后端维护，不强制逐事件分配 native request。新 producer 在启动前建立部分实例和可失败执行停止，先确认 IRQ/URB completion 不再访问 ring，再在 call drain/remove 后交还 owner；USB HID 另遵循 endpoint 释放协议。

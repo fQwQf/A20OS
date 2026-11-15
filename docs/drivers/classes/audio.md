@@ -38,7 +38,7 @@ probe 依次完成以下工作：
 4. 配置 converter stream/channel、pin output、EAPD 和 amplifier gain。
 5. 分配 coherent BDL 与 PCM buffer，并发布 audio class。
 
-任一步失败都必须停止 stream、撤销 codec 配置并释放 DMA。remove 先增加 generation 阻止新 I/O，再 quiesce controller。
+初始化失败先确认 stream/controller 不再使用 DMA，再撤销 codec 状态并交还存储；无法确认则保留资源。现有后端的 generation、ring、stop/drain 仍按各自实现工作，不表示已迁移 native queue。新增异步音频后端在 call drain 前登记 execution stop，流级 STOP/DRAIN 不能代替整个绑定的停止与回调排空；remove 只在安全阶段释放实例。
 
 ## PCM 环形 DMA
 

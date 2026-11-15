@@ -258,6 +258,7 @@ nav:
       - 驱动文档总览: drivers/README.md
       - 开发指南:
           - 快速上手: drivers/guide/getting-started.md
+          - x86 实机驱动复用: drivers/guide/x86-hardware-reuse.md
           - 核心模型: drivers/guide/core-model.md
           - 框架维护与扩展: drivers/guide/framework-development.md
           - 总线与平台设备: drivers/guide/bus-and-platform.md
@@ -280,6 +281,7 @@ nav:
           - 用户态与 devfs: drivers/classes/userspace-and-devfs.md
       - 工程实践:
           - 测试与提交: drivers/meta/testing-and-submission.md
+          - 文档范围与一致性: drivers/meta/documentation-consistency.md
   - 平台移植:
       - 索引与开发板全景: platforms/README.md
       - 移植指南: platforms/porting-guide.md

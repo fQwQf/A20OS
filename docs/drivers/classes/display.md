@@ -6,120 +6,32 @@ virtio-gpu 已按每个 device 独立分配原生 DMA 实例，内嵌 controlq�
 
 ## 驱动接入
 
-probe 初始化完成并设置 `dev->drv_priv` 后调用：
+遵循[共同生命周期](../guide/core-model.md#生命周期的精确语义)，完整同步/异步骨架分别集中在核心模型和[请求队列指南](../guide/request-queues.md#接入骨架)。本页不另设一份手动 free 的 get_fb 退出模板。
 
-```c
-if (gpu_device_register(dev) < 0)
-    goto fail;
-```
+| 阶段 | Display provider 的工作 |
+|---|---|
+| probe 准备 | 选择 managed failed-probe 清理，建立部分实例；先登记 execution stop/native queue，再使硬件访问 ring/backing |
+| 初始化与登记 | 取得映射、backing 和模式，准备缓存角色；在本次 probe 内调用 gpu_device_register，最后返回成功，由核心发布 class |
+| consumer 调用 | fbdev 每次操作捕获默认 publication 的 access；DRM open 固定 publication，GEM/CRTC/EDID/事件按其分区 |
+| execution stop | 在 call drain 前关闭刷新/提交生产者，确认硬件、IRQ/后台工作已停并安全退休请求；失败保留实例与全部硬件可达存储 |
+| remove | call drain 后 gpu_device_unregister，交还 producer 的 VMO/queue 等引用及未托管资源；成功后由核心回收 devres |
 
-默认选择保留已注册 display，并使用 ABI 12 显式原生角色：只选择 SCANOUT，优先 RENDER，同级优先非 BOOT_SCANOUT，等分保持；不再从 virgl 表推断能力。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 会在注销时尝试重选设备，fbdev 仍按每次操作选默认设备；DRM 在 open 时固定 publication，并分区 GEM/CRTC/EDID/事件，跨 publication PRIME 拒绝。这不等于完整多 GPU 节点或热拔插保护。DRM 持久 backing 要求驱动显式 remove，失败不能回收设备仍可访问的存储，见 [DRM 退休](../guide/native-runtime.md#drm-文件命名空间与失败退休)。新原生 GPU 驱动应先明确每设备实例与渲染/显示资源的所有权，不能把 virgl 回调视为通用硬件提交接口。异步任务需在 quiesce 中停止并结束，再在 remove 中释放存储；见 [原生驱动运行时](../guide/native-runtime.md)。
-
-以下是旧 get_fb 接入的简化骨架；实际驱动必须补齐部分初始化回滚及可失败硬件停止，不能照此假定 stop 一定成功。RAM framebuffer 应采用下述 owning scanout：
-
-```c
-/* 1. 注册驱动 */
-static driver_t my_gpu_driver = {
-    .name       = "my-gpu",
-    .bus        = &pci_bus,
-    .id_table   = my_ids,
-    .probe      = my_gpu_probe,
-    .remove     = my_gpu_remove,
-    .class_type = DEV_CLASS_DISPLAY,
-    .class_ops  = &my_gpu_ops,
-};
-DRIVER_REGISTER(my_gpu_driver);
-
-/* 2. probe：初始化硬件、分配 framebuffer、注册 display */
-static int my_gpu_probe(device_t *dev){
-    my_gpu_t *g = kzalloc(sizeof(*g));
-    if (!g) return -ENOMEM;
-
-    dev->drv_priv = g;
-
-    if (init_pci_bar(g, dev) < 0) goto fail;
-    if (alloc_fb(g, WIDTH, HEIGHT, 32) < 0) goto fail;
-    if (first_set_scanout(g) < 0) goto fail;
-
-    /* 注册是最后一步 */
-    if (gpu_device_register(dev) < 0) goto fail_fb;
-
-    return 0;
-
-fail_fb:
-    free_fb(g);
-fail:
-    kfree(g);
-    return -ENODEV;
-}
-
-/* 3. 使用：用户 mmap 后写像素 */
-static int my_gpu_get_info(device_t *dev, uint32_t *w, uint32_t *h, uint32_t *bpp){
-    my_gpu_t *g = dev->drv_priv;
-    *w   = g->width;
-    *h   = g->height;
-    *bpp = g->bpp;
-    return 0;
-}
-
-static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size){
-    my_gpu_t *g = dev->drv_priv;
-    *paddr = g->fb_paddr;
-    *size  = g->fb_size;
-    return 0;
-}
-
-static int my_gpu_flush(device_t *dev, uint32_t x, uint32_t y,
-                        uint32_t width, uint32_t height)
-{
-    my_gpu_t *g = dev->drv_priv;
-    if (x >= g->width || y >= g->height)
-        return -EINVAL;
-    if (width > g->width - x)  width = g->width - x;
-    if (height > g->height - y) height = g->height - y;
-    /* ... 提交设备刷新命令 ... */
-    return 0;
-}
-
-/* 4. remove：下列两步为设备/平台相关协议，失败必须保留实例。
- * retire_fb_views 是骨架占位，当前 raw fbdev 没有通用撤销 helper；
- * 尚不能撤销时不能 free_fb。RAM VMO 路径改为只 put producer 引用。 */
-static int my_gpu_remove(device_t *dev){
-    my_gpu_t *g = dev->drv_priv;
-    int ret = stop_scanout(g);
-    if (ret) return ret;
-    ret = retire_fb_views(g);
-    if (ret) return ret;
-    gpu_device_unregister(dev);
-    free_fb(g);
-    dev->drv_priv = NULL;
-    kfree(g);
-    return 0;
-}
-```
+RAM framebuffer 使用 owning scanout。旧 get_fb 返回借用物理视图，当前没有通用 raw VMA 撤销 helper；不能因 class offline 就 free backing。失败 probe 和 publication 失败走同一可失败退出，不能先 free_fb 再等待硬件停止。
 
 ## 原生能力声明
 
-probe 建立实例后、`gpu_device_register` 前，必须准备纯缓存 `get_capabilities`。以下是上述原生 2D 骨架的能力部分；设备状态与各操作定义仍由实际驱动提供：
+get_capabilities 是纯缓存查询，准备在 gpu_device_register 之前；不访问寄存器、不分配或等待。
 
-```c
-static int my_gpu_get_capabilities(device_t *dev, struct gpu_capabilities *out)
-{
-    if (!out) return -EINVAL;
-    *out = (struct gpu_capabilities){0};
-    if (!dev || !dev->drv_priv) return -ENODEV;
-    out->flags = GPU_CAP_SCANOUT;
-    return 0;
-}
-static const gpu_dev_ops_t my_gpu_ops = {
-    .get_info = my_gpu_get_info,
-    .get_fb = my_gpu_get_fb,
-    .flush = my_gpu_flush,
-    .get_capabilities = my_gpu_get_capabilities,
-};
-```
+| 角色 | 可以声明的条件 |
+|---|---|
+| SCANOUT | 已实现可用的模式/输出与刷新 |
+| RAM_SCANOUT | 已实现符合 get_scanout 契约的 owning RAM 视图 |
+| RENDER | 渲染后端已初始化，且相应操作实际实现 |
+| BOOT_SCANOUT | 保留固件提供的输出，非完整原生输出接管 |
 
-固件保留输出另声明 BOOT_SCANOUT；有 owning RAM get_scanout 才声明 RAM_SCANOUT；仅在渲染后端已建立时声明 RENDER，不能据硬件型号或函数入口推断。headless RENDER 可以发布而不占默认输出。consumer 在已有 access 内调用 `gpu_device_capabilities_get`；标志不替代实际操作校验、VMO 引用或 DMA 权限。四个现有 provider 已接入，当前模块 ABI 为 12，ABI 11 的旧包必须重建；规则见 [原生能力](../guide/native-runtime.md#原生-gpu-能力与默认选择)。
+默认只选择 SCANOUT，先比较 RENDER，同级优先非 BOOT_SCANOUT，等分保持。headless RENDER 可发布但不占默认。consumer 在有效 access 内查询角色；功能位不授予 DMA、用户权限、backing 或固件存储接管权。现有 GPU 表的能力扩展引入于 ABI 12，包须按当前 A20_DRIVER_ABI 重建，不能把旧 vtable 前缀当完整布局。
+
+DRM 文件不跟随默认 promotion 或重绑；跨 publication PRIME 拒绝。per-file handle/FB owner、resident RAM backing 和失败清理保留已实现；完整 master/auth、共享访问权、厂商 BO/GPUVM 及多 GPU 用户节点仍有明确缺口。新原生 GPU 后端以独立协议组合通用 queue/VMO/DMA/fence，virgl 回调不是所有 GPU 的硬件提交标准。
 
 ## 类操作
 
@@ -160,9 +72,11 @@ FBIO_MAP_FB 同样优先 owning RAM 路径，映射完整 scanout 页覆盖并�
 
 ## VirtIO GPU 范例
 
-`virtio_gpu.c` 支持 MMIO/PCI transport。probe 顺序为 modern feature negotiation、controlq、分配连续 framebuffer、`RESOURCE_CREATE_2D`、`ATTACH_BACKING`、`SET_SCANOUT`、首次 flush、注册 display。flush 依次执行 cache clean、`TRANSFER_TO_HOST_2D`、`RESOURCE_FLUSH`。framebuffer 已用连续 VMO 工厂创建，remove 复位 transport、注销 display 并交还 producer 的 VMO 引用；尚存 VMA/snapshot 独立保留 RAM。初始化和退出已通过有界 status=0 读回确认 reset，失败初始化走原生可失败 remove，超时保留绑定、IRQ 和内部 DMA 存储；四条命令路径超时或异常 completion 后封闭共享暂存区，成功 reset 前不复用。当前单静态 controlq 以 owner 守卫拒绝第二设备覆盖，尚未实现多实例；旧 DRM 裸调用仍须外层生命周期协调。详见 [VirtIO reset](../guide/native-runtime.md#virtio-reset-确认与-gpu-退出)。
+`virtio_gpu.c` 为每绑定建立独立原生 DMA 实例和 native command queue，支持 MMIO/PCI transport。probe 完成 reset 读回、feature 协商、controlq、RAM scanout、RESOURCE_CREATE_2D/ATTACH_BACKING/SET_SCANOUT、首次 flush 和 display 登记。模式优先读取 GET_DISPLAY_INFO，失败使用 1024×768×32 回退；这不提供完整动态 modeset。
 
-当前模式固定 1024x768x32，controlq 使用实例 mutex 串行化同步命令；请求和响应先复制到实例内稳定 DMA staging，等待期间保持中断开启。不得把调用者栈对象直接写入 descriptor，也不得用 `spin_lock_irqsave` 包围设备完成等待。
+小命令、大响应、SUBMIT_3D、ATTACH_BACKING 共用 native request/execute 路径。实际 wire controlq 仍一个 active chain；command mutex 保护 staging，运行时 IRQ-assisted park 与启动有界 polling 驱动同一后端。请求保留实例 allocation；超时或异常 used id/index 封闭暂存区，成功 reset 前不扩容、复用或退休未知请求。
+
+execution stop 在 class drain 前设 closing、非阻塞检查 active issuer、确认 status=0 并排空 IRQ；忙或 reset 失败返回错误，保留绑定和 pending request。停止成功后队列安全退休，再由 remove 注销默认选择并交还 producer owner；VMA/snapshot 可独立保留旧 RAM。双设备独立 flush、逻辑注销/重绑及旧 VMA 保留已有 QEMU 验证；不等于多 GPU 节点或任意物理拔除保证。
 
 动态模式设置必须先实现 display info 查询和 prepare/commit/rollback，不能只部分实现 `FBIOPUT_VSCREENINFO`。
 

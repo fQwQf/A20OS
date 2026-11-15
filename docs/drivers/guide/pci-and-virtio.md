@@ -154,52 +154,9 @@ static driver_t my_driver = {
 
 把 `.bus` 设为 `&pci_bus` 最清晰。部分兼容驱动设 `NULL` 以同时匹配 PCI 和 VirtIO-MMIO，只有 ID 表和 probe 真正支持两个 transport 时才允许这样做。
 
-完整生命周期示例：
+生命周期统一采用[核心模型的 PCI 骨架](core-model.md#可编译的-pci-网络驱动骨架)：先 managed rollback、部分实例和 execution stop，再启用/映射 BAR，建立 DMA/IRQ/队列，最后健康检查并返回成功。异步控制器使用[原生请求与队列](request-queues.md)。
 
-```c
-/* 1. 注册驱动 */
-static driver_t my_pci_driver = {
-    .name       = "my-pci-device",
-    .bus        = &pci_bus,
-    .id_table   = my_ids,
-    .probe      = my_pci_probe,
-    .remove     = my_pci_remove,
-    .class_type = DEV_CLASS_BLOCK,
-    .class_ops  = &my_ops,
-};
-DRIVER_REGISTER(my_pci_driver);
-
-/* 2. probe：启用 BAR、初始化 transport、注册类 */
-static int my_pci_probe(device_t *dev){
-    my_pci_dev_t *d = kzalloc(sizeof(*d));
-    if (!d) return -ENOMEM;
-
-    dev->drv_priv = d;
-
-    if (pci_enable_and_assign_bars(dev) < 0) goto fail;
-
-    resource_t *regs = pci_get_bar_resource(dev, 0);
-    if (!regs || regs->end < regs->start + MIN_APERTURE) goto fail;
-    d->reg_base = (void *)regs->start;
-
-    if (init_transport(d) < 0) goto fail;
-    if (setup_queues(d) < 0) goto fail;
-
-    return 0;
-
-fail:
-    kfree(d);
-    return -ENODEV;
-}
-
-/* 3. remove：停止 I/O、释放资源 */
-static int my_pci_remove(device_t *dev){
-    my_pci_dev_t *d = dev->drv_priv;
-    stop_queues(d);
-    kfree(d);
-    return 0;
-}
-```
+BAR 资源保存物理范围，不能把 regs->start 强制转成 CPU 指针。先核对 end>=start 和最小长度，再 pci_map_bar；映射失败即返回错误。初始化或 publication 失败进入可失败退出，停止未确认时保留实例/映射/IRQ/DMA。停止在 call drain 前完成，remove 不承担唯一的请求唤醒入口。
 
 ## 协议驱动的可移植契约
 
@@ -243,35 +200,20 @@ helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和
 
 ## VirtIO feature 协商
 
-标准顺序：设备 status 清零；置 ACKNOWLEDGE/DRIVER；读取 feature words；只写驱动理解的位；必须协商 `VIRTIO_F_VERSION_1`；置 FEATURES_OK 并回读确认；配置所有 queue；最后置 DRIVER_OK。任何失败把 FAILED 写入 status，probe 回滚。
+标准顺序：设备 status 清零；置 ACKNOWLEDGE/DRIVER；读取 feature words；只写驱动理解的位；必须协商 `VIRTIO_F_VERSION_1`；置 FEATURES_OK 并回读确认；配置所有 queue；最后置 DRIVER_OK。失败可设置 FAILED，但该位不证明 DMA 已停；使用 managed failed-probe 清理，在确认 reset/停止后才释放资源。
 
 不得接受后不实现 feature。例如协商 packed ring、indirect descriptors、event idx 后就必须遵守其布局。当前驱动使用 split virtqueue。
 
-典型协商流程：
+协商按 transport 的寄存器访问接口实现，不复制一个只读低 32 位的伪代码模板：
 
-```c
-static int virtio_negotiate(virtio_transport_t *vt){
-    vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
-    vt->write32(vt, VIRTIO_MMIO_STATUS,
-                 VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
+1. virtio_transport_reset 有界写 0 并等待读回，失败保留 transport、IRQ 和 DMA 存储。
+2. 写 ACKNOWLEDGE/DRIVER，分别选择并读取 feature word 0/1；VERSION_1 位于高 word，缺失则拒绝 modern 协商。
+3. 每个 word 只提交已实现的 feature；GPU 等还须显式协商自身特性，而不把“观察到”当作“已接受”。
+4. 写 FEATURES_OK 并回读，失败进入受管退出。
+5. 创建并初始化所有 queue/descriptor/稳定 DMA owner，按正确 cache/barrier 顺序发布地址，最后 DRIVER_OK。
+6. IRQ/poll 推进同一队列完成路径；异常完成或超时保留未知 DMA，停止证据与存储退休分开处理。
 
-    uint32_t features = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
-    features &= VIRTIO_F_VERSION_1 | MY_DRIVER_FEATURES;
-    vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, features);
-
-    vt->write32(vt, VIRTIO_MMIO_STATUS,
-                 VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER |
-                 VIRTIO_CONFIG_S_FEATURES_OK);
-    if (!(vt->read32(vt, VIRTIO_MMIO_STATUS) & VIRTIO_CONFIG_S_FEATURES_OK))
-        return -ENODEV;
-
-    setup_queues(vt);
-    vt->write32(vt, VIRTIO_MMIO_STATUS,
-                 VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER |
-                 VIRTIO_CONFIG_S_FEATURES_OK | VIRTIO_CONFIG_S_DRIVER_OK);
-    return 0;
-}
-```
+参考实际 `virtio_gpu_init_transport` 与 [reset 契约](native-runtime.md#virtio-reset-确认与-gpu-退出)，设备专有 feature/queue 限制仍由驱动验证。
 
 ## Split virtqueue
 

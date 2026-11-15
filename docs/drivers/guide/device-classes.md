@@ -1,442 +1,94 @@
 # 设备类接口
 
-设备类把硬件细节和内核使用者隔开。子系统只看 `class_ops`，不看具体硬件。权威声明在 `kernel/drivers/core/driver_class.h`。
-
-驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针（唯一的例外是 char `ioctl`，它拿到原始用户指针，由驱动自己做 usercopy）。probe 成功后核心自动发布 class device；char、block、audio 分别得到动态 `/dev/charN`、`/dev/diskN`、`/dev/audioN`（char 驱动可在 probe 里改用自己的名字，见下文），所有类都进入 `/sys/class/<class>/`。display 与 input 仍由固定聚合节点提供专用 ABI，详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
+设备类提供块、网络、字符、输入、显示和音频的稳定消费语义。完整结构和成员顺序以 `kernel/drivers/core/driver_class.h` 为准；音频表另见 `kernel/include/drivers/audio/audio_core.h`。本页规定单位、成功值、存储借用与类特有约束，不再维护各类重复的 probe/remove 模板。完整生命周期使用[核心模型](core-model.md#可编译的-pci-网络驱动骨架)或[原生请求与队列](request-queues.md#接入骨架)。
 
 ## 原生协议与传统 class
 
-原生 `drivers/core/protocol.h` 定义一个绑定可组合的协议集合；传统六类自动提供 primary protocol，类之外的服务也可发布 endpoint。新增扩展独立声明语义版本、实际表大小与 capabilities，consumer 检查所需前缀和能力；不要求扩大所有设备的 class_ops。endpoint 和既有 class publication 是同一个对象。begin/end 只管理 active call，caller 持 endpoint 引用贯穿整个操作，因此准入不分配、不触发最终析构，可用于 IRQ；具体方法的上下文由协议定义。完整模型见[架构与开发入口](core-model.md#架构与开发入口)。
+驱动选择 `driver_t.class_type` 并提供匹配的 class_ops；核心为六类自动发布相应 primary protocol。无传统 class 的服务可在 probe 中用 `device_add_protocol()` 发布独立协议。endpoint 与现有 publication 共用身份、引用和 active call，没有第二个设备注册表。
 
-NET_STATS 是已接入的扩展：VirtIO-net 与 RTL8139 发布统计，class_net_read_stats 按当次绑定查询，lwIP 不再直接调用特定驱动的弱符号。缺接口/离线会返回错误而不伪造零计数。模块和内建使用相同路径，主 net 表布局未改变。
+consumer 按协议 ID、语义版本、实际 ops 前缀和功能位取得 access，借用 caller 的 endpoint 引用直到 end；离线后新调用失败，旧引用不转向重绑。独立扩展优先使用新协议，而不是扩大所有设备的 vtable。协议 capability 不是用户 rights。具体入口见[原生协议](core-model.md#原生协议组合能力而非扩大全局-vtable)。
 
 ## 通用调用规则
 
-每个入口必须检查 `dev`、`dev->drv_priv`、buffer 和长度。read/write 的 class buffer 是内核地址。可能并发的入口必须在实例内同步。可选操作留 `NULL`；不要“返回成功但什么也不做”来假装支持。未知 ioctl 返回 `-ENOTTY`，硬件不支持的已知能力返回 `-EOPNOTSUPP`。当前动态 devfs 只为内建 block ioctl 和 audio 通用 ioctl 完成 usercopy；自定义 block/char `ops->ioctl` 仍收到原始 `arg`，在增加通用封送前不得直接解引用它。
+| 问题 | 约定 |
+|---|---|
+| 参数与返回值 | 验证实例、buffer、长度/偏移与溢出；成功值按各类约定，失败为负 errno |
+| 未实现操作 | 可选 callback 留 NULL；已知但不支持的能力返回 EOPNOTSUPP，未知 ioctl 返回 ENOTTY，不报告空成功 |
+| 调用寿命 | device 引用只保留元数据；通过 class adapter 或成功的 protocol/class access 调用 ops，不缓存裸模块表 |
+| 异步数据 | class buffer 通常借用到本次调用返回；要继续 DMA，必须复制或取得独立 backing/mapping owner |
+| 用户指针 | read/write 为内核 buffer；未知 char/block ioctl 的原始 arg 尚未统一封送，需显式 usercopy，不能直接解引用 |
+| 退出 | execution stop 在调用排空前安全解决异步执行；remove 成功后才回收 devres，失败保留绑定与资源 |
 
-`device_find_get_by_class(class, index)` 按当前在线设备的顺序返回持有引用的设备；`index` 是在线列表中的位置。调用者必须以 `device_put()` 归还引用。引用保证设备对象仍存在；调用驱动前还必须取得 class 引用，并在 `class_device_ops_begin()` 与 `class_device_call_end()` 之间访问 vtable。块设备持久句柄使用 `class_device_get_by_index()` 的稳定索引：每次成功发布消耗一个 0–255 索引，解绑后该索引永久离线，本次启动不会分配给另一块盘。
-
-需要在 class 调用结束后保留存储的 adapter，必须分别持有 publication 和 backing 引用。`class_device_binding_stopped()` 只记录该旧 publication 的显式成功 remove 契约，offline/排空本身不成立，缺少 remove 永不成立；旧对象不会跟随设备重新绑定。完整条件见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
-
-DISPLAY 的 DRM adapter 在 open 时固定 publication，并使用显式 scoped access；每 publication 管理兼容 GEM、CRTC/EDID 与事件。失败清理依赖原生停止凭据，不能用新绑定清理旧 ID；每文件持有 GEM handle 和 framebuffer，最后 close 交还；同 publication 通过 PRIME/GEM_OPEN 显式共享，重复导入幂等，跨 publication PRIME 导入拒绝。GETFB 元数据不向未持有者授予 backing，完整 master/auth 仍待实现。见 [DRM 文件与退休](native-runtime.md#drm-文件命名空间与失败退休)。
+`device_find_get_by_class(class, rank)` 返回带引用的设备，rank 是在线列表位置；最终 device_put。class_device_get_by_type/class_device_get_nth 同样是在线 rank，class_device_get_by_index 查询当次 publication 的稳定索引。以上查找不代替在线 access。char/block/audio 自动发布动态 devfs 节点，display/input 使用既有聚合入口；节点和用户 ABI 见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 ## Block：`DEV_CLASS_BLOCK`
 
-```c
-typedef struct block_dev_ops {
-    int (*read)(device_t *, uint64_t lba, void *buf, size_t sectors);
-    int (*write)(device_t *, uint64_t lba, const void *buf, size_t sectors);
-    int (*flush)(device_t *);
-    int (*ioctl)(device_t *, unsigned long req, void *arg);
-    uint64_t (*capacity)(device_t *);
-    uint32_t (*sector_size)(device_t *);
-} block_dev_ops_t;
-```
+操作表为 `block_dev_ops_t`，包含 read、write、capacity、sector_size、flush 和 ioctl。
 
-- `lba` 和 `sectors` 的单位是逻辑扇区；`capacity()` 返回总扇区数，`sector_size()` 返回每扇区字节数。
-- `read/write` 当前约定整次成功返回 `0`，失败返回负 errno。必须拒绝 `lba >= capacity`、`sectors > capacity - lba`、空 buffer 和算术溢出。
-- 不允许静默短 I/O。硬件有单命令上限时，驱动内部拆分请求；任一子请求失败则返回错误。
-- `flush` 在所有此前成功写入已达到持久介质后返回 `0`。仅在硬件无 volatile cache 或保证写穿时才可 no-op。
-- 文件系统适配器可能把块类转接到 `block_dev_t` 请求对象；这不改变驱动的类接口。新 block 驱动必须实现 `block_dev_ops_t`，不得把 `block_dev_t` getter 作为设备发现或驱动注册接口。
+- lba/sectors 均以逻辑扇区计；capacity 返回总扇区数，sector_size 返回每扇区字节数。
+- read/write 整次成功返回 0，失败为负 errno；不能以 0 表示部分完成。核对容量与乘法溢出，超出硬件命令长度时由后端拆分。
+- flush 返回 0 表示此前成功写入已达到约定的持久性；只有硬件无易失缓存或保证写穿时才可 no-op。
+- `/dev/diskN` 和文件系统 block adapter 由通用层提供，不新增驱动私有 block_dev_t getter。
+- 通用 native queue 可用于新异步后端；既有 VirtIO/NVMe/AHCI 专用队列是否迁移由实际实现决定，不能由框架新增接口推断已迁移。
 
-参考实现：`virtio_blk.c`（并发 VirtIO）、`virtio_scsi.c`（VirtualBox ARM）、`ahci.c`（VirtualBox x86_64）。
-
-典型的注册、probe、I/O 与 remove 顺序：
-
-```c
-/* 1. 注册：启动段把驱动挂到总线 */
-static driver_t my_blk_driver = {
-    .name       = "my-blk",
-    .bus        = &pci_bus,
-    .id_table   = my_ids,
-    .probe      = my_blk_probe,
-    .remove     = my_blk_remove,
-    .class_type = DEV_CLASS_BLOCK,
-    .class_ops  = &my_blk_ops,
-};
-DRIVER_REGISTER(my_blk_driver);
-
-/* 2. probe：绑定设备并初始化 */
-static int my_blk_probe(device_t *dev){
-    my_blk_t *b = kzalloc(sizeof(*b));
-    if (!b) return -ENOMEM;
-
-    dev->drv_priv = b;
-    if (init_hardware(b) < 0) {
-        kfree(b);
-        return -EIO;
-    }
-    return 0;
-}
-
-/* 3. open/use：文件系统通过 class_ops 发 I/O */
-static int my_blk_read(device_t *dev, uint64_t lba,
-                       void *buf, size_t sectors)
-{
-    my_blk_t *b = dev->drv_priv;
-    if (lba >= b->capacity || sectors > b->capacity - lba)
-        return -EINVAL;
-    /* ... 整次完成 ... */
-    return 0;
-}
-
-/* 4. close 由 VFS 层管理；remove 释放硬件 */
-static int my_blk_remove(device_t *dev){
-    my_blk_t *b = dev->drv_priv;
-    stop_queue(b);
-    kfree(b);
-    return 0;
-}
-```
-
-静默短 I/O 会直接破坏文件系统一致性：不要把 `0` 当成“部分成功”，文件系统会把 `0` 理解为整次 I/O 完成。
+参考 `virtio_blk.c`、`virtio_scsi.c`、`nvme.c`、`ahci.c`。初始化与退出遵循共同生命周期，停止/映射失效未确认时保留 DMA，不在失败标签中直接 free。
 
 ## Network：`DEV_CLASS_NET`
 
-```c
-typedef struct net_dev_ops {
-    int (*open)(device_t *);
-    int (*stop)(device_t *);
-    int (*send)(device_t *, const void *pkt, size_t len);
-    int (*recv)(device_t *, void *buf, size_t maxlen);
-    const uint8_t *(*mac)(device_t *);
-    void (*poll)(device_t *);
-    int (*ioctl)(device_t *, unsigned long req, void *arg);
-} net_dev_ops_t;
-```
+操作表为 `net_dev_ops_t`。lwIP 消费者至少需要 send、recv、mac；可选 open/stop、poll、ioctl、link_up、rx_irq_driven、send_sg、caps 以当前头文件为准。其他网络后端通过公共适配层接入。
 
-- lwIP 注册至少要求 `send`、`recv`、`mac`；当前 MTU 固定为 1500。
-- `send` 成功返回提交的字节数，队列暂满返回 `-EAGAIN`，参数错误返回 `-EINVAL`。
-- `recv` 返回一帧字节数；当前 lwIP 适配约定无包返回 `0`，负值表示错误。不得把一帧拆成多次返回；buffer 太小应丢弃或返回 `-EMSGSIZE`，策略必须写在驱动注释中。
-- `mac` 返回六字节地址，指针至少在设备仍绑定期间有效。
-- `poll` 不得睡眠或分配，可回收 TX、推进 RX。它可能在 `g_lwip_lock` 下调用，锁顺序必须是 `g_lwip_lock -> device lock`，驱动锁下不得回调 lwIP。
-- `open/stop` 由网络适配器在需要时调用；probe 必须完成硬件可用性和队列准备，remove 必须停止数据面。驱动不得假设 open 一定会在 probe 后立即发生。
+- send 成功返回帧字节数，队列满返回 EAGAIN；recv 返回一帧长度，当前 lwIP 适配无包返回 0。
+- recv 不把一帧拆成多次返回；容量不足时的丢弃/EMSGSIZE 策略由 provider 明确。
+- mac 返回六字节借用地址，仅在受保护调用范围内读取/复制，不在 consumer 长期保存私有指针。
+- send_sg 的各段只借用到方法返回；返回成功不允许后端继续访问 caller 的栈/pbuf，需要独立的 TX 存储 owner。
+- caps 只报告已协商且实现的能力。checksum/逐帧元数据需要 stack 与 provider 共同实现，不能仅设置位。
+- lwIP 锁下调用的 send/poll 必须非阻塞、不分配、不重入 lwIP；设备 IRQ/RX 释放私有锁后再进入 stack，详见[锁契约](lock-order.md)。
 
-参考实现：`virtio_net.c`、`e1000.c`。
-
-生命周期骨架：
-
-```c
-/* 1. 注册 */
-static driver_t my_net_driver = {
-    .name       = "my-net",
-    .bus        = &pci_bus,
-    .id_table   = my_ids,
-    .probe      = my_net_probe,
-    .remove     = my_net_remove,
-    .class_type = DEV_CLASS_NET,
-    .class_ops  = &my_net_ops,
-};
-DRIVER_REGISTER(my_net_driver);
-
-/* 2. probe：初始化硬件和队列 */
-static int my_net_probe(device_t *dev){
-    my_net_t *n = kzalloc(sizeof(*n));
-    if (!n) return -ENOMEM;
-
-    dev->drv_priv = n;
-    if (init_rx_tx_rings(n) < 0) {
-        kfree(n);
-        return -EIO;
-    }
-    return 0;
-}
-
-/* 3. open：lwIP 启动网卡时调用 */
-static int my_net_open(device_t *dev){
-    my_net_t *n = dev->drv_priv;
-    enable_rx(n);
-    return 0;
-}
-
-/* 4. send/recv/poll：数据面 */
-static int my_net_send(device_t *dev, const void *pkt, size_t len){
-    my_net_t *n = dev->drv_priv;
-    if (len > 1500) return -EINVAL;
-    if (!tx_slot_free(n)) return -EAGAIN;
-    return post_packet(n, pkt, len);
-}
-
-/* 5. stop/remove：停数据面并释放 */
-static int my_net_stop(device_t *dev){
-    my_net_t *n = dev->drv_priv;
-    disable_rx_tx(n);
-    return 0;
-}
-
-static int my_net_remove(device_t *dev){
-    my_net_t *n = dev->drv_priv;
-    my_net_stop(dev);
-    free_rings(n);
-    kfree(n);
-    return 0;
-}
-```
-
-`poll` 里分配 mbuf 或获取可能睡眠的锁都会死锁：`poll` 运行在 lwIP 锁下，一旦睡眠或重入 lwIP 就会锁死。
+NET_STATS 是独立协议扩展，VirtIO-net、RTL8139 已提供；consumer 用 `class_net_read_stats()` 获取按绑定保护的快照。错误输出虽会清零，返回错误仍表示不可用，不能作为成功的零计数。网络 stop 是数据面方法，不替代核心 execution stop、call drain 与最终 remove。
 
 ## Character：`DEV_CLASS_CHAR`
 
-```c
-typedef struct char_dev_ops {
-    int (*read)(device_t *, void *buf, size_t count);
-    int (*write)(device_t *, const void *buf, size_t count);
-    int (*ioctl)(device_t *, unsigned long req, void *arg);
-    int (*poll)(device_t *, short events);
-} char_dev_ops_t;
-```
+操作表为 `char_dev_ops_t`，read/write 返回实际字节数，非阻塞无进展返回 EAGAIN；poll 观察 readiness，不消费数据或睡眠。未知 ioctl 返回 ENOTTY；原始 arg 需按已知 ABI 明确封送。
 
-`read/write` 成功返回字节数。非阻塞无进展返回 `-EAGAIN`。`poll` 只观察 readiness，不得消费数据或睡眠。UART 硬件驱动只负责收发和中断，通用行规、前台进程组和 termios 应由 tty/devfs 层承担。
+类默认生成 `/dev/charN`；probe 内可用 `device_set_devfs_name()` 选择本实例名称（例如 vport0）。名字复制到 publication，拒绝空、超长、含斜杠或冲突的名字，发布后不能改名。它不提供任意 vnode/权限/用户 ABI 注册。名称冲突属于 publication 失败，进入可失败退出；不能保证硬件清理一定一次成功。
 
-char class 会按发布顺序自动生成 `/dev/charN`，通用适配器转发 read/write/ioctl。驱动可以在 **probe 内**用 `device_set_devfs_name(dev, "vport0")` 为自己的 class device 指定节点名，取代生成的 `charN`；名字在 `class_device_publish()`（紧接 probe 返回 0 之后）复制进 class device，因此调用点只有这一处，且必须在返回 0 之前。名字为空、超长（`CLASS_DEVICE_NAME_MAX`）或含 `/` 一律 `-EINVAL`，已发布后再改名返回 `-EEXIST`——这条限制保证驱动只能影响自己那一个节点的命名，不能把名字伸出设备的 devfs 目录。`class_device_publish()` 另有一条**全局唯一性**检查：在 `g_class_lock` 下遍历已发布的 class device，名字撞车就返回 `-EEXIST`（索引/devt 的唯一性不覆盖名字，名字解析在 devfs/sysfs/netlink 上都是首个命中即返回）。两次 probe 要同一个名字时，第二次 probe 被判失败并按 `driver_probe_bound_device()` 的既有回滚路径调 `remove()` 拆干净——这也是 `vport0`、`hwrng` 的「单静态实例」由代码而非注释保证的地方。模块驱动经 `drv_device_set_devfs_name()` 走到同一个实现。除命名之外，仍没有让驱动自选权限或安装私有 vnode 的注册 API；这些仍应在通用 class/devfs 层设计，不能在具体驱动里直接拼 VFS vnode。详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
-
-char 类的对应骨架：
-
-```c
-/* 1. 注册 */
-static driver_t my_uart_driver = {
-    .name       = "my-uart",
-    .bus        = &platform_bus,
-    .id_table   = my_ids,
-    .probe      = my_uart_probe,
-    .remove     = my_uart_remove,
-    .class_type = DEV_CLASS_CHAR,
-    .class_ops  = &my_uart_ops,
-};
-DRIVER_REGISTER(my_uart_driver);
-
-/* 2. probe：初始化硬件 */
-static int my_uart_probe(device_t *dev){
-    my_uart_t *u = kzalloc(sizeof(*u));
-    if (!u) return -ENOMEM;
-
-    dev->drv_priv = u;
-    init_uart(u, dev->resources);
-    return 0;
-}
-
-/* 3. read/write：字节流 */
-static int my_uart_read(device_t *dev, void *buf, size_t count){
-    my_uart_t *u = dev->drv_priv;
-    size_t n = min(count, rx_ready(u));
-    if (n == 0) return -EAGAIN;
-    copy_from_rx(u, buf, n);
-    return (int)n;
-}
-
-/* 4. remove：关中断、释放 */
-static int my_uart_remove(device_t *dev){
-    my_uart_t *u = dev->drv_priv;
-    disable_uart_irq(u);
-    kfree(u);
-    return 0;
-}
-```
-
-`termios` 与行编辑属于 tty 层，不放进 UART 驱动；把行规塞进硬件驱动会让新板子无法复用同一套 UART 代码。
+UART 的寄存器、收发和 IRQ 属于硬件实现，tty 层负责 termios、行编辑与前台进程组。参考[用户接口](../classes/userspace-and-devfs.md)与[virtio-console](../classes/virtio-console.md)。
 
 ## Input：`DEV_CLASS_INPUT`
 
-```c
-typedef struct input_dev_ops {
-    int (*read)(device_t *, void *buf, size_t count);
-    int (*ioctl)(device_t *, unsigned long req, void *arg);
-    int (*poll)(device_t *, short events);
-} input_dev_ops_t;
-```
+操作表为 `input_dev_ops_t`，read/ioctl/poll 提供事件消费。事件 ABI 使用 `kernel/include/drivers/input/virtio_input.h` 中的 `struct input_event`；时间字段随 CONFIG_64BIT 选择 64/32 位，不能复制一个固定 32 位结构当作所有架构的线格式。
 
-事件 ABI 为 `kernel/include/drivers/input/virtio_input.h` 中的：
+- read 只返回完整事件的字节数，容量不足返回 EINVAL，无事件返回 EAGAIN。
+- poll 只观察 readiness；一批变化以 EV_SYN/SYN_REPORT 结束。
+- 每实例维护事件 ring，溢出不静默覆盖旧事件；记录丢弃并按子系统支持的方式报告。
+- `/dev/event0` mux 通过受保护的 class 调用聚合输入。IRQ 入队后可调用 `input_mux_wake()`，不需要私有硬件 getter。
+- 退出先关闭硬件/URB producer 并确认回调排空，才释放 ring/实例；HID endpoint 交还遵循 USB 的可失败协议。
 
-```c
-struct input_event {
-    uint32_t time_sec;
-    uint32_t time_usec;
-    uint16_t type;
-    uint16_t code;
-    int32_t  value;
-};
-```
-
-- `read` 只返回完整事件，成功返回字节数；buffer 小于一个事件返回 `-EINVAL`，无事件返回 `-EAGAIN`。
-- `poll` 返回非零表示至少一个事件可读，不消费事件。
-- 键盘/鼠标一批状态变化后应输出 `EV_SYN/SYN_REPORT`，避免消费者看到不完整帧。
-- 每实例维护 ring；满时不得覆盖尚未读取的数据，必须记录丢弃计数或通过类 ioctl 暴露可观察的 overflow 状态。
-- `/dev/event0` 聚合所有 `DEV_CLASS_INPUT`。新 input 驱动只需正确注册类，不要新增硬件私有 getter。
-
-参考实现：`vinput.a20drv`（drvmod 模块）和 USB HID 共享实现 `kernel/drivers/usb/class/usb_hid.c`（generic 包为 `usb-hid.a20drv`）。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
-
-input 类的对应骨架：
-
-```c
-/* 1. 注册 */
-static driver_t my_hid_driver = {
-    .name       = "my-hid",
-    .bus        = &pci_bus,
-    .id_table   = my_ids,
-    .probe      = my_hid_probe,
-    .remove     = my_hid_remove,
-    .class_type = DEV_CLASS_INPUT,
-    .class_ops  = &my_hid_ops,
-};
-DRIVER_REGISTER(my_hid_driver);
-
-/* 2. probe：初始化并创建事件 ring */
-static int my_hid_probe(device_t *dev){
-    my_hid_t *h = kzalloc(sizeof(*h));
-    if (!h) return -ENOMEM;
-
-    dev->drv_priv = h;
-    h->ring = ring_alloc(INPUT_RING_SIZE);
-    if (!h->ring) {
-        kfree(h);
-        return -ENOMEM;
-    }
-    init_hid(h);
-    return 0;
-}
-
-/* 3. 中断：合成事件并推入 ring */
-static void my_hid_irq(device_t *dev){
-    my_hid_t *h = dev->drv_priv;
-    struct input_event ev;
-
-    ev.type = EV_KEY;
-    ev.code = KEY_A;
-    ev.value = 1;
-    push_event(h, &ev);
-
-    ev.type = EV_SYN;
-    ev.code = SYN_REPORT;
-    ev.value = 0;
-    push_event(h, &ev);
-}
-
-/* 4. read/poll：暴露给用户聚合器 */
-static int my_hid_read(device_t *dev, void *buf, size_t count){
-    my_hid_t *h = dev->drv_priv;
-    if (count < sizeof(struct input_event))
-        return -EINVAL;
-    if (ring_empty(h->ring))
-        return -EAGAIN;
-    return ring_pop(h->ring, buf, sizeof(struct input_event));
-}
-
-/* 5. remove：停止中断、释放 ring */
-static int my_hid_remove(device_t *dev){
-    my_hid_t *h = dev->drv_priv;
-    disable_hid(h);
-    ring_free(h->ring);
-    kfree(h);
-    return 0;
-}
-```
-
-ring 满时不能直接覆盖旧事件，这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
-
-`/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.a20drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
+参考 `vinput.a20drv` 与 USB HID。PS/2 的既有控制台桥有单独边界，新 input 实现优先走标准 class，见[输入子系统](../classes/input.md)。
 
 ## Display：`DEV_CLASS_DISPLAY`
 
-```c
-/* 仅列出基础操作；完整布局以 driver_class.h 为准。 */
-typedef struct gpu_dev_ops {
-    int (*get_info)(device_t *, uint32_t *width, uint32_t *height, uint32_t *bpp);
-    int (*get_fb)(device_t *, uintptr_t *paddr, size_t *size);
-    int (*flush)(device_t *, uint32_t x, uint32_t y,
-                 uint32_t width, uint32_t height);
-    int (*ioctl)(device_t *, unsigned long req, void *arg);
-} gpu_dev_ops_t;
-```
+`gpu_dev_ops_t` 的基础模式/刷新、VirtIO/virgl 扩展、owning scanout 和原生角色均在完整头文件中定义；其中设备专有 3D 回调不是所有原生 GPU 的提交协议。
 
-Display 驱动在 probe 完成实例初始化后、返回成功前调用 `gpu_device_register(dev)`；随后由核心发布 class。remove 中撤销默认选择。ABI 12 要求显式 `get_capabilities`，默认仅选择 SCANOUT，先比较 RENDER，同级优先非 BOOT_SCANOUT，headless 不占默认；不依赖 virgl 表。能力声明不授予资源访问或替代存储引用，见 [原生能力查询](native-runtime.md#原生-gpu-能力与默认选择)。ABI 11 在完整 GPU vtable 末尾追加 `get_scanout(device, struct gpu_scanout *)`；它交出连续 RAM VMO 引用，不能将示意结构当作完整二进制布局。操作与映射规则详见 [Display/Framebuffer](../classes/display.md)。
+- probe 初始化部分实例和停止路径，准备缓存角色后调用 `gpu_device_register()`；核心随后发布 class。
+- 默认输出要求 SCANOUT，优先 RENDER，同级优先非 BOOT_SCANOUT；headless 可发布但不占默认输出。
+- get_info 返回当前模式。get_fb 返回借用的 CPU 物理视图，既不拥有 backing，也不授予 DMA 权限。
+- RAM framebuffer 优先通过 get_scanout 交出 owning VMO；消费者可结束 access 后由 snapshot/VMA 继续保留 RAM。
+- execution stop 在 call drain 前确认停止并安全退休请求，remove 再注销默认选择和交还 owner。raw 物理 VMA 没有自动撤销协议，不能以 offline 代替 backing 安全退休。
 
-display 类的对应骨架：
-
-```c
-/* 1. 注册 */
-static driver_t my_gpu_driver = {
-    .name       = "my-gpu",
-    .bus        = &pci_bus,
-    .id_table   = my_ids,
-    .probe      = my_gpu_probe,
-    .remove     = my_gpu_remove,
-    .class_type = DEV_CLASS_DISPLAY,
-    .class_ops  = &my_gpu_ops,
-};
-DRIVER_REGISTER(my_gpu_driver);
-
-/* 2. probe：分配 framebuffer 并注册 display */
-static int my_gpu_probe(device_t *dev){
-    my_gpu_t *g = kzalloc(sizeof(*g));
-    if (!g) return -ENOMEM;
-
-    dev->drv_priv = g;
-    g->fb = alloc_framebuffer(WIDTH, HEIGHT, 32);
-    if (!g->fb) {
-        kfree(g);
-        return -ENOMEM;
-    }
-
-    if (gpu_device_register(dev) < 0) {
-        free_framebuffer(g->fb);
-        kfree(g);
-        return -EIO;
-    }
-    return 0;
-}
-
-/* 3. 使用：用户映射 framebuffer 后写像素 */
-static int my_gpu_get_fb(device_t *dev, uintptr_t *paddr, size_t *size){
-    my_gpu_t *g = dev->drv_priv;
-    *paddr = g->fb_paddr;
-    *size  = g->fb_size;
-    return 0;
-}
-
-static int my_gpu_flush(device_t *dev, uint32_t x, uint32_t y,
-                        uint32_t w, uint32_t h)
-{
-    my_gpu_t *g = dev->drv_priv;
-    if (x >= g->width || y >= g->height)
-        return -EINVAL;
-    if (w > g->width - x)  w = g->width - x;
-    if (h > g->height - y) h = g->height - y;
-    /* ... 提交设备命令 ... */
-    return 0;
-}
-
-/* 4. remove：注销 display、释放显存 */
-static int my_gpu_remove(device_t *dev){
-    my_gpu_t *g = dev->drv_priv;
-    gpu_device_unregister(dev);
-    free_framebuffer(g->fb);
-    kfree(g);
-    return 0;
-}
-```
-
-注册 display 是 probe 的最后一个步骤。在它之前失败，用户不会看到半成品设备；在它之后失败，必须先 `gpu_device_unregister` 再释放资源，否则 `/dev/fb0` 可能指向已释放内存。
+详细接口、能力和映射规则见[Display/Framebuffer](../classes/display.md)。DRM 的 per-publication/per-file 归属与 native queue 的请求归属互补；厂商 BO/GPUVM、抢占和恢复仍由子系统/后端实现。
 
 ## Audio：`DEV_CLASS_AUDIO`
 
-```c
-typedef struct audio_dev_ops {
-    a20_audio_caps_t caps;
-    a20_audio_format_t pcm_format;
-    int (*read)(device_t *, void *buf, size_t count);
-    int (*write)(device_t *, const void *buf, size_t count);
-    int (*set_format)(device_t *, const a20_audio_format_t *format);
-    int (*tone)(device_t *, const a20_audio_tone_t *tone);
-    int (*stop)(device_t *);
-    int (*drain)(device_t *);
-    int (*ioctl)(device_t *, unsigned long req, void *arg);
-    int (*poll)(device_t *, short events);
-    int (*close)(device_t *);
-} audio_dev_ops_t;
-```
+操作表为 `audio_dev_ops_t`，以 caps/pcm_format 描述能力，read/write、set_format、tone、stop、drain、ioctl、poll、close 按支持范围实现。完整声明及用户结构分别见 audio_core.h 与 uapi/a20/audio.h。
 
-audio class 自动发布为 `/dev/audioN`。设备编号只表示绑定顺序，不表示能力；PC Speaker 可能先占用 `audio0`，因此客户端必须通过 `GET_CAPS` 区分 tone 与 PCM。`audio_core` 统一处理通用 ioctl 的 usercopy、capability/format 校验和 close 时的 drain/stop；具体驱动不能重复解释 UAPI。PCM write 返回实际接受的字节数，DRAIN、STOP、HDA ring 与 VirtIO queue 约束见 [音频子系统](../classes/audio.md)。
+- `/dev/audioN` 的编号不表示 PCM/tone 能力，consumer 先 GET_CAPS。
+- PCM write 返回接受的字节数，允许短写；DRAIN 等待已接受数据，STOP 终止当前流/generation。
+- audio_core 负责通用 ioctl usercopy 和 close 的 drain/stop 策略，驱动实现硬件动作。
+- stream STOP 与绑定 execution stop 不同；后者还须覆盖 IRQ、后台工作、DMA 与失败初始化。现有音频后端有各自 ring/等待路径，不宣称已迁移 native queue。
+
+格式、HDA/VirtIO PCM 进度及当前功能限制见[音频子系统](../classes/audio.md)。
 
 ## 新增设备类
 
-仅在至少两个硬件实现，或一个硬件实现和一个独立内核消费者共享稳定语义时新增类。必须同时完成：在 `driver_class.h` 定义最小 ops；规定每个参数单位、返回值、阻塞和并发语义；实现按类枚举的消费者；定义用户 ABI 时使用固定宽度字段并带版本/长度；增加文档和构建门禁。不得把任意厂商命令 blob 塞入通用 ioctl 代替类设计。
+先判断能否通过既有 class 加独立协议表达需求。确需新增类时，明确跨硬件/独立 consumer 的稳定语义，规定单位、上下文、并发、错误和异步存储所有权；实现 consumer、publication/primary protocol、适用配置与必要的用户 adapter，并验证完整接入。改变既有共享布局按模块 ABI 规则处理，不用厂商命令 blob 或一个可选功能扩大全局类模型。方法见[框架维护与扩展](framework-development.md)。

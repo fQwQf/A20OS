@@ -2,7 +2,7 @@
 
 统一服务入口为原生 endpoint/protocol，完整设计见[架构](core-model.md#架构与开发入口)。协议仅在本设备 probe 中登记并复制，table/code 随绑定保留；元数据可跨 offline 读取，ops 只能在成功 access 内使用。版本必须相等，表大小覆盖所用前缀，能力包含所需位，错误清空 access。caller 引用贯穿 begin/end，借用准入不分配/不析构，不引入全局生命周期锁；具体方法声明 task/IRQ 规则。新服务无需伪造 class 节点，旧 endpoint 不跟随重绑。
 
-原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：失败 probe 可在初始化前显式选择 `device_probe_use_remove()`，由同一退出路径处理部分实例，清理失败保留绑定与原 probe_error；子设备阻塞时保持 PROBE_CLEANUP 并拒绝新资源/DMA 使用。需要提前保护 child 存储的 provider 可登记可失败 remove prepare，先于 consumer 解绑，失败保留 PREPARING 并跳过已完成动作。下线分为 offline、quiesce、在途调用排空和可失败 remove；错误保留绑定/devres，显式重试不重复 quiesce；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
+原生 GPU 与其他异步设备的新增契约见 [原生驱动运行时](native-runtime.md)：失败 probe 可在初始化前显式选择 `device_probe_use_remove()`，由同一退出路径处理部分实例，清理失败保留绑定与原 probe_error；子设备阻塞时保持 PROBE_CLEANUP 并拒绝新资源/DMA 使用。需要提前保护 child 存储的 provider 可登记可失败 remove prepare，先于 consumer 解绑，失败保留 PREPARING 并跳过已完成动作。下线分为可选 prepare、consumer/child、offline、可失败 execution stop、quiesce、在途调用排空和可失败 remove；错误保留绑定/devres，显式重试不重复 quiesce；页级 DMA mapping、原生 fence、可取消工作队列、IRQ 排空及有界固件读取已提供独立接口，硬件 GPU 驱动仍待实现。
 
 使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
@@ -22,7 +22,7 @@
 
 `queue.h` 提供每绑定有界 admission、多 active 请求、FIFO dependency、精确排队取消和 IRQ-safe complete。complete 只记录硬件交还；任务 retire=0 后才锁外 signal fence 与交还 accepted 引用。retire 或 stop 失败保留请求、存储、容量及模块代码。fence wait 超时不取消或释放 DMA；active cancel 返回 EBUSY。native view 保留固定 RAM VMO/原 charge 或 DMA buffer，不等于权限、mapping 或 cache sync。
 
-队列在 probe、硬件启动前创建并自动登记 execution action。consumer/child 解绑后、quiesce 与 active-call drain 前尝试所有未完成 stop；错误立即返回，成功项 checkpoint。stop=0 后仍须保留 provider context 到 class drain/remove，不能在停止回调中释放实例。worker 模式共享已有 native workqueue；早期启动由调用方有界驱动同一队列。完整接口和限制见[原生请求与队列](request-queues.md)。
+队列在 probe、硬件启动前创建并自动登记 execution action。consumer/child 解绑后、quiesce 与 active-call drain 前尝试所有未完成 stop，记录首个错误并 checkpoint 成功项；有错误则返回，不进入调用排空。stop=0 后仍须保留 provider context 到 class drain/remove，不能在停止回调中释放实例。worker 模式共享已有 native workqueue；早期启动由调用方有界驱动同一队列。完整接口和限制见[原生请求与队列](request-queues.md)。
 
 ## 原生 GPU 能力
 
@@ -44,7 +44,7 @@ VirtIO driver 可用导出的 `virtio_transport_reset(t, timeout_ms)` 在排除�
 
 `resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在已安全回滚的 probe 失败或成功解除绑定时回收；remove 失败则继续保留，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
 
-这些映射 helper 自动申请 owner 独占区间；另一设备持有重叠区间时拒绝映射。`device_map_resource_exclusive(dev, res, &address)` 返回详细错误（如 `-EBUSY`、`-ENOMEM`、`-EOVERFLOW`），失败清空 address；原有指针接口返回 NULL。受管映射保留设备引用，architecture unmap 完成后才归还区间。驱动应在 quiesce/remove 中停止访问，不能将地址区间的释放当作 CPU 访问撤销或 DMA 停止。
+这些映射 helper 自动申请 owner 独占区间；另一设备持有重叠区间时拒绝映射。`device_map_resource_exclusive(dev, res, &address)` 返回详细错误（如 `-EBUSY`、`-ENOMEM`、`-EOVERFLOW`），失败清空 address；原有指针接口返回 NULL。受管映射保留设备引用，architecture unmap 完成后才归还区间。驱动在 execution stop/兼容退出路径关闭访问，并在 call drain 后才交还实例，不能将地址区间的释放当作 CPU 访问撤销或 DMA 停止。
 
 port I/O 可先调用 `device_claim_resource()` 申请 `dev->res` 中的 `RES_IOPORT`，范围限 0..ffffh。显式 `driver_resource_request()` 句柄需要独立释放，且会跨 unbind 保留占用；其 device 引用只保护对象存储，不保证绑定仍在线。受管申请及 devres 链操作限已经串行化的 probe/lifecycle 上下文。raw `arch_device_map_mmio()`、`drv_map_mmio()` 和直接 port I/O 访问不自动参与占用登记，不能据此宣称所有硬件访问都已隔离。
 
@@ -144,7 +144,7 @@ void free_irq(uint32_t irq, void *priv);
 int synchronize_irq(uint32_t irq);
 ```
 
-成功注册后由驱动拥有，remove 和 probe 回滚必须成对 `free_irq`。`priv` 应是设备实例，释放时必须传回同一值。重复注册已占用 IRQ 返回 `-EBUSY`；驱动只有在协议明确支持轮询时才可降级。
+成功注册后由驱动持有注册所有权；执行停止/安全失败清理最终配对 free_irq，先确认回调不再使用 priv，再交还存储。`priv` 应是设备实例，释放时必须传回同一值。重复注册已占用 IRQ 返回 `-EBUSY`；驱动只有在协议明确支持轮询时才可降级。
 
 handler 返回 `int`，当前 dispatch 不使用返回值。handler 必须：确认设备中断源；清硬件状态；完成有界 ring 推进；记录/唤醒后立即返回。不得分配、访问 VFS、睡眠或长时间轮询。ack/eoi 由核心/板级 irqchip 处理。
 
@@ -176,11 +176,11 @@ spin_unlock_irqrestore(&priv->lock, flags);
 
 避免“检查为空 -> IRQ 到来 -> 登记 waiter -> 永久睡眠”的丢唤醒。基本循环是：持锁检查条件；在同一锁下登记 waiter/队列；解锁；调度；醒来后重新检查。多个读者必须使用 wait queue，不能只放单个 `task_t *waiter`。
 
-异步驱动在 quiesce 中禁止新提交，停止或复位硬件后结束并唤醒未完成请求；核心随后排空在途调用，再执行 remove。不得等到 remove 才唤醒阻塞的 class 调用。中断 handler 可以 signal 原生 fence，但不在 fence/设备自旋锁下运行等待者逻辑。等待超时不表示硬件已经停止，不能据此释放 DMA 缓冲。
+新异步驱动登记 execution stop，在调用排空前关闭提交并确认停止，失败返回以保留资源重试。native queue 的 IRQ/poll producer 调用 driver_request_complete，只记录硬件交还；任务 retire 完成缓存/映射/cookie 清理后才 signal 请求 fence。独立低层 fence 可表示明确的硬件阶段，但不得让消费者误以为存储已退休。void quiesce 保持兼容职责，remove 不是唯一唤醒入口；等待超时不授予 DMA 回收权。
 
 ## 错误、超时和日志
 
-包含 `core/errno.h`，返回最具体的负 errno。probe 中使用一条 `goto fail_*` 逆序清理链比多个裸 return 更可靠。日志前缀使用稳定驱动名，例如 `[AHCI]`、`[E1000]`；成功 probe 至少打印设备身份和关键容量/模式，失败打印阶段和错误，不打印每个数据包或每次寄存器轮询。
+包含 `core/errno.h`，返回最具体的负 errno。新驱动优先在初始化前选择 managed rollback，错误时返回 errno，由同一退出管线清理；不要再从 goto 标签重复 free 已转交的 owner。旧式局部回滚必须先确认硬件停止，再逆序交还。日志前缀使用稳定驱动名，例如 `[AHCI]`、`[E1000]`；成功 probe 至少打印设备身份和关键容量/模式，失败打印阶段和错误，不打印每个数据包或每次寄存器轮询。
 
 不可恢复协议错误应先停止/复位设备，再返回 `-EIO`。超时返回 `-ETIMEDOUT`。暂时队列满用 `-EAGAIN`，不要伪装成硬件错误。
 
@@ -216,7 +216,7 @@ RISC-V 原生 PCI 驱动可显式使用 `riscv_iommu_dma_domain_create()`。创�
 
 原生 RISC-V 驱动使用 `riscv_iommu_dma_fault_poll()` 取得并处理共享 FQ 故障。`blocked`、`isolated` 和 `isolation_error` 必须分开检查：软件停发与隔离命令完成都不证明设备请求已停止，不能直接回收 DMA 页。`queue_error` 非零表示 fault 记录可能丢失，应将已知 count 当作下界并进入恢复流程。接口是任务上下文轮询，不自动完成 fence，不自动恢复硬件。
 
-需要后台监测时使用 `riscv_iommu_dma_watch_start()`。回调固定创建时的 owner token，快照有效期仅到回调返回；可 signal 驱动持有的 fence，但不自动停止硬件。quiesce 中先 `watch_stop()` 排空，再销毁 domain/context。停止超时保留句柄和回调资源，必须重试；回调内自停止返回 `-EDEADLK`。watch 不保持绑定有效，也不自动固定回调所在模块。
+需要后台监测时使用 `riscv_iommu_dma_watch_start()`。回调固定创建时的 owner token，快照有效期仅到回调返回；可 signal 驱动持有的 fence，但不自动停止硬件。在 call drain 前的执行停止路径先 watch_stop 排空，再于安全阶段销毁 domain/context。停止超时保留句柄和回调资源，必须重试；回调内自停止返回 `-EDEADLK`。watch 不保持绑定有效，也不自动固定回调所在模块。
 
 ## DMA owner 的锁外退休
 
