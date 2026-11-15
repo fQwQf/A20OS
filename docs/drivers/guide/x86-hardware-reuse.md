@@ -1,7 +1,7 @@
 # 在另一台 x86 电脑复用实机驱动
 
 本指南对应 2026-11-13 的 PC 驱动整理。Lenovo 83EG 是验收样机，不是驱动选择条件。
-先读[核心模型](core-model.md)、[运行时契约](runtime-contracts.md)和[提交规范](../meta/testing-and-submission.md)。
+通用框架现状使用[框架维护指南](framework-development.md)与[请求队列](request-queues.md)；本页的特定硬件路径不因此自动迁移为 native queue。先读[核心模型](core-model.md)、[运行时契约](runtime-contracts.md)和[提交规范](../meta/testing-and-submission.md)。
 上游代码成熟程度不能替代 A20OS 的资源所有权、类接口、失败回滚和异步退出契约。
 
 ## 组件与边界
@@ -90,6 +90,10 @@ PC host 门禁同时编译 NVMe/PS/2/R8169 模块并检查导出依赖，覆盖�
 I²C 协议、FIFO 和报告解析还有使用生产路径的启动自检。
 AArch64 编译只能证明共享代码的编译层级，不代表 AMD/Synaptics 硬件在 ARM 已运行。
 
+## 历史验证记录（2026-11-13）
+
+以下测试数、阻塞和镜像只属于当时阶段；当前通用退出契约以核心模型为准，USB 已接入的 callback/endpoint 生命周期见 [USB 设计](../classes/usb-design.md)，不从旧记录推断当前仍缺少该机制。
+
 本轮独立源码树通过44项PC测试、371项固件/驱动测试、sleep ABI及112实例的manifest检查，
 x86 EFI与AArch64内核构建通过，RISC-V生命周期和平台IRQ回退门禁通过。16 CPU/8 GiB测试中，USB桌面图形关机与未启用无线的
 NVMe桌面普通重启均进入ACPI，退出后fsck=0、clean、RECOVER=0、last_orphan=0；
@@ -98,6 +102,6 @@ NVMe桌面普通重启均进入ACPI，退出后fsck=0、clean、RECOVER=0、last
 原第18轮实机验收仍对应整理前的 EFI：1320条连续日志、clean，触控板6566个有效报告，
 错误/恢复/丢帧为0。最终同步仍约105 s，ordered 阶段约88 s，保留为性能限制。
 本轮工作队列与打包拆分属于新改动，实机效果需下一轮确认；已验收 U盘保持原样。
-USB HID 的既有热拔插完成回调退出窗口仍未关闭，不能据此宣称已支持任意热拔插；
+当时 USB HID 的热拔插完成回调退出窗口仍未关闭；后续协议与验证按现行 USB 文档核对，不能据此宣称已支持任意热拔插；
 R8169 的有线设备和其他新机器仍需各自实机验收。
 证据与精确构建、镜像、测试结果见 `build/evidence/lenovo-83eg-2026-11-13/driver-consolidation/`。

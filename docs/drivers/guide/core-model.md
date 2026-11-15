@@ -132,7 +132,7 @@ res[] ------> MMIO/IRQ/DMA/MEM resources
 matched_id --> matched id_table entry
 ```
 
-`plat_data` 属于总线或板级代码，驱动不得释放。`drv_priv` 属于驱动，probe 时创建或选定，remove 时清理。类操作只接收 `device_t *`，通过 `dev->drv_priv` 找到实例。解除绑定时，核心先标记 class device offline，执行可选的 `quiesce` 停止新提交并结束软件请求，再等待已进入驱动的 class 调用退出，最后调用可失败的 `remove`：仅返回 0 后才释放受管存储、依赖和绑定；非零保留 `REMOVING` 绑定及注册引用，旧 class 句柄保持离线，调用者显式重试。经该 publication 准入的后续调用返回 `-ENODEV`；仍绕过 class 的旧消费者须单独迁移。原生异步请求的完整契约见 [原生驱动运行时](native-runtime.md)。
+`plat_data` 由总线/板级所有，驱动不释放。`drv_priv` 指向本绑定的部分或完整实例，probe 早保存以供 managed rollback 使用；服务由成功 probe 后的 publication 公开。退出先可选 prepare、consumer/child，再 offline 和可失败 execution stop，成功后 quiesce、调用排空、remove 与 devres。停止失败保留 PREPARING/PROBE_CLEANUP，remove 失败保留 REMOVING；旧引用不转到新绑定。精确语义见下文生命周期。
 
 持有旧 class publication 的消费者，可用 `class_device_binding_stopped()` 区分离线与旧绑定已经成功停止。该凭据仅在显式 remove 成功进入核心 devres 回收时成立，重绑不改变旧凭据，没有 remove 则不成立。它不延长存储或证明全部资源已经析构；调用者必须保留 publication 引用。完整条件和局部 devres 回滚见 [原生停止凭据](native-runtime.md#原生-publication-的绑定停止凭据)。
 
@@ -140,7 +140,7 @@ DISPLAY provider 通过 ABI 12 `get_capabilities` 声明原生 SCANOUT/RENDER/RA
 
 固定 RAM 的 DMA 请求可用 `driver_dma_map_owned_vmo` 保留原生 VMO 的整个 backing 与原始预算 owner；设备只获得选定页视图。映射、存储引用与硬件停止仍分别管理。buffer/VMO 最终 put 在 domain 锁外，失败失效保留句柄供重试，见 [VMO owner](native-runtime.md#持有-vmo-的-dma-视图与锁外-owner-退休)。
 
-驱动使用原生 fence watch 通知时，登记仅保留 fence，不保留模块代码/context。quiesce/remove 必须先停止通知/工作 producer；watch try_remove 返回 EBUSY 时保留 owner 并重试，成功后仍需排空已调度的工作才能回收上下文。不能以 fence terminal 或 class offline 推断 callback 已返回，见 [一次性通知](native-runtime.md#一次性通知与显式撤销)。
+驱动使用原生 fence watch 通知时，登记仅保留 fence，不保留模块代码/context。execution stop 或明确的旧式退出路径必须先停止通知/工作 producer；watch try_remove 返回 EBUSY 时保留 owner 并重试，成功后仍需排空已调度的工作才能回收上下文。不能以 fence terminal 或 class offline 推断 callback 已返回，见 [一次性通知](native-runtime.md#一次性通知与显式撤销)。
 
 ## 数据结构字段
 

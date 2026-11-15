@@ -14,7 +14,7 @@ protocol access 借用 caller 的 endpoint 引用，caller 必须持有到 end�
 |---|---|
 | 设备核心 | device/driver/bus/class、绑定、引用、依赖、资源回收、下线顺序 |
 | 通用运行时 | 有界 request/queue、DMA mapping/domain、IRQ 排空、共享工作队列、原生 fence、固件读取 |
-| GPU 子系统 | 已有 DISPLAY 默认选择与带引用的调用入口；后续实现每设备 BO、GPUVM、上下文、任务队列和同步 UAPI |
+| GPU 子系统 | 已有带引用的 DISPLAY/DRM 与 native queue 接入；厂商 BO/GPUVM、硬件上下文、调度/恢复和同步 UAPI 按后端完善 |
 | 硬件驱动 | IP/固件初始化、命令协议、硬件完成中断、停止与复位 |
 | 可选 Linux 源码兼容层 | 将上游源码接口映射到原生运行时，不成为原生驱动的依赖 |
 
@@ -580,12 +580,14 @@ policy 是不含借用指针的值快照，其引用不保留 route、设备或�
 
 超时或等待者退出不完成 fence、不取消设备任务，也不允许释放 DMA 页面。请求队列和完成中断的 producer 必须持有自己的 fence 引用，直到完成处理返回。等待者持有独立引用，wait 过程再额外保留一份。IRQ producer 不执行最后一次 put；由任务上下文回收对象。
 
-典型请求生命周期：
+native request 的完成生命周期：
 
-1. 准备 RAM、建立 DMA mapping、创建 fence，队列保留 mapping 和 producer fence 引用。
-2. 提交硬件；等待者可等待或超时返回，队列继续持有资源。
-3. IRQ 确认硬件完成后 signal；异常路径须先确认硬件停止再 signal 错误。
-4. 在任务上下文同步/解除映射，释放队列引用和请求存储。
+1. request 保留 owning RAM/映射所需存储及自己的完成 fence，submit 成功后由队列持有 accepted 引用。
+2. issue 发布硬件；等待者超时或退出不取消 DMA。
+3. IRQ/poll 确认硬件交还请求后 complete，任务 retire 成功完成缓存交接、映射失效和 cookie 清理。
+4. 锁外 signal 请求 fence，再交还 accepted 引用。stop/retire 失败保留请求和 pending fence，显式重试。
+
+独立的低层 fence 可以由 IRQ signal 一个明确的内部阶段，但它不是 backing 或 DMA 停止凭据；新通用执行路径按[请求队列契约](request-queues.md)处理最终退休。
 
 这是原生内核同步基础，不是 Linux `dma_fence` 的结构兼容实现；没有接入 DRM syncobj、timeline、sync_file 或用户态等待 ABI。现有 DRM 能力位不会因此自动改变。
 
@@ -599,7 +601,7 @@ policy 是不含借用指针的值快照，其引用不保留 route、设备或�
 
 `driver_fence_watch_try_remove(&watch)` 限任务上下文、单 owner 串行调用，始终不等待：pending 时 O(1) 撤销，callback 已返回时确认退休；成功清空指针，在锁外交还 fence 引用和登记存储。若已选中 callback 且尚未返回，返回 `-EBUSY` 并保留指针、引用及代码/context，调用者显式重试。NULL 参数返回 `-EINVAL`，已清空指针成功。terminal status 不等于 callback 已返回；即使 status 已终止，尚未选中的 pending 通知仍可被撤销。成功通知后也必须 remove，不能让 IRQ 路径执行最终 put。撤销不会改变 fence、停止 GPU/DMA、取消已排入的 work 或释放 callback context；这些由各自 owner 协调。callback 已调度的工作须另行 cancel/flush 后才可销毁上下文。
 
-fence spinlock 只保护 status、登记链及 PENDING/RUNNING/DONE 交接，回调、wait queue wake、最终 put/free 均在锁外；callback 返回后发布 DONE，producer 不再读取该 watch，避免 owner 随即释放造成 UAF。signal 对登记数量线性遍历；大量依赖宜通过短通知调度后台工作处理，不在 IRQ callback 中展开任务提交或资源退休。这里只提供异步依赖的通知底座，BO/GPUVM、请求提交/恢复和 DRM 同步 UAPI 仍需独立接入。
+fence spinlock 只保护 status、登记链及 PENDING/RUNNING/DONE 交接，回调、wait queue wake、最终 put/free 均在锁外；callback 返回后发布 DONE，producer 不再读取该 watch，避免 owner 随即释放造成 UAF。signal 对登记数量线性遍历；大量依赖宜通过短通知调度后台工作处理，不在 IRQ callback 中展开任务提交或资源退休。native queue 已使用通知推进依赖并在取消/退休时撤销 watch；厂商 BO/GPUVM、硬件调度/恢复和 DRM 同步 UAPI 仍需独立实现。
 
 ## 后台工作、延迟任务与销毁
 
@@ -621,7 +623,7 @@ fence spinlock 只保护 status、登记链及 PENDING/RUNNING/DONE 交接，回
 
 销毁超时返回 `-ETIMEDOUT` 并保留 queue 指针、回调和 context，允许稍后重试。存活的 work 引用继续保留 offline queue 的软件对象，所以销毁后通过 work 提交会得到错误，不会引用已释放的 queue。销毁和重试由同一个 owner 串行执行；创建工作项、flush 等使用 queue 指针的操作不得与 owner 的最终销毁竞争。
 
-cancel 成功后其他 producer 仍可重新提交，释放 context 前必须先停止这些 producer。quiesce 应先禁止新请求，排空或停止/复位硬件，并解除回调依赖的完成等待，同时保留回调仍访问的存储；随后停止 IRQ 来源并 `free_irq()`，销毁/排空工作队列，最后让 remove 释放实例存储。不能先关掉回调所依赖的完成中断，再无限等待该回调退出。回调不得等待同队列上的后续工作，也不能在持有其需要的锁时同步取消它。跨队列依赖环由驱动避免；这里没有完整 Linux workqueue ABI、共享 worker 池或通用死锁检测器。
+cancel 成功后其他 producer 仍可重新提交，释放 context 前必须先停止这些 producer。新驱动在 execution stop 中禁止新请求并报告失败，排空或停止/复位硬件，并解除回调依赖的完成等待，同时保留回调仍访问的存储；随后停止 IRQ 来源并 `free_irq()`，销毁/排空工作队列，最后让 remove 释放实例存储。不能先关掉回调所依赖的完成中断，再无限等待该回调退出。回调不得等待同队列上的后续工作，也不能在持有其需要的锁时同步取消它。跨队列依赖环由驱动避免；多个 native execution queue 可共享一个 driver_workqueue；这不等于动态全局 worker 池、完整 Linux workqueue ABI 或通用死锁检测器。
 
 ## IRQ 完整分发排空
 
@@ -653,7 +655,7 @@ image 数据是普通 CPU RAM，只有持有 image 引用时可访问；需要 D
 
 ```sh
 python3 -m unittest tools.tests.test_driver_memory tools.tests.test_driver_resources tools.tests.test_resource_pci_integration tools.tests.test_pci_resources tools.tests.test_amd_iommu_probe tools.tests.test_acpi_ivrs tools.tests.test_amd_iommu_owner tools.tests.test_pci_scope tools.tests.test_pci_requester tools.tests.test_amd_iommu_route -v
-python3 -m unittest tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
+python3 -m unittest tools.tests.test_driver_protocol tools.tests.test_driver_queue tools.tests.test_driver_quiesce tools.tests.test_driver_dma_mapping tools.tests.test_driver_fence tools.tests.test_driver_workqueue tools.tests.test_driver_irq_sync tools.tests.test_driver_firmware tools.tests.test_riscv_iommu_queue tools.tests.test_riscv_iommu_watch -v
 make ARCH=x86_64 BOARD=qemu-virt-x86_64 kernel-only -j4
 make smoke-driver-lifecycle-x86_64 -j4
 tools/a20 test smoke-driver-runtime-x86_64
@@ -671,14 +673,20 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=
 
 QEMU 生命周期门禁还保留一个在途 class 调用，由 quiesce 结束它，验证生产内核能继续完成 unregister。新增运行时门禁通过显式 `driver.runtime_test=1` 在 init_kthread 中测试实际内核 worker 与 Park/Wake，验证延迟/重设、取消、自重排、销毁超时保留对象和重试。测试成功自动关机，普通启动不执行。它们没有执行实体 GPU DMA，也没有证明 AMD/NVIDIA 硬件初始化成功。主机 fence 测试中的调度和 IRQ 是替代后端，不应声称为真实 IRQ/SMP 调度压力验证。
 
+native queue/protocol 的运行路径另由 `tools/a20 test smoke-driver-gpu-stop-x86_64` 验证真实 worker、停止重试和 call drain，并检查 DRIVER_QUEUE 完成标记；generic VirtIO GPU 模块回归见 `make PYTHON=python3 smoke-gpu-access-x86_64`。主机模型、QEMU 设备和实体 GPU 的证据分别记录。
+
 ## 下一阶段
 
 1. 固件目录的系统级部署与启动交接、可选线程化 IRQ，以及工作队列资源/故障策略。
 2. 在 AMD-Vi 被动绑定与完整 aperture claim 基础上补齐剩余 RAM/固件保留来源，基于显式 PCI 集合占用和 IVMD 约束补齐全部 alias peer 的停止/归属协调、硬件 PTE/Unity/Exclusion 策略，再实现翻译、失效完成、故障处理及失败保留/恢复协议；扩展 IOMMU 地址空间能力与共享 worker 策略。被动绑定和只读快照均不能直接转为硬件启用入口。
-3. 在已有每设备实例、每文件 adapter 所有权和固定 resident RAM 底座上实现 BO 预算/迁移/驻留策略、GPUVM、上下文与请求队列，明确 VMO/请求/原生 fence 的引用关系；补齐 master/auth 和共享访问权。
+3. 在已有每设备实例、每文件 adapter 所有权和固定 resident RAM 底座上实现 BO 预算/迁移/驻留策略、GPUVM、硬件上下文与调度队列，复用已实现的 native request/queue/VMO/fence 所有权；补齐 master/auth 和共享访问权。
 4. Phoenix 固件/IP 初始化、SDMA 操作及像素回读，再接上 Mesa 的 AMD UAPI 和显示呈现。
 
 以上是待实现工作，不能以头文件预留或本阶段测试代替实现证据。
+
+## 历史验证记录
+
+以下按实现提交保留当时的测试数、ABI 与构建阻塞；它们是证据记录，不是当前接口/待办清单。当前开发使用上文契约、[请求与队列](request-queues.md)和[实现状态](../../status/current/drivers-implementation-status.md)。后续记录修复的限制不应从早期段落重新推断为仍未实现。
 
 本轮验证：上述三项主机测试和 x86_64 生命周期 QEMU 门禁通过；x86_64 默认部署、AArch64 embedded 内核构建通过。AArch64 generic 构建在用户态依赖阶段因 `external/sbase/id.c` 缺失失败，未作为完整 generic 构建通过。文档导航检查在加入本页索引后仅剩原工作区已有的四个未索引文档，原生接口测试还在独立导出的提交树上通过，避免依赖工作区其他未提交修改。验证代码提交为 `a25b51a85`（包含前置生命周期提交 `aedf811ef`）。
 

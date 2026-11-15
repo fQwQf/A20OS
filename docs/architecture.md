@@ -226,21 +226,15 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 
 ### 驱动模型（`kernel/drivers/`）
 
-驱动模型分为三层：
+驱动模型按发现、绑定、协议、资源、执行和部署组织：固件/总线发布 device；每次绑定拥有独立 endpoint/publication；传统六类自动提供 primary protocol，无 class 服务可发布独立协议。consumer 持引用并通过 active access 调用，不缓存可跨卸载的裸 ops，也不让旧引用跟随重绑。
 
-* 零开销 MMIO：板级地址通过宏常量内联，`kernel/drivers/core/driver_hwapi.h` 中的 `readl`/`writel` 编译为单条 load/store。
-* 统一 hwapi：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
-* 类 ops vtable：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
+CPU/平台提供 MMIO、IRQ、DMA/cache 能力，硬件地址来自资源描述并经受管映射访问，不把板级常量当作通用驱动接口。native VMO/buffer、mapping、请求与 fence 各自持有明确的所有权；协议 capability 描述功能，用户权限由 Native broker/ABI adapter 验证。
 
-静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/arch/<arch>/boards/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all` 与 ARMv7-M 默认）把完整驱动集静态链接进内核。PPC64LE 的历史默认值不再适用于当前构建。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
+native queue 支持有界 admission、多 active、FIFO 依赖通知、排队取消及 IRQ complete/任务 retire。只有安全退休后才 signal 最终 fence。退出为可选 pre-consumer prepare → consumer/child → offline → 可失败 execution stop → quiesce → active-call drain → remove → devres；停止/失效失败保留资源供显式重试。简单同步和专用批量路径仍可直接使用相应协议。
 
-```text
-trap/MM/time init -> board->early_init() -> driver_core_init()
--> board->enumerate_devices() -> driver_probe_all() -> vfs_init()
--> generic Early DriverStore -> net/mount/proc -> generic Runtime DriverStore
-```
+内建与 `.a20drv` 模块使用同一 driver_t；generic 的设备包通过 Early/Runtime DriverStore 部署，embedded 按显式源码账本链接。不是把所有类目录通配进镜像，也不建立第二套模型。MCU 有独立裁剪与轻量 publication，不能推断具备完整 hosted 异步运行时。
 
-各驱动私有锁顺序记录在 [驱动锁顺序](drivers/guide/lock-order.md)。
+精确生命周期、启动顺序和能力边界分别见[核心模型](drivers/guide/core-model.md)、[启动模型](dev/boot-model.md)与[部署配置](drivers/guide/deployment-profiles.md)。编写具体驱动从[入门路线](drivers/guide/getting-started.md)开始，扩展框架从[维护指南](drivers/guide/framework-development.md)开始；锁契约见[锁顺序](drivers/guide/lock-order.md)。
 
 ### IPC（`kernel/ipc/`）
 

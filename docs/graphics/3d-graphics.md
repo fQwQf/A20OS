@@ -6,6 +6,8 @@
 
 ---
 
+本文第 0–3 节描述当前驱动结构；后续带提交号的桌面/Mesa 排查保留历史上下文。原生驱动的共同契约以[核心模型](../drivers/guide/core-model.md)、[请求执行](../drivers/guide/request-queues.md)和[当前缺口](../status/gaps/drivers.md)为准，virgl UAPI 不定义所有 GPU 的内核模型。
+
 ## 0. 当前能力与实现矩阵
 
 本章节列出 A20OS virtio-gpu 2D/3D 加速栈在当前主干分支的已实现能力、在册功能与验证门禁状态：
@@ -16,15 +18,15 @@
 | virtio-gpu 3D 协议结构体与命令封装 | 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
 | QEMU 侧提供 virgl 设备 | 已支持 | `GPU_3D=1` 选择 `virtio-gpu-gl-*`（2D-only 模式使用默认配置） |
 | 3D 传输通路端到端 | 已支持（三架构验证） | `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`：guest 协商到 VIRGL 并从 host virglrenderer 读取 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁验证 FAIL。三架构像素回读均获得确定性颜色值。依赖 display 使用 GLX 后端（`gtk,gl=on`）；`egl-headless` 下 QEMU 会降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
-| 3D 资源挂载 backing | 已实现并验证 | VIRTGPU 资源由 GEM handle 承载，内核将 VMO 页 materialize（`vmo_get_page_charged`）后转为 `virtio_gpu_mem_entry[]` 下发 `RESOURCE_ATTACH_BACKING`；实测 host 正常接受：`3D resource 2 created with host backing` |
+| 3D 资源挂载 backing | 已实现并验证 | VIRTGPU 资源由 GEM handle 承载，DRM 预分配固定 resident RAM VMO，attach 查询已物化页并转为 `virtio_gpu_mem_entry[]` 下发 `RESOURCE_ATTACH_BACKING`；实测 host 正常接受：`3D resource 2 created with host backing` |
 | 命令流提交与像素回读 | 已实现（像素回读验证） | `gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），并回读像素比对：双遍颜色均命中（红 `0xffff0000`、蓝 `0xff0000ff`，各 4096 像素）。规范约束见 §0.5 |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | 已实现 | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 编号与 Linux UAPI 一致（`tools/check-drm-abi.sh`），未与 legacy `DRM_IOCTL_VIRGL_*` 混淆（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
 | `GET_CAPS` 宿主能力获取 | 已实测可用 | 客户机读取 `GET_CAPS returned a 308 byte capset`。`GET_CAPSET_INFO` 按索引寻址，`GET_CAPS` 按 id 寻址（见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md)） |
 | stock Mesa 实际挂载 | 已挂载 virgl | `smoke-mesa-attach` 确认 `attached: yes`，renderer 为 `virgl (…radeonsi…)`。`VIRTGPU_GETPARAM` 遵循用户态指针写穿规范，`version_major=0`（Mesa `virgl_drm_get_version()` 要求 major=0）。详见 §0.8 |
 | guest 里的 GL/GLES 客户端 | 已可用（llvmpipe） | `es2gears_wayland` 在 Wayland 路径运行，`eglinfo -p wayland` 报告 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2） |
-| DRM GEM 对象模型 | 已实现 | `GEM_OPEN`/`GEM_FLINK` 为有效 UAPI ioctl，`GEM_CLOSE` 释放对象，dumb buffer 复用统一分配器，上限 64。规范见 §8.1 |
+| DRM GEM 对象模型 | 基础可用 | 动态 store 按 publication 分区，每文件 handle/FB owner 与正常 close 已接入；显式 PRIME/GEM_OPEN 共享，失败清理保留。backing 为 owning resident VMO，完整共享授权仍需完善 |
 | KMS 对象模型 | 已实现 | 1 CRTC / 1 connector / 1 encoder / 1 plane，固定 ID；CRTC 保存 framebuffer 绑定，`GETCRTC` 报告绑定并回写 connector 列表，framebuffer 上限 64 |
-| dma-buf（PRIME）支持 | 基础导出可用 | 采用 VMO 快照拷贝至 memfd；按 `vfile.identity`（单调递增 per-open ID）管理映射表，关闭的条目自动回收，防止 handle 串用。跨进程共享内存暂未支持 |
+| dma-buf（PRIME）支持 | 同 publication 显式共享 | 匿名 dma-buf 文件保留 GEM/VMO；导入文件取得独立 handle owner，跨 publication 返回 EXDEV。不是 memfd 快照复制，也不是跨 GPU attach；完整 master/auth 与共享权限仍有缺口 |
 | 合成器 GL 渲染器 | 未启用 | `A20_RENDERER` 默认采用 `pixman`（会话脚本支持动态配置） |
 | Mesa/virgl 用户态客户端 | 基础 UAPI 就绪 | UAPI 契约就绪，由 stock Mesa 提供 Gallium 驱动 |
 
@@ -32,7 +34,7 @@
 
 ## 0.5 命令流编码、资源绑定与像素回读规范
 
-系统通过 `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}` 执行跨架构像素回读断言，要求输出 `pixel readback ok`。实现必须遵守以下三项硬性约束：
+系统通过 `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}` 执行跨架构像素回读断言，要求输出 `pixel readback ok`。实现必须遵守以下四项约束：
 
 1. **SUBMIT_3D 命令头线格式**：宿主 QEMU（`hw/display/virtio-gpu-virgl.c` 的 `virgl_cmd_submit_3d`）通过跳过固定 32 字节获取命令体。内核中的 `submit_hdr` 必须严格等于原始 `struct virtio_gpu_cmd_submit`（32 字节），不得附加多余的 `mem_entry` 或额外填充。内核在编译期通过 `_Static_assert` 约束该线格式。
 2. **Context 资源绑定约束**： virglrenderer 的资源查找基于 context 本地哈希表（`ctx->res_hash`）。在 EXECBUFFER 提交引用到某个资源的命令之前，必须先行下发 `VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE`（0x0202），否则宿主渲染器将因资源未注册而拒绝执行。
@@ -43,9 +45,9 @@
 
 ## 0.6 KMS 主从权限与显示设备重选机制
 
-1. **Master / Render 权限边界**： KMS 控制类 ioctl（包括 `CREATE_DUMB`、modeset 及 page-flip）限制仅允许 DRM Master 节点调用。Render node 仅承载计算与 3D 渲染，拒绝 KMS 模式设置。GBM 与桌面合成器在此权限模型下正常运行。
+1. **Primary / Render 边界**：render_only 文件被拒绝执行 primary-only 的 KMS/dumb 操作；这是节点角色限制，不等于完整 DRM master/auth 或共享授权。操作使用该文件固定 publication 的 scoped access，handle/FB 归属按文件检查；失败硬件清理保留到成功或旧绑定停止。
 2. **动态设备重选与降级防护**：当活动显示设备离线时，`gpu_device_unregister()` 触发设备重选，遍历在线显示设备列表，依据 [`kernel/include/drivers/gpu/gpu_select.h`](../../kernel/include/drivers/gpu/gpu_select.h) 声明的晋级规则选择新后端：
-   - 扫描过程优先保留具备 3D 能力的候选设备，避免较早被探测的 2D 设备抢占并导致静默降级；
+   - 候选须支持 SCANOUT，先比较 RENDER，同级优先非 BOOT_SCANOUT，等分稳定；headless 不占默认，不能从 virgl 回调表推断角色；
    - 重选逻辑不抢占扫描期间已被并发注册成功占用的槽位；
    - 决策谓词由 `tools/tests/gpu_select_test.c` 提供单元测试覆盖。
 
@@ -54,7 +56,7 @@
 ## 0.7 `eglinfo` 执行与 Mesa 平台已知边界
 
 1. **`DRM_CAP_TIMESTAMP_MONOTONIC` 依赖**：内核驱动在此项能力上固定报告 1。wlroots 将该项作为启用 DRM 后端的硬性前置依赖；若报告 0，桌面合成器将直接放弃 DRM 后端并退出。
-2. **ioctl 调度与设备枚举**：驱动完整实现了 47 个标准 DRM ioctl，未实现项均返回 `-ENOTTY`。在无界面环境下执行 `eglinfo` 出现的异常偏向于 Mesa 读取 `/dev/dri/card0` 后的 GBM 设备选择与枚举阶段，排查需配合带符号的回溯分析。
+2. **ioctl 调度与设备枚举**：支持的 DRM ioctl 以当前 dispatch 为准；该兼容入口的未知请求目前返回 EINVAL，不能以固定 ioctl 数量代替语义验收。在无界面环境下执行 `eglinfo` 出现的异常偏向于 Mesa 读取 `/dev/dri/card0` 后的 GBM 设备选择与枚举阶段，排查需配合带符号的回溯分析。
 
 ---
 
@@ -134,14 +136,14 @@
    ↓
 kernel/fs/devfs/devfs.c   DEVFS_DRM open → drm_create_vfile()
    ↓
-kernel/drivers/gpu/drm.c drm_ioctl() → drm_virtgpu_*
+kernel/drivers/gpu/drm.c 固定文件 publication / scoped access → drm_virtgpu_*
    │  解析 GEM handle、attach backing、copy 命令流（内核不解码 virgl 字节）
    ↓
 kernel/drivers/gpu/virtio_gpu.c 的 gpu_dev_ops_t 3D ops
    │  ctx_create / resource_create_3d / resource_attach_backing / submit_3d
    ↓
 virtio_gpu_send_cmd() / virtio_gpu_send_cmd_big() / virtio_gpu_submit_3d()
-   │  controlq 描述符链 + MMIO notify
+   │  共用 virtio_gpu_execute / native request queue → descriptor + notify
    ↓
 QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 ```
@@ -152,7 +154,7 @@ QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 
 ### 3.1 feature 协商（`virtio_gpu_init_transport`）
 
-- 读取 device features 低 32 位，协商 `VIRTIO_GPU_F_VIRGL` 与 `VIRTIO_GPU_F_EDID`；高 32 位只协商 `VIRTIO_F_VERSION_1_BIT`。
+- 读取 device features 低 32 位，协商已实现的 VIRGL、EDID 与 CONTEXT_INIT；高 32 位只协商 `VIRTIO_F_VERSION_1_BIT`。
 - 协商结果记录在 `inst->virgl` 与 `inst->context_init`。
 - 与 2D 一样 setup controlq（queue 0），发送请求-响应对。
 
@@ -160,8 +162,9 @@ QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 
 - `virtio_gpu_send_cmd()`：固定 128 字节命令槽，实例内 `command_req/command_resp`，用于 capset info、ctx、resource 等小命令。
 - `virtio_gpu_send_cmd_big()`：动态增长 `big_req/big_resp`，用于 `GET_CAPSET` 大 blob。
-- `virtio_gpu_submit_3d()`：三描述符链（hdr+entry → 命令 blob → 响应），命令 blob 拷入 `big_req` 保证 DMA 安全。禁止把调用者栈对象直接写入 descriptor。
-- 所有命令在 `command_lock` 串行；等待期间若注册了 IRQ 则 park，否则有界轮询 + yield。
+- `virtio_gpu_submit_3d()`：三描述符链（严格 32 字节 hdr、无附加 entry → 命令 blob → 响应），命令 blob 拷入 `big_req` 保证 DMA 安全。禁止把调用者栈对象直接写入 descriptor。
+- 四种命令格式共用 native request/queue；wire controlq 仍一个 active chain，command_lock 保护 staging，IRQ-assisted park 与启动有界 poll 使用同一后端。
+- 超时/异常 used 结果封闭 staging 并保留 pending request；execution stop 在调用排空前确认 reset、排空 IRQ并退休请求，remove 再交还实例 owner。
 
 ### 3.3 3D 命令封装
 
@@ -181,7 +184,7 @@ QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 
 ### 3.5 drvmod 导出
 
-`kernel/drvmod/framework.c` 的 `drv_export_table` 新增 `copy_from_user`/`copy_to_user`，供 virtio-gpu 模块透传用户请求。
+VirtIO GPU 模块包装复用共享硬件实现，经 framework 导入原生 queue/request、DMA buffer、协议与 transport API。用户指针封送由 DRM/ABI adapter 负责，硬件后端接收已验证的内核数据；模块仍须保留执行代码直到停止/退休成功，不能凭 class offline 提前卸载。接口与模块 ABI 见[模块指南](../drivers/guide/kernel-modules.md)。
 
 ### 3.6 一个已知约束：PIC 跳转表
 
@@ -306,6 +309,8 @@ boot 日志应出现：
 
 ## 8. 用户态 GL（Mesa/EGL/GBM）的前置条件
 
+本节保留用户态接入的阶段性前提与旧观察；GEM/PRIME/文件归属和原生执行的当前状态以第 0–3 节及原生运行时为准。旧客户端/桌面的单次失败不直接转写为通用驱动框架缺失。
+
 内核侧 3D 命令透传（第 2 节）可用，`xfce` world 现在也装了 Mesa （`mesa`/`mesa-dri-gallium`/`mesa-gl`/`mesa-gles`/`mesa-egl`/`mesa-gbm`/ `virglrenderer` + `mesa-utils`/`mesa-demos`）。镜像里能查到`swrast_dri.so`/`kms_swrast_dri.so`/`virtio_gpu_dri.so`/`zink_dri.so` 与`libGL.so.1`/`libEGL.so.1`/`libgbm.so.1`/`libGLESv2.so.2`。但**用户态 GL 仍然起不来**，缺的是 DRM 侧的三样东西：
 
 | 缺口 | 为什么需要 | 现状 |
@@ -347,7 +352,7 @@ IN_FORMATS 四次尝试的二分结论，关键在触发器不是 blob，而是�
 - 最后的 `DROP_MASTER` 是 libdrm `drmGetNodeTypeFromFd()` 的 node-type 探测，即它发生在一个新打开的 fd 上，对应 wlroots 的 allocator 阶段（`wlr_drm_allocator_create`：先试 `drmModeCreateLease`，失败后 plain open 再探测），而不是 plane 循环。所以失败点在 allocator（dumb/gbm 后端用 plane 的格式集），不在属性本身。
 - 全流程里 wlroots 唯一未实现的 ioctl 是 `DRM_IOCTL_MODE_CREATE_LEASE`（`0xc6`），它自己会 `falling back to plain open`，非致命。
 - 下一步建议：写个用户态小程序 `drmModeGetPropertyBlob(IN_FORMATS)` + `drmModeGetPlane`，把内核返回的字节与 wlroots/Mesa 的解析逐字段对齐；或先只让 dumb allocator 的格式来源自洽（GETPLANE 与 IN_FORMATS 完全一致、并确认 modifier 解析出 XRGB8888+LINEAR），再往上试 GBM。
-| 真正的 dma-buf（PRIME） | 客户端把渲染结果当 `wl_buffer` 交给合成器（`zwp_linux_dmabuf_v1`）；dumb buffer 导不出 dma-buf | `DRM_IOCTL_PRIME_HANDLE_TO_FD` 现在是把缓冲内容 memcpy 进 memfd 再返回该 fd（`drm_prime_handle_to_fd`），不是可共享的 dma-buf |
+| 真正的 dma-buf（PRIME） | 客户端显式共享渲染 backing | 当前匿名 dma-buf 文件保留原 GEM/VMO，导入同 publication 后建立 per-file handle；跨 publication EXDEV。原 memfd 快照描述已过期，完整共享授权、跨 GPU attach 和厂商 backing 仍有边界 |
 | `DRM_IOCTL_MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | 已实现（ioctl 号与内核结构体均已对齐 UAPI，见 §8.1）。此前 ioctl 号错误，`drmModeGetFB2` 恒返回 `EINVAL`；再此前它是一个清零 stub |
 
 实测（guest 内 `eglinfo`）：
@@ -427,7 +432,7 @@ libEGL warning: egl: failed to create dri2 screen
 
 > Linux UAPI 里根本没有 `GEM_CREATE`、`GEM_MMAP`、`GEM_GET_HANDLE`。用户态分配缓冲走 `MODE_CREATE_DUMB`；给导入用的 handle 起名走 `GEM_FLINK`。所以那三个 A20OS 号**没有上游对应物可对齐**，而 A20OS 当时正是"照 Linux 的样子"猜的号，于是一个私有号落到了真 `GEM_OPEN` 的位置上。
 
-现状：这三个里 `GEM_FLINK` 已作为真 ioctl 实现；仍保留的两个是 **A20 私有**，落在 `0x4710` / `0x4711`，不与任何 Linux 号冲突。内核侧实测共 49 个 DRM ioctl（7 device/auth、5 GEM、2 PRIME、25 KMS、10 VIRTGPU）加一个 16 槽的 A20 私有号段。
+该轮对齐后的状态：GEM_FLINK 已作为真 ioctl 实现；仍保留的两个是 **A20 私有**，落在 `0x4710` / `0x4711`，不与任何 Linux 号冲突。内核侧实测共 49 个 DRM ioctl（7 device/auth、5 GEM、2 PRIME、25 KMS、10 VIRTGPU）加一个 16 槽的 A20 私有号段。
 
 同时更正一条旧文档的错误结论：早期版本与旧路线图称 `MODE_GETFB2` "已加"，因此"不是空洞"。它是空洞：ioctl 号错了，从来没被命中过。
 
@@ -439,6 +444,8 @@ libEGL warning: egl: failed to create dri2 screen
 实测：48 个号与 Linux UAPI 一致，1 个无上游对应（`MODE_DPMS`，上游同样没有定义）。**两个方向都实测会失败**：扰动 `MODE_RMFB`、从 `drm_mode_fb_cmd`删掉一个字段，都会被抓出来。漂移 exit 1，通过 exit 0，没装 Linux 头文件时干净地 skip。
 
 ---
+
+以下 9.x 节为各提交阶段的排查证据，保留其当时假设与后续修正；不把历史候选方案、旧全局 GEM 限制或早期阻塞当作当前驱动接口。现行归属、共享和发现机制以上文及[DRM 发现](drm-sysfs-discovery.md)为准。
 
 ## 9. libdrm 设备识别所需的 sysfs 形态（反汇编实证，可直接照做）
 

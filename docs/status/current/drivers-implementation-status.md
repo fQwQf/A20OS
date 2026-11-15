@@ -34,7 +34,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 |---|---|---|
 | 原生组合协议 | 基础可用 | 每绑定 endpoint 复用 class publication，六类 primary 自动发布，其他服务无需 class；版本/实际表大小/能力匹配，不可变元数据可跨 offline，调用按同一 active count 排空，旧 endpoint 不跟随重绑。完整/MCU 共用核心；VirtIO-net、RTL8139、lwIP 与模块导入已接入，ABI 12 不变；原生请求/队列已接入，硬件特有调度与恢复由设备协议实现 |
 | 原生请求/队列 | 已实现并接入 VirtIO GPU | 有界 depth/active/bytes、FIFO dependency、排队取消、乱序硬件完成与任务退休；保留固定 VMO/charge 或 DMA buffer；共享 worker/早期 polling；自动 execution stop 先于 call drain，失败保留并重试。实际 controlq 仍一个 active chain；厂商 BO/GPUVM、主动 abort/抢占、动态队列和公平调度尚需上层实现，见[请求队列](../../drivers/guide/request-queues.md) |
-| driver core | 符合 | 动态 registry；bus ID 后可执行无副作用的 driver protocol match；操作 mutex 串行化注册、probe/remove 与遍历；数组 spinlock 不跨回调；probe 失败完整解绑；增长失败注入在 riscv64（单 hart 与 `-smp 2`）、x86_64、aarch64、loongarch64 上都实跑，driver/device/bus 三条路径均为 `-ENOMEM` → 旧条目保留 → 重试成功 → 计数与 capacity 恢复（`smoke-driver-lifecycle-{x86_64,aarch64,loongarch64,smp2}`） |
+| driver core | 符合 | 动态 registry；bus ID 后可执行无副作用的 driver protocol match；操作 mutex 串行化注册、probe/remove 与遍历；数组 spinlock 不跨回调；managed probe 失败进入可失败退出，未确认停止时保留绑定；增长失败注入在 riscv64（单 hart 与 `-smp 2`）、x86_64、aarch64、loongarch64 上都实跑，driver/device/bus 三条路径均为 `-ENOMEM` → 旧条目保留 → 重试成功 → 计数与 capacity 恢复（`smoke-driver-lifecycle-{x86_64,aarch64,loongarch64,smp2}`） |
 | 固件设备模型 | 已实现 | DT、ACPI/uACPI、静态 provider 共用节点/物理资源/IRQ domain/依赖接口；未知设备独立保留，失败事务回滚，probe 可延后。交接、保留区和架构边界见 [启动模型](../../dev/boot-model.md)；不代表任意板卡已完成实机验证。 |
 | PCI bus | 已扩展 | ECAM、ID/subsystem match、零值未分配 BAR sizing/assignment、BAR 编号查询、modern VirtIO capabilities；已设置 `matched_id`。BAR 规划在 discovery 事务内核对资源声明/占用，全部通过后提交新地址与资源；规划失败保留原 BAR/command/资源，调用者仍须先 quiesce；已持有 function 的用户查询仅读现有 BAR/IRQ 清单，不重写 BAR/BME 或资源 |
 | 显式失败 probe 清理 | 基础可用 | `device_probe_use_remove` 在初始化前无分配选择既有部分实例退出管线；清理失败保留绑定/devres/依赖和原 probe_error，子设备阻塞状态拒绝新使用。device/driver 布局沿用既有模型，当前 ABI 12，旧驱动需逐一迁移；不代表实体 GPU 停止已验证 |
@@ -53,7 +53,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | 原生 VMO DMA 导入 | 基础可用 | Rust 原子保留已物化 canonical RAM，缺页不物化、物理 VMO 拒绝、4096 页批次；显式 map_vmo 交还临时 pin，mapping/清理句柄跨源 resize/销毁保留原帧；不转移预算/权限或建立驻留租约，真实 EDU 在源 VMO 销毁后 DMA 已验证 |
 | 独立 DMA buffer | 基础可用 | 记录实际 PFN/分配阶数，支持大小独立于强对齐，捕获 mask，显式引用跨 unbind/owner 注销保留存储；可显式 map_buffer 接入 domain，覆盖请求页及末页 padding，失败清理保留整块对象；RISC-V native 不再二次 pin 尾页；无隐式隔离/停止证明，xHCI bulk 已使用；该 buffer 接口未改布局，当前全局模块 ABI 12 |
 | 原生 fence 一次性通知 | 基础可用 | pending 登记独立持 fence，IRQ-safe 短 callback 在锁外执行，竞争准入与原错误状态保留；任务 try_remove 对 RUNNING 返回 EBUSY 保留 owner，成功后锁外释放，通知后也须显式 remove。代码/context 与已调度 work 由调用者保留；主机竞争/失败注入及 x86 原生 worker 验证见运行时，不代表完整 GPU job 或 DRM 同步适配，ABI 12 不变 |
-| 原生异步驱动运行时 | 基础可用 | `quiesce`、页级 DMA domain/mapping、fence、可取消工作队列、IRQ 全分发排空、有界固件来源/image。失败保留与回收契约及 hosted 限制见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；尚未接入实体 GPU |
+| 原生异步驱动运行时 | 基础可用 | 原生 request/queue、调用排空前可失败 execution stop、页级 DMA domain/mapping、fence、共享工作队列、IRQ 排空与有界固件来源/image。失败保留与回收契约及 hosted 限制见 [原生驱动运行时](../../drivers/guide/native-runtime.md)；尚未接入实体 GPU |
 | 资源占用与清单核对 | 基础可用 | owner-pinned MMIO/port claim、受管映射先 unmap 后释放占用；checked claim 核对未绑定设备声明并阻止后续冲突发布。已导入受管 RAM 与 ACPI 表页；PFA 之外的 RAM/其他固件保留区尚不完整，也不拦截 raw MMIO/PIO；主机竞争/失败注入与 QEMU 元数据自检记录见运行时文档 |
 | 物理存储保留 | 基础可用 | 原生独立句柄，复制/归并区间后原子发布，阻止 MMIO claim/map、设备发布和 PCI 地址使用；`RES_MEM` 描述可共存。hosted 启动导入受管 RAM 与 ACPI 表页，失败不发布部分保护；主机竞争/失败注入、QEMU 双核 `memory=1` 已验证。不是 PFA 页分配或 DMA 隔离 |
 | DMA 物理约束 | 基础可用 | 独立复制至多 1024 个物理字节规则，权限交集/identity 合并；带 policy 的 managed domain 在整批 pin/provider 前预检，IOVA 违规进入可失败回滚并保留 policy。字节模型、方向、部分页、Unity、分配失败和清理重试通过；不检查硬件 PTE，旧构造器不自动获得约束 |

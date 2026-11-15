@@ -34,7 +34,7 @@
 | [PCI 与 VirtIO](guide/pci-and-virtio.md) | PCI ID、BAR、ECAM、VirtIO transport |
 | [运行时契约](guide/runtime-contracts.md) | MMIO、IRQ、DMA、锁、超时 |
 | [原生请求与队列](guide/request-queues.md) | admission、依赖、取消、IRQ 完成、任务退休、共享 worker 和可失败停止 |
-| [原生驱动运行时](guide/native-runtime.md) | quiesce、资源占用、页级 DMA、fence、工作队列、固件及验证边界 |
+| [原生驱动运行时](guide/native-runtime.md) | execution stop、资源占用、页级 DMA、fence、工作队列、固件及验证边界 |
 | [驱动锁顺序契约](guide/lock-order.md) | 锁的嵌套规则 |
 
 ### 二、设备类专章（按硬件类）
@@ -55,6 +55,7 @@
 | 文档 | 说明 |
 |---|---|
 | [驱动实现符合性与限制](../status/current/drivers-implementation-status.md) | 当前实现矩阵：已迁移模块、不可迁移边界、驱动类状态 |
+| [文档范围与一致性](meta/documentation-consistency.md) | 跨页面共同口径、权威入口和历史记录边界 |
 | [构建、测试与提交](meta/testing-and-submission.md) | 编译矩阵、失败清理和提交证据 |
 
 ### 四、平台与混合内核参考
@@ -64,6 +65,10 @@
 | [VirtualBox 驱动发现链](../platforms/virtualbox.md) | VirtualBox x86/ARM 平台驱动 |
 | [双态部署驱动框架](../hybrid-kernel/04-dual-placement.md) | 内核/用户双驻留驱动与所有权仲裁 |
 | [混合内核机制](../hybrid-kernel/01-mechanisms.md) | 混合内核核心机制 |
+
+## 文档一致性
+
+现行指南、设备专章及架构/启动/图形/状态页使用同一套绑定、请求和退出术语。文档分工、共同契约以及如何区分历史验证记录，集中在[文档范围与一致性](meta/documentation-consistency.md)。各类不再维护独立的旧式 probe/remove 模板。
 
 ## 阅读时的约定
 

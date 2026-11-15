@@ -2,6 +2,8 @@
 
 TUN 是由 `open("/dev/net/tun")` 和 `TUNSETIFF` 创建的内核服务，没有可探测的硬件。`drivers/net/tun.c` 拥有名字、文件 ABI、等待与有界报文队列；协议接口、路由、IP 输入和协议缓冲由当前后端拥有。公共头 `net/tun.h` 不包含 netif/pbuf/mbuf。
 
+TUN 的 file/网络域/报文队列属于纯软件服务，沿用自己的 close 与回调互斥协议；native 硬件请求队列不会自动替代它。功能与用户 CAP_NET_ADMIN 授权分别检查，不能把原生协议的 capability 位当作访问权。通用模型边界见[框架维护](../guide/framework-development.md#1-设计边界)。
+
 ## 数据和生命周期
 
 `net_stack_tun_create` 返回公共接口索引；驱动不保存协议对象指针。输出回调同步借用报文 reader，复制后归还；禁止保留源指针或从回调反向调用协议后端。注入同步借用输入字节，后端完成复制后调用自己的 IP 输入函数。destroy 与输入/输出执行互斥，返回后不再回调该实例。物理 NIC 和 TUN 都经过公共过滤/NAT，TUN 不绕过策略。

@@ -41,6 +41,8 @@ A20OS 现在同时支持三种驱动路径：
 
 模块只能解析 `kernel/drvmod/framework.c` 中的导出表。当前导出接口包括：
 
+- 原生服务与执行：`device_add_protocol`、endpoint/protocol access、`driver_queue_*`、`driver_request_*`、fence/watch 与 workqueue。queue 自动登记可失败 stop，IRQ complete 后任务 retire 成功才 signal；新增可选协议不改变 legacy class 表。
+
 - 内存与日志：`drv_alloc`、`drv_free`、`drv_log`。
 - MMIO：`drv_map_mmio`（返回校验后的 direct-map VA）、`drv_unmap_mmio`、`drv_read32`、`drv_write32`。
 - 端口 I/O（x86）：`drv_in8`、`drv_out8`。
@@ -50,7 +52,7 @@ A20OS 现在同时支持三种驱动路径：
 - 板级 IRQ 资源与内核参数：`platform_device_irq`、`bootargs_get`。前者是模块驱动读自己 IRQ 线号的唯一入口，返回 `>= 0` 表示可用线号、`-ENODEV` 表示板级没发布 `RES_IRQ`（应当轮询，不是错误）；后者读 `a20.*` 内核参数串，配合导出表里已有的 `memcmp` 手工切 token，避免为一次参数解析再引入 `strncmp` 依赖。
 `usb_device_poll` 和 `usb_interface_release_endpoints` 另导出给 USB class 模块；后者用于当前 remove，在 class drain 后逐项永久释放 endpoint，错误保留 URB/实例/模块所有权并显式重试。前者的调用者持有协议存储，忙时返回 `-EAGAIN`；不得从 active class 调用直接阻塞等待拓扑锁。
 
-- 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
+- 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_get_by_class`、`device_register/unregister`、`device_probe_use_remove`、`device_add_remove_prepare`、`device_add_execution_action`、`driver_lifecycle_begin/try_begin/end`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_get_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
 - VirtIO GPU 实例：驱动使用既有 `driver_dma_buffer_create/data/put` 持有每绑定队列/锁/暂存，实例退出后不留下模块回调；模块边界测试实际编译包装器并核对这些 imports。私有实例不扩展公开布局（当前模块 ABI 为 12）；停止失败保留 allocation，不允许卸载代码，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
 - VirtIO transport：`virtio_transport_reset` 通过既有 read32/write32 完成有界 status 读回确认，失败不释放 queue/IRQ/存储；不扩展 transport vtable，模块 ABI 沿用当前版本 12，见 [退出协议](native-runtime.md#virtio-reset-确认与-gpu-退出)。
@@ -232,7 +234,7 @@ generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Ea
 
 1. 把资源、中断、DMA 和 class 操作收敛到框架 API。
 2. 用 `.a20drv` 描述符声明设备身份与资源，模块内注册统一 `driver_t`。
-3. 为 probe/remove 建立失败回滚和设备引用关系。
+3. 初始化前建立 managed failed-probe、执行停止与存储引用；stop/retire/remove 失败保留可重试状态。
 4. 用一个真实设备 smoke 验证，再从内建源列表移除该驱动。
 
 因此 generic 的内核只保留显式服务账本，设备能力取决于目标架构实际列出的包；embedded 只静态链接 `EMBEDDED_DEVICE_DRIVER_SRCS` 当前列出的共享驱动，不与 generic 模块清单自动保持能力对等。RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 及 vinput-probe 等 module-only 实现当前不在 embedded 静态账本。详见[驱动部署 Profile](deployment-profiles.md)。

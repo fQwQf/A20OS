@@ -1,10 +1,10 @@
 # 驱动部署 Profile
 
-A20OS 只有两种驱动部署 profile：`generic` 与 `embedded`。profile 描述制品如何部署，不改变统一的 `driver_t`、`device_t`、描述符或 probe/remove 语义。
+A20OS 只有两种驱动部署 profile：`generic` 与 `embedded`。profile 描述制品如何部署，不改变统一的 device/driver、按绑定的协议和 request/queue 生命周期；两者都支持 managed failed-probe 与可失败 execution stop。
 
 ## generic
 
-除默认 embedded 的 `armv7m`/`ppc64le` 外，构建默认使用 `DRIVER_DEPLOYMENT=generic`。可选硬件必须以架构清单实际列出的 `.a20drv` 包部署，由驱动管理器扫描并按描述符 placement 激活：内核模块进入 drvmod；user-service 只能在 Runtime 阶段按白名单 MMIO 和 Native ABI 边界生成，带 `SUPERVISED` 的包只记录并交给外部 supervisor。
+除默认 embedded 的 armv7m/arm32/riscv32 外，活跃 hosted 构建默认使用 `DRIVER_DEPLOYMENT=generic`。可选硬件必须以架构清单实际列出的 `.a20drv` 包部署，由驱动管理器扫描并按描述符 placement 激活：内核模块进入 drvmod；user-service 只能在 Runtime 阶段按白名单 MMIO 和 Native ABI 边界生成，带 `SUPERVISED` 的包只记录并交给外部 supervisor。
 
 generic 有两个 DriverStore 层次：
 
@@ -35,7 +35,7 @@ IOMMU 属于内核 DMA 隔离基础设施：RISC-V provider 与 x86_64 + ACPI �
 
 full profile 的 `DRIVER_DEPLOYMENT=embedded` 将 `EMBEDDED_DEVICE_DRIVER_SRCS` 与内核服务静态链接到内核，过滤掉 `driver_manager.c`，不构建 `.a20drv` 包，也不填充或扫描 DriverStore。该静态账本不是 generic 包的并集：RTC、PC speaker、TPM、HDA、vinput 和 vinput-probe 等 module-only 实现当前不会出现在 embedded 镜像。NVMe在x86_64/loongarch64、PS/2在x86_64由embedded显式选择对应的共享实现；DesignWare I²C、I²C-HID与R8169也在静态账本中。
 
-MCU profile 是构建图例外：`armv7m` 强制 `PROFILE=mcu`，直接通配 `BOARD_DRIVER_DIR`（当前为 `kernel/arch/armv7m/boards/stm32f103/drivers/*.c`）和板级平台源码，不消费 full profile 的 `DRIVER_KERNEL_SRCS`。`armv7m` 和尚无 drvmod 工具链的 `ppc64le` 当前都默认标记为 embedded，但二者的实际源码选择分别由 MCU 分支和 full-profile embedded 分支决定。其他架构可显式选择 embedded，但必须按实际构建分支核对所需能力。
+MCU profile 是构建图例外：`armv7m` 强制 `PROFILE=mcu`，直接通配 `BOARD_DRIVER_DIR`（当前为 `kernel/arch/armv7m/boards/stm32f103/drivers/*.c`）和板级平台源码，不消费 full profile 的 `DRIVER_KERNEL_SRCS`。armv7m、arm32、riscv32 默认 embedded；实际源码选择还须区分 MCU 和 full-profile 分支。PPC64LE 已退休，不列入当前支持矩阵。其他架构可显式选择 embedded，但必须按实际构建分支核对所需能力。
 
 模块包装通常通过包含 `kernel/drivers/` 下的共享实现并改写 `DRIVER_REGISTER` 来复用同一协议源码；只有在 `tools/mk/driver-modules.mk` 明确提供包装和架构清单项时，这种双部署才成立。embedded 不是第二个驱动模型，也不应产生只适用于 STM32 的部署 API。
 
@@ -47,6 +47,6 @@ make ARCH=armv7m print-driver-deployment
 make ARCH=x86_64 DRIVER_DEPLOYMENT=embedded kernel-only
 ```
 
-输出同时给出该 profile 的模块数和 `EMBEDDED_DEVICE_DRIVER_SRCS` 账本项数；对 MCU profile，后者不是实际 `BOARD_DRIVER_DIR` 源码数。非 MCU 架构的 embedded 构建目录带有 `-embedded` 后缀，避免与默认 generic 对象复用；generic 与 STM32 保持既有目录名，兼容现有运行、烧录与测试入口。
+输出同时给出该 profile 的模块数和 `EMBEDDED_DEVICE_DRIVER_SRCS` 账本项数；对 MCU profile，后者不是实际 `BOARD_DRIVER_DIR` 源码数。内核对象目录按架构、板型、ABI 与配置键隔离；不要手工依赖历史的 -embedded 后缀。使用 tools/a20 show-vars 或 Make 输出确认本次制品位置，部署不同 profile 时重建对应模块与镜像。
 
 构建规则按职责拆分：顶层 `Makefile` 保留全局变量、核心编译图和聚合入口；`tools/mk/driver-deployment.mk` 定义 profile，`tools/mk/driver-sources.mk` 维护驱动源账本，`tools/mk/driver-modules.mk` 维护驱动包与 smoke，`tools/mk/stm32.mk` 维护 STM32 专用入口，`tools/mk/run-targets.mk` 维护运行、镜像和调试入口。
