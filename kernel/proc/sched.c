@@ -563,7 +563,10 @@ static void eevdf_charge(proc_runq_t *rq, task_t *t, uint64_t now)
     if (!dt)
         return;
     eevdf_account_run(t, dt);
-    uint64_t total = rq->eevdf_weight;
+    /* rq weight counts queued tasks only. The current task is detached
+     * from the tree, but still participates in fair virtual time; omitting
+     * it freezes the clock while it is alone and overcharges it otherwise. */
+    uint64_t total = rq->eevdf_weight + eevdf_weight(t);
     rq->eevdf_vtime = a20_eevdf_advance_vtime(rq->eevdf_vtime, dt, total);
 }
 
@@ -705,8 +708,10 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
     if (t->eevdf_deadline == 0)
         eevdf_reset_deadline(t);
 
-    /* Clamp the sleeper bonus so a long-sleeper cannot hog the CPU. */
-    if (rq->eevdf_root) {
+    /* An empty tree can still have a running incumbent. Clamp newcomers
+     * there too: a fresh vruntime=0 must not receive the whole CPU history
+     * as credit and keep the incumbent's peers waiting for seconds. */
+    {
         uint64_t clamped = a20_eevdf_clamp_sleeper(
             t->eevdf_vruntime, rq->eevdf_vtime, EEVDF_MAX_LAG);
         if (clamped != t->eevdf_vruntime) {
