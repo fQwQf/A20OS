@@ -1014,6 +1014,9 @@ fn apply_exit_decision(
             write(output, b"SVC_MGR: crash detected name=");
             write_name(output, service.def.name);
             write(output, b" exit_code=");
+            if exit_code < 0 {
+                write(output, b"-");
+            }
             write_u64(output, exit_code.unsigned_abs() as u64);
             write(output, b"\n");
             close_owned(&mut service.client_ep, output);
