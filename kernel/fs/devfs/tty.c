@@ -19,10 +19,6 @@
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
-/* The console's foreground process group; the discipline needs it to know who
- * an ISIG signal is for.  Same accessor the TIOCSPGRP/TIOCGPGRP path uses
- * (kernel/abi/linux/sys_fs.c). */
-extern int  uart_get_foreground_pgid(void);
 /* Owned by kernel/core/klog.c and kernel/core/printf.c: the one lock every
  * console byte passes under.  Declared extern the same way printf.c:9 does. */
 extern spinlock_t klog_console_lock;
