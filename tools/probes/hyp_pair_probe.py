@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live P1/P2 gate. Run only after runtime validation is authorized.
+"""Validate paired guest execution, isolation and complete lifecycle teardown.
 
 Requires an already-built, running named H host with a20-vmd. It creates two
 real RAMFS guests, checks shell execution and console separation, reconnects,
@@ -19,11 +19,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cli"))
 from a20_error import A20Error
-from a20_vm import START, READ, WRITE, PAUSE, RESUME, STOP, DESTROY, STATS
+from a20_vm import START, LIST, READ, WRITE, PAUSE, RESUME, STOP, DESTROY, STATS
 from a20_vm import _name, _profile, _rpc, list_guests
 
 
-def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
+def probe(host: str, profile_name: str, timeout: float, report: Path, cancel: bool = False) -> None:
     profile = _profile(profile_name)
     nonce = secrets.token_hex(5)
     names = [f"probe-a-{nonce}", f"probe-b-{nonce}"]
@@ -31,13 +31,14 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
     cursors = dict.fromkeys(names, 0)
     output = {name: bytearray() for name in names}
     answered_queries = dict.fromkeys(names, 0)
-    evidence = dict(host=host, names=names, profile=profile_name, passed=[], status="running")
+    terminal_codes = {0}
+    evidence = dict(host=host, names=names, profile=profile_name, termination="stop" if cancel else "shutdown", passed=[], status="running")
 
-    def rpc(*args, **kwargs):
+    def measured(op, function, *args, **kwargs):
         started = time.monotonic()
-        result = _rpc(*args, **kwargs)
+        result = function(*args, **kwargs)
         elapsed = (time.monotonic() - started) * 1000
-        key = str(args[1])
+        key = str(op)
         maxima = evidence.setdefault("rpc_max_ms", {})
         maxima[key] = max(maxima.get(key, 0), round(elapsed, 3))
         evidence["rpc_calls"] = evidence.get("rpc_calls", 0) + 1
@@ -46,6 +47,12 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         if "baseline_stats" in evidence and elapsed >= 3000:
             raise A20Error(f"management RPC {key} exceeded 3 s: {elapsed:.3f} ms")
         return result
+
+    def rpc(*args, **kwargs):
+        return measured(args[1], _rpc, *args, **kwargs)
+
+    def listing():
+        return measured(LIST, list_guests, host)
 
     def save():
         report.parent.mkdir(parents=True, exist_ok=True)
@@ -83,12 +90,12 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             pump()
-            records, epoch = list_guests(host)
+            records, epoch = listing()
             if any(item[0] != epoch for item in identities.values()):
                 raise A20Error("manager restarted during probe")
             by_name = {g["name"]: g for g in records}
             for name in names:
-                if name in by_name and by_name[name]["state"] == 4 and by_name[name]["code"] != 0:
+                if name in by_name and by_name[name]["state"] == 4 and by_name[name]["code"] not in terminal_codes:
                     raise A20Error(f"{name}: VMM exited with code {by_name[name]['code']}")
             if predicate(by_name):
                 evidence["passed"].append(label); save(); return
@@ -150,14 +157,19 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
             wait_for(lambda _: alive in output[peer], f"peer executes while {label} guest paused")
             action(name, RESUME)
             wait_for(lambda state: state[name]["state"] == 1, f"{label} VMM resumed")
-        # PID 1 respawns the RAMFS shell after exit. Ask BusyBox init to
-        # shut down so EXITED proves the kernel completed its teardown.
-        for name in names: send(name, b"/bin/poweroff\n")
-        wait_for(lambda state: all(state[n]["state"] == 4 and state[n]["code"] == 0 and
+        if cancel:
+            terminal_codes.clear(); terminal_codes.update((137, 143))
+            for name in names: action(name, STOP)
+        else:
+            # PID 1 respawns the RAMFS shell after exit. Ask BusyBox init to
+            # shut down so EXITED proves the kernel completed its teardown.
+            for name in names: send(name, b"/bin/poweroff\n")
+        wait_for(lambda state: all(state[n]["state"] == 4 and state[n]["code"] in terminal_codes and
                                   cursors[n] >= state[n]["output_end"] for n in names),
+                 "both guests cancelled and output drained" if cancel else
                  "both guests shut down cleanly and output drained")
         for name in names: action(name, DESTROY)
-        records, _ = list_guests(host)
+        records, _ = listing()
         if any(g["name"] in names for g in records): raise A20Error("destroy left guest records")
         evidence["passed"].append("guest identities destroyed")
         after, after_epoch = rpc(host, STATS)
@@ -184,10 +196,11 @@ def main() -> int:
     parser.add_argument("--profile", default="a20-ramfs-riscv64")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--stop", action="store_true", help="cancel both running guests through management STOP")
     args = parser.parse_args()
     if args.timeout <= 0: parser.error("--timeout must be positive")
     try:
-        probe(args.host, args.profile, args.timeout, args.report)
+        probe(args.host, args.profile, args.timeout, args.report, cancel=args.stop)
     except (A20Error, OSError, ValueError) as exc:
         print(f"HYP_PAIR: FAIL {exc}"); return 1
     print(f"HYP_PAIR: PASS; evidence in {args.report}")
