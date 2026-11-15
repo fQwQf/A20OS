@@ -1834,13 +1834,20 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
      *    may now reach its home location; the hold exists only to enforce the
      *    order above, and the checkpoint replays into the same bytes anyway. */
     if (txn_phase == JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT) {
-        /* SYNC_HELD selects by the hold bit. Keep it set until all home
-         * writes and their flush succeed; releasing first would checkpoint
-         * zero pages and clear the durable log before any metadata write. */
+#ifdef CONFIG_UFSD_RUST_JBD2_POLICY
+        /* The user Rust cache snapshots its held set into a retained
+         * checkpoint list on release; sync_held consumes that list. */
+        bcache_release_holds(fs->bc);
+#endif
+        /* The kernel cache selects directly by hold bits, so it must retain
+         * them until home writes and their flush succeed. The user adapter's
+         * independent checkpoint snapshot survives a failed flush/retry. */
         ret = bcache_sync_held(fs->bc);
         if (ret < 0)
             goto out;
+#ifndef CONFIG_UFSD_RUST_JBD2_POLICY
         bcache_release_holds(fs->bc);
+#endif
 #ifdef CONFIG_UFSD_RUST_JBD2_TXN
         ret = a20_jbd2_txn_mark_checkpointed(ej->txn);
         if (ret < 0)
