@@ -2,6 +2,8 @@
 
 `device_t`、`driver_t`、`bus_type_t` 三个对象如何配合，probe/remove 的完整回滚流程，以及一份可直接编译的 PCI 网络驱动骨架。具体声明以 `kernel/drivers/core/driver_core.h`、`driver_class.h`、`driver_register.h` 为准。
 
+开发具体设备的路线见[第一个驱动](getting-started.md)，修改公共机制的路线见[框架维护与扩展](framework-development.md)。本页集中说明对象、生命周期和同步 PCI 骨架；异步后端使用[请求与队列](request-queues.md)。
+
 ## 架构与开发入口
 
 驱动框架分成发现、绑定、协议、资源、执行和部署六部分。它们服务于字符、块、网络、输入、音频、显示和没有传统设备节点的控制器/服务。硬件协议留在具体驱动，Linux 文件/ioctl 和 Native handle 是上层适配，不定义内核对象的所有权。
@@ -196,7 +198,13 @@ DMA 内存约束使用独立的 `driver_dma_policy` 不可变对象，不借用 
 
 ### `driver_t`
 
-platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。新驱动可在硬件初始化前显式 `device_probe_use_remove()`，让失败 probe 使用可失败 remove 管线；部分初始化回调、保留/重试与 PROBE_CLEANUP 状态见 [原生运行时](native-runtime.md#显式选择失败-probe-的清理所有权)。remove 失败必须保留实例和硬件可达存储；`device_unregister()`/`driver_unregister()` 返回错误，不能忽略后继续释放设备或模块。quiesce 每次退出只执行一次，之后仅重试 remove。需要先冻结控制器再释放 child 存储的驱动可显式登记 `device_add_remove_prepare()`；PREPARING 保留图和资源，成功的准备动作会被记住，详见 [提前准备协议](native-runtime.md#在-consumer-解绑前准备退出)。virtio-gpu 也已选择失败 probe 管线，reset 读回失败保留实例/IRQ/DMA，成功后才释放；静态实例 owner 防止另一设备覆盖清理状态，见 [VirtIO 退出](native-runtime.md#virtio-reset-确认与-gpu-退出)。USB HID/hub 在 remove 中进一步逐项交还 endpoint，失败保留 URB 和绑定；USB vtable 的该扩展始于 ABI 10；当前 GPU 扩展后全局模块 ABI 为 12。DMA buffer 可作为独立存储所有者保留实际分配阶数与设备元数据引用；它与绑定、IOVA 映射和请求完成分开，不随 unbind 自动销毁；显式 map_buffer 由 mapping 保留整块存储直到失效确认；原生 VMO 通过锁内页快照接入 map_vmo，mapping 保留独立帧而非冻结 VMO 大小/预算，见 [原生存储契约](native-runtime.md#独立-dma-buffer-所有权)。总线私有拓扑通过 `driver_lifecycle_begin/end` 与核心绑定协调，进度使用 `driver_lifecycle_try_begin` 忙时返回；普通协调不抑制 probe，也不固定对象引用，见 [拓扑协调](native-runtime.md#总线拓扑的原生生命周期协调)。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
+platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有数字 ID 保存在 `matched_id`。`class_ops` 的真实类型由 `class_type` 决定，内建驱动的 `module` 为 NULL，该字段由核心维护。
+
+新驱动在硬件初始化前选择 `device_probe_use_remove()`，让部分初始化也进入受管退出。`device_add_execution_action()` 和 native queue 自动选择这条路径；停止失败保留实例、IRQ、DMA、依赖和原 probe_error。prepare、execution stop、quiesce、call drain、remove 的阶段与重试规则见下文，不把可失败停止藏在 void quiesce 中。USB 借用 endpoint 存储等需要更早冻结时使用 [remove prepare](native-runtime.md#在-consumer-解绑前准备退出)。
+
+DMA buffer、固定 RAM VMO 和 mapping 各自保留存储/地址所有权；device 引用、绑定 access 和 backing 引用不互相替代。原生 queue 在安全退休后才发布 fence；具体 GPU 的上下文/驻留和外部 backing 使用仍由子系统管理。详见[存储与完成契约](request-queues.md#存储与用户边界)。
+
+总线私有拓扑使用 `driver_lifecycle_begin/end` 与核心绑定协调，进度入口可用 try-begin 避免阻塞；该协调不代替对象引用。USB endpoint 退出、GPU 能力与模块 ABI 的当前支持范围见[原生运行时](native-runtime.md)和[模块接口](kernel-modules.md#模块接口)。
 
 匹配分两阶段完成：总线 `bus_type_t.match(dev, drv)` 先按 transport identity 匹配并设置 `dev->matched_id`；可选的 `driver_t.match(dev)` 再按协议字段缩小范围。例如 HDA 检查 `04:03:00`，NVMe 检查 `01:08:02`。第二阶段只能读取已经枚举的身份信息，不得访问设备寄存器、分配 BAR/DMA 或改变硬件；拒绝时核心清除 `matched_id`，不会调用 probe。
 
@@ -226,50 +234,51 @@ Makefile 不通配收集 full profile 的设备驱动。新增源码必须进入
 ## 生命周期的精确语义
 
 ```text
-UNINIT --match--> probe
-                    | 0
-                    v
-                  PROBED + class_device online
-                    |
-        remove/device_unregister/driver_unregister
-                    v
-          REMOVING -> class offline -> quiesce -> active calls drain
-                    -> remove -> managed resources release -> REMOVED
+UNINIT/DEFERRED -> match -> probe -> PROBED + publication online
 
-probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
+退出：可选 pre-consumer prepare -> consumer/child 解绑
+    -> offline -> execution stop -> quiesce -> active-call drain
+    -> remove=0 -> devres/依赖回收 -> 清空绑定 -> REMOVED
 ```
 
-核心在 probe 失败和 remove 后逆序执行受管资源动作并清理依赖；MMIO 映射 helper 自动登记回收。驱动必须回滚未托管的分配，停止 DMA 并撤销 IRQ。返回 `-EPROBE_DEFER` 表示 provider 尚未就绪；使用 `device_add_dependency()` 建立依赖后，核心负责有界重试及 provider 撤销时先解除 consumer 绑定。`quiesce/remove` 在 driver registry spinlock 之外调用，但仍持有 lifecycle mutex，不得等待需要该 mutex 的操作。成功 probe 后类发布失败也会调用 quiesce/remove；失败的 probe 自行停止已启动的硬件。
+| 场景 | 核心行为 |
+|---|---|
+| probe 成功 | 发布 class/已登记的 native protocols；没有任何服务的绑定可以不生成 endpoint |
+| 已选择 managed rollback 的 probe 失败 | 进入 PROBE_CLEANUP，执行同一可失败退出；成功清空绑定，失败保留部分实例与原 probe_error |
+| 未选择 managed rollback 的旧 probe 失败 | 驱动先自行停止并撤回硬件访问，核心随后回收 devres 并清空绑定；核心不推断硬件状态 |
+| probe 成功但 publication 失败 | 进入可失败退出；清理未成功时不能换另一驱动覆盖实例 |
+| remove prepare / execution stop 失败 | publication offline，保留 PREPARING（失败 probe 保持 PROBE_CLEANUP）；不继续到 call drain，显式重试未成功动作 |
+| remove 失败 | 保留 REMOVING、实例和资源；此前成功 stop/quiesce 不重复，重试 remove |
+| `-EPROBE_DEFER` | 表示 provider 尚未就绪；成功清理后保持 deferred，依赖就绪时由核心重试 |
+
+`device_unregister()`/`driver_unregister()` 的错误必须传播；失败不是事务回滚，部分 child/consumer 可能已停止。正常注销成功之前，设备仍可能处于 registry 中，但成员关系不授予在线调用许可。
 
 ### 推荐 probe 顺序
 
-1. 验证 `dev`、`dev->bus`、`matched_id` 和必需资源。
-2. 选择并清零一个实例槽，初始化锁，但暂不设置全局 ready 标志。
-3. 映射/启用总线资源；PCI 驱动调用 `pci_enable_and_assign_bars()`。
-4. 复位硬件并验证版本/能力。
-5. 分配 DMA、队列和普通内存。
-6. 建立 descriptor/ring，进行 feature negotiation。
-7. 清除旧中断状态；注册 IRQ 或明确选择轮询模式。
-8. 启动设备并执行最小健康检查。
-9. 设置 `dev->drv_priv`。
-10. 如有类级 registry（例如 display），注册后再设置实例 ready；最后返回 `0`。
+1. 核对总线身份和资源需求，在硬件初始化前选择 managed failed-probe 清理。
+2. 分配每实例对象，初始化锁/状态，交给 devres 或明确的 remove owner；把部分实例保存到 `drv_priv`，以便失败清理查到它。
+3. 登记原生协议和 execution stop（native queue 自动登记），均在启动生产者之前完成。
+4. 通过总线公共入口取得资源；MMIO 先映射，DMA 显式选择地址能力、存储 owner、mapping 和 cache 交接。
+5. 按设备协议完成 reset、能力检查、ring/IRQ 或受支持的 polling，最后启动并做健康检查。
+6. 如需 GPU 默认选择等子系统登记，在本次 probe 所有权下完成；ready 仅在设备可用后设置，返回 0 后由核心发布服务。
+
+`drv_priv` 早保存不等于服务已公开。managed 路径的失败由同一退出管线清理，probe 错误标签不能再释放同一 owner。MMIO 自动 devres、显式 DMA mapping 和普通实例内存各自按其所有权释放。
 
 ### 推荐 quiesce 与 remove 顺序
 
-1. quiesce 在实例锁下设置 stopping 状态，禁止新提交；核心此前已拒绝新的 class 调用。
-2. 排空队列，必要时停止/复位 DMA。确认硬件不再使用请求缓冲区后，使未完成请求成功或以错误结束，唤醒等待者。
-3. 同步中断并取消后台工作。可以在 quiesce 中释放 IRQ，必须保留仍在途调用可能访问的实例存储。
-4. 核心等待在途 class 调用结束，然后进入 remove。
-5. remove 注销 display 等私有 registry，解除 DMA mapping 并释放未托管存储；受管映射及动作随后由核心回收。
-6. 清空 `dev->drv_priv` 和实例槽。核心随后再次清空绑定字段。
+1. consumer 仍借用硬件可达存储时，显式 pre-consumer prepare 先冻结硬件；普通执行队列不额外要求此阶段。
+2. consumer/child 退出后拒绝新调用；execution stop 关闭生产者、确认硬件/IRQ/后台工作已停并安全退休请求。失败返回且保留资源，成功项 checkpoint。
+3. 可选 void quiesce 只作兼容或剩余软件封闭。已有 CPU 调用仍可使用实例，不能提前释放 context。
+4. 核心排空在途调用，再进入 remove；remove 交还剩余非受管资源/子系统登记，失败仍保留绑定供重试。
+5. remove=0 后核心逆序回收 devres 和依赖并清空绑定。devres-owned 实例不再手动 free。
 
-只有同步有界操作的驱动可以保持 quiesce 为空；需要取消等待的驱动不能将全部停止逻辑留到 remove。
+所有阶段的回调都不持 registry spinlock，但在 lifecycle 串行化下执行；不能等待需要同一 lifecycle mutex 的完成工作。纯同步有界设备可以没有 execution action/quiesce；会等待异步完成的调用不能把唯一唤醒入口留在 remove。
 
-> 不要在枚举函数栈上创建 `device_t` 或 `resource_t`；不要从 `kernel_main` 手动调用 `probe`；不要把所有错误返回裸 `-1`；也不要在同一平台已经接入总线模型后，又通过 `arch_virtio_*_probe()` 扫描 PCI 并重新分配 BAR。这些做法都会破坏已绑定驱动的 MMIO/notify 地址，导致设备 status 归零、queue 停止。
+不要从 `kernel_main` 手动调用 probe、在枚举函数栈上创建 device/resource，或在 consumer 中重新扫描 PCI/改 BAR；硬件由唯一枚举者发布。
 
 ## 可编译的 PCI 网络驱动骨架
 
-以下骨架展示结构，不包含具体寄存器协议：
+以下骨架展示 managed probe、独立 execution stop、受管实例和精确 PCI 匹配，不包含具体寄存器协议。示例 ID 必须替换为已实现的硬件；send/recv 在补齐硬件协议前返回 EOPNOTSUPP，不作为可收发的网卡使用。异步硬件不要另造一套请求寿命，见[异步骨架](request-queues.md#接入骨架)。
 
 ```c
 #include "drivers/bus/pci_bus.h"
@@ -291,22 +300,24 @@ typedef struct {
 
 static int example_send(device_t *dev, const void *data, size_t len) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->ready || !data || !len)
-        return -EINVAL;
-    /* 提交成功必须返回 len，队列满返回 -EAGAIN。*/
-    return (int)len;
+    if (!p || !__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE))
+        return -ENODEV;
+    if (!data || !len) return -EINVAL;
+    /* 实现后：提交成功返回 len，队列满返回 -EAGAIN。*/
+    return -EOPNOTSUPP;
 }
 
 static int example_recv(device_t *dev, void *data, size_t capacity) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->ready || !data || !capacity)
-        return -EINVAL;
-    return 0; /* 当前网络类约定：无包返回 0。*/
+    if (!p || !__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE))
+        return -ENODEV;
+    if (!data || !capacity) return -EINVAL;
+    return -EOPNOTSUPP; /* 实现后：无包返回 0，有包返回一帧字节数。*/
 }
 
 static const uint8_t *example_mac(device_t *dev) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
-    return p && p->ready ? p->mac : NULL;
+    return p && __atomic_load_n(&p->ready, __ATOMIC_ACQUIRE) ? p->mac : NULL;
 }
 
 static const net_dev_ops_t example_ops = {
@@ -314,6 +325,14 @@ static const net_dev_ops_t example_ops = {
     .recv = example_recv,
     .mac = example_mac,
 };
+
+static int example_stop(void *context) {
+    example_priv_t *p = context;
+    __atomic_store_n(&p->ready, 0, __ATOMIC_RELEASE);
+    /* 此骨架没有启动硬件；真实实现确认 DMA/IRQ/工作已停后才返回 0。
+     * 停止失败返回 errno 并保留实例与所有硬件可达存储。 */
+    return 0;
+}
 
 static int example_probe(device_t *dev) {
     int ret = device_probe_use_remove(dev);
@@ -324,6 +343,8 @@ static int example_probe(device_t *dev) {
     if (ret) { kfree(p); return ret; }
     dev->drv_priv = p; /* Partial cleanup can find this device's own instance. */
     spin_init(&p->lock);
+    ret = device_add_execution_action(dev, example_stop, NULL, p);
+    if (ret) return ret;
     ret = pci_enable_and_assign_bars(dev);
     if (ret < 0) return ret;
     resource_t *bar0 = pci_get_bar_resource(dev, 0);
@@ -332,7 +353,7 @@ static int example_probe(device_t *dev) {
     p->regs = (uintptr_t)pci_map_bar(dev, 0);
     if (!p->regs) return -ENODEV;
     /* reset, identify, allocate DMA, initialize rings */
-    p->ready = 1;
+    __atomic_store_n(&p->ready, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -340,16 +361,15 @@ static int example_remove(device_t *dev) {
     example_priv_t *p = dev ? dev->drv_priv : NULL;
     if (!p)
         return 0;
-    p->ready = 0;
-    /* Real implementations confirm stop here; return its errno on failure,
-     * retaining p/queues/IRQ for retry. This skeleton has not started hardware. */
+    /* execution stop 和 active-call drain 已完成。
+     * 此处交还未托管资源/子系统登记；不能提前释放后再报错。 */
     dev->drv_priv = NULL;
     /* p is devres-owned: core frees it only after confirmed remove success. */
     return 0;
 }
 
 static const device_id_t example_ids[] = {
-    { .vendor = VENDOR_ANY, .device = DEVICE_ANY,
+    { .vendor = 0x1234U, .device = 0x5678U, /* 示例，替换为真实支持的 ID */
       .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
     { 0 },
 };
@@ -378,7 +398,7 @@ DRIVER_REGISTER(example_driver);
 
 生命周期操作成功返回 `0`。I/O 操作的成功返回值由设备类规定，不得自行选择。块类 `read/write` 成功返回 `0`，表示请求中的全部扇区已经完成；它们不是返回完成扇区数。
 
-注册函数会拒绝不完整对象（`-EINVAL`）和同一指针的重复注册（`-EEXIST`）。注册 driver/device 可能同步执行 `probe`，注销可能同步执行 `remove`，所以调用者在函数返回前必须保持对象及其资源有效。核心以可睡眠操作锁串行化注册、probe、remove 和注销；生命周期回调不得递归调用这些注册 API，也不得从中断上下文调用。registry spinlock 只保护数组元数据，不跨任何驱动回调。
+注册函数会拒绝不完整对象（`-EINVAL`）和同一指针的重复注册（`-EEXIST`）。注册 driver/device 可能同步执行 `probe`，注销可能同步执行 `remove`，所以调用者在函数返回前必须保持对象及其资源有效。核心以可睡眠操作锁串行化注册、probe、remove 和注销；总线/HCD 按既有拓扑协调协议发布子对象；递归退出同一对象返回 EBUSY。普通 active call 不得等待需要自己排空的生命周期操作，注册/注销也不得从中断上下文调用。registry spinlock 只保护数组元数据，不跨任何驱动回调。
 
 运行期发现或拔除设备时，bus/平台必须调用 `device_hotplug(dev, BUS_EVENT_ADD)` 或 `device_hotplug(dev, BUS_EVENT_REMOVE)`，不能绕过核心直接调用驱动回调。它把设备事件接入上述同一套注册、匹配、class offline 和 remove 路径；详情见[热插拔与即插即用](hotplug-and-pnp.md)。
 
