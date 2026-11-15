@@ -876,7 +876,7 @@ static void *r8169_phys_to_va(uint64_t pa)
     pfn_t pfn = phys_to_pfn(pa);
     if (pfn == PFN_NONE)
         return NULL;
-    return (void *)((uintptr_t)pfn_to_virt(pfn) + (pa & (PAGE_SIZE - 1U)));
+    return (void *)((uintptr_t)pfn_to_virt(pfn) + (uintptr_t)(pa & (PAGE_SIZE - 1U)));
 }
 
 static uint32_t r8169_sim_get32(r8169_sim_t *sim, uint32_t reg)

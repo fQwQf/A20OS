@@ -50,8 +50,7 @@ extern vaddr_t a20_mmap_physical_rust(mm_struct_t *, vaddr_t, size_t, int, int,
 int a20_mmap_physical_supported(const mm_struct_t *mm, uint64_t physical,
                                  size_t len, pte_t memory_flags) {
     return mm && mm->pgdir && physical == (uint64_t)(paddr_t)physical &&
-           len && len - 1 <= (uint64_t)(paddr_t)-1 &&
-           physical <= (uint64_t)(paddr_t)-1 - (len - 1) &&
+           len && (uint64_t)(len - 1) <= (uint64_t)(paddr_t)-1 - physical &&
            !(memory_flags & ~(PTE_DEVICE | PTE_MAT1));
 }
 pte_t a20_mmap_physical_pte(int prot, pte_t memory_flags) {
