@@ -22,6 +22,12 @@ static int64_t linux_sys_lseek_call(const linux_syscall_args_t *args)
     /* Linux RV32 slot 62 is _llseek(fd, hi, lo, result64, whence). */
     return sys_riscv32_llseek((int)A(0), (uint32_t)A(1), (uint32_t)A(2),
                              (void *)(uintptr_t)A(3), (int)A(4));
+#elif defined(CONFIG_ARM32)
+    int64_t value = sys_lseek((int)A(0), (int64_t)A(1), (int)A(2));
+    if (!A(5) || value < 0) return value;
+    if (copy_to_user((void *)(uintptr_t)A(3), &value, sizeof(value)) < 0)
+        return -EFAULT;
+    return 0;
 #else
     return sys_lseek((int)A(0), (int64_t)A(1), (int)A(2));
 #endif
