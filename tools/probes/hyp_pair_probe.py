@@ -30,6 +30,7 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
     identities: dict[str, tuple[int, int]] = {}
     cursors = dict.fromkeys(names, 0)
     output = {name: bytearray() for name in names}
+    answered_queries = dict.fromkeys(names, 0)
     evidence = dict(host=host, names=names, profile=profile_name, passed=[], status="running")
 
     def save():
@@ -53,6 +54,16 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
             if gap or start != cursors[name] or end - start != len(data) - 20:
                 raise A20Error(f"{name}: history gap or invalid cursor")
             output[name].extend(data[20:]); cursors[name] = end
+            if any(marker in output[name] for marker in
+                   (b"PANIC", b"Kernel panic", b"Kernel BUG", b"LOCK-STALL")):
+                raise A20Error(f"{name}: guest kernel failed")
+            # BusyBox ash asks the terminal for its cursor position. Answer
+            # each query once, including queries split across READ replies.
+            queries = output[name].count(b"\x1b[6n")
+            pending = queries - answered_queries[name]
+            answered_queries[name] = queries
+            if pending:
+                send(name, b"\x1b[1;1R" * pending)
 
     def wait_for(predicate, label: str):
         deadline = time.monotonic() + timeout
@@ -119,7 +130,9 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         wait_for(lambda _: alive in output[names[1]], "second guest executes while first paused")
         action(names[0], RESUME)
         wait_for(lambda state: state[names[0]]["state"] == 1, "first VMM resumed")
-        for name in names: send(name, b"exit\n")
+        # PID 1 respawns the RAMFS shell after exit. Ask BusyBox init to
+        # shut down so EXITED proves the kernel completed its teardown.
+        for name in names: send(name, b"/bin/poweroff\n")
         wait_for(lambda state: all(state[n]["state"] == 4 and state[n]["code"] == 0 and
                                   cursors[n] >= state[n]["output_end"] for n in names),
                  "both guests shut down cleanly and output drained")
