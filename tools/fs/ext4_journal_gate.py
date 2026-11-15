@@ -265,7 +265,12 @@ def feed(argv, script, delay, log_path, timeout):
                     raise GateError(f"guest exited with status {guest.returncode}")
                 if re.search(rb"UBSAN:|Kernel BUG|LOCK-STALL", output):
                     raise GateError("guest kernel diagnostic failed")
-                if b"CRASH-INJECT " not in output and b"[SD] POWER_OFF entry" not in output:
+                # SMP console writes are best effort: entry may be retained only in
+                # klog when another CPU holds the console. The diagnostic audit
+                # runs strictly after successful vfs_system_shutdown in sys_reboot.
+                shutdown_done = (b"[SD] POWER_OFF entry" in output or
+                                 re.search(rb"\[SD\] audit errors=0(?![0-9])", output))
+                if b"CRASH-INJECT " not in output and not shutdown_done:
                     raise GateError("guest exited without crash injection or completed shutdown")
             finally:
                 if guest.poll() is None:

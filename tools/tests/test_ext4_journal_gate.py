@@ -49,6 +49,15 @@ print('[SD] POWER_OFF entry',flush=True)
                     gate.feed([sys.executable,'-u','-c',script],'poweroff\n',0,log,.2)
                 self.assertTrue(log.exists())
 
+    def test_post_shutdown_audit_survives_missing_best_effort_entry_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            gate.feed([sys.executable,'-u','-c',"print('[SD] audit errors=0[MM-ASM]')"],
+                      '',0,Path(d)/'log',1)
+        for audit in ('1','01','10'):
+            with tempfile.TemporaryDirectory() as d,self.assertRaises(gate.GateError):
+                gate.feed([sys.executable,'-u','-c',f"print('[SD] audit errors={audit}')"],
+                          '',0,Path(d)/'log',1)
+
     def test_e2fsck_exit_code_is_required_even_without_known_error_word(self):
         with patch.object(gate.subprocess,'run',return_value=subprocess.CompletedProcess([],4,'unexpected failure','')):
             with self.assertRaises(gate.GateError):gate.fsck_clean('disk.img','e2fsck')
