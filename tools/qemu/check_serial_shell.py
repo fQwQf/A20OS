@@ -21,7 +21,7 @@ MARKERS = ("A20_EXEC_ONE", "A20_EXEC_TWO", "A20_UNAME_OK", "A20_SLEEP_OK",
            "A20_SUBSHELL_OK", "A20_FILE_CONTENT", "A20_FILES_OK", "A20_SYNC_OK")
 
 
-def commands(shutdown, fpu=False, stress_forks=0, timers=False):
+def commands(shutdown, fpu=False, stress_forks=0, timers=False, fp_signals=False):
     script = (
         "/bin/echo A20_EXEC_ONE", "/bin/echo A20_EXEC_TWO",
         "/bin/uname -s > /tmp/a20-uname && test -s /tmp/a20-uname && echo A20_UNAME_OK",
@@ -39,6 +39,8 @@ def commands(shutdown, fpu=False, stress_forks=0, timers=False):
         script = tuple(line.replace(marker, marker[:4] + "'" + marker[4:] + "'")
                        for line in script)
     probes = (("/bin/fork_fpu_probe",) if fpu else ())
+    if fp_signals:
+        probes += ("/bin/arm_fp_signal_test",)
     if timers:
         probes += ("/bin/timer_preempt", "/bin/timer_idle")
     if stress_forks:
@@ -48,17 +50,19 @@ def commands(shutdown, fpu=False, stress_forks=0, timers=False):
     return probes + script
 
 
-def validate_output(text, status, shutdown, fpu=False, stress_forks=0, timers=False):
+def validate_output(text, status, shutdown, fpu=False, stress_forks=0, timers=False, fp_signals=False):
     lines = text.replace("\r", "").splitlines()
     missing = [marker for marker in MARKERS if marker not in lines]
     if fpu and "FORK_FPU: PASS" not in lines:
         missing.append("FORK_FPU: PASS")
+    if fp_signals and "ARM_FP_SIGNAL: rounds=1000 signals=1000 PASS" not in lines:
+        missing.append("ARM_FP_SIGNAL: rounds=1000 signals=1000 PASS")
     if stress_forks and "A20_STRESS_OK" not in lines:
         missing.append("A20_STRESS_OK")
     if timers:
         missing += [marker for marker in ("TIMER_PREEMPT: PASS", "TIMER_IDLE: PASS") if marker not in lines]
     final = "Rebooting system." if shutdown == "reboot" else "System is going down for power-off NOW."
-    errors = [word for word in ("SIGSEGV", "KERNEL PANIC", "UBSAN:", "can't fork", "FORK_FPU: FAIL") if word in text]
+    errors = [word for word in ("SIGSEGV", "KERNEL PANIC", "UBSAN:", "can't fork", "FORK_FPU: FAIL", "ARM_FP_SIGNAL: FAIL") if word in text]
     if status or missing or final not in lines or errors:
         raise ValueError(f"exit={status}, missing={missing}, shutdown={final in lines}, errors={errors}")
 
@@ -98,7 +102,7 @@ def qemu_command(arch, kernel, memory):
     yield command
 
 
-def run(command, timeout, shutdown, fpu=False, stress_forks=0, timers=False):
+def run(command, timeout, shutdown, fpu=False, stress_forks=0, timers=False, fp_signals=False):
     output = bytearray()
     sent = False
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -114,7 +118,7 @@ def run(command, timeout, shutdown, fpu=False, stress_forks=0, timers=False):
                     else:
                         selector.unregister(key.fileobj)
                 if not sent and b"# " in output:
-                    proc.stdin.write(("\n".join(commands(shutdown, fpu, stress_forks, timers)) + "\n").encode())
+                    proc.stdin.write(("\n".join(commands(shutdown, fpu, stress_forks, timers, fp_signals)) + "\n").encode())
                     proc.stdin.flush()
                     sent = True
             if proc.poll() is None:
@@ -132,22 +136,25 @@ def main():
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--shutdown", choices=("poweroff", "reboot"), default="poweroff")
     parser.add_argument("--fpu", action="store_true", help="require the optional RAMFS_FPU_TESTS probe")
+    parser.add_argument("--fp-signals", action="store_true", help="require 1000 asynchronous ARM32 VFP signal round trips")
     parser.add_argument("--stress-forks", type=int, default=0, help="sequential external-command fork/wait pressure")
     parser.add_argument("--timers", action="store_true", help="require CPU-hog preemption and idle timeout probes")
     parser.add_argument("--log", type=Path)
     args = parser.parse_args()
     if not args.kernel.is_file() or args.memory_mb < 64 or args.timeout <= 0 or args.stress_forks < 0:
         parser.error("a kernel, >=64 MiB RAM and positive timeout are required")
+    if args.fp_signals and args.arch != "arm32":
+        parser.error("--fp-signals requires --arch arm32")
     policy = Policy.from_env()
     gate(Requirement(args.memory_mb + policy.reserve_mem_mb, 1, policy.min_disk_mb),
          policy, ROOT, wait=False, label=args.arch + " RAMFS shell")
     log = args.log or ROOT / ".kernel-build/smoke" / (args.arch + "-serial-shell.log")
     try:
         with qemu_command(args.arch, args.kernel.resolve(), args.memory_mb) as command:
-            output, status = run(command, args.timeout, args.shutdown, args.fpu, args.stress_forks, args.timers)
+            output, status = run(command, args.timeout, args.shutdown, args.fpu, args.stress_forks, args.timers, args.fp_signals)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(output)
-        validate_output(output.decode(errors="replace"), status, args.shutdown, args.fpu, args.stress_forks, args.timers)
+        validate_output(output.decode(errors="replace"), status, args.shutdown, args.fpu, args.stress_forks, args.timers, args.fp_signals)
     except (ValueError, subprocess.SubprocessError) as error:
         print(f"FAIL: {error}; log: {log}")
         return 1

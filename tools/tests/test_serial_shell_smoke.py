@@ -38,6 +38,19 @@ class SerialShellOracleTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             smoke.validate_output(text + "\nSystem is going down for power-off NOW.\n", 0, "poweroff")
 
+    def test_arm_fp_signals_require_complete_executed_rounds(self):
+        base = "\n".join((*smoke.MARKERS, "System is going down for power-off NOW."))
+        marker = "ARM_FP_SIGNAL: rounds=1000 signals=1000 PASS"
+        self.assertIn("/bin/arm_fp_signal_test", smoke.commands("poweroff", fp_signals=True))
+        smoke.validate_output(base + "\n" + marker, 0, "poweroff", fp_signals=True)
+        for extra, status in (("/bin/arm_fp_signal_test", 0),
+                              (marker.replace("1000", "999"), 0),
+                              (marker + "\nARM_FP_SIGNAL: FAIL d15", 0),
+                              (marker, -9)):
+            with self.subTest(extra=extra, status=status), self.assertRaises(ValueError):
+                smoke.validate_output(base + "\n" + extra, status, "poweroff", fp_signals=True)
+
+
 
 if __name__ == "__main__":
     unittest.main()
