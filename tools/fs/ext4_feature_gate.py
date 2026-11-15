@@ -103,8 +103,16 @@ def run(args):
                 ('clean-orphan-file', None, None),
                 ('active-orphan-file', 'orphan_present', b'active orphan_file recovery is unsupported'),
                 ('encryption-incompat', 'encrypt', b'Unsupported incompat features'),
+                ('external-journal', None, b'external or missing internal journal is unsupported'),
+                ('missing-journal-source', None, b'external or missing internal journal is unsupported'),
             ):
                 image = d / (name + '.img'); shutil.copyfile(pristine, image)
+                if name in ('external-journal', 'missing-journal-source'):
+                    external([debugfs, '-w', '-R', 'set_super_value journal_inum 0', str(image)],
+                             args.output / (name + '-source.log'))
+                    if name == 'external-journal':
+                        external([debugfs, '-w', '-R', 'set_super_value journal_dev 1', str(image)],
+                                 args.output / (name + '-device.log'))
                 if feature:
                     external([debugfs, '-w', '-R', f'feature {feature}', str(image)],
                              args.output / (name + '-feature.log'))
