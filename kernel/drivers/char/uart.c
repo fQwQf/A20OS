@@ -333,29 +333,36 @@ int uart_try_getc(void) {
 }
 
 int uart_has_input(void) {
-    if (current_board && current_board->uart_rx_is_polled) {
-        /* Polled boards have no top half, but the read and the store still go
-         * in one rx_lock section so a concurrent reader cannot push a later
-         * byte first (RX_LOCK_INVARIANT). */
-        proc_wake_q_t wake_q;
-        proc_wake_q_init(&wake_q);
-        uint64_t pflags = spin_lock_irqsave(&rx_lock);
-        int polled = arch_uart_poll_getc();
-        int sig = 0;
-        if (polled >= 0)
-            sig = uart_rx_push_locked((char)polled, &wake_q);
-        spin_unlock_irqrestore(&rx_lock, pflags);
-        (void)proc_wake_q_flush(&wake_q);
-        if (sig)
-            tty_console_isig_raise(sig);
-    }
+    /* Readiness must include bytes still in the hardware FIFO, just as
+     * uart_getc() does. PL011 can have a nonempty FIFO below its interrupt
+     * threshold after an IRQ drain. A poll-before-read client (BusyBox ash)
+     * would otherwise sleep forever while a direct read could make progress.
+     * Publish under the same lock as the IRQ path to preserve byte order. */
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    int sig = 0;
     uint64_t flags = spin_lock_irqsave(&rx_lock);
+    if (rx_head == rx_tail) {
+        int polled = arch_uart_poll_getc();
+        if (polled >= 0) {
+            rx_polls_rx_bytes++;
+            sig = uart_rx_push_locked((char)polled, &wake_q);
+        }
+    }
     int has = rx_head != rx_tail;
     spin_unlock_irqrestore(&rx_lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
+    if (sig)
+        tty_console_isig_raise(sig);
     return has;
 }
 
 wait_queue_t *uart_read_wait_queue(void) {
+    /* A poll-only console has no producer to wake this queue. Advertise no
+     * event source so readiness_wait_once uses its bounded polling fallback,
+     * rather than parking poll/select forever after the FIFO becomes empty. */
+    if (arch_uart_irq() < 0 || (current_board && current_board->uart_rx_is_polled))
+        return NULL;
     return &rx_waiters;
 }
 

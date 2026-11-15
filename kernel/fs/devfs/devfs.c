@@ -736,7 +736,10 @@ static size_t devfs_tty_poll_sources(vfile_t *vf, short events,
     (void)vf;
     if (!sources || max == 0 || !(events & POLLIN))
         return 0;
-    sources[0] = (readiness_source_t){ uart_read_wait_queue(), 0, 0 };
+    wait_queue_t *queue = uart_read_wait_queue();
+    if (!queue)
+        return 0; /* polling-only UART: use the readiness fallback deadline */
+    sources[0] = (readiness_source_t){ queue, 0, 0 };
     return 1;
 }
 
