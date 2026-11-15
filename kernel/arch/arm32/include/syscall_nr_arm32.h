@@ -300,10 +300,15 @@ static inline int arm32_syscall_rewrite_args(uint32_t arm_nr,
                         args->arg[5] = args->arg[0] & 0xFFu;
                         return 1;
                     }
+        case 19:
+            args->arg[1] = (uint64_t)(int64_t)(int32_t)args->arg[1];
+            args->arg[5] = 0; /* legacy lseek returns its offset directly */
+            return 1;
         case 140:
             {
-                        int64_t off = ((int64_t)(int32_t)args->arg[1] << 32) |
-                                      (uint32_t)args->arg[2];
+                        int64_t off = (int64_t)(((uint64_t)(uint32_t)args->arg[1] << 32) |
+                                               (uint32_t)args->arg[2]);
+                        args->arg[5] = 1; /* _llseek writes arg[3], returns zero */
                         args->arg[1] = (uint64_t)off;
                         args->arg[2] = args->arg[4];
                         return 1;
