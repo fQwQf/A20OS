@@ -353,9 +353,11 @@ hyp_arch_vcpu_enter:
     .set n, n+1
     .endr
 
-    /* sp last: nothing may read through the frame after this. */
-    ld      t0, 2*8(sp)
-    mv      sp, t0
+    /* Restore sp directly, after every other GPR. Managed RUN re-entry may
+     * resume between any two guest instructions, including a load of
+     * sstatus into t0 and the following csrw. A temporary here overwrites
+     * the guest's restored t0 with its stack pointer on every RUN. */
+    ld      sp, 2*8(sp)
     sret
     .size hyp_arch_vcpu_enter, . - hyp_arch_vcpu_enter
 
