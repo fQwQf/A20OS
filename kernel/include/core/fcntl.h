@@ -21,6 +21,7 @@
 #define O_NOATIME    0x40000
 #define O_SYNC       0x101000
 #define O_EXCL       0x80
+#define O_NOCTTY     0x100
 #define O_PATH       0x200000
 
 /* Linux keeps these four flag values in its per-architecture fcntl ABI

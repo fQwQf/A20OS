@@ -317,6 +317,12 @@ typedef struct vfile {
     char            path[MAX_PATH_LEN];
     vfile_ops_t    *ops;
     void           *priv;           /* fs/pipe private data */
+    /* Immutable binding for this open file; dup/fork share the same epoch.
+     * A virtual hangup revokes old slave/console files without revoking a
+     * newly opened file on the same device. */
+    uint32_t        tty_id;
+    uint32_t        tty_master;
+    uint64_t        tty_io_epoch;
 } vfile_t;
 
 /*

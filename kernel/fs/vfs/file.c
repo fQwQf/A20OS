@@ -1,3 +1,5 @@
+#include "fs/tty_control.h"
+#include "core/ioctl.h"
 #include "fs/vfs/file.h"
 #include "fs/vfs/file_state.h"
 #include "fs/quota.h"
@@ -364,6 +366,13 @@ static int vfs_ioctl_vfile_impl(vfile_t *vf, unsigned long req, void *arg)
         return -EBADF;
     if (vf->backend_close_done)
         return -ESHUTDOWN;
+    if (tty_control_is_ioctl(req)) return (int)tty_control_ioctl(vf, req, arg);
+    if (tty_control_revoked(vf)) return -EIO;
+    if (req == TCSETS || req == TCSETSW || req == TCSETSF ||
+        req == TCFLSH || req == TCSBRK || req == TIOCSWINSZ) {
+        int r = tty_control_access(vf, 1, 1);
+        if (r < 0) return r;
+    }
     if (vf->ops && vf->ops->ioctl)
         return vf->ops->ioctl(vf, req, arg);
     return -ENOTTY;

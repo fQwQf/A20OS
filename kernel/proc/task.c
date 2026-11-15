@@ -1,5 +1,6 @@
 #include "cluster/ssi.h"
 #include "proc/proc.h"
+#include "fs/tty_control.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
 #include "proc/task_object.h"
@@ -251,6 +252,7 @@ void proc_task_init_base(task_t *t, task_t *parent)
         t->pgid = t->pid;
     if (t->sid <= 0)
         t->sid = t->pid;
+    tty_control_inherit(t, parent);
     t->fs.umask     = parent ? parent->fs.umask : 022;
     t->cred.uid       = parent ? parent->cred.uid : 0;
     t->cred.euid      = parent ? parent->cred.euid : 0;

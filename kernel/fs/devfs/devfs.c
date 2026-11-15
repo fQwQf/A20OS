@@ -1,3 +1,4 @@
+#include "fs/tty_control.h"
 #include "fs/devfs.h"
 #include "fs/readiness.h"
 #include "devfs_internal.h"
@@ -265,7 +266,7 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_NULL, "cpu_dma_latency", 0x10a),
     STATIC_NODE(DEVFS_FULL, "full", 0x107),
     STATIC_NODE(DEVFS_KMSG, "kmsg", 0x10b),
-    STATIC_NODE(DEVFS_TTY, "tty", 0x500),
+    STATIC_NODE(DEVFS_CTTY, "tty", 0x500),
     STATIC_NODE(DEVFS_TTY, "console", 0x501),
     STATIC_NODE(DEVFS_TTY, "tty0", 0x400),
     STATIC_NODE(DEVFS_TTY, "tty1", 0x401),
@@ -644,8 +645,8 @@ extern int  pty_master_write(int idx, const char *buf, size_t count);
 extern int  pty_master_ioctl(int idx, unsigned long req, void *arg);
 extern int  pty_master_poll(int idx, short events);
 extern void pty_master_close(int idx);
-extern int  pty_slave_read(int idx, char *buf, size_t count, int nonblock);
-extern int  pty_slave_write(int idx, const char *buf, size_t count);
+extern int pty_slave_read_vfile(vfile_t *vf, int idx, char *buf, size_t count, int nonblock);
+extern int pty_slave_write_vfile(vfile_t *vf, int idx, const char *buf, size_t count);
 extern int  pty_slave_ioctl(int idx, unsigned long req, void *arg);
 extern int  pty_slave_poll(int idx, short events);
 extern void pty_slave_close(int idx);
@@ -710,11 +711,16 @@ static vfile_ops_t g_devfs_ptm_ops = { .read = devfs_ptm_read, .write = devfs_pt
 
 static int devfs_pts_read(vfile_t *vf, char *buf, size_t count) {
     int idx = (int)(intptr_t)vf->priv;
-    return pty_slave_read(idx, buf, count, (vf->flags & O_NONBLOCK) != 0);
+    if (tty_control_revoked(vf)) return 0;
+    int r = tty_control_access(vf, 0, 0);
+    if (r < 0) return r;
+    return pty_slave_read_vfile(vf, idx, buf, count, (vf->flags & O_NONBLOCK) != 0);
 }
 static int devfs_pts_write(vfile_t *vf, const char *buf, size_t count) {
     int idx = (int)(intptr_t)vf->priv;
-    return pty_slave_write(idx, buf, count);
+    int r = tty_control_access(vf, 1, 0);
+    if (r < 0) return r;
+    return pty_slave_write_vfile(vf, idx, buf, count);
 }
 static int devfs_pts_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     int idx = (int)(intptr_t)vf->priv;
@@ -1313,7 +1319,31 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_RANDOM: vf->ops = &g_devfs_random_ops; break;
     case DEVFS_FULL: vf->ops = &g_devfs_full_ops; break;
     case DEVFS_KMSG: vf->ops = &g_devfs_kmsg_ops; break;
-    case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
+    case DEVFS_CTTY: {
+        uint64_t epoch;
+        uint32_t id = tty_control_current(&epoch);
+        if (!id) return devfs_open_failed(vf, -ENXIO);
+        if (id == TTY_CONSOLE_ID) {
+            vf->ops = &g_devfs_tty_ops;
+            vf->priv = (void *)(intptr_t)DEVFS_TTY;
+        } else {
+            int idx = (int)id - 2;
+            int r = pty_slave_open(idx);
+            if (r < 0) return devfs_open_failed(vf, r);
+            vf->ops = &g_devfs_pts_ops;
+            vf->priv = (void *)(intptr_t)idx;
+        }
+        tty_control_bind(vf, id, 0, flags | O_NOCTTY);
+        if (vf->tty_io_epoch != epoch || tty_control_current(NULL) != id) {
+            if (vf->ops->close) vf->ops->close(vf);
+            return devfs_open_failed(vf, -ENXIO);
+        }
+        break;
+    }
+    case DEVFS_TTY:
+        vf->ops = &g_devfs_tty_ops;
+        tty_control_bind(vf, TTY_CONSOLE_ID, 0, flags);
+        break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
     case DEVFS_FB:
         vf->ops = &g_devfs_fb_ops;
@@ -1370,6 +1400,7 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
             return devfs_open_failed(vf, pty_idx);
         vf->ops = &g_devfs_ptm_ops;
         vf->priv = (void *)(intptr_t)pty_idx;
+        tty_control_bind(vf, TTY_PTY_ID(pty_idx), 1, flags);
         break;
     }
     case DEVFS_PTS_DIR:
@@ -1448,6 +1479,7 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
             return devfs_open_failed(vf, result);
         vf->ops = &g_devfs_pts_ops;
         vf->priv = (void *)(intptr_t)pts_idx;
+        tty_control_bind(vf, TTY_PTY_ID(pts_idx), 0, flags);
         break;
     }
     default:
@@ -1478,30 +1510,38 @@ int devfs_is_tty_vfile(vfile_t *vf) {
 
 /* Device identities are local to devfs; callers pass pinned vfiles. */
 int tty_vfile_get_termios(vfile_t *vf, ktty_termios_t *out) {
+    if (tty_control_revoked(vf)) return -EIO;
     if (devfs_is_tty_vfile(vf)) return tty_console_get_termios(out);
     if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
         return pty_get_termios((int)(intptr_t)vf->priv, out);
     return -ENOTTY;
 }
 int tty_vfile_set_termios(vfile_t *vf, const ktty_termios_t *in, int action) {
+    int r = tty_control_access(vf, 1, 1);
+    if (r < 0) return r;
     if (devfs_is_tty_vfile(vf)) return tty_console_set_termios(in, action);
     if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
         return pty_set_termios((int)(intptr_t)vf->priv, in, action, vf->ops == &g_devfs_ptm_ops);
     return -ENOTTY;
 }
 int tty_vfile_get_winsize(vfile_t *vf, ktty_winsize_t *out) {
+    if (tty_control_revoked(vf)) return -EIO;
     if (devfs_is_tty_vfile(vf)) return tty_console_get_winsize(out);
     if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
         return pty_get_winsize((int)(intptr_t)vf->priv, out);
     return -ENOTTY;
 }
 int tty_vfile_set_winsize(vfile_t *vf, const ktty_winsize_t *in) {
+    int r = tty_control_access(vf, 1, 1);
+    if (r < 0) return r;
     if (devfs_is_tty_vfile(vf)) return tty_console_set_winsize(in);
     if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
         return pty_set_winsize((int)(intptr_t)vf->priv, in);
     return -ENOTTY;
 }
 int tty_vfile_flush(vfile_t *vf, int queue) {
+    int r = tty_control_access(vf, 1, 1);
+    if (r < 0) return r;
     if (devfs_is_tty_vfile(vf)) return tty_console_flush(queue);
     if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
         return pty_flush((int)(intptr_t)vf->priv, queue, vf->ops == &g_devfs_ptm_ops);
@@ -1542,6 +1582,9 @@ vnode_t *devfs_mount(void) {
     g_stderr_file.ops = &g_devfs_stderr_ops;
     g_stderr_file.flags = O_WRONLY;
     g_stderr_file.priv = (void *)(intptr_t)DEVFS_TTY;
+    tty_control_bind(&g_stdin_file, TTY_CONSOLE_ID, 0, O_NOCTTY);
+    tty_control_bind(&g_stdout_file, TTY_CONSOLE_ID, 0, O_NOCTTY);
+    tty_control_bind(&g_stderr_file, TTY_CONSOLE_ID, 0, O_NOCTTY);
     pty_init();
     size_t pts_dir_idx = 0;
     size_t dri_dir_idx = 0;

@@ -147,6 +147,7 @@ typedef struct proc_cred {
 #define CAP_SYS_NICE         23
 #define CAP_SYS_ADMIN        21
 #define CAP_SYS_RESOURCE     24
+#define CAP_SYS_TTY_CONFIG   26
 #define CAP_SYS_BOOT         22
 #define CAP_NET_ADMIN        12
 #define CAP_NET_RAW          13
@@ -679,6 +680,10 @@ typedef struct task_t {
     spinlock_t         jobctl_lock;
     uint32_t           jobctl_state;
     uint32_t           jobctl_stop_epoch; /* member's queued stop generation */
+    /* Controlling terminal belongs to the thread group. Access the leader's
+     * slot through tty_control; generations invalidate detached sessions. */
+    uint32_t           ctty_id;
+    uint64_t           ctty_generation;
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&

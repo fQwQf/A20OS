@@ -767,50 +767,12 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
 {
     req = arch_linux_ioctl_request(req & 0xffffffffUL);
 
-    if (req == TIOCGPGRP || req == TIOCSPGRP) {
-        /* Let the tty behind this fd answer for itself first: a pty pair keeps
-         * its own foreground process group (kernel/drivers/char/pty.c), and
-         * routing every TIOCSPGRP to the console's group is what left that
-         * field permanently zero -- and Ctrl-C dead inside the desktop's
-         * terminals.  Only a tty that does not implement the request falls
-         * through to the console logic below, which is what this path has
-         * always done (the console tty answers -ENOTTY here, as do filesystems
-         * for an ioctl they do not know). */
-        int64_t own = vfs_ioctl((int)gfd, req, arg);
-        if (own != -ENOTTY)
-            return own;
-    }
-    if (req == TIOCGPGRP) {
-        int pgid = uart_get_foreground_pgid();
-        /* Nobody claims the foreground group placeholder: if the group has no
-         * live user process left, the caller is the foreground process by
-         * fact.  busybox ash's POSIX job-control handshake depends on this,
-         * otherwise it raises SIGTTIN against its own group and stops, taking
-         * the init/mksh processes in that group down with it. */
-        if (!proc_pgid_alive(pgid)) {
-            task_t *self = proc_current();
-            if (self && self->pgid > 0) {
-                pgid = self->pgid;
-                uart_set_foreground_pgid(pgid);
-            }
-        }
-        return copy_to_user(arg, &pgid, sizeof(pgid)) < 0 ? -EFAULT : 0;
-    }
-    if (req == TIOCSPGRP) {
-        int pgid = 0;
-        if (copy_from_user(&pgid, arg, sizeof(pgid)) < 0) return -EFAULT;
-        if (pgid <= 0) return -EINVAL;
-        uart_set_foreground_pgid(pgid);
-        return 0;
-    }
     if (req == TIOCGWINSZ) {
         /* Linux semantics: ENOTTY on non-terminals.  musl's isatty() is
          * TIOCGWINSZ-based, so faking success here makes pipes/files look
          * like ttys and trips Node.js's PlatformInit tcgetattr check. */
         return vfs_ioctl((int)gfd, req, arg);
     }
-    if (req == TIOCSCTTY)
-        return 0;
     if (req == FIONBIO) {
         /* A socket blocks in the net data path, so "non-blocking" has to be
          * real here.  Go through the same two steps as fcntl(F_SETFL): the

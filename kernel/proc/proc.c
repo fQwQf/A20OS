@@ -14,6 +14,7 @@
  */
 
 #include "proc/proc.h"
+#include "fs/tty_control.h"
 #include "proc/proc_internal.h"
 #include "proc/tasklist.h"
 #include "proc/proc_accounting.h"
@@ -835,6 +836,80 @@ int proc_pgid_alive(int pgid) {
     }
     spin_unlock_irqrestore(&tasklist_lock, flags);
     return alive;
+}
+
+
+/* TTY delivery is kernel initiated. References survive the task-list unlock;
+ * each live thread group is notified once, including a group whose leader
+ * has already exited. No signal lock is acquired under tasklist_lock. */
+static int tty_task_live(task_t *t) {
+    int state = proc_task_state_get(t);
+    return state != PROC_UNUSED && state != PROC_ZOMBIE && (t->mm || t->pgdir);
+}
+int proc_tty_group_session(int pgid, int *sid) {
+    int found = 0;
+    uint64_t f = spin_lock_irqsave(&tasklist_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t))
+        if (t->pgid == pgid && tty_task_live(t)) { *sid = t->sid; found = 1; break; }
+    spin_unlock_irqrestore(&tasklist_lock, f);
+    return found;
+}
+int proc_tty_group_orphaned(int sid, int pgid) {
+    int orphaned = 1;
+    uint64_t f = spin_lock_irqsave(&tasklist_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->sid != sid || t->pgid != pgid || !tty_task_live(t)) continue;
+        task_t *p = t->parent;
+        if (p && p->sid == sid && p->pgid != pgid && tty_task_live(p)) {
+            orphaned = 0; break;
+        }
+    }
+    spin_unlock_irqrestore(&tasklist_lock, f);
+    return orphaned;
+}
+void proc_tty_signal_group(int sid, int pgid, int sig) {
+    int after = 0;
+    for (;;) {
+        task_t *target = NULL;
+        uint64_t f = spin_lock_irqsave(&tasklist_lock);
+        for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t))
+            if (t->sid == sid && t->pgid == pgid && t->tgid > after &&
+                tty_task_live(t) && (!target || t->tgid < target->tgid)) target = t;
+        if (target) { proc_get(target); after = target->tgid; }
+        spin_unlock_irqrestore(&tasklist_lock, f);
+        if (!target) break;
+        signal_send_task(target, sig);
+        proc_put(target);
+    }
+}
+void proc_tty_signal_leader(int sid, int sig) {
+    task_t *target = NULL;
+    uint64_t f = spin_lock_irqsave(&tasklist_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t))
+        if (t->tgid == sid && t->sid == sid && tty_task_live(t)) {
+            target = proc_get(t); break;
+        }
+    spin_unlock_irqrestore(&tasklist_lock, f);
+    if (target) { signal_send_task(target, sig); proc_put(target); }
+}
+int proc_tty_group_exited(task_t *t) {
+    int dead = 1;
+    uint64_t f = spin_lock_irqsave(&tasklist_lock);
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    for (task_t *m = leader; m; m = m->tg_next) {
+        int state = proc_task_state_get(m);
+        if (state != PROC_UNUSED && state != PROC_ZOMBIE) { dead = 0; break; }
+    }
+    spin_unlock_irqrestore(&tasklist_lock, f);
+    return dead;
+}
+/* sid/pgid are process properties, replicated to each member for syscall
+ * readers and signal selection. The list lock also serializes clone links. */
+void proc_tty_set_ids(task_t *task, int sid, int pgid) {
+    uint64_t f = spin_lock_irqsave(&tasklist_lock);
+    task_t *leader = task->tg_leader ? task->tg_leader : task;
+    for (task_t *m = leader; m; m = m->tg_next) { m->sid = sid; m->pgid = pgid; }
+    spin_unlock_irqrestore(&tasklist_lock, f);
 }
 
 // Send a signal to the given process; the implementation of the kill syscall

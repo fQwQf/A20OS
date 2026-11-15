@@ -133,6 +133,7 @@ int signal_task_get_pending_info(void *task, int signum, void *out,
  * internals from outside this file (signal-exit boundary contract). */
 int signal_signo_pending_scoped(void *task, int signum, int thread_scoped);
 
+int signal_task_blocks_or_ignores(void *task, int sig);
 int  signal_task_has_unblocked(void *task);
 int  signal_task_has_fatal(void *task);
 int  signal_task_should_restart(void *task);

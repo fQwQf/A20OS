@@ -25,6 +25,7 @@ enum {
     DEVFS_FULL,
     DEVFS_KMSG,
     DEVFS_TTY,
+    DEVFS_CTTY,
     DEVFS_RTC,
     DEVFS_LOOP,
     DEVFS_LOOP_CTRL,

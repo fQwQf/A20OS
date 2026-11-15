@@ -1,3 +1,4 @@
+#include "fs/tty_control.h"
 /*
  * A20OS — Virtual Filesystem (VFS)
  *
@@ -1584,6 +1585,7 @@ int vfs_file_is_pollable(vfile_t *vf)
 
 int vfs_poll_file(vfile_t *vf, short events) {
     if (!vf) return POLLNVAL;
+    if (tty_control_revoked(vf)) return POLLHUP | POLLERR | (events & (POLLIN | POLLOUT));
     int sr = signalfd_poll_events(vf, events);
     if (sr >= 0)
         return sr;

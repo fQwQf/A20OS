@@ -1,5 +1,6 @@
 #include "cluster/ssi.h"
 #include "proc/proc.h"
+#include "fs/tty_control.h"
 #include "proc/task_object.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
@@ -540,6 +541,7 @@ static void exit_publish_zombie(void *opaque)
     __atomic_thread_fence(__ATOMIC_RELEASE);
     t->state = PROC_ZOMBIE;
     spin_unlock_irqrestore(&t->park_lock, flags);
+    tty_control_task_exit(t);
 }
 
 static void exit_parent_bookkeeping(void *opaque)

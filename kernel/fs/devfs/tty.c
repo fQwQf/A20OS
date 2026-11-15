@@ -1,3 +1,4 @@
+#include "fs/tty_control.h"
 #include "fs/tty.h"
 #include "drivers/char/uart.h"
 #include "fs/file.h"
@@ -243,9 +244,7 @@ int tty_console_isig_signal(char c)
  * uart_get_foreground_pgid), so callers must be outside that lock. */
 void tty_console_isig_raise(int sig)
 {
-    int pgid = uart_get_foreground_pgid();
-    if (pgid > 0)
-        (void)proc_kill_pgid(pgid, sig, 0);
+    tty_control_signal_foreground(TTY_CONSOLE_ID, sig);
 }
 
 static void fill_default_termios(ktty_termios_t *tio) {
@@ -294,8 +293,9 @@ void tty_console_init(void) {
 }
 
 int tty_console_read(vfile_t *vf, char *buf, size_t count) {
-    (void)vf;
-    if (count == 0) return 0;
+    if (count == 0 || tty_control_revoked(vf)) return 0;
+    int access = tty_control_access(vf, 0, 0);
+    if (access < 0) return access;
 
     /* drain pending mouse escape-sequence bytes first */
     if (g_dev_tty.mouse_enabled && !mouse_buf_empty()) {
@@ -309,7 +309,8 @@ int tty_console_read(vfile_t *vf, char *buf, size_t count) {
     }
 
     for (;;) {
-        int c = uart_getc();
+        int c = uart_getc_vfile(vf);
+        if (c == -EIO && tty_control_revoked(vf)) return 0;
         /* -ERESTARTSYS from an interrupted wait: hand it to the caller so the
          * syscall can be restarted or reported as EINTR, the way pty reads
          * already do (kernel/drivers/char/pty.c).  ISIG control characters
@@ -361,12 +362,14 @@ static int tty_parse_mouse_mode(const char *buf, size_t count)
 }
 
 int tty_console_write(vfile_t *vf, const char *buf, size_t count) {
-    (void)vf;
     if (!count) return 0;
+    int access = tty_control_access(vf, 1, 0);
+    if (access < 0) return access;
     /* One owner for the entire userspace write. Kernel records use the same
      * console spinlock for each bounded burst, so they cannot splice bytes
      * into a short line. No PID lookup or pending per-task buffers are needed. */
     mutex_lock(&g_tty_write_lock);
+    if (tty_control_revoked(vf)) { mutex_unlock(&g_tty_write_lock); return -EIO; }
     tty_parse_mouse_mode(buf, count);
     if (g_tty_use_bulk_console) {
         if (!g_tty_bulk_console)

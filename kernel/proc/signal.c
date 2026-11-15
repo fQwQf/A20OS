@@ -556,6 +556,16 @@ int signal_send_task(void *task, int signum)
     return signal_queue_task((task_t *)task, signum, NULL, 0, 0);
 }
 
+int signal_task_blocks_or_ignores(void *task, int sig) {
+    task_t *t = task;
+    if (!t || !t->signals || sig <= 0 || sig >= NSIG) return 0;
+    signal_state_t *ss = t->signals;
+    uint64_t f = spin_lock_irqsave(&ss->lock);
+    int blocked = (t->sig_blocked & signal_mask_bit(sig)) || ss->actions[sig].sa_handler == SIG_IGN;
+    spin_unlock_irqrestore(&ss->lock, f);
+    return blocked;
+}
+
 int signal_task_has_unblocked(void *task) {
     task_t *t = (task_t *)task;
     if (!t) return 0;
