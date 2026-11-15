@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,7 +17,17 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/cli'))
-from a20_runtime import _path
+from a20_runtime import _path, _qmp
+
+
+def affinity_layout(cpu_records, thread_ids, cpus):
+    """Use authoritative QMP IDs even when all Linux thread names are equal."""
+    if len(cpus) != 3 or len(set(cpus)) != 3:
+        raise RuntimeError('--host-cpus requires three distinct CPUs: vCPU0,vCPU1,IO')
+    cpu_threads = {int(row['thread-id']): int(row['cpu-index']) for row in cpu_records}
+    if len(cpu_threads) != 2 or set(cpu_threads.values()) != {0, 1} or not set(cpu_threads) <= set(thread_ids):
+        raise RuntimeError('QMP must identify both live host vCPU thread IDs')
+    return {tid: cpus[cpu_threads.get(tid, 2)] for tid in thread_ids}
 
 
 def run(args):
@@ -34,6 +45,24 @@ def run(args):
             kernel = Path(argv[argv.index('-kernel') + 1])
             if not kernel.is_absolute(): kernel = ROOT / kernel
             result['kernel_sha256'] = hashlib.sha256(kernel.read_bytes()).hexdigest()
+        pid = int((host_dir / 'qemu.pid').read_text())
+        threads = sorted(Path(f'/proc/{pid}/task').iterdir(), key=lambda p: int(p.name))
+        cpu_records = _qmp(host_dir, 'query-cpus-fast')
+        result['qmp_cpu_threads'] = cpu_records
+        if args.host_cpus:
+            cpus = [int(value) for value in args.host_cpus.split(',')]
+            if not set(cpus) <= os.sched_getaffinity(0):
+                raise RuntimeError('--host-cpus contains an unavailable CPU')
+            layout = affinity_layout(cpu_records, [int(t.name) for t in threads], cpus)
+            for tid, cpu in layout.items():
+                os.sched_setaffinity(tid, {cpu})
+        result['host_thread_affinity'] = [dict(tid=int(thread.name),
+            name=(thread / 'comm').read_text().strip(), cpus=sorted(os.sched_getaffinity(int(thread.name))))
+            for thread in threads]
+        result['base_images_sha256'] = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(host_dir.glob('base-*.qcow2'))
+        }
         for index in range(1, args.cycles // 2 + 1):
             report = args.output / f'round-{index:03d}.json'
             begin = time.monotonic()
@@ -78,6 +107,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', required=True)
     parser.add_argument('--profile', default='a20-ramfs-riscv64-smp2')
+    parser.add_argument('--host-cpus', help='optional fixed Linux CPU affinity: vCPU0,vCPU1,IO')
     parser.add_argument('--cycles', type=int, default=100)
     parser.add_argument('--timeout', type=float, default=90)
     parser.add_argument('--output', type=Path, required=True)
