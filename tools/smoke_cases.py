@@ -2643,7 +2643,7 @@ CASES: dict[str, dict] = {
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
         'expect': ['TRAP_STORM: demand-cow-clean PASS',
                    'TRAP_STORM: plain-fault-signalled PASS',
-                   '\\[TRAP-STORM\\] pid=[0-9]+ pc=0x[0-9a-f]+ va=0x20000000 cause=15 count=4096',
+                   r'TRAP_STORM: kernel-record \[TRAP-STORM\] pid=[0-9]+ pc=0x[0-9a-f]+ va=0x20000000 cause=15 count=4096',
                    'TRAP_STORM: refault-terminated PASS',
                    'TRAP_STORM: unrelated-progress PASS',
                    'TRAP_STORM: PASS',

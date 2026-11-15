@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/klog.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -107,6 +108,42 @@ static int reap_until(pid_t pid, int *status, int budget_ms) {
     return -1;
 }
 
+#ifdef CONFIG_TRAP_STORM_TEST
+static int report_storm_record(pid_t pid) {
+    /* Console warning/error bursts are rate-limited. Inspect the retained
+     * record rather than requiring that this particular line won a console
+     * slot immediately after the deliberate SIGSEGV diagnostics. */
+    int capacity = klogctl(10, NULL, 0);
+    if (capacity <= 0 || capacity > 4 * 1024 * 1024)
+        return -1;
+    char *buffer = malloc((size_t)capacity + 1);
+    if (!buffer)
+        return -1;
+    int length = klogctl(3, buffer, capacity);
+    if (length < 0 || length > capacity) {
+        free(buffer);
+        return -1;
+    }
+    buffer[length] = '\0';
+    char needle[80];
+    snprintf(needle, sizeof(needle), "[TRAP-STORM] pid=%d pc=0x", (int)pid);
+    char *record = strstr(buffer, needle);
+    int found = 0;
+    if (record) {
+        char *end = strchr(record, '\n');
+        if (end)
+            *end = '\0';
+        const char detail[] = " va=0x20000000 cause=15 count=4096";
+        char *match = strstr(record, detail);
+        found = match && match[sizeof(detail) - 1] == '\0';
+        if (found)
+            printf("TRAP_STORM: kernel-record %s\n", record);
+    }
+    free(buffer);
+    return found ? 0 : -1;
+}
+#endif
+
 int main(int argc, char **argv) {
     int inject = argc > 1 && strcmp(argv[1], "--inject") == 0;
     int failures = 0;
@@ -179,6 +216,10 @@ int main(int argc, char **argv) {
         failures++;
     } else {
         printf("TRAP_STORM: refault-terminated PASS\n");
+    }
+    if (report_storm_record(storm) != 0) {
+        printf("TRAP_STORM: FAIL missing matching retained kernel record\n");
+        failures++;
     }
 
     if (waitpid(worker, &worker_status, 0) != worker ||
