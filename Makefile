@@ -2176,6 +2176,10 @@ endif
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
 # tools/mk/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。
 CONFIG_STACK_PROTECTOR ?= 1
+CONFIG_DEBUG_SHUTDOWN_AUDIT ?= 0
+ifeq ($(filter 1,$(CONFIG_DEBUG_SHUTDOWN_AUDIT)),1)
+CFLAGS += -DCONFIG_DEBUG_SHUTDOWN_AUDIT=1
+endif
 ifeq ($(filter 1,$(CONFIG_STACK_PROTECTOR)),1)
 CFLAGS += -fstack-protector-strong -DCONFIG_STACK_PROTECTOR=1
 endif

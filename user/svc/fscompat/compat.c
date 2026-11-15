@@ -517,6 +517,10 @@ void vfs_drop_time_meta_mount(mount_t *mnt)
 }
 
 uint32_t g_a20_perf_enabled;
+/* The shared diskfs sources compile epoch-aware kernel counter hooks. UFSD
+ * never enables those kernel-only measurement windows, but their inline
+ * fast paths still reference the epoch even in this userspace placement. */
+uint64_t g_a20_perf_generation;
 
 /* perf counters are a no-op in the host; only the storage needed for linking
  * is provided */
