@@ -1047,6 +1047,22 @@ smoke-bounded-progress:
 smoke-bounded-progress-smp2:
 	$(PYTHON) tools/smoke.py smoke-bounded-progress-smp2
 
+# Read real IRQ/poll counters through QMP while no task reads the terminal.
+# The image is snapshotted by the checker; private user outputs keep these
+# profiles independent of other architecture/ABI builds.
+.PHONY: smoke-uart-ctrl-c smoke-uart-ctrl-c-smp2 _smoke-uart-ctrl-c
+smoke-uart-ctrl-c:
+	$(MAKE) NR_CPUS=1 _smoke-uart-ctrl-c
+smoke-uart-ctrl-c-smp2:
+	$(MAKE) NR_CPUS=2 _smoke-uart-ctrl-c
+_smoke-uart-ctrl-c:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 \
+		USER_BUILD_DIR=$(abspath build/uart-ctrl-c-user) dev-build
+	@bdir=$$($(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir); \
+	$(PYTHON) tools/qemu/check_uart_ctrl_c.py --kernel "$$bdir/kernel.elf" \
+		--image "$$bdir/fat32.img" --smp $(NR_CPUS) \
+		--output build/uart-ctrl-c-smp$(NR_CPUS)
+
 # Same workload as smoke-sched-stress on two CPUs, with its own log.  Runqueue
 # placement, migration and cross-CPU wakeups only run with more than one CPU;
 # the single-CPU target above keeps its own semantics.
