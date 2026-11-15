@@ -107,13 +107,15 @@ def run(args):
     bitmap=re.search(r'Group\s+0: block bitmap at (\d+)',stats)
     if not bitmap or re.search(r'Group\s+1:',stats):
         raise RuntimeError('this gate requires a single-group 4 KiB journal fixture')
-    rules=[('descriptor',physical(1)*8,False),('payload',physical(2)*8,False),
+    rules=[('ordered-flush',None,False),('descriptor',physical(1)*8,False),('payload',physical(2)*8,False),
            ('commit',physical(2+count)*8,False),('checkpoint-bitmap',int(bitmap[1])*8,True)]
     try:
         for name,sector,survives in rules:
             with tempfile.TemporaryDirectory(prefix='a20-journal-io-') as tmp:
                 image=Path(tmp)/'ext4.img';shutil.copyfile(pristine,image)
-                rule=dict(event='pwritev',iotype='write',errno=5,sector=sector,once=False)
+                rule=dict(event='none' if sector is None else 'pwritev',
+                          iotype='flush' if sector is None else 'write',errno=5,once=False)
+                if sector is not None:rule['sector']=sector
                 argv=argv_for(base,image,rule)
                 (args.output/(name+'-argv.json')).write_text(json.dumps(argv,indent=2)+'\n')
                 fault_boot(argv,args.output/(name+'-fault.log'),args.timeout,require_retries=not survives)
