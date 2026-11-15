@@ -881,7 +881,7 @@ int pty_slave_open(int idx) {
     }
     if (pty->locked) {
         spin_unlock_irqrestore(&pty->lock, flags);
-        return -EACCES;
+        return -EIO;
     }
     pty->slave_refs++;
     spin_unlock_irqrestore(&pty->lock, flags);
