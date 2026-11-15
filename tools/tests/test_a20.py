@@ -24,7 +24,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
@@ -973,8 +973,7 @@ class TestResourceGate(unittest.TestCase):
 
 
 class TestHostMeasurement(unittest.TestCase):
-    """The snapshot functions are what the gate actually trusts, so they get
-    tested against the real /proc rather than only through injected values."""
+    """Stable fixtures verify field selection; live /proc checks sanity."""
 
     def _meminfo(self) -> dict[str, int]:
         fields = {}
@@ -987,8 +986,12 @@ class TestHostMeasurement(unittest.TestCase):
 
     def test_mem_available_is_read_not_free(self) -> None:
         from a20_resource import _mem_available_mb
-        info = self._meminfo()
-        self.assertEqual(_mem_available_mb(), info["MemAvailable"])
+        # A second live /proc read can differ even by 1 MiB while another
+        # test or QEMU allocates memory. Use distinct, stable field values to
+        # prove selection rather than asserting two moments are identical.
+        data = "MemTotal: 32768 kB\nMemFree: 1024 kB\nMemAvailable: 8192 kB\nCached: 4096 kB\n"
+        with patch("a20_resource.open", mock_open(read_data=data), create=True):
+            self.assertEqual(_mem_available_mb(), 8)
 
     def test_mem_available_exceeds_free_on_a_cached_host(self) -> None:
         """The property the whole design turns on: on an idle machine the two
