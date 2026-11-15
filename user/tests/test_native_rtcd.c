@@ -2,9 +2,9 @@
  * rtcd supervisor e2e test (docs/hybrid-kernel/01-roadmap.md phase 4).
  *
  * Spawns the user-space RTC driver service and verifies end to end:
- *   1. time RPC: goldfish RTC read via user-mapped MMIO (sec plausible);
+ *   1. time RPC: board RTC read via user-mapped MMIO (sec plausible);
  *   2. alarm IRQ: arm 100 ms alarm, receive the async reply posted when
- *      the kernel routed IRQ 11 to the driver's event queue;
+ *      the kernel routed the board RTC IRQ to the driver's event queue;
  *   3. crash self-heal: kill the driver, supervisor respawns it and the
  *      time RPC works again (user-space driver crash != system crash).
  */
@@ -149,6 +149,12 @@ int main(int argc, char **argv, char **envp)
     if (g_out == A20_HANDLE_NULL)
         return 90;
 
+    /* Child exit is tracked through EXITED events. A raw Native SDK
+     * program has no libc checkpoint handler to consume SIGCHLD; leaving
+     * it pending would interrupt every RPC after the first crash. */
+    if (a20_thread_signal_mask(1ULL << 17, 0, 0) != A20_OK)
+        return fail(14, "mask SIGCHLD failed");
+
     a20_handle_t eq;
     if (a20_event_queue_create(&eq) != A20_OK)
         return fail(1, "event_queue_create failed");
@@ -159,7 +165,7 @@ int main(int argc, char **argv, char **envp)
     if (a20_event_watch(eq, task, A20_EVENT_MASK(A20_EVENT_EXITED), 0) != A20_OK)
         return fail(3, "event_watch failed");
 
-    /* 1. Time RPC: user-space MMIO read of the goldfish RTC. */
+    /* 1. Time RPC: user-space MMIO read of the board RTC. */
     uint64_t sec = 0;
     if (rtcd_time_rpc(ep, &sec) != 0)
         return fail(4, "time RPC failed");
@@ -169,7 +175,8 @@ int main(int argc, char **argv, char **envp)
     if (sec < 1577836800ULL /* 2020-01-01 */ || sec > 4102444800ULL /* 2100 */)
         return fail(5, "rtc seconds implausible");
 
-    /* 2. Alarm IRQ: async reply must arrive after ~100 ms. */
+    /* 2. Alarm IRQ: never early; PL031's whole-second hardware may
+     * round a 100 ms request up by as much as two seconds. */
     uint8_t areq[sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_alarm_request_t)] = {0};
     a20_idl_envelope_t aenv = {
         A20_SERVICES_IDL_VERSION, RTCD_REQ_ALARM, sizeof(areq)
@@ -232,7 +239,12 @@ int main(int argc, char **argv, char **envp)
     put_u64(sec2);
     put("\n", 1);
 
-    a20_task_kill(task, 0);
+    if (a20_task_kill(task, 9) != A20_OK)
+        return fail(15, "stop rtcd failed");
+    a20_event_t stopped;
+    a20_time_t stop_timeout = { .secs = 2, .nsecs = 0 };
+    if (a20_event_wait(eq, stop_timeout, &stopped) < 0 || (int64_t)stopped.data0 != -9)
+        return fail(16, "stopped rtcd EXITED not observed");
     a20_event_cancel(eq, task);
     a20_hdl_close(task);
     a20_hdl_close(ep);

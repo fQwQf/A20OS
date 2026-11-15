@@ -14,6 +14,10 @@ int64_t a20_svcmgr_startup(svcmgr_handle_t *out_stdout,
     a20_start_info_t *info = a20_get_start_info();
     if (!info)
         return -A20_ERR_NOT_FOUND;
+    /* Supervision consumes EXITED events, not the Native SIGCHLD queue. */
+    a20_status_t status = a20_thread_signal_mask(1ULL << 17, 0, 0);
+    if (status != A20_OK)
+        return status;
     *out_stdout = info->stdout_handle;
     *out_root = info->root_dir;
     return A20_OK;

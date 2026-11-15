@@ -437,6 +437,12 @@ int main(int argc, char **argv, char **envp)
     if (g_out == A20_HANDLE_NULL)
         return 90;
 
+    /* EXITED events own child supervision. Raw Native programs must mask
+     * SIGCHLD so its unconsumed checkpoint bit cannot interrupt all later
+     * channel/event waits after a service restart. */
+    if (a20_thread_signal_mask(1ULL << 17, 0, 0) != A20_OK)
+        return 6;
+
     a20_handle_t reg_ep = (a20_handle_t)a20_registry_claim();
     if ((int32_t)reg_ep < 0) {
         put_str("SVC_MGR: FAIL registry claim\n");

@@ -168,6 +168,10 @@ int main(int argc, char **argv, char **envp)
     if (g_out == A20_HANDLE_NULL)
         return 90;
 
+    /* Child lifetime is observed through EXITED events. */
+    if (a20_thread_signal_mask(1ULL << 17, 0, 0) != A20_OK)
+        return fail(11, "mask SIGCHLD failed");
+
     a20_handle_t eq;
     if (a20_event_queue_create(&eq) != A20_OK)
         return fail(1, "event_queue_create failed");
@@ -229,7 +233,12 @@ int main(int argc, char **argv, char **envp)
     }
 
     /* Clean shutdown: kill the service, observe EXITED, release everything. */
-    a20_task_kill(task, 0);
+    if (a20_task_kill(task, 9) != A20_OK)
+        return fail(12, "stop service failed");
+    a20_event_t stopped;
+    a20_time_t stop_timeout = { .secs = 2, .nsecs = 0 };
+    if (a20_event_wait(eq, stop_timeout, &stopped) < 0 || (int64_t)stopped.data0 != -9)
+        return fail(13, "stopped service EXITED not observed");
     a20_event_cancel(eq, task);
     a20_hdl_close(task);
     a20_hdl_close(ep);
