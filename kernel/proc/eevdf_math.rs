@@ -418,6 +418,16 @@ pub fn clamp_sleeper_vruntime(vruntime: u64, vtime: u64, max_lag: u64) -> u64 {
     }
 }
 
+/// Preserve signed virtual lag when moving between independent CPU clocks.
+#[unsafe(no_mangle)]
+pub extern "C" fn a20_eevdf_rebase(vruntime: u64, source: u64, destination: u64) -> u64 {
+    if vruntime >= source {
+        destination.saturating_add(vruntime - source)
+    } else {
+        destination.saturating_sub(source - vruntime)
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn a20_eevdf_effective_weight(base: u32, boost: u32) -> u64 {
     effective_weight(base, boost)
