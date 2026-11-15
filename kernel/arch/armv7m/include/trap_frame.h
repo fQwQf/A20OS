@@ -30,6 +30,10 @@ typedef struct {
 #ifdef CONFIG_MCU_NATIVE_PROGRAM
 struct armv7m_program;
 void armv7m_program_release(struct armv7m_program *program);
+struct task_t;
+int armv7m_program_resume_stack_valid(const struct task_t *task, uintptr_t sp);
+#define ARCH_TASK_EXTRA_RESUME_STACK_VALID(task, sp) \
+    armv7m_program_resume_stack_valid((task), (sp))
 #define ARCH_PROGRAM_FIELD struct armv7m_program *arch_program;
 #define ARCH_PROGRAM_INIT(task) ((task)->arch_program = NULL)
 #define ARCH_TASK_RELEASE(task)                                                \

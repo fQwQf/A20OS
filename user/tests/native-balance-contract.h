@@ -1,5 +1,6 @@
 #ifndef A20_NATIVE_BALANCE_CONTRACT_H
 #define A20_NATIVE_BALANCE_CONTRACT_H
+#include <stddef.h>
 #include "liba20rt/a20_task.h"
 #include "liba20rt/a20_handle.h"
 #include "liba20rt/a20_execution.h"
