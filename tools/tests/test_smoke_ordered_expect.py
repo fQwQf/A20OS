@@ -7,9 +7,25 @@ from tools.smoke import (_ordered_expect_missing,
                          _ordered_forbid_before_violations,
                          _exit_status_missing,
                          report)
+from tools.smoke import CASES
 
 
 class OrderedExpectationTests(unittest.TestCase):
+    def test_nommu_gate_requires_child_output_not_command_echo(self):
+        case = dict(CASES['smoke-nommu-exec'])
+        for output, status, wanted in (
+            ("# /bin/echo NOMMU_MARK\n# /bin/echo NOMMU_SECOND\n"
+             "[SD] POWER_OFF entry\n", 0, 1),
+            ("NOMMU_MARK\r\nNOMMU_SECOND\r\n[SD] POWER_OFF entry\n", 0, 0),
+            ("NOMMU_MARK\nNOMMU_SECOND\n[SD] POWER_OFF entry\n", 124, 1),
+        ):
+            with self.subTest(output=output, status=status), tempfile.NamedTemporaryFile(mode='w+') as f:
+                f.write(output)
+                f.flush()
+                case['log'] = f.name
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(report('smoke-nommu-exec', case, status), wanted)
+
     def test_allows_expected_sequence(self):
         patterns = [r"boundary call=5", r"source-presplit-error split=5",
                     r"RETRY: begin split=5", r"phase=enter", r"PASS split=5"]

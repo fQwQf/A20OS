@@ -586,11 +586,8 @@ CASES: dict[str, dict] = {
     },
     # NOMMU runtime/exec: the same static-ELF path runs without page tables.
     # The loader uses its flat allocation ledger instead of PT_LOAD mappings.
-    # This case asserts the first external exec under NOMMU; the NOMMU
-    # userland's fork/reap path is a separate core gap (the shell does not
-    # survive an external child), so it is not used as evidence for a full
-    # multi-process runtime.  Platforms without a buildable toolchain are
-    # recorded as N/A in the runtime status page.
+    # Require the shell to survive SIGCHLD and execute a second child before
+    # explicit shutdown. RISC-V NOMMU uses its dedicated signal restorer.
     'smoke-nommu-exec': {
         'gate': {'mem': '1G', 'cpus': '2'},
         'pre': [],
@@ -599,7 +596,7 @@ CASES: dict[str, dict] = {
                   'target': 'dev-build'},
         'log': '.kernel-build/smoke/nommu-exec-riscv64.log',
         'stdin': {'kind': 'sendline', 'expect': '# ',
-                  'lines': ['/bin/echo NOMMU_MARK']},
+                  'lines': ["/bin/echo 'NOMMU_'MARK", "/bin/echo 'NOMMU_'SECOND", 'poweroff']},
         'timeout': '120s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G',
@@ -610,7 +607,7 @@ CASES: dict[str, dict] = {
                  '-netdev', 'user,id=net', '-device',
                  'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
                  '-kernel', '@BUILD_DIR@/kernel.elf'],
-        'expect': ['NOMMU_MARK',
+        'expect': [r'^NOMMU_MARK\r?$', r'^NOMMU_SECOND\r?$',
                    r'\[SD\] POWER_OFF entry|System is going down for power-off NOW'],
         'forbid': ['PANIC|Kernel panic|LOCK-STALL|Kernel BUG'],
         'require_exit_zero': True,
