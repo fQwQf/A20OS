@@ -3471,7 +3471,7 @@ RAMFS_USER_PROGRAMS += tcp_loopback_test udp_loopback_test ipv6_loopback_test \
 CFLAGS += -DCONFIG_RAMFS_NET_TESTS
 endif
 ifeq ($(RAMFS_FPU_TESTS),1)
-RAMFS_USER_PROGRAMS += fork_fpu_probe
+RAMFS_USER_PROGRAMS += fork_fpu_probe arm_fp_signal_test
 CFLAGS += -DCONFIG_RAMFS_FPU_TESTS
 endif
 ifeq ($(RAMFS_MEDIA),1)

@@ -15,6 +15,7 @@ extern const unsigned char _binary_timer_idle_start[];
 extern const unsigned char _binary_timer_idle_end[];
 #ifdef CONFIG_RAMFS_FPU_TESTS
 extern const unsigned char _binary_fork_fpu_probe_start[], _binary_fork_fpu_probe_end[];
+extern const unsigned char _binary_arm_fp_signal_test_start[], _binary_arm_fp_signal_test_end[];
 #endif
 extern const unsigned char _binary_echo_start[], _binary_echo_end[];
 extern const unsigned char _binary_uname_start[], _binary_uname_end[];
@@ -136,6 +137,7 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/timer_idle", timer_idle),
 #ifdef CONFIG_RAMFS_FPU_TESTS
     USER_ENTRY("/bin/fork_fpu_probe", fork_fpu_probe),
+    USER_ENTRY("/bin/arm_fp_signal_test", arm_fp_signal_test),
 #endif
     USER_ENTRY("/bin/echo", echo),
     USER_ENTRY("/bin/uname", uname),
