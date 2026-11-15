@@ -720,8 +720,10 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
         }
     }
 
-    /* First EEVDF task on this CPU defines the system virtual time. */
-    if (!rq->eevdf_root)
+    /* An empty tree can still have a running fair task. A sleeper's
+     * allowed bonus must never rewind that CPU's virtual clock: repeated
+     * 5 ms wakeups would otherwise erase the incumbent's accounted time. */
+    if (!rq->eevdf_root && t->eevdf_vruntime > rq->eevdf_vtime)
         rq->eevdf_vtime = t->eevdf_vruntime;
 
     n->left = NULL;

@@ -62,6 +62,7 @@ int main(int argc, char **argv) {
         if (newcomer.eevdf_vruntime + EEVDF_MAX_LAG < incumbent.eevdf_vruntime)
             return 33;
         if (newcomer.eevdf_vruntime > incumbent.eevdf_vruntime) return 34;
+        if (rq.eevdf_vtime < incumbent.eevdf_vruntime) return 35;
     }
     return 0;
 }
@@ -84,6 +85,9 @@ class EevdfEmptyQueue(unittest.TestCase):
                 ('fixed', charge, enqueue, [0, 0]),
                 ('missing-current', charge.replace('rq->eevdf_weight + eevdf_weight(t)',
                                                    'rq->eevdf_weight'), enqueue, [33, 0]),
+                ('clock-rewind', charge, enqueue.replace(
+                    'if (!rq->eevdf_root && t->eevdf_vruntime > rq->eevdf_vtime)',
+                    'if (!rq->eevdf_root)'), [0, 35]),
                 ('unbounded-arrival', charge, enqueue.replace(
                     '    {\n        uint64_t clamped',
                     '    if (rq->eevdf_root) {\n        uint64_t clamped'), [0, 33]),
