@@ -102,7 +102,7 @@ int ext4_validate_mount_options(const char *opts)
     static const char *const rejected[] = {
         "data=journal", "data=writeback", "journal_async_commit",
         "journal_checksum", "barrier=0", "nobarrier", "fast_commit",
-        "journal_dev",
+        "journal_dev", "journal_path",
     };
     if (!opts)
         return 0;
@@ -114,8 +114,10 @@ int ext4_validate_mount_options(const char *opts)
             end++;
         size_t len = (size_t)(end - p);
         for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
-            if (strlen(rejected[i]) == len &&
-                strncmp(p, rejected[i], len) == 0) {
+            size_t option_len = strlen(rejected[i]);
+            if ((option_len == len ||
+                 (len > option_len && p[option_len] == '=')) &&
+                strncmp(p, rejected[i], option_len) == 0) {
                 /* The kernel printf has no "%.*s": copy the name out. */
                 char name[32];
                 size_t n = len < sizeof(name) - 1 ? len : sizeof(name) - 1;
@@ -129,6 +131,17 @@ int ext4_validate_mount_options(const char *opts)
     }
     return 0;
 }
+
+/* Only an internal inode-backed journal can provide our replay guarantee.
+ * A HAS_JOURNAL image with an external device or no source must not silently
+ * take the no-journal path, even when the caller requested a writable mount. */
+static int ext4_validate_journal_source(const ext4_superblock_t *sb)
+{
+    if (!(sb->s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL))
+        return 0;
+    return sb->s_journal_inum && !sb->s_journal_dev ? 0 : -EOPNOTSUPP;
+}
+
 
 static int ext4_state_admit(uint16_t state)
 {
@@ -2993,6 +3006,11 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
 
     if (sb.s_magic != EXT4_DISK_MAGIC) {
         printf("[EXT4] Bad magic: 0x%x (expected 0x%x)\n", sb.s_magic, EXT4_DISK_MAGIC);
+        return NULL;
+    }
+
+    if (ext4_validate_journal_source(&sb) < 0) {
+        printf("[EXT4] external or missing internal journal is unsupported\n");
         return NULL;
     }
 
