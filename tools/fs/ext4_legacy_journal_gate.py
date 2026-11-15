@@ -15,6 +15,8 @@ The host's e2fsck has the last word on the clean image.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -26,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import img  # noqa: E402
+from ext4_journal_gate import feed as strict_feed, GateError as BootError
 
 
 class GateError(Exception):
@@ -45,10 +48,10 @@ def make_dirty(src, dst):
     path.write_bytes(raw[:off] + bytes(meta) + raw[off + 4096:])
 
 
-def qemu_argv(kernel, fat, clean, dirty):
+def qemu_argv(kernel, fat, clean, dirty, cpus=1):
     argv = [
         "qemu-system-riscv64", "-machine", "virt", "-m", "1G", "-nographic",
-        "-smp", "1", "-no-reboot", "-bios", "default",
+        "-smp", str(cpus), "-no-reboot", "-bios", "default",
         "-global", "virtio-mmio.force-legacy=false",
     ]
     for idx, path in enumerate((fat, clean, dirty)):
@@ -58,35 +61,34 @@ def qemu_argv(kernel, fat, clean, dirty):
     return argv + ["-kernel", kernel]
 
 
+def device_script(output):
+    """Device names follow discovered VirtIO slots, not the QEMU -drive order."""
+    records = re.findall(rb"\[VIRTIO(\d+)\] Block device ready: capacity=(\d+) sectors", output)
+    capacities = {int(capacity): int(slot) for slot, capacity in records}
+    clean, dirty = 64 * 2048, 68 * 2048
+    if clean not in capacities or dirty not in capacities:
+        raise GateError("missing unique clean/dirty block capacities")
+    if max(capacities[clean], capacities[dirty]) >= 26:
+        raise GateError("block slot outside /dev/vda..vdz")
+    return (f"ext4_legacy_ro_test /dev/vd{chr(97 + capacities[clean])} clean\n"
+            f"ext4_legacy_ro_test /dev/vd{chr(97 + capacities[dirty])} dirty\n"
+            "poweroff\n")
+
+
 def feed(argv, script, delay, log_path, timeout):
-    feeder = subprocess.Popen(["bash", "-c", f"sleep {delay}; printf '{script}'"],
-                              stdout=subprocess.PIPE)
-    guest = subprocess.Popen(argv, stdin=feeder.stdout,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    feeder.stdout.close()
-    try:
-        out, _ = guest.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        guest.kill()
-        out, _ = guest.communicate()
-    finally:
-        if guest.poll() is None:
-            guest.kill()
-            guest.wait()
-        feeder.kill()
-        feeder.wait()
-    with open(log_path, "wb") as log:
-        log.write(out or b"")
-    return (out or b"").decode("utf-8", "replace")
+    strict_feed(argv, script, delay, log_path, timeout)
+    return Path(log_path).read_text(errors="replace")
 
 
-def main():
+def run_main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--log-dir", required=True)
+    ap.add_argument("--cpus", type=int, default=1)
     ap.add_argument("--delay", type=int, default=22)
     ap.add_argument("--timeout", type=int, default=180)
     a = ap.parse_args()
+    if a.cpus < 1: ap.error("--cpus must be positive")
 
     e2fsck = shutil.which("e2fsck") or "/usr/sbin/e2fsck"
     kernel = os.path.join(a.build_dir, "kernel.elf")
@@ -103,10 +105,14 @@ def main():
     shutil.copyfile(clean_src, clean)
     try:
         make_dirty(clean_src, dirty)
-        script = ("ext4_legacy_ro_test /dev/vdb clean\n"
-                  "ext4_legacy_ro_test /dev/vdc dirty\n"
-                  "poweroff\n")
-        text = feed(qemu_argv(kernel, fat, clean, dirty), script, a.delay,
+        # A harmless trailing region gives the dirty copy a unique capacity;
+        # the filesystem geometry remains that of the original 64 MiB image.
+        if os.path.getsize(clean) != 64 * 1024 * 1024:
+            raise GateError("requires a 64 MiB clean legacy fixture")
+        with open(dirty, "r+b") as handle: handle.truncate(68 * 1024 * 1024)
+        hashes = {name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                  for name, path in (("clean", clean), ("dirty", dirty))}
+        text = feed(qemu_argv(kernel, fat, clean, dirty, a.cpus), device_script, a.delay,
                     os.path.join(a.log_dir, "ext4-legacy-journal-riscv64.log"),
                     a.timeout)
         if "LEGACY_JOURNAL: SKIP" in text:
@@ -119,13 +125,20 @@ def main():
         if not re.search(r"LEGACY_JOURNAL: PASS dirty-rejected", text):
             raise GateError("a dirty legacy log was not refused\n" + tail(text))
 
+        for name, path in (("clean", clean), ("dirty", dirty)):
+            if hashlib.sha256(Path(path).read_bytes()).hexdigest() != hashes[name]:
+                raise GateError(name + " legacy image changed during read-only/refusal tests")
+
         proc = subprocess.run([e2fsck, "-fn", clean], capture_output=True,
                               text=True)
+        Path(a.log_dir, "legacy-clean.fsck").write_text(proc.stdout + proc.stderr)
         bad = [l.strip() for l in proc.stdout.splitlines()
                if "Fix?" in l or "WARNING" in l]
         if proc.returncode != 0 or bad:
             raise GateError("e2fsck rejects the clean legacy image:\n  "
                             + "\n  ".join(bad))
+        Path(a.log_dir, "report.json").write_text(json.dumps(dict(passed=True, cpus=a.cpus,
+            kernel_sha256=hashlib.sha256(Path(kernel).read_bytes()).hexdigest(), images_sha256=hashes), indent=2) + "\n")
         print("ext4-legacy-journal-gate: PASS (clean v1 read-only admitted, "
               "write=EROFS, writable refused, dirty log refused, e2fsck clean)")
     finally:
@@ -136,9 +149,24 @@ def tail(text, lines=25):
     return "  " + "\n  ".join(text.splitlines()[-lines:])
 
 
-if __name__ == "__main__":
+def main():
+    root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(root / "tools/cli"))
+    from a20_resource import Policy, Requirement, gate
+    from smoke import guest_slot_locks, _release_guest_slot_locks
+    state, handles = guest_slot_locks()
+    if state == "busy": print("ext4-legacy-journal-gate: shared QEMU slot busy"); return 75
     try:
-        main()
-    except GateError as exc:
-        print(f"ext4-legacy-journal-gate: FAIL: {exc}", file=sys.stderr)
-        sys.exit(1)
+        policy = Policy.from_env()
+        gate(Requirement(1024 + policy.reserve_mem_mb, 2, policy.min_disk_mb), policy, root,
+             wait=False, label="legacy journal read-only boundary")
+        run_main()
+        return 0
+    except (GateError, BootError, RuntimeError) as exc:
+        print(f"ext4-legacy-journal-gate: FAIL: {exc}", file=sys.stderr); return 1
+    finally:
+        if handles is not None: _release_guest_slot_locks(handles)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

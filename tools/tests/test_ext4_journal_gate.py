@@ -30,6 +30,14 @@ print('[SD] POWER_OFF entry',flush=True)
             self.assertIn('executed sync',log.read_text())
             self.assertIn('executed poweroff',log.read_text())
 
+    def test_script_may_use_devices_observed_before_the_first_prompt(self):
+        script="import sys;print('capacity=123\\n# ',end='',flush=True);assert input()=='poweroff';print('[SD] POWER_OFF entry',flush=True)"
+        def commands(output):
+            self.assertIn(b'capacity=123', output)
+            return 'poweroff\n'
+        with tempfile.TemporaryDirectory() as d:
+            gate.feed([sys.executable,'-u','-c',script],commands,0,Path(d)/'log',5)
+
     def test_timeout_failed_exit_and_missing_shutdown_are_rejected(self):
         for script in ('import time; time.sleep(10)',
                        "print('[SD] POWER_OFF entry');raise SystemExit(1)",

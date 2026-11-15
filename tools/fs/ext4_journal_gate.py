@@ -229,7 +229,7 @@ def feed(argv, script, delay, log_path, timeout):
     """
     del delay
     output = bytearray()
-    pending = script.splitlines()
+    pending = None if callable(script) else script.splitlines()
     cursor = queries = 0
     last_output = time.monotonic()
     with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -251,6 +251,8 @@ def feed(argv, script, delay, log_path, timeout):
                         guest.stdin.write(b"\x1b[1;1R" * (seen - queries))
                         guest.stdin.flush()
                         queries = seen
+                    if pending is None and re.search(rb"(?:^|[\r\n])# ", output):
+                        pending = script(bytes(output)).splitlines()
                     if pending and guest.poll() is None and time.monotonic() - last_output >= .05:
                         if re.search(rb"(?:^|[\r\n])# ", output[cursor:]):
                             cursor = len(output)
