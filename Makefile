@@ -1592,7 +1592,7 @@ ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=
 # PPC64LE needs the same =global form because it is PIC.
 ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only -fno-omit-frame-pointer \
                            -mstack-protector-guard=global
-ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -static -mno-unaligned-access -fno-omit-frame-pointer
+ARCH_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-short-enums -fno-pic -static -mno-unaligned-access -fno-omit-frame-pointer
 ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-short-enums -fno-pic -static \
                            -ffunction-sections -fdata-sections -fno-unwind-tables \
                            -fno-asynchronous-unwind-tables
