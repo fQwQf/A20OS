@@ -647,7 +647,8 @@ int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos, size_t count) {
  * Journal checkpoint: flush only the pages a transaction is holding.  Called
  * by the filesystem immediately after its commit block is durable, at which
  * point the metadata may safely reach its home location -- so the caller
- * releases the holds (bcache_release_holds) around this call.
+ * releases the holds (bcache_release_holds) only after this call succeeds.
+ * Clearing them first would select no pages and lose the checkpoint.
  */
 int bcache_sync_held(bcache_t *bc) {
     return bcache_sync_common(bc, NULL, 0, BC_SYNC_HELD);

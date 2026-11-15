@@ -137,6 +137,7 @@ struct ext4_journal {
     uint32_t   tx_count;
     uint32_t   tx_capacity;
     int        txn_faulted;
+    uint32_t   txn_phase; /* survives I/O failures after durable commit */
 #endif
     /* True once EXT4_FEATURE_INCOMPAT_RECOVER has been written and flushed
      * for this dirty period.  The on-disk flag is what makes a crash between
@@ -207,11 +208,10 @@ static int jbd2_txn_block(const ext4_journal_t *ej, uint32_t i, uint64_t *out)
 }
 
 static int jbd2_txn_clear(ext4_journal_t *ej)
-{ ej->tx_count = 0; return 0; }
+{ ej->tx_count = 0; ej->txn_phase = JBD2_TXN_COLLECTING; return 0; }
 
 static uint32_t jbd2_txn_phase(const ext4_journal_t *ej)
-{ return ej->txn_faulted ? JBD2_TXN_FAULTED :
-         (ej->tx_count ? JBD2_TXN_WRITING_LOG : JBD2_TXN_COLLECTING); }
+{ return ej->txn_faulted ? JBD2_TXN_FAULTED : ej->txn_phase; }
 #endif
 
 static uint32_t get_be32(const void *ptr)
@@ -1112,7 +1112,7 @@ int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
 #else
     /* The C collector also owns the failed transaction's cache image. Never
      * mutate it after poison, even if a later write reuses a recorded block. */
-    if (ej->txn_faulted) {
+    if (ej->txn_faulted || ej->txn_phase != JBD2_TXN_COLLECTING) {
         mutex_unlock(&ej->lock);
         return -EIO;
     }
@@ -1736,9 +1736,13 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
         return start;
     }
     txn_phase = jbd2_txn_phase(ej);
+#else
+    if (ej->txn_phase == JBD2_TXN_COLLECTING)
+        ej->txn_phase = JBD2_TXN_WRITING_LOG;
+    txn_phase = ej->txn_phase;
 #endif
 
-    int ret;
+    int ret = 0;
     uint64_t started = timer_get_ticks();
     uint64_t ordered_done = started, log_done = started;
     uint64_t checkpoint_done = started;
@@ -1820,6 +1824,9 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
     jbd2_crash_point(ej, "post-commit");
 
     txn_phase = JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT;
+#ifndef CONFIG_UFSD_RUST_JBD2_TXN
+    ej->txn_phase = txn_phase;
+#endif
     }
     log_done = timer_get_ticks();
 
@@ -1827,16 +1834,22 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
      *    may now reach its home location; the hold exists only to enforce the
      *    order above, and the checkpoint replays into the same bytes anyway. */
     if (txn_phase == JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT) {
-        bcache_release_holds(fs->bc);
+        /* SYNC_HELD selects by the hold bit. Keep it set until all home
+         * writes and their flush succeed; releasing first would checkpoint
+         * zero pages and clear the durable log before any metadata write. */
         ret = bcache_sync_held(fs->bc);
         if (ret < 0)
             goto out;
+        bcache_release_holds(fs->bc);
 #ifdef CONFIG_UFSD_RUST_JBD2_TXN
         ret = a20_jbd2_txn_mark_checkpointed(ej->txn);
         if (ret < 0)
             goto out;
 #endif
         txn_phase = JBD2_TXN_CHECKPOINTED_NEEDS_LOG_CLEAR;
+#ifndef CONFIG_UFSD_RUST_JBD2_TXN
+    ej->txn_phase = txn_phase;
+#endif
         jbd2_crash_point(ej, "post-checkpoint");
     }
     checkpoint_done = timer_get_ticks();
@@ -1856,6 +1869,9 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
             goto out;
 #endif
         txn_phase = JBD2_TXN_LOG_CLEARED_NEEDS_RECOVER_CLEAR;
+#ifndef CONFIG_UFSD_RUST_JBD2_TXN
+    ej->txn_phase = txn_phase;
+#endif
     }
     if (txn_phase == JBD2_TXN_LOG_CLEARED_NEEDS_RECOVER_CLEAR) {
         ret = bcache_read_bytes(fs->bc, 1024, &disk_sb, sizeof(disk_sb));
