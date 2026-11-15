@@ -9,7 +9,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from test_pt_mcs_preempt_window import extract_function
+if __package__:
+    from .test_pt_mcs_preempt_window import extract_function
+else:
+    from test_pt_mcs_preempt_window import extract_function
 
 ROOT = Path(__file__).resolve().parents[2]
 PRELUDE = r'''
@@ -40,6 +43,7 @@ static unsigned cpu;
 static int irq_enabled, inject, pending;
 static int g_sched_base_slice_ms;
 static int sched_task_rt(task_t *t) { (void)t; return 0; }
+static int sched_task_dl(task_t *t) { (void)t; return 0; }
 static task_t *proc_current(void) { return &current; }
 static task_t *proc_idle_task(void) { return &idle; }
 static unsigned cpu_current_id(void) { return cpu; }
@@ -100,7 +104,7 @@ int main(void) {
                 proc_yield();
                 if (current.eevdf_vruntime != 150 ||
                     current.eevdf_last_account != 200 ||
-                    sched_runq[cpu].eevdf_vtime != 150 ||
+                    sched_runq[cpu].eevdf_vtime != 75 ||
                     irq_enabled != enabled || current.park_lock) {
                     printf("incorrect accounting cpu=%u irq=%d inject=%d runtime=%llu vtime=%llu\n",
                         cpu, enabled, interrupt,
