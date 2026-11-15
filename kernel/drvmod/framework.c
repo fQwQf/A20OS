@@ -66,6 +66,10 @@
 #include "platform.h"
 #endif
 extern void input_mux_wake(void);
+/* GCC may lower a module's bit scan to this libgcc ABI helper on targets
+ * without a native count-trailing-zeros instruction (notably RV64G). The
+ * kernel links the same compiler runtime, but modules resolve only exports. */
+extern int __ctzdi2(uint64_t value);
 #include "core/sync.h"
 #include "core/timer.h"
 #include "proc/park.h"
@@ -337,6 +341,7 @@ const struct drv_export drv_export_table[] = {
     { "strncpy",             strncpy },
     { "memset",              memset },
     { "memcpy",              memcpy },
+    { "__ctzdi2",            __ctzdi2 },
     { "memcmp",              memcmp },
     { "strcmp",              strcmp },
     { "strlen",              strlen },
