@@ -259,6 +259,7 @@ nav:
       - 开发指南:
           - 快速上手: drivers/guide/getting-started.md
           - 核心模型: drivers/guide/core-model.md
+          - 框架维护与扩展: drivers/guide/framework-development.md
           - 总线与平台设备: drivers/guide/bus-and-platform.md
           - 设备类: drivers/guide/device-classes.md
           - PCI 与 VirtIO: drivers/guide/pci-and-virtio.md

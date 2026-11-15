@@ -1,10 +1,19 @@
 # A20OS 驱动文档
 
-架构总入口是[核心设备与驱动模型](guide/core-model.md#架构与开发入口)：发现、绑定、组合协议、资源、执行和部署使用一套原生模型，传统设备类是其适配层。新能力通过按绑定发布的版本/大小检查扩展，不再依赖具体驱动的弱符号。
+这里为两类开发者提供入口：实现一个具体驱动，或维护通用驱动框架。先建立对象与生命周期的共同认识，再进入所需的总线、设备类和执行路径。
 
-如何为 A20OS 添加一个驱动：从读懂硬件手册，到实现可编译、可枚举、可绑定、能清理的驱动；以及 generic 的架构模块清单与 embedded 的显式静态源码账本。
+## 从这里开始
 
-通用实现位于 `kernel/drivers/`，板级适配位于 `kernel/arch/<arch>/boards/`，公共头文件位于 `kernel/include/drivers/`，可加载驱动模块包装位于 `kernel/drvmod/examples/`。full profile 不按类目录通配收集设备驱动：`tools/mk/driver-sources.mk` 仍通配收集 `drivers/core/*.c` 与 `drivers/bus/*.c`，但 generic 内核服务和 embedded 设备实现采用显式源码账本；generic 的设备包则以 `tools/mk/driver-modules.mk` 的每架构清单为准。
+| 你的任务 | 阅读与实施路线 |
+|---|---|
+| 开发具体驱动 | [架构总览](guide/core-model.md#架构与开发入口) → [第一个驱动](guide/getting-started.md) → 所用总线/设备类 → [测试与提交](meta/testing-and-submission.md) |
+| 开发异步 DMA/GPU/加速器后端 | 上述路线，再读[请求与队列](guide/request-queues.md)，复用 native memory、fence 和可失败停止 |
+| 完善接口或核心机制 | [核心模型](guide/core-model.md) → [框架维护与扩展](guide/framework-development.md) → [运行时契约](guide/runtime-contracts.md)与[锁顺序](guide/lock-order.md) |
+| 判断当前能依赖什么 | [实现状态](../status/current/drivers-implementation-status.md)与[已知缺口](../status/gaps/drivers.md)，区分接口、模型验证和实机证据 |
+
+框架按发现、绑定、协议、资源、执行和部署组织。传统设备类与无 class 服务共用原生绑定模型；Linux ABI 与 Native ABI 位于消费适配边界。完整同步骨架只维护在核心模型中，异步骨架只维护在请求队列指南中，入门页按步骤引用它们。
+
+通用实现位于 `kernel/drivers/`，公共声明分布在 `kernel/include/drivers/` 与既有 `kernel/drivers/core/` 核心头；板级适配位于 `kernel/arch/<arch>/boards/`。generic 设备模块包装在 `kernel/drvmod/examples/`，构建账本见 `tools/mk/driver-sources.mk` 与 `driver-modules.mk`；新设备文件不会只因放入类目录就自动接入。
 
 ## 分类导航
 
@@ -18,6 +27,7 @@
 | [启动与硬件发现](../dev/boot-model.md) | 交接阶段、DT/ACPI/静态 provider、设备图、资源和依赖 |
 | [x86 实机驱动复用](guide/x86-hardware-reuse.md) | 代码归属、硬件匹配、上游服务边界与移植验证 |
 | [核心设备与驱动模型](guide/core-model.md) | 完整架构、原生 endpoint/protocol、所有权与 probe/remove 生命周期 |
+| [驱动框架维护与扩展](guide/framework-development.md) | 源码地图、扩展落点、公共契约、协议/模块 ABI 与验证选择 |
 | [热插拔与即插即用](guide/hotplug-and-pnp.md) | USB/PCI 运行期发现、ADD/REMOVE 生命周期与驱动编写要求 |
 | [设备类接口](guide/device-classes.md) | 各类操作、单位、返回值和阻塞语义 |
 | [总线与平台](guide/bus-and-platform.md) | platform device、板级资源、MMIO/IRQ |
@@ -55,18 +65,11 @@
 | [双态部署驱动框架](../hybrid-kernel/04-dual-placement.md) | 内核/用户双驻留驱动与所有权仲裁 |
 | [混合内核机制](../hybrid-kernel/01-mechanisms.md) | 混合内核核心机制 |
 
-## 推荐阅读顺序
+## 阅读时的约定
 
-1. [从零开发第一个驱动](guide/getting-started.md)：从 PCI 网卡模板入手，走通创建、注册、构建和调试。
-2. [可安装内核驱动](guide/kernel-modules.md)：可加载内核模块、框架 API 与 DriverStore；新驱动优先按模块编写。
-3. [核心模型](guide/core-model.md)：`device_t`、`driver_t`、`bus_type_t` 和完整的 probe/remove 模板。
-4. 根据总线继续读：
-   - [总线与平台](guide/bus-and-platform.md)：platform device、板级资源和 MMIO/IRQ。
-   - [PCI 与 VirtIO](guide/pci-and-virtio.md)：PCI ID、BAR、ECAM、VirtIO transport。
-5. [设备类](guide/device-classes.md)：各类操作、单位、返回值和阻塞语义；写输入/显示/音频驱动前先读对应专章。
-6. [运行时契约](guide/runtime-contracts.md) + [锁顺序](guide/lock-order.md)：IRQ、DMA、屏障、并发。
-7. [用户接口与 devfs](classes/userspace-and-devfs.md)：从 class 到 `/dev`。
-8. [构建、测试与提交](meta/testing-and-submission.md)：编译矩阵、失败清理和提交证据。
+核心模型解释“对象是什么、为什么这样退出”；入门页说明“先实现哪一步、怎样接到构建和消费者”；运行时与请求指南提供精确契约；设备类专章解释数据单位和子系统语义。无需先读完全部文档再写第一个驱动。
+
+声明与结构以当前源码为准，文档中的骨架省略具体硬件协议。未实现的示例 I/O 不报告成功；可调用接口、完成验证的平台和后续硬件工作分别记录在状态文档中。
 
 ## 相关文档
 

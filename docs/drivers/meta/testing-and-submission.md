@@ -1,6 +1,6 @@
 # 构建、测试与提交驱动
 
-> 不要只运行 `make` 就提交，不要只附截图，不要跳过构建矩阵，也不要忘记更新 `lock-order.md`。
+按实际改动选择验证：文档校验链接和示例，公共机制校验生产工作流，硬件实现还需目标 I/O 证据。锁或上下文变化同步更新 `lock-order.md`。
 
 驱动的完成标准不是“文件能编译”，而是枚举、匹配、失败回滚、类消费和目标硬件 I/O 都有证据。外部贡献者按下面的命令矩阵执行。
 
@@ -11,6 +11,12 @@ full profile 不会通配包含类目录中的设备驱动。`tools/mk/driver-so
 MCU profile 只编译 `BOARD_DRIVER_DIR` 和选中的平台，新增文件要检查 Makefile 的 profile 分支。新平台还需要平台链接脚本和 `BOARD_INCLUDE_DIR`。
 
 `#ifdef CONFIG_<ARCH>` 只应包围真正架构限定的 I/O（例如 x86 port I/O）。可跨架构的 PCI/MMIO 驱动不要按板名条件编译。
+
+## 仅修订文档时
+
+在仓库根目录运行 `python3 tools/docs/check_doc_citations.py` 与 `python3 tools/docs/check_doc_nav.py`。新增指南登记到文档导航；有完整 C 骨架时，用目标架构的当前头文件作语法检查。局部片段应说明其依赖的类型、调用上下文和省略的硬件实现，不将占位代码写成真实 I/O 成功。
+
+文档导航存在迁移或既有问题时，记录改动前后的相同基线，保证本次新增链接/锚点可解析。仅文档/API 注释变化不要求重跑全套 QEMU 和硬件门禁；运行行为未变不增加一次“实机验证”的声明。扩展公共机制的验证路线见[框架维护指南](../guide/framework-development.md#7-按改动选择验证)。
 
 ## 原生执行接口的验证
 
@@ -84,8 +90,8 @@ make check-stm32f103
 | 场景 | 预期 |
 |---|---|
 | ID 不匹配 | probe 不调用，设备保持 UNINIT |
-| 必需 BAR/MMIO/IRQ 缺失 | 返回 `-ENODEV`，无 ready/私有指针 |
-| DMA 第 N 次分配失败 | 前 N-1 次全部释放 |
+| 必需 BAR/MMIO/IRQ 缺失 | 返回负 errno，无 ready；清理成功后清空私有指针，停止未确认则保留部分实例 |
+| DMA 第 N 次分配失败 | 确认硬件/映射不再使用后回收前 N-1 次所有权；清理失败则保留句柄供重试 |
 | feature/version 不支持 | 设备 FAILED/复位，无 queue 泄漏 |
 | request_irq 失败 | 若支持轮询则明确降级，否则 probe 失败并清理 |
 | 健康检查超时 | `-ETIMEDOUT`，设备停止后才释放 DMA |

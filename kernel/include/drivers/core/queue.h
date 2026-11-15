@@ -83,8 +83,8 @@ void driver_queue_put(struct driver_queue *);
  * closing. Without start, caller MUST run progress (boot polling works).
  * No implicit hardware polling: IRQ/poll producers call complete(). */
 int driver_queue_start(struct driver_queue *, struct driver_workqueue *);
-/* Bounded, allocation-free core progress; callbacks may allocate as specified
- * by their provider. Serializes prepare/issue/retire without blocking; EBUSY
+/* Bounded task progress; first dependency-watch setup may allocate, as may
+ * provider callbacks. Serializes prepare/issue/retire without blocking; EBUSY
  * if another pump/stop owns dispatch. Returns processed transitions, or first
  * cleanup error. budget must be 1..4096. No queue spinlock across callbacks,
  * fence notifications, native backing puts or module code. */

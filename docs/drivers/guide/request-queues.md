@@ -53,7 +53,7 @@ ops 携带实际 size，创建时复制已知表；回调代码与 context 属�
 
 prepare/issue/retire 都不能获取驱动 lifecycle 串行化；解绑可能持有它并尝试停止队列。stop 不等待持有调用者私有锁的线程，必要时返回 EBUSY 让退出重试。后端发出 complete 后，除非另有 request 引用，不再访问 request/cookie；队列可能立即在其他 CPU 上完成退休。inline complete 的退休则等 issue 返回后才执行。
 
-手动 `driver_queue_run(q, budget)` 的 budget 为 1..4096，限制每次进度转换次数；无工作线程时，驱动负责持续调用它。worker 模式每次最多 64 次转换，然后重新排队。单个 provider 回调仍须遵守其非阻塞/有界约定，budget 不能抢占阻塞回调。共享 workqueue 必须活到所有附着队列成功停止之后。
+手动 `driver_queue_run(q, budget)` 的 budget 为 1..4096，限制每次进度转换次数；无工作线程时，驱动负责持续调用它。worker 模式每次最多 64 次转换，然后重新排队。task progress 初次为 pending dependency 建立 fence watch 时可能分配；prepare/retire 也按 provider 约定分配或清理。只有 submit/IRQ complete 的框架热路径不分配请求对象。单个 provider 回调仍须遵守其非阻塞/有界约定，budget 不能抢占阻塞回调。共享 workqueue 必须活到所有附着队列成功停止之后。
 
 ## 绑定停止与失败重试
 
