@@ -23,6 +23,7 @@
 #include "fs/vfs.h"
 #include "fs/uxfs.h"
 #include "fs/vfs/path.h"
+#include "syscall/syscall_internal.h"
 #include "fs/fdtable.h"
 #include "fs/tty.h"
 #include "fs/locks.h"
@@ -338,21 +339,13 @@ int64_t sys_a20_path_create(const a20_syscall_args_t *args)
     int gfd = -1;
     if (kargs.type == 1) {
         char full[MAX_PATH_LEN];
-        if (kpath[0] == '/') {
-            strncpy(full, kpath, MAX_PATH_LEN);
-            full[MAX_PATH_LEN - 1] = '\0';
-        } else {
-            char start[MAX_PATH_LEN];
-            r = vfs_dirfd_path(dirfd, start, sizeof(start));
-            if (r < 0) {
-                if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
-                return -A20_ERR_NO_ENTRY;
-            }
-            size_t slen = strlen(start);
-            if (slen > 0 && start[slen - 1] == '/')
-                snprintf(full, sizeof(full), "%s%s", start, kpath);
-            else
-                snprintf(full, sizeof(full), "%s/%s", start, kpath);
+        /* Mutation paths name the global mount tree. Use the shared
+         * dirfd/chroot resolver, just as Linux mkdirat does. The later
+         * openat still consumes the original user-visible path. */
+        int path_r = syscall_path_at(dirfd, kpath, full, sizeof(full));
+        if (path_r < 0) {
+            if (dirfd != AT_FDCWD) fdtable_close_current(dirfd);
+            return a20_native_vfs_result(path_r);
         }
         int mkdir_r = vfs_mkdir(full, (int)kargs.mode);
         if (mkdir_r < 0) {
@@ -988,7 +981,8 @@ int64_t sys_a20_fs_mount(const a20_syscall_args_t *args)
         return -A20_ERR_FAULT;
 
     char full_tgt[MAX_PATH_LEN];
-    resolve_path(ktgt, full_tgt);
+    int path_r = syscall_path_at(AT_FDCWD, ktgt, full_tgt, sizeof(full_tgt));
+    if (path_r < 0) return a20_native_vfs_result(path_r);
 
     int r = vfs_mount(ksrc[0] ? ksrc : NULL, full_tgt,
                        kfs[0] ? kfs : "ext2", (int)kargs.flags, NULL);
@@ -1007,7 +1001,8 @@ int64_t sys_a20_fs_umount(const a20_syscall_args_t *args)
     if (copy_path_from_user(ktgt, utarget, tgt_len) < 0) return -A20_ERR_FAULT;
 
     char full_tgt[MAX_PATH_LEN];
-    resolve_path(ktgt, full_tgt);
+    int path_r = syscall_path_at(AT_FDCWD, ktgt, full_tgt, sizeof(full_tgt));
+    if (path_r < 0) return a20_native_vfs_result(path_r);
 
     int r = vfs_umount(full_tgt);
     if (r < 0) return -A20_ERR_IO;
@@ -1136,7 +1131,8 @@ int64_t sys_a20_fs_serve(const a20_syscall_args_t *args)
                             kargs.target_len) < 0)
         return -A20_ERR_FAULT;
     char full_tgt[MAX_PATH_LEN];
-    resolve_path(ktgt, full_tgt);
+    int path_r = syscall_path_at(AT_FDCWD, ktgt, full_tgt, sizeof(full_tgt));
+    if (path_r < 0) return a20_native_vfs_result(path_r);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
