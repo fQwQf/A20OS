@@ -153,6 +153,21 @@ struct vmm_group {
 struct vmm_runner { struct vmm_group *group; unsigned id; };
 static void stop_group(struct vmm_group *group, int reason, int error)
 {
+    /* A peer can observe VM-wide shutdown before the hart issuing SBI
+     * shutdown returns from RUN. Normalize in the shared coordinator so the
+     * main runner and secondary runners cannot race STOPPED over SHUTDOWN. */
+    if (reason == HYP_GUEST_EXIT_STOPPED) {
+        struct hyp_guest_status status;
+        if (hyp_guest_vm_status(group->vm, &status) < 0) {
+            reason = HYP_GUEST_EXIT_ERROR;
+            if (!error) error = errno;
+        } else if (status.exit == HYP_GUEST_EXIT_SHUTDOWN) {
+            reason = HYP_GUEST_EXIT_SHUTDOWN;
+        } else if (status.exit == HYP_GUEST_EXIT_ERROR) {
+            reason = HYP_GUEST_EXIT_ERROR;
+            if (!error) error = EIO;
+        }
+    }
     int expected = 0;
     __atomic_compare_exchange_n(&group->terminal, &expected, reason, 0,
                                 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
@@ -177,11 +192,6 @@ static void *run_secondary(void *opaque)
             usleep(1000); continue;
         }
         if (__atomic_load_n(&group->done, __ATOMIC_ACQUIRE)) break;
-        if (reason == HYP_GUEST_EXIT_STOPPED) {
-            struct hyp_guest_status status;
-            if (!hyp_guest_vm_status(group->vm, &status) && status.exit == HYP_GUEST_EXIT_SHUTDOWN)
-                reason = HYP_GUEST_EXIT_SHUTDOWN;
-        }
         stop_group(group, reason < 0 ? HYP_GUEST_EXIT_ERROR : (int)reason,
                     reason < 0 ? errno : 0);
     }
