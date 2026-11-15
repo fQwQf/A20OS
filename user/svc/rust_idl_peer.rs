@@ -70,6 +70,7 @@ const A20_SYS_TASK_SPAWN: u64 = 0x0201;
 const A20_SYS_TASK_WAIT: u64 = 0x0202;
 const A20_SYS_TASK_KILL: u64 = 0x0203;
 const A20_SYS_THREAD_SLEEP: u64 = 0x0207;
+const A20_SYS_SIGNAL_CHECK: u64 = 0x020F;
 const A20_SYS_CLOCK_GET: u64 = 0x0700;
 const A20_SYS_PATH_OPEN: u64 = 0x0400;
 const A20_SYS_CHANNEL_CREATE: u64 = 0x0504;
@@ -80,6 +81,9 @@ const A20_TASK_WAIT_NONBLOCK: u64 = 0x1; // user/liba20rt/a20_task.h
 // task_kill() takes a signal number. SIGKILL is 9 in the shared kernel signal
 // ABI; signal 0 is only a permission/handle probe and does not terminate.
 const A20_SIGKILL: u32 = 9;
+const A20_SIGCHLD: u32 = 17;
+const A20_SIGNAL_THREAD: u64 = 1;
+const A20_SIGNAL_SELECT: u64 = 4;
 
 // a20_types.h rights bits.
 const A20_RIGHT_READ: Rights = 1 << 0;
@@ -90,6 +94,7 @@ const A20_RIGHT_EXEC: Rights = 1 << 2;
 const A20_MSG_NONBLOCK: u32 = 1 << 0;
 
 // a20_types.h error codes, negated in a20_status_t.
+const A20_ERR_INTERRUPTED: Status = -3;
 const A20_ERR_BAD_HANDLE: Status = -5;
 const A20_ERR_INVALID_ARGUMENT: Status = -12;
 const A20_ERR_WOULD_BLOCK: Status = -18;
@@ -887,6 +892,18 @@ fn pause_before_deadline(deadline: u64) -> Result<(), Status> {
     let now = monotonic_now_ns()?;
     if now >= deadline { return Err(A20_ERR_TIMED_OUT); }
     let st = thread_sleep_ns((deadline - now).min(1_000_000));
+    // This freestanding client has no libc signal dispatcher. Child exit
+    // notifications remain pending even after task_wait reaps the child;
+    // consume only SIGCHLD at the Native checkpoint before retrying. Other
+    // signals and cancellation still abort the exchange. Keep the original
+    // absolute deadline, including when the child exits during this sleep.
+    if st == A20_ERR_INTERRUPTED {
+        let child = unsafe {
+            sys::syscall6(A20_SYS_SIGNAL_CHECK, A20_SIGNAL_THREAD | A20_SIGNAL_SELECT,
+                          1 << A20_SIGCHLD, 0, 0, 0, 0)
+        };
+        if child == (1 << A20_SIGCHLD) { return Ok(()); }
+    }
     if st == A20_OK { Ok(()) } else { Err(st) }
 }
 

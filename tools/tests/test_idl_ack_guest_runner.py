@@ -2,7 +2,7 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-PATH = Path(__file__).parents[1] / "run-idl-ack-guest.py"
+PATH = Path(__file__).parents[1] / "xlator/run-idl-ack-guest.py"
 SPEC = importlib.util.spec_from_file_location("idl_ack_runner", PATH)
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)

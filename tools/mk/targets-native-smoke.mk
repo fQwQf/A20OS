@@ -273,7 +273,7 @@ smoke-abi-behavior-linux:
 
 # ABI-02: the full malformed-ACK matrix on the reserved AArch64 ABI.
 smoke-idl-ack-aarch64:
-	sh tools/run-idl-ack-matrix.sh aarch64
+	sh tools/xlator/run-idl-ack-matrix.sh aarch64
 
 smoke-native-linux:
 	$(PYTHON) tools/smoke.py smoke-native-linux --arch $(ARCH)
