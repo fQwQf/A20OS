@@ -73,15 +73,47 @@ int window(const void *blob, size_t bytes, uint64_t physical,
 }
 ''')
         so = Path(cls.temp.name) / "memory.so"
+        # Userspace headers must resolve against libc, not kernel sys/syscall.h.
+        guest = Path(cls.temp.name) / "hyp_guest.o"
+        subprocess.run(["cc", "-fPIC", "-std=gnu99", "-O2", "-fno-builtin",
+                        "-Wall", "-Wextra", "-Werror", "-c",
+                        str(ROOT / "user/cmds/core/hyp/hyp_guest.c"),
+                        "-o", str(guest)], check=True)
         subprocess.run(["cc", "-shared", "-fPIC", "-std=gnu99", "-O2", "-fno-builtin",
                         "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "kernel/include"),
-                        str(wrapper), str(ROOT / "kernel/core/fdt_view.c"),
+                        str(wrapper), str(guest),
+                        str(ROOT / "kernel/core/fdt_view.c"),
                         str(ROOT / "kernel/firmware/devicetree/node.c"),
                         str(ROOT / "kernel/firmware/devicetree/memory.c"), str(ROOT / "kernel/firmware/devicetree/framebuffer.c"), str(ROOT / "kernel/boot/framebuffer.c"), "-o", str(so)], check=True)
         cls.lib = ctypes.CDLL(str(so))
         cls.lib.window.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64,
                                   ctypes.c_uint64, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]
         cls.lib.window.restype = ctypes.c_int
+        cls.lib.hyp_guest_fdt_capacity.restype = ctypes.c_size_t
+        cls.lib.hyp_guest_fdt_build_smp.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_uint64, ctypes.c_uint64, ctypes.c_char_p, ctypes.c_uint]
+        cls.lib.hyp_guest_fdt_build_smp.restype = ctypes.c_size_t
+
+    def test_real_hypervisor_guest_tree_is_accepted_by_real_memory_parser(self):
+        for cpus in (1, 2, 8):
+            for memory_mb in (128, 256):
+                with self.subTest(cpus=cpus, memory_mb=memory_mb):
+                    capacity = self.lib.hyp_guest_fdt_capacity()
+                    buffer = ctypes.create_string_buffer(capacity)
+                    base, size = 0x80000000, memory_mb << 20
+                    length = self.lib.hyp_guest_fdt_build_smp(buffer, capacity,
+                        base, size, b'a20.hypguest=1', cpus)
+                    self.assertGreater(length, 0)
+                    physical = base + size - (1 << 20)
+                    result = (ctypes.c_uint64 * 33)()
+                    self.assertEqual(self.lib.window(buffer, length, physical,
+                        base, base + (512 << 20), result), 0)
+                    self.assertGreater(result[0], 0)
+                    self.assertEqual(result[1], base)
+                    for i in range(result[0]):
+                        start, end = result[1+i*2], result[2+i*2]
+                        self.assertLessEqual(end, base + size)
+                        self.assertFalse(start < physical + length and end > physical)
 
     @classmethod
     def tearDownClass(cls):

@@ -437,6 +437,13 @@ size_t hyp_guest_fdt_build_smp(unsigned char *out, size_t cap,
              (unsigned long long)mem_base);
 
     blob_u32(&st, FDT_BEGIN_NODE); blob_name(&st, "");        /* root */
+    /* Memory reg below contains two 64-bit quantities. The DT default is
+     * two address cells but ONE size cell; omitting these properties makes
+     * the 16-byte reg malformed to a conforming firmware memory parser. */
+    blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+    blob_u32(&st, blob_str(&sr, "#address-cells")); blob_u32(&st, 2);
+    blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+    blob_u32(&st, blob_str(&sr, "#size-cells")); blob_u32(&st, 2);
     blob_u32(&st, FDT_BEGIN_NODE); blob_name(&st, "chosen");
     blob_u32(&st, FDT_PROP);
     blob_u32(&st, (uint32_t)strlen(bootargs) + 1);
@@ -445,6 +452,9 @@ size_t hyp_guest_fdt_build_smp(unsigned char *out, size_t cap,
     blob_u32(&st, FDT_END_NODE);
 
     blob_u32(&st, FDT_BEGIN_NODE); blob_name(&st, memname);
+    blob_u32(&st, FDT_PROP); blob_u32(&st, sizeof("memory"));
+    blob_u32(&st, blob_str(&sr, "device_type"));
+    blob_value(&st, "memory", sizeof("memory"));
     blob_u32(&st, FDT_PROP);
     blob_u32(&st, 16);
     blob_u32(&st, blob_str(&sr, "reg"));
