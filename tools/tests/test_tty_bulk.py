@@ -30,7 +30,10 @@ static device_t device;static class_device_t binding={&device};
 static class_device_t *g_tty_bulk_console;static int g_tty_use_bulk_console=1,g_tty_bulk_ready;
 static int g_tty_write_lock,klog_console_lock,spin_held,mutex_held,active,refs,gets,puts,online=1,supported,interrupted,fail_after;
 static char serial[1024],bulk[1024];static size_t ns,nb;static int capabilities;
-static void mutex_lock(int *p){(void)p;assert(!mutex_held);mutex_held=1;}
+static int access_error,revoked,revoke_on_lock;
+static int tty_control_access(vfile_t *vf,int writing,int force){(void)vf;assert(writing==1&&force==0&&!mutex_held);return access_error;}
+static int tty_control_revoked(const vfile_t *vf){(void)vf;assert(mutex_held);return revoked;}
+static void mutex_lock(int *p){(void)p;assert(!mutex_held);mutex_held=1;if(revoke_on_lock)revoked=1;}
 static void mutex_unlock(int *p){(void)p;assert(mutex_held);mutex_held=0;}
 static uint64_t spin_lock_irqsave(int *p){(void)p;assert(!spin_held);spin_held=1;return 0;}
 static void spin_unlock_irqrestore(int *p,uint64_t f){(void)p;(void)f;assert(spin_held);spin_held=0;}
@@ -64,6 +67,14 @@ int main(void){
  fail_after=0;interrupted=1;nb=0;assert(tty_console_write(NULL,data,40)==-ERESTARTSYS);assert(!nb&&!ns);interrupted=0;
  online=0;assert(tty_console_write(NULL,data,10)==10);assert(ns==10&&!nb&&!refs&&!g_tty_bulk_ready);
  online=1;ns=0;assert(tty_console_write(NULL,data,10)==10);assert(nb==10&&!ns&&capabilities==old+1);
+ vfile_t file;int before_gets=gets;size_t before_bulk=nb,before_serial=ns;
+ access_error=-ERESTARTSYS;
+ assert(tty_console_write(&file,data,10)==-ERESTARTSYS&&!mutex_held);
+ assert(gets==before_gets&&nb==before_bulk&&ns==before_serial);
+ access_error=0;revoke_on_lock=1;
+ assert(tty_console_write(&file,data,10)==-EIO&&!mutex_held);
+ assert(gets==before_gets&&nb==before_bulk&&ns==before_serial);
+ revoke_on_lock=revoked=0;
  assert(!active&&!mutex_held&&!spin_held);class_device_put(g_tty_bulk_console);return 0;
 }
 '''

@@ -125,7 +125,7 @@ static void start_wan(char **envp)
 
 static void setup_console(void)
 {
-    int fd = open("/dev/console", O_RDWR);
+    int fd = open("/dev/console", O_RDWR | O_NOCTTY);
     if (fd < 0)
         return;
     dup2(fd, STDIN_FILENO);
@@ -346,6 +346,8 @@ int main(void)
 
     if (detect_distro_rootfs())
         enter_distro_rootfs();
+
+    ioctl(STDIN_FILENO, TIOCSCTTY, 0);
 
 #if defined(__powerpc64__)
     char *argv[] = {"mksh", NULL};

@@ -1,3 +1,5 @@
+#include "fs/tty_control.h"
+#include "fs/vfs.h"
 #include "drivers/char/uart.h"
 #include "drivers/char/fbcon.h"
 #include "drivers/core/driver_core.h"
@@ -49,7 +51,6 @@ static volatile uint32_t rx_tail;
  * outside it, so no other lock is ever acquired while rx_lock is held. */
 static spinlock_t rx_lock = SPINLOCK_INIT;
 static wait_queue_t rx_waiters;
-static int tty_foreground_pgid;
 
 /*
  * RX_FIDELITY: runtime evidence for the guest console dropping input
@@ -177,7 +178,6 @@ static int uart_irq_wrapper(int irq, void *priv);
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
-    tty_foreground_pgid = 0;
     spin_init(&rx_lock);
     wait_queue_init(&rx_waiters);
     arch_uart_init();
@@ -209,8 +209,12 @@ void uart_write(const char *data, size_t length) {
 }
 
 // blocking read of one character (yields the CPU if there is no data)
-int uart_getc(void) {
+int uart_getc_vfile(vfile_t *vf) {
     for (;;) {
+        if (vf) {
+            int r = tty_control_access(vf, 0, 0);
+            if (r < 0) return r;
+        }
         /* Standard blocking-read semantics: a pending unblocked signal ends the
          * wait instead of parking forever.  Without this a reader blocked on
          * the console ignored SIGTERM/SIGINT outright -- measured before the
@@ -307,7 +311,7 @@ int uart_getc(void) {
         spin_unlock_irqrestore(&rx_lock, flags);
 
         arch_local_irq_enable();
-        if (linked)
+        if (linked && !(vf && tty_control_revoked(vf)))
             (void)proc_park_commit(token);
         else
             (void)proc_park_cancel(token);
@@ -378,19 +382,12 @@ void uart_flush(void) {
     arch_uart_flush();
 }
 
-int uart_get_foreground_pgid(void) {
-    uint64_t flags = spin_lock_irqsave(&rx_lock);
-    int pgid = tty_foreground_pgid;
-    spin_unlock_irqrestore(&rx_lock, flags);
-    return pgid;
+int uart_getc(void) { return uart_getc_vfile(NULL); }
+void uart_tty_wake(void) {
+    wait_queue_wake_all(&rx_waiters, 0, PROC_WAKE_EVENT);
 }
-
-void uart_set_foreground_pgid(int pgid) {
-    if (pgid <= 0)
-        return;
-    uint64_t flags = spin_lock_irqsave(&rx_lock);
-    tty_foreground_pgid = pgid;
-    spin_unlock_irqrestore(&rx_lock, flags);
+int uart_get_foreground_pgid(void) {
+    return tty_control_foreground(TTY_CONSOLE_ID);
 }
 
 void uart_handle_irq(void) {

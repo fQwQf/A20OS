@@ -18,6 +18,11 @@ class TtyJobcontrolReference(unittest.TestCase):
                         str(ROOT / "user/cmds/core/tty_jobcontrol_test.c"),
                         "-o", str(cls.binary)], check=True)
 
+        cls.lifecycle = Path(cls.work.name) / "lifecycle"
+        subprocess.run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+                        str(ROOT / "user/cmds/core/tty_lifecycle_test.c"),
+                        "-o", str(cls.lifecycle)], check=True)
+
     @classmethod
     def tearDownClass(cls):
         cls.work.cleanup()
@@ -32,9 +37,17 @@ class TtyJobcontrolReference(unittest.TestCase):
         result = subprocess.run([str(self.binary)], timeout=15,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for section in ("ownership", "background-read", "background-write", "detach"):
+        for section in ("ownership", "background-read", "background-ioctl", "background-write", "detach"):
             self.assertIn("TTY_JOBCTRL: " + section + " PASS", result.stdout)
         self.assertIn("TTY_JOBCTRL: PASS", result.stdout)
+
+    def test_detach_exit_and_master_hangup(self):
+        result = subprocess.run([str(self.lifecycle)], timeout=20,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for section in ("detach-signals", "leader-exit", "master-close", "thread-sharing", "orphan-access", "automatic-acquire"):
+            self.assertIn("TTY_LIFECYCLE: " + section + " PASS", result.stdout)
+        self.assertIn("TTY_LIFECYCLE: PASS", result.stdout)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+#include "fs/tty_control.h"
 #include "proc/resource_ns.h"
 #include "core/klog.h"
 #include "abi/linux/rlimit_policy.h"
@@ -403,23 +404,33 @@ int64_t sys_getpgid(int pid) {
 int64_t sys_setpgid(int pid, int pgid) {
     task_t *self = proc_current();
     task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
+    if (t && t->tg_leader && t->tg_leader != t) {
+        task_t *leader = proc_get(t->tg_leader);
+        proc_put(t);
+        t = leader;
+    }
     int64_t r = a20_setpgid(self != NULL, t != NULL,
-                            t ? t->pid : 0, t ? t->ppid : 0, t ? t->sid : 0,
-                            self ? self->pid : 0, self ? self->sid : 0,
-                            t != NULL && t == self, pgid);
-    if (r >= 0 && t)
-        t->pgid = (int)r;
+                            t ? t->tgid : 0, t ? t->ppid : 0, t ? t->sid : 0,
+                            self ? self->tgid : 0, self ? self->sid : 0,
+                            t && self && t->tgid == self->tgid, pgid);
+    if (r >= 0 && t) {
+        int sid = 0;
+        if (t->sid == t->tgid ||
+            (r != t->tgid && (!proc_tty_group_session((int)r, &sid) || sid != t->sid)))
+            r = -EPERM;
+        else proc_tty_set_ids(t, t->sid, (int)r);
+    }
     proc_put(t);
     return r < 0 ? r : 0;
 }
 
 int64_t sys_setsid(void) {
     task_t *t = proc_current();
-    int64_t r = a20_setsid(t != NULL, t ? t->pid : 0, t ? t->pgid : 0);
+    int64_t r = a20_setsid(t != NULL, t ? t->tgid : 0, t ? t->pgid : 0);
     if (r < 0)
         return r;
-    t->sid = (int)r;
-    t->pgid = (int)r;
+    proc_tty_set_ids(t, (int)r, (int)r);
+    tty_control_new_session(t);
     return r;
 }
 
@@ -486,13 +497,7 @@ int64_t sys_personality(unsigned int persona) {
 }
 
 int64_t sys_vhangup(void) {
-    /* vhangup(2) revokes the caller's controlling terminal.  A20OS has no
-     * tty layer at all: there is no session leader, no controlling-terminal
-     * pointer in task_t, and no tty driver to hang up, so there is no state
-     * to revoke.  Reporting success would tell a caller its terminal was
-     * revoked when it was not — the fail-closed policy requires reporting
-     * "does not exist" instead. */
-    return -ENOSYS;
+    return tty_control_vhangup();
 }
 
 int64_t sys_unshare(int flags) {

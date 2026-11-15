@@ -11,6 +11,9 @@ void uart_putc(char c);
 void uart_write(const char *data, size_t length);
 void uart_receive_char(char c);
 int  uart_getc(void);
+struct vfile;
+int uart_getc_vfile(struct vfile *vf);
+void uart_tty_wake(void);
 int  uart_try_getc(void);
 int  uart_has_input(void);
 wait_queue_t *uart_read_wait_queue(void);
@@ -18,6 +21,5 @@ void uart_puts(const char *s);
 void uart_flush(void);
 void uart_handle_irq(void);
 int  uart_get_foreground_pgid(void);
-void uart_set_foreground_pgid(int pgid);
 
 #endif /* _UART_H */

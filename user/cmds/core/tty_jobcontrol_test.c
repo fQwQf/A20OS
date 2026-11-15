@@ -94,6 +94,13 @@ static void run_session(int identity_only)
     errno = 0;
     CHECK(ioctl(null, TIOCGPTN, &first_number) == -1 && errno == ENOTTY,
           "non-pty number query rejected");
+    unsigned long controls[] = {TIOCSCTTY, TIOCNOTTY, TIOCGPGRP, TIOCSPGRP, TIOCGSID};
+    for (unsigned i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
+        int group = getpgrp();
+        errno = 0;
+        CHECK(ioctl(null, controls[i], &group) == -1 && errno == ENOTTY,
+              "non-terminal control rejected");
+    }
     int locked = 1;
     CHECK(ioctl(master, TIOCSPTLCK, &locked) == 0, "lock pty slave");
     char locked_path[128];
@@ -174,6 +181,21 @@ static void run_session(int identity_only)
 
     struct termios modes;
     CHECK(tcgetattr(slave, &modes) == 0, "get modes");
+    child = fork();
+    CHECK(child >= 0, "fork ioctl writer");
+    if (!child) {
+        CHECK(setpgid(0, 0) == 0, "ioctl writer group");
+        block_signal(SIGTTOU, 0);
+        int result;
+        do { result = tcsetattr(slave, TCSANOW, &modes); } while (result < 0 && errno == EINTR);
+        CHECK(result == 0, "foreground ioctl resumed");
+        _exit(0);
+    }
+    CHECK(wait_event(child, 1) == SIGTTOU, "background ioctl signals without TOSTOP");
+    CHECK(tcsetpgrp(slave, child) == 0 && kill(child, SIGCONT) == 0, "ioctl writer foreground");
+    wait_event(child, 0);
+    CHECK(tcsetpgrp(slave, getpgrp()) == 0, "restore ioctl foreground");
+    puts("TTY_JOBCTRL: background-ioctl PASS");
     modes.c_lflag |= TOSTOP;
     CHECK(tcsetattr(slave, TCSANOW, &modes) == 0, "set TOSTOP");
     child = fork();
@@ -190,6 +212,17 @@ static void run_session(int identity_only)
     CHECK(tcsetpgrp(slave, child) == 0 && kill(child, SIGCONT) == 0, "foreground writer continue");
     wait_event(child, 0);
     CHECK(tcsetpgrp(slave, getpgrp()) == 0, "restore writer foreground");
+    for (int ignore = 0; ignore < 2; ignore++) {
+        child = fork();
+        CHECK(child >= 0, "fork permitted writer");
+        if (!child) {
+            CHECK(setpgid(0, 0) == 0, "permitted writer group");
+            if (ignore) { block_signal(SIGTTOU, 0); signal(SIGTTOU, SIG_IGN); }
+            CHECK(write(slave, "P", 1) == 1, "blocked/ignored TTOU allows write");
+            _exit(0);
+        }
+        wait_event(child, 0);
+    }
     modes.c_lflag &= ~TOSTOP;
     CHECK(tcsetattr(slave, TCSANOW, &modes) == 0, "clear TOSTOP");
     puts("TTY_JOBCTRL: background-write PASS");

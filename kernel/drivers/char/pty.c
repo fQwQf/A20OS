@@ -1,3 +1,5 @@
+#include "fs/tty_control.h"
+#include "fs/vfs.h"
 #include "core/poll.h"
 #include "core/defs.h"
 #include "core/string.h"
@@ -54,7 +56,8 @@ typedef ktty_termios_t pty_termios_t;
 typedef struct {
     /* LOCK_ORDER: per-pair lock protects ring buffers, master/slave refs,
      * locked flag, nonblock flags, and window size. No nesting with
-     * g_pty_alloc_lock or other kernel locks. */
+     * g_pty_alloc_lock. Pair -> tty control lock is allowed for epoch and
+     * hangup publication; signal notifications run after dropping the pair. */
     spinlock_t  lock;
     char       *m2s_buf;
     char       *s2m_buf;
@@ -65,7 +68,7 @@ typedef struct {
     int         master_refs;
     int         slave_refs;
     uint16_t    ws_row, ws_col;
-    int         pgrp;           /* foreground process group (TIOCGPGRP/SPGRP) */
+    uint64_t    input_signals;  /* collected under pair lock, delivered after unlock */
     int         master_nonblock;
     int         slave_nonblock;
     int         packet_mode;    /* TIOCPKT: master reads get a status prefix */
@@ -182,12 +185,14 @@ static int pty_alloc(void) {
     pty->master_nonblock = 0;
     pty->slave_nonblock = 0;
     pty->packet_mode = 0;
+    pty->input_signals = 0;
     pty->master_waiting = 0;
     pty->slave_waiting = 0;
     wait_queue_init(&pty->master_readers);
     wait_queue_init(&pty->slave_readers);
     pty_fill_default_termios(&pty->termios);
     spin_unlock_irqrestore(&g_pty_alloc_lock, flags);
+    tty_control_reset(TTY_PTY_ID(idx));
     return idx;
 }
 
@@ -262,8 +267,7 @@ static void pty_input_byte_locked(pty_pair_t *pty, char ch) {
         else if (ch == (char)tio->c_cc[PTY_CC_VQUIT]) sig = SIGQUIT;
         else if (ch == (char)tio->c_cc[PTY_CC_VSUSP]) sig = SIGTSTP;
         if (sig) {
-            if (pty->pgrp > 0)
-                (void)proc_kill_pgid(pty->pgrp, sig, 0);
+            pty->input_signals |= 1ULL << sig;
             return;
         }
     }
@@ -316,7 +320,7 @@ static size_t pty_slave_readable_locked(pty_pair_t *pty) {
 }
 
 static int pty_wait_interruptible_locked(pty_pair_t *pty, wait_queue_t *wq,
-                                         int *waiting, uint64_t *pty_flags) {
+                                         int *waiting, uint64_t *pty_flags, vfile_t *vf) {
     task_t *task = proc_current();
     if (!task) {
         spin_unlock_irqrestore(&pty->lock, *pty_flags);
@@ -334,10 +338,11 @@ static int pty_wait_interruptible_locked(pty_pair_t *pty, wait_queue_t *wq,
     if (!token.task)
         return 0;
 
-    int should_wait =
-        (wq == &pty->master_readers) ?
+    int revoked = vf && tty_control_io_epoch(TTY_PTY_ID((int)(pty - g_ptys))) != vf->tty_io_epoch;
+    int should_wait = !revoked &&
+        ((wq == &pty->master_readers) ?
             (pty->s2m_used == 0 && pty->slave_refs != 0) :
-            (pty_slave_readable_locked(pty) == 0 && pty->master_refs != 0);
+            (pty_slave_readable_locked(pty) == 0 && pty->master_refs != 0));
     int interrupted = signal_task_has_unblocked(task);
     if (!should_wait || interrupted) {
         spin_unlock_irqrestore(&pty->lock, *pty_flags);
@@ -390,7 +395,7 @@ int pty_master_read(int idx, char *buf, size_t count, int nonblock) {
             return -EAGAIN;
         }
         int result = pty_wait_interruptible_locked(
-            pty, &pty->master_readers, &pty->master_waiting, &flags);
+            pty, &pty->master_readers, &pty->master_waiting, &flags, NULL);
         if (result < 0) {
             pty_maybe_free_locked(pty);
             spin_unlock_irqrestore(&pty->lock, flags);
@@ -429,14 +434,18 @@ int pty_master_write(int idx, const char *buf, size_t count) {
     for (size_t i = 0; i < count; i++)
         pty_input_byte_locked(&g_ptys[idx], buf[i]);
     int echoed = g_ptys[idx].s2m_used != old_s2m;
+    uint64_t signals = g_ptys[idx].input_signals;
+    g_ptys[idx].input_signals = 0;
     spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+    for (int sig = 1; sig < NSIG; sig++)
+        if (signals & (1ULL << sig)) tty_control_signal_foreground(TTY_PTY_ID(idx), sig);
     wait_queue_wake_all(&g_ptys[idx].slave_readers, 0, PROC_WAKE_EVENT);
     if (echoed)
         wait_queue_wake_all(&g_ptys[idx].master_readers, 0, PROC_WAKE_EVENT);
     return (int)count;
 }
 
-int pty_slave_read(int idx, char *buf, size_t count, int nonblock) {
+int pty_slave_read_vfile(vfile_t *vf, int idx, char *buf, size_t count, int nonblock) {
     if (idx < 0 || idx >= MAX_PTYS) return -EIO;
     if (count == 0) return 0;
 
@@ -446,7 +455,19 @@ int pty_slave_read(int idx, char *buf, size_t count, int nonblock) {
         spin_unlock_irqrestore(&pty->lock, flags);
         return -EIO;
     }
-    while (pty_slave_readable_locked(pty) == 0) {
+    for (;;) {
+        /* Revalidate after every wake, outside the pair lock: foreground
+         * ownership can change while an input read is parked. */
+        spin_unlock_irqrestore(&pty->lock, flags);
+        int access = vf ? tty_control_access(vf, 0, 0) : 0;
+        if (vf && tty_control_revoked(vf)) return 0;
+        if (access < 0) return access;
+        flags = spin_lock_irqsave(&pty->lock);
+        if (vf && tty_control_io_epoch(TTY_PTY_ID(idx)) != vf->tty_io_epoch) {
+            spin_unlock_irqrestore(&pty->lock, flags);
+            return 0;
+        }
+        if (pty_slave_readable_locked(pty) != 0) break;
         if (pty->master_refs == 0) {
             spin_unlock_irqrestore(&pty->lock, flags);
             return 0;
@@ -456,7 +477,7 @@ int pty_slave_read(int idx, char *buf, size_t count, int nonblock) {
             return -EAGAIN;
         }
         int result = pty_wait_interruptible_locked(
-            pty, &pty->slave_readers, &pty->slave_waiting, &flags);
+            pty, &pty->slave_readers, &pty->slave_waiting, &flags, vf);
         if (result < 0) {
             pty_maybe_free_locked(pty);
             spin_unlock_irqrestore(&pty->lock, flags);
@@ -485,6 +506,25 @@ int pty_slave_read(int idx, char *buf, size_t count, int nonblock) {
     }
     spin_unlock_irqrestore(&pty->lock, flags);
     return (int)n;
+}
+
+int pty_slave_read(int idx, char *buf, size_t count, int nonblock) {
+    return pty_slave_read_vfile(NULL, idx, buf, count, nonblock);
+}
+void pty_hangup_wake(int idx, uint64_t expected_epoch) {
+    if (idx < 0 || idx >= MAX_PTYS) return;
+    pty_pair_t *pty = &g_ptys[idx];
+    uint64_t flags = spin_lock_irqsave(&pty->lock);
+    if (tty_control_io_epoch(TTY_PTY_ID(idx)) != expected_epoch) {
+        spin_unlock_irqrestore(&pty->lock, flags);
+        return;
+    }
+    pty->m2s_head = pty->m2s_tail = pty->m2s_used = 0;
+    pty->s2m_head = pty->s2m_tail = pty->s2m_used = 0;
+    pty->canon_len = pty->canon_lines = 0;
+    spin_unlock_irqrestore(&pty->lock, flags);
+    wait_queue_wake_all(&pty->slave_readers, 0, PROC_WAKE_EVENT);
+    wait_queue_wake_all(&pty->master_readers, 0, PROC_WAKE_EVENT);
 }
 
 int pty_master_poll(int idx, short events) {
@@ -528,9 +568,13 @@ int pty_slave_poll(int idx, short events) {
     return revents;
 }
 
-int pty_slave_write(int idx, const char *buf, size_t count) {
+int pty_slave_write_vfile(vfile_t *vf, int idx, const char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS) return -EIO;
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+    if (vf && tty_control_io_epoch(TTY_PTY_ID(idx)) != vf->tty_io_epoch) {
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        return -EIO;
+    }
     if (!g_ptys[idx].in_use) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
         return -EIO;
@@ -566,6 +610,10 @@ int pty_slave_write(int idx, const char *buf, size_t count) {
     if (n > 0)
         wait_queue_wake_all(&g_ptys[idx].master_readers, 0, PROC_WAKE_EVENT);
     return (int)n;
+}
+
+int pty_slave_write(int idx, const char *buf, size_t count) {
+    return pty_slave_write_vfile(NULL, idx, buf, count);
 }
 
 int pty_get_termios(int idx, ktty_termios_t *out) {
@@ -758,24 +806,6 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
         return 0;
     }
-    if (req == TIOCSCTTY) return 0;
-    if (req == TIOCNOTTY) return 0;
-    if (req == TIOCGPGRP) {
-        int pgrp;
-        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
-        pgrp = g_ptys[idx].pgrp ? g_ptys[idx].pgrp : 0;
-        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
-        if (copy_to_user(arg, &pgrp, sizeof(pgrp)) < 0) return -EFAULT;
-        return 0;
-    }
-    if (req == TIOCSPGRP) {
-        int pgrp;
-        if (copy_from_user(&pgrp, arg, sizeof(pgrp)) < 0) return -EFAULT;
-        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
-        g_ptys[idx].pgrp = pgrp;
-        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
-        return 0;
-    }
     if (req == TCFLSH) {
         /* Flush input (0), output (1), or both (2) ring buffers. */
         int mode = (int)(uintptr_t)arg;
@@ -818,7 +848,11 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         pty_input_byte_locked(&g_ptys[idx], ch);
         int echoed = g_ptys[idx].s2m_used > 0;
+        uint64_t signals = g_ptys[idx].input_signals;
+        g_ptys[idx].input_signals = 0;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        for (int sig = 1; sig < NSIG; sig++)
+            if (signals & (1ULL << sig)) tty_control_signal_foreground(TTY_PTY_ID(idx), sig);
         wait_queue_wake_all(&g_ptys[idx].slave_readers, 0, PROC_WAKE_EVENT);
         if (echoed)
             wait_queue_wake_all(&g_ptys[idx].master_readers, 0, PROC_WAKE_EVENT);
@@ -849,9 +883,13 @@ void pty_master_close(int idx) {
     }
     if (pty->master_refs > 0)
         pty->master_refs--;
+    tty_hangup_notice_t notice = {0};
+    if (pty->master_refs == 0)
+        notice = tty_control_hangup_prepare(TTY_PTY_ID(idx), 1);
     pty_maybe_free_locked(pty);
     spin_unlock_irqrestore(&pty->lock, flags);
     wait_queue_wake_all(&pty->slave_readers, 0, PROC_WAKE_EVENT);
+    tty_control_hangup_notify(notice);
 }
 
 void pty_slave_close(int idx) {
