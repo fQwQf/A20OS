@@ -46,7 +46,7 @@
 static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;
 static volatile uint32_t rx_tail;
-/* LOCK_ORDER: rx_lock protects the RX ring and tty_foreground_pgid only.  The
+/* LOCK_ORDER: rx_lock protects the RX ring and receive registration.  The
  * Ctrl-C path takes it just long enough to collect a wake; signalling runs
  * outside it, so no other lock is ever acquired while rx_lock is held. */
 static spinlock_t rx_lock = SPINLOCK_INIT;
@@ -111,8 +111,8 @@ static unsigned rx_fidelity_reported;
  *
  * Returns the signal the console line discipline wants raised for this byte, or
  * 0 when the byte was queued as data.  The caller must raise it after dropping
- * rx_lock: tty_console_isig_raise() takes rx_lock itself (through
- * uart_get_foreground_pgid), and LOCK_ORDER forbids taking another lock while
+ * rx_lock: tty_console_isig_raise() queries shared terminal state and task
+ * references, and LOCK_ORDER forbids taking another lock while
  * rx_lock is held.  Control bytes are consumed here rather than queued, which
  * is what a line discipline does with them.
  */
