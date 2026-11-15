@@ -1,36 +1,25 @@
 /*
- * rtcd — user-space goldfish-RTC driver service (hybrid-kernel phase 4,
+ * rtcd — user-space RTC driver service (hybrid-kernel phase 4,
  * dual-placement user shell).
  *
- * Owns the QEMU virt goldfish RTC entirely from user space: the kernel
- * only mapped the whitelisted MMIO window and routes IRQ 11 to this
- * task's event queue.  Requests arrive on the service channel endpoint
- * (installed at A20_RTCD_EP_SLOT by the supervisor).
- *
- * The device register protocol is shared verbatim with the kernel
- * placement (the drvmod module kernel/drvmod/examples/goldfish_rtc.c,
- * loaded at boot as /lib/drivers/rtc.a20drv) through
- * kernel/include/drivers/dual/goldfish_rtc.h — only the shell differs
- * (this main loop + EventQ vs kernel init/ISR).
+ * Uses the board RTC protocol from service_rtc.h: Goldfish on RISC-V,
+ * PL031 on AArch64. The kernel maps the board-authorized MMIO window
+ * and routes its IRQ to this task's event queue. Requests arrive on
+ * the endpoint installed at A20_RTCD_EP_SLOT by the supervisor.
  */
 #define DRV_ENV_USER 1
-#include "drivers/dual/goldfish_rtc.h"
+#include "drivers/dual/service_rtc.h"
 #include "liba20rt/a20_sdk.h"
 #include "a20_services_idl.h"
 
-/* QEMU virt goldfish RTC identity (driver-local; same values as
- * kernel/include/drivers/dual/goldfish_rtc.h). */
-#define GOLDFISH_RTC_BASE   0x101000ULL
-#define GOLDFISH_RTC_SIZE   0x1000ULL
-#define GOLDFISH_RTC_IRQ    11u
 #include "liba20rt/crt0_a20.h"
 #include "drivers/driver_descriptor.h"
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
-                      A20_DRIVER_TYPE_RTC, "goldfish-rtc", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ,
+                      A20_DRIVER_TYPE_RTC, SERVICE_RTC_NAME, A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ,
                       A20_DRIVER_FLAG_SUPERVISED, 1,
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO,
-                                           0x101000UL, 0));
+                                           SERVICE_RTC_BASE, 0));
 
 #define IRQ_TAG 0x52435449ULL /* "RTCI" — event user_data for the irq */
 #define CH_TAG  0x52435443ULL /* "RTCC" — event user_data for the channel */
@@ -39,12 +28,12 @@ static uint64_t g_rtc;
 
 static uint64_t rtc_read_ns(void)
 {
-    return grtc_read_ns(g_rtc);
+    return service_rtc_read_ns(g_rtc);
 }
 
 static void rtc_set_alarm_ns(uint64_t ns)
 {
-    grtc_set_alarm_ns(g_rtc, ns);
+    service_rtc_set_alarm_ns(g_rtc, ns);
 }
 
 /* Returns 1 = handled one message, 0 = queue empty, 42 = crash request,
@@ -112,11 +101,11 @@ int main(int argc, char **argv, char **envp)
 #define RTCD_LOG(msg) a20_hdl_write_buf(out, msg, sizeof(msg) - 1, (void *)0)
     RTCD_LOG("rtcd: start\n");
 
-    if (a20_device_claim(GOLDFISH_RTC_BASE) != A20_OK) {
+    if (a20_device_claim(SERVICE_RTC_BASE) != A20_OK) {
         RTCD_LOG("rtcd: claim failed\n");
         return 2;
     }
-    uint64_t rtc_va = grtc_map();
+    uint64_t rtc_va = service_rtc_map();
     if (!rtc_va) {
         RTCD_LOG("rtcd: map_mmio failed\n");
         return 2;
@@ -139,7 +128,7 @@ int main(int argc, char **argv, char **envp)
     int have_ping = (a20_event_watch(eq, ping_ep,
                                      A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
                                      CH_TAG) == A20_OK);
-    if (a20_device_irq_listen(GOLDFISH_RTC_IRQ, eq, IRQ_TAG) != A20_OK) {
+    if (a20_device_irq_listen(SERVICE_RTC_IRQ, eq, IRQ_TAG) != A20_OK) {
         RTCD_LOG("rtcd: irq_listen failed\n");
         return 5;
     }
@@ -174,7 +163,7 @@ int main(int argc, char **argv, char **envp)
 
         if (ev.user_data == IRQ_TAG) {
             /* Alarm fired: clear the device IRQ, report, re-arm the line. */
-            grtc_clear_alarm(g_rtc);
+            service_rtc_clear_alarm(g_rtc);
             if (alarm_pending) {
                 uint64_t ns = rtc_read_ns();
                 struct {
@@ -189,7 +178,7 @@ int main(int argc, char **argv, char **envp)
                                  &rep, sizeof(rep), 0, 0);
                 alarm_pending = 0;
             }
-            a20_device_irq_ack(GOLDFISH_RTC_IRQ);
+            a20_device_irq_ack(SERVICE_RTC_IRQ);
         }
         /* CH_TAG events are handled by the drain at the loop top. */
     }

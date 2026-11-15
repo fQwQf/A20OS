@@ -468,7 +468,7 @@ $(RUST_USER_RTCD_OBJ): $(RUST_USER_RTCD_SRC) $(RUST_USER_IDL_RUST) tools/mk/rust
 		$< -o $@
 $(RUST_USER_RTCD_BIN): $(RUST_USER_RTCD_OBJ) $(RUST_USER_CRT0_SRC) $(RUST_USER_RTCD_ABI_SRC) $(RUST_USER_RTCD_ABI_HDR) \
 		$(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_LD) \
-		kernel/include/drivers/dual/goldfish_rtc.h kernel/include/drivers/dual/drv_env.h \
+		kernel/include/drivers/dual/service_rtc.h kernel/include/drivers/dual/goldfish_rtc.h kernel/include/drivers/dual/drv_env.h \
 		kernel/include/drivers/driver_descriptor.h user/liba20rt/a20_sdk.h user/svc/a20_services.idl
 	@mkdir -p $(dir $@)
 	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -Iuser -Iuser/liba20rt -Ikernel/include \

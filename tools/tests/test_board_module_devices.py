@@ -149,6 +149,28 @@ uint64_t physical(unsigned i) { return i<(unsigned)count ? devices[i].physical :
         self.assertEqual((lib.created_count(),lib.device_count(),lib.owned(0)),(0,1,1))
         lib=self.configure('aa64');self.assertEqual(lib.created_count(),1)
 
+    def test_aa64_rtc_claim_requires_present_pl031_page(self):
+        lib=self.configure('aa64',[(0xa000a00,b'virtio,mmio'),
+                                  (0x9010000,b'arm,pl031')])
+        self.assertEqual([lib.owned(i) for i in range(2)],[1,1])
+        lib.board_user_mmio_allowed.argtypes=[ctypes.c_uint64,ctypes.c_uint64]
+        lib.board_user_mmio_present.argtypes=[ctypes.c_uint64]
+        lib.board_user_mmio_index.argtypes=[ctypes.c_uint64]
+        self.assertEqual(lib.board_user_mmio_allowed(0x9010000,0x1000),1)
+        self.assertEqual(lib.board_user_mmio_allowed(0x9010ffc,4),1)
+        for physical,size in [(0x101000,0x1000),(0x40000000,4096),
+                              (0x9010fff,2),(0x9010000,0),
+                              (0x9010000,2**64-1),(0x900ffff,1)]:
+            self.assertEqual(lib.board_user_mmio_allowed(physical,size),0)
+        self.assertEqual(lib.board_user_mmio_index(0x9010000),0)
+        self.assertEqual(lib.board_user_mmio_index(0x101000),-1)
+        self.assertEqual(lib.references(),0)
+        lib.reset()
+        self.assertEqual(lib.board_user_mmio_present(0x9010000),0)
+        self.assertEqual(lib.board_user_mmio_allowed(0x9010000,0x1000),0)
+        self.assertEqual(lib.board_user_mmio_index(0x9010000),-1)
+        self.assertEqual(lib.references(),0)
+
     def test_la64_does_not_invent_an_rv64_rtc(self):
         lib=self.configure('la64');self.assertEqual(lib.device_count(),0)
         lib=self.configure('la64',[(0x123000,b'google,goldfish-rtc')])
