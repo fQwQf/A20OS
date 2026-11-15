@@ -1,0 +1,9 @@
+#!/sbin/openrc-run
+description="A20OS 1.0 Native supervision acceptance"
+command="/bin/sh"
+command_args="/usr/lib/a20/supervision-qa.sh"
+command_background=true
+pidfile="/run/a20-supervision-qa.pid"
+output_log="/dev/console"
+error_log="/dev/console"
+depend() { need a20-desktop; }
