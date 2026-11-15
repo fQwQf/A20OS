@@ -18,6 +18,7 @@
 #include "core/stdio.h"
 #include "core/timer.h"
 #include "core/cpu.h"
+#include "core/preempt.h"
 #include "proc/proc.h"
 #include "hyp_asm_offsets.h"
 _Static_assert(__builtin_offsetof(hyp_vcpu_t, fpu) == HYP_ASM_VCPU_FPU_OFF, "FPU offset");
@@ -461,8 +462,14 @@ int hyp_arch_guest_trap(void *trap_frame)
      * and the guest would re-trap on it the instant it resumed.  A preemption
      * request raised here (proc_sched_tick only asks) is consumed after the
      * guest is gone, at the syscall's own safe point. */
-    if (scause & CAUSE_INTR_MASK)
+    if (scause & CAUSE_INTR_MASK) {
+        /* Guest frames bypass generic kernel_trap_handler IRQ bookkeeping.
+         * Keep wake/driver callbacks in hardirq context until the source has
+         * been serviced; the RUN exit remains the reschedule boundary. */
+        hardirq_enter();
         arch_handle_irq(scause & CAUSE_CODE_MASK, 0);
+        hardirq_exit();
+    }
 
     int resume = hyp_vcpu_handle_trap(vcpu, ctx, scause, arch_read_tval(),
                                       hyp_read_htval());
