@@ -12,7 +12,8 @@ PRE = r'''
 #include <stdint.h>
 #include <stddef.h>
 #define PCACHE_PAGE_SIZE 4096
-typedef struct { int enabled,txn_faulted,lock; } ext4_journal_t;
+#define JBD2_TXN_COLLECTING 0U
+typedef struct { int enabled,txn_faulted,lock; uint32_t txn_phase; } ext4_journal_t;
 typedef struct { ext4_journal_t *journal; void *bc; unsigned block_size; } ext4_sb_info_t;
 static int writes,holds,records,write_error;
 static int ext4_is_inconsistent(ext4_sb_info_t *fs){(void)fs;return 0;}
@@ -30,6 +31,11 @@ int main(void){
  assert(ext4_journal_meta_write(&fs,1024,&byte,1)==-EIO);
  assert(!writes&&!holds&&!records&&!ej.lock);
  ej.txn_faulted=0;
+ for (ej.txn_phase=1;ej.txn_phase<=4;ej.txn_phase++) {
+  assert(ext4_journal_meta_write(&fs,1024,&byte,1)==-EIO);
+  assert(!writes&&!holds&&!records&&!ej.lock);
+ }
+ ej.txn_phase=0;
  assert(ext4_journal_meta_write(&fs,1024,&byte,1)==0);
  assert(writes==1&&holds==1&&records==1&&!ej.lock);
  write_error=-EIO;
@@ -47,7 +53,7 @@ class JournalFaultFreeze(unittest.TestCase):
     def test_c_collector_freezes_before_cache_mutation(self):
         source = (ROOT / 'kernel/fs/diskfs/ext4_journal.c').read_text()
         code = function(source, 'ext4_journal_meta_write')
-        guard = '''    if (ej->txn_faulted) {
+        guard = '''    if (ej->txn_faulted || ej->txn_phase != JBD2_TXN_COLLECTING) {
         mutex_unlock(&ej->lock);
         return -EIO;
     }
