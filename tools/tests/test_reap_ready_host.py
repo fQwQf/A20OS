@@ -85,6 +85,7 @@ static void spin_unlock_irqrestore(spinlock_t *lock, uint64_t flags) {
 }
 static void mm_context_leave(void *mm, unsigned cpu) { (void)mm; (void)cpu; }
 static unsigned proc_sched_select_cpu_locked(task_t *t) { (void)t; return 0; }
+static void proc_sched_set_task_cpu_locked(task_t *t, unsigned cpu) { t->cpu_id = cpu; }
 static void proc_runq_enqueue_locked(task_t *t) { t->on_rq = 1; }
 static int proc_sched_should_preempt_locked(task_t *t, unsigned cpu) { (void)t; (void)cpu; return 0; }
 static void proc_sched_request_cpu(unsigned cpu, int resched) { (void)cpu; (void)resched; }

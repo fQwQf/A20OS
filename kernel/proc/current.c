@@ -85,7 +85,7 @@ static task_t *proc_switch_complete_locked(unsigned cpu)
         unsigned target = cpu;
         if (old->affinity_migrate_pending) {
             target = proc_sched_select_cpu_locked(old);
-            old->cpu_id = target;
+            proc_sched_set_task_cpu_locked(old, target);
             old->affinity_migrate_pending = 0;
         }
         proc_runq_enqueue_locked(old);

@@ -114,6 +114,7 @@ static void sched_runq_eevdf_del_weight(proc_runq_t *rq, task_t *t) {
     (void)t; assert(rq->lock);
 }
 static unsigned sched_task_cpu_mask(task_t *t) { (void)t; return 3; }
+static void proc_sched_set_task_cpu_locked(task_t *t, unsigned cpu) { t->cpu_id = cpu; }
 '''
         check = r'''
 int main(void) {
@@ -137,7 +138,7 @@ int main(void) {
         migrations = ('        __atomic_fetch_add(&sched_runqueue_migrations, '
                       '1, __ATOMIC_RELAXED);\n')
         unlock = '        spin_unlock_irqrestore(&rrq->lock, rrf);\n'
-        publish = '        t->cpu_id = local;\n'
+        publish = '        proc_sched_set_task_cpu_locked(t, local);\n'
         release_after_remove = unlock + migrations
         if steal.count(release_after_remove) != 1 or steal.count(publish) != 1:
             raise ValueError(

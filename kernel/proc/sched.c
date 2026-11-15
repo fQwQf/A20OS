@@ -528,6 +528,28 @@ static void eevdf_reset_deadline(task_t *t)
     spin_unlock_irqrestore(&t->eevdf_deadline_lock, flags);
 }
 
+extern uint64_t a20_eevdf_rebase(uint64_t runtime, uint64_t source, uint64_t destination);
+
+/* park_lock owns an unqueued task; the steal path instead owns both runqueues.
+ * Virtual times are CPU-local coordinates. Carry lag across a move, rather
+ * than making a task wait for the destination clock to catch up by seconds.
+ * Sampling the clocks independently avoids blocking on a second runqueue in
+ * the ordinary park-lock path; their small sampling skew is bounded by the
+ * IRQ-masked caller, and sleeper credit is clamped when the task is queued. */
+void proc_sched_set_task_cpu_locked(task_t *t, unsigned destination)
+{
+    unsigned source = t->cpu_id;
+    if (source != destination && source < CONFIG_NR_CPUS &&
+        destination < CONFIG_NR_CPUS && t->eevdf_deadline &&
+        !sched_task_rt(t) && !sched_task_dl(t)) {
+        uint64_t from = __atomic_load_n(&sched_runq[source].eevdf_vtime, __ATOMIC_RELAXED);
+        uint64_t to = __atomic_load_n(&sched_runq[destination].eevdf_vtime, __ATOMIC_RELAXED);
+        t->eevdf_vruntime = a20_eevdf_rebase(t->eevdf_vruntime, from, to);
+        eevdf_reset_deadline(t);
+    }
+    t->cpu_id = destination;
+}
+
 static void eevdf_account_run(task_t *t, uint64_t dt)
 {
     uint64_t flags = spin_lock_irqsave(&t->eevdf_deadline_lock);
@@ -1170,13 +1192,13 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     }
 
     if (ready) {
-        t->cpu_id = target_cpu;
+        proc_sched_set_task_cpu_locked(t, target_cpu);
         proc_runq_enqueue_locked(t);
         if (old_cpu != target_cpu)
             __atomic_fetch_add(&sched_runqueue_migrations, 1, __ATOMIC_RELAXED);
         proc_put(t); /* replaced the detached queue reference */
     } else if (!t->on_cpu && !t->dispatching && !t->on_rq) {
-        t->cpu_id = target_cpu;
+        proc_sched_set_task_cpu_locked(t, target_cpu);
     }
 
     int queued = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
@@ -1721,7 +1743,7 @@ int proc_sched_resume_task(task_t *t)
         } else if (!t->dispatching && !t->on_rq) {
             uint32_t eligible = sched_task_cpu_mask(t);
             if (t->cpu_id >= 32 || !(eligible & (1U << t->cpu_id)))
-                t->cpu_id = proc_sched_select_cpu_locked(t);
+                proc_sched_set_task_cpu_locked(t, proc_sched_select_cpu_locked(t));
         }
         target_cpu = t->cpu_id;
         queued = proc_runq_enqueue_locked(t);
@@ -2121,7 +2143,7 @@ void proc_make_ready(task_t *t)
     } else if (!__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
                !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED)) {
         if (first_ready || !was_blocked)
-            t->cpu_id = proc_sched_select_cpu_locked(t);
+            proc_sched_set_task_cpu_locked(t, proc_sched_select_cpu_locked(t));
     }
     target_cpu = t->cpu_id;
     /* A runtime-exhausted deadline task is already on the throttle list; it
@@ -2284,7 +2306,7 @@ int proc_sched_resume_stopped(task_t *t, int report_continued)
             t->cpu_id = __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED);
         } else if (!__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
                    !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED)) {
-            t->cpu_id = proc_sched_select_cpu_locked(t);
+            proc_sched_set_task_cpu_locked(t, proc_sched_select_cpu_locked(t));
         }
         target_cpu = t->cpu_id;
         queued = proc_runq_enqueue_locked(t);
@@ -2464,7 +2486,7 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
          * must never observe an unqueued task without a dispatch owner:
          * it could enqueue a second copy during that gap. Both source and
          * destination queues are locked until this publication is complete. */
-        t->cpu_id = local;
+        proc_sched_set_task_cpu_locked(t, local);
         t->dispatching = 1;
         t->owner_cpu = local;
         spin_unlock_irqrestore(&rrq->lock, rrf);
