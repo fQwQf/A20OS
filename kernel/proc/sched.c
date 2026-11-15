@@ -2148,6 +2148,7 @@ void proc_sched_stop_current(int exit_code)
 
     task_t *notify_parent = NULL;
     task_t *wake_for = NULL;
+    int group_stop = 0;
     /*
      * D: only this task's park_lock is held here.  The child-waiter wake walks
      * the global list and takes each candidate's park_lock, so it runs after
@@ -2164,17 +2165,19 @@ void proc_sched_stop_current(int exit_code)
      */
     if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE) ||
         signal_task_has_fatal(t) ||
-        signal_task_continue_pending(t)) {
+        signal_task_continue_pending(t) ||
+        signal_task_group_stop_cancelled(t)) {
         spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
     if (t->state == PROC_RUNNING) {
         t->exit_code = exit_code;
-        t->stop_report_pending = 1;
+        group_stop = signal_task_group_stop_active(t);
+        t->stop_report_pending = !group_stop;
         t->continue_report_pending = 0;
         t->state = PROC_STOPPED;
         task_t *parent = t->parent;
-        if (parent) {
+        if (parent && !group_stop) {
             int pstate = proc_task_state_get(parent);
             if (pstate != PROC_UNUSED && pstate != PROC_ZOMBIE) {
                 wake_for = parent;
@@ -2186,6 +2189,8 @@ void proc_sched_stop_current(int exit_code)
     }
     spin_unlock_irqrestore(&t->park_lock, flags);
 
+    if (group_stop)
+        signal_group_stop_completed(t, exit_code);
     if (wake_for)
         proc_wake_child_waiters(wake_for);
     if (notify_parent) {

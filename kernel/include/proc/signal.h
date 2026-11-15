@@ -69,6 +69,7 @@ typedef struct signal_state {
      * signal struct).  Inherited across fork via signal_copy(), preserved by
      * signal_exec_reset().  0 suppresses core dumps. */
     uint64_t    rlim_core;
+
 } signal_state_t;
 
 /*
@@ -139,6 +140,10 @@ int  signal_task_user_handler_available(void *task, int signum);
 int  signal_task_sigchld_auto_reap(void *task);
 int  signal_task_sigchld_no_cldstop(void *task);
 int  signal_task_continue_pending(void *task);
+int  signal_task_group_stop_cancelled(void *task);
+void signal_group_stop_inherit(void *task);
+int signal_task_group_stop_active(void *task);
+void signal_group_stop_completed(void *task, int sig);
 int  signal_task_set_temporary_mask(void *task, uint64_t new_mask,
                                     uint64_t *old_mask);
 void signal_task_restore_mask(void *task, uint64_t old_mask);
