@@ -24,7 +24,13 @@ outcome:
 """
 
 import argparse
+import hashlib
+import json
 import os
+from pathlib import Path
+import re
+import selectors
+import time
 import shutil
 import subprocess
 import sys
@@ -122,8 +128,8 @@ def fsck_clean(image, e2fsck):
                "count wrong", "does not match checksum", "ERROR",
                "MULTIPLE", "UNEXPECTED", "missing", "orphan",
                "FILE SYSTEM WAS MODIFIED", "UNDELETE"))]
-    if bad:
-        raise GateError("e2fsck found problems:\n  " + "\n  ".join(bad))
+    if proc.returncode or bad:
+        raise GateError(f"e2fsck exited {proc.returncode}:\n" + out)
     return out
 
 
@@ -154,7 +160,7 @@ def run_point(arch, build_dir, workdir, log_dir, delay, e2fsck,
                         f"  tail of {log1}:\n" + tail(text1))
     if "[PANIC]" not in text1:
         raise GateError(f"{point}: injected crash did not panic\n" + tail(text1))
-    fsck_clean(ext_copy, e2fsck)
+    Path(log1 + ".fsck").write_text(fsck_clean(ext_copy, e2fsck))
 
     # Boot 2: same image, no injection.  Recovery has to run on its own.
     log2 = os.path.join(log_dir, f"ext4-journal-{arch}-{point}-recover.log")
@@ -179,7 +185,7 @@ def run_point(arch, build_dir, workdir, log_dir, delay, e2fsck,
     elif got_file:
         raise GateError(f"{point}: an uncommitted transaction came back\n"
                         + tail(text2))
-    fsck_clean(ext_copy, e2fsck)
+    Path(log2 + ".fsck").write_text(fsck_clean(ext_copy, e2fsck))
     return replayed
 
 
@@ -200,7 +206,7 @@ def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck, timeout):
     if "recovery start=" in text1:
         raise GateError("a clean run replayed a journal: the previous boot's "
                         "checkpoint did not finish\n" + tail(text1))
-    fsck_clean(ext_copy, e2fsck)
+    Path(log1 + ".fsck").write_text(fsck_clean(ext_copy, e2fsck))
 
     log2 = os.path.join(log_dir, f"ext4-journal-{arch}-clean-read.log")
     feed(QEMU[arch](kernel, fat_copy, ext_copy, []), READ_SCRIPT, delay,
@@ -212,53 +218,64 @@ def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck, timeout):
     if "recovery start=" in text2:
         raise GateError("clean reboot replayed a journal it should not have\n"
                         + tail(text2))
-    fsck_clean(ext_copy, e2fsck)
+    Path(log2 + ".fsck").write_text(fsck_clean(ext_copy, e2fsck))
 
 
 def feed(argv, script, delay, log_path, timeout):
-    """Boot the guest, type `script` at the shell, and stop.
+    """Require a natural exit; feed each command only after a fresh shell prompt.
 
-    `timeout` is a hard wall on the whole interaction: a guest that never
-    reaches `halt` (a wedged scheduler, a shell that stopped accepting input)
-    would otherwise hang the gate forever instead of failing it.  The QEMU
-    process is killed and the caller sees a non-zero return so the case is
-    reported as a failure with the partial log."""
-    feeder = subprocess.Popen(
-        ["bash", "-c", f"sleep {delay}; printf '{script}'"],
-        stdout=subprocess.PIPE,
-    )
-    guest = subprocess.Popen(
-        argv, stdin=feeder.stdout,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-    )
-    feeder.stdout.close()
-    try:
-        try:
-            out, _ = guest.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            guest.kill()
-            out, _ = guest.communicate()
-            with open(log_path, "wb") as log:
-                log.write(out or b"")
-            raise GateError(
-                f"guest did not finish within {timeout}s (killed); the "
-                f"interaction hung rather than completing\n"
-                + tail((out or b"").decode("utf-8", "replace")))
-        with open(log_path, "wb") as log:
-            log.write(out or b"")
-    finally:
-        if guest.poll() is None:
-            guest.kill()
-            guest.wait()
-        feeder.kill()
-        feeder.wait()
+    delay remains accepted for callers of the older fixed-delay gate. Terminal
+    cursor queries are answered so BusyBox line editing works over pipes.
+    """
+    del delay
+    output = bytearray()
+    pending = script.splitlines()
+    cursor = queries = 0
+    last_output = time.monotonic()
+    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, bufsize=0) as guest:
+        with selectors.DefaultSelector() as poller:
+            poller.register(guest.stdout, selectors.EVENT_READ)
+            deadline = time.monotonic() + timeout
+            try:
+                while guest.poll() is None and time.monotonic() < deadline:
+                    for key, _ in poller.select(.03):
+                        data = os.read(key.fd, 65536)
+                        if data:
+                            output.extend(data)
+                            last_output = time.monotonic()
+                        else:
+                            poller.unregister(key.fileobj)
+                    seen = output.count(b"\x1b[6n")
+                    if guest.poll() is None and seen > queries:
+                        guest.stdin.write(b"\x1b[1;1R" * (seen - queries))
+                        guest.stdin.flush()
+                        queries = seen
+                    if pending and guest.poll() is None and time.monotonic() - last_output >= .05:
+                        if re.search(rb"(?:^|[\r\n])# ", output[cursor:]):
+                            cursor = len(output)
+                            guest.stdin.write((pending.pop(0) + "\n").encode())
+                            guest.stdin.flush()
+                if guest.poll() is None:
+                    raise GateError(f"guest did not finish within {timeout}s (killed)")
+                output.extend(guest.stdout.read() or b"")
+                if guest.returncode:
+                    raise GateError(f"guest exited with status {guest.returncode}")
+                if re.search(rb"UBSAN:|Kernel BUG|LOCK-STALL", output):
+                    raise GateError("guest kernel diagnostic failed")
+                if b"CRASH-INJECT " not in output and b"[SD] POWER_OFF entry" not in output:
+                    raise GateError("guest exited without crash injection or completed shutdown")
+            finally:
+                if guest.poll() is None:
+                    guest.kill(); guest.wait()
+                Path(log_path).write_bytes(output)
 
 
 def tail(text, lines=25):
     return "  " + "\n  ".join(text.splitlines()[-lines:])
 
 
-def main():
+def run_main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", default="x86_64", choices=sorted(QEMU))
     parser.add_argument("--build-dir",
@@ -268,9 +285,19 @@ def main():
     parser.add_argument("--delay", type=int, default=22,
                         help="seconds to wait before typing at the shell")
     parser.add_argument("--e2fsck", default=shutil.which("e2fsck") or "e2fsck")
+    parser.add_argument("--cpus", type=int, default=1, help="configured guest CPU count")
     parser.add_argument("--keep", action="store_true",
                         help="keep the scratch image directory")
     args = parser.parse_args()
+
+    if args.cpus < 1:
+        parser.error("--cpus must be positive")
+    original_qemu = QEMU[args.arch]
+    def configured_qemu(*values):
+        argv = original_qemu(*values)
+        argv[argv.index("-smp") + 1] = str(args.cpus)
+        return argv
+    QEMU[args.arch] = configured_qemu
 
     if shutil.which(args.e2fsck) is None and not os.path.exists(args.e2fsck):
         print(f"ext4-journal-gate: {args.e2fsck} not found; cannot verify "
@@ -283,9 +310,17 @@ def main():
 
     control = tempfile.mkdtemp(prefix="a20-journal-")
     workdir = None
+    report = dict(passed=False, arch=args.arch, cpus=args.cpus, cases=[],
+                  kernel_sha256=hashlib.sha256(Path(build_dir, "kernel.elf").read_bytes()).hexdigest(),
+                  image_sha256=hashlib.sha256(Path(build_dir, "ext4-journal.img").read_bytes()).hexdigest())
+    def record(name, directory):
+        report["cases"].append(dict(name=name, image=str(Path(directory, "ext4.img")),
+            postimage_sha256=hashlib.sha256(Path(directory, "ext4.img").read_bytes()).hexdigest()))
+        Path(args.log_dir, "report.json").write_text(json.dumps(report, indent=2) + "\n")
     try:
         run_clean(args.arch, build_dir, control, args.log_dir, args.delay,
                   args.e2fsck, args.timeout)
+        record("clean", control)
         print("ext4-journal-gate: clean run PASS (no replay, file intact, "
               "e2fsck clean)")
         for point, survives in CRASH_POINTS:
@@ -293,6 +328,7 @@ def main():
             replayed = run_point(args.arch, build_dir, workdir, args.log_dir,
                                  args.delay, args.e2fsck, point, survives,
                                  args.timeout)
+            record(point, workdir)
             state = "replayed" if replayed else "nothing to replay"
             expect = "survives" if survives else "correctly lost"
             print(f"ext4-journal-gate: {point} PASS "
@@ -303,10 +339,13 @@ def main():
         if not args.keep:
             shutil.rmtree(control, ignore_errors=True)
             control = None
+        report["passed"] = True
     except GateError as exc:
+        report["error"] = str(exc)
         print(f"ext4-journal-gate: FAIL\n{exc}", file=sys.stderr)
         return 1
     finally:
+        Path(args.log_dir, "report.json").write_text(json.dumps(report, indent=2) + "\n")
         # The per-crash-point workdir and the control dir each hold a full ext4
         # image (hundreds of MB), so a failure or a killed run must reclaim them
         # too -- previously only the success path did, leaking one image per
@@ -316,6 +355,24 @@ def main():
                 if leftover is not None:
                     shutil.rmtree(leftover, ignore_errors=True)
     return 0
+
+
+def main():
+    root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(root / "tools"))
+    sys.path.insert(0, str(root / "tools/cli"))
+    from a20_resource import Policy, Requirement, gate
+    from smoke import guest_slot_locks, _release_guest_slot_locks
+    state, handles = guest_slot_locks()
+    if state == "busy":
+        print("ext4-journal-gate: shared QEMU slot busy"); return 75
+    try:
+        policy = Policy.from_env()
+        gate(Requirement(1024 + policy.reserve_mem_mb, 2, policy.min_disk_mb),
+             policy, root, wait=False, label="ext4 journal crash recovery")
+        return run_main()
+    finally:
+        if handles is not None: _release_guest_slot_locks(handles)
 
 
 if __name__ == "__main__":
