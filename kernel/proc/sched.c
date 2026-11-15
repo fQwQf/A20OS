@@ -2779,7 +2779,12 @@ static void context_switch_locked(task_t *next) {
             panic("context switch: next pid=%d kstack=0x%lx base=%p outside kernel stack",
                   next->pid, (unsigned long)kc, next->kstack_base);
         uintptr_t ksp = arch_task_context_resume_sp((task_context_t *)kc);
-        if (ksp < kb || ksp - kb > KERNEL_STACK_SIZE)
+        int sp_valid = ksp >= kb && ksp - kb <= KERNEL_STACK_SIZE;
+#ifdef ARCH_TASK_EXTRA_RESUME_STACK_VALID
+        if (!sp_valid)
+            sp_valid = ARCH_TASK_EXTRA_RESUME_STACK_VALID(next, ksp);
+#endif
+        if (!sp_valid)
             panic("context switch: next pid=%d saved sp=0x%lx kstack=0x%lx base=%p",
                   next->pid, (unsigned long)ksp, (unsigned long)kc, next->kstack_base);
     }

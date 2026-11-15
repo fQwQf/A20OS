@@ -86,22 +86,23 @@ int main(int argc, char **argv) {
                   value) ||
                 cpu >= 2 || control > 1 || write > 1 ||
                 (size != 1 && size != 2 && size != 4 && size != 8) ||
-                (size != 1 && (address & 1)) || address >= (1U << 26))
+                (control && size != 1 && (address & 1)) ||
+                address >= (1U << 26) || size > (1U << 26) - address)
                 throw std::runtime_error("invalid cosimulation request");
             uint64_t result = 0;
-            if (size == 1) {
-                unsigned shift = (address & 1) * 8;
-                result =
-                    (halfword(cpu, control, write, address & ~1U,
-                              uint16_t(value << shift), 1U << (address & 1)) >>
-                     shift) &
-                    255;
-            } else {
-                for (unsigned offset = 0; offset < size; offset += 2)
-                    result |=
-                        uint64_t(halfword(cpu, control, write, address + offset,
-                                          uint16_t(value >> (offset * 8)), 3))
-                        << (offset * 8);
+            // Cortex-M3 normal-memory unaligned accesses are split into bus
+            // beats. FSMC exposes aligned 16-bit words plus byte lanes; never
+            // pass a fictitious odd halfword transaction to the RTL pins.
+            for (unsigned offset = 0; offset < size;) {
+                unsigned current = address + offset;
+                unsigned width = !(current & 1) && size - offset >= 2 ? 2 : 1;
+                unsigned shift = (current & 1) * 8;
+                unsigned lanes = width == 2 ? 3 : 1U << (current & 1);
+                unsigned mask = width == 2 ? 65535 : 255;
+                uint16_t beat = halfword(cpu, control, write, current & ~1U,
+                    uint16_t((value >> (offset * 8)) << shift), lanes);
+                result |= uint64_t((beat >> shift) & mask) << (offset * 8);
+                offset += width;
             }
             std::cout << result << '\n' << std::flush;
         }

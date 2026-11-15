@@ -56,6 +56,18 @@ static int within(uintptr_t base, size_t size, uintptr_t p, size_t n) {
     return p >= base && p - base <= size && n <= size - (p - base);
 }
 
+int armv7m_program_resume_stack_valid(const task_t *task, uintptr_t sp) {
+    const armv7m_program_t *p = task ? task->arch_program : NULL;
+    const task_context_t *ctx = task ? (const void *)(uintptr_t)task->kstack : NULL;
+    /* Native SVC/tick trampolines execute privileged Thread mode on the
+     * application's PSP. A blocked syscall therefore saves a PSP inside its
+     * owned/pinned application stack, rather than the separate kernel MSP.
+     * Admit only that state; MSP and ordinary kernel tasks retain the generic
+     * kernel-stack guard, and arbitrary flat-memory addresses are rejected. */
+    return p && p->owner && p->in_kernel && ctx && ctx->control == 2U &&
+           p->stack && within((uintptr_t)p->stack, p->stack_size, sp, 0);
+}
+
 int mcu_program_user_range(const void *pointer, size_t length) {
     task_t *task = proc_current();
     armv7m_program_t *p = task ? task->arch_program : NULL;
