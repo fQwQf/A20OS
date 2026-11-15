@@ -1,5 +1,5 @@
 #define DRV_ENV_USER 1
-#include "drivers/dual/goldfish_rtc.h"
+#include "drivers/dual/service_rtc.h"
 #include "liba20rt/a20_sdk.h"
 #include "drivers/driver_descriptor.h"
 #include "rtcd_rust_abi.h"
@@ -7,21 +7,20 @@
 a20_start_info_t *a20_get_start_info(void);
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
-                      A20_DRIVER_TYPE_RTC, "goldfish-rtc", A20_DRIVER_ABI,
+                      A20_DRIVER_TYPE_RTC, SERVICE_RTC_NAME, A20_DRIVER_ABI,
                       A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ,
                       A20_DRIVER_FLAG_SUPERVISED, 1,
-                      A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO, 0x101000UL, 0));
+                      A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO, SERVICE_RTC_BASE, 0));
 
-#define GOLDFISH_RTC_IRQ 11u
 #define IRQ_TAG 0x52435449ULL
 
 int64_t a20_rtcd_init(uint64_t *rtc_base, uint32_t *stdout_handle)
 {
     a20_start_info_t *si = a20_get_start_info();
     *stdout_handle = si ? si->stdout_handle : A20_HANDLE_NULL;
-    a20_status_t status = a20_device_claim(GOLDFISH_RTC_BASE);
+    a20_status_t status = a20_device_claim(SERVICE_RTC_BASE);
     if (status < 0) return status;
-    *rtc_base = grtc_map();
+    *rtc_base = service_rtc_map();
     return *rtc_base ? A20_OK : -1;
 }
 
@@ -32,7 +31,7 @@ int64_t a20_rtcd_watch(uint32_t queue, uint32_t handle, uint64_t tag)
 { return a20_event_watch(queue, handle, A20_EVENT_MASK(A20_EVENT_MESSAGE_READY), tag); }
 
 int64_t a20_rtcd_irq_listen(uint32_t queue, uint64_t tag)
-{ return a20_device_irq_listen(GOLDFISH_RTC_IRQ, queue, tag); }
+{ return a20_device_irq_listen(SERVICE_RTC_IRQ, queue, tag); }
 
 int64_t a20_rtcd_recv(uint32_t endpoint, uint8_t *bytes, uint32_t *length)
 {
@@ -52,10 +51,10 @@ int64_t a20_rtcd_wait(uint32_t queue, uint64_t *tag)
     return status;
 }
 
-uint64_t a20_rtcd_read_ns(uint64_t base) { return grtc_read_ns(base); }
+uint64_t a20_rtcd_read_ns(uint64_t base) { return service_rtc_read_ns(base); }
 void a20_rtcd_set_alarm(uint64_t base, uint64_t deadline_ns)
-{ grtc_set_alarm_ns(base, deadline_ns); }
-void a20_rtcd_clear_alarm(uint64_t base) { grtc_clear_alarm(base); }
-int64_t a20_rtcd_irq_ack(void) { return a20_device_irq_ack(GOLDFISH_RTC_IRQ); }
+{ service_rtc_set_alarm_ns(base, deadline_ns); }
+void a20_rtcd_clear_alarm(uint64_t base) { service_rtc_clear_alarm(base); }
+int64_t a20_rtcd_irq_ack(void) { return a20_device_irq_ack(SERVICE_RTC_IRQ); }
 void a20_rtcd_log(uint32_t handle, const uint8_t *bytes, uint32_t length)
 { (void)a20_hdl_write_buf(handle, bytes, length, 0); }
