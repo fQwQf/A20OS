@@ -17,10 +17,12 @@
 #include "mm/mm.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
+#include <stdint.h>
 
 #define VIRTIO_SCSI_QUEUE_SIZE 32
 #define VIRTIO_SCSI_REQUEST_QUEUE 2U
 #define VIRTIO_SCSI_MAX_DEVS 4
+#define VIRTIO_SCSI_DMA_BYTES 65536U
 #define VIRTIO_SCSI_CDB_SIZE 32
 #define VIRTIO_SCSI_SENSE_SIZE 96
 #define VIRTIO_SCSI_TIMEOUT_TICKS (clock_ticks_per_sec() * 10)
@@ -120,10 +122,17 @@ typedef struct {
     uint64_t capacity;
     int slot;
     int ready;
+    device_t *device;
+    uint32_t consumer_refs;
+    int closing;
+    int transport_live;
+    uint8_t *bounce;
+    uint64_t bounce_dma;
 } virtio_scsi_dev_t;
 
 static virtio_scsi_dev_t g_scsi[VIRTIO_SCSI_MAX_DEVS];
-static int g_scsi_count;
+static spinlock_t g_scsi_instance_lock = SPINLOCK_INIT;
+static int virtio_scsi_stop(void *context);
 
 /* a20.virtio-scsi.poll=1 forces the polling completion path even on a
  * transport that exposes an interrupt line.  It is the manual counterpart of
@@ -163,6 +172,9 @@ static int virtio_scsi_setup_queue(virtio_scsi_dev_t *dev, uint32_t queue,
     memset(desc, 0, sizeof(virtq_desc_t) * VIRTIO_SCSI_QUEUE_SIZE);
     memset(avail, 0, sizeof(*avail));
     memset(used, 0, sizeof(*used));
+    arch_dma_sync_for_device(desc, sizeof(*desc) * VIRTIO_SCSI_QUEUE_SIZE);
+    arch_dma_sync_for_device(avail, sizeof(*avail));
+    arch_dma_sync_for_device(used, sizeof(*used));
     vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_LOW, (uint32_t)va_to_pa(desc));
     vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_HIGH,
                 (uint32_t)((uint64_t)va_to_pa(desc) >> 32));
@@ -250,6 +262,22 @@ static int virtio_scsi_command_once(virtio_scsi_dev_t *dev, const uint8_t *cdb,
                                     int *unit_attention) {
     mutex_lock(&dev->lock);
     *unit_attention = 0;
+    if (__atomic_load_n(&dev->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&dev->lock);
+        return -ENODEV;
+    }
+    if (bytes > VIRTIO_SCSI_DMA_BYTES || (bytes && (!data || !dev->bounce))) {
+        mutex_unlock(&dev->lock);
+        return -EINVAL;
+    }
+    /* Only driver-owned storage crosses the DMA boundary. A timeout can
+     * return to the caller while the device still owns this entire chain. */
+    if (bytes) {
+        if (data_in)
+            memset(dev->bounce, 0, bytes);
+        else
+            memcpy(dev->bounce, data, bytes);
+    }
     dev->commands++;
     memset(&dev->req, 0, sizeof(dev->req));
     memset(&dev->resp, 0, sizeof(dev->resp));
@@ -265,7 +293,7 @@ static int virtio_scsi_command_once(virtio_scsi_dev_t *dev, const uint8_t *cdb,
         /* Device-readable descriptors must precede device-writable ones. */
         dev->desc[0].flags = VIRTQ_DESC_F_NEXT;
         dev->desc[0].next = 1;
-        dev->desc[1].addr = va_to_pa(data);
+        dev->desc[1].addr = dev->bounce_dma;
         dev->desc[1].len = (uint32_t)bytes;
         dev->desc[1].flags = VIRTQ_DESC_F_NEXT;
         dev->desc[1].next = 2;
@@ -283,7 +311,7 @@ static int virtio_scsi_command_once(virtio_scsi_dev_t *dev, const uint8_t *cdb,
         dev->desc[2].len = sizeof(dev->resp);
         dev->desc[2].flags = VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE;
         dev->desc[2].next = 1;
-        dev->desc[1].addr = va_to_pa(data);
+        dev->desc[1].addr = dev->bounce_dma;
         dev->desc[1].len = (uint32_t)bytes;
         dev->desc[1].flags = VIRTQ_DESC_F_WRITE;
         dev->desc[1].next = 0;
@@ -303,7 +331,7 @@ static int virtio_scsi_command_once(virtio_scsi_dev_t *dev, const uint8_t *cdb,
     dev->avail.idx++;
     arch_dma_sync_for_device(&dev->req, sizeof(dev->req));
     if (bytes)
-        arch_dma_sync_for_device(data, bytes);
+        arch_dma_sync_for_device(dev->bounce, bytes);
     arch_dma_sync_for_device(&dev->resp, sizeof(dev->resp));
     arch_dma_sync_for_device(dev->desc, sizeof(dev->desc));
     arch_dma_sync_for_device(&dev->avail, sizeof(dev->avail));
@@ -327,9 +355,12 @@ static int virtio_scsi_command_once(virtio_scsi_dev_t *dev, const uint8_t *cdb,
          * not freeze the whole boot permanently. */
         if (timer_get_ticks() >= deadline || --spins == 0) {
             dev->timeouts++;
+            __atomic_store_n(&dev->closing, 1, __ATOMIC_RELEASE);
+            /* Do not overwrite or recycle a chain whose ownership is
+             * uncertain. Explicit stop/reset and rebind are required. */
             mutex_unlock(&dev->lock);
             kinfo("[VIRTIO-SCSI] request timeout\n");
-            return -1;
+            return -ETIMEDOUT;
         }
         if (!dev->irq_registered || timer_get_ticks() < pre_poll_until) {
             arch_cpu_relax();
@@ -356,16 +387,38 @@ static int virtio_scsi_command_once(virtio_scsi_dev_t *dev, const uint8_t *cdb,
         wait_queue_unlink(&dev->waiters, &entry);
         proc_park_finish(token);
     }
+    /* This driver has one outstanding chain headed by descriptor zero.
+     * A foreign/stale completion does not hand that chain back to us. */
+    arch_dma_sync_for_cpu(&dev->used, sizeof(dev->used));
+    uint32_t used_bytes = dev->used.ring[used_before % VIRTIO_SCSI_QUEUE_SIZE].len;
+    size_t writable_data = data_in ? bytes : 0;
+    size_t response_header = sizeof(dev->resp) - sizeof(dev->resp.sense);
+    /* QEMU counts data-out in used.len too. Accept that accounting without
+     * treating the output-only descriptor as device-writable storage. */
+    if ((uint16_t)(dev->used.idx - used_before) != 1U ||
+        dev->used.ring[used_before % VIRTIO_SCSI_QUEUE_SIZE].id != 0U ||
+        (!dev->vt.legacy && (used_bytes < response_header ||
+                            used_bytes > sizeof(dev->resp) + bytes))) {
+        __atomic_store_n(&dev->closing, 1, __ATOMIC_RELEASE);
+        mutex_unlock(&dev->lock);
+        return -EIO;
+    }
     if (completed_while_parked)
         dev->irq_completions++;
     else
         dev->spin_completions++;
     arch_dma_sync_for_cpu(&dev->resp, sizeof(dev->resp));
     if (bytes)
-        arch_dma_sync_for_cpu(data, bytes);
+        arch_dma_sync_for_cpu(dev->bounce, bytes);
     dev->last_used = dev->used.idx;
-    int ok = dev->resp.response == VIRTIO_SCSI_S_OK && dev->resp.status == SCSI_STATUS_GOOD;
-    *unit_attention = !ok && virtio_scsi_was_unit_attention(dev);
+    int valid = dev->resp.sense_len <= VIRTIO_SCSI_SENSE_SIZE && dev->resp.resid <= bytes &&
+                (dev->vt.legacy || used_bytes >= response_header + dev->resp.sense_len);
+    int ok = valid && !dev->resp.resid && dev->resp.response == VIRTIO_SCSI_S_OK &&
+             dev->resp.status == SCSI_STATUS_GOOD &&
+             (!writable_data || dev->vt.legacy || used_bytes == sizeof(dev->resp) + writable_data);
+    *unit_attention = valid && !ok && virtio_scsi_was_unit_attention(dev);
+    if (ok && bytes && data_in)
+        memcpy(data, dev->bounce, bytes);
     /* A unit attention is the caller's to retry, so it is not reported here
      * as a failed command; every other refusal is. */
     if (!ok && !*unit_attention)
@@ -387,11 +440,12 @@ static int virtio_scsi_command(virtio_scsi_dev_t *dev, const uint8_t *cdb,
                                void *data, size_t bytes, int data_in) {
     for (unsigned attempt = 0; attempt <= VIRTIO_SCSI_UA_RETRIES; attempt++) {
         int unit_attention = 0;
-        if (virtio_scsi_command_once(dev, cdb, data, bytes, data_in,
-                                     &unit_attention) == 0)
+        int ret = virtio_scsi_command_once(dev, cdb, data, bytes, data_in,
+                                           &unit_attention);
+        if (ret == 0)
             return 0;
         if (!unit_attention)
-            return -1;
+            return ret;
         if (attempt == VIRTIO_SCSI_UA_RETRIES) {
             kerr("[VIRTIO-SCSI] SCSI command %02x: unit attention did not "
                  "clear after %u retries\n", cdb[0], VIRTIO_SCSI_UA_RETRIES);
@@ -406,15 +460,27 @@ static int virtio_scsi_command(virtio_scsi_dev_t *dev, const uint8_t *cdb,
 static int virtio_scsi_rw(block_dev_t *block, uint64_t lba, void *buf,
                           size_t sectors, int write) {
     virtio_scsi_dev_t *dev = (virtio_scsi_dev_t *)block->priv;
-    if (!dev || !dev->ready || sectors == 0 || sectors > 0xffffU ||
-        lba > 0xffffffffU || lba + sectors > dev->capacity)
-        return -1;
-    uint8_t cdb[VIRTIO_SCSI_CDB_SIZE] = { 0 };
-    cdb[0] = write ? SCSI_CMD_WRITE10 : SCSI_CMD_READ10;
-    put_be32(&cdb[2], (uint32_t)lba);
-    cdb[7] = (uint8_t)(sectors >> 8);
-    cdb[8] = (uint8_t)sectors;
-    return virtio_scsi_command(dev, cdb, buf, sectors * 512U, !write);
+    if (!dev || __atomic_load_n(&dev->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
+    if (!dev->ready || !buf || sectors == 0 || sectors > 0xffffU ||
+        lba > 0xffffffffU || lba >= dev->capacity || sectors > dev->capacity - lba)
+        return -EINVAL;
+    while (sectors) {
+        size_t chunk = sectors > VIRTIO_SCSI_DMA_BYTES / 512U ?
+                       VIRTIO_SCSI_DMA_BYTES / 512U : sectors;
+        uint8_t cdb[VIRTIO_SCSI_CDB_SIZE] = { 0 };
+        cdb[0] = write ? SCSI_CMD_WRITE10 : SCSI_CMD_READ10;
+        put_be32(&cdb[2], (uint32_t)lba);
+        cdb[7] = (uint8_t)(chunk >> 8);
+        cdb[8] = (uint8_t)chunk;
+        int ret = virtio_scsi_command(dev, cdb, buf, chunk * 512U, !write);
+        if (ret)
+            return ret;
+        lba += chunk;
+        sectors -= chunk;
+        buf = (uint8_t *)buf + chunk * 512U;
+    }
+    return 0;
 }
 
 static int virtio_scsi_read(block_dev_t *block, uint64_t lba, void *buf, size_t sectors) {
@@ -433,6 +499,8 @@ static int virtio_scsi_write(block_dev_t *block, uint64_t lba, const void *buf, 
  * exactly the failure the filesystem durability path cannot detect. */
 static int virtio_scsi_flush(block_dev_t *block) {
     virtio_scsi_dev_t *dev = (virtio_scsi_dev_t *)block->priv;
+    if (!dev || __atomic_load_n(&dev->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (!dev || !dev->ready)
         return -1;
     uint8_t cdb[VIRTIO_SCSI_CDB_SIZE] = { 0 };
@@ -443,20 +511,54 @@ static int virtio_scsi_flush(block_dev_t *block) {
     return virtio_scsi_command(dev, cdb, NULL, 0, 0);
 }
 
+static void virtio_scsi_block_release(block_dev_t *block) {
+    virtio_scsi_dev_t *dev = block->priv;
+    uint64_t flags = spin_lock_irqsave(&g_scsi_instance_lock);
+    if (dev->consumer_refs)
+        dev->consumer_refs--;
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
+}
+
 static int virtio_scsi_probe(device_t *pdev) {
-    if (g_scsi_count >= VIRTIO_SCSI_MAX_DEVS)
-        return -1;
-    virtio_scsi_dev_t *dev = &g_scsi[g_scsi_count];
+    int ret = device_probe_use_remove(pdev);
+    if (ret)
+        return ret;
+    uint64_t flags = spin_lock_irqsave(&g_scsi_instance_lock);
+    virtio_scsi_dev_t *dev = NULL;
+    for (int slot = 0; slot < VIRTIO_SCSI_MAX_DEVS; slot++) {
+        if (g_scsi[slot].device)
+            continue;
+        dev = &g_scsi[slot];
+        break;
+    }
+    if (!dev) {
+        spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
+        return -ENOSPC;
+    }
     memset(dev, 0, sizeof(*dev));
+    dev->slot = (int)(dev - g_scsi);
+    dev->device = pdev;
     dev->vt.irq = -1;
     mutex_init(&dev->lock);
     wait_queue_init(&dev->waiters);
+    pdev->drv_priv = dev;
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
+    ret = device_add_execution_action(pdev, virtio_scsi_stop, NULL, dev);
+    if (ret)
+        return ret;
     if (pci_virtio_transport_init(pdev, VIRTIO_ID_SCSI, &dev->vt) != 0) {
         kerr("[VIRTIO-SCSI] PCI transport initialization failed\n");
         return -1;
     }
 
-    dev->vt.write32(&dev->vt, VIRTIO_MMIO_STATUS, 0);
+    dev->transport_live = 1;
+    ret = virtio_transport_reset(&dev->vt, 100);
+    if (ret)
+        return ret;
+    dev->bounce = dma_alloc_coherent_aligned(pdev, VIRTIO_SCSI_DMA_BYTES, 512U,
+                                             &dev->bounce_dma);
+    if (!dev->bounce)
+        return -ENOMEM;
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     dev->vt.write32(&dev->vt, VIRTIO_MMIO_STATUS, status);
     dev->vt.write32(&dev->vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 0);
@@ -549,10 +651,10 @@ static int virtio_scsi_probe(device_t *pdev) {
     dev->block.capacity = dev->capacity;
     dev->block.sector_size = 512;
     dev->block.priv = dev;
-    dev->slot = g_scsi_count;
+    dev->block.release = virtio_scsi_block_release;
+    flags = spin_lock_irqsave(&g_scsi_instance_lock);
     dev->ready = 1;
-    pdev->drv_priv = dev;
-    g_scsi_count++;
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
     kinfo("[VIRTIO-SCSI] disk ready: %lu sectors (%lu MiB), completion=%s irq=%d\n",
           (unsigned long)dev->capacity, (unsigned long)(dev->capacity / 2048U),
           dev->irq_mode == A20_BLK_IRQ_MSIX ? "msix" :
@@ -561,14 +663,22 @@ static int virtio_scsi_probe(device_t *pdev) {
     return 0;
 }
 
-static int virtio_scsi_remove(device_t *pdev) {
-    virtio_scsi_dev_t *dev = pdev ? pdev->drv_priv : NULL;
-    if (!dev)
-        return 0;
-    dev->ready = 0;
-    /* Device reset stops all interrupt sources before the handler goes. */
-    dev->vt.write32(&dev->vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
+static int virtio_scsi_stop(void *context) {
+    virtio_scsi_dev_t *dev = context;
+    uint64_t flags = spin_lock_irqsave(&g_scsi_instance_lock);
+    __atomic_store_n(&dev->closing, 1, __ATOMIC_RELEASE);
+    int pinned = dev->consumer_refs != 0;
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
+    if (pinned || !mutex_trylock(&dev->lock))
+        return -EBUSY;
+    if (dev->transport_live) {
+        int ret = virtio_transport_reset(&dev->vt, 100);
+        if (ret) {
+            mutex_unlock(&dev->lock);
+            return ret;
+        }
+        dev->transport_live = 0;
+    }
     if (dev->irq_mode == A20_BLK_IRQ_MSIX) {
         /* The vectors live at msix_base, not at dev->vt.irq, which MSI-X
          * registration cleared on purpose. */
@@ -579,9 +689,23 @@ static int virtio_scsi_remove(device_t *pdev) {
     }
     dev->irq_registered = 0;
     dev->irq_mode = A20_BLK_IRQ_POLL;
+    mutex_unlock(&dev->lock);
+    return 0;
+}
+
+static int virtio_scsi_remove(device_t *pdev) {
+    virtio_scsi_dev_t *dev = pdev ? pdev->drv_priv : NULL;
+    if (!dev)
+        return 0;
+    int ret = virtio_scsi_stop(dev);
+    if (ret)
+        return ret;
+    if (dev->bounce)
+        dma_free_coherent_aligned(dev->bounce, VIRTIO_SCSI_DMA_BYTES, dev->bounce_dma);
     pdev->drv_priv = NULL;
-    while (g_scsi_count > 0 && !g_scsi[g_scsi_count - 1].ready)
-        g_scsi_count--;
+    uint64_t flags = spin_lock_irqsave(&g_scsi_instance_lock);
+    memset(dev, 0, sizeof(*dev));
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
     return 0;
 }
 
@@ -662,11 +786,26 @@ static driver_t virtio_scsi_driver = {
 DRIVER_REGISTER(virtio_scsi_driver);
 
 block_dev_t *virtio_scsi_get_dev(int index) {
-    if (index < 0 || index >= g_scsi_count || !g_scsi[index].ready)
+    if (index < 0 || index >= VIRTIO_SCSI_MAX_DEVS)
         return NULL;
-    return &g_scsi[index].block;
+    uint64_t flags = spin_lock_irqsave(&g_scsi_instance_lock);
+    virtio_scsi_dev_t *dev = &g_scsi[index];
+    block_dev_t *block = NULL;
+    if (dev->ready && !__atomic_load_n(&dev->closing, __ATOMIC_ACQUIRE) &&
+        dev->consumer_refs != UINT32_MAX) {
+        dev->consumer_refs++;
+        block = &dev->block;
+    }
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
+    return block;
 }
 
 int virtio_scsi_ready(int index) {
-    return virtio_scsi_get_dev(index) != NULL;
+    if (index < 0 || index >= VIRTIO_SCSI_MAX_DEVS)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&g_scsi_instance_lock);
+    int ready = g_scsi[index].ready &&
+                !__atomic_load_n(&g_scsi[index].closing, __ATOMIC_ACQUIRE);
+    spin_unlock_irqrestore(&g_scsi_instance_lock, flags);
+    return ready;
 }
