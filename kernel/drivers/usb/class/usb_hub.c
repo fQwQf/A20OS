@@ -246,6 +246,18 @@ static const usb_hcd_ops_t hub_hcd_ops = {
     .abort_slot = hub_op_abort_slot,
 };
 
+/* Close the hub before consumer-first unbind starts. If a child cannot stop,
+ * the retained hub must not enumerate replacements or rearm its status URB.
+ * This is admission closure only; endpoint release still proves DMA stop. */
+static int usb_hub_prepare(void *context)
+{
+    usb_hub_t *hub = context;
+    uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
+    hub->stopping = 1;
+    spin_unlock_irqrestore(&hub->sc_lock, flags);
+    return 0;
+}
+
 static int usb_hub_probe(device_t *dev)
 {
     usb_interface_t *iface = dev->plat_data;
@@ -302,6 +314,8 @@ static int usb_hub_probe(device_t *dev)
         .priv = hub,
         .hub_depth = bus->hub_depth + 1U,
     };
+    r = device_add_remove_prepare(dev, usb_hub_prepare, hub);
+    if (r) return r;
     kinfo("[USB-HUB] hub %04x:%04x: downstream ports=%u status_bytes=%u ss=%u\n",
           hub_dev->vendor, hub_dev->product, hd->ports, hub->status_bytes, superspeed);
 
@@ -352,9 +366,7 @@ static int usb_hub_remove(device_t *dev)
 {
     usb_hub_t *hub = dev->drv_priv;
     if (hub) {
-        uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
-        hub->stopping = 1;
-        spin_unlock_irqrestore(&hub->sc_lock, flags);
+        usb_hub_prepare(hub);
         int ret = usb_core_unregister_hcd(&hub->hcd);
         if (ret) return ret;
         ret = usb_interface_release_endpoints(dev->plat_data);
