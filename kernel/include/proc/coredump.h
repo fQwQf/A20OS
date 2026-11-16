@@ -13,7 +13,8 @@
  *
  * Boundaries of the basic implementation:
  * - 64-bit architectures only. x86_64 emits its Linux GPR/PRPSINFO wire
- *   layouts, saved CS/SS and TLS bases; other selectors are zero and no FP note is
+ *   layouts, saved CS/SS and the current task's TLS bases; other selectors
+ *   are zero and no FP note is
  *   advertised. riscv64 retains its GPR mapping; other ports retain the
  *   legacy best-effort generic notes, not debugger-compatible regset claims.
  * - core_pattern "|pipe" mode is not supported (the dump is skipped and a

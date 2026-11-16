@@ -73,13 +73,16 @@ def main() -> int:
         debugger = shutil.which('gdb')
         if debugger:
             result = subprocess.run([debugger, '-nx', '-batch', '-c', str(core),
-                '-ex', 'printf "CORE_REGS %lx %lx %lx\\n", $rax, $rip, $rsp'],
+                '-ex', 'printf "CORE_REGS %lx %lx %lx\\n", $rax, $rip, $rsp',
+                '-ex', 'printf "CORE_TLS %lx %lx\\n", $fs_base, $gs_base'],
                 check=True, capture_output=True, text=True, timeout=10)
             if args.evidence_dir:
                 (args.evidence_dir / 'gdb.txt').write_text(result.stdout + result.stderr)
             if 'CORE_REGS 1000 1010 1007' not in result.stdout:
                 raise AssertionError(result.stdout + result.stderr)
-            print('CORE_X86: GDB reads the emitted RAX/RIP/RSP')
+            if 'CORE_TLS 777000 888000' not in result.stdout:
+                raise AssertionError(result.stdout + result.stderr)
+            print('CORE_X86: GDB reads the emitted RAX/RIP/RSP and MSR-sourced TLS bases')
         else:
             print('CORE_X86: skipped debugger consumer (gdb unavailable)')
         return 0

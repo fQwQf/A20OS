@@ -16,6 +16,10 @@ typedef struct {
     char name[64];
 } task_t;
 /* TRAP_CONTEXT */
+/* Privileged MSR reads are the modeled boundary; deliberately differ from
+ * the unused/stale trap-frame slots to catch accidental frame copying. */
+static uint64_t arch_read_user_fs_base(void) { return 0x777000; }
+static uint64_t arch_read_user_gs_base(void) { return 0x888000; }
 /* ARCH_EXPORT */
 #define ARCH_COREDUMP_EXPORT_REGS arch_coredump_export_regs
 /* NOTE_ADAPTER */
@@ -44,7 +48,8 @@ int main(int argc,char **argv) {
     assert(regs.r8==ctx.r8 && regs.r9==ctx.r9 && regs.r10==ctx.r10 && regs.r11==ctx.r11);
     assert(regs.r12==ctx.r12 && regs.r13==ctx.r13 && regs.r14==ctx.r14 && regs.r15==ctx.r15);
     assert(regs.rip==ctx.rip && regs.eflags==ctx.rflags && regs.cs==ctx.cs && regs.ss==ctx.ss);
-    assert(regs.fs_base==ctx.user_fs_base && regs.gs_base==ctx.user_gs_base);
+    assert(regs.fs_base==arch_read_user_fs_base() && regs.gs_base==arch_read_user_gs_base());
+    assert(regs.fs_base!=ctx.user_fs_base && regs.gs_base!=ctx.user_gs_base);
     size_t next=20+sizeof(status);memcpy(&nh,notes+next,sizeof(nh));
     assert(nh.n_type==NT_PRPSINFO && nh.n_descsz==sizeof(struct elf_prpsinfo));
     struct elf_prpsinfo info;memcpy(&info,notes+next+20,sizeof(info));

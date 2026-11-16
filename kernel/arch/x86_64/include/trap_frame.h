@@ -2,6 +2,7 @@
 #define _ARCH_X86_64_TRAP_H
 
 #include "core/types.h"
+#include "cpu.h"
 #include "proc/debug_regs.h"
 #include "page_table.h"
 #include "platform.h"
@@ -389,16 +390,17 @@ static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
     out->orig_syscall = ctx->rax;
 }
 
-/* Core notes additionally need saved selectors and TLS bases, which are not
- * part of the generic GPR export. Keep those facts in the architecture. */
+/* Core export runs only for the current task's fatal-signal hook. IRQ entry
+ * does not save TLS in these frame slots (and reuses the GS slot); the live
+ * FS and SWAPGS-parked user GS MSRs remain authoritative in kernel mode. */
 #define ARCH_COREDUMP_EXPORT_REGS arch_coredump_export_regs
 static inline void arch_coredump_export_regs(const trap_context_t *ctx,
                                             proc_debug_regs_t *out) {
     arch_ptrace_export_regs(ctx, out);
     out->regs[16] = ctx->cs;
     out->regs[17] = ctx->ss;
-    out->regs[18] = ctx->user_fs_base;
-    out->regs[19] = ctx->user_gs_base;
+    out->regs[18] = arch_read_user_fs_base();
+    out->regs[19] = arch_read_user_gs_base();
 }
 
 static inline void arch_ptrace_import_regs(trap_context_t *ctx,
