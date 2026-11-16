@@ -621,6 +621,7 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
         if (ar < 0) return a20_native_net_result(ar);
     }
 
+    size_t capacity = klen;
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
@@ -640,7 +641,7 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
     a20_object_release(entry.object, entry.type);
     if (r < 0) return a20_native_net_result(r);
     if (addr && addrlen) {
-        if (native_net_addr_out(addr, kaddr, klen) < 0 ||
+        if (native_net_addr_out(addr, kaddr, klen < capacity ? klen : capacity) < 0 ||
             native_net_addrlen_out(addrlen, klen) < 0)
             return a20_native_net_result(-EFAULT);
     }

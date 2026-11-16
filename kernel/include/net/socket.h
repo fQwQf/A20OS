@@ -194,6 +194,8 @@ int net_bind(int gfd, const void *addr, size_t addrlen);
 int net_connect(int gfd, const void *addr, size_t addrlen);
 int net_listen(int gfd, int backlog);
 int net_accept(int gfd, void *addr, size_t *addrlen, int flags);
+/* getname: *addrlen is input capacity / output full address size.
+ * Only min(capacity, full size) bytes are written. */
 int net_getsockname(int gfd, void *addr, size_t *addrlen);
 int net_getpeername(int gfd, void *addr, size_t *addrlen);
 int net_sendto(int gfd, const void *buf, size_t len, int flags,

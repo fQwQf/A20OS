@@ -323,6 +323,22 @@ int net_getsockname(int gfd, void *addr, size_t *addrlen)
     return net_getsockname_sock(net_socket_from_file(gfd), addr, addrlen);
 }
 
+/* Caller holds the socket lock. An unnamed Unix address still contains
+ * sa_family_t; libuv uses it to recognize socketpair-backed stdio. Report
+ * the complete length even when only the caller's prefix fits. */
+static void net_socket_name_copy(int domain, const void *name, size_t length,
+                                  void *addr, size_t *addrlen)
+{
+    uint16_t family = AF_UNIX;
+    if (domain == AF_UNIX && length == 0) {
+        name = &family;
+        length = sizeof(family);
+    }
+    size_t copied = length < *addrlen ? length : *addrlen;
+    memcpy(addr, name, copied);
+    *addrlen = length;
+}
+
 int net_getsockname_sock(net_socket_t *s, void *addr, size_t *addrlen)
 {
     if (!s)
@@ -336,9 +352,7 @@ int net_getsockname_sock(net_socket_t *s, void *addr, size_t *addrlen)
     }
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
-    size_t n = s->local_len < *addrlen ? s->local_len : *addrlen;
-    memcpy(addr, s->local, n);
-    *addrlen = n;
+    net_socket_name_copy(s->domain, s->local, s->local_len, addr, addrlen);
     net_sock_unlock(s, irq);
     return 0;
 }
@@ -352,11 +366,19 @@ int net_getpeername_sock(net_socket_t *s, void *addr, size_t *addrlen)
 {
     if (!s)
         return -ENOTSOCK;
-    if (!s->connected)
+    if (!addr || !addrlen)
+        return -EFAULT;
+    uint64_t irq = net_sock_lock(s);
+    if (!net_socket_is_live(s)) {
+        net_sock_unlock(s, irq);
+        return -ENOTSOCK;
+    }
+    if (!s->connected) {
+        net_sock_unlock(s, irq);
         return net_notconn(NET_NOTCONN_GETPEERNAME);
-    size_t n = s->peer_len < *addrlen ? s->peer_len : *addrlen;
-    memcpy(addr, s->peer_addr, n);
-    *addrlen = n;
+    }
+    net_socket_name_copy(s->domain, s->peer_addr, s->peer_len, addr, addrlen);
+    net_sock_unlock(s, irq);
     return 0;
 }
 
