@@ -58,6 +58,7 @@ const VM_FILE: u64 = 1 << 13;
 const VM_VMO: u64 = 1 << 14;
 const VM_LOCKED: u64 = 1 << 15;
 const VM_NATIVE_CAP: u64 = 1 << 19;
+const VM_PHYSICAL_OWNER: u64 = 1 << 20;
 const VM_DONTFORK: u64 = 1 << 9;
 const VM_PFNMAP: u64 = 1 << 17;
 
@@ -136,6 +137,7 @@ unsafe extern "C" {
     fn a20_mmap_physical_unmap(mm: *mut c_void, va: usize);
     fn a20_mmap_physical_note(mm: *mut c_void, va: usize, len: usize);
     fn a20_mmap_physical_rss(mm: *mut c_void, pages: usize);
+    fn a20_mmap_physical_owner_get(owner: *mut c_void);
 }
 
 /// Eager CPU physical mappings share the ordinary placement policy, but own
@@ -146,6 +148,22 @@ unsafe extern "C" {
 pub unsafe extern "C" fn a20_mmap_physical_rust(
     mm: *mut c_void, addr: usize, len: usize, prot: i32, flags: i32,
     physical: u64, memory: usize,
+) -> usize {
+    unsafe { mmap_physical(mm, addr, len, prot, flags, physical, memory, core::ptr::null_mut()) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn a20_mmap_physical_owned_rust(
+    mm: *mut c_void, addr: usize, len: usize, prot: i32, flags: i32,
+    physical: u64, memory: usize, owner: *mut c_void,
+) -> usize {
+    if owner.is_null() { return errno(EINVAL); }
+    unsafe { mmap_physical(mm, addr, len, prot, flags, physical, memory, owner) }
+}
+
+unsafe fn mmap_physical(
+    mm: *mut c_void, addr: usize, len: usize, prot: i32, flags: i32,
+    physical: u64, memory: usize, owner: *mut c_void,
 ) -> usize {
     if mm.is_null() || physical & (PAGE_SIZE as u64 - 1) != 0 ||
         prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 || prot == 0 ||
@@ -194,10 +212,15 @@ pub unsafe extern "C" fn a20_mmap_physical_rust(
         }
         let spec = SegSpec {
             start: va, end: va + len,
-            vm_flags: VM_SHARED | VM_PFNMAP | VM_DONTFORK | VM_NATIVE_CAP | prot_vm_flags(effective),
+            vm_flags: VM_SHARED | VM_PFNMAP | VM_DONTFORK | VM_NATIVE_CAP |
+                if owner.is_null() { 0 } else { VM_PHYSICAL_OWNER } | prot_vm_flags(effective),
             pte_flags: pte, vmar_cap: effective as u32, backing_offset: physical,
+            file: owner, // C record's mutually exclusive physical_owner union slot.
             ..SegSpec::default()
         };
+        // Everything fallible has succeeded. Borrowed owner remains live
+        // through the call; the published record takes one independent ref.
+        if !owner.is_null() { a20_mmap_physical_owner_get(owner); }
         a20_mmap_seg_fill(vma, &spec, core::ptr::null_mut());
         mm_insert_vma(mm, vma);
         a20_mmap_total_vm_add(mm, len / PAGE_SIZE);

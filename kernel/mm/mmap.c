@@ -4,6 +4,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
+#include "mm/mapping_owner.h"
 #include "mm/vmar.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
@@ -44,6 +45,11 @@ extern vaddr_t a20_mmap_vmo_rust(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 extern vaddr_t a20_mmap_physical_rust(mm_struct_t *, vaddr_t, size_t, int, int,
                                       uint64_t, pte_t);
+extern vaddr_t a20_mmap_physical_owned_rust(mm_struct_t *, vaddr_t, size_t, int, int,
+                                            uint64_t, pte_t, struct mm_mapping_owner *);
+void a20_mmap_physical_owner_get(struct mm_mapping_owner *owner) {
+    mm_mapping_owner_get(owner);
+}
 
 /* Physical mapping policy lives beside the other Rust creation transactions.
  * These bridges only expose layout, architecture and lock/TLB primitives. */
@@ -88,6 +94,20 @@ vaddr_t mm_mmap_physical(mm_struct_t *mm, vaddr_t addr, size_t len,
     return (vaddr_t)-EOPNOTSUPP;
 #else
     return a20_mmap_physical_rust(mm, addr, len, prot, flags, physical, memory_flags);
+#endif
+}
+
+vaddr_t mm_mmap_physical_owned(mm_struct_t *mm, vaddr_t addr, size_t len,
+                               int prot, int flags, uint64_t physical,
+                               pte_t memory_flags, struct mm_mapping_owner *owner) {
+#ifdef CONFIG_NOMMU
+    (void)mm; (void)addr; (void)len; (void)prot; (void)flags;
+    (void)physical; (void)memory_flags; (void)owner;
+    return (vaddr_t)-EOPNOTSUPP;
+#else
+    if (!owner) return (vaddr_t)-EINVAL;
+    return a20_mmap_physical_owned_rust(mm, addr, len, prot, flags, physical,
+                                        memory_flags, owner);
 #endif
 }
 

@@ -125,9 +125,9 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
     if (vma) {
         kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file=%lu off=0x%lx\n",
              vma->start, vma->end, vma->vm_flags, vma->pte_flags,
-             (unsigned long)(vma->file ? vma->file->identity : 0),
+             (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0),
              vma->backing_offset);
-        if (vma->file) {
+        if ((vma->vm_flags & VM_FILE) && vma->file) {
             vfile_t *vf = vma->file;
             vfile_get(vf);
             if (vf) {

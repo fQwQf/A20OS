@@ -3,6 +3,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vmo.h"
+#include "mm/mapping_owner.h"
 #include "mm/vmar.h"
 #include "mm/slab.h"
 #include "mm/pt.h"
@@ -320,10 +321,27 @@ void vma_release_ipc(mm_seg_t *vma)
  * cursors and the page-table node entries have all let go.  Idempotent: every
  * step clears the field it acted on, and a put on a record already at zero
  * cannot reach here twice. */
+static void vma_ref_physical(mm_seg_t *vma)
+{
+    if (vma && (vma->vm_flags & VM_PHYSICAL_OWNER))
+        mm_mapping_owner_get(vma->physical_owner);
+}
+
+static void vma_release_physical(mm_seg_t *vma)
+{
+    if (vma && (vma->vm_flags & VM_PHYSICAL_OWNER)) {
+        struct mm_mapping_owner *owner = vma->physical_owner;
+        vma->physical_owner = NULL;
+        vma->vm_flags &= ~(uint64_t)VM_PHYSICAL_OWNER;
+        mm_mapping_owner_put(owner);
+    }
+}
+
 void vma_release(mm_seg_t *vma)
 {
     vma_release_file(vma);
     vma_release_ipc(vma);
+    vma_release_physical(vma);
     if (vma && vma->vmar_owner) {
         vmar_release(vma->vmar_owner);
         vma->vmar_owner = NULL;
@@ -365,6 +383,7 @@ int vma_ref_fork(mm_seg_t *vma)
         vmo_ref(vma->vmo);
     if (vma && vma->vmar_owner)
         vmar_acquire(vma->vmar_owner);
+    vma_ref_physical(vma);
     return 0;
 }
 
@@ -382,6 +401,7 @@ int vma_ref_aux(mm_seg_t *vma)
         vmo_ref(vma->vmo);
     if (vma && vma->vmar_owner)
         vmar_acquire(vma->vmar_owner);
+    vma_ref_physical(vma);
     return 0;
 }
 
