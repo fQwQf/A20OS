@@ -12,8 +12,9 @@ reports. N08 remains open; neither a registered workload nor a historical PASS
 establishes acceptance of the current release candidate. The current RV64 SMP2
 pynode application run exposed a pip-cleanup EIO, a Node child SIGSEGV and a refused
 filesystem shutdown. Fork-advice range/wipe regressions now pass a direct RV64 SMP2
-check, but Node child output remains missing and the original pip workload is still
-unaccepted; see the register for the bounded evidence.
+check. Unix unnamed-address and offline Node/npm child/timer/I/O checks now pass,
+but installation workload shutdown still refuses writeback and the pip cleanup
+fails; see the register for the bounded evidence.
 
 ## Coverage Legend
 
@@ -150,8 +151,8 @@ strength of a boilerplate note.
 | `accept` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `accept4` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `connect` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `getsockname` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `getpeername` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `getsockname` | sockets | `partial` | `smoke-abi-linux`; `application_runtime_guest.py --check unix-names` (RV64 SMP2 / Linux reference) | unnamed Unix addresses include AF_UNIX; truncated buffers receive only their prefix while the returned length is complete. Other protocol edge semantics remain gaps. |
+| `getpeername` | sockets | `partial` | `smoke-abi-linux`; `application_runtime_guest.py --check unix-names` (RV64 SMP2 / Linux reference) | unnamed Unix addresses include AF_UNIX; truncated buffers receive only their prefix while the returned length is complete. Other protocol edge semantics remain gaps. |
 | `sendto` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `recvfrom` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `setsockopt` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |

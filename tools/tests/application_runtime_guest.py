@@ -129,6 +129,40 @@ def madvise_fork_range():
             assert region[:] == b"x" * len(region)
 
 
+def unix_socket_names():
+    import ctypes
+    import socket
+    import struct
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    family = struct.pack("=H", socket.AF_UNIX)
+    for name in ("getsockname", "getpeername"):
+        getattr(libc, name).argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+
+    def check(sock, operation, expected):
+        for capacity in (0, 1, 2, 128):
+            buffer = (ctypes.c_ubyte * 128)(*([0xa5] * 128))
+            length = ctypes.c_uint(capacity)
+            rc = getattr(libc, operation)(sock.fileno(), buffer, ctypes.byref(length))
+            assert rc == 0, (operation, ctypes.get_errno())
+            assert length.value == len(expected), (operation, capacity, length.value)
+            copied = min(capacity, len(expected))
+            assert bytes(buffer[:copied]) == expected[:copied]
+            assert bytes(buffer[copied:]) == b"\xa5" * (128 - copied)
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unbound:
+        check(unbound, "getsockname", family)
+    left, right = socket.socketpair()
+    with left, right:
+        for sock in (left, right):
+            check(sock, "getsockname", family)
+            check(sock, "getpeername", family)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as bound:
+        name = b"\0a20-name-" + str(os.getpid()).encode()
+        bound.bind(name)
+        check(bound, "getsockname", family + name)
+
+
 def desktop_abi():
     import desktop_abi_probe
     desktop_abi_probe.exec_scripts()
@@ -139,12 +173,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="append",
                         choices=("shell", "python-install", "node-install",
-                                 "desktop-abi", "madvise-fork-range"))
+                                 "desktop-abi", "madvise-fork-range", "unix-names"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     checks = {"shell": shell_pipeline, "python-install": python_install,
               "node-install": node_install, "desktop-abi": desktop_abi,
-              "madvise-fork-range": madvise_fork_range}
+              "madvise-fork-range": madvise_fork_range, "unix-names": unix_socket_names}
     results = {}
     for name in args.check or checks:
         try:

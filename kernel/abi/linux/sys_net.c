@@ -169,10 +169,11 @@ int64_t sys_getsockname(int fd, void *addr, void *addrlen) {
     size_t klen;
     int r = copy_sockaddr_len_from_user(addrlen, &klen);
     if (r < 0) return r;
+    size_t capacity = klen;
     r = net_getsockname((int)gfd, kaddr, &klen);
     if (r < 0)
         return r;
-    if (copy_to_user(addr, kaddr, klen) < 0) return -EFAULT;
+    if (copy_to_user(addr, kaddr, klen < capacity ? klen : capacity) < 0) return -EFAULT;
     return copy_sockaddr_len_to_user(addrlen, klen);
 }
 
@@ -184,10 +185,11 @@ int64_t sys_getpeername(int fd, void *addr, void *addrlen) {
     size_t klen;
     int r = copy_sockaddr_len_from_user(addrlen, &klen);
     if (r < 0) return r;
+    size_t capacity = klen;
     r = net_getpeername((int)gfd, kaddr, &klen);
     if (r == -ENOTSOCK) return -ENOTSOCK;
     if (r < 0) return r;
-    if (copy_to_user(addr, kaddr, klen) < 0) return -EFAULT;
+    if (copy_to_user(addr, kaddr, klen < capacity ? klen : capacity) < 0) return -EFAULT;
     return copy_sockaddr_len_to_user(addrlen, klen);
 }
 
