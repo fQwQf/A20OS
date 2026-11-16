@@ -62,7 +62,10 @@ def derive_make_vars(inst: Instance) -> list[str]:
         if value is not None:
             v.append(f"VIRTIO_CONSOLE_{name.upper()}={value}")
     if m.accel is not None:
-        v.append(f"QEMU_ACCEL={m.accel}")
+        accel = m.accel
+        if m.tcg_tb_size_mb is not None:
+            accel += f",tb-size={m.tcg_tb_size_mb}"
+        v.append(f"QEMU_ACCEL={accel}")
     if m.console is not None:
         v.append(f"QEMU_CONSOLE={m.console}")
     if m.smp is not None:

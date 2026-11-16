@@ -7,6 +7,9 @@ vm_manager = true
 smp = 2
 memory = "2G"
 accel = "tcg"
+# Bound emulator-wide cache-reset work during repeated guest lifecycles.
+# The 150 ms guest timer bound is unchanged; this is a host TCG setting.
+tcg_tb_size_mb = 128
 extra_qemu = ["-cpu", "rv64,h=true,sstc=true", "-append", "a20.vmd.timer_audit=1"]
 
 [net]

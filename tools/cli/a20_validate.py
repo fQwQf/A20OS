@@ -148,6 +148,11 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
             e.append("machine.vm_manager requires generic driver deployment for virtio-console")
     if m.accel is not None and m.accel not in {"tcg", "kvm"}:
         e.append("machine.accel must be tcg or kvm")
+    if m.tcg_tb_size_mb is not None:
+        if m.accel != "tcg":
+            e.append("machine.tcg_tb_size_mb requires machine.accel=tcg")
+        if not 1 <= m.tcg_tb_size_mb <= 4096:
+            e.append("machine.tcg_tb_size_mb must be between 1 and 4096 MiB")
     if m.console is not None and m.console not in {"serial", "virtio"}:
         e.append("machine.console must be serial or virtio")
     if m.console == "virtio":
