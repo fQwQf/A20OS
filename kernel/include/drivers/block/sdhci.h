@@ -42,6 +42,9 @@ typedef struct sdhci_host {
     /* Optional vendor hook after host reset/initial clock, before CMD0. */
     int (*before_idle)(void *context);
     void *vendor_context;
+    /* Lifecycle cancellation is atomic; other host fields stay serialized by
+     * the caller. A closed host is not reused for a new binding. */
+    int closing;
 } sdhci_host_t;
 
 int sdhci_clock_divider(uint32_t input_hz, uint32_t requested_hz,
@@ -50,6 +53,7 @@ int sdhci_clock_divider(uint32_t input_hz, uint32_t requested_hz,
 int sdhci_card_initialize(sdhci_host_t *host);
 int sdhci_card_transfer(sdhci_host_t *host, uint64_t lba, void *buffer,
                         size_t count, int write);
-void sdhci_card_stop(sdhci_host_t *host);
+/* Caller has drained PIO execution. Failure retains the mapped host/owner. */
+int sdhci_card_stop(sdhci_host_t *host);
 
 #endif

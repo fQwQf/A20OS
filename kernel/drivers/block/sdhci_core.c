@@ -46,30 +46,52 @@ static void wr(sdhci_host_t *h, unsigned reg, unsigned width, uint32_t value) {
 static int expired(sdhci_host_t *h, uint64_t start, unsigned ms) {
     return h->io.time_ms(h->io.context) - start >= ms;
 }
+static int cancelled(sdhci_host_t *h) {
+    return __atomic_load_n(&h->closing, __ATOMIC_ACQUIRE);
+}
 static int wait_mask(sdhci_host_t *h, unsigned reg, unsigned width,
                      uint32_t mask, uint32_t wanted, unsigned ms) {
     uint64_t start = h->io.time_ms(h->io.context);
     do {
-        if ((rd(h, reg, width) & mask) == wanted)
+        if (cancelled(h))
+            return -ENODEV;
+        uint32_t value = rd(h, reg, width);
+        uint32_t absent = width == 1 ? 0xffU : width == 2 ? 0xffffU : 0xffffffffU;
+        if (value == absent)
+            return -ENODEV;
+        if ((value & mask) == wanted)
             return 0;
         h->io.delay_us(h->io.context, 10);
     } while (!expired(h, start, ms));
     return -ETIMEDOUT;
 }
 static int reset(sdhci_host_t *h, unsigned mask) {
+    if (cancelled(h) || rd(h, SOFTWARE_RESET, 1) == 0xffU)
+        return -ENODEV;
     wr(h, SOFTWARE_RESET, 1, mask);
     return wait_mask(h, SOFTWARE_RESET, 1, mask, 0, 100);
 }
 static int recover(sdhci_host_t *h, int error) {
-    if (reset(h, 6))
+    if (cancelled(h) || error == -ENODEV) {
         h->ready = 0;
+        return -ENODEV;
+    }
+    int rc = reset(h, 6);
+    if (rc)
+        h->ready = 0;
+    if (rc == -ENODEV)
+        return rc;
     wr(h, INT_STATUS, 4, 0xffffffffU);
     return error;
 }
 static int wait_interrupt(sdhci_host_t *h, uint32_t wanted, unsigned ms) {
     uint64_t start = h->io.time_ms(h->io.context);
     do {
+        if (cancelled(h))
+            return -ENODEV;
         uint32_t status = rd(h, INT_STATUS, 4);
+        if (status == 0xffffffffU)
+            return -ENODEV;
         if (status & (ERROR | ERROR_BITS)) {
             /* Command and data timeout status have distinct error bits. */
             int error = status & ((1U << 16) | (1U << 20)) ? -ETIMEDOUT : -EIO;
@@ -170,6 +192,8 @@ int sdhci_card_initialize(sdhci_host_t *h) {
     h->ready = 0;
     h->sectors = 0;
     h->write_protected = 0;
+    if (cancelled(h))
+        return -ENODEV;
     int rc = reset(h, 1);
     if (rc)
         return rc;
@@ -280,6 +304,8 @@ static int transfer_sector(sdhci_host_t *h, uint64_t lba, unsigned char *buffer,
         return rc;
     /* Byte packing permits unaligned filesystem buffers on every architecture. */
     for (unsigned offset = 0; offset < 512; offset += 4) {
+        if (cancelled(h))
+            return -ENODEV;
         if (write) {
             uint32_t value = buffer[offset] |
                              (uint32_t)buffer[offset + 1] << 8 |
@@ -317,7 +343,7 @@ int sdhci_card_transfer(sdhci_host_t *h, uint64_t lba, void *buffer,
                         size_t count, int write) {
     if (!h || !buffer || !count || (write != 0 && write != 1))
         return -EINVAL;
-    if (!h->ready)
+    if (!h->ready || cancelled(h))
         return -ENODEV;
     if (lba >= h->sectors || count > h->sectors - lba ||
         count > (size_t)-1 / 512)
@@ -336,11 +362,39 @@ int sdhci_card_transfer(sdhci_host_t *h, uint64_t lba, void *buffer,
     }
     return 0;
 }
-void sdhci_card_stop(sdhci_host_t *h) {
-    if (!h)
-        return;
+int sdhci_card_stop(sdhci_host_t *h) {
+    if (!h || !h->io.read || !h->io.write || !h->io.delay_us)
+        return -EINVAL;
+    __atomic_store_n(&h->closing, 1, __ATOMIC_RELEASE);
     h->ready = 0;
+    if (rd(h, SOFTWARE_RESET, 1) == 0xffU)
+        return -ENODEV;
+    wr(h, SIGNAL_ENABLE, 4, 0);
+    wr(h, INT_ENABLE, 4, 0);
+    /* This raw, bounded reset deliberately ignores the cancellation flag:
+     * normal PIO has exited, but hardware acknowledgement is still required.
+     * Do not depend on timer IRQ progress during shutdown. */
+    wr(h, SOFTWARE_RESET, 1, 1);
+    for (unsigned attempt = 0; ; attempt++) {
+        uint32_t value = rd(h, SOFTWARE_RESET, 1);
+        if (value == 0xffU)
+            return -ENODEV;
+        if (!(value & 7U))
+            break;
+        if (attempt == 9999)
+            return -ETIMEDOUT;
+        h->io.delay_us(h->io.context, 10);
+    }
     wr(h, SIGNAL_ENABLE, 4, 0);
     wr(h, INT_ENABLE, 4, 0);
     wr(h, CLOCK_CONTROL, 2, 0);
+    uint32_t signals = rd(h, SIGNAL_ENABLE, 4);
+    uint32_t interrupts = rd(h, INT_ENABLE, 4);
+    uint32_t clock = rd(h, CLOCK_CONTROL, 2);
+    if (signals == 0xffffffffU || interrupts == 0xffffffffU || clock == 0xffffU)
+        return -ENODEV;
+    if (signals || interrupts || (clock & 5U))
+        return -ETIMEDOUT;
+    h->actual_hz = 0;
+    return 0;
 }

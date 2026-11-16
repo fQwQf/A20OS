@@ -2,6 +2,7 @@
 #include "drivers/block/sdhci.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "core/errno.h"
@@ -16,6 +17,8 @@ typedef struct {
     device_t *device;
     const sdhci_platform_data_t *platform;
     mutex_t lock;
+    int prepared;
+    int hardware_stopped;
 } sdhci_device_t;
 
 static uint32_t mmio_read(void *opaque, unsigned offset, unsigned width) {
@@ -51,8 +54,20 @@ static int before_idle(void *opaque) {
                ? p->platform->before_idle(p->device, p->base)
                : 0;
 }
-static void free_private(void *opaque) {
-    kfree(opaque);
+static int sdhci_stop(void *opaque) {
+    sdhci_device_t *p = opaque;
+    __atomic_store_n(&p->host.closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&p->lock))
+        return -EBUSY;
+    int rc = 0;
+    /* The protocol has not touched a host whose clocks/pins were not prepared.
+     * In particular, do not access an unmapped or unclocked host on rollback. */
+    if (p->prepared && !p->hardware_stopped)
+        rc = sdhci_card_stop(&p->host);
+    if (!rc)
+        p->hardware_stopped = 1;
+    mutex_unlock(&p->lock);
+    return rc;
 }
 
 static int sdhci_probe(device_t *dev) {
@@ -64,21 +79,23 @@ static int sdhci_probe(device_t *dev) {
     if (!resource || resource->end < resource->start ||
         resource->end - resource->start < 0xff)
         return -EINVAL;
-    void *base = device_map_mmio(dev, 0);
-    if (!base)
-        return -ENOMEM;
+    int rc = device_probe_use_remove(dev);
+    if (rc)
+        return rc;
     sdhci_device_t *p = kmalloc(sizeof(*p));
     if (!p)
         return -ENOMEM;
     memset(p, 0, sizeof(*p));
-    if (device_add_resource_action(dev, free_private, p)) {
-        kfree(p);
-        return -ENOMEM;
-    }
-    p->base = base;
     p->device = dev;
     p->platform = platform;
     mutex_init(&p->lock);
+    dev->drv_priv = p;
+    rc = device_add_execution_action(dev, sdhci_stop, NULL, p);
+    if (rc)
+        return rc;
+    p->base = device_map_mmio(dev, 0);
+    if (!p->base)
+        return -ENOMEM;
     p->host = (sdhci_host_t){
         .io = {p, mmio_read, mmio_write, time_ms, delay_us},
         .input_hz = platform->input_hz,
@@ -87,27 +104,22 @@ static int sdhci_probe(device_t *dev) {
         .before_idle = before_idle,
         .vendor_context = p,
     };
-    int rc = platform->prepare(dev, base);
-    int prepared = !rc;
-    if (prepared)
+    rc = platform->prepare(dev, p->base);
+    p->prepared = !rc;
+    if (p->prepared)
         rc = sdhci_card_initialize(&p->host);
     if (rc) {
-        if (prepared)
-            sdhci_card_stop(&p->host);
         kwarn("[SDHCI] %s: SD initialization failed: %d\n", dev->name, rc);
         return rc;
     }
     int read_only = fw_node_has_property(&dev->firmware_node, "read-only");
-    if (read_only < 0) {
-        sdhci_card_stop(&p->host);
+    if (read_only < 0)
         return read_only;
-    }
     if (read_only)
         p->host.write_protected = 1;
 #ifdef CONFIG_STORAGE_READ_ONLY
     p->host.write_protected = 1;
 #endif
-    dev->drv_priv = p;
     kinfo("[SDHCI] %s: %lu sectors, %u Hz, 1-bit PIO (no DMA)%s\n", dev->name,
           (unsigned long)p->host.sectors, p->host.actual_hz,
           p->host.write_protected ? ", read-only" : "");
@@ -116,11 +128,11 @@ static int sdhci_probe(device_t *dev) {
 static int sdhci_remove(device_t *dev) {
     sdhci_device_t *p = dev->drv_priv;
     if (p) {
-        /* Driver core offlines the class and drains active calls before remove. */
-        mutex_lock(&p->lock);
-        sdhci_card_stop(&p->host);
-        mutex_unlock(&p->lock);
+        int rc = sdhci_stop(p);
+        if (rc)
+            return rc;
         dev->drv_priv = NULL;
+        kfree(p);
     }
     return 0;
 }
@@ -130,7 +142,8 @@ static int block_transfer(device_t *dev, uint64_t lba, void *buf, size_t count,
     if (!p)
         return -ENODEV;
     mutex_lock(&p->lock);
-    int rc = sdhci_card_transfer(&p->host, lba, buf, count, write);
+    int rc = __atomic_load_n(&p->host.closing, __ATOMIC_ACQUIRE) ? -ENODEV :
+             sdhci_card_transfer(&p->host, lba, buf, count, write);
     mutex_unlock(&p->lock);
     return rc;
 }
@@ -143,7 +156,8 @@ static int block_write(device_t *dev, uint64_t lba, const void *buf,
 }
 static uint64_t block_capacity(device_t *dev) {
     sdhci_device_t *p = dev->drv_priv;
-    return p ? p->host.sectors : 0;
+    return p && !__atomic_load_n(&p->host.closing, __ATOMIC_ACQUIRE) ?
+           p->host.sectors : 0;
 }
 static uint32_t block_sector_size(device_t *dev) {
     (void)dev;
