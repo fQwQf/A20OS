@@ -1,3 +1,4 @@
+#include "drivers/core/driver_core.h"
 #include "fs/tty_control.h"
 #include "proc/resource_ns.h"
 #include "core/klog.h"
@@ -1129,6 +1130,11 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                 klog_disk_mark_ready();
             return shutdown_ret;
         }
+        shutdown_ret = driver_core_shutdown_all();
+        if (shutdown_ret < 0) {
+            kinfo("[SD] reboot refused: device stop failed (%d)\n", shutdown_ret);
+            return shutdown_ret;
+        }
         firmware_reboot();
         panic("firmware reboot returned after filesystem shutdown");
     } else if (magic1 == 0 ||
@@ -1143,6 +1149,11 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   shutdown_ret);
             if (!mntns_shutdown_active())
                 klog_disk_mark_ready();
+            return shutdown_ret;
+        }
+        shutdown_ret = driver_core_shutdown_all();
+        if (shutdown_ret < 0) {
+            kinfo("[SD] poweroff refused: device stop failed (%d)\n", shutdown_ret);
             return shutdown_ret;
         }
         kinfo("[SD] POWER_OFF entry\n");

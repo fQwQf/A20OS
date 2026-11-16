@@ -26,9 +26,9 @@ class DriverRemove(unittest.TestCase):
         prelude = prelude.replace('return realloc(p, n);', 'return probe_allocations_blocked ? NULL : realloc(p, n);')
         cases = (ROOT / 'tools/tests/driver_remove_host.c').read_text()
         marker = 'int main(int argc,char **argv) {'
-        cases = cases.replace(marker, (ROOT / 'tools/tests/driver_probe_cleanup_host.c').read_text() + '\n' + (ROOT / 'tools/tests/driver_remove_prepare_host.c').read_text() + '\n' + marker)
+        cases = cases.replace(marker, (ROOT / 'tools/tests/driver_probe_cleanup_host.c').read_text() + '\n' + (ROOT / 'tools/tests/driver_remove_prepare_host.c').read_text() + '\n' + (ROOT / 'tools/tests/driver_shutdown_host.inc').read_text() + '\n' + marker)
         cases = cases.replace('if(!strcmp(argv[1],"arguments"))',
-                              'if(!strncmp(argv[1],"probe-",6))probe_cleanup_case(argv[1]+6);\n else if(!strncmp(argv[1],"prepare-",8))prepare_case(argv[1]+8);\n else if(!strcmp(argv[1],"arguments"))')
+                              'if(!strncmp(argv[1],"shutdown-",9))shutdown_case(argv[1]+9);\n else if(!strncmp(argv[1],"probe-",6))probe_cleanup_case(argv[1]+6);\n else if(!strncmp(argv[1],"prepare-",8))prepare_case(argv[1]+8);\n else if(!strcmp(argv[1],"arguments"))')
         fixture.write_text(prelude + cases)
         wrapper = work / 'registry.rs'
         wrapper.write_text('#![no_std]\n#![allow(unused_attributes)]\n#[path = ' + repr(str(ROOT / 'kernel/drivers/core/registry_state.rs')).replace("'", '"') + '] mod registry;\n'
@@ -55,6 +55,9 @@ class DriverRemove(unittest.TestCase):
             for case in cases:
                 with self.subTest(registry=binary.name, case=case):
                     subprocess.run([str(binary), case], check=True, timeout=10)
+
+    def test_terminal_stop_propagates_errors_retains_resources_and_supports_retry(self):
+        self.run_cases('shutdown-missing', 'shutdown-retry')
 
     def test_device_and_driver_failure_keep_binding_resources_and_pins(self):
         self.run_cases('device', 'driver')

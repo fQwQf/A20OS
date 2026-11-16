@@ -32,6 +32,9 @@ static spinlock_t g_driver_core_lock = SPINLOCK_INIT;
 /* Serializes registry mutation with probe/remove callbacks.  The spinlock only
  * protects the arrays themselves and is never held across driver code. */
 static mutex_t g_driver_core_ops = MUTEX_INIT;
+/* Sticky terminal admission gate. A failed stop permits cleanup retry, not
+ * new bindings whose hardware might race the next-kernel handoff. */
+static int g_driver_shutdown_active;
 
 /* The scheduler mutex is recursive only when it has a task owner. Before
  * proc_init the boot CPU also enters nested bus/driver callbacks; represent
@@ -246,7 +249,8 @@ static int driver_matches_device(driver_t *drv, device_t *dev)
     int match = 0;
     dev->matched_id = NULL;
     dev->firmware_match = NULL;
-    if (driver_withdrawing(drv) || device_is_stopping(dev)) return 0;
+    if (g_driver_shutdown_active || driver_withdrawing(drv) ||
+        device_is_stopping(dev)) return 0;
     if (dev->bus && dev->bus->match)
         match = dev->bus->match(dev, drv);
     else if (!dev->bus && !drv->bus)
@@ -874,6 +878,9 @@ static int depends_on(device_t *dev, device_t *target, unsigned depth) {
 int device_add_dependency(device_t *consumer, device_t *provider) {
     if (!consumer || !provider) return -EINVAL;
     driver_ops_lock();
+    if (g_driver_shutdown_active) {
+        driver_ops_unlock(); return -ESHUTDOWN;
+    }
     if (device_is_stopping(provider) || device_removal_active(provider)) {
         driver_ops_unlock(); return -EPROBE_DEFER;
     }
@@ -1108,6 +1115,9 @@ int driver_register(driver_t *drv) {
         return -EINVAL;
 
     driver_ops_lock();
+    if (g_driver_shutdown_active) {
+        driver_ops_unlock(); return -ESHUTDOWN;
+    }
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int insert = a20_driver_registry_insert((void **)&g_drivers,
@@ -1222,6 +1232,9 @@ int device_register(device_t *dev) {
         return -EINVAL;
 
     driver_ops_lock();
+    if (g_driver_shutdown_active) {
+        driver_ops_unlock(); return -ESHUTDOWN;
+    }
     device_t *held_parent = NULL;
     if (dev->parent_reference && dev->parent_reference != dev->parent) {
         driver_ops_unlock();
@@ -1386,6 +1399,9 @@ int bus_register(bus_type_t *bus) {
     if (!bus || !bus->name)
         return -EINVAL;
     driver_ops_lock();
+    if (g_driver_shutdown_active) {
+        driver_ops_unlock(); return -ESHUTDOWN;
+    }
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int insert = a20_driver_registry_insert((void **)&g_buses,
@@ -1467,6 +1483,9 @@ void bus_unregister(bus_type_t *bus) {
 int bus_probe_device(device_t *dev) {
     if (!dev) return -EINVAL;
     driver_ops_lock();
+    if (g_driver_shutdown_active) {
+        driver_ops_unlock(); return -ESHUTDOWN;
+    }
     if (dev->drv || device_is_stopping(dev)) {
         driver_ops_unlock();
         return -EBUSY;
@@ -1657,32 +1676,53 @@ void driver_progress_class(uint32_t class_type)
     }
 }
 
-int driver_core_kexec_prepare(void)
+static int driver_core_shutdown_supported(void)
 {
-    int rc = 0;
-    driver_ops_lock();
     for (int i = 0; i < g_device_count; i++) {
         device_t *dev = g_devices[i];
-        if (dev->drv && !dev->drv->shutdown) {
-            kinfo("[KEXEC] driver '%s' has no shutdown callback\n",
+        if (dev->drv && !dev->drv->remove) {
+            kinfo("[SHUTDOWN] driver '%s' has no fallible stop/remove protocol\n",
                   dev->drv->name ? dev->drv->name : "?");
-            rc = -EOPNOTSUPP;
-            break;
+            return -EOPNOTSUPP;
         }
     }
+    return 0;
+}
+
+int driver_core_kexec_prepare(void)
+{
+    driver_ops_lock();
+    int rc = driver_core_shutdown_supported();
     driver_ops_unlock();
     return rc;
 }
 
-void driver_core_shutdown_all(void)
+int driver_core_shutdown_all(void)
 {
     driver_ops_lock();
-    for (int i = g_device_count - 1; i >= 0; i--) {
-        device_t *dev = g_devices[i];
-        if (dev->drv && dev->drv->shutdown)
-            dev->drv->shutdown(dev);
+    int rc = driver_core_shutdown_supported();
+    if (rc) {
+        driver_ops_unlock();
+        return rc;
+    }
+    g_driver_shutdown_active = 1;
+    for (;;) {
+        device_t *dev = NULL;
+        /* Unbind may retire child declarations through devres. Rescan the
+         * current registry instead of retaining an index across callbacks. */
+        for (int i = g_device_count - 1; i >= 0; i--) {
+            if (g_devices[i]->drv) { dev = g_devices[i]; break; }
+        }
+        if (!dev) break;
+        device_get(dev);
+        /* Reuse prepare/consumer-first/stop/quiesce/class-drain/remove.
+         * Its error path retains the binding, DMA storage and dependencies. */
+        rc = device_unbind(dev);
+        device_put(dev);
+        if (rc) break;
     }
     driver_ops_unlock();
+    return rc;
 }
 
 /* Format the registered drivers for /proc/drivers (Linux format). */
