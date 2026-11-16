@@ -88,6 +88,19 @@ static int dumpable_access_probe(void) {
         char c;
         if (child < 0 || read(ready[0], &c, 1) != 1) return 5;
         close(ready[0]);
+        /* Numeric procfs fast paths must enforce the same dumpability
+         * policy as following the actual procfs vnode. */
+        char path[64], executable[512];
+        snprintf(path, sizeof(path), "/proc/%d/exe", child);
+        errno = 0;
+        ssize_t length = readlink(path, executable, sizeof(executable));
+        if (enabled ? length <= 0 : length != -1 || errno != EACCES)
+            return 8;
+        errno = 0;
+        int image = open(path, O_RDONLY);
+        if (enabled ? image < 0 : image != -1 || errno != EACCES)
+            return 9;
+        if (image >= 0) close(image);
         errno = 0;
         long r = ptrace(PTRACE_ATTACH, child, NULL, NULL);
         int ok = enabled ? r == 0 : r == -1 && errno == EPERM;
@@ -104,6 +117,11 @@ static int dumpable_access_probe(void) {
 }
 
 static int dumpable_probe(void) {
+    char target[32];
+    errno = 0;
+    if (readlink("/proc/2147483647/exe", target, sizeof(target)) != -1 ||
+        errno != ENOENT)
+        return 7;
     if (prctl(PR_GET_DUMPABLE) != 1 || prctl(PR_SET_DUMPABLE, 0L) ||
         prctl(PR_GET_DUMPABLE) != 0) return 1;
     errno = 0;

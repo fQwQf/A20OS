@@ -471,6 +471,10 @@ void  vfs_task_fs_pins_release(struct task_t *t);
 struct mount *vfs_task_root_mount(struct task_t *t);
 /* Copy @src's root/cwd references into @dst (fork/clone). */
 void  vfs_task_fs_pins_copy(struct task_t *dst, const struct task_t *src);
+/* Render a global VFS path in the reader's root. Returns @physical or a
+ * string in @visible; NULL means the output buffer is too short. */
+const char *vfs_chroot_visible_path(struct task_t *reader, const char *physical,
+                                   char *visible, size_t visible_sz);
 
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);

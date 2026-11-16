@@ -1148,7 +1148,7 @@ static int vfs_readlink_copy_target(const char *target, char *buf, size_t sz) {
  * namespace.  Translate only on the visibility boundary; callers doing VFS
  * lookup continue to use the physical path.
  */
-static const char *vfs_chroot_visible_path(task_t *task, const char *physical,
+const char *vfs_chroot_visible_path(task_t *task, const char *physical,
                                            char *visible, size_t visible_sz) {
     const char *root =
         task && task->fs.root_path[0] ? task->fs.root_path : "/";
@@ -1237,6 +1237,12 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
         if (pid > 0 && q != p) {
             if (strcmp(q, "/exe") == 0) {
                 task_t *t = proc_find_get(pid);
+                if (!t)
+                    return -ENOENT;
+                if (!proc_task_may_access(cur, t)) {
+                    proc_put(t);
+                    return -EACCES;
+                }
                 const char *exe = t && t->exec_path[0] ? t->exec_path : "/bin/sh";
                 char visible_exe[MAX_PATH_LEN];
                 const char *target =
@@ -1249,6 +1255,12 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
             }
             if (strcmp(q, "/cwd") == 0) {
                 task_t *t = proc_find_get(pid);
+                if (!t)
+                    return -ENOENT;
+                if (!proc_task_may_access(cur, t)) {
+                    proc_put(t);
+                    return -EACCES;
+                }
                 const char *cwd_res = t ? t->fs.cwd : "/";
                 int r = vfs_readlink_copy_target(cwd_res, buf, sz);
                 proc_put(t);
