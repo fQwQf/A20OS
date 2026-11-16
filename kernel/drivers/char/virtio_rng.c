@@ -170,11 +170,40 @@ typedef struct {
     int        irq;
     int        irq_registered;
     int        valid;
+    int        closing;
+    int        reset_required;
+    int        hardware_stopped;
+    /* Pins lock-free notify, read waits and entropy-pool mixing across stop. */
+    unsigned   active_calls;
+    device_t  *owner;
 } vrng_inst_t;
 
 /* One device, one instance: a second virtio-rng function stays unbound rather
  * than fighting the first one for the single /dev/hwrng node. */
 static vrng_inst_t g_vrng;
+static int vrng_stop(void *context);
+
+static int vrng_call_begin(vrng_inst_t *p)
+{
+    if (!p)
+        return -ENODEV;
+    uint64_t flags = spin_lock_irqsave(&p->lock);
+    int ret = -ENODEV;
+    if (__atomic_load_n(&p->valid, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) {
+        p->active_calls++;
+        ret = 0;
+    }
+    spin_unlock_irqrestore(&p->lock, flags);
+    return ret;
+}
+
+static void vrng_call_end(vrng_inst_t *p)
+{
+    uint64_t flags = spin_lock_irqsave(&p->lock);
+    p->active_calls--;
+    spin_unlock_irqrestore(&p->lock, flags);
+}
 
 /* ------------------------------------------------------------------ */
 /* Ring helpers                                                        */
@@ -196,7 +225,8 @@ static inline uint64_t vrng_buf_pa(const vrng_inst_t *p, unsigned slot)
 static void vrng_pump(vrng_inst_t *p)
 {
     uint64_t flags = spin_lock_irqsave(&p->lock);
-    if (!p->valid || !p->mem) {
+    if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&p->valid, __ATOMIC_ACQUIRE) || !p->mem) {
         spin_unlock_irqrestore(&p->lock, flags);
         return;
     }
@@ -234,6 +264,11 @@ static void vrng_pump(vrng_inst_t *p)
 static size_t vrng_take(vrng_inst_t *p, void *buf, size_t count)
 {
     uint64_t flags = spin_lock_irqsave(&p->lock);
+    if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&p->valid, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&p->lock, flags);
+        return 0;
+    }
     size_t avail = (p->head + VRNG_RING_SIZE - p->tail) % VRNG_RING_SIZE;
     size_t n = count < avail ? count : avail;
     for (size_t i = 0; i < n; i++)
@@ -257,7 +292,8 @@ static uint32_t vrng_post_free(vrng_inst_t *p)
     uint32_t posted = 0;
 
     uint64_t flags = spin_lock_irqsave(&p->lock);
-    if (!p->valid || !p->mem) {
+    if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&p->valid, __ATOMIC_ACQUIRE) || !p->mem) {
         spin_unlock_irqrestore(&p->lock, flags);
         return 0;
     }
@@ -306,7 +342,7 @@ static uint32_t vrng_inflight(vrng_inst_t *p)
  * Fold the bytes just handed to a reader into the kernel entropy pool.
  *
  * random_reseed() mixes one 64-bit word per call (kernel/core/random.c), so a
- * 256-byte read becomes four pool reseeds rather than one.
+ * 256-byte read contributes 32 words rather than one.
  */
 static void vrng_feed_pool(vrng_inst_t *p, const void *buf, size_t len)
 {
@@ -336,16 +372,16 @@ static int vrng_irq_handler(int irq, void *priv)
 {
     (void)irq;
     vrng_inst_t *p = priv;
-    if (!p || !p->valid)
+    if (!p)
         return 0;
 
     /* On the PCI transport the read below already reaches the ISR window and
      * deasserts; only the raw virtio-mmio path needs the explicit ack. */
     uint32_t status = p->vt.read32(&p->vt, VRNG_MMIO_INTR_STATUS);
-    if (p->mmio && status)
+    if (p->mmio && status && status != 0xffffffffU)
         p->vt.write32(&p->vt, VRNG_MMIO_INTR_ACK, status);
-
-    vrng_pump(p);
+    if (!__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE))
+        vrng_pump(p);
     return 0;
 }
 
@@ -388,16 +424,14 @@ static void vrng_free_dma(vrng_inst_t *p)
     }
 }
 
-/* Full rollback for every probe failure: the core only clears pointers, so
- * IRQ, DMA and the device state have to be undone here. */
-static void vrng_fail(vrng_inst_t *p, int irq_registered, int irq)
+/* Mark initialization failure; managed stop owns every fallible reset and
+ * release. The live owner remains attached even when reset cannot finish. */
+static int vrng_fail(vrng_inst_t *p, int error)
 {
-    if (irq_registered && irq >= 0)
-        free_irq((uint32_t)irq, p);
-    p->vt.write32(&p->vt, VRNG_MMIO_STATUS,
-                  p->vt.read32(&p->vt, VRNG_MMIO_STATUS) | VRNG_STATUS_FAILED);
-    vrng_free_dma(p);
-    memset(p, 0, sizeof(*p));
+    uint32_t status = p->vt.read32(&p->vt, VRNG_MMIO_STATUS);
+    if (status != 0xffffffffU)
+        p->vt.write32(&p->vt, VRNG_MMIO_STATUS, status | VRNG_STATUS_FAILED);
+    return error;
 }
 
 /* ------------------------------------------------------------------ */
@@ -419,8 +453,6 @@ static int vrng_init_transport(device_t *dev, const virtio_transport_t *vt_in,
 {
     vrng_inst_t *p = &g_vrng;
 
-    memset(p, 0, sizeof(*p));
-    spin_init(&p->lock);
     p->vt = *vt_in;
     p->irq = p->vt.irq;
     p->mmio = is_mmio;
@@ -430,15 +462,20 @@ static int vrng_init_transport(device_t *dev, const virtio_transport_t *vt_in,
      * three offsets, so the check runs identically on both. */
     if (p->vt.read32(&p->vt, VRNG_MMIO_MAGIC) != VRNG_MMIO_MAGIC_VALUE ||
         p->vt.read32(&p->vt, VRNG_MMIO_VERSION) != 2U ||
-        p->vt.read32(&p->vt, VRNG_MMIO_DEVICE_ID) != VRNG_DEVICE_ID)
+        p->vt.read32(&p->vt, VRNG_MMIO_DEVICE_ID) != VRNG_DEVICE_ID ||
+        p->vt.legacy)
         return -ENODEV;
 
     /* Feature negotiation: VIRTIO_F_VERSION_1 only, so the queue is the modern
      * split ring programmed below.  virtio-rng offers no other feature bits
      * (get_features in hw/virtio/virtio-rng.c returns its argument unchanged),
      * so the low half is explicitly offered as zero. */
-    p->vt.write32(&p->vt, VRNG_MMIO_STATUS, 0);
-    mb();
+    p->reset_required = 1;
+    if (p->vt.read32(&p->vt, VRNG_MMIO_STATUS) == 0xffffffffU)
+        return -ENODEV;
+    int reset = virtio_transport_reset(&p->vt, 100);
+    if (reset)
+        return reset;
     uint32_t status = VRNG_STATUS_ACK | VRNG_STATUS_DRIVER;
     p->vt.write32(&p->vt, VRNG_MMIO_STATUS, status);
     mb();
@@ -446,7 +483,7 @@ static int vrng_init_transport(device_t *dev, const virtio_transport_t *vt_in,
     p->vt.write32(&p->vt, VRNG_MMIO_DEV_FEATURES_SEL, 1);
     uint32_t features_hi = p->vt.read32(&p->vt, VRNG_MMIO_DEV_FEATURES);
     if (!(features_hi & VRNG_F_VERSION_1))
-        return -EOPNOTSUPP;
+        return vrng_fail(p, -EOPNOTSUPP);
     p->vt.write32(&p->vt, VRNG_MMIO_DRV_FEATURES_SEL, 1);
     p->vt.write32(&p->vt, VRNG_MMIO_DRV_FEATURES, VRNG_F_VERSION_1);
     p->vt.write32(&p->vt, VRNG_MMIO_DRV_FEATURES_SEL, 0);
@@ -457,29 +494,28 @@ static int vrng_init_transport(device_t *dev, const virtio_transport_t *vt_in,
     p->vt.write32(&p->vt, VRNG_MMIO_STATUS, status);
     mb();
     if (!(p->vt.read32(&p->vt, VRNG_MMIO_STATUS) & VRNG_STATUS_FEATURES_OK))
-        return -ENODEV;
+        return vrng_fail(p, -ENODEV);
 
     p->mem = dma_alloc_coherent_aligned(dev, sizeof(*p->mem), PAGE_SIZE,
                                         &p->dma);
     if (!p->mem)
-        return -ENOMEM;
+        return vrng_fail(p, -ENOMEM);
     memset(p->mem, 0, sizeof(*p->mem));
     dma_sync_for_device(p->mem, sizeof(*p->mem));
 
-    if (vrng_setup_queue(p, VRNG_Q_REQ, VRNG_Q_SLOTS) < 0)
-        return -ENODEV;
+    int setup = vrng_setup_queue(p, VRNG_Q_REQ, VRNG_Q_SLOTS);
+    if (setup < 0)
+        return vrng_fail(p, setup);
     vrng_program_queue(p, VRNG_Q_REQ,
                        p->dma + offsetof(vrng_mem_t, desc),
                        p->dma + offsetof(vrng_mem_t, avail),
                        p->dma + offsetof(vrng_mem_t, used));
 
-    int irq_registered = 0;
     if (p->vt.irq >= 0) {
         unsigned long irq_flags = p->vt.shared_irq ? IRQF_SHARED : 0;
         if (request_irq((uint32_t)p->vt.irq, vrng_irq_handler, irq_flags,
                         p) == 0) {
             p->irq_registered = 1;
-            irq_registered = 1;
         } else {
             kinfo("[VRNG] INTx %d unavailable, entropy falls back to "
                   "read/poll\n", p->vt.irq);
@@ -487,22 +523,16 @@ static int vrng_init_transport(device_t *dev, const virtio_transport_t *vt_in,
         }
     }
 
-    p->valid = 1;
-    dev->drv_priv = p;
-
     /* The core publishes the class device right after this returns 0; asking
      * for the node name here is the only place a driver may choose one. */
     int ret = drv_device_set_devfs_name(dev, "hwrng");
-    if (ret < 0) {
-        p->valid = 0;
-        vrng_fail(p, irq_registered, p->vt.irq);
-        dev->drv_priv = NULL;
-        return ret;
-    }
+    if (ret < 0)
+        return vrng_fail(p, ret);
 
     status |= VRNG_STATUS_DRIVER_OK;
     p->vt.write32(&p->vt, VRNG_MMIO_STATUS, status);
     mb();
+    __atomic_store_n(&p->valid, 1, __ATOMIC_RELEASE);
 
     kinfo("[VRNG] virtio-rng ready (irq=%d, /dev/hwrng)\n", p->vt.irq);
     return 0;
@@ -510,10 +540,22 @@ static int vrng_init_transport(device_t *dev, const virtio_transport_t *vt_in,
 
 static int vrng_probe(device_t *dev)
 {
-    if (g_vrng.valid)
+    if (g_vrng.owner)
         return -EBUSY; /* single instance, documented limit */
 
-    virtio_transport_t vt;
+    int managed = device_probe_use_remove(dev);
+    if (managed)
+        return managed;
+    vrng_inst_t *p = &g_vrng;
+    memset(p, 0, sizeof(*p));
+    spin_init(&p->lock);
+    p->owner = dev;
+    p->irq = -1;
+    dev->drv_priv = p;
+    int execution = device_add_execution_action(dev, vrng_stop, NULL, p);
+    if (execution)
+        return execution;
+    virtio_transport_t vt = {0};
     int is_mmio = 1;
 
     if (dev->bus == &pci_bus) {
@@ -535,17 +577,33 @@ static int vrng_probe(device_t *dev)
         vt.irq = irq_res ? (int)irq_res->start : -1;
     }
 
-    vrng_inst_t *p = &g_vrng;
-    int ret = vrng_init_transport(dev, &vt, is_mmio);
-    if (ret != 0) {
-        /* vrng_init_transport() leaves the instance partly built on every
-         * failure path, so roll it back here rather than at each site. */
-        if (p->valid || p->mem || p->irq_registered)
-            vrng_fail(p, p->irq_registered, p->vt.irq);
-        else
-            memset(p, 0, sizeof(*p));
-        return ret;
+    return vrng_init_transport(dev, &vt, is_mmio);
+}
+
+static int vrng_stop(void *context)
+{
+    vrng_inst_t *p = context;
+    __atomic_store_n(&p->closing, 1, __ATOMIC_RELEASE);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&p->lock, &flags))
+        return -EBUSY;
+    __atomic_store_n(&p->valid, 0, __ATOMIC_RELEASE);
+    if (p->active_calls) {
+        spin_unlock_irqrestore(&p->lock, flags);
+        return -EBUSY;
     }
+    spin_unlock_irqrestore(&p->lock, flags);
+    if (p->reset_required && !p->hardware_stopped) {
+        if (p->vt.read32(&p->vt, VRNG_MMIO_STATUS) == 0xffffffffU)
+            return -ENODEV;
+        int ret = virtio_transport_reset(&p->vt, 100);
+        if (ret)
+            return ret;
+    }
+    p->hardware_stopped = 1;
+    if (p->irq_registered && p->irq >= 0)
+        free_irq((uint32_t)p->irq, p);
+    __atomic_store_n(&p->irq_registered, 0, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -554,16 +612,9 @@ static int vrng_remove(device_t *dev)
     vrng_inst_t *p = dev ? dev->drv_priv : NULL;
     if (!p)
         return 0;
-
-    uint64_t flags = spin_lock_irqsave(&p->lock);
-    p->valid = 0;
-    spin_unlock_irqrestore(&p->lock, flags);
-
-    if (p->irq_registered && p->irq >= 0)
-        free_irq((uint32_t)p->irq, p);
-
-    p->vt.write32(&p->vt, VRNG_MMIO_STATUS, 0);
-    mb();
+    int ret = vrng_stop(p);
+    if (ret)
+        return ret;
     vrng_free_dma(p);
     dev->drv_priv = NULL;
     memset(p, 0, sizeof(*p));
@@ -577,8 +628,12 @@ static int vrng_remove(device_t *dev)
 static int vrng_class_read(device_t *dev, void *buf, size_t count)
 {
     vrng_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->valid || !buf || !count)
+    if (!buf || !count)
         return -EINVAL;
+    int result = vrng_call_begin(p);
+    if (result)
+        return result;
+    result = -ETIMEDOUT;
 
     /* Drain first: data that arrived before the last interrupt was handled is
      * still readable, and this is the whole path when request_irq() failed. */
@@ -592,6 +647,10 @@ static int vrng_class_read(device_t *dev, void *buf, size_t count)
         uint64_t deadline =
             clock_get_ticks() + MS_TO_TICKS(VRNG_READ_TIMEOUT_MS);
         for (;;) {
+            if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) {
+                result = -ENODEV;
+                goto out;
+            }
             proc_yield();
             vrng_pump(p);
             n = vrng_take(p, buf, count);
@@ -610,23 +669,27 @@ static int vrng_class_read(device_t *dev, void *buf, size_t count)
         uint64_t flags = spin_lock_irqsave(&p->lock);
         p->read_timeouts++;
         spin_unlock_irqrestore(&p->lock, flags);
-        return -ETIMEDOUT;
+        goto out;
     }
 
     vrng_feed_pool(p, buf, n);
-    return (int)n;
+    result = (int)n;
+out:
+    vrng_call_end(p);
+    return result;
 }
 
 static int vrng_class_poll(device_t *dev, short events)
 {
     vrng_inst_t *p = dev ? dev->drv_priv : NULL;
     (void)events;
-    if (!p || !p->valid)
+    if (vrng_call_begin(p))
         return 0;
     vrng_pump(p);
     uint64_t flags = spin_lock_irqsave(&p->lock);
     int ready = p->head != p->tail;
     spin_unlock_irqrestore(&p->lock, flags);
+    vrng_call_end(p);
     return ready;
 }
 
