@@ -24,7 +24,7 @@ struct virtio_transport {
 };
 typedef struct {void *drv_priv;} device_t;
 typedef struct {virtio_transport_t vt;device_t *device;int valid,transport_live,published,irq_registered,irq;void *ring_mem;} virtio_net_inst_t;
-typedef struct {struct {int valid;} blk;virtio_transport_t vt;int in_flight,irq_registered;void *queue_dma_mem;} virtio_blk_inst_t;
+typedef struct {struct {int valid;} blk;virtio_transport_t vt;int in_flight,irq_registered,transport_live,ever_published;device_t *device;void *queue_dma_mem;} virtio_blk_inst_t;
 static struct {unsigned reads,resets,acks,frees,teardowns,ring_frees,stack_calls,confirmed;int stuck;} hw;
 static uint64_t ticks;
 static uint64_t clock_ticks_per_sec(void){return 1000;}
@@ -44,6 +44,7 @@ static void write32(virtio_transport_t *t,uint32_t off,uint32_t value){
 static void free_irq(uint32_t irq,void *owner){(void)irq;assert(owner&&hw.confirmed);hw.frees++;}
 static void teardown(virtio_transport_t *t){assert(hw.confirmed&&hw.frees==(unsigned)t->msix_vectors);hw.teardowns++;}
 static void virtio_net_free_ring(virtio_net_inst_t *net){assert(hw.confirmed&&!net->irq_registered&&net->ring_mem);net->ring_mem=NULL;hw.ring_frees++;}
+static void virtio_blk_free_dma(virtio_blk_inst_t *inst){(void)inst;assert(0);}
 static void net_stack_device_interrupt(device_t *d){assert(d);hw.stack_calls++;}
 '''
 MAIN = r'''
@@ -64,7 +65,7 @@ int main(void){
   assert(!virtio_net_driver_remove(&dev)&&hw.resets==2);
 
   hw=(__typeof__(hw)){.stuck=1};
-  virtio_blk_inst_t blk={.vt=vt,.blk={.valid=1},.irq_registered=1,
+  virtio_blk_inst_t blk={.vt=vt,.blk={.valid=1},.irq_registered=1,.transport_live=1,.ever_published=1,
    .in_flight=3,.queue_dma_mem=&blk};dev.drv_priv=&blk;
   assert(virtio_blk_driver_remove(&dev)==-ETIMEDOUT);
   assert(dev.drv_priv==&blk&&!blk.blk.valid&&blk.irq_registered&&blk.in_flight==3);

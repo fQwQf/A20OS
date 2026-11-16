@@ -103,6 +103,7 @@ typedef struct virtio_blk_req {
 } virtio_blk_req_t;
 typedef struct virtio_blk_inst {
     int slot;
+    int ever_published;
     size_t request_slots;
     struct { int valid; } blk;
     test_lock_t lock;
@@ -127,6 +128,7 @@ static void reset(void) {
     g_insts[0].slot = 0;
     g_insts[0].request_slots = VIRTIO_BLK_MAX_REQ_SLOTS;
     g_insts[0].blk.valid = 1;
+    g_insts[0].ever_published = 1;
     alloc_calls = submit_calls = wait_calls = fallback_calls = 0;
     in_use_now = max_outstanding = outstanding_at_first_wait = 0;
     kick_calls = kicks_at_first_wait = submit_notify_nonzero = 0;
