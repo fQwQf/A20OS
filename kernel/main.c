@@ -759,6 +759,11 @@ void init_kthread(void) {
     task_t *init_task = proc_find_get(ret);
     if (!init_task || !init_task->mm)
         panic("init: missing initial address space");
+    /* The boot image bypasses exec_commit(), so install its executable path
+     * here too. Otherwise /proc/1/exe falls back to /bin/sh even when PID 1
+     * is an ELF init such as OpenRC. Use the selected interpreter for scripts. */
+    strncpy(init_task->exec_path, init_path, sizeof(init_task->exec_path) - 1);
+    init_task->exec_path[sizeof(init_task->exec_path) - 1] = '\0';
     init_task->mm->auxv_n = init_auxv_n;
     for (uint32_t i = 0; i < init_auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
         init_task->mm->auxv[i][0] = init_auxv[i][0];
