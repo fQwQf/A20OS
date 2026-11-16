@@ -58,6 +58,15 @@ int main(void){
 }
 ''')
 
+    def test_designware_checked_stop_and_partial_probe(self):
+        strip = lambda text: re.sub(r'^#include.*\n', '', text, flags=re.M)
+        generated = (ROOT / 'tools/tests/dw_i2c_lifecycle_host.c').read_text()
+        for marker, name in [('HEADER', 'kernel/include/drivers/i2c/i2c.h'),
+                             ('REGISTRY', 'kernel/drivers/i2c/i2c-core.c'),
+                             ('PRODUCTION', 'kernel/drivers/i2c/i2c-designware.c')]:
+            generated = generated.replace('/* ' + marker + ' */', strip((ROOT / name).read_text()))
+        run(generated)
+
     def test_hid_teardown_keeps_context_until_worker_has_exited(self):
         source = (ROOT / 'kernel/drivers/hid/i2c-hid.c').read_text()
         run(r'''

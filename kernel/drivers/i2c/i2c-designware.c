@@ -123,6 +123,9 @@ typedef struct dw_i2c_controller {
     int failure_logged;
     unsigned recovery_count;
     mutex_t lock;
+    int closing;
+    int hardware_owned;
+    int adapter_registered;
     i2c_adapter_t adapter;
 } dw_i2c_controller_t;
 
@@ -215,8 +218,10 @@ static void dw_i2c_scl_timing(uint64_t ic_clk,
 static int dw_i2c_wait_enable(dw_i2c_controller_t *i2c, int enabled)
 {
     for (unsigned i = 0; i < DW_I2C_TIMEOUT_US; i++) {
-        uint32_t st = dw_read(i2c, DW_IC_ENABLE_STATUS) & 1U;
-        if (!!st == !!enabled)
+        uint32_t st = dw_read(i2c, DW_IC_ENABLE_STATUS);
+        if (st == UINT32_MAX)
+            return -ENODEV;
+        if (!!(st & 1U) == !!enabled)
             return 0;
         udelay(1);
     }
@@ -243,11 +248,15 @@ static int dw_i2c_enable(dw_i2c_controller_t *i2c)
  * the DesignWare sequence used by Linux's __i2c_dw_disable(). */
 static int dw_i2c_abort_transfer(dw_i2c_controller_t *i2c)
 {
-    if (dw_i2c_enable(i2c) < 0)
-        return -ETIMEDOUT;
+    int ret = dw_i2c_enable(i2c);
+    if (ret)
+        return ret;
     dw_write(i2c, DW_IC_ENABLE, 1U | DW_ENABLE_ABORT);
     for (unsigned i = 0; i < 1000; i++) {
-        if (!(dw_read(i2c, DW_IC_ENABLE) & DW_ENABLE_ABORT))
+        uint32_t enable = dw_read(i2c, DW_IC_ENABLE);
+        if (enable == UINT32_MAX)
+            return -ENODEV;
+        if (!(enable & DW_ENABLE_ABORT))
             return dw_i2c_disable(i2c);
         udelay(1);
     }
@@ -268,7 +277,11 @@ static void dw_i2c_clear_errors(dw_i2c_controller_t *i2c)
 
 static int dw_i2c_abort_status(dw_i2c_controller_t *i2c)
 {
+    if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
     uint32_t src = dw_read(i2c, DW_IC_TX_ABRT_SOURCE);
+    if (src == UINT32_MAX)
+        return -ENODEV;
     if (!src && !(dw_read(i2c, DW_IC_RAW_INTR_STAT) & DW_INTR_TX_ABRT))
         return 0;
     (void)dw_read(i2c, DW_IC_CLR_TX_ABRT);
@@ -330,7 +343,11 @@ static int dw_i2c_read_msg(dw_i2c_controller_t *i2c, i2c_msg_t *msg, int first,
     uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(200);
 
     while (drained < msg->len) {
+        if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
         uint32_t status = dw_read(i2c, DW_IC_STATUS);
+        if (status == UINT32_MAX)
+            return -ENODEV;
         if (drained < pushed && (status & DW_STATUS_RFNE)) {
             msg->buf[drained++] =
                 (uint8_t)(dw_read(i2c, DW_IC_DATA_CMD) & 0xffU);
@@ -362,6 +379,8 @@ static int dw_i2c_transfer(i2c_adapter_t *adapter, i2c_msg_t *msgs, int n)
     dw_i2c_controller_t *i2c = adapter ? adapter->priv : NULL;
     if (!i2c || !msgs || n <= 0)
         return -EINVAL;
+    if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
     if (!msgs[0].len)
         return 0;
     /* All messages of one transfer target the same slave; a transfer that
@@ -375,20 +394,22 @@ static int dw_i2c_transfer(i2c_adapter_t *adapter, i2c_msg_t *msgs, int n)
 
     mutex_lock(&i2c->lock);
     int ret = 0;
+    if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&i2c->lock);
+        return -ESHUTDOWN;
+    }
 
     /* IC_TAR is latched when the controller is enabled, and RESTART_EN has to
      * be part of IC_CON before a write-then-read is issued.  Disable, program
      * the target, then enable: the same order as i2c_dw_xfer_init(). */
-    if (dw_i2c_disable(i2c) < 0) {
-        ret = -ETIMEDOUT;
+    ret = dw_i2c_disable(i2c);
+    if (ret)
         goto out;
-    }
     dw_i2c_clear_errors(i2c);
     dw_write(i2c, DW_IC_TAR, msgs[0].addr);
-    if (dw_i2c_enable(i2c) < 0) {
-        ret = -ETIMEDOUT;
+    ret = dw_i2c_enable(i2c);
+    if (ret)
         goto out;
-    }
     (void)dw_read(i2c, DW_IC_CLR_INTR);
 
     for (int i = 0; i < n && ret == 0; i++) {
@@ -405,6 +426,13 @@ static int dw_i2c_transfer(i2c_adapter_t *adapter, i2c_msg_t *msgs, int n)
         ret = dw_i2c_wait_stop(i2c);
 
 out:
+    /* Stop may have closed admission while this PIO owner held the lock.
+     * Do not restart hardware for recovery; the retrying stop owns cleanup. */
+    if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE) || ret == -ENODEV) {
+        __atomic_store_n(&i2c->closing, 1, __ATOMIC_RELEASE);
+        mutex_unlock(&i2c->lock);
+        return ret ? ret : -ESHUTDOWN;
+    }
     if (ret == -ETIMEDOUT && !i2c->failure_logged) {
         i2c->failure_logged = 1;
         kwarn("[I2C-DW] first timeout: addr=%02x len=%u status=%02x raw=%04x tx=%u rx=%u\n",
@@ -414,14 +442,19 @@ out:
     }
     /* Linux disables the adapter between transfers (__i2c_dw_disable_nowait)
      * so the next one starts from a known idle state. */
+    int cleanup;
     if (ret) {
         int recovered = dw_i2c_abort_transfer(i2c);
+        cleanup = recovered;
         if (ret == -ETIMEDOUT && (++i2c->recovery_count <= 5 || !(i2c->recovery_count % 16)))
             kinfo("[I2C-DW] timeout recovery: abort/disable result=%d\n", recovered);
     } else {
-        (void)dw_i2c_disable(i2c);
+        cleanup = dw_i2c_disable(i2c);
+        ret = cleanup;
     }
-    if (ret)
+    if (cleanup)
+        __atomic_store_n(&i2c->closing, 1, __ATOMIC_RELEASE);
+    else if (ret)
         dw_i2c_clear_errors(i2c);
     mutex_unlock(&i2c->lock);
     return ret;
@@ -435,8 +468,9 @@ static int dw_i2c_program_timing(dw_i2c_controller_t *i2c);
  */
 static int dw_i2c_init_hw(dw_i2c_controller_t *i2c)
 {
-    if (dw_i2c_disable(i2c) < 0)
-        return -ETIMEDOUT;
+    int ret = dw_i2c_disable(i2c);
+    if (ret)
+        return ret;
     dw_i2c_clear_errors(i2c);
     dw_write(i2c, DW_IC_INTR_MASK, 0);
     dw_i2c_program_timing(i2c);
@@ -468,24 +502,66 @@ static int dw_i2c_program_timing(dw_i2c_controller_t *i2c)
     return 0;
 }
 
+/* No storage is released until both checked hardware stop and adapter
+ * reference drain have succeeded. The core checkpoints a successful stop. */
+static int dw_i2c_stop(void *context)
+{
+    dw_i2c_controller_t *i2c = context;
+    __atomic_store_n(&i2c->closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&i2c->lock))
+        return -EBUSY;
+    int ret = 0;
+    if (i2c->hardware_owned) {
+        if (dw_read(i2c, DW_IC_COMP_TYPE) != DW_COMP_TYPE_VALUE) {
+            ret = -ENODEV;
+            goto out;
+        }
+        dw_write(i2c, DW_IC_INTR_MASK, 0);
+        uint32_t mask = dw_read(i2c, DW_IC_INTR_MASK);
+        if (mask) {
+            ret = mask == UINT32_MAX ? -ENODEV : -EIO;
+            goto out;
+        }
+        ret = dw_i2c_disable(i2c);
+        if (!ret)
+            dw_i2c_clear_errors(i2c);
+    }
+out:
+    mutex_unlock(&i2c->lock);
+    return ret;
+}
+
+static void dw_i2c_release(void *context)
+{
+    kfree(context);
+}
+
 static int dw_i2c_probe(device_t *dev)
 {
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
     if (!res || res->end < res->start ||
-        res->end - res->start + 1U < DW_IC_COMP_TYPE + 4U)
+        res->end - res->start < DW_IC_COMP_TYPE + 3U)
         return -ENODEV;
 
+    int rc = device_probe_use_remove(dev);
+    if (rc)
+        return rc;
     dw_i2c_parse_cmdline();
 
     dw_i2c_controller_t *i2c = kcalloc(1, sizeof(*i2c));
     if (!i2c)
         return -ENOMEM;
-    i2c->regs = (uintptr_t)device_map_mmio(dev, 0);
-    if (!i2c->regs) {
-        kfree(i2c);
-        return -EIO;
-    }
     mutex_init(&i2c->lock);
+    dev->drv_priv = i2c;
+    rc = device_add_execution_action(dev, dw_i2c_stop, dw_i2c_release, i2c);
+    if (rc) {
+        dev->drv_priv = NULL;
+        kfree(i2c);
+        return rc;
+    }
+    i2c->regs = (uintptr_t)device_map_mmio(dev, 0);
+    if (!i2c->regs)
+        return -EIO;
     i2c->ic_clk_hz = g_dw_ic_clk_hz;
     i2c->bus_speed_hz = g_dw_bus_speed_hz;
     uint32_t hz;
@@ -496,18 +572,19 @@ static int dw_i2c_probe(device_t *dev)
         hz >= 10000U && hz <= 1000000U)
         i2c->bus_speed_hz = hz;
 
-    /* Confirm the register file before touching anything else: ACPI memory
-     * descriptors have been wrong before, and driving an unrelated block with
-     * this register layout is not recoverable. */
+    /* A mismatched register file is never written, including failed-probe
+     * cleanup. Only a verified controller becomes our hardware to stop. */
     uint32_t type = dw_read(i2c, DW_IC_COMP_TYPE);
     if (type != DW_COMP_TYPE_VALUE) {
         kerr("[I2C-DW] component type 0x%08x != 0x%08x; not this "
              "controller\n", type, DW_COMP_TYPE_VALUE);
-        kfree(i2c);
         return -ENODEV;
     }
+    i2c->hardware_owned = 1;
 
     uint32_t comp = dw_read(i2c, DW_IC_COMP_PARAM_1);
+    if (comp == UINT32_MAX)
+        return -ENODEV;
     i2c->tx_fifo_depth = ((comp >> 16) & 0xffU) + 1U;
     i2c->rx_fifo_depth = ((comp >> 8) & 0xffU) + 1U;
     if (i2c->tx_fifo_depth < 2U || i2c->tx_fifo_depth > 256U)
@@ -515,35 +592,26 @@ static int dw_i2c_probe(device_t *dev)
     if (i2c->rx_fifo_depth < 2U || i2c->rx_fifo_depth > 256U)
         i2c->rx_fifo_depth = 8U;
 
-    if (dw_i2c_init_hw(i2c) < 0) {
+    rc = dw_i2c_init_hw(i2c);
+    if (rc) {
         kerr("[I2C-DW] controller did not initialise\n");
-        kfree(i2c);
-        return -EIO;
+        return rc;
     }
-
+    /* Publish only after checked transition to the idle-disabled state. */
+    rc = dw_i2c_disable(i2c);
+    if (rc)
+        return rc;
     int nr = i2c_adapter_alloc_nr();
-    if (nr < 0) {
-        (void)dw_i2c_disable(i2c);
-        kfree(i2c);
+    if (nr < 0)
         return nr;
-    }
     i2c->adapter.name = "i2c-designware";
     i2c->adapter.nr = nr;
     i2c->adapter.transfer = dw_i2c_transfer;
     i2c->adapter.priv = i2c;
-    int rc = i2c_adapter_add_for_device(dev, &i2c->adapter);
-    if (rc < 0) {
-        (void)dw_i2c_disable(i2c);
-        kfree(i2c);
+    rc = i2c_adapter_add_for_device(dev, &i2c->adapter);
+    if (rc)
         return rc;
-    }
-    dev->drv_priv = i2c;
-
-    /* Leave the core disabled between transfers, as i2c_dw_init() does: an
-     * enabled idle master keeps its clock divider running and some cores
-     * latch the wrong target if the bus is touched before the next transfer
-     * re-programs IC_TAR. */
-    (void)dw_i2c_disable(i2c);
+    i2c->adapter_registered = 1;
 
     kinfo("[I2C-DW] adapter %d ready: speed=%u Hz ic_clk=%u Hz "
           "fifo tx=%u rx=%u\n",
@@ -557,12 +625,13 @@ static int dw_i2c_remove(device_t *dev)
     dw_i2c_controller_t *i2c = dev ? dev->drv_priv : NULL;
     if (!i2c)
         return 0;
-    int ret = i2c_adapter_remove(&i2c->adapter);
-    if (ret)
-        return ret;
-    (void)dw_i2c_disable(i2c);
+    if (i2c->adapter_registered) {
+        int ret = i2c_adapter_remove(&i2c->adapter);
+        if (ret)
+            return ret;
+        i2c->adapter_registered = 0;
+    }
     dev->drv_priv = NULL;
-    kfree(i2c);
     return 0;
 }
 
