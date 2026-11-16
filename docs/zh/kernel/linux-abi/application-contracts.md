@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | BusyBox shell、CLI 的 zsh/bash；[CLI world](../../../../packages/world/cli.world) | clone/execve/wait4、pipe2/dup/close、rt_sigaction/rt_sigprocmask、setsid/setpgid、终端 ioctl、get/setrlimit/prlimit64。管道 EOF/EPIPE、子进程收割、CLOEXEC、后台读写拒绝及非法限制组合必须有明确结果。 | `make smoke-child-exit-matrix`、`make smoke-sigchld-group`；[TTY 生产程序](../../../../user/cmds/core/tty_jobcontrol_test.c)及[运行契约](tty-jobcontrol.md)。RV64 SMP2/AArch64 SMP4 的历史记录见[本轮归档](../../archive/v1-closeout-2026-11-16.md#控制终端与作业控制)；本轮 prlimit 主机检查见下表，不能替代完整 shell 客体运行。 |
 | OpenRC PID 1 / supervise-daemon；[XFCE world](../../../../packages/world/xfce.world) | mknodat/openat/read/write/poll、kill/wait4、procfs、mount/reboot。FIFO 无对端的非阻塞写打开为 ENXIO，断开写为 EPIPE；PID 1 保留、监督重启、正常关机和停止错误须如实交付。 | [init 接口契约](init-compatibility.md)，[FIFO 客体检查](../../../../tools/tests/fifo_guest.py)、[环境读取检查](../../../../tools/tests/proc_environ_guest.py)、[OpenRC 监督检查](../../../../tools/tests/openrc_supervision_guest.py)。AArch64 实际 world 的历史监督恢复见[桌面状态](../../status/current/desktop-minecraft-status.md#aarch64-原生服务恢复2026-11-16)；不把进程存活当作服务恢复通过。 |
-| Python 3 / Node.js/npm；[pynode world](../../../../packages/world/pynode.world) | execve、mmap/mprotect、futex、poll/epoll、clock_gettime/timerfd、socket 与基础文件 I/O。事件循环的超时/中断、关闭描述符、错误路径和安装期子进程退出须有可观察结果。 | `make smoke-poll-edge`、`make smoke-timer-edge`、`make smoke-futex-stress` 提供共享机制入口；[脚本执行与共享内存探针](../../../../tools/tests/desktop_abi_probe.py)提供客体/宿主对照。新增[离线安装期应用检查](../../../../tools/tests/application_runtime_guest.py)。本轮 RV64 双核真实客体的 Python 安装流程报 EIO，Node 安装期子进程发生 SIGSEGV，均未通过，见下方运行记录。 |
+| Python 3 / Node.js/npm；[pynode world](../../../../packages/world/pynode.world) | execve、mmap/mprotect、futex、poll/epoll、clock_gettime/timerfd、socket 与基础文件 I/O。事件循环的超时/中断、关闭描述符、错误路径和安装期子进程退出须有可观察结果。 | `make smoke-poll-edge`、`make smoke-timer-edge`、`make smoke-futex-stress` 提供共享机制入口；[脚本执行与共享内存探针](../../../../tools/tests/desktop_abi_probe.py)提供客体/宿主对照。新增[离线安装期应用检查](../../../../tools/tests/application_runtime_guest.py)。本轮 RV64 双核真实客体的 Python 安装清理报 EIO；Node 子进程经 fork advice 修复后不再崩溃，但预期输出缺失，仍未通过，见下方运行记录。 |
 | labwc / XFCE / Firefox；[XFCE world](../../../../packages/world/xfce.world) | clone(CLONE_SIGHAND)、execve、Linux 信号与 syscall restart、seccomp、poll/epoll、Unix socket 的 SCM_RIGHTS、mmap 与设备 ioctl。线程共享处理表、SIGSYS 处理、正确的架构重启长度、共享对象关闭与沙箱拒绝是关键边界。 | [syscall 重启程序](../../../../user/cmds/core/syscall_restart_test.c)、`make smoke-scm-stress`、[桌面 ABI 探针](../../../../tools/tests/desktop_abi_probe.py)、[浏览器客体入口](../../../../tools/tests/xfce-web-smoke.sh)。[x86_64 历史修复记录](../../status/history/desktop-regressions-2026-10-22.md)记录了真实浏览器交互；脚本本身注明视觉交互需另行确认，不能仅凭启动标记关闭应用路径。 |
 | OpenJDK 21 / Minecraft；[客户端范围](../../distro/minecraft.md) | clone/TLS/futex、Linux 信号、文件映射、动态库加载、socket/ioctl(SIOCGIFCONF)、设备 ioctl 与共享描述符。接口尺寸查询、短缓冲区不越界、线程与共享映射寿命、退出及存档重载需保持一致。 | [网卡枚举契约](interface-enumeration.md)、`make smoke-net-iface`；[客户端客体入口](../../../../tools/tests/xfce-minecraft-smoke.sh)与[实际保存/重载步骤](../../distro/minecraft.md#验证方法)。[历史桌面记录](../../status/history/desktop-regressions-2026-10-22.md)不升级为当前候选或所有架构通过；账号登录、Realms 和联机仍按现有应用范围披露。 |
 | CLI/桌面的 curl 与网络查询工具；[CLI world](../../../../packages/world/cli.world) | socket/connect/send/recv、setsockopt/getsockopt、接口 ioctl/netlink 与地址族校验。TCP 连通、接口枚举和 UDP DNS 是不同契约，不能互相替代；不支持的选项/地址族必须给出真实错误。 | [上游用户态接口探针](../../../../user/tests/test_upstream_userland.c)、`make smoke-net-iface`及[HTTP/HTTPS 入口](../../../../tools/tests/xfce-web-smoke.sh)。CLI world 中保留的旧网络失败描述须与当前实现核对，不能直接当作现行故障，也不能用一次 HTTP 200 宣称网络工具全部可用。 |
@@ -25,11 +25,14 @@
 使用当前工作树的 RV64 QEMU virt、ABI=both、SMP2、BSD 网络栈配置，重建内核、驱动、FAT 与 pynode world；运行使用私有磁盘副本，应用包/缓存为临时目录且不访问网络。入口为 `python3 /usr/lib/a20/application_runtime_guest.py`，其中脚本执行与 SysV 共享内存复用已有探针。
 
 - shell 管道/子进程等待通过；脚本执行和 SysV IPC_RMID 后共享内存探针通过。
-- Python 本地 pip 安装流程返回 `OSError(5, 'I/O error')`，具体失败位置尚未定位。
+- Python 本地 pip 安装与导入断言完成，随后临时目录 `installed` 的 rmdir 清理返回 `OSError(5, 'I/O error')`；整个安装期检查仍失败，定位日志见 `application-exec-diagnostic/guest.log`。
 - npm 安装期脚本启动的 `/usr/bin/node -e ...` 子进程触发 SIGSEGV，未以禁用功能或忽略子进程失败绕过。
 - 正常 poweroff 在文件写回时被 JBD2 record 的 ENOSPC/EIO 拒绝。保存日志后由宿主停止私有 guest；QEMU 返回码 0 不计为自然关机通过，整体结果为失败。
 
 原始命令、内核/基线/注入脚本哈希、串口日志和报告位于 `build/evidence/v1-closeout-20261116/application-runtime/`；报告明确含 `forced_stop=true`、`shutdown_refused=true`。这是已复现的正常应用阻塞，不新增故障注入矩阵；优先定位上述失败，N08 尚未关闭。
+
+
+后续已关闭 madvise fork-policy 的范围扩大与 WIPEONFORK 错误移除映射两处缺陷。[定向回归](../../../../tools/tests/application_runtime_guest.py)的 `--check madvise-fork-range` 已在宿主 Linux 与实际 RV64 SMP2 guest 通过，Rust 策略宿主检查通过 236 个断言；旧内核负控复现范围外页面 SIGSEGV。最终同一 guest 的 Node 子进程 callback 无错误但输出为空，未达到预期标记，整体结果仍失败；该次自然关机与 FAT/ext4 检查均为 0，不关闭原 pip 负载写回故障。细节见[本轮记录](../../archive/v1-closeout-2026-11-16.md#linux-fork-advice-的范围与清零语义)，证据在 `build/evidence/v1-closeout-20261116/madvise-fork-range/verified/report.json`。诊断 trace 扫描器的 SMP 竞争尚待修复，不作为 Node 通过证据。
 
 ## 证据与关闭规则
 

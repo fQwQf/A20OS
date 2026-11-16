@@ -10,8 +10,10 @@ workloads to their required calls, error boundaries and checks. It distinguishes
 current direct host checks from historical application runs and missing original
 reports. N08 remains open; neither a registered workload nor a historical PASS
 establishes acceptance of the current release candidate. The current RV64 SMP2
-pynode application run exposed a pip-flow EIO, a Node child SIGSEGV and a refused
-filesystem shutdown; those are recorded failures in the register, not PASS evidence.
+pynode application run exposed a pip-cleanup EIO, a Node child SIGSEGV and a refused
+filesystem shutdown. Fork-advice range/wipe regressions now pass a direct RV64 SMP2
+check, but Node child output remains missing and the original pip workload is still
+unaccepted; see the register for the bounded evidence.
 
 ## Coverage Legend
 
@@ -281,7 +283,7 @@ strength of a boilerplate note.
 | `munmap` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mprotect` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `msync` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `madvise` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `madvise` | memory | `partial` | `smoke-mm-stress`; `application_runtime_guest.py --check madvise-fork-range` (RV64 SMP2 / Linux reference) | fork advice changes only the requested pages; WIPEONFORK retains a zero-filled child mapping, KEEPONFORK restores inheritance. Other Linux edge semantics remain gaps. |
 | `mremap` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `shm_open` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `memfd_create` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |

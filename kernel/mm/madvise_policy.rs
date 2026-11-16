@@ -44,6 +44,8 @@ const EINVAL: i32 = -22;
 const ENOMEM: i32 = -12;
 const ENOSYS: i32 = -38;
 
+const VM_SHARED: u64 = 1 << 3;
+const VM_FILE: u64 = 1 << 13;
 const VM_DONTFORK: u64 = 1 << 9;
 const VM_WIPEONFORK: u64 = 1 << 10;
 const VM_VMO: u64 = 1 << 14;
@@ -459,6 +461,11 @@ pub unsafe extern "C" fn a20_madvise_fork_flags(
             unsafe { a20_madvise_unlock(mm, lock_flags) };
             return EPERM;
         }
+        if on != 0 && flags & VM_WIPEONFORK != 0 &&
+            rec.flags & (VM_FILE | VM_SHARED | VM_VMO) != 0 {
+            unsafe { a20_madvise_unlock(mm, lock_flags) };
+            return EINVAL;
+        }
         va = rec.end;
     }
     /* Splitting after the validation pass and before the marking pass is what
@@ -512,9 +519,9 @@ fn action_of(advice: i32) -> Action {
         MADV_PAGEOUT => Action::Pageout,
         MADV_DONTFORK => Action::Fork { flags: VM_DONTFORK, on: 1 },
         MADV_DOFORK => Action::Fork { flags: VM_DONTFORK, on: 0 },
-        /* WIPEONFORK implies DONTFORK: a range the child must not see the
-         * contents of must not be mapped into the child at all. */
-        MADV_WIPEONFORK => Action::Fork { flags: VM_DONTFORK | VM_WIPEONFORK, on: 1 },
+        /* Keep the anonymous VMA in the child, but omit its populated leaves
+         * so demand faults supply zeros. DONTFORK would remove the VMA itself. */
+        MADV_WIPEONFORK => Action::Fork { flags: VM_WIPEONFORK, on: 1 },
         MADV_KEEPONFORK => Action::Fork { flags: VM_WIPEONFORK, on: 0 },
         /* Removing backing-store contents requires a filesystem hole-punch
          * operation; swapping private pages out does not implement it. */
