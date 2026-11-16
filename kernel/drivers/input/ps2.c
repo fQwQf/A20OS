@@ -46,6 +46,8 @@ typedef struct {
 
 static ps2_input_t g_ps2;
 static int g_ps2_kbd_irq = -1, g_ps2_mouse_irq = -1;
+static device_t *g_ps2_owner;
+static int g_ps2_closing, g_ps2_hardware_owned, g_ps2_stop_complete;
 
 static const char ps2_keymap[128] = {
     [0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4',
@@ -83,10 +85,18 @@ static const char ps2_shift_keymap[128] = {
     [0x34] = '>', [0x35] = '?', [0x39] = ' ',
 };
 
-static void ps2_flush_output(void)
+/* Both boot draining and IRQ dispatch must terminate on a stuck/lost port. */
+static int ps2_flush_output(void)
 {
-    while (ioport_read8(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT)
+    for (unsigned i = 0; i < PS2_RING_SIZE; i++) {
+        uint8_t status = ioport_read8(PS2_STATUS_PORT);
+        if (status == 0xff)
+            return -ENODEV;
+        if (!(status & PS2_STATUS_OUTPUT))
+            return 0;
         (void)ioport_read8(PS2_DATA_PORT);
+    }
+    return -ETIMEDOUT;
 }
 
 static void ps2_push_event(uint16_t type, uint16_t code, int32_t value)
@@ -202,8 +212,12 @@ static void ps2_handle_mouse_byte(uint8_t byte)
 
 static void ps2_handle_irq(void)
 {
-    while (ioport_read8(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT) {
+    for (unsigned i = 0; i < PS2_RING_SIZE; i++) {
+        if (__atomic_load_n(&g_ps2_closing, __ATOMIC_ACQUIRE))
+            break;
         uint8_t status = ioport_read8(PS2_STATUS_PORT);
+        if (status == 0xff || !(status & PS2_STATUS_OUTPUT))
+            break;
         uint8_t byte = ioport_read8(PS2_DATA_PORT);
         if (!g_ps2.initialized)
             continue;
@@ -226,54 +240,54 @@ static int ps2_write_cmd(uint8_t cmd)
 {
     int tries = 10000;
     while (tries-- > 0) {
-        if (!(ioport_read8(PS2_STATUS_PORT) & PS2_STATUS_INPUT)) {
+        uint8_t status = ioport_read8(PS2_STATUS_PORT);
+        if (status == 0xff)
+            return -ENODEV;
+        if (!(status & PS2_STATUS_INPUT)) {
             ioport_write8(PS2_CMD_PORT, cmd);
             return 0;
         }
         udelay(20);
     }
-    return -1;
+    return -ETIMEDOUT;
 }
 
 static int ps2_write_data(uint8_t data)
 {
     int tries = 10000;
     while (tries-- > 0) {
-        if (!(ioport_read8(PS2_STATUS_PORT) & PS2_STATUS_INPUT)) {
+        uint8_t status = ioport_read8(PS2_STATUS_PORT);
+        if (status == 0xff)
+            return -ENODEV;
+        if (!(status & PS2_STATUS_INPUT)) {
             ioport_write8(PS2_DATA_PORT, data);
             return 0;
         }
         udelay(20);
     }
-    return -1;
+    return -ETIMEDOUT;
 }
 
 static int ps2_write_mouse(uint8_t data)
 {
-    int tries = 10000;
-    while (tries-- > 0) {
-        if (!(ioport_read8(PS2_STATUS_PORT) & PS2_STATUS_INPUT)) {
-            ioport_write8(PS2_CMD_PORT, 0xd4);
-            udelay(20);
-            ioport_write8(PS2_DATA_PORT, data);
-            return 0;
-        }
-        udelay(20);
-    }
-    return -1;
+    int ret = ps2_write_cmd(0xd4);
+    return ret ? ret : ps2_write_data(data);
 }
 
 static int ps2_read_data(uint8_t *out)
 {
     int tries = 10000;
     while (tries-- > 0) {
-        if (ioport_read8(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT) {
+        uint8_t status = ioport_read8(PS2_STATUS_PORT);
+        if (status == 0xff)
+            return -ENODEV;
+        if (status & PS2_STATUS_OUTPUT) {
             *out = ioport_read8(PS2_DATA_PORT);
             return 0;
         }
         udelay(20);
     }
-    return -1;
+    return -ETIMEDOUT;
 }
 
 static int __attribute__((unused)) ps2_wait_input_clear(void)
@@ -295,6 +309,7 @@ static int ps2_init_hw(void)
     int selftest = -1;
     int kbd_reset = -1;
     int mouse_reset = -1;
+    int ret;
 
     memset(&g_ps2, 0, sizeof(g_ps2));
     spin_init(&g_ps2.lock);
@@ -303,11 +318,12 @@ static int ps2_init_hw(void)
      * the per-command timeout on every step just to discover that the
      * keyboard is I2C-HID. */
     if (ioport_read8(PS2_STATUS_PORT) == 0xff)
-        return -1;
+        return -ENODEV;
 
     (void)ps2_write_cmd(0xad);          /* keyboard off */
     (void)ps2_write_cmd(0xa7);          /* mouse off */
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
 
     if (ps2_write_cmd(0x20) == 0 && ps2_read_data(&config) == 0)
         have_config = 1;
@@ -315,22 +331,25 @@ static int ps2_init_hw(void)
         config = 0x45;                  /* translation on, both IRQs off */
 
     config &= (uint8_t)~0x03;           /* IRQs off while programming */
-    config |= 0x0c;                     /* both ports disabled */
-    if (ps2_write_cmd(0x60) || ps2_write_data(config))
-        return -1;
+    config |= 0x30;                     /* both ports disabled */
+    if ((ret = ps2_write_cmd(0x60)) || (ret = ps2_write_data(config)))
+        return ret;
 
     /* The self-test is advisory.  Laptop ECs are known to return 0xfc/0xfd
      * or drop the response; that does not mean the keyboard cannot deliver
      * keys.  The interface tests are likewise best effort. */
     if (ps2_write_cmd(0xaa) == 0 && ps2_read_data(&response) == 0)
         selftest = (response == 0x55) ? 1 : 0;
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
     (void)ps2_write_cmd(0xab);
     (void)ps2_read_data(&response);
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
     (void)ps2_write_cmd(0xa9);
     (void)ps2_read_data(&response);
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
 
     (void)ps2_write_cmd(0xae);          /* keyboard port on */
     (void)ps2_write_cmd(0xa8);          /* mouse port on (may be absent) */
@@ -341,12 +360,13 @@ static int ps2_init_hw(void)
      * config byte.  Doing this before 0xf4 means a key press cannot splice a
      * scancode into the config response. */
     if (ps2_write_cmd(0x20) == 0 && ps2_read_data(&config) == 0) {
-        config &= (uint8_t)~0x3c;       /* KBDDIS/AUXDIS, KBDCLK/AUXCLK */
+        config &= (uint8_t)~0x30;       /* KBDDIS/AUXDIS; preserve other control bits */
         config |= 0x43;                 /* KBDINT/AUXINT, set-2 -> set-1 */
         (void)ps2_write_cmd(0x60);
         (void)ps2_write_data(config);
     }
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
 
     /* Keyboard reset and enable scanning.  This is the device the driver
      * exists for.  A failed reset is recorded, but 0xf4 is still attempted
@@ -359,12 +379,14 @@ static int ps2_init_hw(void)
         else
             kbd_reset = 0;
     }
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
     if (ps2_write_data(0xf4) == 0) {
         if (ps2_read_data(&response) == 0 && response == 0xfa)
             kbd_reset = 1;
     }
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
 
     /* Optional mouse.  A missing AUX device used to fail the whole probe --
      * exactly wrong on a laptop whose pointing device is I2C-HID: the
@@ -376,11 +398,13 @@ static int ps2_init_hw(void)
             mouse_reset = 1;
         else
             mouse_reset = 0;
-        ps2_flush_output();
+        if ((ret = ps2_flush_output()))
+            return ret;
         (void)ps2_write_mouse(0xf4);
         (void)ps2_read_data(&response);
     }
-    ps2_flush_output();
+    if ((ret = ps2_flush_output()))
+        return ret;
 
     g_ps2.initialized = 1;
     kinfo("[PS2] init: cfg=%s0x%02x selftest=%d kbd_reset=%d mouse=%d\n",
@@ -389,25 +413,100 @@ static int ps2_init_hw(void)
     return 0;
 }
 
-static void ps2_driver_shutdown(device_t *dev);
+static int ps2_stop(void *context)
+{
+    device_t *dev = context;
+    if (g_ps2_owner != dev)
+        return -ENODEV;
+    __atomic_store_n(&g_ps2_closing, 1, __ATOMIC_RELEASE);
+    /* Handlers stop reading immediately; drain accepted dispatches before
+     * using the shared command/data ports for controller replies. */
+    if (g_ps2_kbd_irq >= 0)
+        irq_disable((uint32_t)g_ps2_kbd_irq);
+    if (g_ps2_mouse_irq >= 0)
+        irq_disable((uint32_t)g_ps2_mouse_irq);
+    int ret;
+    if (g_ps2_kbd_irq >= 0 && (ret = synchronize_irq((uint32_t)g_ps2_kbd_irq)))
+        return ret;
+    if (g_ps2_mouse_irq >= 0 && (ret = synchronize_irq((uint32_t)g_ps2_mouse_irq)))
+        return ret;
+    if (g_ps2_hardware_owned) {
+        /* Stop clocks before flushing so a scancode cannot become the
+         * configuration reply. Preserve translation/system/lock policy. */
+        uint8_t config, verify;
+        if ((ret = ps2_write_cmd(0xad)) || (ret = ps2_write_cmd(0xa7)) ||
+            (ret = ps2_flush_output()) || (ret = ps2_write_cmd(0x20)) ||
+            (ret = ps2_read_data(&config)))
+            return ret;
+        config = (config & (uint8_t)~0x03) | 0x30;
+        if ((ret = ps2_write_cmd(0x60)) || (ret = ps2_write_data(config)) ||
+            (ret = ps2_write_cmd(0x20)) || (ret = ps2_read_data(&verify)))
+            return ret;
+        if ((verify & 0x33) != 0x30)
+            return -EIO;
+        if ((ret = ps2_flush_output()))
+            return ret;
+        kinfo("[PS2] controller stopped: config=0x%02x\n", verify);
+    }
+    g_ps2_stop_complete = 1;
+    return 0;
+}
+
+static void ps2_release(void *context)
+{
+    if (g_ps2_owner != context)
+        return;
+    memset(&g_ps2, 0, sizeof(g_ps2));
+    g_ps2_owner = NULL;
+    g_ps2_hardware_owned = g_ps2_stop_complete = 0;
+}
 
 static int ps2_probe(device_t *dev)
 {
-    if (g_ps2.initialized)
+    if (g_ps2_owner)
         return -EBUSY;
-    (void)dev;
-    if (ps2_init_hw() != 0) {
-        kinfo("[PS2] controller init failed; no PS/2 keyboard\n");
+    /* Use the declared fixed ports, never claim an undeclared ISA range. */
+    resource_t *data = NULL, *command = NULL, *res;
+    for (int i = 0; (res = device_get_resource(dev, RES_IOPORT, i)); i++) {
+        if (res->start <= PS2_DATA_PORT && res->end >= PS2_DATA_PORT)
+            data = res;
+        if (res->start <= PS2_CMD_PORT && res->end >= PS2_CMD_PORT)
+            command = res;
+    }
+    if (!data || !command)
         return -ENODEV;
+    int ret = device_probe_use_remove(dev);
+    if (ret)
+        return ret;
+    g_ps2_owner = dev;
+    g_ps2_hardware_owned = g_ps2_stop_complete = 0;
+    __atomic_store_n(&g_ps2_closing, 0, __ATOMIC_RELEASE);
+    dev->drv_priv = &g_ps2;
+    ret = device_add_execution_action(dev, ps2_stop, ps2_release, dev);
+    if (ret) {
+        g_ps2_owner = NULL;
+        dev->drv_priv = NULL;
+        return ret;
+    }
+    if ((ret = device_claim_resource(dev, data)) ||
+        (command != data && (ret = device_claim_resource(dev, command))))
+        return ret;
+    if (ioport_read8(PS2_STATUS_PORT) == 0xff)
+        return -ENODEV;
+    g_ps2_hardware_owned = 1;
+    ret = ps2_init_hw();
+    if (ret) {
+        kinfo("[PS2] controller init failed; no PS/2 keyboard\n");
+        return ret;
     }
 
     int kbd_vector = firmware_legacy_irq_map(1, IRQ_VECTOR_KEYBOARD);
     int mouse_vector = firmware_legacy_irq_map(12, PS2_MOUSE_IRQ_VECTOR);
-    if (kbd_vector < 0 || request_irq((uint32_t)kbd_vector, ps2_isr, 0, dev) < 0) {
-        ps2_driver_shutdown(dev);
-        g_ps2.initialized = 0;
-        return -EIO;
-    }
+    if (kbd_vector < 0)
+        return kbd_vector;
+    ret = request_irq((uint32_t)kbd_vector, ps2_isr, 0, dev);
+    if (ret)
+        return ret;
     g_ps2_kbd_irq = kbd_vector;
     if (mouse_vector >= 0 && !request_irq((uint32_t)mouse_vector, ps2_isr, 0, dev))
         g_ps2_mouse_irq = mouse_vector;
@@ -418,38 +517,24 @@ static int ps2_probe(device_t *dev)
 
 static int ps2_remove(device_t *dev)
 {
-    /* Stop dispatch and drain any handler before sending controller commands.
-     * Only then release registrations and the shared ISA controller state. */
-    if (g_ps2_kbd_irq >= 0)
-        irq_disable((uint32_t)g_ps2_kbd_irq);
-    if (g_ps2_mouse_irq >= 0)
-        irq_disable((uint32_t)g_ps2_mouse_irq);
-    if (g_ps2_kbd_irq >= 0)
-        synchronize_irq((uint32_t)g_ps2_kbd_irq);
-    if (g_ps2_mouse_irq >= 0)
-        synchronize_irq((uint32_t)g_ps2_mouse_irq);
-    ps2_driver_shutdown(dev);
+    if (g_ps2_owner != dev)
+        return 0;
+    if (!g_ps2_stop_complete)
+        return -EBUSY;
     if (g_ps2_kbd_irq >= 0)
         free_irq((uint32_t)g_ps2_kbd_irq, dev);
     if (g_ps2_mouse_irq >= 0)
         free_irq((uint32_t)g_ps2_mouse_irq, dev);
     g_ps2_kbd_irq = g_ps2_mouse_irq = -1;
-    g_ps2.initialized = 0;
+    dev->drv_priv = NULL;
     return 0;
 }
 
 static void ps2_driver_shutdown(device_t *dev)
 {
-    (void)dev;
-    if (!g_ps2.initialized)
-        return;
-    uint8_t config;
-    if (ps2_write_cmd(0x20) == 0 && ps2_read_data(&config) == 0) {
-        config &= (uint8_t)~0x03;  /* stop keyboard and mouse IRQs */
-        (void)ps2_write_cmd(0x60);
-        (void)ps2_write_data(config);
-    }
-    ps2_flush_output();
+    int ret = ps2_stop(dev);
+    if (ret)
+        kerr("[PS2] legacy shutdown failed: %d\n", ret);
 }
 
 
