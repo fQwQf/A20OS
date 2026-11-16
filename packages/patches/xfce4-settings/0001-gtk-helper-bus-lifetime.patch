@@ -1,0 +1,104 @@
+From: A20OS developers
+Subject: [PATCH] gtk-settings: give each bus callback its own helper reference
+
+GPL-2.0-or-later, matching the upstream file.
+A name-lost callback can follow bus-acquired after disconnect; it must not
+consume the reference still held by main. Weak callback data also permits
+finalization before a queued bus callback is dispatched.
+
+--- a/xfsettingsd/gtk-settings.c
++++ b/xfsettingsd/gtk-settings.c
+@@ -56,6 +56,7 @@
+     GObject parent;
+ 
+     XfceGtkSettingsHelperExported *skeleton;
++    guint bus_owner_id;
+ 
+     GHashTable *gsettings_objs;
+     XfconfChannel *channel;
+@@ -171,8 +172,11 @@
+               const gchar *name,
+               gpointer user_data)
+ {
+-    XfceGtkSettingsHelper *helper = user_data;
++    XfceGtkSettingsHelper *helper = g_weak_ref_get (user_data);
+     GError *error = NULL;
++
++    if (helper == NULL)
++        return;
+ 
+     helper->skeleton = xfce_gtk_settings_helper_exported_skeleton_new ();
+     if (!g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (helper->skeleton),
+@@ -197,10 +201,30 @@
+     if (connection == NULL)
+     {
+         g_warning ("Failed to connect to session bus");
+-        g_object_unref (user_data);
+     }
+     else
+         g_warning ("Name '%s' lost on session bus", name);
++}
++
++
++
++/* The name owner may outlive the helper or report a disconnect after the
++ * initial bus-acquired callback. Keep only a weak link; each callback owns
++ * its own temporary reference rather than consuming the caller's one. */
++static void
++settings_bus_data_free (gpointer data)
++{
++    g_weak_ref_clear (data);
++    g_free (data);
++}
++
++static void
++settings_bus_own (XfceGtkSettingsHelper *helper)
++{
++    GWeakRef *watch = g_new (GWeakRef, 1);
++    g_weak_ref_init (watch, helper);
++    helper->bus_owner_id = g_bus_own_name (G_BUS_TYPE_SESSION, "org.gtk.Settings", G_BUS_NAME_OWNER_FLAGS_NONE,
++                                          bus_acquired, NULL, name_lost, watch, settings_bus_data_free);
+ }
+ 
+ 
+@@ -215,8 +239,7 @@
+ 
+     /* synchronization via gtk-modules: requires GTK 3.24.38 to work properly (see MR !104) */
+     if (WINDOWING_IS_WAYLAND ())
+-        g_bus_own_name (G_BUS_TYPE_SESSION, "org.gtk.Settings", G_BUS_NAME_OWNER_FLAGS_NONE,
+-                        bus_acquired, NULL, name_lost, g_object_ref (helper), NULL);
++        settings_bus_own (helper);
+ 
+     source = g_settings_schema_source_get_default ();
+     if (source == NULL)
+@@ -244,7 +267,7 @@
+         if (!g_hash_table_contains (helper->gsettings_objs, translations[i].schema))
+         {
+             GSettings *gsettings = g_settings_new (translations[i].schema);
+-            g_signal_connect (gsettings, "changed", G_CALLBACK (xfce_gtk_settings_helper_gsettings_changed), helper);
++            g_signal_connect_object (gsettings, "changed", G_CALLBACK (xfce_gtk_settings_helper_gsettings_changed), helper, 0);
+             g_hash_table_insert (helper->gsettings_objs, (gpointer) translations[i].schema, gsettings);
+         }
+ 
+@@ -313,7 +336,7 @@
+     }
+ 
+     helper->channel = xfconf_channel_get ("xsettings");
+-    g_signal_connect (helper->channel, "property-changed", G_CALLBACK (xfce_gtk_settings_helper_channel_property_changed), helper);
++    g_signal_connect_object (helper->channel, "property-changed", G_CALLBACK (xfce_gtk_settings_helper_channel_property_changed), helper, 0);
+ 
+     /*
+      * Initialize GSettings with Xfconf. Since we have no natural way to decide who was
+@@ -339,6 +362,12 @@
+ {
+     XfceGtkSettingsHelper *helper = XFCE_GTK_SETTINGS_HELPER (object);
+ 
++    if (helper->bus_owner_id != 0)
++    {
++        g_bus_unown_name (helper->bus_owner_id);
++        helper->bus_owner_id = 0;
++    }
++
+     if (helper->skeleton != NULL)
+         g_object_unref (helper->skeleton);
+ 

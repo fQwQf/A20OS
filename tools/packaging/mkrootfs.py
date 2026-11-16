@@ -633,6 +633,14 @@ def main() -> None:
             apply_overlay(overlay, staging, sudo)
         run(cmd, sudo, preexec_fn=preexec)
 
+        # The stock 4.20.1 GTK helper drops main's reference on D-Bus loss.
+        # Build the reviewed source patch before explicit overlays (which
+        # retain their normal precedence over packaged files).
+        if (staging / 'usr/bin/xfsettingsd').exists():
+            sys.path.insert(0, str(script_dir))
+            from xfsettingsd_fix import install_if_present
+            install_if_present(staging, args.arch, sudo)
+
         for overlay in args.overlay:
             apply_overlay(overlay, staging, sudo, keep_account_files=True)
 
