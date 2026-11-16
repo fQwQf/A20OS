@@ -111,6 +111,7 @@
 #define XHCI_TRB_CYCLE                (1U << 0)
 #define XHCI_TRB_ENT                  (1U << 1)
 #define XHCI_TRB_ISP                  (1U << 2)
+#define XHCI_TRB_CHAIN                (1U << 4)
 #define XHCI_TRB_IOC                  (1U << 5)
 #define XHCI_TRB_IDT                  (1U << 6)
 #define XHCI_TRB_TYPE(n)              ((uint32_t)(n) << 10)
@@ -147,10 +148,11 @@ typedef struct xhci_trb {
     uint32_t control;
 } __attribute__((packed)) xhci_trb_t;
 
-typedef struct xhci_control_trbs {
+typedef struct xhci_transfer_trbs {
     uint64_t setup;
     uint64_t data;
-} xhci_control_trbs_t;
+    uint64_t bulk_first; /* Earlier member of a two-TRB bulk TD, or zero. */
+} xhci_transfer_trbs_t;
 
 typedef struct xhci_erst_entry {
     uint64_t address;
@@ -327,9 +329,8 @@ static void xhci_ring_init(xhci_ring_t *ring) {
     arch_dma_sync_for_device(ring->trbs, sizeof(ring->trbs));
 }
 
-/* Each queued TD is one TRB. A control transfer queues separate TDs for
- * setup, optional data and status. Defer the setup's cycle bit until all of
- * its stages have been written. */
+/* Defer the first cycle bit when publishing a multi-TRB operation. A Link
+ * inside a chained TD must carry CH across the segment boundary too. */
 static uint64_t xhci_ring_enqueue(xhci_ring_t *ring, uint64_t parameter,
                                   uint32_t status, uint32_t control,
                                   int defer_cycle) {
@@ -345,7 +346,7 @@ static uint64_t xhci_ring_enqueue(xhci_ring_t *ring, uint64_t parameter,
     if (index == XHCI_RING_TRBS - 1U) {
         xhci_trb_t *link = &ring->trbs[index];
         link->control = XHCI_TRB_TYPE(XHCI_TRB_LINK) | XHCI_TRB_ENT |
-                        (ring->cycle ? XHCI_TRB_CYCLE : 0U);
+                        (control & XHCI_TRB_CHAIN) | (ring->cycle ? XHCI_TRB_CYCLE : 0U);
         arch_dma_sync_for_device(link, sizeof(*link));
         ring->cycle ^= 1U;
         index = 0;
@@ -577,7 +578,7 @@ static int xhci_irq_handler(int irq, void *priv) {
 
 static int xhci_event_matches(const xhci_trb_t *event, uint8_t wanted_type,
                               uint64_t pointer,
-                              const xhci_control_trbs_t *control) {
+                              const xhci_transfer_trbs_t *control) {
     if (((event->control >> 10) & 0x3fU) != wanted_type)
         return 0;
     uint64_t event_pointer = event->parameter & ~0x0fULL;
@@ -586,8 +587,11 @@ static int xhci_event_matches(const xhci_trb_t *event, uint8_t wanted_type,
     /* A terminal error can refer to the Setup or Data TRB. A short
      * packet at Data still has a Status stage to complete. */
     uint8_t cc = (uint8_t)(event->status >> 24);
+    /* A short/error on the first bulk member terminates the TD too. */
+    if (control && control->bulk_first && event_pointer == control->bulk_first &&
+        cc != XHCI_CC_SUCCESS) return 1;
     return control && cc != XHCI_CC_SUCCESS && cc != XHCI_CC_SHORT_PACKET &&
-           (event_pointer == control->setup ||
+           ((control->setup && event_pointer == control->setup) ||
             (control->data && event_pointer == control->data));
 }
 
@@ -660,7 +664,7 @@ static int xhci_prepare_remove(void *context) {
 
 static int xhci_wait_event(xhci_controller_t *xhci, uint8_t wanted_type,
                            uint64_t pointer, xhci_trb_t *result,
-                           const xhci_control_trbs_t *control) {
+                           const xhci_transfer_trbs_t *control) {
     if (xhci->fatal)
         return -ENODEV;
     int any = 0;
@@ -812,7 +816,7 @@ static int xhci_command_locked(xhci_controller_t *xhci, uint64_t parameter,
  * xfer_busy across queueing and the completion wait. */
 static uint64_t xhci_control_locked(xhci_controller_t *xhci, uint8_t slot,
                                const usb_setup_packet_t *setup, void *data,
-                               xhci_control_trbs_t *control) {
+                               xhci_transfer_trbs_t *control) {
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
     xhci_ring_t *ring = &xhci->ep0_ring[slot];
     xhci_trb_t *first = &ring->trbs[ring->enqueue];
@@ -877,7 +881,7 @@ static int xhci_control(xhci_controller_t *xhci, uint8_t slot,
         else
             memcpy(stage, data, setup->length);
     }
-    xhci_control_trbs_t control = {0};
+    xhci_transfer_trbs_t control = {0};
     xhci_trb_t event = {0};
     uint64_t status_pointer = xhci_control_locked(xhci, slot, setup, stage,
                                                   &control);
@@ -1447,7 +1451,7 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
     return 0;
 }
 
-/* Bulk transfer: arm a NORMAL TRB on the endpoint ring and wait for its
+/* Bulk transfer: publish a Normal TD on the endpoint ring and wait for its
  * transfer event.  Synchronous (like the control path) because BOT is a
  * strictly serial CBW → data → CSW protocol.  We deliberately do NOT arm
  * ep->pending: xhci_wait_event consumes pending URBs' events and continues,
@@ -1458,7 +1462,7 @@ static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
     if (urb) urb->actual_length = 0;
     if (!urb || !urb->dev || !urb->ep || !urb->dev->slot ||
         urb->dev->slot > xhci->max_slots || !(urb->ep->addr & 15U) ||
-        (urb->len && !urb->buf))
+        (urb->len && !urb->buf) || !(urb->ep->max_packet & 0x7ffU))
         return -EINVAL;
     if (urb->len > XHCI_BULK_MAX_LENGTH) return -EMSGSIZE;
     int acquired = xhci_xfer_acquire(xhci, XHCI_BULK_HOLD_BUDGET_MS);
@@ -1496,23 +1500,45 @@ static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
         result = -ESHUTDOWN;
         goto unlock;
     }
-    uint64_t pointer = xhci_ring_enqueue(&ep->ring, address,
-                                         (uint32_t)urb->len,
-                                         XHCI_TRB_TYPE(XHCI_TRB_NORMAL) |
-                                         XHCI_TRB_ISP | XHCI_TRB_IOC, 0);
+    /* The retained allocation need only be page aligned. Split a transfer at
+     * the 64 KiB buffer boundary, keeping the existing 64 KiB request limit.
+     * xHCI 1.2b 6.4.1 and 4.11.2.4: CH and remaining packet count. */
+    uint32_t first_len = 65536U - (uint32_t)(address & 65535U);
+    if (first_len > urb->len) first_len = (uint32_t)urb->len;
+    uint32_t rest = (uint32_t)urb->len - first_len;
+    uint32_t mps = urb->ep->max_packet & 0x7ffU;
+    uint32_t packets = rest ? ((uint32_t)urb->len + mps - 1U) / mps - first_len / mps : 0;
+    if (packets > 31U) packets = 31U;
+    xhci_trb_t *first = &ep->ring.trbs[ep->ring.enqueue];
+    uint64_t first_pointer = xhci_ring_enqueue(&ep->ring, address,
+        first_len | (packets << 17), XHCI_TRB_TYPE(XHCI_TRB_NORMAL) |
+        XHCI_TRB_ISP | (rest ? XHCI_TRB_CHAIN : XHCI_TRB_IOC), 1);
+    uint64_t pointer = first_pointer;
+    if (rest)
+        pointer = xhci_ring_enqueue(&ep->ring, address + first_len, rest,
+            XHCI_TRB_TYPE(XHCI_TRB_NORMAL) | XHCI_TRB_ISP | XHCI_TRB_IOC, 0);
+    /* Publish only after every member (and a possible Link) is initialized. */
+    wmb();
+    first->control ^= XHCI_TRB_CYCLE;
+    arch_dma_sync_for_device(first, sizeof(*first));
     wmb();
     xhci_write32(xhci->doorbell, (uint32_t)slot * 4U, dci);
     (void)xhci_read32(xhci->doorbell, (uint32_t)slot * 4U);
     spin_unlock_irqrestore(&xhci->lock, flags);
     xhci_trb_t event = {0};
-    result = xhci_wait_event(xhci, XHCI_TRB_TRANSFER_EVENT, pointer, &event, NULL);
+    xhci_transfer_trbs_t transfer = { .bulk_first = rest ? first_pointer : 0 };
+    result = xhci_wait_event(xhci, XHCI_TRB_TRANSFER_EVENT, pointer, &event, &transfer);
     if (result && (event.status >> 24) == 6U) result = -EPIPE; /* STALL Error */
     if (!result) {
         uint32_t remaining = event.status & 0xffffffU;
-        if (remaining > urb->len) result = -EIO;
+        uint64_t completed = event.parameter & ~0x0fULL;
+        uint32_t before = rest && completed == pointer ? first_len : 0;
+        uint32_t length = before ? rest : first_len;
+        if ((completed != first_pointer && completed != pointer) || remaining > length)
+            result = -EIO;
         else {
-            urb->actual_length = urb->len - remaining;
-            if (remaining) result = -EMSGSIZE;
+            urb->actual_length = before + length - remaining;
+            if (urb->actual_length != urb->len) result = -EMSGSIZE;
         }
     }
     if ((!result || result == -EMSGSIZE) && urb->actual_length && (addr & USB_DIR_IN)) {
@@ -2104,7 +2130,7 @@ static int xhci_probe(device_t *dev)
     xhci->hcd.priv = xhci;
     dev->drv_priv = xhci;
     int buffer = driver_dma_buffer_create(dev, XHCI_BULK_MAX_LENGTH,
-                                           XHCI_BULK_MAX_LENGTH, &xhci->bulk_buffer);
+                                           PAGE_SIZE, &xhci->bulk_buffer);
     if (buffer) return buffer;
 
     /* Firmware commonly leaves MSI/MSI-X enabled on the xHC after booting
