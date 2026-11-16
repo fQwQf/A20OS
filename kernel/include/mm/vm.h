@@ -12,6 +12,7 @@ struct vmo;
 struct vmar;
 struct vnode;
 struct vfile;
+struct mm_mapping_owner;
 struct page_cache_page;
 
 #define VM_READ      (1UL << 0)
@@ -42,6 +43,8 @@ struct page_cache_page;
 /* Explicit mapping permission ceiling: Native handles (including PROT_NONE)
  * and borrowed CPU physical views. Independent of the caller's ABI. */
 #define VM_NATIVE_CAP (1UL << 19)
+/* Optional resource reference for eager CPU physical mappings. */
+#define VM_PHYSICAL_OWNER (1UL << 20)
 
 /* Typical compiler processes have O(100) mappings.  Keep a compact secondary
  * pointer index for binary-search lookup while retaining the linked list as
@@ -138,7 +141,12 @@ struct mm_seg {
     /* FILE: the record owns one reference to the open file description it was
      * mapped from, so a fork's copy takes one vfile_get() rather than a
      * fault-time descriptor lookup. */
-    struct vfile    *file;
+    union {
+        struct vfile *file;
+        /* VM_PHYSICAL_OWNER and VM_FILE are mutually exclusive. Reusing the
+         * pointer slot preserves the record layout; no file I/O is involved. */
+        struct mm_mapping_owner *physical_owner;
+    };
     struct vnode    *file_vnode; /* FILE, referenced by the record itself */
     struct vmo      *vmo;        /* VMO, referenced by the record itself */
     /* Drop the backing references.  Runs from the deferred-free queue only,
@@ -621,6 +629,11 @@ int mm_mremap_native_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
 vaddr_t mm_mmap_physical(mm_struct_t *mm, vaddr_t addr, size_t len,
                          int prot, int flags, uint64_t physical,
                          pte_t memory_flags);
+/* Borrow owner through the call. A successfully installed VMA holds its own
+ * reference until deferred release, including split/move copies. A failed
+ * transaction acquires none. DONTFORK and all physical placement rules apply. */
+vaddr_t mm_mmap_physical_owned(mm_struct_t *, vaddr_t, size_t, int, int,
+                               uint64_t, pte_t, struct mm_mapping_owner *);
 
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
                 int prot, int flags);

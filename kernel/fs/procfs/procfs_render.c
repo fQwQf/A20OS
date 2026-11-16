@@ -243,7 +243,7 @@ static int snapshot_pid_maps(int pid, int smaps,
                 strncpy(rec->name, "[stack]", sizeof(rec->name) - 1);
             } else if (v->start >= mm->start_brk && v->start < mm->brk) {
                 strncpy(rec->name, "[heap]", sizeof(rec->name) - 1);
-            } else if (v->file) {
+            } else if ((v->vm_flags & VM_FILE) && v->file) {
                 vfile_t *vf = v->file;
                 if (vf->path[0])
                     strncpy(rec->name, vf->path,

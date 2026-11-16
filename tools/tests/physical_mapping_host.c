@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define _TYPES_H
+#include "mm/mapping_owner.h"
 #define PAGE_SIZE 4096UL
 #define ARCH_PT_ROOT_LEVEL 2
 #define USER_VA_LIMIT 0x40000UL
@@ -29,6 +31,9 @@
 #define VM_DONTFORK (1UL<<9)
 #define VM_PFNMAP (1UL<<17)
 #define VM_NATIVE_CAP (1UL<<19)
+#define VM_PHYSICAL_OWNER (1UL<<20)
+#define VM_FILE (1UL<<13)
+#define VM_VMO (1UL<<14)
 #define PROT_READ 1
 #define PROT_WRITE 2
 #define PROT_EXEC 4
@@ -42,10 +47,19 @@ typedef uintptr_t vaddr_t;
 typedef uintptr_t paddr_t;
 typedef struct mm_seg {
  uintptr_t start,end;uint64_t vm_flags;uintptr_t pte_flags;uint32_t vmar_cap;
- void *file;uint64_t backing_offset;void *file_vnode,*vmo,*vmar_owner;struct mm_seg *next;
+ union {void *file;struct mm_mapping_owner *physical_owner;};uint64_t backing_offset;void *file_vnode,*vmo,*vmar_owner;struct mm_seg *next;
 } mm_seg_t;
 typedef struct {pte_t *pgdir;int lock;uintptr_t mmap_base;mm_seg_t *mmap;size_t total_vm,rss;} mm_struct_t;
 static int live_tables,live_vmas,transaction,changes,retired,fail_after=-1,allocations;
+static mm_seg_t *deferred_vmas;
+static int owner_releases;
+static void owner_released(struct mm_mapping_owner *owner){(void)owner;assert(!transaction);owner_releases++;}
+static int vma_ref_file(mm_seg_t *v){assert(!(v->vm_flags&VM_FILE));return 0;}
+static void vmo_ref(void *v){(void)v;assert(0);}
+static void vmar_acquire(void *v){(void)v;assert(0);}
+/* PRODUCTION_OWNER */
+static void defer_vma(mm_seg_t *v){v->next=deferred_vmas;deferred_vmas=v;}
+
 static int record_oom,unmap_error,nommu,installs,unmaps,finishes,cache_error;
 static pte_t *retire_list[32];
 static int arch_pt_vpn(uintptr_t va,int level){return (va>>(12+2*level))&3;}
@@ -76,8 +90,8 @@ static uint64_t spin_lock_irqsave(int *lock){assert(transaction&&!*lock);*lock=1
 static void spin_unlock_irqrestore(int *lock,uint64_t f){assert(f==7&&*lock);*lock=0;}
 static void mm_tlb_note_change(mm_struct_t *mm,uintptr_t va,size_t n){(void)va;(void)n;assert(mm->lock&&transaction);changes++;}
 static void mm_tlb_invalidate_finish(mm_struct_t *mm){assert(!mm->lock&&transaction);for(int i=0;i<retired;i++){free(retire_list[i]);live_tables--;}retired=0;transaction=0;finishes++;}
-static void vma_put(mm_struct_t *mm,mm_seg_t *s){assert(!mm->lock&&!transaction);free(s);live_vmas--;}
-static void mm_vma_flush_deferred(mm_struct_t *mm){assert(!mm->lock&&!transaction);}
+static void vma_put(mm_struct_t *mm,mm_seg_t *s){assert(!mm->lock&&!transaction);vma_release_physical(s);free(s);live_vmas--;}
+static void mm_vma_flush_deferred(mm_struct_t *mm){assert(!mm->lock&&!transaction);while(deferred_vmas){mm_seg_t *v=deferred_vmas;deferred_vmas=v->next;vma_put(mm,v);}}
 mm_seg_t *mm_seg_new(void){assert(!transaction);if(record_oom)return NULL;live_vmas++;return calloc(1,sizeof(mm_seg_t));}
 uintptr_t a20_mmap_user_va_limit(void){return USER_VA_LIMIT;}
 uintptr_t a20_mmap_base_addr(void){return MMAP_BASE_ADDR;}
@@ -95,7 +109,7 @@ void *a20_mmap_nommu_alloc(size_t n,uintptr_t *p){(void)n;(void)p;assert(0);retu
 /* PRODUCTION_PT */
 int mm_munmap_locked(void *p,uintptr_t addr,size_t len){
  mm_struct_t *mm=p;assert(mm->lock&&transaction);unmaps++;if(unmap_error)return unmap_error;
- mm_seg_t **slot=&mm->mmap;while(*slot){mm_seg_t *s=*slot;if(s->start<addr+len&&addr<s->end){assert(addr<=s->start&&addr+len>=s->end);for(uintptr_t va=s->start;va<s->end;va+=PAGE_SIZE)assert(!pt_unmap(mm,va));size_t pages=(s->end-s->start)/PAGE_SIZE;mm->rss-=pages;mm->total_vm-=pages;*slot=s->next;free(s);live_vmas--;mm_tlb_note_change(mm,addr,len);}else slot=&s->next;}return 0;
+ mm_seg_t **slot=&mm->mmap;while(*slot){mm_seg_t *s=*slot;if(s->start<addr+len&&addr<s->end){assert(addr<=s->start&&addr+len>=s->end);for(uintptr_t va=s->start;va<s->end;va+=PAGE_SIZE)assert(!pt_unmap(mm,va));size_t pages=(s->end-s->start)/PAGE_SIZE;mm->rss-=pages;mm->total_vm-=pages;*slot=s->next;defer_vma(s);mm_tlb_note_change(mm,addr,len);}else slot=&s->next;}return 0;
 }
 /* PRODUCTION_MM */
 static int udriver_mmio_allowed(uint64_t pa,uint64_t n){return pa>=0x100000&&n<=0x200000-pa&&pa<=0x200000;}
@@ -116,7 +130,7 @@ static int boot_framebuffer_user_flags(uint64_t pa,size_t n,uintptr_t requested,
 #define FBIO_MAP_FB 1
 /* PRODUCTION_FB */
 static mm_struct_t fresh(void){assert(!live_tables&&!live_vmas&&!transaction);fail_after=-1;allocations=changes=installs=unmaps=finishes=0;record_oom=unmap_error=nommu=cache_error=0;return (mm_struct_t){.pgdir=new_table()};}
-static void cleanup(mm_struct_t *mm){fail_after=-1;uint64_t f=a20_mmap_physical_enter(mm);for(uintptr_t va=0;va<USER_VA_LIMIT;va+=PAGE_SIZE)(void)pt_unmap(mm,va);for(mm_seg_t *s=mm->mmap;s;){mm_seg_t *next=s->next;free(s);live_vmas--;s=next;}mm->mmap=NULL;a20_mmap_physical_finish(mm,f,NULL);free(mm->pgdir);live_tables--;assert(!live_tables&&!live_vmas&&!transaction&&!mm->lock);}
+static void cleanup(mm_struct_t *mm){fail_after=-1;uint64_t f=a20_mmap_physical_enter(mm);for(uintptr_t va=0;va<USER_VA_LIMIT;va+=PAGE_SIZE)(void)pt_unmap(mm,va);for(mm_seg_t *s=mm->mmap;s;){mm_seg_t *next=s->next;defer_vma(s);s=next;}mm->mmap=NULL;a20_mmap_physical_finish(mm,f,NULL);free(mm->pgdir);live_tables--;assert(!live_tables&&!live_vmas&&!transaction&&!mm->lock);}
 static uintptr_t map(mm_struct_t *mm,uintptr_t addr,size_t n,int prot,int flags,uint64_t pa){return mm_mmap_physical(mm,addr,n,prot,flags,pa,PTE_DEVICE);}
 int main(int argc,char **argv){
  assert(argc==2);const char *name=argv[1];mm_struct_t mm=fresh();
@@ -183,6 +197,28 @@ int main(int argc,char **argv){
    else assert(ret==va&&mm.rss==3&&mm.total_vm==3);
    assert(leaf(&mm,0)==saved);cleanup(&mm);
   }return 0;
+ }else if(!strcmp(name,"owner")){
+  struct mm_mapping_owner owner;mm_mapping_owner_init(&owner,owner_released);
+  assert((intptr_t)mm_mmap_physical_owned(&mm,0,PAGE_SIZE,3,1,0,PTE_DEVICE,NULL)==-EINVAL);
+  record_oom=1;
+  assert((intptr_t)mm_mmap_physical_owned(&mm,0,PAGE_SIZE,3,1,0,PTE_DEVICE,&owner)==-ENOMEM);
+  assert(refcount_read(&owner.references)==1);record_oom=0;
+  fail_after=0;allocations=0;
+  assert((intptr_t)mm_mmap_physical_owned(&mm,0,PAGE_SIZE,3,1,0,PTE_DEVICE,&owner)==-ENOMEM);
+  assert(refcount_read(&owner.references)==1&&!mm.mmap);fail_after=-1;
+  uintptr_t va=mm_mmap_physical_owned(&mm,0,2*PAGE_SIZE,3,1,0,PTE_DEVICE,&owner);
+  assert(!mm_addr_is_error(va)&&refcount_read(&owner.references)==2);
+  assert((intptr_t)mm_mmap_physical_owned(&mm,va,PAGE_SIZE,3,MAP_SHARED|MAP_FIXED_NOREPLACE,0,PTE_DEVICE,&owner)==-EEXIST);
+  assert(refcount_read(&owner.references)==2);
+  mm_seg_t *head=mm.mmap,*tail=mm_seg_new();*tail=*head;
+  assert(!vma_ref_aux(tail)&&refcount_read(&owner.references)==3);
+  tail->start+=PAGE_SIZE;tail->backing_offset+=PAGE_SIZE;head->end-=PAGE_SIZE;head->next=tail;
+  mm_mapping_owner_put(&owner);assert(refcount_read(&owner.references)==2&&!owner_releases);
+  uint64_t irq=a20_mmap_physical_enter(&mm);assert(!mm_munmap_locked(&mm,va,PAGE_SIZE));
+  assert(refcount_read(&owner.references)==2); /* TLB and deferred record still own it. */
+  a20_mmap_physical_finish(&mm,irq,NULL);
+  assert(refcount_read(&owner.references)==1&&!owner_releases);
+  cleanup(&mm);assert(!refcount_read(&owner.references)&&owner_releases==1);return 0;
  }else if(!strcmp(name,"consumers")){
   uint64_t out=0xfeed;assert(udriver_map_mmio(&mm,0x100001,PAGE_SIZE,3,&out)==-1&&out==0xfeed);
   record_oom=1;assert(udriver_map_mmio(&mm,0x100000,PAGE_SIZE,3,&out)==-1&&out==0xfeed);record_oom=0;

@@ -25,10 +25,11 @@ def build_fixture(work, policy_text=None, unmap_transform=None, narrow_pa=False,
         'uint64_t a20_mmap_physical_enter(', 'void a20_mmap_physical_finish(',
         'int a20_mmap_physical_occupied(', 'int a20_mmap_physical_install(',
         'void a20_mmap_physical_unmap(', 'void a20_mmap_physical_note(',
-        'void a20_mmap_physical_rss(', 'vaddr_t mm_mmap_physical(', 'void a20_mmap_seg_fill('])
+        'void a20_mmap_physical_rss(', 'void a20_mmap_physical_owner_get(',
+        'vaddr_t mm_mmap_physical(', 'vaddr_t mm_mmap_physical_owned(', 'void a20_mmap_seg_fill('])
     flags=(ROOT/'kernel/mm/pte_flags.c').read_text()
     flags='\n'.join(extract_function(flags,n) for n in ['pte_t mm_prot_to_pte_flags(', 'int mm_pte_flags_to_prot(', 'pte_t mm_pte_flags_apply_prot('])
-    body=spec+';\n'+flags+'\nextern uintptr_t a20_mmap_physical_rust(void *,uintptr_t,size_t,int,int,uint64_t,uintptr_t);\n'+bridges
+    body=spec+';\n'+flags+'\nextern uintptr_t a20_mmap_physical_rust(void *,uintptr_t,size_t,int,int,uint64_t,uintptr_t);\nextern uintptr_t a20_mmap_physical_owned_rust(void *,uintptr_t,size_t,int,int,uint64_t,uintptr_t,struct mm_mapping_owner *);\n'+bridges
     driver=extract_function((ROOT/'kernel/drivers/core/udriver.c').read_text(),'int udriver_map_mmio(')
     fb=(ROOT/'kernel/drivers/gpu/framebuffer.c').read_text()
     fb_body='\n'.join(extract_function(fb,n) for n in ['static int64_t fb_map_scanout(', 'static int64_t fb_map_physical(', 'static int64_t fbdev_linux_mmap_active('])
@@ -36,6 +37,9 @@ def build_fixture(work, policy_text=None, unmap_transform=None, narrow_pa=False,
     branch=ioctl[ioctl.index('        case FBIO_MAP_FB: {'):ioctl.index('        case FBIO_FLUSH:')]
     fb_body+='\nstatic int fb_ioctl_map(struct gpu_device_access *access,void *arg){\nconst gpu_dev_ops_t *ops=access->ops;struct device *dev=access->device;switch(FBIO_MAP_FB){\n'+branch+'\n}return -EINVAL;}\n'
     source=(ROOT/'tools/tests/physical_mapping_host.c').read_text()
+    vma=(ROOT/'kernel/mm/vma.c').read_text()
+    source=source.replace('/* PRODUCTION_OWNER */','\n'.join(extract_function(vma,n) for n in [
+        'static void vma_ref_physical(', 'static void vma_release_physical(', 'int vma_ref_aux(']))
     for marker,text in [('PT',pt),('MM',body),('UDRIVER',driver),('FB',fb_body)]:
         source=source.replace('/* PRODUCTION_'+marker+' */',text)
     if narrow_pa: source=source.replace('typedef uintptr_t paddr_t;', 'typedef uint32_t paddr_t;')
@@ -43,7 +47,7 @@ def build_fixture(work, policy_text=None, unmap_transform=None, narrow_pa=False,
     fixture=work/'fixture.c';fixture.write_text(source);binary=work/'test'
     subprocess.run(['cc','-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
         '-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-fsanitize=address,undefined',
-        '-fno-sanitize-recover=all',str(fixture),str(obj),'-o',str(binary)],check=True)
+        '-fno-sanitize-recover=all','-I'+str(ROOT/'kernel/include'),str(fixture),str(obj),'-o',str(binary)],check=True)
     return binary
 
 
@@ -64,6 +68,7 @@ class PhysicalMapping(unittest.TestCase):
     def test_metadata_oom_before_any_transaction_or_install(self):self.run_case('oom')
     def test_each_pt_allocation_boundary_prunes_failed_page_and_prefix(self):self.run_case('rollback')
     def test_actual_fbdev_mmu_and_udriver_consumers(self):self.run_case('consumers')
+    def test_physical_owner_survives_split_and_releases_after_tlb_retirement(self):self.run_case('owner')
 
     def test_rollback_controls_fail_at_runtime(self):
         source=(ROOT/'kernel/mm/mmap_policy.rs').read_text()

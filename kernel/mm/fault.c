@@ -260,7 +260,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
     page_cache_page_t *pcp = page_cache_get(vf->vnode, index, 1);
     if (!pcp) {
         kerr("[SHFAULT] cache_get failed pid=%d va=0x%lx fd=%d idx=%lu\n",
-             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0),
              (unsigned long)index);
         return -1;
     }
@@ -268,7 +268,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
     if (!page_cache_is_uptodate(pcp)) {
         if (page_cache_fill_vfile_page(vf, pcp) < 0) {
             kerr("[SHFAULT] fill failed pid=%d va=0x%lx fd=%d idx=%lu\n",
-                 proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
+                 proc_current()->pid, (unsigned long)page_va, (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0),
                  (unsigned long)index);
             page_cache_put(pcp);
             return -1;
@@ -278,7 +278,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
     pfn_t cache_pfn = page_cache_pfn(pcp);
     if (!pfn_valid(cache_pfn)) {
         kerr("[SHFAULT] bad pfn pid=%d va=0x%lx fd=%d idx=%lu pfn=%lu\n",
-             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0),
              (unsigned long)index, (unsigned long)cache_pfn);
         page_cache_put(pcp);
         return -1;
@@ -290,7 +290,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
                       MM_ST_FILE_SHARED);
     if (r < 0) {
         kerr("[SHFAULT] map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
-             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0),
              (unsigned long)index, r);
         page_cache_put(pcp);
         return -1;
@@ -706,11 +706,11 @@ static void shadow_seg_check(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
           (unsigned long)va,
           (unsigned long)vma->start, (unsigned long)vma->end,
           (unsigned long)want, shared,
-          (unsigned long)(vma->file ? vma->file->identity : 0), kind,
+          (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0), kind,
           (unsigned long)found->start, (unsigned long)found->end,
           (unsigned long)found->backing_offset, mm_seg_kind(found),
           mm_seg_shared(found),
-          (unsigned long)(found->file ? found->file->identity : 0),
+          (unsigned long)((found->vm_flags & VM_FILE) && found->file ? found->file->identity : 0),
           vma == found ? "" : "  (a different mapping)");
     mm_seg_put(found);
 #endif /* ARCH_HAS_PGTABLE_OPS */
@@ -963,33 +963,33 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
             if (file_pos >= vf->vnode->size) {
                 kerr("[MFAULT] oob pid=%d va=0x%lx fd=%d pos=%lu size=%llu\n",
-                     t->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
+                     t->pid, (unsigned long)page_va, (unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0),
                      (unsigned long)file_pos,
                      (unsigned long long)vf->vnode->size);
                 signal_send(t->pid, SIGBUS);
-                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
+                vfs_put_file_ref((unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0), vf);
                 return -1;
             }
 
             if (vma->vm_flags & VM_SHARED) {
                 int r = mm_shared_file_fault(t->mm, vma, page_va, vf);
-                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
+                vfs_put_file_ref((unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0), vf);
                 return r;
             } else {
                 page_cache_page_t *pcp = page_cache_get(vf->vnode,
                                                          file_pos / PAGE_SIZE, 1);
                 if (!pcp) {
-                    vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
+                    vfs_put_file_ref((unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0), vf);
                     return -1;
                 }
                 if (!page_cache_is_uptodate(pcp)) {
                     if (page_cache_fill_vfile_page(vf, pcp) < 0) {
                         page_cache_put(pcp);
-                        vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
+                        vfs_put_file_ref((unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0), vf);
                         return -1;
                     }
                 }
-                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
+                vfs_put_file_ref((unsigned long)((vma->vm_flags & VM_FILE) && vma->file ? vma->file->identity : 0), vf);
 
                 pfn_t cache_pfn = page_cache_pfn(pcp);
                 if (!pfn_valid(cache_pfn)) {
