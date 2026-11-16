@@ -91,7 +91,7 @@ typedef struct {
     uintptr_t base;
     uint32_t rca, input_hz, max_hz, fifo_offset;
     uint64_t sectors;
-    int block_addressed, write_protected, ready, stopped;
+    int block_addressed, write_protected, ready, stopped, hardware_stopped;
     mutex_t lock;
     int irq, irq_registered, poll_only;
     uint32_t irq_status;
@@ -188,7 +188,11 @@ static int sdio_wait_cond(sdio_priv_t *p, uintptr_t base, uint32_t mask,
         (clock_ticks_per_sec() * SDIO_IRQ_PRE_POLL_US) / 1000000;
 
     for (;;) {
+        if (__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE))
+            return -ENODEV;
         uint32_t sts = sdio_reg_read(base, SDIO_RINTSTS);
+        if (sts == 0xffffffffU)
+            return -ENODEV;
         sdio_latch_irq(p, sts);
 
         uint32_t seen = sdio_latched_irq(p);
@@ -201,13 +205,6 @@ static int sdio_wait_cond(sdio_priv_t *p, uintptr_t base, uint32_t mask,
             sdio_clear_latched(p, mask);
             return 0;
         }
-        /* remove() sets stopped before it takes the IRQ away; a waiter that has
-         * not observed the teardown yet must not park on a line that is about
-         * to stop delivering.  This is deliberately not `ready`: the card
-         * bring-up waits on the same path with ready still 0. */
-        if (p->stopped)
-            return -ENODEV;
-
         uint64_t now = timer_get_ticks();
         if (now >= deadline)
             return -ETIMEDOUT;
@@ -224,18 +221,26 @@ static int sdio_wait_cond(sdio_priv_t *p, uintptr_t base, uint32_t mask,
  * raise CMD_DONE, so waiting for that interrupt would always time out. */
 static int sdio_wait_clear(sdio_priv_t *p, uint32_t reg, uint32_t mask) {
     uint64_t until = sdio_deadline(SDIO_CMD_TIMEOUT_MS);
-    while (sdio_reg_read(p->base, reg) & mask) {
-        if (p->stopped)
+    for (;;) {
+        if (__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE))
             return -ENODEV;
+        uint32_t value = sdio_reg_read(p->base, reg);
+        if (value == 0xffffffffU)
+            return -ENODEV;
+        if (!(value & mask))
+            return 0;
         if (timer_get_ticks() >= until)
             return -ETIMEDOUT;
         cpu_relax();
     }
-    return 0;
 }
 static int sdio_reset(sdio_priv_t *p, uint32_t bits) {
-    sdio_reg_write(p->base, SDIO_CTRL,
-                   sdio_reg_read(p->base, SDIO_CTRL) | bits);
+    if (__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE))
+        return -ENODEV;
+    uint32_t control = sdio_reg_read(p->base, SDIO_CTRL);
+    if (control == 0xffffffffU)
+        return -ENODEV;
+    sdio_reg_write(p->base, SDIO_CTRL, control | bits);
     return sdio_wait_clear(p, SDIO_CTRL, bits);
 }
 static int sdio_update_clock(sdio_priv_t *p) {
@@ -349,7 +354,7 @@ static int sdio_wait_card(sdio_priv_t *p) {
         if (timer_get_ticks() >= until)
             return -ETIMEDOUT;
         mdelay(1);
-    } while (!p->stopped);
+    } while (!__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE));
     return -ENODEV;
 }
 static int sdio_card_init(sdio_priv_t *p, unsigned fifo_depth) {
@@ -449,34 +454,66 @@ static int sdio_irq_handler(int irq, void *data) {
     (void)irq;
     sdio_priv_t *p = data;
     uint32_t bits = sdio_reg_read(p->base, SDIO_RINTSTS);
-    if (!bits)
+    if (!bits || bits == 0xffffffffU)
+        return 0;
+    sdio_reg_write(p->base, SDIO_RINTSTS, bits);
+    if (__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE))
         return 0;
     sdio_latch_irq(p, bits);
-    sdio_reg_write(p->base, SDIO_RINTSTS, bits);
     proc_wake_q_t queue;
     proc_wake_q_init(&queue);
     wait_queue_collect_all(&p->waiters, 0, PROC_WAKE_EVENT, &queue, NULL);
     proc_wake_q_flush(&queue);
     return 0;
 }
-static void sdio_stop(void *data) {
+static int sdio_stop(void *data) {
     sdio_priv_t *p = data;
-    p->stopped = 1;
-    p->ready = 0;
-    sdio_reg_write(p->base, SDIO_INTMASK, 0);
-    sdio_reg_write(p->base, SDIO_CTRL,
-                   sdio_reg_read(p->base, SDIO_CTRL) & ~CTRL_INT_ENABLE);
-    if (p->irq_registered)
-        free_irq((uint32_t)p->irq, p);
-    p->irq_registered = 0;
+    __atomic_store_n(&p->stopped, 1, __ATOMIC_RELEASE);
+    /* Cancel parked PIO calls before attempting their lock. Storage and IRQ
+     * remain owned until the call has observed cancellation and exited. */
     proc_wake_q_t queue;
     proc_wake_q_init(&queue);
     wait_queue_collect_all(&p->waiters, 0, PROC_WAKE_EVENT, &queue, NULL);
     proc_wake_q_flush(&queue);
-}
-static void sdio_release(void *data) {
-    sdio_stop(data);
-    kfree(data);
+    if (!mutex_trylock(&p->lock))
+        return -EBUSY;
+    p->ready = 0;
+    int rc = 0;
+    if (!p->hardware_stopped && p->base) {
+        uint32_t control = sdio_reg_read(p->base, SDIO_CTRL);
+        if (control == 0xffffffffU) {
+            rc = -ENODEV;
+            goto out;
+        }
+        sdio_reg_write(p->base, SDIO_INTMASK, 0);
+        /* PIO has no caller-buffer DMA. Owning the lock ends CPU FIFO access;
+         * reset acknowledgement ends the host data path. Do not confuse a
+         * masked IRQ or requested reset with confirmation from the device. */
+        uint32_t reset = CTRL_RESET | CTRL_FIFO_RESET | CTRL_DMA_RESET;
+        sdio_reg_write(p->base, SDIO_CTRL, reset);
+        for (unsigned ms = 0; ms < SDIO_CMD_TIMEOUT_MS; ms++) {
+            control = sdio_reg_read(p->base, SDIO_CTRL);
+            uint32_t mask = sdio_reg_read(p->base, SDIO_INTMASK);
+            if (control == 0xffffffffU || mask == 0xffffffffU) {
+                rc = -ENODEV;
+                goto out;
+            }
+            if (!(control & (reset | CTRL_INT_ENABLE)) && !mask)
+                goto confirmed;
+            mdelay(1);
+        }
+        rc = -ETIMEDOUT;
+        goto out;
+    }
+confirmed:
+    p->hardware_stopped = 1;
+out:
+    mutex_unlock(&p->lock);
+    if (!rc && p->irq_registered) {
+        free_irq((uint32_t)p->irq, p);
+        p->irq_registered = 0;
+    }
+    return rc;
 }
 
 /* FIFO flags are sampled on every iteration. Latched RXDR/TXDR/DTO events
@@ -485,15 +522,19 @@ static void sdio_release(void *data) {
 static int sdio_fifo_word(sdio_priv_t *p, uint8_t *bytes, int write,
                           uint64_t until) {
     for (;;) {
+        if (__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE))
+            return -ENODEV;
         uint32_t bits = sdio_reg_read(p->base, SDIO_RINTSTS);
+        if (bits == 0xffffffffU)
+            return -ENODEV;
         sdio_latch_irq(p, bits);
         if (sdio_latched_irq(p) & DATA_ERRORS)
             return -EIO;
         uint32_t status = sdio_reg_read(p->base, SDIO_STATUS);
+        if (status == 0xffffffffU)
+            return -ENODEV;
         if (!(status & (write ? STATUS_FIFO_FULL : STATUS_FIFO_EMPTY)))
             break;
-        if (p->stopped)
-            return -ENODEV;
         if (timer_get_ticks() >= until)
             return -ETIMEDOUT;
         if (sdio_can_park(p))
@@ -548,7 +589,7 @@ static int sdio_io(device_t *dev, uint64_t lba, void *buf, size_t count,
         return -EINVAL;
     mutex_lock(&p->lock);
     int rc = 0;
-    if (!p->ready || p->stopped)
+    if (!p->ready || __atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE))
         rc = -ENODEV;
     else if (write && p->write_protected)
         rc = -EROFS;
@@ -565,7 +606,8 @@ static int sdio_io(device_t *dev, uint64_t lba, void *buf, size_t count,
         /* Do not issue further requests into an unknown card/controller data
          * state. Rebind explicitly re-enumerates the card after an I/O error. */
         p->ready = 0;
-        sdio_reg_write(p->base, SDIO_INTMASK, 0);
+        if (!__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE) && rc != -ENODEV)
+            sdio_reg_write(p->base, SDIO_INTMASK, 0);
     }
     mutex_unlock(&p->lock);
     return rc;
@@ -578,7 +620,8 @@ static int sdio_write(device_t *dev, uint64_t lba, const void *buf,
     return sdio_io(dev, lba, (void *)buf, count, 1);
 }
 static uint64_t sdio_capacity(device_t *dev) {
-    return ((sdio_priv_t *)dev->drv_priv)->sectors;
+    sdio_priv_t *p = dev->drv_priv;
+    return p && !__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE) ? p->sectors : 0;
 }
 static uint32_t sdio_sector_size(device_t *dev) {
     (void)dev;
@@ -619,30 +662,27 @@ static int sdio_probe(device_t *dev) {
     /* A generic host cannot infer its CIU clock from a compatible string. */
     if (!hz || !max_hz)
         return -EINVAL;
+    int rc = device_probe_use_remove(dev);
+    if (rc)
+        return rc;
     sdio_priv_t *p = kcalloc(1, sizeof(*p));
     if (!p)
         return -ENOMEM;
-    p->base = (uintptr_t)device_map_mmio(dev, 0);
-    if (!p->base) {
-        kfree(p);
-        return -EIO;
-    }
-    p->input_hz = hz;
-    p->max_hz = max_hz;
-    p->irq = platform_device_irq(dev);
-    if (p->irq < 0 && p->irq != -ENODEV) {
-        int error = p->irq;
-        kfree(p);
-        return error;
-    }
     mutex_init(&p->lock);
     spin_init(&p->irq_lock);
     wait_queue_init(&p->waiters);
-    int rc = device_add_resource_action(dev, sdio_release, p);
-    if (rc) {
-        kfree(p);
+    dev->drv_priv = p;
+    rc = device_add_execution_action(dev, sdio_stop, NULL, p);
+    if (rc)
         return rc;
-    }
+    p->base = (uintptr_t)device_map_mmio(dev, 0);
+    if (!p->base)
+        return -EIO;
+    p->input_hz = hz;
+    p->max_hz = max_hz;
+    p->irq = platform_device_irq(dev);
+    if (p->irq < 0 && p->irq != -ENODEV)
+        return p->irq;
     rc = sdio_card_init(p, depth);
     if (rc) {
         kinfo("[DW-SDIO] '%s' card initialization failed (%d)\n", dev->name,
@@ -666,15 +706,19 @@ static int sdio_probe(device_t *dev) {
                        SDIO_INT_UNMASK | DATA_ERRORS | INT_RTO | INT_RCRC |
                            INT_RE);
     }
-    dev->drv_priv = p;
     kinfo("[DW-SDIO] '%s' %s completion\n", dev->name,
           p->irq_registered ? "IRQ" : "polling");
     return 0;
 }
 static int sdio_remove(device_t *dev) {
-    if (dev->drv_priv)
-        sdio_stop(dev->drv_priv);
+    sdio_priv_t *p = dev->drv_priv;
+    if (!p)
+        return 0;
+    int rc = sdio_stop(p);
+    if (rc)
+        return rc;
     dev->drv_priv = NULL;
+    kfree(p);
     return 0;
 }
 static const firmware_device_id_t sdio_ids[] = {
