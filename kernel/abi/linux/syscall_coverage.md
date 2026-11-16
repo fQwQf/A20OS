@@ -14,8 +14,10 @@ pynode application run exposed a pip-cleanup EIO, a Node child SIGSEGV and a ref
 filesystem shutdown. Fork-advice range/wipe regressions now pass a direct RV64 SMP2
 check. Unix unnamed-address and offline Node/npm child/timer/I/O checks now pass,
 and the Python build/install/import/cleanup workload now shuts down cleanly after
-fixing directory rename parent metadata. The earlier npm writeback refusal remains
-open; see the register for bounded evidence.
+fixing directory rename parent metadata. Ordered file-data initialization also fixes
+the npm workload writeback refusal; both application workloads now have bounded
+RV64 SMP2 clean-shutdown and filesystem-check evidence. Other application and
+release-candidate requirements remain open in the register.
 
 ## Coverage Legend
 
