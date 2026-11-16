@@ -50,6 +50,10 @@
  * architecture facts actually live. */
 #define COREDUMP_SUPPORTED (ARCH_ELF_CLASS == 2)
 
+#ifndef ARCH_COREDUMP_EXPORT_REGS
+#define ARCH_COREDUMP_EXPORT_REGS arch_ptrace_export_regs
+#endif
+
 #define CORE_PATTERN_MAX 128
 #define CORE_VMA_SNAPSHOT_MAX 1024
 #define CORE_NOTES_MAX 2048
@@ -172,7 +176,7 @@ static void coredump_fill_note_input(task_t *t, int sig, trap_context_t *ctx,
     proc_debug_regs_t regs;
     memset(&regs, 0, sizeof(regs));
     if (ctx)
-        arch_ptrace_export_regs(ctx, &regs);
+        ARCH_COREDUMP_EXPORT_REGS(ctx, &regs);
 
     in->sig = sig;
     in->pid = t->pid;
@@ -181,11 +185,13 @@ static void coredump_fill_note_input(task_t *t, int sig, trap_context_t *ctx,
     in->sid = t->sid;
     in->uid = (uint32_t)t->cred.uid;
     in->gid = (uint32_t)t->cred.gid;
-    /* The shared export puts the pc first and the remaining registers in
-     * order, which is both Linux's user_regs_struct order and this kernel's
-     * regs[] order on riscv64. */
-    in->regs[0] = regs.pc;
-    for (int i = 1; i < 32; i++)
+    /* Preserve the entire generic register file, including rax/x0. The
+     * serializer chooses the ELF-machine wire order; pc is not a GPR slot. */
+    in->pc = regs.pc;
+    in->sp = regs.sp;
+    in->status = regs.status;
+    in->orig_syscall = regs.orig_syscall;
+    for (int i = 0; i < 32; i++)
         in->regs[i] = regs.regs[i];
     for (int i = 0; i < 32; i++)
         in->fp[i] = regs.fp[i];
@@ -243,7 +249,7 @@ int coredump_on_fatal_signal(int sig, trap_context_t *ctx)
     coredump_note_input_t nin;
     uint64_t notes_len = 0;
     coredump_fill_note_input(t, sig, ctx, &nin);
-    rc = a20_coredump_notes(&nin, notes, CORE_NOTES_MAX, &notes_len);
+    rc = a20_coredump_notes(&nin, ARCH_ELF_MACHINE, notes, CORE_NOTES_MAX, &notes_len);
     if (rc < 0)
         goto out;
 
