@@ -31,6 +31,12 @@
 #define UFS_CLOSE_TOKEN_CAPABILITY 0x55465343544f4b31ull
 #define UFS_CLOSE_CONFIRM_CAPABILITY 0x55465343464d5231ull /* 'UFSCFMR1' */
 #define UFS_SHUTDOWN_RETRY_SAFE 0x53414645u /* no irreversible teardown began */
+/* GETATTR out2: high word 'NLK1', low word the authoritative u32 nlink.
+ * Zero links is valid for an open orphan. Legacy peers leave out2 zero;
+ * the tag distinguishes that absence from a real zero-link inode without
+ * changing the frame layout or OPEN/CLOSE token fields. */
+#define UFS_GETATTR_NLINK_TAG 0x4e4c4b3100000000ull
+#define UFS_GETATTR_NLINK_MASK 0xffffffff00000000ull
 #define UFS_REQ_MAGIC 0x55465352u /* 'UFSR' */
 #define UFS_RESP_MAGIC 0x55465350u /* 'UFSP' */
 
@@ -95,7 +101,7 @@ typedef struct ufs_resp_hdr {
     int32_t status;   /* 0, or a negative errno */
     uint64_t out0;    /* op-dependent: ino / size / total byte count and so on */
     uint64_t out1;    /* op-dependent: type / remaining amount and so on */
-    uint64_t out2;    /* op-dependent: INIT shutdown capability / OPEN close token; reserved otherwise */
+    uint64_t out2;    /* INIT shutdown capability / OPEN token / tagged GETATTR nlink */
     uint32_t payload_len;
     uint32_t _pad;
 } ufs_resp_hdr_t;

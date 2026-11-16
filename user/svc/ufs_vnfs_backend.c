@@ -522,6 +522,18 @@ static int64_t vn_lookup(uint64_t dir_ino, const char *name,
     return 0;
 }
 
+/* A backend open owns both the temporary vfile and its vnode reference.
+ * The filesystem close callback releases only its private context. Pair all
+ * three RPC-local opens (READ, WRITE and READDIR), including error returns. */
+static void vn_close_temporary(vfile_t *vf)
+{
+    vnode_t *vn = vf->vnode;
+    if (vf->ops && vf->ops->close)
+        vf->ops->close(vf);
+    vnode_put(vn);
+    vfile_free(vf);
+}
+
 static int64_t vn_getattr(uint64_t ino, ufs_resp_hdr_t *r)
 {
     vnode_t *vn = vn_map_get(ino);
@@ -538,6 +550,8 @@ static int64_t vn_getattr(uint64_t ino, ufs_resp_hdr_t *r)
     }
     r->out0 = st.st_size;
     r->out1 = (uint64_t)(st.st_mode ? st.st_mode : vn->mode) << 32;
+    if (vn->ops->stat)
+        r->out2 = UFS_GETATTR_NLINK_TAG | (uint32_t)st.st_nlink;
     return 0;
 }
 
@@ -592,8 +606,7 @@ static int64_t vn_readdir(uint64_t dir_ino, uint64_t skip,
         if (used + 10 + 32 > cap)
             break;
     }
-    if (vf->ops && vf->ops->close)
-        vf->ops->close(vf);
+    vn_close_temporary(vf);
     r->payload_len = used;
     return 0;
 }
@@ -782,8 +795,7 @@ static int64_t vn_read(uint64_t ino, uint64_t off, uint32_t count,
                                                      count)
                                      : -U_ENOSYS;
 
-    if (vf->ops && vf->ops->close)
-        vf->ops->close(vf);
+    vn_close_temporary(vf);
     if (n < 0) {
         put_fail(r, n);
         return n;
@@ -812,8 +824,7 @@ static int64_t vn_write(uint64_t ino, uint64_t off, const uint8_t *data,
                                                        (const char *)data,
                                                        count)
                                       : -U_ENOSYS;
-    if (vf->ops && vf->ops->close)
-        vf->ops->close(vf);
+    vn_close_temporary(vf);
     if (n < 0) {
         put_fail(r, n);
         return n;
