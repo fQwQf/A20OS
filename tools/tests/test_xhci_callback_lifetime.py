@@ -22,13 +22,13 @@ class XhciCallbackLifetime(unittest.TestCase):
         model = model.replace('#define XHCI_WAIT_LOOPS 4U', '#define XHCI_WAIT_LOOPS 4U\n#define XHCI_IRQ_BATCH 8U\n#define XHCI_TRB_TRANSFER_EVENT 32U')
         model = model.replace('uint64_t xfer_deadline,dcbaa[3];', 'uint8_t control_buffer[4096];uint64_t xfer_deadline,dcbaa[3];')
         helper = r'''
-typedef struct {uint64_t setup,data;} xhci_control_trbs_t;
+typedef struct {uint64_t setup,data,bulk_first;} xhci_transfer_trbs_t;
 typedef struct {uint64_t parameter;uint32_t status,control;} xhci_trb_t;
 static unsigned control_posts;
-static uint64_t xhci_control_locked(xhci_controller_t *x,uint8_t slot,const usb_setup_packet_t *s,void *data,xhci_control_trbs_t *c) {
+static uint64_t xhci_control_locked(xhci_controller_t *x,uint8_t slot,const usb_setup_packet_t *s,void *data,xhci_transfer_trbs_t *c) {
  (void)x;(void)s;(void)data;(void)c;assert(slot==1);control_posts++;return 5;
 }
-static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xhci_trb_t *event,const xhci_control_trbs_t *c) {
+static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xhci_trb_t *event,const xhci_transfer_trbs_t *c) {
  (void)x;(void)event;(void)c;assert(type==32&&pointer==5);return 0;
 }
 '''

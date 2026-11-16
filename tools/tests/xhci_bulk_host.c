@@ -6,17 +6,18 @@ static int bulk_probe(device_t *d) {
  spin_init(&x->lock);d->drv_priv=x;x->op=0x1000;x->runtime=0x2000;x->doorbell=0x3000;x->max_slots=2;
  static const usb_hcd_ops_t ops={.start=bulk_start,.abort_slot=xhci_op_abort_slot,.submit_bulk=xhci_op_submit_bulk};
  x->hcd=(usb_hcd_t){.hcd_dev=d,.ops=&ops,.priv=x,.max_ports=1};allocation_owner=d;
- int ret=driver_dma_buffer_create(d,65536,65536,&x->bulk_buffer);if(ret)return ret;
+ int ret=driver_dma_buffer_create(d,65536,PAGE_SIZE,&x->bulk_buffer);if(ret)return ret;
  x->hardware_owned=x->running=x->irq_registered=1;x->irq=12;
  assert(!usb_core_register_hcd(&x->hcd));
  usb_device_t *u=usb_create(&x->hcd,1);u->slot=1;u->address=usb_core_alloc_address();assert(u->address==1);
- u->ifaces[0].ep_count=1;u->ifaces[0].eps[0].addr=0x81;
+ u->ifaces[0].ep_count=1;u->ifaces[0].eps[0].addr=0x81;u->ifaces[0].eps[0].max_packet=512;
  x->hcd.port_devices[0]=u;x->hcd.port_state[0]=USB_PORT_ADDRESS_OWNED;x->dcbaa[1]=0xabc;
  xhci_ep_t *ep=kcalloc(1,sizeof(*ep));assert(ep);ep->alloc_ptr=ep;ep->slot=1;ep->dci=3;ep->addr=0x81;
  ep->ring.cycle=1;x->eps=ep;x->ep_count=1;return 0;
 }
 static void bulk_case(const char *name) {
  pfa.nr_ranges=1;pfa.ranges[0]=(pfa_range_t){.base=0x8800b000,.end=0x8900b000,.start_pfn=0,.end_pfn=4096};
+ if(!strcmp(name,"chain"))chosen=0; /* Valid page-aligned, non-64-KiB frame. */
  bus_type_t bus={.name="bulk",.match=bulk_match};assert(!bus_register(&bus));
  driver_t driver={.name="bulk",.bus=&bus,.probe=bulk_probe,.remove=xhci_remove};assert(!driver_register(&driver));
  device_t d={.name="bulk",.bus=&bus,.references=1};
@@ -60,6 +61,32 @@ static void bulk_case(const char *name) {
   wait_remaining=65;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EIO&&!urb.actual_length&&caller[0]==0x55);
   wait_remaining=0;wait_rc=-EIO;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EIO&&!urb.actual_length&&caller[0]==0x55);
   wait_rc=-6;wait_cc=6;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EPIPE&&!urb.actual_length&&caller[0]==0x55);
+ } else if(!strcmp(name,"chain")) {
+  uint64_t base=driver_dma_buffer_address(x->bulk_buffer);
+  assert((base&65535U)!=0); /* Page alignment exercises a real boundary split. */
+  urb.len=65536;x->eps->ring.enqueue=XHCI_RING_TRBS-2;x->eps->ring.cycle=1;
+  assert(!xhci_op_submit_bulk(&x->hcd,&urb)&&urb.actual_length==65536);
+  assert(x->eps->ring.enqueue==1&&!x->eps->ring.cycle);
+  assert((x->eps->ring.trbs[XHCI_RING_TRBS-1].control&XHCI_TRB_CHAIN));
+  assert(x->eps->ring.trbs[XHCI_RING_TRBS-2].control&XHCI_TRB_CYCLE);
+  assert(!(x->eps->ring.trbs[0].control&XHCI_TRB_CYCLE));
+  memset(caller,0x55,65536);wait_early=1;wait_cc=13;wait_remaining=8;
+  unsigned initial=65536U-(unsigned)(base&65535U);
+  assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE&&urb.actual_length==initial-8);
+  for(unsigned i=0;i<65536;i++)assert(caller[i]==(i<initial-8?0x3c:0x55));
+  memset(caller,0x55,65536);wait_early=0;wait_remaining=8;
+  assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE&&urb.actual_length==65528);
+  assert(caller[65527]==0x3c&&caller[65528]==0x55);
+  wait_early=1;wait_cc=6;wait_rc=-6;wait_remaining=0;
+  assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EPIPE&&!urb.actual_length);
+  wait_early=0;wait_cc=0;wait_rc=-ETIMEDOUT;stop_status=0;
+  assert(xhci_op_submit_bulk(&x->hcd,&urb)==-ETIMEDOUT&&x->bulk_buffer&&!page_frees);
+  kfree(caller);caller=NULL;
+  small_memory[65535]=0xe2;
+  assert(driver_unregister(&driver)==-ETIMEDOUT&&d.drv_priv==x&&!page_frees);
+  stop_status=1;
+  assert(!driver_unregister(&driver)&&!d.drv_priv&&page_frees==1&&controller_frees==1);
+  assert(!device_unregister(&d));bus_unregister(&bus);return;
  } else if(!strcmp(name,"admission")) {
   urb.len=65537;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE);urb.len=64;
   urb.buf=NULL;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EINVAL);urb.buf=caller;

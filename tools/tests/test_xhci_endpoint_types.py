@@ -40,14 +40,15 @@ MODEL = r'''
 #define XHCI_TRB_NORMAL 1U
 #define XHCI_TRB_TRANSFER_EVENT 32U
 #define XHCI_TRB_ISP (1U<<2)
+#define XHCI_TRB_CHAIN (1U<<4)
 #define XHCI_TRB_IOC (1U<<5)
 #define XHCI_BULK_MAX_LENGTH 65536U
 typedef struct{uint64_t parameter;uint32_t status,control;}xhci_trb_t;
-typedef struct{uint64_t setup,data;}xhci_control_trbs_t;
+typedef struct{uint64_t setup,data,bulk_first;}xhci_transfer_trbs_t;
 typedef struct{xhci_trb_t trbs[64];uint16_t enqueue;uint8_t cycle;}xhci_ring_t;
-typedef struct{uint8_t addr;}usb_endpoint_t;
+typedef struct{uint8_t addr;uint16_t max_packet;}usb_endpoint_t;
 typedef struct{uint8_t slot;}usb_device_t;
-typedef struct usb_urb{usb_endpoint_t*ep;usb_device_t*dev;void*buf;size_t len;}usb_urb_t;
+typedef struct usb_urb{usb_endpoint_t*ep;usb_device_t*dev;void*buf;size_t len,actual_length;}usb_urb_t;
 typedef struct xhci_ep{struct xhci_ep*next;uint8_t slot,dci,closing;xhci_ring_t ring;usb_urb_t*pending;}xhci_ep_t;
 typedef struct{int held;}spinlock_t;
 typedef struct {
@@ -91,8 +92,8 @@ static uint64_t xhci_ring_enqueue(xhci_ring_t*r,uint64_t p,uint32_t n,uint32_t c
  return (uintptr_t)&r->trbs[i];
 }
 static int xhci_wait_event(xhci_controller_t*x,uint8_t t,uint64_t p,
-                           xhci_trb_t*out,const xhci_control_trbs_t*control){
- (void)out;assert(!control&&xfer_busy&&!x->lock.held&&t==32&&p);waits++;return 0;
+                           xhci_trb_t*out,const xhci_transfer_trbs_t*control){
+ assert(control&&!control->bulk_first&&xfer_busy&&!x->lock.held&&t==32&&p);out->parameter=p;out->status=1U<<24;waits++;return 0;
 }
 '''
 
@@ -118,7 +119,7 @@ int main(void){
  xhci_slot_add_context(slot,7);assert((slot[0]>>27)==7);
  assert((slot[0]&0x07ffffffU)==0x005abcdeU);
  xhci_ep_t bulk={.slot=1,.dci=3};x.eps=&bulk;x.max_slots=32;x.dcbaa[1]=1;
- usb_device_t dev={.slot=1};usb_endpoint_t in={.addr=0x81};uint8_t data[64]={0};
+ usb_device_t dev={.slot=1};usb_endpoint_t in={.addr=0x81,.max_packet=512};uint8_t data[64]={0};
  usb_urb_t urb={.ep=&in,.dev=&dev,.buf=data,.len=8};usb_hcd_t hcd={&x};
  /* READ CAPACITY(10) data and a CSW both use a bulk IN Normal TRB. */
  assert(!xhci_op_submit_bulk(&hcd,&urb));urb.len=13;
@@ -159,7 +160,7 @@ CONTROL_MODEL = r'''
 #include <string.h>
 
 typedef struct {uint64_t parameter; uint32_t status, control;} xhci_trb_t;
-typedef struct {uint64_t setup, data;} xhci_control_trbs_t;
+typedef struct {uint64_t setup, data, bulk_first;} xhci_transfer_trbs_t;
 typedef struct {
     _Alignas(16) xhci_trb_t trbs[XHCI_RING_TRBS];
     uint16_t enqueue;
@@ -199,7 +200,7 @@ int main(void) {
     usb_setup_packet_t setup = { .request_type = 0x80, .request = 6,
                                  .value = 0x100, .length = 8 };
     uint8_t data[8];
-    xhci_control_trbs_t control = {0};
+    xhci_transfer_trbs_t control = {0};
     /* Put Setup immediately before the Link, so Data and Status use cycle 0. */
     ring->enqueue = XHCI_RING_TRBS - 2;
     ring->cycle = 1;

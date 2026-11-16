@@ -26,13 +26,18 @@ class XhciBulkLifetime(unittest.TestCase):
 #define XHCI_TRB_LINK 6U
 #define XHCI_TRB_ENT 2U
 #define XHCI_TRB_CYCLE 1U
+#define XHCI_TRB_CHAIN 16U
+#define XHCI_CC_SUCCESS 1U
+#define XHCI_CC_SHORT_PACKET 13U
 #define XHCI_TRB_NORMAL 1U
 #define XHCI_TRB_ISP 4U
 #define XHCI_TRB_IOC 32U
 #define XHCI_TRB_TRANSFER_EVENT 32U
 typedef struct {uint64_t parameter;uint32_t status,control;} xhci_trb_t;
 typedef struct {xhci_trb_t trbs[XHCI_RING_TRBS];uint16_t enqueue;uint8_t cycle;} xhci_ring_t;
-static unsigned bulk_bells,bulk_waits;static int wait_rc,sync_race;static uint32_t wait_remaining,wait_cc;static void *bulk_caller;
+typedef struct {uint64_t setup,data,bulk_first;} xhci_transfer_trbs_t;
+static int xhci_event_matches(const xhci_trb_t *,uint8_t,uint64_t,const xhci_transfer_trbs_t *);
+static unsigned bulk_bells,bulk_waits;static int wait_rc,sync_race,wait_early;static uint32_t wait_remaining,wait_cc;static void *bulk_caller;
 #undef wmb
 #define wmb() ((void)0)
 static uint64_t bulk_address(const void *p) {return (uintptr_t)p;}
@@ -48,24 +53,39 @@ static uint64_t bulk_address(const void *p) {return (uintptr_t)p;}
 }''')
         model = model.replace('#define arch_dma_sync_for_device stop_sync', '#define arch_dma_sync_for_device stop_sync\n#define arch_dma_sync_for_cpu stop_sync')
         helper = r'''
-static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xhci_trb_t *event,const void *control) {
- assert(x->xfer_busy&&type==32&&pointer&&event&&!control);bulk_waits++;
- unsigned i=(x->eps->ring.enqueue+XHCI_RING_TRBS-1)%XHCI_RING_TRBS;
- xhci_trb_t *trb=&x->eps->ring.trbs[i];assert(trb->parameter==driver_dma_buffer_address(x->bulk_buffer));
- assert(trb->parameter!=(uintptr_t)bulk_caller&&!(trb->parameter&65535U));
- if(!wait_rc&&trb->status){
-  if(x->hcd.port_devices[0]->ifaces[0].eps[0].addr&USB_DIR_IN){
-   if(wait_remaining<=trb->status)memset(small_memory,0x3c,trb->status-wait_remaining);
-  }else{assert(small_memory[0]==0x55&&small_memory[trb->status-1]==0x55);}
+static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xhci_trb_t *event,const xhci_transfer_trbs_t *scope) {
+ assert(x->xfer_busy&&type==32&&pointer&&event&&scope);bulk_waits++;
+ xhci_trb_t *last=(void *)(uintptr_t)pointer;
+ xhci_trb_t *first=scope->bulk_first?(void *)(uintptr_t)scope->bulk_first:last;
+ uint64_t base=driver_dma_buffer_address(x->bulk_buffer);
+ assert(first->parameter==base&&base!=(uintptr_t)bulk_caller);
+ unsigned initial=first->status&0x1ffffU,tail=first==last?0:last->status&0x1ffffU;
+ assert((base&65535U)+initial<=65536U);
+ if(first!=last){
+  assert(last->parameter==base+initial&&!(last->parameter&65535U));
+  assert((first->control&XHCI_TRB_CHAIN)&&!(first->control&XHCI_TRB_IOC));
+  assert(!(last->control&XHCI_TRB_CHAIN)&&(last->control&XHCI_TRB_IOC));
+  assert(((first->status>>17)&31U)==(tail/512>31?31:tail/512));
  }
- event->status=wait_remaining|(wait_cc<<24);
+ unsigned total=initial+tail,limit=wait_early?initial:total;
+ if(!wait_rc&&wait_remaining<=limit){
+  if(x->hcd.port_devices[0]->ifaces[0].eps[0].addr&USB_DIR_IN)
+   memset(small_memory,0x3c,limit-wait_remaining);
+  else if(total)assert(small_memory[0]==0x55&&small_memory[total-1]==0x55);
+ }
+ event->parameter=wait_early?(uintptr_t)first:pointer;
+ event->control=XHCI_TRB_TYPE(32);
+ event->status=wait_remaining|((wait_cc?wait_cc:1U)<<24);
+ xhci_trb_t unrelated=*event;unrelated.parameter=0;unrelated.status=6U<<24;
+ assert(!xhci_event_matches(&unrelated,32,pointer,scope));
+ assert(xhci_event_matches(event,32,pointer,scope));
  if(wait_rc==-ETIMEDOUT){x->fatal=1;x->running=0;}
  return wait_rc;
 }
 '''
         production = (ROOT / 'kernel/drivers/usb/host/xhci.c').read_text()
         bodies = '\n'.join(function(production, name) for name in (
-            'xhci_find_ep', 'xhci_ring_enqueue', 'xhci_wait32',
+            'xhci_event_matches', 'xhci_find_ep', 'xhci_ring_enqueue', 'xhci_wait32',
             'xhci_xfer_acquire', 'xhci_xfer_release', 'xhci_prepare_remove',
             'xhci_op_abort_slot', 'xhci_remove', 'xhci_op_submit_bulk'))
         model = model.replace('/* PRODUCTION_FUNCTIONS */', helper+bodies)
@@ -92,3 +112,4 @@ static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xh
     def test_exit_during_copy_is_rechecked_before_doorbell(self): self.run_case('copy-race')
     def test_another_transfer_keeps_sole_staging_ownership(self): self.run_case('busy')
     def test_staging_allocation_failure_unwinds_unstarted_controller(self): self.run_case('probe-failure')
+    def test_chained_boundary_wrap_short_and_timeout_retain_whole_td(self): self.run_case('chain')
