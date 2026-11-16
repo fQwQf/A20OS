@@ -79,6 +79,32 @@ OpenRC 更新 `/run` 属性后，查找跳过其 tmpfs，运行状态和 socket 
 每轮留下64个文件、16 MiB数据后走正常电源流程，均约10 s，退出后fsck=0、clean、
 RECOVER=0、last_orphan=0。含控制台截图；实机优化耗时仍待第18轮验证。
 
+## 本轮 OpenRC 实际运行（2026-11-16）
+
+RV64 QEMU virt、ABI=both、SMP2 的精简客体直接运行上述原版 OpenRC 0.63-r1，
+进入 default runlevel。`proc_environ_guest.py` 的独立 exec、16 KiB、原始用户页修改、
+fork/父进程读取通过。监督进程 161 依次拥有子进程 162、168、170：直接 SIGKILL 后
+重新拉起；确认 `/run/openrc/supervise-a20-supervision-qa.ctl` 为 FIFO，使用上游
+`supervise-daemon --signal KILL` 经该 FIFO 再次触发退出及重启；状态查询与服务停止
+通过，停止后 pidfile、控制 FIFO 和子进程均消失。
+
+`rc-service stop` 由上游向监督进程发送 SIGTERM，不能单独证明控制 FIFO 可用。
+PID 1 的关机 FIFO 是另一条控制通路：本轮普通 `openrc-shutdown --poweroff now`
+由 PID 1 接收，完成 shutdown runlevel、最终 TERM/KILL 和 sync 后自然关机；没有
+使用强制 reboot/poweroff。报告为
+`build/evidence/v1-closeout-20261116/openrc-runtime/control-verified/report.json`，
+耗时 11.335 秒，QEMU 退出 0，ext4/FAT 只读检查均为 0。
+
+同时修复 boot ELF 路径绕过普通 exec 提交而未设置 `exec_path` 的问题。PID 1 发布前
+记录所选的 ELF/脚本解释器路径，`/proc/1/exe` 不再错误回退为 `/bin/sh`；本轮返回
+启动别名 `/sbin/init`，读取的文件 SHA-256 与原版 `/sbin/openrc-init` 相同。这不是对
+所有 procfs magic link 或跨 chroot 路径语义的完整认证。
+
+精简镜像保留了缺少可选 `dev` 服务、`root:uucp` 账号解析和时钟偏差警告；本轮不验证
+这些未启动服务，也不把该结果计为 XFCE/D-Bus 图形关机、设备恢复或实机复位通过。
+首次运行因探针对 exe 链接名的错误假定失败，第二次运行通过但只覆盖普通服务停止，
+均保留在同目录 `first`、`verified`；最终报告补上真实 FIFO 信号控制及启动路径修复。
+
 ## 验证
 
 ```sh
@@ -96,7 +122,7 @@ python3 tools/tests/openrc_supervision_guest.py
 FIFO 客体测试覆盖两种文件系统、两套 x86_64 系统调用入口、打开/关闭竞争、信号中断、
 原子写入、多写者、硬链接与路径复用。环境测试覆盖独立 exec、16 KiB 环境、原始用户页
 修改和 fork。OpenRC 测试用临时服务验证启动、子进程异常退出后重新拉起、状态及通过
-FIFO 停止，退出后删除测试服务。
+控制 FIFO 向子进程发送信号、再次拉起，以及正常服务停止；退出后删除测试服务。
 
 验收必须运行普通命令行重启、桌面 D-Bus 关机/重启，并在 QEMU 退出后对实际写过的
 ext4 副本执行只读 fsck，检查 clean、RECOVER=0、last_orphan=0。具体镜像哈希、运行日志

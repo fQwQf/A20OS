@@ -3,6 +3,7 @@
 import glob
 import os
 import signal
+import stat
 import subprocess
 import time
 
@@ -38,6 +39,16 @@ retry="TERM/2/KILL/1"
                 pass
         return None
 
+    def replacement(parent, previous):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            child = child_of(parent)
+            if child and child != previous:
+                return child
+            time.sleep(.05)
+        raise AssertionError(('child was not respawned', parent, previous))
+
+    control = '/run/openrc/supervise-' + name + '.ctl'
     started = False
     try:
         run('start')
@@ -46,20 +57,23 @@ retry="TERM/2/KILL/1"
         first = child_of(supervisor)
         assert first and first != supervisor
         os.kill(first, signal.SIGKILL)
-        deadline = time.monotonic() + 8
-        second = None
-        while time.monotonic() < deadline:
-            second = child_of(supervisor)
-            if second and second != first:
-                break
-            time.sleep(.05)
-        assert second and second != first, (supervisor, first, second)
+        second = replacement(supervisor, first)
+        assert stat.S_ISFIFO(os.stat(control).st_mode)
+        # Upstream --signal writes "sig N" to the control FIFO; --stop uses
+        # SIGTERM on the supervisor, so rc-service stop alone cannot prove FIFO.
+        subprocess.run(['/sbin/supervise-daemon', name, '--signal', 'KILL'],
+                       env=dict(os.environ, RC_SVCNAME=name),
+                       check=True, timeout=5)
+        third = replacement(supervisor, second)
+        print('OPENRC_SUPERVISION: supervisor=%d children=%d,%d,%d control=%s' %
+              (supervisor, first, second, third, control), flush=True)
         run('status')
         run('stop')
         started = False
         assert not os.path.exists(pidfile)
         assert child_of(supervisor) is None
-        print('OPENRC_SUPERVISION: PASS start, child crash/respawn, status, FIFO stop', flush=True)
+        assert not os.path.exists(control)
+        print('OPENRC_SUPERVISION: PASS start, child crash/respawn, FIFO signal, status, stop', flush=True)
     finally:
         if started:
             subprocess.run(['/sbin/rc-service', name, 'stop'], timeout=15)
