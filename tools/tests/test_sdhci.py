@@ -26,6 +26,9 @@ struct model {
  int legacy, never_powerup, bad_echo, bad_csd, select_error, wrong_voltage;
  int stuck_reset, stuck_clock, stuck_inhibit, stuck_data;
  int command_error, data_error, hook_error;
+ int gone, clock_gone, stuck_masks, stuck_clock_off, cancel_at;
+ unsigned mmio_reads, mmio_writes;
+ sdhci_host_t *owner;
  unsigned r1_flags;
 };
 static uint32_t get(struct model *m,unsigned r,unsigned width) {
@@ -37,9 +40,12 @@ static void put(struct model *m,unsigned r,unsigned width,uint32_t v) {
 static void status(struct model *m,uint32_t bits) {put(m,INT_STATUS,4,get(m,INT_STATUS,4)|bits);}
 static uint32_t read_reg(void *p,unsigned r,unsigned width) {
  struct model *m=p;assert(r+width<=0x100);
+ m->mmio_reads++;
+ if(m->gone||(m->clock_gone&&r==CLOCK_CONTROL))return width==1?0xffU:width==2?0xffffU:0xffffffffU;
  if(r==BUFFER) {
   assert(width==4&&m->fifo<128);uint32_t v=0;for(unsigned i=0;i<4;i++)v|=(uint32_t)(unsigned char)(m->fifo*4+i)<<(i*8);
   m->fifo++;m->reads++;
+  if(m->cancel_at&&(int)m->fifo==m->cancel_at)__atomic_store_n(&m->owner->closing,1,__ATOMIC_RELEASE);
   if(m->fifo==128) {
    status(m,m->data_error?ERROR|(1U<<21):DATA_DONE);put(m,PRESENT_STATE,4,0);
   }
@@ -50,9 +56,11 @@ static uint32_t read_reg(void *p,unsigned r,unsigned width) {
 }
 static void write_reg(void *p,unsigned r,unsigned width,uint32_t v) {
  struct model *m=p;assert(r+width<=0x100);
+ assert(!m->gone);m->mmio_writes++;
+ if((r==SIGNAL_ENABLE||r==INT_ENABLE)&&!v&&m->stuck_masks)return;
  if(r==INT_STATUS){assert(width==4);put(m,r,4,get(m,r,4)&~v);return;}
  if(r==SOFTWARE_RESET){assert(width==1);m->resets++;put(m,r,1,m->stuck_reset?v:0);return;}
- if(r==CLOCK_CONTROL){assert(width==2);put(m,r,2,v|((v&1)&&!m->stuck_clock?2:0));return;}
+ if(r==CLOCK_CONTROL){assert(width==2);if(!v&&m->stuck_clock_off)return;put(m,r,2,v|((v&1)&&!m->stuck_clock?2:0));return;}
  if(r==BUFFER) {
   assert(width==4&&m->fifo<128);assert(v==0xa5a5a5a5U);m->fifo++;m->writes++;
   if(m->fifo==128){status(m,DATA_DONE);put(m,PRESENT_STATE,4,0);}return;
@@ -116,6 +124,20 @@ int main(int argc,char **argv) {
   assert(sdhci_clock_divider(96000000,100000,0,&encoded,&actual)==-ERANGE);
   assert(sdhci_clock_divider(0,400000,2,&encoded,&actual)==-EINVAL);return 0;
  }
+ if(!strcmp(argv[1],"stop-contract")) {
+  for(unsigned problem=0;problem<4;problem++) {
+   h=host(&m,0);assert(!sdhci_card_initialize(&h));
+   m.stuck_reset=problem==0;m.stuck_masks=problem==1;m.stuck_clock_off=problem==2;m.gone=problem==3;
+   unsigned writes=m.mmio_writes;
+   assert(sdhci_card_stop(&h)==(m.gone?-ENODEV:-ETIMEDOUT)&&h.closing&&!h.ready);
+   if(m.gone)assert(m.mmio_writes==writes);
+   unsigned reads=m.mmio_reads;writes=m.mmio_writes;
+   assert(sdhci_card_transfer(&h,0,buf,1,0)==-ENODEV&&m.mmio_reads==reads&&m.mmio_writes==writes);
+   m.stuck_reset=m.stuck_masks=m.stuck_clock_off=m.gone=0;
+   assert(!sdhci_card_stop(&h)&&!get(&m,SOFTWARE_RESET,1)&&!get(&m,CLOCK_CONTROL,2)&&!h.actual_hz);
+  }
+  return 0;
+ }
  if(!strcmp(argv[1],"bl808")){h.input_hz=96000000;h.spec_version=0;}
  if(!strcmp(argv[1],"sdsc"))h=host(&m,1);
  if(!strcmp(argv[1],"bad-echo"))m.bad_echo=1;
@@ -131,13 +153,20 @@ int main(int argc,char **argv) {
  if(!strcmp(argv[1],"bad-ocr-voltage"))m.wrong_voltage=1;
  if(!strcmp(argv[1],"permanent-wp"))m.long_csd[3]|=1U<<13;
  if(!strcmp(argv[1],"temporary-wp"))m.long_csd[3]|=1U<<12;
+ if(!strcmp(argv[1],"clock-gone"))m.clock_gone=1;
  int rc=sdhci_card_initialize(&h);
+ if(!strcmp(argv[1],"clock-gone")){assert(rc==-ENODEV&&!h.ready&&!m.commands);return 0;}
  if(strstr(argv[1],"timeout")){assert(rc==-ETIMEDOUT&&!h.ready);return 0;}
  if(!strncmp(argv[1],"bad-",4)||!strcmp(argv[1],"hook-error")||!strcmp(argv[1],"select-error")||!strcmp(argv[1],"locked-card")) {
   assert(rc<0&&!h.ready);return 0;
  }
  assert(!rc&&h.ready&&h.rca==0x1234&&h.sectors==(m.legacy?524288:16384));
  assert(!get(&m,SIGNAL_ENABLE,4));
+ if(!strcmp(argv[1],"cancel-pio")) {
+  m.owner=&h;m.cancel_at=16;unsigned resets=m.resets;
+  assert(sdhci_card_transfer(&h,2,buf,1,0)==-ENODEV&&m.reads==16&&!h.ready&&m.resets==resets);
+  assert(!sdhci_card_stop(&h));return 0;
+ }
  if(!strcmp(argv[1],"command-error"))m.command_error=1;
  if(!strcmp(argv[1],"data-error"))m.data_error=1;
  if(!strcmp(argv[1],"data-stall"))m.stuck_data=1;
@@ -159,7 +188,7 @@ int main(int argc,char **argv) {
  if(strstr(argv[1],"-wp")) {assert(h.write_protected);assert(sdhci_card_transfer(&h,7,buf,1,1)==-EROFS&&h.ready&&!m.writes);return 0;}
  memset(buf,0xa5,512);assert(!sdhci_card_transfer(&h,7,buf,1,1));
  assert(m.writes==128&&m.arg24==(m.legacy?3584:7)&&m.write_checks==3);
- sdhci_card_stop(&h);assert(!h.ready&&!get(&m,CLOCK_CONTROL,2));
+ assert(!sdhci_card_stop(&h));assert(!h.ready&&!get(&m,CLOCK_CONTROL,2));
  assert(sdhci_card_transfer(&h,0,buf,1,0)==-ENODEV);return 0;
 }
 '''
@@ -259,10 +288,10 @@ DRIVER_FIXTURE = r'''
 #include "drivers/block/sdhci.c"
 static unsigned char hardware[4096];
 static resource_t resource={.type=RES_MMIO,.start=0x04310000,.end=0x04310fff};
-static void (*release_action)(void*);
-static void *release_data;
-static unsigned allocated,freed,prepared,initialized,stopped,locked;
-static int failure;
+static int (*execution_stop)(void*);
+static void *execution_data;
+static unsigned allocated,freed,prepared,initialized,stopped,locked,managed,transfers;
+static int failure,stop_error;
 int fw_node_has_property(const fw_node_t *node,const char *name) {
  (void)node;assert(!strcmp(name,"read-only"));return failure==8?1:failure==9?-EINVAL:0;
 }
@@ -271,9 +300,12 @@ int klog_level=10;
 void klog_write(const char*fmt,...) {(void)fmt;}
 int klog_write_ex(int level,const char*fmt,...) {(void)level;(void)fmt;return 0;}
 void *kmalloc(size_t n) {if(failure==1)return NULL;allocated++;return malloc(n);}
-void kfree(void *p) {assert(p);freed++;free(p);}
+void kfree(void *data) {
+ sdhci_device_t *p=data;assert(p&&p->hardware_stopped&&p->host.closing&&!locked);freed++;free(p);
+}
 void mutex_init(mutex_t*m) {(void)m;}
 void mutex_lock(mutex_t*m) {(void)m;assert(!locked);locked=1;}
+int mutex_trylock(mutex_t*m) {(void)m;if(locked)return 0;locked=1;return 1;}
 void mutex_unlock(mutex_t*m) {(void)m;assert(locked);locked=0;}
 uint64_t clock_get_ticks(void) {return 123456789;}
 uint64_t clock_ticks_per_sec(void) {return 1000000;}
@@ -281,18 +313,31 @@ void udelay(unsigned n) {(void)n;}
 resource_t *device_get_resource(device_t*d,enum resource_type t,int index) {
  (void)d;assert(t==RES_MMIO&&index==0);return &resource;
 }
-void *device_map_mmio(device_t*d,int index) {(void)d;assert(index==0);return failure==2?NULL:hardware;}
-int device_add_resource_action(device_t*d,void(*release)(void*),void*p) {
- (void)d;if(failure==3)return -ENOMEM;release_action=release;release_data=p;return 0;
+void *device_map_mmio(device_t*d,int index) {
+ assert(index==0&&managed&&execution_stop&&d->drv_priv);return failure==2?NULL:hardware;
+}
+int device_probe_use_remove(device_t*d) {(void)d;managed=1;return 0;}
+int device_add_execution_action(device_t*d,int(*stop)(void*),void(*release)(void*),void*p) {
+ assert(managed&&d->drv_priv==p&&stop&&!release);
+ if(failure==3)return -ENOMEM;
+ execution_stop=stop;execution_data=p;return 0;
 }
 static int prepare(device_t*d,void*base) {(void)d;assert(base==hardware);prepared++;return failure==4?-EIO:0;}
 int sdhci_card_initialize(sdhci_host_t*h) {
  assert(prepared&&h->input_hz==25000000&&h->io.read&&h->io.write&&h->io.time_ms);
  initialized++;h->sectors=12345;h->ready=1;return failure==5?-ETIMEDOUT:0;
 }
-void sdhci_card_stop(sdhci_host_t*h) {stopped++;h->ready=0;}
+int sdhci_card_stop(sdhci_host_t*h) {assert(locked&&prepared);stopped++;h->ready=0;return stop_error;}
 int sdhci_card_transfer(sdhci_host_t*h,uint64_t lba,void*buf,size_t count,int write) {
- assert(locked&&h->ready&&lba==7&&buf&&count==2&&(write==0||write==1));return h->write_protected&&write?-EROFS:0;
+ assert(locked&&h->ready&&lba==7&&buf&&count==2&&(write==0||write==1));transfers++;
+ if(failure==13)assert(sdhci_stop(h->io.context)==-EBUSY&&!freed&&!stopped);
+ return h->closing?-ENODEV:h->write_protected&&write?-EROFS:0;
+}
+static int cleanup(device_t *dev) {
+ int rc=execution_stop?execution_stop(execution_data):0;
+ if(!rc)rc=sdhci_remove(dev);
+ if(!rc){execution_stop=NULL;execution_data=NULL;}
+ return rc;
 }
 int main(int argc,char**argv) {
  assert(argc==2);failure=atoi(argv[1]);
@@ -301,20 +346,35 @@ int main(int argc,char**argv) {
  if(failure==6)dev.plat_data=NULL;
  if(failure==7)resource.end=resource.start+0xfe;
  int rc=sdhci_probe(&dev);
- if(failure&&failure!=8) {
-  assert(rc<0&&!dev.drv_priv);
+ if(failure>0&&failure<10&&failure!=8) {
+  assert(rc<0&&!freed);
+  if(allocated)assert(dev.drv_priv);else assert(!dev.drv_priv);
   if(failure==4)assert(prepared&&!initialized&&!stopped);
-  if(failure==5)assert(prepared&&initialized&&stopped==1);
+  if(failure==5)assert(prepared&&initialized&&!stopped);
  } else {
   assert(!rc&&dev.drv_priv&&sdhci_block_ops.capacity(&dev)==12345);
-  unsigned char buf[1024];assert(!sdhci_block_ops.read(&dev,7,buf,2));
-  if(failure==8)assert(((sdhci_device_t*)dev.drv_priv)->host.write_protected);
-  assert(sdhci_block_ops.write(&dev,7,buf,2)==(failure==8?-EROFS:0));
-  assert(!sdhci_remove(&dev)&&!dev.drv_priv&&stopped==1&&!locked);
-  assert(sdhci_block_ops.read(&dev,7,buf,2)==-ENODEV);
+  unsigned char buf[1024];
+  if(failure==10) {
+   mutex_lock(&((sdhci_device_t*)dev.drv_priv)->lock);
+   assert(execution_stop(execution_data)==-EBUSY&&!stopped&&!freed);
+   mutex_unlock(&((sdhci_device_t*)dev.drv_priv)->lock);
+  } else if(failure==11||failure==12) {
+   stop_error=failure==11?-ETIMEDOUT:-ENODEV;void *saved=dev.drv_priv;
+   assert(cleanup(&dev)==stop_error&&dev.drv_priv==saved&&stopped==1&&!freed);
+  } else {
+   assert(sdhci_block_ops.read(&dev,7,buf,2)==(failure==13?-ENODEV:0));
+   if(failure!=13)assert(sdhci_block_ops.write(&dev,7,buf,2)==(failure==8?-EROFS:0));
+  }
+  if(failure>=10) {
+   unsigned old=transfers;
+   assert(sdhci_block_ops.read(&dev,7,buf,2)==-ENODEV&&sdhci_block_ops.write(&dev,7,buf,2)==-ENODEV);
+   assert(!sdhci_block_ops.capacity(&dev)&&transfers==old);
+  }
  }
- if(release_action)release_action(release_data);
- assert(allocated==freed);return 0;
+ stop_error=0;assert(!cleanup(&dev)&&!dev.drv_priv&&!locked);
+ if(failure==4)assert(!stopped);
+ assert(allocated==freed&&sdhci_block_ops.read(&dev,7,hardware,2)==-ENODEV);
+ assert(!sdhci_remove(&dev));return 0;
 }
 '''
 
@@ -378,13 +438,21 @@ class SdhciTests(unittest.TestCase):
     def test_driver_probe_io_remove_and_release(self): self.driver_case(0)
     def test_driver_allocation_failure(self): self.driver_case(1)
     def test_driver_mapping_failure(self): self.driver_case(2)
-    def test_driver_release_action_failure_frees_allocation(self): self.driver_case(3)
+    def test_driver_execution_action_failure_uses_managed_cleanup(self): self.driver_case(3)
     def test_driver_does_not_access_unprepared_host(self): self.driver_case(4)
     def test_driver_failed_card_initialization_stops_and_releases(self): self.driver_case(5)
     def test_driver_requires_board_clock_and_pins(self): self.driver_case(6)
     def test_driver_rejects_short_mmio_resource(self): self.driver_case(7)
     def test_driver_firmware_read_only(self): self.driver_case(8)
     def test_driver_malformed_read_only(self): self.driver_case(9)
+    def test_driver_busy_stop_cancels_new_io(self): self.driver_case(10)
+    def test_driver_failed_stop_retains_binding_until_retry(self):
+        self.driver_case(11)
+        self.driver_case(12)
+    def test_driver_stop_during_pio_retains_private_state(self): self.driver_case(13)
+    def test_stop_requires_reset_irq_and_clock_acknowledgement(self): self.case("stop-contract")
+    def test_cancelled_pio_stops_before_next_fifo_word(self): self.case("cancel-pio")
+    def test_all_ones_clock_is_not_stability_ack(self): self.case("clock-gone")
     def test_csd_permanent_write_protection(self): self.case("permanent-wp")
     def test_csd_temporary_write_protection(self): self.case("temporary-wp")
     def test_ocr_rejects_wrong_supply_voltage(self): self.case("bad-ocr-voltage")
