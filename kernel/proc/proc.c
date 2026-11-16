@@ -497,7 +497,7 @@ void proc_init(void) {
     idle->limits.nofile = MAX_FILES;
     idle->limits.memlock = 64 * 1024;
     idle->limits.as = 0;
-    idle->limits.nproc = 0;
+    idle->limits.nproc = UINT64_MAX;
     idle->cpus_allowed = CONFIG_NR_CPUS >= 32
                          ? ~0U : (1U << CONFIG_NR_CPUS) - 1U;
     proc_set_name(idle, "idle");

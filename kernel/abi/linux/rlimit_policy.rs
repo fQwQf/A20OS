@@ -72,7 +72,8 @@ pub unsafe extern "C" fn a20_rlimit_get(t: *mut core::ffi::c_void, view: *const 
             RLIMIT_STACK => USER_STACK_MAX_SIZE,
             RLIMIT_CORE => core,
             RLIMIT_NOFILE => MAX_FILES,
-            RLIMIT_AS | RLIMIT_NPROC => 0,
+            RLIMIT_AS => 0,
+            RLIMIT_NPROC => u64::MAX,
             RLIMIT_RTPRIO => return ESRCH,
             _ => return ENOSYS,
         };
@@ -371,8 +372,19 @@ mod tests {
         assert_eq!(pair, [MAX_FILES, MAX_FILES]);
         assert_eq!(unsafe { a20_rlimit_get(core::ptr::null_mut(), core::ptr::null(), RLIMIT_AS, 0, pair.as_mut_ptr()) }, 0);
         assert_eq!(pair, [0, 0]);
+        assert_eq!(unsafe { a20_rlimit_get(core::ptr::null_mut(), core::ptr::null(), RLIMIT_NPROC, 0, pair.as_mut_ptr()) }, 0);
+        assert_eq!(pair, [u64::MAX, u64::MAX]);
         assert_eq!(unsafe { a20_rlimit_get(core::ptr::null_mut(), core::ptr::null(), RLIMIT_RTPRIO, 0, pair.as_mut_ptr()) }, ESRCH);
         assert_eq!(unsafe { a20_rlimit_set(core::ptr::null_mut(), core::ptr::null(), RLIMIT_AS, 1, 1) }, ESRCH);
+    }
+
+    #[test]
+    fn nproc_distinguishes_zero_from_infinity() {
+        let _g = reset();
+        assert_eq!(set(RLIMIT_NPROC, u64::MAX, u64::MAX), 0);
+        assert_eq!(get(RLIMIT_NPROC, 0).1, [u64::MAX, u64::MAX]);
+        assert_eq!(set(RLIMIT_NPROC, 0, 0), 0);
+        assert_eq!(get(RLIMIT_NPROC, 0).1, [0, 0]);
     }
 
     #[test]
