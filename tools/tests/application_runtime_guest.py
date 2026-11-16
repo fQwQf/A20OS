@@ -163,6 +163,74 @@ def unix_socket_names():
         check(bound, "getsockname", family + name)
 
 
+def directory_rename():
+    import ctypes
+    import errno
+
+    def links(path, expected):
+        assert path.stat().st_nlink == expected, (str(path), path.stat().st_nlink, expected)
+
+    with tempfile.TemporaryDirectory(prefix="a20-rename-") as directory:
+        root = Path(directory)
+        old, new = root / "old", root / "new"
+        old.mkdir(); new.mkdir()
+        moved = old / "child"; moved.mkdir()
+        (moved / "payload").write_text("retained")
+        links(old, 3); links(new, 2)
+        os.rename(moved, new / "moved")
+        links(old, 2); links(new, 3)
+        moved = new / "moved"
+        assert (moved / "..").stat().st_ino == new.stat().st_ino
+        assert (moved / "payload").read_text() == "retained"
+        try:
+            os.rename(new, moved / "cycle")
+        except OSError as error:
+            assert error.errno == errno.EINVAL, error
+        else:
+            raise AssertionError("directory moved inside itself")
+        os.rename(moved, new / "renamed")
+        links(new, 3)
+        (new / "renamed" / "payload").unlink()
+        (new / "renamed").rmdir(); links(new, 2)
+
+        # Replacing an empty directory must remove both victim links.
+        (old / "source").mkdir(); (new / "target").mkdir()
+        source_ino = (old / "source").stat().st_ino
+        os.rename(old / "source", new / "target")
+        links(old, 2); links(new, 3)
+        assert (new / "target").stat().st_ino == source_ino
+        (new / "target").rmdir(); links(new, 2)
+
+        # Exchanging a directory and file transfers the parent's subdir link.
+        (old / "dir").mkdir(); (new / "file").write_text("file")
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        arguments = (ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(old / "dir")),
+                     ctypes.c_int(-100), ctypes.c_char_p(os.fsencode(new / "file")),
+                     ctypes.c_uint(2))
+        if renameat2 is None:
+            # musl need not export the wrapper. Use the retained Linux syscall
+            # numbers (core/syscall_nr.h and syscall_nr_x86_64.h).
+            machine = os.uname().machine
+            number = {"riscv64": 276, "aarch64": 276, "loongarch64": 276,
+                      "x86_64": 316}[machine]
+            libc.syscall.restype = ctypes.c_long
+            rc = libc.syscall(ctypes.c_long(number), *arguments)
+        else:
+            rc = renameat2(*arguments)
+        assert rc == 0, ctypes.get_errno()
+        links(old, 2); links(new, 3)
+        assert (new / "file" / "..").stat().st_ino == new.stat().st_ino
+        assert (old / "dir").read_text() == "file"
+        (old / "dir").unlink(); (new / "file").rmdir()
+
+        # Renaming one hard link over another is a no-op.
+        (old / "one").write_text("linked")
+        os.link(old / "one", new / "two")
+        os.rename(old / "one", new / "two")
+        assert (old / "one").exists() and (new / "two").stat().st_nlink == 2
+
+
 def desktop_abi():
     import desktop_abi_probe
     desktop_abi_probe.exec_scripts()
@@ -173,12 +241,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="append",
                         choices=("shell", "python-install", "node-install",
-                                 "desktop-abi", "madvise-fork-range", "unix-names"))
+                                 "desktop-abi", "madvise-fork-range", "unix-names",
+                                 "directory-rename"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     checks = {"shell": shell_pipeline, "python-install": python_install,
               "node-install": node_install, "desktop-abi": desktop_abi,
-              "madvise-fork-range": madvise_fork_range, "unix-names": unix_socket_names}
+              "madvise-fork-range": madvise_fork_range, "unix-names": unix_socket_names,
+              "directory-rename": directory_rename}
     results = {}
     for name in args.check or checks:
         try:

@@ -1475,16 +1475,99 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
 }
 
 
+/* metadata_lock serializes the namespace and these disk-parent walks. */
+static int ext4_rename_check_ancestor(ext4_sb_info_t *sb, uint32_t moving,
+                                      uint32_t destination)
+{
+    for (uint32_t steps = 0; steps < sb->inodes_count; steps++) {
+        if (destination == moving) return -EINVAL;
+        ext4_inode_t inode;
+        int ret = ext4_read_inode(sb, destination, &inode);
+        if (ret < 0) return ret;
+        uint32_t parent;
+        ret = ext4_dir_find(sb, &inode, ext4_inode_size(&inode), "..", &parent, NULL);
+        if (ret < 0) return ret;
+        if (parent == destination)
+            return destination == EXT4_ROOT_INO ? 0 : -EIO;
+        destination = parent;
+    }
+    return -ELOOP;
+}
+
+static int ext4_rename_link_delta_valid(const ext4_inode_t *inode, int delta)
+{
+    if (!delta) return 0;
+    int links = (int)inode->i_links_count + delta;
+    return links < 2 ? -EIO : links > 65535 ? -EMLINK : 0;
+}
+
+static int ext4_rename_link_delta(ext4_sb_info_t *sb, uint32_t ino, int delta)
+{
+    if (!delta) return 0;
+    /* Directory insertion may have grown/linearized this inode. Read its
+     * current image instead of restoring a pre-insertion extent/size. */
+    ext4_inode_t inode;
+    int ret = ext4_read_inode(sb, ino, &inode);
+    if (ret < 0) return ret;
+    ret = ext4_rename_link_delta_valid(&inode, delta);
+    if (ret < 0) return ret;
+    inode.i_links_count = (uint16_t)((int)inode.i_links_count + delta);
+    return ext4_write_inode(sb, ino, &inode);
+}
+
+static int ext4_rename_dotdot(ext4_sb_info_t *sb, uint32_t ino, uint32_t parent)
+{
+    ext4_inode_t inode;
+    int ret = ext4_read_inode(sb, ino, &inode);
+    if (ret < 0) return ret;
+    uint64_t size = ext4_inode_size(&inode);
+    return ext4_dir_update_entry(sb, &inode, ino, &size, "..", parent, EXT4_FT_DIR);
+}
+
+static int ext4_rename_parent_metadata(ext4_sb_info_t *sb,
+        uint32_t old_parent, uint32_t new_parent, uint32_t source, int source_dir,
+        uint32_t target, int exchange, int target_dir)
+{
+    if (old_parent == new_parent) return 0;
+    int ret = source_dir ? ext4_rename_dotdot(sb, source, new_parent) : 0;
+    if (ret == 0 && exchange && target_dir)
+        ret = ext4_rename_dotdot(sb, target, old_parent);
+    int delta = (exchange ? target_dir : 0) - source_dir;
+    if (ret == 0) ret = ext4_rename_link_delta(sb, old_parent, delta);
+    if (ret == 0) ret = ext4_rename_link_delta(sb, new_parent, -delta);
+    if (ret < 0) {
+        /* The names have moved. A partial parent update must not be treated
+         * as an ordinary retryable failure or admitted on a writable restart. */
+        if (sb->journal) (void)ext4_journal_poison(sb);
+        return ext4_record_status(sb, -117);
+    }
+    return 0;
+}
+
+static void ext4_rename_cached_parent(ext4_sb_info_t *sb, uint32_t ino,
+                                        vnode_t *parent, vnode_t **deferred)
+{
+    vnode_t *moved = ext4_vnode_cache_lookup(sb, ino);
+    if (moved && moved->parent && moved->parent != parent) {
+        *deferred = moved->parent;
+        vnode_get(parent);
+        moved->parent = parent;
+    }
+    if (moved) vnode_put(moved);
+}
+
 int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
                                    vnode_t *new_dir, const char *new_name,
                                    unsigned int flags, vnode_t **deferred_put,
                                    vnode_t **deferred_parent_put) {
     ext4_vnode_priv_t *op = (ext4_vnode_priv_t *)old_dir->fs_data;
     ext4_vnode_priv_t *np = (ext4_vnode_priv_t *)new_dir->fs_data;
+    if (ext4_is_inconsistent(op->sb)) return -117;
     if (op->type != VFS_FT_DIR || np->type != VFS_FT_DIR) return -ENOTDIR;
     if (__atomic_load_n(&op->unlinked, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&np->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
-    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
+    if ((flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE)) ||
+        flags == (RENAME_NOREPLACE | RENAME_EXCHANGE))
         return -EINVAL;
     if (op->sb == np->sb && op->inode_num == np->inode_num &&
         strcmp(old_name, new_name) == 0)
@@ -1512,6 +1595,36 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         if (tgt_exists) return -EEXIST;
     }
 
+    if ((flags & RENAME_EXCHANGE) && !tgt_exists) return -ENOENT;
+    if (tgt_exists && tgt_ino == src_ino) return 0;
+
+    ext4_inode_t source_inode, target_inode;
+    if (ext4_read_inode(op->sb, src_ino, &source_inode) < 0) return -EIO;
+    int source_dir = (source_inode.i_mode & S_IFMT) == S_IFDIR;
+    int target_dir = 0;
+    if (tgt_exists) {
+        if (ext4_read_inode(op->sb, tgt_ino, &target_inode) < 0) return -EIO;
+        target_dir = (target_inode.i_mode & S_IFMT) == S_IFDIR;
+    }
+    int exchange = (flags & RENAME_EXCHANGE) != 0;
+    if (!exchange && tgt_exists && source_dir != target_dir)
+        return source_dir ? -ENOTDIR : -EISDIR;
+    if (op->inode_num != np->inode_num) {
+        if (source_dir) {
+            r = ext4_rename_check_ancestor(op->sb, src_ino, np->inode_num);
+            if (r < 0) return r;
+        }
+        if (exchange && target_dir) {
+            r = ext4_rename_check_ancestor(op->sb, tgt_ino, op->inode_num);
+            if (r < 0) return r;
+        }
+        int delta = (exchange ? target_dir : 0) - source_dir;
+        r = ext4_rename_link_delta_valid(&odi, delta);
+        if (r == 0)
+            r = ext4_rename_link_delta_valid(&ndi, -delta - (!exchange && target_dir));
+        if (r < 0) return r;
+    }
+
     if (flags & RENAME_EXCHANGE) {
         if (!tgt_exists) return -ENOENT;
         if (old_dir == new_dir && strcmp(old_name, new_name) == 0) return 0;
@@ -1526,22 +1639,20 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
             ext4_dir_update_entry(op->sb, &odi, op->inode_num, &odsz, old_name, src_ino, src_ft);
             return r;
         }
-        if (odsz != ext4_inode_size(&odi)) {
-            ext4_inode_set_size(&odi, odsz);
-            ext4_write_inode(op->sb, op->inode_num, &odi);
-            op->file_size = odsz;
-        }
-        if (ndsz != ext4_inode_size(&ndi)) {
-            ext4_inode_set_size(&ndi, ndsz);
-            ext4_write_inode(np->sb, np->inode_num, &ndi);
-            np->file_size = ndsz;
-        }
+        r = ext4_rename_parent_metadata(op->sb, op->inode_num, np->inode_num,
+                                        src_ino, source_dir, tgt_ino, 1, target_dir);
+        if (r < 0) return r;
+        ext4_rename_cached_parent(op->sb, src_ino, new_dir, deferred_parent_put);
+        /* Exchange has no deleted victim; reuse that deferred-put slot for
+         * the other moved inode's former cached parent reference. */
+        ext4_rename_cached_parent(op->sb, tgt_ino, old_dir, deferred_put);
         return 0;
     }
 
     /* Check if target exists — if so, remove it */
     if (tgt_exists) {
-        r = ext4_inode_remove(np->sb, new_dir->mnt, np->inode_num, &ndi,
+        r = target_dir ? ext4_vn_rmdir_unlocked(new_dir, new_name, deferred_put) :
+            ext4_inode_remove(np->sb, new_dir->mnt, np->inode_num, &ndi,
                               new_name, tgt_ino, deferred_put);
         if (r < 0) return r;
         /* Re-read ndi after modification */
@@ -1563,21 +1674,12 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         return r;
     }
 
-    /* The moved inode keeps its single cached vnode; repoint its parent so
-     * that ".." resolution follows the new location.  The old parent
-     * reference is dropped by the caller after the lock is released. */
-    vnode_t *moved = ext4_vnode_cache_lookup(op->sb, src_ino);
-    if (moved && moved->parent && moved->parent != new_dir) {
-        if (deferred_parent_put)
-            *deferred_parent_put = moved->parent;
-        vnode_get(new_dir);
-        moved->parent = new_dir;
-    }
-    if (moved)
-        vnode_put(moved);
+    r = ext4_rename_parent_metadata(op->sb, op->inode_num, np->inode_num,
+                                    src_ino, source_dir, tgt_ino, 0, target_dir);
+    if (r < 0) return r;
+    ext4_rename_cached_parent(op->sb, src_ino, new_dir, deferred_parent_put);
     return 0;
 }
-
 
 int ext4_readlink(vnode_t *vn, char *buf, size_t sz) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
