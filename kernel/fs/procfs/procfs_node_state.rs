@@ -831,7 +831,7 @@ pub unsafe extern "C" fn a20_procfs_child_node(
         put!(PF_PID_CMDLINE, parent_pid, 0);
     }
     if root_task && n!(b"mounts") {
-        put!(PF_MOUNTS, 0, 0);
+        put!(PF_MOUNTS, parent_pid, 0);
     }
     if root_task && n!(b"cgroup") {
         put!(PF_PID_CGROUP, parent_pid, 0);
@@ -995,8 +995,9 @@ pub type GenI32Fn = extern "C" fn() -> c_int;
 pub type GenLoadavgFn =
     extern "C" fn(*mut u64, *mut u64, *mut u64, *mut u32, *mut u32, *mut c_int);
 pub type MeminfoFn = extern "C" fn(*mut A20MeminfoRaw);
-pub type MountCountFn = extern "C" fn() -> c_int;
-pub type MountAtFn = extern "C" fn(c_int, *mut A20MountEnt) -> c_int;
+pub type MountSnapshotFn = extern "C" fn(c_int, *mut *mut A20MountEnt, *mut usize,
+                                          *mut c_char, usize) -> c_int;
+pub type MountSnapshotFreeFn = extern "C" fn(*mut A20MountEnt);
 pub type CpuTimesFn = extern "C" fn(c_int, *mut u64, *mut u64, *mut u64) -> c_int;
 pub type U64OutFn = extern "C" fn(*mut u64);
 pub type SwapGetFn = extern "C" fn(c_int, *mut A20SwapEnt) -> c_int;
@@ -1233,10 +1234,10 @@ pub struct A20MeminfoRaw {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct A20MountEnt {
-    pub dev: [u8; 32],
-    pub path: [u8; 256],
+    pub dev: [u8; 64],
+    pub path: [u8; 512],
     pub fstype: [u8; 32],
-    pub opts: [u8; 32],
+    pub opts: [u8; 256],
     pub mnt_id: u32,
     pub parent_id: u32,
     pub detached: u8,
@@ -1262,8 +1263,8 @@ pub struct A20ProcfsGen {
     pub lease_break_time: Option<GenI32Fn>,
     pub max_files: Option<GenI32Fn>,
     pub meminfo_raw: Option<MeminfoFn>,
-    pub mount_count: Option<MountCountFn>,
-    pub mount_at: Option<MountAtFn>,
+    pub mount_snapshot: Option<MountSnapshotFn>,
+    pub mount_snapshot_free: Option<MountSnapshotFreeFn>,
     pub nr_cpus: Option<GenI32Fn>,
     pub cpu_times: Option<CpuTimesFn>,
     pub realtime: Option<U64OutFn>,
@@ -1477,8 +1478,8 @@ struct Gen<'a> {
     lease_break_time: &'a GenI32Fn,
     max_files: &'a GenI32Fn,
     meminfo_raw: &'a MeminfoFn,
-    mount_count: &'a MountCountFn,
-    mount_at: &'a MountAtFn,
+    mount_snapshot: &'a MountSnapshotFn,
+    mount_snapshot_free: &'a MountSnapshotFreeFn,
     nr_cpus: &'a GenI32Fn,
     cpu_times: &'a CpuTimesFn,
     realtime: &'a U64OutFn,
@@ -1545,8 +1546,8 @@ impl<'a> Gen<'a> {
             lease_break_time: t.lease_break_time.as_ref()?,
             max_files: t.max_files.as_ref()?,
             meminfo_raw: t.meminfo_raw.as_ref()?,
-            mount_count: t.mount_count.as_ref()?,
-            mount_at: t.mount_at.as_ref()?,
+            mount_snapshot: t.mount_snapshot.as_ref()?,
+            mount_snapshot_free: t.mount_snapshot_free.as_ref()?,
             nr_cpus: t.nr_cpus.as_ref()?,
             cpu_times: t.cpu_times.as_ref()?,
             realtime: t.realtime.as_ref()?,
@@ -1635,6 +1636,75 @@ impl Write for W {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.bytes(s.as_bytes())
     }
+}
+
+/// Mountpoints outside a target's chroot are omitted. Match a complete path
+/// component: /world must never expose a sibling such as /world-other.
+fn visible_mount_path<'a>(root: &[u8], path: &'a [u8]) -> Option<&'a [u8]> {
+    if !root.starts_with(b"/") || !path.starts_with(b"/") { return None; }
+    let mut root = root;
+    while root.len() > 1 && root.ends_with(b"/") { root = &root[..root.len()-1]; }
+    if root == b"/" { return Some(path); }
+    if path == root { return Some(b"/"); }
+    let tail = path.strip_prefix(root)?;
+    if tail.starts_with(b"/") { Some(tail) } else { None }
+}
+
+fn mount_field(w: &mut W, value: &[u8]) -> fmt::Result {
+    for &byte in value {
+        match byte {
+            b' ' => w.bytes(b"\\040")?,
+            b'\t' => w.bytes(b"\\011")?,
+            b'\n' => w.bytes(b"\\012")?,
+            b'\\' => w.bytes(b"\\134")?,
+            _ => w.bytes(&[byte])?,
+        }
+    }
+    Ok(())
+}
+
+fn render_mount_rows(ty: c_int, rows: &[A20MountEnt], root: &[u8],
+                     buf: *mut c_char, bufsz: usize) -> c_int {
+    let mut w = W { p: buf as *mut u8, cap: bufsz - 1, len: 0, over: false };
+    for e in rows {
+        if e.detached != 0 { continue; }
+        let path = match visible_mount_path(root, zero_terminated(&e.path)) {
+            Some(path) => path,
+            None => continue,
+        };
+        let start = w.len;
+        let line = (|| -> fmt::Result {
+            if ty == PF_PID_MOUNTINFO {
+                write!(w, "{} {} 0:{} / ", e.mnt_id, e.parent_id, e.mnt_id)?;
+                mount_field(&mut w, path)?;
+                w.bytes(b" ")?;
+                mount_field(&mut w, zero_terminated(&e.opts))?;
+                w.bytes(b" - ")?;
+                mount_field(&mut w, zero_terminated(&e.fstype))?;
+                w.bytes(b" ")?;
+                mount_field(&mut w, zero_terminated(&e.dev))?;
+                w.bytes(b" ")?;
+                mount_field(&mut w, zero_terminated(&e.opts))?;
+                w.bytes(b"\n")
+            } else {
+                mount_field(&mut w, zero_terminated(&e.dev))?;
+                w.bytes(b" ")?;
+                mount_field(&mut w, path)?;
+                w.bytes(b" ")?;
+                mount_field(&mut w, zero_terminated(&e.fstype))?;
+                w.bytes(b" ")?;
+                mount_field(&mut w, zero_terminated(&e.opts))?;
+                w.bytes(b" 0 0\n")
+            }
+        })();
+        if line.is_err() {
+            // No partial records: a short procfs buffer ends on a line boundary.
+            w.len = start;
+            break;
+        }
+    }
+    unsafe { *w.p.add(w.len) = 0; }
+    w.len as c_int
 }
 
 const AF_UNIX_PROC: i32 = 1;
@@ -1853,6 +1923,25 @@ pub unsafe extern "C" fn a20_procfs_generate(
     // SAFETY: buf[0] is writable.
     unsafe { *buf = 0; }
 
+    if ty == PF_MOUNTS || ty == PF_PID_MOUNTINFO {
+        let mut rows: *mut A20MountEnt = core::ptr::null_mut();
+        let mut count = 0usize;
+        let mut root = [0u8; 512];
+        let rc = (g.mount_snapshot)(pid, &mut rows, &mut count,
+                                   root.as_mut_ptr() as *mut c_char, root.len());
+        if rc < 0 { return rc; }
+        if count > 64 || (count != 0 && rows.is_null()) {
+            (g.mount_snapshot_free)(rows);
+            return -5;
+        }
+        let entries = if count == 0 { &[] } else {
+            // SAFETY: the snapshot owns count complete entries until free.
+            unsafe { core::slice::from_raw_parts(rows, count) }
+        };
+        let n = render_mount_rows(ty, entries, zero_terminated(&root), buf, bufsz);
+        (g.mount_snapshot_free)(rows);
+        return n;
+    }
     if ty == PF_PID_PAGEMAP {
         return 0; /* no content; the size path reports length 0 */
     }
@@ -2078,41 +2167,6 @@ pub unsafe extern "C" fn a20_procfs_generate(
                 m.huge_total,
                 m.huge_free
             );
-            true
-        }
-        PF_MOUNTS => {
-            let count = (g.mount_count)();
-            'mounts: for i in 0..count {
-                let mut e = A20MountEnt {
-                    dev: [0; 32],
-                    path: [0; 256],
-                    fstype: [0; 32],
-                    opts: [0; 32],
-                    mnt_id: 0,
-                    parent_id: 0,
-                    detached: 0,
-                };
-                if (g.mount_at)(i, &mut e) == 0 {
-                    continue;
-                }
-                let segs: [&[u8]; 4] = [
-                    zero_terminated(&e.dev),
-                    zero_terminated(&e.path),
-                    zero_terminated(&e.fstype),
-                    zero_terminated(&e.opts),
-                ];
-                let line_len = segs.iter().map(|s| s.len()).sum::<usize>() + 3 + b" 0 0\n".len();
-                if w.len + line_len > w.cap {
-                    break 'mounts; /* C breaks before adding an overflowing line */
-                }
-                for (n, seg) in segs.iter().enumerate() {
-                    if n > 0 {
-                        let _ = w.bytes(b" ");
-                    }
-                    let _ = w.bytes(seg);
-                }
-                let _ = w.bytes(b" 0 0\n");
-            }
             true
         }
         PF_CGROUPS => {
@@ -2559,60 +2613,6 @@ pub unsafe extern "C" fn a20_procfs_generate(
             let _ = write!(w, "[{}]\n", ino);
             true
         }
-        PF_PID_MOUNTINFO => {
-            let count = (g.mount_count)();
-            'mi: for i in 0..count {
-                let mut e = A20MountEnt {
-                    dev: [0; 32],
-                    path: [0; 256],
-                    fstype: [0; 32],
-                    opts: [0; 32],
-                    mnt_id: 0,
-                    parent_id: 0,
-                    detached: 0,
-                };
-                if (g.mount_at)(i, &mut e) == 0 {
-                    continue;
-                }
-                let segs: [&[u8]; 4] = [
-                    zero_terminated(&e.path),
-                    zero_terminated(&e.opts),
-                    zero_terminated(&e.fstype),
-                    zero_terminated(&e.dev),
-                ];
-                let root: &[u8] = if e.detached != 0 { b"none" } else { b"/" };
-                /* "%u %u 0:%u %s %s %s - %s %s %s\n" */
-                let line_len = 24
-                    + root.len()
-                    + segs[0].len()
-                    + segs[1].len()
-                    + segs[2].len()
-                    + segs[3].len()
-                    + segs[1].len()
-                    + 6;
-                if w.len + line_len > w.cap {
-                    break 'mi;
-                }
-                let _ = write!(
-                    w,
-                    "{} {} 0:{} ",
-                    e.mnt_id, e.parent_id, e.mnt_id
-                );
-                let _ = w.bytes(root);
-                let _ = w.bytes(b" ");
-                let _ = w.bytes(segs[0]);
-                let _ = w.bytes(b" ");
-                let _ = w.bytes(segs[1]);
-                let _ = w.bytes(b" - ");
-                let _ = w.bytes(segs[2]);
-                let _ = w.bytes(b" ");
-                let _ = w.bytes(segs[3]);
-                let _ = w.bytes(b" ");
-                let _ = w.bytes(segs[1]);
-                let _ = w.bytes(b"\n");
-            }
-            true
-        }
         PF_NET | PF_NET_STATUS => {
             let n = (g.format_helper)(15, buf, bufsz);
             if n < 0 {
@@ -3032,7 +3032,7 @@ mod tests {
         let (r, n) = child(PF_ROOT, 77, "cmdline", true);
         assert_eq!((r, n.ty, n.pid), (0, PF_PID_CMDLINE, 77));
         let (r, n) = child(PF_ROOT, 77, "mounts", true);
-        assert_eq!((r, n.ty, n.pid), (0, PF_MOUNTS, 0));
+        assert_eq!((r, n.ty, n.pid), (0, PF_MOUNTS, 77));
         assert_eq!(child(PF_ROOT, 77, "meminfo", true).0, ENOENT);
         let (r, n) = child(PF_ROOT, 77, "uid_map", true);
         assert_eq!((r, n.ty, n.pid), (0, PF_UID_MAP, 77));
@@ -3255,10 +3255,6 @@ mod tests {
         });
     }
 
-    extern "C" fn g_mount_count() -> c_int {
-        CW.with(|w| w.borrow().mounts.len() as c_int)
-    }
-
     extern "C" fn g_nr_cpus() -> c_int {
         CW.with(|w| w.borrow().nr_cpus)
     }
@@ -3320,30 +3316,34 @@ mod tests {
         n as c_int
     }
 
-    extern "C" fn g_mount_at(i: c_int, out: *mut A20MountEnt) -> c_int {
+    #[repr(C)]
+    struct TestMountSnapshot { rows: [A20MountEnt; 64] }
+    extern "C" fn g_mount_snapshot(_pid: c_int, out: *mut *mut A20MountEnt,
+                                  count: *mut usize, root: *mut c_char,
+                                  root_size: usize) -> c_int {
+        assert!(root_size >= 2);
+        unsafe { *root = b'/' as c_char; *root.add(1) = 0; }
+        let mut snapshot = Box::new(TestMountSnapshot {
+            rows: unsafe { core::mem::zeroed() },
+        });
         CW.with(|w| {
             let b = w.borrow();
-            let idx = i as usize;
-            if idx >= b.mounts.len() {
-                return 0;
-            }
-            let m = &b.mounts[idx];
-            unsafe {
-                let e = &mut *out;
-                e.dev = [0; 32];
-                e.path = [0; 256];
-                e.fstype = [0; 32];
-                e.opts = [0; 32];
+            unsafe { *count = b.mounts.len(); }
+            for (idx, m) in b.mounts.iter().enumerate() {
+                let e = &mut snapshot.rows[idx];
                 e.mnt_id = 100 + idx as u32;
                 e.parent_id = 1;
-                e.detached = 0;
                 e.dev[..m.0.len()].copy_from_slice(m.0);
                 e.path[..m.1.len()].copy_from_slice(m.1);
                 e.fstype[..m.2.len()].copy_from_slice(m.2);
                 e.opts[..m.3.len()].copy_from_slice(m.3);
             }
-            1
-        })
+        });
+        unsafe { *out = Box::into_raw(snapshot) as *mut A20MountEnt; }
+        0
+    }
+    extern "C" fn g_mount_snapshot_free(rows: *mut A20MountEnt) {
+        unsafe { drop(Box::from_raw(rows as *mut TestMountSnapshot)); }
     }
 
     extern "C" fn g_bcache(out: *mut A20BcacheRaw) {
@@ -3762,8 +3762,8 @@ mod tests {
             lease_break_time: Some(g_lease),
             max_files: Some(g_maxfiles),
             meminfo_raw: Some(g_meminfo),
-            mount_count: Some(g_mount_count),
-            mount_at: Some(g_mount_at),
+            mount_snapshot: Some(g_mount_snapshot),
+            mount_snapshot_free: Some(g_mount_snapshot_free),
             nr_cpus: Some(g_nr_cpus),
             cpu_times: Some(g_cpu_times),
             realtime: Some(g_realtime),
@@ -3989,6 +3989,35 @@ mod tests {
         assert!(s.contains("HugePages_Total: 512\n"), "{}", s);
         assert!(s.contains("HugePages_Free:  500\n"), "{}", s);
         assert!(s.contains("Hugepagesize:   2048 kB\n"), "{}", s);
+    }
+
+    #[test]
+    fn content_mounts_chroot_filters_components_and_escapes_fields() {
+        let mut rows: [A20MountEnt; 4] = unsafe { core::mem::zeroed() };
+        for (e, path) in rows.iter_mut().zip([
+            b"/world".as_slice(), b"/world/a b\t\n\\", b"/world-other/secret", b"/hidden",
+        ]) {
+            e.path[..path.len()].copy_from_slice(path);
+            e.dev[..4].copy_from_slice(b"none");
+            e.fstype[..5].copy_from_slice(b"tmpfs");
+            e.opts[..2].copy_from_slice(b"rw");
+            e.mnt_id = 7; e.parent_id = 1;
+        }
+        let mut buf = [0u8; 512];
+        let n = render_mount_rows(PF_MOUNTS, &rows, b"/world/",
+                                  buf.as_mut_ptr() as *mut c_char, buf.len());
+        assert_eq!(&buf[..n as usize],
+                   b"none / tmpfs rw 0 0\nnone /a\\040b\\011\\012\\134 tmpfs rw 0 0\n");
+        let n = render_mount_rows(PF_PID_MOUNTINFO, &rows, b"/world",
+                                  buf.as_mut_ptr() as *mut c_char, buf.len());
+        assert_eq!(&buf[..n as usize],
+                   b"7 1 0:7 / / rw - tmpfs none rw\n7 1 0:7 / /a\\040b\\011\\012\\134 rw - tmpfs none rw\n");
+        // The first complete mountinfo line fits exactly, with a terminator.
+        let cap = b"7 1 0:7 / / rw - tmpfs none rw\n".len() + 1;
+        let n = render_mount_rows(PF_PID_MOUNTINFO, &rows, b"/world",
+                                  buf.as_mut_ptr() as *mut c_char, cap);
+        assert_eq!(n as usize, cap - 1);
+        assert_eq!(buf[n as usize], 0);
     }
 
     #[test]

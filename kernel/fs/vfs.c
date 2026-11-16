@@ -1435,8 +1435,12 @@ void vfs_task_root_set(task_t *t, mount_t *mnt, vnode_t *vn,
     t->fs.root_vn = vn;
     t->fs.root_mnt = mnt;
     if (root_path) {
+        /* Match procfs's cross-task root-path snapshot. No vnode puts or
+         * mount-table operations may run under this short string lock. */
+        uint64_t flags = spin_lock_irqsave(&t->park_lock);
         strncpy(t->fs.root_path, root_path, MAX_PATH_LEN - 1);
         t->fs.root_path[MAX_PATH_LEN - 1] = '\0';
+        spin_unlock_irqrestore(&t->park_lock, flags);
     }
     /* Linux resets the cwd to the new root on chroot; pivot_root sets it
      * explicitly afterwards.  Keeping cwd root-relative, "/" is correct for

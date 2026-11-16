@@ -123,8 +123,8 @@ man-pages
 #   * dig 在 IP_RECVERR 返回 EOPNOTSUPP 后退出，尚未发出 UDP DNS 查询；
 #     应用显示的 address family not supported 不是已证实的地址族根因。
 #     nslookup 分项尚未运行，不能用 HTTP 成功代替 UDP DNS 验收。
-#   * mount tmpfs 实际成功，旧 mount no-op 描述已失效；当前阻塞为 chroot
-#     内的 /proc/self/mountinfo 暴露 /extra/... 等全局路径。
+#   * tmpfs 挂载、文件写读和卸载通过；procfs 挂载视图的 chroot 路径及
+#     目标 PID 选择已修复，当前进程与私有 namespace/chroot 子进程检查通过。
 #   * bash 管道崩溃已修复（NPROC 默认无限制曾被报告为零）；bash/zsh 的
 #     管道、命令替换、后台等待及退出码通过，无特权零 NPROC 拒绝 fork。
 #

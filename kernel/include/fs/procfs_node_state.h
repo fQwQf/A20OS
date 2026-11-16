@@ -219,10 +219,10 @@ struct a20_meminfo_raw {
 };
 
 struct a20_mount_ent {
-    char dev[32];
-    char path[256];
+    char dev[64];
+    char path[512];
     char fstype[32];
-    char opts[32];
+    char opts[256];
     uint32_t mnt_id;
     uint32_t parent_id;
     uint8_t detached;
@@ -406,8 +406,9 @@ struct a20_procfs_gen {
     int (*lease_break_time)(void);
     int (*max_files)(void);
     void (*meminfo_raw)(struct a20_meminfo_raw *out);
-    int (*mount_count)(void);
-    int (*mount_at)(int index, struct a20_mount_ent *out);
+    int (*mount_snapshot)(int pid, struct a20_mount_ent **out, size_t *count,
+                          char *root, size_t root_size);
+    void (*mount_snapshot_free)(struct a20_mount_ent *rows);
     int (*nr_cpus)(void);
     int (*cpu_times)(int cpu, uint64_t *user, uint64_t *system, uint64_t *idle);
     void (*realtime)(uint64_t *out);
