@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -36,6 +37,10 @@ def main():
                        help='check mkdir/rmdir directory-count and unpublished-inode rollback')
     modes.add_argument('--mount-abort', action='store_true',
                        help='check callback/owner lifetime when journal mount fails')
+    modes.add_argument('--directory-orphan', action='store_true',
+                       help='check held-rmdir cleanup failure and fresh-process recovery')
+    parser.add_argument('--c-orphan', action='store_true',
+                        help='use the C reference orphan controller')
     args = parser.parse_args()
     out = Path(os.environ['EVIDENCE_DIR']).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -53,19 +58,22 @@ def main():
             raise RuntimeError('Rust backend build failed')
         sources = ['kernel/fs/diskfs/' + n + '.c' for n in
                    ['ext4', 'ext4_namei', 'ext4_file', 'ext4_journal', 'ext4_csum', 'ext4_sync', 'ext4_xattr']]
-        fixture = ('tools/tests/ext4_mount_abort/fixture.c' if args.mount_abort else
+        fixture = ('tools/tests/ext4_directory_orphan/fixture.c' if args.directory_orphan else
+                   'tools/tests/ext4_mount_abort/fixture.c' if args.mount_abort else
                    'tools/tests/ext4_directory_account/fixture.c' if args.directory_account
                    else 'tools/tests/ext4_orphan_compensation/fixture.c')
         sources += ['user/svc/fscompat/compat.c', 'user/svc/fscompat/bcache_user_rust_abi.c', fixture]
         binary = out / 'harness'
+        orphan_config = [] if args.c_orphan else ['-DCONFIG_UFSD_RUST_EXT4_ORPHAN']
         built = run(['cc', '-std=gnu11', '-O1', '-DCONFIG_EXT4_RUST_EXTENT_TXN',
-                     '-DCONFIG_UFSD_RUST_EXT4_ORPHAN', '-ffunction-sections', '-fdata-sections',
+                     *orphan_config, '-ffunction-sections', '-fdata-sections',
                      '-Wno-builtin-declaration-mismatch', '-Iuser/liba20rt', '-Iuser/svc/fscompat',
                      '-Ikernel/include', '-Ikernel/arch/riscv64/include', *sources, library,
                      '-Wl,--gc-sections', '-lpthread', '-ldl', '-lm', '-o', binary], out / 'build-c.log')
         if built.returncode:
             raise RuntimeError('C backend build failed')
-        inputs = sources + [p for _, p in modules] + ['kernel/fs/diskfs/tests/ext4_partial_trunc_host.c']
+        inputs = sources + [p for _, p in modules] + [
+            'kernel/fs/diskfs/tests/ext4_partial_trunc_host.c', 'kernel/include/fs/ext4.h']
         report['source_sha256'] = {p: sha(ROOT / p) for p in inputs}
         report['gate_sha256'] = sha(Path(__file__))
         report['harness_sha256'] = sha(binary)
@@ -84,7 +92,8 @@ def main():
             raise RuntimeError('seed file was not created')
         report['base_sha256'] = sha(base)
         report['cases'] = []
-        cases = ([('mount-abort', [], 0)] if args.mount_abort else
+        cases = ([('directory-orphan', [], 0)] if args.directory_orphan else
+                 [('mount-abort', [], 0)] if args.mount_abort else
                  [('directories', [], 0)] if args.directory_account else
                  [('transient', [], 0), ('persistent', ['persistent'], 117)])
         for name, extra, expected in cases:
@@ -93,7 +102,23 @@ def main():
             result = run([binary, image, *extra], out / (name + '.log'))
             if result.returncode != expected:
                 raise RuntimeError(f'{name}: unexpected backend exit {result.returncode}')
-            marker = ('MOUNT_ABORT_PASS' if args.mount_abort else
+            recovery = None
+            if args.directory_orphan:
+                pending = re.search(r'DIR_ORPHAN_PENDING ino=(\d+) blocks=(\d+) inodes=(\d+)',
+                                    result.stdout + result.stderr)
+                if not pending:
+                    raise RuntimeError('missing held directory orphan/checkpoint')
+                raw = image.read_bytes()[1024:2048]
+                ino = int(pending[1])
+                if int.from_bytes(raw[0xe8:0xec], 'little') != ino or int.from_bytes(raw[0x3a:0x3c], 'little') & 3:
+                    raise RuntimeError('held directory orphan/dirty state not persisted')
+                recovery = run([binary, image, 'recover', pending[2], pending[3]],
+                               out / 'directory-recovery.log')
+                if recovery.returncode:
+                    raise RuntimeError(f'directory recovery exited {recovery.returncode}')
+                result = recovery
+            marker = ('DIR_ORPHAN_RECOVERY_PASS' if args.directory_orphan else
+                      'MOUNT_ABORT_PASS' if args.mount_abort else
                       'DIR_ACCOUNT_PASS' if args.directory_account else
                       'ORPHAN_RETRY_PASS' if not extra else 'ORPHAN_QUARANTINE_PASS')
             if marker not in (result.stdout + result.stderr).splitlines():
@@ -114,6 +139,8 @@ def main():
                     raise RuntimeError('rejected mount changed the quarantined image')
             report['cases'].append({'name': name, 'backend_exit': result.returncode,
                                     'e2fsck_exit': checked.returncode, 'postimage_sha256': post})
+        report['directory_orphan'] = args.directory_orphan
+        report['orphan_controller'] = 'c' if args.c_orphan else 'rust'
         report['mount_abort'] = args.mount_abort
         report['directory_account'] = args.directory_account
         report['passed'] = True

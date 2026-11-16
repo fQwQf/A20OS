@@ -41,7 +41,7 @@ fn valid_ino(io: &impl OrphanIo, ino: u32) -> bool {
     ino >= io.first_ino() && ino <= io.inode_count()
 }
 
-fn add_last_link<I: OrphanIo>(io: &mut I, ino: u32) -> Result<(), i32> {
+fn add_final_links<I: OrphanIo>(io: &mut I, ino: u32, links: u16) -> Result<(), i32> {
     if !valid_ino(io, ino) { return Err(EINVAL); }
     let mut head = io.head()?;
     let mut steps = 0u32;
@@ -55,7 +55,7 @@ fn add_last_link<I: OrphanIo>(io: &mut I, ino: u32) -> Result<(), i32> {
     }
 
     let original = io.read_inode(ino)?;
-    if original.links != 1 { return Err(EINVAL); }
+    if original.links != links { return Err(EINVAL); }
     let mut victim = original;
     let old_head = io.head()?;
     victim.links = 0;
@@ -76,6 +76,10 @@ fn add_last_link<I: OrphanIo>(io: &mut I, ino: u32) -> Result<(), i32> {
         } else { error });
     }
     Ok(())
+}
+
+fn add_last_link<I: OrphanIo>(io: &mut I, ino: u32) -> Result<(), i32> {
+    add_final_links(io, ino, 1)
 }
 
 fn find_link<I: OrphanIo>(io: &mut I, target: u32) -> Result<(u32, InodeLink), i32> {
@@ -289,6 +293,14 @@ pub unsafe extern "C" fn a20_ext4_orphan_add_last_link(ops: *const Ext4OrphanOps
                                                          ino: u32) -> i32 {
     let Some(ops) = (unsafe { ops.as_ref() }) else { return EINVAL; };
     add_last_link(&mut CallbackIo(ops), ino).map_or_else(|e| e, |_| 0)
+}
+
+/// An empty directory loses its parent entry and its self link together.
+#[no_mangle]
+pub unsafe extern "C" fn a20_ext4_orphan_add_directory(ops: *const Ext4OrphanOps,
+                                                       ino: u32) -> i32 {
+    let Some(ops) = (unsafe { ops.as_ref() }) else { return EINVAL; };
+    add_final_links(&mut CallbackIo(ops), ino, 2).map_or_else(|e| e, |_| 0)
 }
 
 #[no_mangle]
