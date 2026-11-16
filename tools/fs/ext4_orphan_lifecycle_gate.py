@@ -2,7 +2,8 @@
 """Check ext4 hardlink/open-unlink lifetimes against external fsck.
 
 --ufsd selects a matching Native service binary instead of the kernel mount.
-Service death, crash cuts and injected metadata failures are separate gates.
+--service-death uses ufs_orphan_recovery_test to kill and restart that service.
+Crash cuts and injected metadata failures remain separate gates.
 """
 import argparse
 import hashlib
@@ -22,11 +23,13 @@ from a20_resource import Policy, Requirement, gate
 from smoke import guest_slot_locks, _release_guest_slot_locks
 
 
-def validate(text, cycles):
-    matches = re.findall(r"^FS_ORPHAN: PASS old_ino=(\d+) bytes=24576\r?$", text, re.M)
+def validate(text, cycles, service_death=False):
+    pattern = (r"^UFS_ORPHAN_RECOVERY: PASS old_ino=(\d+) death=SIGKILL stale=EIO consumed=EBADF\r?$"
+               if service_death else r"^FS_ORPHAN: PASS old_ino=(\d+) bytes=24576\r?$")
+    matches = re.findall(pattern, text, re.M)
     if len(matches) != cycles or any(int(value) < 11 for value in matches):
         raise ValueError("missing completed hardlink/open-unlink cycles")
-    if re.search(r"FS_ORPHAN: FAIL|\[PANIC\]|Kernel panic|UBSAN:|LOCK-STALL", text):
+    if re.search(r"FS_ORPHAN: FAIL|UFS_ORPHAN_RECOVERY: FAIL|\[PANIC\]|Kernel panic|UBSAN:|LOCK-STALL", text):
         raise ValueError("guest failure diagnostic")
     if "[SMP] 2/2 configured CPUs online" not in text:
         raise ValueError("missing SMP2 boot")
@@ -46,9 +49,13 @@ def run(args):
     result = {"passed": False, "scope": "kernel ext4 POSIX lifetime, not Native UFSD/crash/failure certification",
               "kernel_sha256": sha(args.kernel), "input_fat_sha256": sha(args.fat),
               "test_sha256": sha(args.test), "cycles": args.cycles, "cases": []}
+    result["service_death"] = args.service_death
+    test_name = "ufs_orphan_recovery_test" if args.service_death else "fs_orphan_lifecycle"
     if args.ufsd:
         result["scope"] = "Native UFSD ext4 POSIX lifetime; crash and injected failures are separate"
         result["ufsd_sha256"] = sha(args.ufsd)
+        if args.service_death:
+            result["scope"] = "Native UFSD durable open-unlink, SIGKILL, stale-fd errors and service remount; not crash/failure certification"
     try:
         with tempfile.TemporaryDirectory(prefix="a20-ext4-orphan-") as temporary:
             work = Path(temporary)
@@ -70,7 +77,7 @@ def run(args):
                                                capture_output=True, text=True, check=True)
                     (args.output / (name + "-populate.log")).write_text(populated.stdout + populated.stderr)
                 shutil.copyfile(args.fat, fat)
-                subprocess.run(["mcopy", "-o", "-i", str(fat), str(args.test), "::/fs_orphan_lifecycle"], check=True)
+                subprocess.run(["mcopy", "-o", "-i", str(fat), str(args.test), "::/" + test_name], check=True)
                 if args.ufsd:
                     subprocess.run(["mcopy", "-o", "-i", str(fat), str(args.ufsd), "::/orphan-ufsd"], check=True)
                 command = ["qemu-system-riscv64", "-machine", "virt", "-bios", "default",
@@ -96,19 +103,23 @@ def run(args):
                             "-kernel", str(args.kernel.resolve())]
                 (args.output / (name + "-argv.json")).write_text(json.dumps(command, indent=2) + "\n")
                 log = args.output / (name + ".log")
-                script = "/bin/fs_orphan_lifecycle /extra\n" * args.cycles
+                script = f"/bin/{test_name} /extra\n" * args.cycles
                 if args.ufsd:
                     script = ("/bin/orphan-ufsd /ufs 2 ext4 &\n" +
                               (f"FS_ORPHAN_EXPECT_UXFS=1 FS_ORPHAN_EXPECT_VOLUME_TOKEN={token} /bin/fs_orphan_lifecycle /ufs\n") * args.cycles +
                               "umount /ufs && echo FS_ORPHAN_UNMOUNT_PASS\n")
+                if args.service_death:
+                    script = (f"FS_ORPHAN_EXPECT_VOLUME_TOKEN={token} /bin/{test_name} /bin/orphan-ufsd /ufs 2\n") * args.cycles
                 try:
                     feed(command, script + "poweroff\n", 0, str(log), args.timeout)
                     text = log.read_text(errors="replace")
-                    inodes = validate(text, args.cycles)
-                    if args.ufsd and (text.count("FS_ORPHAN: mounted=UXFS") != args.cycles or
+                    inodes = validate(text, args.cycles, args.service_death)
+                    if args.ufsd and not args.service_death and (text.count("FS_ORPHAN: mounted=UXFS") != args.cycles or
                                       "UFSD: serving /ufs as ext4" not in text or
                                       "FS_ORPHAN_UNMOUNT_PASS" not in text.splitlines()):
                         raise ValueError("missing real Native ext4 service or completed unmount")
+                    if args.service_death and text.count("UFSD: serving /ufs as ext4") != 2 * args.cycles:
+                        raise ValueError("missing killed and recovered Native services")
                 except Exception:
                     shutil.copyfile(ext, args.output / (name + "-failure.img"))
                     checked = subprocess.run(["/usr/sbin/e2fsck", "-fn", str(ext)], capture_output=True, text=True)
@@ -144,14 +155,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", type=Path, required=True, help="RV64 SMP2 kernel.elf")
     parser.add_argument("--fat", type=Path, required=True)
-    parser.add_argument("--test", type=Path, required=True, help="matching RV64 fs_orphan_lifecycle binary")
+    parser.add_argument("--test", type=Path, required=True, help="matching RV64 fs_orphan_lifecycle (or ufs_orphan_recovery_test) binary")
     parser.add_argument("--ufsd", type=Path, help="matching Native RV64 UFSD binary; use a dedicated disk 2")
+    parser.add_argument("--service-death", action="store_true", help="run actual Native service SIGKILL/remount fixture (requires --ufsd)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     if not 1 <= args.cycles <= 16 or args.timeout <= 0:
         parser.error("cycles 1..16 and positive timeout required")
+    if args.service_death and not args.ufsd:
+        parser.error("--service-death requires --ufsd")
     policy = Policy.from_env()
     gate(Requirement(1024 + policy.reserve_mem_mb, 2, policy.min_disk_mb), policy, ROOT,
          wait=False, label="ext4 orphan lifecycle")

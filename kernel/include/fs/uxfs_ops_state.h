@@ -223,6 +223,8 @@ struct a20_uxfs_lifecycle {
     int      (*lifetime_close_confirm)(void *sb, uint64_t ino, uint64_t token,
                                        int *acked, int *request_sent);
     void     (*trace)(void *vfile, void *fctx);
+    int      (*peer_gone)(void *sb);
+    void     (*vf_retire)(void *vfile);
 };
 
 void *a20_uxfs_file_open(const struct a20_uxfs_lifecycle *lc, void *vn,

@@ -25,5 +25,19 @@ class OrphanLifecycleOracle(unittest.TestCase):
             probe.validate(text, 4)
 
 
+    def test_service_death_requires_exact_consumed_fd_and_recovery_result(self):
+        line = "UFS_ORPHAN_RECOVERY: PASS old_ino=19 death=SIGKILL stale=EIO consumed=EBADF\n"
+        text = "[SMP] 2/2 configured CPUs online\n" + line * 3 + "[SD] POWER_OFF entry\n"
+        self.assertEqual(probe.validate(text, 3, True), [19])
+        for bad in (text.replace("SIGKILL", "SIGTERM"), text.replace("EIO", "0"),
+                    text.replace("EBADF", "0"), text.replace("old_ino=19", "old_ino=0"),
+                    text.replace("UFS_ORPHAN_RECOVERY: PASS", "# echo UFS_ORPHAN_RECOVERY: PASS"),
+                    text + "UFS_ORPHAN_RECOVERY: FAIL stale fd\n"):
+            with self.assertRaises(ValueError):
+                probe.validate(bad, 3, True)
+        with self.assertRaises(ValueError):
+            probe.validate(text, 3)
+
+
 if __name__ == "__main__":
     unittest.main()
