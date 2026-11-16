@@ -1449,11 +1449,12 @@ static int rlimit_set(task_t *t, int resource, uint64_t cur, uint64_t max)
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
     if (resource < 0 || resource >= RLIM_NLIMITS)
         return -EINVAL;
-    if (!new_rlim && !old_rlim)
-        return 0;
+    /* Input and output may alias. Snapshot the requested limit before any
+     * output write, and only copy the old pair back after a successful set. */
+    uint64_t requested[2];
+    if (new_rlim && copy_from_user(requested, new_rlim, sizeof(requested)) < 0)
+        return -EFAULT;
 
-    /* Previously the pid argument was discarded outright, so a supervisor
-     * could only ever inspect or change its own limits. */
     task_t *self = proc_current();
     if (!self)
         return -ESRCH;
@@ -1465,39 +1466,34 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
     }
 
     int ret = 0;
-    if (old_rlim) {
-        uint64_t r[2] = { 0, 0 };
-        int gr = rlimit_get(t, resource, r);
-        if (gr < 0) {
-            /* Nothing enforces this resource, so there is no value to report.
-             * RLIM_INFINITY is the truth; ENOSYS would be a lie about which
-             * resources exist. */
-            r[0] = 0;
-            r[1] = (uint64_t)-1;
-        }
-        if (copy_to_user(old_rlim, r, sizeof(r)) < 0)
-            ret = -EFAULT;
+    /* Reading another task's limits uses the same permission boundary as
+     * changing them; a denied request must not expose an old pair. */
+    if (t != self) {
+        rlimit_view_t view;
+        (void)a20_rl_view_fill(t, &view);
+        ret = a20_prlimit_may_change(&view, 0,
+                                     proc_has_cap(self, CAP_SYS_RESOURCE));
     }
-    if (ret == 0 && new_rlim) {
-        /* Changing another task's limits is a privilege operation. */
-        if (t != self) {
-            rlimit_view_t view;
-            (void)a20_rl_view_fill(t, &view);
-            ret = a20_prlimit_may_change(&view, 0,
-                                         proc_has_cap(self, CAP_SYS_RESOURCE));
-        }
-        if (ret == 0) {
-            uint64_t r[2];
-            if (copy_from_user(r, new_rlim, sizeof(r)) < 0)
-                ret = -EFAULT;
-            else
-                ret = rlimit_set(t, resource, r[0], r[1]);
+    uint64_t previous[2] = { 0, 0 };
+    if (ret == 0 && old_rlim) {
+        if (rlimit_get(t, resource, previous) < 0) {
+            /* Preserve the existing partial-ABI fallback for resources
+             * outside the supported policy. */
+            previous[0] = 0;
+            previous[1] = (uint64_t)-1;
         }
     }
-    if (t != self)
+    if (ret == 0 && new_rlim)
+        ret = rlimit_set(t, resource, requested[0], requested[1]);
+    if (ret == 0 && old_rlim &&
+        copy_to_user(old_rlim, previous, sizeof(previous)) < 0)
+        ret = -EFAULT;
+    /* An explicit self pid also came from the owning lookup. */
+    if (pid != 0)
         proc_put(t);
     return ret;
 }
+
 
 int64_t sys_getrlimit(int resource, void *rlim) {
     if (resource < 0 || resource >= RLIM_NLIMITS)
