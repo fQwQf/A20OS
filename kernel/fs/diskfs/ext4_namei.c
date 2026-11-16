@@ -344,6 +344,7 @@ typedef struct {
 
 #ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
 extern int a20_ext4_orphan_add_last_link(const ext4_orphan_ops_t *, uint32_t);
+extern int a20_ext4_orphan_add_directory(const ext4_orphan_ops_t *, uint32_t);
 extern int a20_ext4_orphan_reap(const ext4_orphan_ops_t *, uint32_t);
 extern int a20_ext4_orphan_recover(const ext4_orphan_ops_t *, uint32_t *);
 #endif
@@ -489,17 +490,21 @@ static int ext4_orphan_chain_contains(ext4_orphan_ops_t *ops, uint32_t target)
 }
 #endif
 
-static int ext4_orphan_add_last_link(ext4_sb_info_t *sb, uint32_t ino)
+static int ext4_orphan_add_final_links(ext4_sb_info_t *sb, uint32_t ino,
+                                       uint16_t expected_links)
 {
     ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
 #ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
-    return ext4_record_status(sb, a20_ext4_orphan_add_last_link(&ops, ino));
+    return ext4_record_status(sb, expected_links == 2 ?
+        a20_ext4_orphan_add_directory(&ops, ino) :
+        a20_ext4_orphan_add_last_link(&ops, ino));
 #else
     int ret = ext4_orphan_chain_contains(&ops, ino);
     if (ret < 0) return ret;
     uint16_t links;
     uint32_t old_next, head;
-    if (ops.read_inode(ops.context, ino, &links, &old_next) < 0 || links != 1)
+    if (ops.read_inode(ops.context, ino, &links, &old_next) < 0 ||
+        links != expected_links)
         return -EIO;
     if (ops.read_head(ops.context, &head) < 0) return -EIO;
     ret = ops.write_inode(ops.context, ino, 0, head);
@@ -517,6 +522,11 @@ static int ext4_orphan_add_last_link(ext4_sb_info_t *sb, uint32_t ino)
     }
     return ret;
 #endif
+}
+
+static int ext4_orphan_add_last_link(ext4_sb_info_t *sb, uint32_t ino)
+{
+    return ext4_orphan_add_final_links(sb, ino, 1);
 }
 
 static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino)
@@ -805,24 +815,6 @@ int ext4_stat(vnode_t *vn, kstat_t *st) {
 }
 
 
-/*
- * Finish a rmdir whose directory inode could not be freed at the time: the
- * caller has already removed the dirent and dropped the parent's link, so all
- * that is left is to truncate the directory, mark its inode deleted and free
- * it.  Shared by the immediate rmdir path and by the deferred path taken when
- * the child vnode was still cached.
- */
-static int ext4_reclaim_removed_directory(ext4_sb_info_t *sb, uint32_t ino)
-{
-    ext4_inode_t cdi;
-    if (ext4_read_inode(sb, ino, &cdi) < 0) return -EIO;
-    ext4_block_truncate(sb, ino, &cdi);
-    ext4_inode_mark_deleted(&cdi);
-    if (ext4_write_inode(sb, ino, &cdi) < 0) return -EIO;
-    return ext4_free_inode(sb, ino);
-}
-
-
 /* An ownership preflight has not modified metadata. A failed read leaves the
  * durable orphan entry for shutdown/recovery; it cannot poison other writers'
  * pending transaction. Mutation failures inside reap still abort as before. */
@@ -872,20 +864,6 @@ void ext4_release_vn(vnode_t *vn) {
             vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         }
         rw_mutex_write_unlock(&sb->metadata_lock);
-    } else if (p && __atomic_load_n(&p->dir_removed, __ATOMIC_ACQUIRE)) {
-        /* A directory removed while this vnode was cached.  No orphan entry
-         * exists to recover it later, so the free happens here. */
-        ext4_sb_info_t *sb = p->sb;
-        __atomic_store_n(&p->dir_removed, 0, __ATOMIC_RELEASE);
-        rw_mutex_write_lock(&sb->metadata_lock);
-        int ret = ext4_reclaim_removed_directory(sb, p->inode_num);
-        if (ret < 0) (void)ext4_record_status(sb, -117);
-        rw_mutex_write_unlock(&sb->metadata_lock);
-        if (ret < 0) {
-            printf("[EXT4] deferred directory cleanup failed ino=%u err=%d; "
-                   "inode left allocated\n", p->inode_num, ret);
-        } else
-            vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
     }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
     if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
@@ -901,18 +879,6 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
 {
     if (!vn || !vn->fs_data) return -EINVAL;
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
-    if (__atomic_load_n(&p->dir_removed, __ATOMIC_ACQUIRE)) {
-        ext4_sb_info_t *dir_sb = p->sb;
-        if (!dir_sb) return -EIO;
-        rw_mutex_write_lock(&dir_sb->metadata_lock);
-        int dir_ret = ext4_reclaim_removed_directory(dir_sb, p->inode_num);
-        rw_mutex_write_unlock(&dir_sb->metadata_lock);
-        if (dir_ret == 0) {
-            __atomic_store_n(&p->dir_removed, 0, __ATOMIC_RELEASE);
-            vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
-        }
-        return dir_ret;
-    }
     if (!__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return 0;
     ext4_sb_info_t *sb = p->sb;
     if (!sb) return -EIO;
@@ -948,6 +914,7 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
 int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **out) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -1039,6 +1006,7 @@ static int ext4_mkdir_discard_unpublished(ext4_sb_info_t *sb, uint32_t ino,
 int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -1156,6 +1124,7 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
 int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
     if (!target || !target->fs_data) return -EINVAL;
     if (target->type == VFS_FT_DIR) return -EPERM;
 
@@ -1215,6 +1184,7 @@ int ext4_vn_link(vnode_t *dir, const char *name, vnode_t *target) {
 int ext4_vn_unlink_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_put) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -1257,6 +1227,7 @@ int ext4_dir_empty(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz) {
 int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_put) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
@@ -1271,20 +1242,27 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     r = ext4_dir_empty(p->sb, &cdi, ext4_inode_size(&cdi));
     if (r < 0) return r;
 
-    /* A directory's last two links are its own "." and its parent's "..",
-     * both of which disappear with it, so it cannot go through the unlink path
-     * -- that one only drops the first of the two and leaves the directory
-     * allocated forever.  The parent loses one link, the child loses both plus
-     * its blocks. */
+    /* An empty directory loses its parent entry and its self link together.
+     * Record that zero-link inode on disk before it becomes unreachable. */
+    if (cdi.i_links_count != 2) return -EIO;
+    uint32_t orphan_next;
+    r = ext4_orphan_read_head(p->sb, &orphan_next);
+    if (r < 0) return r;
     /* Reject a count-write failure before removing the directory name. */
     r = ext4_account_directory(p->sb, child_ino, -1);
     if (r < 0) return r;
-    r = ext4_dir_remove(p->sb, &di, p->inode_num, ext4_inode_size(&di), name);
+    r = ext4_orphan_add_final_links(p->sb, child_ino, 2);
     if (r < 0) {
-        int restored = ext4_account_directory(p->sb, child_ino, 1);
-        if (restored < 0 || r == -EIO || r == -117)
+        if (ext4_account_directory(p->sb, child_ino, 1) < 0)
             return ext4_record_status(p->sb, -117);
         return r;
+    }
+    r = ext4_dir_remove(p->sb, &di, p->inode_num, ext4_inode_size(&di), name);
+    if (r < 0) {
+        /* The name may have changed in cache. Do not free a possibly named
+         * orphan or admit a writable restart after uncertain publication. */
+        if (p->sb->journal) (void)ext4_journal_poison(p->sb);
+        return ext4_record_status(p->sb, -117);
     }
 
     if (di.i_links_count > 0) di.i_links_count--;
@@ -1294,20 +1272,19 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     vnode_t *live = ext4_vnode_cache_remove(p->sb, child_ino);
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
-        /* The directory's own two links went away with it, so unlike an
-         * unlinked file there is no orphan entry a later mount could recover
-         * from: record the pending free on the vnode and let
-         * ext4_release_vn() finish it. */
-        if (vp)
-            __atomic_store_n(&vp->dir_removed, 1, __ATOMIC_RELEASE);
+        if (vp) {
+            __atomic_store_n(&vp->orphan_next, orphan_next, __ATOMIC_RELEASE);
+            __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
+        }
         if (!vp || __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) == 0)
             page_cache_discard_unlinked(live);
         if (deferred_put) *deferred_put = live;
         return 0;
     }
 
-    r = ext4_reclaim_removed_directory(p->sb, child_ino);
-    return r < 0 ? ext4_record_status(p->sb, -117) : 0;
+    r = ext4_orphan_reap(p->sb, child_ino);
+    if (r == 0) vfs_drop_time_meta_identity(dir->mnt, child_ino);
+    return r;
 }
 
 
@@ -1318,6 +1295,8 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
     ext4_vnode_priv_t *op = (ext4_vnode_priv_t *)old_dir->fs_data;
     ext4_vnode_priv_t *np = (ext4_vnode_priv_t *)new_dir->fs_data;
     if (op->type != VFS_FT_DIR || np->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&op->unlinked, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&np->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
     if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
         return -EINVAL;
     if (op->sb == np->sb && op->inode_num == np->inode_num &&
@@ -1437,6 +1416,7 @@ int ext4_readlink(vnode_t *vn, char *buf, size_t sz) {
 int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
                                     const char *target) {    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
+    if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
     ext4_inode_t di;
     if (ext4_read_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
