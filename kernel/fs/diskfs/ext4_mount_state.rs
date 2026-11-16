@@ -109,13 +109,11 @@ pub unsafe extern "C" fn a20_ext4_mount_state_transition(
         3 => a20_ext4_mount_state_error(state),
         _ => return EINVAL,
     };
-    // A no-op BEGIN can resume orphan recovery or retry a failed flush.
-    // An idempotent ERROR may skip IO because it is already
-    // fail-closed. CLEAN must still issue a barrier when the bytes already
-    // match: a previous CLEAN write may have reached cache but its flush
-    // failed, and retry must not mistake cached state for durable state.
+    // Matching cache bytes do not prove a prior flush succeeded. ERROR
+    // needs the same retry barrier as BEGIN/CLEAN so quarantine survives
+    // losing the in-memory mount.
     if next == state {
-        return if transition == 1 || transition == 2 { flush(ops.context) } else { 0 };
+        return flush(ops.context);
     }
     let ret = write_state(ops.context, next);
     if ret < 0 { return ret; }
@@ -129,7 +127,7 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct FakeDisk { state: u16, fail_write: bool, fail_flush: bool, calls: [u8; 8], len: usize }
+    struct FakeDisk { state: u16, durable_state: u16, fail_write: bool, fail_flush: bool, calls: [u8; 8], len: usize }
     unsafe extern "C" fn read(ctx: *mut core::ffi::c_void, out: *mut u16) -> i32 {
         let disk = &mut *(ctx as *mut FakeDisk);
         disk.calls[disk.len] = 1; disk.len += 1;
@@ -144,7 +142,7 @@ mod tests {
     unsafe extern "C" fn flush(ctx: *mut core::ffi::c_void) -> i32 {
         let disk = &mut *(ctx as *mut FakeDisk);
         disk.calls[disk.len] = 3; disk.len += 1;
-        if disk.fail_flush { -5 } else { 0 }
+        if disk.fail_flush { -5 } else { disk.durable_state = disk.state; 0 }
     }
 
     #[test]
@@ -234,4 +232,24 @@ mod tests {
         assert_eq!(unsafe { a20_ext4_mount_state_transition(&ops, 2) }, 0);
         assert_eq!(&disk.calls[..disk.len], &[1, 3, 1, 3]);
     }
+    #[test]
+    fn error_retry_persists_cached_quarantine_after_failed_barrier() {
+        let mut disk = FakeDisk { state: 0, fail_flush: true,
+                                  ..FakeDisk::default() };
+        let ops = MountStateOps { context: (&mut disk as *mut FakeDisk).cast(),
+            read_state: Some(read), write_state: Some(write), flush: Some(flush) };
+        assert_eq!(unsafe { a20_ext4_mount_state_transition(&ops, 3) }, EIO);
+        assert_eq!(disk.state, EXT4_ERROR_FS);
+        assert_eq!(disk.durable_state, 0);
+        disk.len = 0;
+        assert_eq!(unsafe { a20_ext4_mount_state_transition(&ops, 3) }, EIO);
+        assert_eq!(&disk.calls[..disk.len], &[1, 3]);
+        disk.fail_flush = false;
+        disk.len = 0;
+        assert_eq!(unsafe { a20_ext4_mount_state_transition(&ops, 3) }, 0);
+        assert_eq!(&disk.calls[..disk.len], &[1, 3]);
+        assert_eq!(a20_ext4_mount_state_recoverable(disk.durable_state), 0);
+        assert_eq!(a20_ext4_mount_state_admit(disk.durable_state), 0);
+    }
+
 }
