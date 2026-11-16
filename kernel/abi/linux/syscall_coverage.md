@@ -2,6 +2,15 @@
 
 This file tracks the intended compatibility level of the Linux syscall subset. It is deliberately conservative: a syscall should not be marked `full` merely because it has an entry in `syscall_table.def`.
 
+## Application contracts and evidence
+
+The [application contract register](../../../docs/zh/kernel/linux-abi/application-contracts.md)
+links the existing shell/service, Python/Node, desktop/browser, JVM and network-tool
+workloads to their required calls, error boundaries and checks. It distinguishes
+current direct host checks from historical application runs and missing original
+reports. N08 remains open; neither a registered workload nor a historical PASS
+establishes acceptance of the current release candidate.
+
 ## Coverage Legend
 
 - `full`: intended complete behavior for supported objects and flags.
