@@ -1510,7 +1510,11 @@ static int virtio_blk_driver_remove(device_t *dev) {
     virtio_blk_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (!inst)
         return 0;
-    inst->blk.valid = 0;
+    __atomic_store_n(&inst->blk.valid, 0, __ATOMIC_RELEASE);
+    /* A reset request is not a DMA stop acknowledgement. Keep the instance,
+     * IRQ and DMA queue storage until the device reports zero. */
+    int ret = virtio_transport_reset(&inst->vt, 100);
+    if (ret) return ret;
     if (inst->irq_registered) {
         if (inst->vt.msix_vectors > 0) {
             for (int i = 0; i < inst->vt.msix_vectors; i++)
@@ -1521,8 +1525,6 @@ static int virtio_blk_driver_remove(device_t *dev) {
         }
         inst->irq_registered = 0;
     }
-    inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
     inst->in_flight = 0;
     dev->drv_priv = NULL;
     return 0;
