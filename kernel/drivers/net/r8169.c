@@ -11,10 +11,8 @@
  *
  *   - no checksum/scatter-gather offload (caps() is absent, which the class
  *     documents as "linear send only");
- *   - no PHY link reporting: link_up stays NULL, which the class documents as
- *     "always up".  The PHYAR/PHYstatus indirect access is chip-generation
- *     specific, and reporting a wrong polarity would take the netif offline.
- *   - one static instance.
+ *   - carrier reporting from PHYstatus; no PHY negotiation controls;
+ *   - one private context per binding.
  *
  * Register offsets, descriptor format and the reset/start sequence follow the
  * Linux r8169 driver (drivers/net/ethernet/realtek/r8169_main.c and
@@ -24,9 +22,8 @@
  * What is NOT claimed
  * -------------------
  * No r8169-family silicon was exercised: QEMU has no r8168 model, so this file
- * is compile- and review-tested only.  The two paths that need a real PHY and
- * MDIO bench (link speed/duplex negotiation and the EEPROM-less MAC fallback)
- * are deliberately left to the hardware's post-reset defaults.
+ * is checked by compilation and register/lifecycle models only. PHY/MDIO,
+ * generation-specific firmware and reset errata still need a hardware bench.
  */
 
 #include "drivers/bus/pci_bus.h"
@@ -195,6 +192,9 @@ typedef struct r8169_device {
     int irq;
     int irq_registered;
     int ready;
+    int closing;
+    int hardware_stopped;
+    device_t *device;
 
     r8169_desc_t *tx_ring;
     uint64_t tx_ring_dma;
@@ -221,6 +221,7 @@ typedef struct r8169_device {
     spinlock_t lock;
 } r8169_device_t;
 
+static int r8169_stop(void *context);
 
 static uint8_t r8169_sim_read8(r8169_device_t *nic, uint32_t reg);
 static void r8169_sim_write8(r8169_device_t *nic, uint32_t reg, uint8_t value);
@@ -342,10 +343,8 @@ static int r8169_alloc_rings(r8169_device_t *nic, device_t *dev)
     nic->rx_buf = dma_alloc_coherent_aligned(
         dev, R8169_RX_DESC_COUNT * R8169_BUF_SIZE, PAGE_SIZE,
         &nic->rx_buf_dma);
-    if (!nic->tx_ring || !nic->tx_buf || !nic->rx_ring || !nic->rx_buf) {
-        r8169_free_rings(nic);
+    if (!nic->tx_ring || !nic->tx_buf || !nic->rx_ring || !nic->rx_buf)
         return -ENOMEM;
-    }
     return 0;
 }
 
@@ -384,17 +383,20 @@ static int r8169_irq_handler(int irq, void *priv)
     (void)irq;
     device_t *dev = (device_t *)priv;
     r8169_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic || !nic->ready)
+    if (!nic)
         return 0;
 
     uint16_t status = r8169_read16(nic, R8169_INTRSTAT);
-    if (!status)
+    if (!status || status == 0xFFFFU)
         return 0;
     /* Write-1-to-clear the causes this handler services.  Clearing them is
      * what deasserts the level-triggered INTx line; the core masks the line
      * across this call, and the handler must leave nothing pending or the
      * unmask would immediately re-enter (see IRQ_TRIGGER_MODEL). */
     r8169_write16(nic, R8169_INTRSTAT, status);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&nic->ready, __ATOMIC_ACQUIRE))
+        return 0;
 
     nic->irq_count++;
     if (status & R8169_IRQ_RX_EVENTS)
@@ -427,6 +429,10 @@ static void r8169_poll(device_t *dev)
     if (!nic || !nic->tx_ring)
         return;
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return;
+    }
     unsigned released = r8169_reclaim_tx_locked(nic);
     /* 8168 doorbell-loss workaround from rtl_tx(): a TxPoll issued while
      * another transmit was in flight can be dropped, so re-kick whenever
@@ -447,6 +453,10 @@ static int r8169_send(device_t *dev, const void *packet, size_t length)
     size_t wire_len = length < R8169_MIN_FRAME ? R8169_MIN_FRAME : length;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
     r8169_reclaim_tx_locked(nic);
     if (nic->tx_busy == 0xFFFFFFFFU) {
         nic->tx_dropped++;
@@ -516,6 +526,10 @@ static int r8169_recv(device_t *dev, void *buffer, size_t max_length)
 
     int result = -EAGAIN;
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
     r8169_desc_t *d = &nic->rx_ring[nic->rx_next];
     uint32_t opts1 = __atomic_load_n(&d->opts1, __ATOMIC_ACQUIRE);
     if (!(opts1 & R8169_DESC_OWN)) {
@@ -553,7 +567,8 @@ static int r8169_recv(device_t *dev, void *buffer, size_t max_length)
 static const uint8_t *r8169_mac(device_t *dev)
 {
     r8169_device_t *nic = dev ? dev->drv_priv : NULL;
-    return nic ? nic->mac : NULL;
+    return nic && !__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) ?
+           nic->mac : NULL;
 }
 
 /* Carrier comes from PHYstatus bit 1 (rtl8169_PHYstatus / LinkStatus).  The
@@ -563,7 +578,13 @@ static int r8169_link_up(device_t *dev)
     r8169_device_t *nic = dev ? dev->drv_priv : NULL;
     if (!nic || !nic->regs)
         return 0;
+    uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return 0;
+    }
     uint8_t phy = r8169_read8(nic, R8169_PHYSTATUS);
+    spin_unlock_irqrestore(&nic->lock, flags);
     /* 0xFF means the register window does not answer (device in a low-power
      * state).  The class contract treats "unknown" as up, not as down. */
     if (phy == 0xffU)
@@ -574,14 +595,21 @@ static int r8169_link_up(device_t *dev)
 static int r8169_rx_irq_driven(device_t *dev)
 {
     r8169_device_t *nic = dev ? dev->drv_priv : NULL;
-    return nic && nic->irq_registered;
+    return nic && !__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&nic->ready, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&nic->irq_registered, __ATOMIC_ACQUIRE);
 }
 
 static int r8169_reset(r8169_device_t *nic)
 {
+    if (r8169_read8(nic, R8169_CHIPCMD) == 0xFFU)
+        return -ENODEV;
     r8169_write8(nic, R8169_CHIPCMD, R8169_CMD_RESET);
     for (unsigned i = 0; i < 100; i++) {
-        if (!(r8169_read8(nic, R8169_CHIPCMD) & R8169_CMD_RST_MASK))
+        uint8_t command = r8169_read8(nic, R8169_CHIPCMD);
+        if (command == 0xFFU)
+            return -ENODEV;
+        if (!(command & (R8169_CMD_RST_MASK | R8169_CMD_TE | R8169_CMD_RE)))
             return 0;
         mdelay(1);
     }
@@ -653,6 +681,7 @@ static void r8169_parse_cmdline(void)
  */
 static void r8169_hw_start(r8169_device_t *nic)
 {
+    nic->hardware_stopped = 0;
     /* Multicast hash: MAR0 (0x08) and MAR4 (0x0C) are the only two hash
      * dwords this core has (rtl_set_rx_mode()).  Writing past them would
      * reach the counter-address and transmit-descriptor registers.  All-ones
@@ -696,18 +725,24 @@ static void r8169_hw_start(r8169_device_t *nic)
      * rtl_hw_start(): the receiver must never DMA into a descriptor the
      * driver has not filled yet. */
     r8169_write8(nic, R8169_CFG9346, R8169_CFG_LOCK);
+    arch_dma_sync_for_device(nic->tx_ring,
+                             R8169_TX_DESC_COUNT * sizeof(r8169_desc_t));
+    arch_dma_sync_for_device(nic->rx_ring,
+                             R8169_RX_DESC_COUNT * sizeof(r8169_desc_t));
+    arch_dma_sync_for_device(nic->rx_buf,
+                             R8169_RX_DESC_COUNT * R8169_BUF_SIZE);
     r8169_write8(nic, R8169_CHIPCMD,
                  r8169_read8(nic, R8169_CHIPCMD) | R8169_CMD_TE |
                      R8169_CMD_RE);
-    arch_dma_sync_for_device(nic->rx_buf,
-                             R8169_RX_DESC_COUNT * R8169_BUF_SIZE);
-
 }
 
 static int r8169_probe(device_t *dev)
 {
     r8169_parse_cmdline();
 
+    int managed = device_probe_use_remove(dev);
+    if (managed)
+        return managed;
     if (pci_enable_and_assign_bars(dev) < 0)
         return -ENODEV;
 
@@ -723,22 +758,27 @@ static int r8169_probe(device_t *dev)
         return -ENOMEM;
     memset(nic, 0, sizeof(*nic));
     nic->irq = -1;
+    nic->device = dev;
     spin_init(&nic->lock);
+    dev->drv_priv = nic;
+    int execution = device_add_execution_action(dev, r8169_stop, NULL, nic);
+    if (execution)
+        return execution;
     nic->regs = (uintptr_t)pci_map_bar(dev, 2);
-    if (!nic->regs) {
-        kfree(nic);
+    if (!nic->regs)
         return -EIO;
-    }
 
     /* Reset first: it restores the IDR shadow from the EEPROM and quiesces
      * any DMA the firmware left running.  Mask and acknowledge interrupts
      * before the reset so a stale cause cannot assert INTx during probe. */
+    if (r8169_read8(nic, R8169_CHIPCMD) == 0xFFU)
+        return -ENODEV;
     r8169_write16(nic, R8169_INTRMASK, 0);
     r8169_write16(nic, R8169_INTRSTAT, 0xFFFFU);
-    if (r8169_reset(nic) < 0) {
-        kerr("[R8169] reset timed out\n");
-        kfree(nic);
-        return -EIO;
+    int rc = r8169_reset(nic);
+    if (rc < 0) {
+        kerr("[R8169] reset failed: %d\n", rc);
+        return rc;
     }
     r8169_write16(nic, R8169_INTRMASK, 0);
     r8169_write16(nic, R8169_INTRSTAT, 0xFFFFU);
@@ -766,24 +806,18 @@ static int r8169_probe(device_t *dev)
     int mask = dma_set_mask(dev, DMA_MASK_64BIT);
     if (mask < 0) {
         r8169_write8(nic, R8169_CFG9346, R8169_CFG_LOCK);
-        kfree(nic);
         return mask;
     }
-    int rc = r8169_alloc_rings(nic, dev);
+    rc = r8169_alloc_rings(nic, dev);
     if (rc < 0) {
         r8169_write8(nic, R8169_CFG9346, R8169_CFG_LOCK);
-        kfree(nic);
         return rc;
     }
 
     r8169_hw_start(nic);
 
-    /* Publish the instance before the line is armed: request_irq() opens a
-     * window in which the handler can run, and it resolves the instance
-     * through dev->drv_priv.  ready stays 0 until the causes are unmasked, so
-     * an interrupt in that window is acknowledged and ignored. */
-    dev->drv_priv = nic;
-
+    /* The retained context is already visible to an early IRQ. Before ready
+     * is set, the handler acknowledges causes without entering the stack. */
     int irq = pci_intx_irq(dev);
     if (!g_r8169_poll_mode && irq >= 0) {
         /* The handler writes IntrStatus back (W1C), which deasserts the
@@ -797,14 +831,11 @@ static int r8169_probe(device_t *dev)
             kinfo("[R8169] IRQ %d registration failed; using polling\n", irq);
         }
     }
+    __atomic_store_n(&nic->ready, 1, __ATOMIC_RELEASE);
     if (nic->irq_registered)
         r8169_write16(nic, R8169_INTRMASK, R8169_IRQ_MASK);
-    nic->ready = 1;
 
-    /* Provider-side link diagnostics.  link_up is deliberately left NULL
-     * (always up): the stack consults it once, at netif registration, and
-     * never re-polls carrier, so reporting a believable "down" at boot would
-     * leave the interface down after the cable is plugged in. */
+    /* Provider-side diagnostics; the stack also polls carrier via link_up. */
     uint8_t phy = r8169_read8(nic, R8169_PHYSTATUS);
     kinfo("[R8169] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x mode=%s irq=%d "
           "rxdesc=%u txdesc=%u phy=0x%02x%s%s%s\n",
@@ -820,37 +851,49 @@ static int r8169_probe(device_t *dev)
     return 0;
 }
 
+static int r8169_stop(void *context)
+{
+    r8169_device_t *nic = context;
+    __atomic_store_n(&nic->closing, 1, __ATOMIC_RELEASE);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&nic->lock, &flags))
+        return -EBUSY;
+    __atomic_store_n(&nic->ready, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&nic->lock, flags);
+    if (!nic->hardware_stopped && (nic->regs || nic->sim)) {
+        if (r8169_read8(nic, R8169_CHIPCMD) == 0xFFU)
+            return -ENODEV;
+        r8169_write16(nic, R8169_INTRMASK, 0);
+        uint16_t status = r8169_read16(nic, R8169_INTRSTAT);
+        if (status == 0xFFFFU)
+            return -ENODEV;
+        r8169_write16(nic, R8169_INTRSTAT, status);
+        int ret = r8169_reset(nic);
+        if (ret)
+            return ret;
+        uint16_t mask = r8169_read16(nic, R8169_INTRMASK);
+        if (mask == 0xFFFFU)
+            return -ENODEV;
+        if (mask)
+            return -ETIMEDOUT;
+    }
+    nic->hardware_stopped = 1;
+    if (nic->irq_registered) {
+        free_irq((uint32_t)nic->irq, nic->device);
+        __atomic_store_n(&nic->irq_registered, 0, __ATOMIC_RELEASE);
+    }
+    return 0;
+}
+
 static int r8169_remove(device_t *dev)
 {
     r8169_device_t *nic = dev ? dev->drv_priv : NULL;
     if (!nic)
         return 0;
-
-    /* Stop new work, mask the device causes, then release the handler; the
-     * class layer has already taken the device offline so no new send/recv
-     * can start. */
-    nic->ready = 0;
-    r8169_write16(nic, R8169_INTRMASK, 0);
-    r8169_write16(nic, R8169_INTRSTAT, 0xFFFFU);
-    if (nic->irq_registered) {
-        free_irq((uint32_t)nic->irq, dev);
-        nic->irq_registered = 0;
-    }
-
-    /* Clear TE/RE before the rings are freed, so the device stops DMAing into
-     * memory the driver is about to hand back. */
-    r8169_write8(nic, R8169_CHIPCMD, 0);
-    unsigned wait;
-    for (wait = 0; wait < 1000U; wait++) {
-        if (!(r8169_read8(nic, R8169_CHIPCMD) &
-              (R8169_CMD_TE | R8169_CMD_RE)))
-            break;
-        udelay(1);
-    }
-    if (wait == 1000U)
-        return -ETIMEDOUT; /* Retain rings/context until a safe retry. */
+    int ret = r8169_stop(nic);
+    if (ret)
+        return ret;
     r8169_free_rings(nic);
-
     kinfo("[R8169] removed: irq=%lu err=%lu tx=%lu rx=%lu tx_drop=%lu "
           "rx_drop=%lu\n",
           (unsigned long)nic->irq_count, (unsigned long)nic->error_irqs,
@@ -1074,6 +1117,7 @@ int a20_boot_selftest_r8169(void)
     memset(&nic, 0, sizeof(nic));
     memset(&dev, 0, sizeof(dev));
     nic.sim = &sim;
+    nic.device = &dev;
     nic.irq = -1;
     spin_init(&nic.lock);
 
@@ -1094,6 +1138,7 @@ int a20_boot_selftest_r8169(void)
     r8169_rx_fill(&nic);
     stage = 14;
     r8169_hw_start(&nic);
+    nic.ready = 1;
 
     /* With the config window closed, a ring-base write must be dropped. */
     stage = 15;
@@ -1131,6 +1176,8 @@ int a20_boot_selftest_r8169(void)
     if (r8169_recv(&dev, out, sizeof(out)) != -EAGAIN)
         goto fail;
 
+    if (r8169_stop(&nic) < 0)
+        goto fail;
     r8169_free_rings(&nic);
     return 0;
 
@@ -1140,7 +1187,8 @@ fail:
          stage, (unsigned)sim.cfg_locked,
          (unsigned)r8169_read32(&nic, R8169_TNPDS_LO),
          (unsigned)r8169_read32(&nic, R8169_TNPDS_LO));
-    r8169_free_rings(&nic);
+    if (r8169_stop(&nic) == 0)
+        r8169_free_rings(&nic);
     return -1;
 }
 
