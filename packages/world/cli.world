@@ -12,10 +12,10 @@
 # /sbin/init，由它接管并开出 zsh 登录 shell（与 server / xfce world 同一模式）。
 #
 # 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk
-# 缓存。上游是 Alpine v3.23 的 main（见 tools/mkrootfs.py 的
+# 缓存。上游是 Alpine v3.23 的 main（见 tools/packaging/mkrootfs.py 的
 # DEFAULT_ALPINE_VERSION / DEFAULT_ALPINE_MIRROR），镜像源可用
 # ALPINE_MIRROR_ROOT 覆盖；tools/pkg.py 的 image-world 目前不透传该开关，
-# 需要换源时直接调 tools/mkrootfs.py --alpine-mirror。
+# 需要换源时直接调 tools/packaging/mkrootfs.py --alpine-mirror。
 #
 # 全部包都在 Alpine main 里，四个 hosted 架构（riscv64/aarch64/x86_64/
 # loongarch64）都有——刻意不碰 community，避免某个架构缺包时整个镜像组不出来。
@@ -72,8 +72,8 @@ jq
 
 # 网络。curl/wget 走 slirp 出网；openssh-client 是 ssh/scp/sftp；
 # iproute2 + iputils 给 ip/ping/ss，bind-tools 给 dig/nslookup。
-# 出网实测可用（curl 取到 200），但 `ip` 与 `nslookup` 目前受内核缺口影响，
-# 见文末"三、网络工具的两个缺口"。
+# RV64 SMP2 的本地 HTTP 与 ip 接口/地址/路由查询已通过；
+# dig/nslookup 的 UDP DNS 仍未通过，当前根因与边界见文末验证记录。
 curl
 wget
 openssh-client
@@ -116,41 +116,22 @@ man-pages
 # 可导入；`curl https://dl-cdn.alpinelinux.org/...` 返回 200；`poweroff` 走
 # [SD] POWER_OFF 正常关机。同一张镜像连续启动两次，第二次仍能正常挂载。
 #
-# **一、ext4 orphan 回收缺口（内核侧；本 world 会稳定触发，已规避）**
+# 2026-11-16 当前定向运行（RV64 QEMU virt / ABI=both / SMP2 / BSD）：
 #
-#   kernel/fs/diskfs/ext4_namei.c:717 ext4_release_vn() 在一个"被引用期间被
-#   unlink"的 inode 上调用 ext4_orphan_reap()，后者返回 -95（EOPNOTSUPP），
-#   于是打印 "[EXT4] unlink orphan ... deferred orphan cleanup failed ...;
-#   orphan retained for recovery"，inode 留在 orphan 链里。world 镜像是无日志
-#   ext4（mkrootfs 的 EXT4_MKFS_ARGS 带 ^has_journal），journal poison 那一步被
-#   跳过，所以当场没有别的报错——但**下一次挂载这张镜像会失败**：
-#   "[EXT4] refusing mount: orphan recovery failed (-95)"，镜像被拒，启动退回到
-#   FAT32 根（A20OS 原生用户态），表现为"world 没生效"。
+#   * ip 的 SO_SNDBUF 拒绝已修复，link/address/route JSON 查询通过。
+#   * curl 实际访问宿主本地 HTTP 服务通过；不等于本轮已验证公网 HTTPS。
+#   * dig 在 IP_RECVERR 返回 EOPNOTSUPP 后退出，尚未发出 UDP DNS 查询；
+#     应用显示的 address family not supported 不是已证实的地址族根因。
+#     nslookup 分项尚未运行，不能用 HTTP 成功代替 UDP DNS 验收。
+#   * mount tmpfs 实际成功，旧 mount no-op 描述已失效；当前阻塞为 chroot
+#     内的 /proc/self/mountinfo 暴露 /extra/... 等全局路径。
+#   * bash 简单 echo 成功，管道/命令替换 SIGSEGV；zsh 登录可用，脚本待验收。
 #
-#   触发条件是 zsh 的历史文件：`.zshrc` 里开 SHARE_HISTORY / INC_APPEND_HISTORY
-#   时，zsh 每条命令都重写历史文件，于是每条命令留一个 orphan（实测：连
-#   `echo` 都留；同一镜像上 busybox ash 跑同样命令是 0 条）。关掉这两个选项后
-#   orphan 计数归零，镜像连续两次启动都正常。所以
-#   packages/overlay/cli/root/.zshrc 刻意不设它们，并把 HISTFILE 指向 /dev/shm
-#   （内核已挂的 tmpfs），避免历史写到 ext4 上。
-#
-#   日常 `tools/a20 run cli-<arch>` 每次都会重建镜像（image-world 是 phony），
-#   所以这个缺口平时被"重建"掩盖；真正会踩到的是 `a20 run --no-build`，或手工
-#   用同一张镜像连续启动两次。根因在内核的 ext4 orphan 回收路径，值得单独修。
-#
-# **二、guest 内 `mount` 不生效（内核侧）**
-#
-#   `mount -t tmpfs tmpfs /tmp`、`mount -t tmpfs -o size=64m tmpfs /var/tmp`
-#   在 guest 内都返回 32，事后 /proc/mounts 里既没有 /tmp 也没有 /dev/pts。
-#   内核只在自己挂载（chroot 前挂在 /extra 下），/extra/dev/shm 与 /extra/run
-#   的 tmpfs 就是这么来的。所以 overlay init 里那几个 mount 目前是 no-op；
-#   pty 走 /dev/ptmx 仍然可用（tmux 实测能起 session），本 world 不依赖它们。
-#
-# **三、网络工具的两个缺口（内核侧）**
-#
-#   `ip`（netlink）失败在 `SO_SNDBUF: Not supported`；`nslookup`/`dig`（自己发
-#   UDP DNS）失败在 `address family not supported`。TCP 路径不受影响（curl
-#   返回 200 就是证据：musl 解析器在 UDP 失败后回退到 TCP DNS）。
+# 普通 ext4 orphan 生命周期及其余已完成修复不再列为本 world 缺口。
+# 尚未关闭的恢复边界由 docs/zh/status/current/ext4-orphan-gap.md 跟踪；
+# 保留 HISTFILE=/dev/shm 是当前配置，不代表旧 orphan EOPNOTSUPP 仍然存在。
+# 实际命令、证据与剩余契约：docs/zh/kernel/linux-abi/application-contracts.md；
+# 原始运行：build/evidence/v1-closeout-20261116/cli-application/。
 #
 # **四、控制台尺寸（内核侧缺口，已在本 world 内规避）**
 #

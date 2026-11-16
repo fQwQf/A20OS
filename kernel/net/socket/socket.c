@@ -953,10 +953,14 @@ int a20_net_sendto_packet(void *sp, const void *buf, size_t len,
     return net_packet_socket_send((net_socket_t *)sp, buf, len, addr, addrlen);
 }
 
-/* The netlink protocol arms are pure dispatch, so they stay here. */
+/* Netlink requests share the native datagram budget before protocol dispatch. */
 int a20_net_sendto_netlink(void *sp, const void *buf, size_t len,
                            const void *addr, size_t addrlen) {
     net_socket_t *s = (net_socket_t *)sp;
+    uint64_t flags = net_sock_lock(s);
+    uint32_t limit = s->snd_buf;
+    net_sock_unlock(s, flags);
+    if (limit && len > limit) return -EMSGSIZE;
     if (s->protocol == NETLINK_SOCK_DIAG)
         return net_netlink_diag_request(s, buf, len, addr, addrlen);
     if (s->protocol == NETLINK_ROUTE) {
