@@ -818,7 +818,14 @@ int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
          * back before returning, otherwise orphan retry sees an already-free
          * block and can neither complete nor safely free it again. */
         byte |= (uint8_t)(1U << (bit % 8));
-        if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0) {
+        int restore = ext4_meta_write(sb, byte_off, &byte, sizeof(byte));
+        /* Rewriting this allocation byte is idempotent while alloc_lock is
+         * held. A no-journal device may reject one compensation write too;
+         * retry it once before declaring the allocation state uncertain.
+         * Journal errors use their existing poison/replay path. */
+        if (restore < 0 && !sb->journal)
+            restore = ext4_meta_write(sb, byte_off, &byte, sizeof(byte));
+        if (restore < 0) {
             printf("[EXT4] bitmap free rollback failed block=%lu bit=%u\n",
                    (unsigned long)bm_blk, bit);
             return -117;

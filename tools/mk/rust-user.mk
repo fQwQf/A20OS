@@ -50,8 +50,8 @@ NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE ?= 0
 # backend block write during one reap. 1 retains the original single-write
 # fixture; larger values exercise rollback after completed frees.
 NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER ?= 1
-# Test-only: fail the selected orphan-reap write and the immediately following
-# compensation write, to verify fatal status/quarantine handling.
+# Test-only: fail the selected orphan-reap write and both bounded
+# compensation attempts, to verify fatal status/quarantine handling.
 NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL ?= 0
 # Test-only: fail the first extent reclaim free during explicit truncation.
 NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE ?= 0

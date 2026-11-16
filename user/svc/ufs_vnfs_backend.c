@@ -63,9 +63,6 @@ static int         g_ext4_backend;
 static volatile uint32_t g_close_orphan_reap_active;
 static volatile uint32_t g_close_orphan_write_failed;
 static volatile uint32_t g_close_orphan_write_count;
-#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL
-static volatile uint32_t g_close_orphan_restore_failed;
-#endif
 extern void a20_ufsd_test_log(const char *line);
 #endif
 
@@ -357,15 +354,17 @@ static int dev_write_sector(struct block_dev *dev, uint64_t lba,
             !__atomic_exchange_n(&g_close_orphan_write_failed, 1, __ATOMIC_ACQ_REL))
             inject = 1;
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL
-        if (write_index == CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER + 1 &&
-            !__atomic_exchange_n(&g_close_orphan_restore_failed, 1, __ATOMIC_ACQ_REL))
+        /* Exhaust both bounded compensation attempts in the quarantine
+         * profile. The monotonic write index injects each failure once. */
+        if (write_index == CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER + 1 ||
+            write_index == CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER + 2)
             inject = 1;
 #endif
         if (inject) {
             char line[96];
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL
-            const char *kind = write_index ==
-                CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER + 1 ?
+            const char *kind = write_index >
+                CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER ?
                 "UFSD_CLOSE_ORPHAN_RESTORE_EIO: HIT write=%u" :
                 "UFSD_CLOSE_ORPHAN_WRITE_EIO: HIT write=%u";
 #else
