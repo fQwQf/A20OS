@@ -60,6 +60,8 @@ pub const CREATE_MODE: u32 = S_IFREG | 0o755;
 pub const STATFS_BLOCK: u64 = 512;
 pub const STATFS_NAMELEN: u64 = 255;
 pub const STATFS_TYPE: u64 = 0x5558_4653; /* 'UXFS' */
+pub const GETATTR_NLINK_TAG: u64 = 0x4e4c_4b31_0000_0000;
+pub const GETATTR_NLINK_MASK: u64 = 0xffff_ffff_0000_0000;
 
 /* page size used by readpage/writepage offsets */
 pub const PAGE_SIZE: u64 = 4096;
@@ -836,13 +838,18 @@ pub unsafe extern "C" fn a20_uxfs_op_stat(
     }
     let size = resp.out0;
     let mode = (resp.out1 >> 32) as u32;
+    let nlink = if resp.out2 & GETATTR_NLINK_MASK == GETATTR_NLINK_TAG {
+        resp.out2 as u32
+    } else {
+        1 /* compatibility with a peer that does not report link counts */
+    };
     // SAFETY: the caller passes a live `kstat_t`; the mirror matches its layout.
     let st = unsafe { &mut *(kstat_out as *mut Kstat) };
     *st = Kstat {
         st_dev: 0,
         st_ino: ino,
         st_mode: mode,
-        st_nlink: 1,
+        st_nlink: nlink,
         st_uid: 0,
         st_gid: 0,
         st_rdev: 0,
@@ -2504,6 +2511,14 @@ mod tests {
         assert_eq!(st.st_nlink, 1);
         assert_eq!(st.st_blocks, (2048 + 511) / 512);
         assert_eq!(WORLD.with(|w| w.borrow().size), 2048);
+        for links in [0u32, 1, 2, 65_535, u32::MAX] {
+            WORLD.with(|w| w.borrow_mut().reply_out2 = GETATTR_NLINK_TAG | links as u64);
+            assert_eq!(unsafe { a20_uxfs_op_stat(&t, VN, &mut st as *mut Kstat as *mut c_void) }, 0);
+            assert_eq!(st.st_nlink, links);
+        }
+        WORLD.with(|w| w.borrow_mut().reply_out2 = 0xabcd_1234_0000_0002);
+        assert_eq!(unsafe { a20_uxfs_op_stat(&t, VN, &mut st as *mut Kstat as *mut c_void) }, 0);
+        assert_eq!(st.st_nlink, 1); // unknown extensions do not fabricate nlink=2
     }
 
     #[test]
