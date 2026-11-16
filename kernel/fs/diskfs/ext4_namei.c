@@ -1591,7 +1591,8 @@ int ext4_vn_create(vnode_t *dir, const char *name, int mode,
 {
     ext4_sb_info_t *sb = ((ext4_vnode_priv_t *)dir->fs_data)->sb;
     rw_mutex_write_lock(&sb->metadata_lock);
-    int r = ext4_vn_create_unlocked(dir, name, mode, out);
+    int r = ext4_is_inconsistent(sb) ? -117 :
+            ext4_vn_create_unlocked(dir, name, mode, out);
     rw_mutex_write_unlock(&sb->metadata_lock);
     return r;
 }
