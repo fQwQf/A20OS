@@ -24,9 +24,10 @@ struct virtio_transport {
 };
 typedef struct {void *drv_priv;} device_t;
 typedef struct {virtio_transport_t vt;device_t *device;int valid,transport_live,published,irq_registered,irq;void *ring_mem;} virtio_net_inst_t;
-typedef struct {struct {int valid;} blk;virtio_transport_t vt;int in_flight,irq_registered,transport_live,ever_published,closing,lock;uint32_t active_calls;device_t *device;void *queue_dma_mem;} virtio_blk_inst_t;
+typedef struct {struct {int valid;} blk;virtio_transport_t vt;int in_flight,irq_registered,transport_live,ever_published,closing,lock;uint32_t active_calls,consumer_refs;device_t *device;void *queue_dma_mem;} virtio_blk_inst_t;
 static struct {unsigned reads,resets,acks,frees,teardowns,ring_frees,stack_calls,confirmed;int stuck;} hw;
 static uint64_t ticks;
+static int g_instance_lock;
 static uint64_t spin_lock_irqsave(int *lock){assert(!*lock);*lock=1;return 0;}
 static void spin_unlock_irqrestore(int *lock,uint64_t flags){(void)flags;assert(*lock);*lock=0;}
 static uint64_t clock_ticks_per_sec(void){return 1000;}
@@ -91,7 +92,6 @@ WRAPPER_MODEL = r'''
 #define VIRTIO_BLK_MAX_TRANSFER_SECTORS 2
 #define VIRTIO_BLK_SECTOR_SIZE 512
 static virtio_blk_inst_t g_insts[1];
-static int g_ninst=1;
 static unsigned io_calls,admitted;
 static int virtio_blk_rw(int idx,uint64_t lba,void *buf,size_t count,int write,int flush){
  (void)lba;(void)buf;(void)count;(void)write;(void)flush;assert(!idx);
@@ -109,13 +109,13 @@ static void check_call_wrappers(void){
   g_insts[0]=(virtio_blk_inst_t){.vt={.read32=read32,.write32=write32},
    .blk={.valid=1},.ever_published=1,.transport_live=1};
   int rc=writing?virtio_blk_write(0,0,data,3):virtio_blk_read(0,0,data,3);
-  assert(rc==-ESHUTDOWN&&io_calls==2&&admitted==1&&!g_insts[0].active_calls);
+  assert(rc==-ESHUTDOWN&&io_calls==2&&admitted==1&&!g_insts[0].active_calls&&!g_insts[0].consumer_refs);
   assert(!virtio_blk_stop(&g_insts[0])&&!g_insts[0].blk.valid&&hw.resets==1);
  }
  hw=(__typeof__(hw)){0};io_calls=admitted=0;
  g_insts[0]=(virtio_blk_inst_t){.vt={.read32=read32,.write32=write32},
   .blk={.valid=1},.ever_published=1,.transport_live=1};
- assert(!virtio_blk_flush(0)&&io_calls==1&&admitted==1&&!g_insts[0].active_calls);
+ assert(!virtio_blk_flush(0)&&io_calls==1&&admitted==1&&!g_insts[0].active_calls&&!g_insts[0].consumer_refs);
  assert(!virtio_blk_stop(&g_insts[0])&&hw.resets==1);
 }
 '''
@@ -133,6 +133,8 @@ class VirtioStopAck(unittest.TestCase):
         code += function(block[block.index('static int virtio_blk_stop(void *context)\n{'):], 'virtio_blk_stop')
         code += function(block, 'virtio_blk_driver_remove')
         code += WRAPPER_MODEL
+        code += function(block, 'virtio_blk_get_instance')
+        code += function(block, 'virtio_blk_put_instance')
         code += '\n'.join(function(block, name) for name in (
             'virtio_blk_call_begin', 'virtio_blk_call_end', 'virtio_blk_transfer',
             'virtio_blk_read', 'virtio_blk_write', 'virtio_blk_flush'))

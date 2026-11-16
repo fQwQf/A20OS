@@ -88,6 +88,7 @@ typedef struct {
     int                ever_published;
     int                closing;
     uint32_t           active_calls;
+    uint32_t           consumer_refs;
     void              *queue_dma_mem;
     uint64_t           queue_dma_addr;
     void              *request_dma_mem;
@@ -121,28 +122,53 @@ typedef struct {
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
+/* Protects slot ownership and consumer pins. Never nest with inst->lock. */
+static spinlock_t g_instance_lock = SPINLOCK_INIT;
 
-/* Lifecycle mutex held. Failed probe slots can be reused after acknowledged
- * cleanup; published metadata stays reserved for borrowed block_dev_t users. */
+static virtio_blk_inst_t *virtio_blk_get_instance(int idx)
+{
+    if (idx < 0 || idx >= VIRTIO_MAX_DEVS) return NULL;
+    uint64_t flags = spin_lock_irqsave(&g_instance_lock);
+    virtio_blk_inst_t *inst = &g_insts[idx];
+    if (!__atomic_load_n(&inst->ever_published, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&inst->blk.valid, __ATOMIC_ACQUIRE) ||
+        inst->consumer_refs == UINT32_MAX) inst = NULL;
+    else inst->consumer_refs++;
+    spin_unlock_irqrestore(&g_instance_lock, flags);
+    return inst;
+}
+
+static void virtio_blk_put_instance(virtio_blk_inst_t *inst)
+{
+    uint64_t flags = spin_lock_irqsave(&g_instance_lock);
+    if (inst->consumer_refs) inst->consumer_refs--;
+    if (!inst->consumer_refs && !inst->device)
+        __atomic_store_n(&inst->ever_published, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_instance_lock, flags);
+}
+
+
+/* Lifecycle mutex held. Old device/cache references reserve a stopped slot
+ * until their final put; no consumer can accidentally follow its rebind. */
 static virtio_blk_inst_t *virtio_blk_claim_instance(device_t *dev)
 {
+    uint64_t flags = spin_lock_irqsave(&g_instance_lock);
+    virtio_blk_inst_t *claimed = NULL;
     for (int idx = 0; idx < VIRTIO_MAX_DEVS; idx++) {
         virtio_blk_inst_t *inst = &g_insts[idx];
-        if (inst->device || inst->ever_published) continue;
-        /* Unpublished holes can be queried by legacy index readers. Keep
-         * their atomic publication guard intact while rebuilding the slot. */
-        size_t guard = __builtin_offsetof(virtio_blk_inst_t, ever_published);
-        size_t after = guard + sizeof(inst->ever_published);
-        memset(inst, 0, guard);
-        memset((char *)inst + after, 0, sizeof(*inst) - after);
+        if (inst->device || inst->consumer_refs) continue;
+        memset(inst, 0, sizeof(*inst));
         inst->device = dev;
         inst->slot = idx;
         inst->vt.irq = -1;
         spin_init(&inst->lock);
         dev->drv_priv = inst;
-        return inst;
+        claimed = inst;
+        break;
     }
-    return NULL;
+    spin_unlock_irqrestore(&g_instance_lock, flags);
+    return claimed;
 }
 
 static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
@@ -577,16 +603,19 @@ static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&inst->lock);
-    if (inst->in_flight > 0)
+    if (inst->blk.valid && inst->in_flight > 0)
         virtio_blk_complete_used_locked(inst, &wake_q);
     spin_unlock_irqrestore(&inst->lock, flags);
     (void)proc_wake_q_flush(&wake_q);
 }
 
 void virtio_blk_poll_all(void) {
-    for (int i = 0; i < __atomic_load_n(&g_ninst, __ATOMIC_ACQUIRE) &&
-         i < VIRTIO_MAX_DEVS; i++)
-        virtio_blk_poll_inst(&g_insts[i]);
+    for (int i = 0; i < VIRTIO_MAX_DEVS; i++) {
+        virtio_blk_inst_t *inst = virtio_blk_get_instance(i);
+        if (!inst) continue;
+        virtio_blk_poll_inst(inst);
+        virtio_blk_put_instance(inst);
+    }
 }
 
 static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
@@ -1219,11 +1248,10 @@ static int virtio_blk_transfer(int idx, uint64_t lba, void *buf,
                                 size_t sectors, int write)
 {
     if (!sectors) return 0;
-    if (idx < 0 || idx >= __atomic_load_n(&g_ninst, __ATOMIC_ACQUIRE))
-        return -ENODEV;
-    virtio_blk_inst_t *inst = &g_insts[idx];
+    virtio_blk_inst_t *inst = virtio_blk_get_instance(idx);
+    if (!inst) return -ENODEV;
     int ret = virtio_blk_call_begin(inst);
-    if (ret) return ret;
+    if (ret) { virtio_blk_put_instance(inst); return ret; }
     uint8_t *cursor = buf;
     while (sectors) {
         size_t chunk = sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS ?
@@ -1235,6 +1263,7 @@ static int virtio_blk_transfer(int idx, uint64_t lba, void *buf,
         sectors -= chunk;
     }
     virtio_blk_call_end(inst);
+    virtio_blk_put_instance(inst);
     return ret;
 }
 
@@ -1247,9 +1276,11 @@ int virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors) {
 }
 
 uint64_t virtio_blk_capacity(int idx) {
-    if (idx < 0 || idx >= __atomic_load_n(&g_ninst, __ATOMIC_ACQUIRE)) return 0;
-    return __atomic_load_n(&g_insts[idx].ever_published, __ATOMIC_ACQUIRE) ?
-           g_insts[idx].blk.capacity : 0;
+    virtio_blk_inst_t *inst = virtio_blk_get_instance(idx);
+    if (!inst) return 0;
+    uint64_t capacity = inst->blk.capacity;
+    virtio_blk_put_instance(inst);
+    return capacity;
 }
 
 static int blk_read_sector(block_dev_t *dev, uint64_t lba, void *buf, size_t count) {
@@ -1383,12 +1414,14 @@ static int blk_write_batch(block_dev_t *dev, const block_write_t *writes,
 }
 
 int virtio_blk_flush(int idx) {
-    if (idx < 0 || idx >= __atomic_load_n(&g_ninst, __ATOMIC_ACQUIRE)) return -EINVAL;
-    virtio_blk_inst_t *inst = &g_insts[idx];
+    virtio_blk_inst_t *inst = virtio_blk_get_instance(idx);
+    if (!inst) return -ENODEV;
     int ret = virtio_blk_call_begin(inst);
-    if (ret) return ret;
-    ret = virtio_blk_rw(idx, 0, NULL, 0, 0, 1);
-    virtio_blk_call_end(inst);
+    if (!ret) {
+        ret = virtio_blk_rw(idx, 0, NULL, 0, 0, 1);
+        virtio_blk_call_end(inst);
+    }
+    virtio_blk_put_instance(inst);
     return ret;
 }
 
@@ -1397,21 +1430,21 @@ static int blk_flush(block_dev_t *dev) {
     return virtio_blk_flush(inst->slot);
 }
 
+static void virtio_blk_dev_release(block_dev_t *dev)
+{
+    virtio_blk_put_instance(dev->priv);
+}
+
 block_dev_t *virtio_blk_get_dev(int idx) {
-    if (idx < 0 || idx >= __atomic_load_n(&g_ninst, __ATOMIC_ACQUIRE)) return NULL;
-    if (!virtio_blk_ready(idx)) return NULL;
-    g_insts[idx].blk_dev.read_sector  = blk_read_sector;
-    g_insts[idx].blk_dev.write_sector = blk_write_sector;
-    g_insts[idx].blk_dev.write_batch  = blk_write_batch;
-    g_insts[idx].blk_dev.flush        = blk_flush;
-    return &g_insts[idx].blk_dev;
+    virtio_blk_inst_t *inst = virtio_blk_get_instance(idx);
+    return inst ? &inst->blk_dev : NULL;
 }
 
 int virtio_blk_ready(int idx) {
-    if (idx < 0 || idx >= __atomic_load_n(&g_ninst, __ATOMIC_ACQUIRE)) return 0;
-    return __atomic_load_n(&g_insts[idx].ever_published, __ATOMIC_ACQUIRE) &&
-           !__atomic_load_n(&g_insts[idx].closing, __ATOMIC_ACQUIRE) &&
-           __atomic_load_n(&g_insts[idx].blk.valid, __ATOMIC_ACQUIRE);
+    virtio_blk_inst_t *inst = virtio_blk_get_instance(idx);
+    if (!inst) return 0;
+    virtio_blk_put_instance(inst);
+    return 1;
 }
 
 static uint32_t virtio_blk_mmio_read32(virtio_transport_t *t, uint32_t off) {
@@ -1521,9 +1554,15 @@ static int virtio_blk_driver_probe(device_t *dev) {
     if (inst->vt.irq < 0 && !inst->irq_registered)
         kinfo("[VIRTIO-BLK] %s using completion polling\n", dev->name);
 
-    __atomic_store_n(&inst->ever_published, 1, __ATOMIC_RELEASE);
+    /* Immutable callbacks are installed before publication to consumers. */
+    inst->blk_dev.read_sector = blk_read_sector;
+    inst->blk_dev.write_sector = blk_write_sector;
+    inst->blk_dev.write_batch = blk_write_batch;
+    inst->blk_dev.flush = blk_flush;
+    inst->blk_dev.release = virtio_blk_dev_release;
     if (__atomic_load_n(&g_ninst, __ATOMIC_RELAXED) <= inst->slot)
         __atomic_store_n(&g_ninst, inst->slot + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&inst->ever_published, 1, __ATOMIC_RELEASE);
     kinfo("[VIRTIO-BLK] Probed device '%s' (legacy=%d irq=%d msix=%d)\n",
           dev->name, inst->vt.legacy, inst->vt.irq, msix_vectors);
     return 0;
@@ -1632,7 +1671,11 @@ static int virtio_blk_driver_remove(device_t *dev) {
      * its entry points reject I/O without touching these retired DMA pages. */
     virtio_blk_free_dma(inst);
     dev->drv_priv = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_instance_lock);
     inst->device = NULL;
+    if (!inst->consumer_refs)
+        __atomic_store_n(&inst->ever_published, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_instance_lock, flags);
     return 0;
 }
 

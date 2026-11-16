@@ -11,11 +11,17 @@ TYPES = r'''
 typedef int wait_queue_t;
 typedef struct {int valid,legacy;uint64_t capacity;} virtio_blk_t;
 typedef struct {uint64_t unused[2];} virtio_blk_req_hdr_t;
+typedef struct {uint64_t lba;const void *buf;size_t count;} block_write_t;
 typedef struct block_dev {
  uint64_t capacity;uint32_t sector_size;void *priv;
  int (*read_sector)(struct block_dev *,uint64_t,void *,size_t);
  int (*write_sector)(struct block_dev *,uint64_t,const void *,size_t);
+ int (*flush)(struct block_dev *);
+ int (*write_batch)(struct block_dev *,const block_write_t *,size_t);
+ void (*release)(struct block_dev *);
 } block_dev_t;
+#define SPINLOCK_INIT 0
+#define VIRTIO_BLK_MAX_TRANSFER_SECTORS 2
 #define VIRTIO_BLK_MAX_REQ_SLOTS 21
 #define VIRTIO_BLK_BOUNCE_BYTES (64U*1024U)
 #define VIRTIO_BLK_QUEUE_DMA_BYTES (4096U*3U)
@@ -51,6 +57,11 @@ static int virtio_blk_device_init_locked(virtio_blk_inst_t *inst){
  hw.queues++;hw.confirmed=0;hw.status=7;inst->blk.valid=1;inst->blk.capacity=64;
  return hw.fail_tx?-EIO:0;
 }
+static unsigned raw_io;
+static int virtio_blk_rw(int idx,uint64_t lba,void *buf,size_t count,int write,int flush){
+ (void)idx;(void)lba;(void)buf;(void)count;(void)write;(void)flush;raw_io++;return 0;
+}
+static int blk_write_batch(block_dev_t *dev,const block_write_t *writes,size_t count){(void)dev;(void)writes;(void)count;return -ENODEV;}
 static int virtio_blk_irq_handler(int irq,void *priv){(void)irq;(void)priv;return 0;}
 '''
 MAIN = r'''
@@ -84,13 +95,28 @@ int main(void){
  /* Published block_dev metadata must not be retargeted by slot reuse. */
  hw.fail_tx=0;device_t published={.name="published"};
  assert(!virtio_blk_driver_probe(&published));virtio_blk_inst_t *old=published.drv_priv;
- block_dev_t *borrowed=&old->blk_dev;
- assert(virtio_blk_ready(old->slot)&&!virtio_blk_driver_remove(&published));
+ block_dev_t *borrowed=virtio_blk_get_dev(old->slot);
+ block_dev_t *second=virtio_blk_get_dev(old->slot);
+ assert(borrowed==&old->blk_dev&&second==borrowed&&old->consumer_refs==2);
+ assert(virtio_blk_ready(old->slot)&&old->consumer_refs==2&&!virtio_blk_driver_remove(&published));
  assert(borrowed->priv==old&&old->ever_published&&!virtio_blk_ready(old->slot));
  hw.fail_tx=1;
  assert(virtio_blk_driver_probe(&extra)==-EIO&&extra.drv_priv!=old);
  assert(borrowed->priv==old&&!old->queue_dma_mem&&old->closing);
+ char byte=0;unsigned issued=raw_io;
+ assert(borrowed->read_sector(borrowed,0,&byte,1)==-ENODEV);
+ assert(borrowed->flush(borrowed)==-ENODEV&&raw_io==issued);
+ borrowed->release(borrowed);assert(old->consumer_refs==1&&old->ever_published);
  assert(!virtio_blk_driver_remove(&extra));
+ second->release(second);assert(!old->consumer_refs&&!old->ever_published);
+ /* Return the final reference, then reuse the original slot beyond capacity. */
+ for(unsigned round=0;round<VIRTIO_MAX_DEVS+2;round++){
+  hw.fail_tx=0;assert(!virtio_blk_driver_probe(&extra)&&extra.drv_priv==old);
+  block_dev_t *held=virtio_blk_get_dev(old->slot);assert(held&&old->consumer_refs==1);
+  assert(!virtio_blk_driver_remove(&extra)&&old->ever_published);
+  held->release(held);assert(!old->consumer_refs&&!old->ever_published);
+ }
+ assert(hw.allocated==hw.freed);
  return 0;
 }
 '''
@@ -105,8 +131,12 @@ class VirtioBlkProbeCleanup(unittest.TestCase):
                               if line.startswith('#define VIRTIO_MMIO_') or line.startswith('#define VIRTIO_MAX_DEVS'))
         reset = function((ROOT / 'kernel/drivers/bus/virtio_transport.c').read_text(), 'virtio_transport_reset')
         free_dma = function(source, 'virtio_blk_free_dma')
-        names = ('virtio_blk_init_instance', 'virtio_blk_ready', 'virtio_blk_mmio_read32',
-                 'virtio_blk_mmio_write32', 'virtio_blk_driver_probe', 'virtio_blk_driver_remove')
+        names = ('virtio_blk_init_instance', 'virtio_blk_call_begin', 'virtio_blk_call_end',
+                 'virtio_blk_transfer', 'virtio_blk_read', 'virtio_blk_write',
+                 'blk_read_sector', 'blk_write_sector', 'virtio_blk_flush', 'blk_flush',
+                 'virtio_blk_dev_release', 'virtio_blk_get_dev', 'virtio_blk_ready',
+                 'virtio_blk_mmio_read32', 'virtio_blk_mmio_write32',
+                 'virtio_blk_driver_probe', 'virtio_blk_driver_remove')
         stop = function(source[source.index('static int virtio_blk_stop(void *context)\n{'):], 'virtio_blk_stop')
         code = stop + '\n' + '\n'.join(function(source, name) for name in names)
         model = TRANSPORT_MODEL.replace('assert(d->managed&&type==1)', 'assert(d->managed&&type==2)')
