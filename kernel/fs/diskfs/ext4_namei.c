@@ -879,11 +879,12 @@ void ext4_release_vn(vnode_t *vn) {
         __atomic_store_n(&p->dir_removed, 0, __ATOMIC_RELEASE);
         rw_mutex_write_lock(&sb->metadata_lock);
         int ret = ext4_reclaim_removed_directory(sb, p->inode_num);
+        if (ret < 0) (void)ext4_record_status(sb, -117);
         rw_mutex_write_unlock(&sb->metadata_lock);
-        if (ret < 0)
+        if (ret < 0) {
             printf("[EXT4] deferred directory cleanup failed ino=%u err=%d; "
                    "inode left allocated\n", p->inode_num, ret);
-        else
+        } else
             vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
     }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
@@ -1017,6 +1018,24 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
 }
 
 
+/* Before a new directory entry is published, every resource is private to
+ * this operation. Undo its directory count as well as its block/inode. */
+static int ext4_mkdir_discard_unpublished(ext4_sb_info_t *sb, uint32_t ino,
+                                         uint64_t block, int accounted,
+                                         int error)
+{
+    ext4_inode_t deleted;
+    ext4_inode_mark_deleted(&deleted);
+    if (ext4_write_inode(sb, ino, &deleted) < 0)
+        return ext4_record_status(sb, -117);
+    int count = accounted ? ext4_account_directory(sb, ino, -1) : 0;
+    int blocks = ext4_free_block(sb, block);
+    int inode = ext4_free_inode(sb, ino);
+    if (count < 0 || blocks < 0 || inode < 0)
+        return ext4_record_status(sb, -117);
+    return error;
+}
+
 int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
@@ -1054,7 +1073,9 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
 
     /* The group this inode lands in now owns one more directory; e2fsck
      * recounts them and reports the group whose descriptor disagrees. */
-    ext4_account_directory(p->sb, new_ino, 1);
+    int account = ext4_account_directory(p->sb, new_ino, 1);
+    if (account < 0)
+        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 0, account);
 
     /* Write extent for the one block */
     uint8_t *raw = (uint8_t *)&ni + offsetof(ext4_inode_t, i_block);
@@ -1071,14 +1092,12 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ext4_inode_sync_i_blocks(p->sb, &ni);
 
     if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
-        ext4_free_block(p->sb, blk);
-        ext4_free_inode(p->sb, new_ino);
-        return -EIO;
+        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, -EIO);
     }
 
     /* Write "." and ".." entries in the new directory block */
     char *buf = (char *)kmalloc(p->sb->block_size);
-    if (!buf) { ext4_free_block(p->sb, blk); ext4_free_inode(p->sb, new_ino); return -ENOMEM; }
+    if (!buf) return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, -ENOMEM);
     memset(buf, 0, p->sb->block_size);
 
     /* "." entry */
@@ -1104,18 +1123,18 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     int wr = ext4_dir_write_block(p->sb, new_ino, ni.i_generation, blk, buf);
     kfree(buf);
     if (wr < 0) {
-        ext4_free_block(p->sb, blk);
-        ext4_free_inode(p->sb, new_ino);
-        return wr;
+        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, wr);
     }
 
     /* Add entry in parent directory */
     uint64_t dsz = ext4_inode_size(&di);
     int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_DIR);
     if (r < 0) {
-        ext4_free_block(p->sb, blk);
-        ext4_free_inode(p->sb, new_ino);
-        return r;
+        /* An I/O error can leave the new entry in a dirty cache page.
+         * Retain its inode/block rather than free a possibly named object. */
+        if (r == -EIO || r == -117)
+            return ext4_record_status(p->sb, -117);
+        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, r);
     }
 
     /* The parent gains a subdirectory, and a directory's link count is the
@@ -1129,7 +1148,7 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
         p->file_size = dsz;
     }
     if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
-        return -EIO;
+        return ext4_record_status(p->sb, -117);
     return 0;
 }
 
@@ -1257,12 +1276,20 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
      * -- that one only drops the first of the two and leaves the directory
      * allocated forever.  The parent loses one link, the child loses both plus
      * its blocks. */
-    r = ext4_dir_remove(p->sb, &di, p->inode_num, ext4_inode_size(&di), name);
+    /* Reject a count-write failure before removing the directory name. */
+    r = ext4_account_directory(p->sb, child_ino, -1);
     if (r < 0) return r;
+    r = ext4_dir_remove(p->sb, &di, p->inode_num, ext4_inode_size(&di), name);
+    if (r < 0) {
+        int restored = ext4_account_directory(p->sb, child_ino, 1);
+        if (restored < 0 || r == -EIO || r == -117)
+            return ext4_record_status(p->sb, -117);
+        return r;
+    }
 
     if (di.i_links_count > 0) di.i_links_count--;
-    if (ext4_write_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
-    ext4_account_directory(p->sb, child_ino, -1);
+    if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
+        return ext4_record_status(p->sb, -117);
 
     vnode_t *live = ext4_vnode_cache_remove(p->sb, child_ino);
     if (live) {
@@ -1279,7 +1306,8 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
         return 0;
     }
 
-    return ext4_reclaim_removed_directory(p->sb, child_ino);
+    r = ext4_reclaim_removed_directory(p->sb, child_ino);
+    return r < 0 ? ext4_record_status(p->sb, -117) : 0;
 }
 
 

@@ -681,20 +681,37 @@ int ext4_superblock_set_last_orphan(ext4_sb_info_t *sb, uint32_t ino)
 /* A directory is counted against the group its inode lives in, not the group
  * its parent lives in, because that is the inode the count protects.  e2fsck
  * recounts them in pass 5 and reports "Directories count wrong for group #0". */
-void ext4_account_directory(ext4_sb_info_t *sb, uint32_t ino, int delta)
+int ext4_account_directory(ext4_sb_info_t *sb, uint32_t ino, int delta)
 {
-    if (!ino) return;
+    if (!sb || !ino || ino > sb->inodes_count || (delta != 1 && delta != -1))
+        return -EINVAL;
     uint32_t g = (ino - 1) / sb->inodes_per_group;
-    if (g >= sb->groups_count) return;
+    if (g >= sb->groups_count) return -EINVAL;
     mutex_lock(&sb->alloc_lock);
+    int ret = 0;
     ext4_group_desc_t *gd = &sb->group_descs[g];
     uint32_t used = gd->bg_used_dirs_count_lo;
-    used = delta > 0 ? used + 1 : (used ? used - 1 : 0);
-    if (used > 0xffffU) used = 0xffffU;
-    gd->bg_used_dirs_count_lo = (uint16_t)used;
-    ext4_writeback_gd(sb, g);
+    if (ext4_is_inconsistent(sb) || (delta < 0 && !used) ||
+        (delta > 0 && used == 0xffffU)) {
+        ret = -117;
+    } else {
+        gd->bg_used_dirs_count_lo = (uint16_t)(used + delta);
+        ret = ext4_writeback_gd(sb, g);
+        if (ret < 0) {
+            gd->bg_used_dirs_count_lo = (uint16_t)used;
+            if (sb->journal) {
+                if (ext4_journal_poison(sb) < 0) ret = -117;
+            } else {
+                int restore = ext4_writeback_gd(sb, g);
+                if (restore < 0) restore = ext4_writeback_gd(sb, g);
+                if (restore < 0) ret = -117;
+            }
+        }
+    }
     mutex_unlock(&sb->alloc_lock);
+    return ext4_record_status(sb, ret);
 }
+
 
 static int ext4_read_group_descs(ext4_sb_info_t *sb)
 {
