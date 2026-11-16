@@ -48,6 +48,7 @@ static struct {
     uint8_t mac[6];
     volatile int carrier;
     int quarantined;
+    int closing, pci_touched, owner_closed;
     int mac_ready;
     mm_struct_t *owner;
     struct wifi_dma dma[WIFI_DMA_SLOTS];
@@ -57,6 +58,8 @@ static struct {
     struct wifi_packets tx, rx;
 } wifi;
 static mutex_t wifi_open_lock = MUTEX_INIT;
+static int wifi_stop(void *context);
+static int wifi_retire_closed_owner(mm_struct_t **retired);
 
 static int packet_push(struct wifi_packets *queue, const void *data, size_t length)
 {
@@ -96,38 +99,58 @@ static int packet_pop(struct wifi_packets *queue, void *data, size_t capacity)
 static int wifi_send(device_t *device, const void *packet, size_t length)
 {
     (void)device;
-    return wifi.carrier ? packet_push(&wifi.tx, packet, length) : -ENETDOWN;
+    return !__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE) && wifi.carrier ?
+        packet_push(&wifi.tx, packet, length) : -ENETDOWN;
 }
 static int wifi_recv(device_t *device, void *packet, size_t length)
 {
     (void)device;
+    if (__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE)) return -ENODEV;
     return packet_pop(&wifi.rx, packet, length);
 }
 static const uint8_t *wifi_mac(device_t *device) { (void)device; return wifi.mac; }
-static int wifi_carrier(device_t *device) { (void)device; return wifi.carrier; }
+static int wifi_carrier(device_t *device) { (void)device; return !__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE) && wifi.carrier; }
 static int wifi_polling(device_t *device) { (void)device; return 0; }
 
-static void wifi_bus_master(int enabled)
+static int wifi_bus_master(int enabled)
 {
+    if (!wifi.device) return -ENODEV;
     uint16_t command = pci_cfg_read16(wifi.device, PCI_COMMAND);
-    command |= PCI_INTX_DISABLE | 2;
-    command = enabled ? command | PCI_MASTER : command & ~PCI_MASTER;
+    if (command == 0xffffU) return -ENODEV;
+    command |= PCI_INTX_DISABLE;
+    command = enabled ? command | PCI_MASTER | 2U : command & ~PCI_MASTER;
     pci_cfg_write16(wifi.device, PCI_COMMAND, command);
+    uint16_t check = pci_cfg_read16(wifi.device, PCI_COMMAND);
+    if (check == 0xffffU) return -ENODEV;
+    uint16_t mask = PCI_MASTER | PCI_INTX_DISABLE | (enabled ? 2U : 0U);
+    return (check & mask) == (command & mask) ? 0 : -EIO;
 }
 
 static int wifi_transport_available(void)
 {
-    return !wifi.device && !wifi.owner && !wifi.quarantined && !wifi.dma_bytes;
+    return !wifi.device && !wifi.owner && !wifi.quarantined && !wifi.dma_bytes && !wifi.mmio_va;
 }
 
 static int wifi_probe_locked(device_t *device)
 {
     if (!wifi_transport_available())
         return -EBUSY;
+    int managed = device_probe_use_remove(device);
+    if (managed) return managed;
+    memset(&wifi, 0, sizeof(wifi));
+    mutex_init(&wifi.control);
+    spin_init(&wifi.packets_lock);
+    wifi.device = device;
+    device->drv_priv = &wifi;
+    int action = device_add_execution_action(device, wifi_stop, NULL, device);
+    if (action) return action;
     /* The macOS platform normally supplies a D0 device to this driver.
      * Perform that platform step here before touching the radio's BAR. */
     uint16_t command = pci_cfg_read16(device, PCI_COMMAND);
-    pci_cfg_write16(device, PCI_COMMAND, (command | PCI_INTX_DISABLE) & ~PCI_MASTER);
+    if (command == 0xffffU) return -ENODEV;
+    wifi.pci_touched = 1;
+    int stopped = wifi_bus_master(0);
+    if (stopped) return stopped;
     uint8_t pm = pci_find_capability(device, 1); /* PCI Power Management */
     if (pm) {
         uint16_t state = pci_cfg_read16(device, pm + 4);
@@ -152,25 +175,21 @@ static int wifi_probe_locked(device_t *device)
     }
     if (pci_enable_and_assign_bars(device) < 0)
         return -ENODEV;
-    pci_cfg_write16(device, PCI_COMMAND,
-                     (pci_cfg_read16(device, PCI_COMMAND) | PCI_INTX_DISABLE) & ~PCI_MASTER);
+    stopped = wifi_bus_master(0);
+    if (stopped) return stopped;
     resource_t *bar = pci_get_bar_resource(device, 2);
     if (!bar || bar->end < bar->start || bar->end - bar->start + 1 < 0x80000 ||
         (bar->start & (PAGE_SIZE - 1)))
         return -ENODEV;
     if (dma_set_mask(device, DMA_MASK_32BIT))
         return -EOPNOTSUPP;
-    wifi.device = device;
     wifi.bar = bar->start;
     wifi.bar_size = bar->end - bar->start + 1;
     wifi.next_token = 1;
-    mutex_init(&wifi.control);
-    spin_init(&wifi.packets_lock);
     /* rtw89d reads the permanent address from efuse after firmware probe.
      * Do not manufacture an address and overwrite the real station identity. */
     memset(wifi.mac, 0, sizeof(wifi.mac));
     wifi.mac_ready = 0;
-    wifi_bus_master(0);
     kinfo("[WIFI] RTL8852BE transport ready: BAR2=%llx size=%llu DMA=32-bit; waiting for rtw89d\n",
           (unsigned long long)wifi.bar, (unsigned long long)wifi.bar_size);
     return 0;
@@ -184,16 +203,42 @@ static int wifi_probe(device_t *device)
     return ret;
 }
 
+static int wifi_stop(void *context)
+{
+    device_t *device = context;
+    if (!device || !device->drv_priv) return 0;
+    __atomic_store_n(&wifi.closing, 1, __ATOMIC_RELEASE);
+    wifi.carrier = 0;
+    if (!mutex_trylock(&wifi_open_lock)) return -EBUSY;
+    if (!mutex_trylock(&wifi.control)) {
+        mutex_unlock(&wifi_open_lock);
+        return -EBUSY;
+    }
+    int result = wifi.device == device ? 0 : -ENODEV;
+    if (!result && wifi.pci_touched) result = wifi_bus_master(0);
+    mm_struct_t *retired = NULL;
+    if (!result) result = wifi_retire_closed_owner(&retired);
+    /* BME readback alone is not an acknowledgement of every radio DMA.
+     * Keep the binding until the service has returned its buffers and closed. */
+    if (!result && (wifi.owner || wifi.dma_bytes || wifi.mmio_va)) result = -EBUSY;
+    mutex_unlock(&wifi.control);
+    mutex_unlock(&wifi_open_lock);
+    if (retired) mm_destroy(retired);
+    return result;
+}
+
 static int wifi_remove(device_t *device)
 {
-    (void)device;
+    if (!device || !device->drv_priv) return 0;
+    int result = wifi_stop(device);
+    if (result) return result;
     mutex_lock(&wifi_open_lock);
-    mutex_lock(&wifi.control);
-    wifi.carrier = 0;
-    wifi_bus_master(0);
-    wifi.device = NULL;
-    wifi.quarantined = wifi.owner != NULL || wifi.dma_bytes != 0;
-    mutex_unlock(&wifi.control);
+    if (wifi.device == device) {
+        wifi.device = NULL;
+        wifi.quarantined = 0;
+        wifi.pci_touched = 0;
+        device->drv_priv = NULL;
+    }
     mutex_unlock(&wifi_open_lock);
     return 0;
 }
@@ -260,13 +305,43 @@ fail:
     return -ENOMEM;
 }
 
-static void wifi_dma_free(struct wifi_dma *buffer)
+static int wifi_dma_free(struct wifi_dma *buffer)
 {
-    if (buffer->mapped)
-        mm_munmap(wifi.owner, buffer->mapped, buffer->size);
+    if (buffer->mapped) {
+        int result = mm_munmap(wifi.owner, buffer->mapped, buffer->size);
+        if (result) return result;
+        buffer->mapped = 0;
+    }
     dma_free_coherent_aligned(buffer->memory, buffer->size, buffer->bus);
     wifi.dma_bytes -= buffer->size;
     memset(buffer, 0, sizeof(*buffer));
+    return 0;
+}
+
+/* Called under control after the last file close. An unmap failure retains
+ * both the address record and mm reference so checked stop can retry it. */
+static int wifi_retire_closed_owner(mm_struct_t **retired)
+{
+    if (!wifi.owner || !wifi.owner_closed) return 0;
+    int result = 0;
+    for (unsigned i = 0; i < WIFI_DMA_SLOTS; i++) {
+        struct wifi_dma *buffer = &wifi.dma[i];
+        if (!buffer->mapped) continue;
+        int error = mm_munmap(wifi.owner, buffer->mapped, buffer->size);
+        if (!error) buffer->mapped = 0;
+        else if (!result) result = error;
+    }
+    if (wifi.mmio_va) {
+        int error = mm_munmap(wifi.owner, wifi.mmio_va, wifi.bar_size);
+        if (!error) wifi.mmio_va = 0;
+        else if (!result) result = error;
+    }
+    if (!result) {
+        *retired = wifi.owner;
+        wifi.owner = NULL;
+        wifi.owner_closed = 0;
+    }
+    return result;
 }
 
 static int wifi_ioctl(vfile_t *file, unsigned long request, void *arg)
@@ -276,7 +351,8 @@ static int wifi_ioctl(vfile_t *file, unsigned long request, void *arg)
         return -EPERM;
     mutex_lock(&wifi.control);
     int result = -ENOTTY;
-    if (!wifi.device) {
+    if (!wifi.device || (__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE) &&
+        request != A20_WIFI_DMA_FREE && request != A20_WIFI_QUIESCE)) {
         result = -ENODEV;
     } else if (request == A20_WIFI_INFO) {
         uint32_t subsystem = pci_cfg_read32(wifi.device, 0x2c);
@@ -360,8 +436,9 @@ static int wifi_ioctl(vfile_t *file, unsigned long request, void *arg)
             result = -ENOENT;
             for (unsigned i = 0; i < WIFI_DMA_SLOTS; i++)
                 if (wifi.dma[i].memory && wifi.dma[i].token == allocation.token) {
-                    wifi_dma_free(&wifi.dma[i]);
-                    result = 0;
+                    result = __atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE) && wifi.pci_touched ?
+                        wifi_bus_master(0) : 0;
+                    if (!result) result = wifi_dma_free(&wifi.dma[i]);
                     break;
                 }
         }
@@ -395,8 +472,7 @@ static int wifi_ioctl(vfile_t *file, unsigned long request, void *arg)
         }
     } else if (request == A20_WIFI_QUIESCE) {
         wifi.carrier = 0;
-        wifi_bus_master(0);
-        result = 0;
+        result = wifi_bus_master(0);
     }
     mutex_unlock(&wifi.control);
     return result;
@@ -413,6 +489,10 @@ static int64_t wifi_mmap(vfile_t *file, uint64_t address, size_t length,
         return -EINVAL;
     mutex_lock(&wifi.control);
     int64_t result = -EINVAL;
+    if (__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&wifi.control);
+        return -ENODEV;
+    }
     if (!offset && !wifi.mmio_va && length == wifi.bar_size && wifi.device) {
         result = wifi_map(wifi.owner, wifi.bar, length, 1);
         if (result > 0)
@@ -438,6 +518,7 @@ static int wifi_read(vfile_t *file, char *data, size_t length)
     (void)file;
     if (proc_current()->mm != wifi.owner)
         return -EPERM;
+    if (__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE)) return -ENODEV;
     return packet_pop(&wifi.tx, data, length);
 }
 static int wifi_write(vfile_t *file, const char *data, size_t length)
@@ -445,7 +526,8 @@ static int wifi_write(vfile_t *file, const char *data, size_t length)
     (void)file;
     if (proc_current()->mm != wifi.owner)
         return -EPERM;
-    return wifi.carrier ? packet_push(&wifi.rx, data, length) : -ENETDOWN;
+    return !__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE) && wifi.carrier ?
+        packet_push(&wifi.rx, data, length) : -ENETDOWN;
 }
 
 static int wifi_close(vfile_t *file)
@@ -454,31 +536,30 @@ static int wifi_close(vfile_t *file)
     mutex_lock(&wifi_open_lock);
     mutex_lock(&wifi.control);
     wifi.carrier = 0;
-    if (wifi.device)
-        wifi_bus_master(0);
-    /* If the service died with DMA outstanding, retain the backing memory
-     * and refuse another owner until reboot. Hardware never sees reused RAM. */
+    int result = wifi.device && wifi.pci_touched ? wifi_bus_master(0) : 0;
+    if (result) wifi.quarantined = 1;
+    /* Orphan DMA remains allocated and blocks rebind; no reset/idle proof is
+     * invented from BME alone. Revoke CPU access before dropping the mm ref. */
     if (wifi.dma_bytes) {
         wifi.quarantined = 1;
         kwarn("[WIFI] service closed with %lu DMA bytes outstanding; memory quarantined\n",
               (unsigned long)wifi.dma_bytes);
-        for (unsigned i = 0; i < WIFI_DMA_SLOTS; i++)
-            if (wifi.dma[i].mapped)
-                mm_munmap(wifi.owner, wifi.dma[i].mapped, wifi.dma[i].size);
     }
-    if (wifi.mmio_va)
-        mm_munmap(wifi.owner, wifi.mmio_va, wifi.bar_size);
-    mm_struct_t *owner = wifi.owner;
-    wifi.owner = NULL;
-    wifi.mmio_va = 0;
+    wifi.owner_closed = 1;
+    mm_struct_t *owner = NULL;
+    int unmapped = wifi_retire_closed_owner(&owner);
+    if (unmapped) {
+        wifi.quarantined = 1;
+        if (!result) result = unmapped;
+    }
     uint64_t flags = spin_lock_irqsave(&wifi.packets_lock);
     memset(&wifi.tx, 0, sizeof(wifi.tx));
     memset(&wifi.rx, 0, sizeof(wifi.rx));
     spin_unlock_irqrestore(&wifi.packets_lock, flags);
     mutex_unlock(&wifi.control);
-    mm_destroy(owner);
     mutex_unlock(&wifi_open_lock);
-    return 0;
+    if (owner) mm_destroy(owner);
+    return result;
 }
 
 static vfile_ops_t wifi_file_ops = {
@@ -493,14 +574,18 @@ int rtw89_file_open(vfile_t *file)
         return -EPERM;
     mutex_lock(&wifi_open_lock);
     int result = -ENODEV;
-    if (wifi.device && !wifi.quarantined) {
+    if (wifi.device && !wifi.quarantined && !__atomic_load_n(&wifi.closing, __ATOMIC_ACQUIRE)) {
         mutex_lock(&wifi.control);
         result = -EBUSY;
         if (!wifi.owner) {
-            wifi.owner = mm_get(proc_current()->mm);
-            wifi_bus_master(1);
-            file->ops = &wifi_file_ops;
-            result = 0;
+            result = wifi_bus_master(1);
+            if (!result) {
+                wifi.owner = mm_get(proc_current()->mm);
+                wifi.owner_closed = 0;
+                file->ops = &wifi_file_ops;
+            } else if (wifi_bus_master(0)) {
+                wifi.quarantined = 1;
+            }
         }
         mutex_unlock(&wifi.control);
     }
