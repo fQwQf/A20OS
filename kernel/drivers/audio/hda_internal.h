@@ -42,6 +42,8 @@ typedef struct hda_controller {
     int stream_draining;
     int codec_configured;
     int dma64;
+    int closing;
+    int hardware_stopped;
     volatile uint32_t generation;
     spinlock_t state_lock;
     mutex_t lock;

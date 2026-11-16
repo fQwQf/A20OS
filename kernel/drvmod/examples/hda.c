@@ -23,6 +23,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/audio/backend.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/errno.h"
 #include "core/poll.h"
@@ -33,6 +34,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "core/timer.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
+#include <stdint.h>
 
 #ifndef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
 #undef kinfo
@@ -85,6 +87,8 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #define HDA_PERIOD_BYTES   (HDA_DMA_BYTES / HDA_BDL_ENTRIES)
 #define HDA_START_BYTES    (HDA_DMA_BYTES / 2U)
 
+static int hda_stop(void *context);
+
 static volatile void *hda_stream_reg(hda_controller_t *hda, uint32_t offset)
 {
     return (volatile void *)(hda->stream + offset);
@@ -94,7 +98,10 @@ static int hda_wait32(hda_controller_t *hda, uint32_t reg,
                       uint32_t mask, uint32_t expected)
 {
     for (unsigned ms = 0; ms < HDA_TIMEOUT_MS; ms++) {
-        if ((readl(hda_reg(hda, reg)) & mask) == expected)
+        uint32_t value = readl(hda_reg(hda, reg));
+        if (value == UINT32_MAX)
+            return -ENODEV;
+        if ((value & mask) == expected)
             return 0;
         mdelay(1);
     }
@@ -103,16 +110,21 @@ static int hda_wait32(hda_controller_t *hda, uint32_t reg,
 
 static int hda_reset(hda_controller_t *hda)
 {
-    writel(readl(hda_reg(hda, HDA_REG_GCTL)) & ~HDA_GCTL_RESET,
-           hda_reg(hda, HDA_REG_GCTL));
-    if (hda_wait32(hda, HDA_REG_GCTL, HDA_GCTL_RESET, 0) < 0)
-        return -ETIMEDOUT;
+    uint32_t control = readl(hda_reg(hda, HDA_REG_GCTL));
+    if (control == UINT32_MAX)
+        return -ENODEV;
+    writel(control & ~HDA_GCTL_RESET, hda_reg(hda, HDA_REG_GCTL));
+    int ret = hda_wait32(hda, HDA_REG_GCTL, HDA_GCTL_RESET, 0);
+    if (ret < 0)
+        return ret;
     mdelay(1);
-    writel(readl(hda_reg(hda, HDA_REG_GCTL)) | HDA_GCTL_RESET,
-           hda_reg(hda, HDA_REG_GCTL));
-    if (hda_wait32(hda, HDA_REG_GCTL, HDA_GCTL_RESET,
-                   HDA_GCTL_RESET) < 0)
-        return -ETIMEDOUT;
+    control = readl(hda_reg(hda, HDA_REG_GCTL));
+    if (control == UINT32_MAX)
+        return -ENODEV;
+    writel(control | HDA_GCTL_RESET, hda_reg(hda, HDA_REG_GCTL));
+    ret = hda_wait32(hda, HDA_REG_GCTL, HDA_GCTL_RESET, HDA_GCTL_RESET);
+    if (ret < 0)
+        return ret;
     mdelay(1);
     return 0;
 }
@@ -177,6 +189,8 @@ static int hda_stream_stop(hda_controller_t *hda)
 
 static int hda_stream_prepare(hda_controller_t *hda)
 {
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (hda_stream_reset(hda) < 0)
         return -EIO;
     memset(hda->pcm, 0, HDA_DMA_BYTES);
@@ -202,6 +216,10 @@ static int hda_stream_prepare(hda_controller_t *hda)
 static int hda_stream_run(hda_controller_t *hda, uint32_t generation)
 {
     uint64_t flags = spin_lock_irqsave(&hda->state_lock);
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&hda->state_lock, flags);
+        return -ENODEV;
+    }
     if (__atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE) != generation) {
         spin_unlock_irqrestore(&hda->state_lock, flags);
         return -EINTR;
@@ -220,6 +238,8 @@ static int hda_stream_run(hda_controller_t *hda, uint32_t generation)
 
 static int hda_stream_refresh(hda_controller_t *hda, uint32_t generation)
 {
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (!hda->stream_running)
         return 0;
     if (__atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE) != generation)
@@ -283,6 +303,10 @@ static int hda_queue_pcm(hda_controller_t *hda, const uint8_t *data,
     if (!bytes || (bytes % HDA_PCM_FRAME))
         return -EINVAL;
     while (bytes) {
+        if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE))
+            return -ENODEV;
+        if (__atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE) != generation)
+            return -EINTR;
         if (!hda->stream_running && !hda->queued_bytes) {
             int ret = hda_stream_prepare(hda);
             if (ret < 0)
@@ -391,6 +415,10 @@ static int hda_write(device_t *dev, const void *buf, size_t count)
     if (!hda || !buf || !count)
         return -EINVAL;
     mutex_lock(&hda->lock);
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&hda->lock);
+        return -ENODEV;
+    }
     uint32_t generation = __atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE);
     int ret = hda_adopt_generation(hda, generation);
     if (ret < 0) {
@@ -446,13 +474,18 @@ static int hda_stop_device(device_t *dev)
     if (!hda)
         return -ENODEV;
     uint64_t flags = spin_lock_irqsave(&hda->state_lock);
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&hda->state_lock, flags);
+        return -ENODEV;
+    }
     uint32_t generation = __atomic_add_fetch(&hda->generation, 1U,
                                               __ATOMIC_ACQ_REL);
     writel(readl(hda_stream_reg(hda, HDA_SD_CTL)) & ~HDA_SD_CTL_RUN,
             hda_stream_reg(hda, HDA_SD_CTL));
     spin_unlock_irqrestore(&hda->state_lock, flags);
     mutex_lock(&hda->lock);
-    int ret = hda_stream_stop(hda);
+    int ret = __atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE) ?
+              -ENODEV : hda_stream_stop(hda);
     if (ret == 0)
         hda_discard_queued(hda, generation);
     mutex_unlock(&hda->lock);
@@ -465,6 +498,10 @@ static int hda_drain_device(device_t *dev)
     if (!hda)
         return -ENODEV;
     mutex_lock(&hda->lock);
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&hda->lock);
+        return -ENODEV;
+    }
     uint32_t generation = __atomic_load_n(&hda->generation,
                                            __ATOMIC_ACQUIRE);
     int ret = hda_adopt_generation(hda, generation);
@@ -504,6 +541,10 @@ static int hda_backend_ioctl(device_t *dev, unsigned long req, void *arg)
         return -EINVAL;
     if (!mutex_trylock(&hda->lock))
         return -EAGAIN;
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&hda->lock);
+        return -ENODEV;
+    }
     uint32_t generation = __atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE);
     int ret = hda_adopt_generation(hda, generation);
     if (ret == 0)
@@ -571,35 +612,65 @@ static int hda_poll(device_t *dev, short events)
 
 static int hda_quiesce(hda_controller_t *hda)
 {
-    __atomic_add_fetch(&hda->generation, 1U, __ATOMIC_ACQ_REL);
-    hda_codec_disable(hda);
+    if (hda->hardware_stopped)
+        return 0;
+    if (!hda->regs) {
+        hda->hardware_stopped = 1;
+        return 0;
+    }
+    uint32_t control = readl(hda_reg(hda, HDA_REG_GCTL));
+    if (control == UINT32_MAX)
+        return -ENODEV;
+    writel(0, hda_reg(hda, HDA_REG_INTCTL));
     if (hda->stream) {
-        writel(readl(hda_stream_reg(hda, HDA_SD_CTL)) & ~HDA_SD_CTL_RUN,
-               hda_stream_reg(hda, HDA_SD_CTL));
+        uint32_t stream = readl(hda_stream_reg(hda, HDA_SD_CTL));
+        if (stream == UINT32_MAX)
+            return -ENODEV;
+        writel(stream & ~HDA_SD_CTL_RUN, hda_stream_reg(hda, HDA_SD_CTL));
+    }
+    /* Controller reset, rather than codec mute, retires stream/command DMA.
+     * Never free a published buffer merely because RUN=0 was requested. */
+    writel(control & ~HDA_GCTL_RESET, hda_reg(hda, HDA_REG_GCTL));
+    int ret = hda_wait32(hda, HDA_REG_GCTL, HDA_GCTL_RESET, 0);
+    if (ret < 0)
+        return ret;
+    if (hda->stream) {
         for (unsigned ms = 0; ms < HDA_TIMEOUT_MS; ms++) {
-            if (!(readb(hda_stream_reg(hda, HDA_SD_CTL)) & HDA_SD_CTL_RUN))
-                goto stream_stopped;
+            uint8_t stream = readb(hda_stream_reg(hda, HDA_SD_CTL));
+            if (stream == 0xFFU)
+                return -ENODEV;
+            if (!(stream & HDA_SD_CTL_RUN))
+                goto stopped;
             mdelay(1);
         }
+        return -ETIMEDOUT;
     }
+stopped:
+    hda->hardware_stopped = 1;
+    return 0;
+}
 
-stream_stopped:
-    if (!hda->regs)
-        return 0;
-    writel(0, hda_reg(hda, HDA_REG_INTCTL));
-    writel(readl(hda_reg(hda, HDA_REG_GCTL)) & ~HDA_GCTL_RESET,
-           hda_reg(hda, HDA_REG_GCTL));
-    return hda_wait32(hda, HDA_REG_GCTL, HDA_GCTL_RESET, 0);
+static int hda_stop(void *context)
+{
+    hda_controller_t *hda = context;
+    uint64_t flags = spin_lock_irqsave(&hda->state_lock);
+    if (!__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&hda->closing, 1, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&hda->generation, 1U, __ATOMIC_ACQ_REL);
+    }
+    spin_unlock_irqrestore(&hda->state_lock, flags);
+    if (!mutex_trylock(&hda->lock))
+        return -EBUSY;
+    int ret = hda_quiesce(hda);
+    mutex_unlock(&hda->lock);
+    return ret;
 }
 
 static void hda_release(hda_controller_t *hda)
 {
     if (!hda)
         return;
-    if (hda_quiesce(hda) < 0) {
-        kerr("[HDA] controller did not quiesce; retaining DMA allocations\n");
-        return;
-    }
+    /* Successful lifecycle stop and class drain own all remaining storage. */
     if (hda->pcm)
         dma_free_coherent_aligned(hda->pcm, HDA_DMA_BYTES, hda->pcm_dma);
     if (hda->bdl)
@@ -611,6 +682,9 @@ static int hda_probe(device_t *dev)
 {
     if (pci_class_code(dev) != 0x040300U)
         return -ENODEV;
+    int managed = device_probe_use_remove(dev);
+    if (managed)
+        return managed;
     if (pci_enable_and_assign_bars(dev) < 0)
         return -ENODEV;
     resource_t *bar = pci_get_bar_resource(dev, 0);
@@ -620,11 +694,18 @@ static int hda_probe(device_t *dev)
     hda_controller_t *hda = kcalloc(1, sizeof(*hda));
     if (!hda)
         return -ENOMEM;
-    hda->regs = (uintptr_t)pci_map_bar(dev, 0);
-    if (!hda->regs) { kfree(hda); return -EIO; }
     mutex_init(&hda->lock);
     spin_init(&hda->state_lock);
+    dev->drv_priv = hda;
+    int execution = device_add_execution_action(dev, hda_stop, NULL, hda);
+    if (execution)
+        return execution;
+    hda->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!hda->regs)
+        return -EIO;
     uint16_t gcap = readw(hda_reg(hda, HDA_REG_GCAP));
+    if (gcap == 0xFFFFU)
+        goto fail_nodev;
     hda->dma64 = (gcap & 1U) != 0;
     /* GCAP[0] is the controller's own DMA64 bit, so this is the one place in
      * the tree where the DMA window comes from hardware rather than from a
@@ -678,29 +759,29 @@ static int hda_probe(device_t *dev)
         goto fail_io;
     kinfo("HDA_STREAM_SMOKE: PASS\n");
 #endif
-    dev->drv_priv = hda;
     kinfo("[HDA] %s codec=%u afg=%u dac=%u pin=%u, 48000 Hz stereo S16_LE\n",
           dev->name, hda->codec, hda->afg, hda->dac, hda->pin);
     return 0;
 
 fail_nomem:
-    hda_release(hda);
     return -ENOMEM;
 fail_io:
     kerr("[HDA] %s probe failed at %s: %d (codec=%u afg=%u dac=%u pin=%u)\n",
          dev->name, stage, ret, hda->codec, hda->afg, hda->dac, hda->pin);
-    hda_release(hda);
     return ret;
 fail_nodev:
-    hda_release(hda);
     return -ENODEV;
 }
 
 static int hda_remove(device_t *dev)
 {
     hda_controller_t *hda = dev ? dev->drv_priv : NULL;
-    if (dev)
-        dev->drv_priv = NULL;
+    if (!hda)
+        return 0;
+    int ret = hda_stop(hda);
+    if (ret)
+        return ret;
+    dev->drv_priv = NULL;
     hda_release(hda);
     return 0;
 }
