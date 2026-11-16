@@ -1,3 +1,4 @@
+#include "drivers/core/driver_core.h"
 /*
  * A20OS Native ABI — Phase 2 syscall implementations.
  *
@@ -223,6 +224,9 @@ int64_t sys_a20_system_reboot(const a20_syscall_args_t *args)
         return -A20_ERR_INVALID_ARGUMENT;
     klog_disk_mark_clean();
     int rc = vfs_system_shutdown();
+    if (rc < 0)
+        return kexec_native_status(rc);
+    rc = driver_core_shutdown_all();
     if (rc < 0)
         return kexec_native_status(rc);
     if (cmd == 0)

@@ -193,7 +193,9 @@ typedef struct driver {
     int  (*remove)(device_t *dev);
     int  (*suspend)(device_t *dev);   /* optional */
     int  (*resume)(device_t *dev);    /* optional */
-    void (*shutdown)(device_t *dev);  /* terminal quiesce, no registry teardown */
+    /* Legacy callback retained for source/layout compatibility. Terminal
+     * shutdown uses the fallible remove lifecycle, never this void hook. */
+    void (*shutdown)(device_t *dev);
     void (*progress)(device_t *dev);  /* optional non-IRQ completion drain */
 
     /* subsystem interface */
@@ -421,7 +423,9 @@ void driver_discovery_end(void);
 int driver_retry_deferred(void);
 int driver_device_count(void);
 int driver_core_kexec_prepare(void);
-void driver_core_shutdown_all(void);
+/* Terminal: run while other CPUs can still complete/drain device calls.
+ * Failures retain resources; cleanup may be retried, new bindings stay closed. */
+int driver_core_shutdown_all(void);
 
 /*
  * Ask for a specific devfs node name for this device, e.g. "vport0" instead of

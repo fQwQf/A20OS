@@ -461,18 +461,24 @@ int kexec_execute(void)
         return rc;
 
     rc = driver_core_kexec_prepare();
-    if (!rc)
-        rc = machine_kexec_prepare(&g_kexec_image);
     if (rc < 0)
         goto fail;
-    kinfo("[KEXEC] secondary harts stopped; closing filesystems\n");
+    kinfo("[KEXEC] closing filesystems before stopping devices\n");
     rc = vfs_system_shutdown();
+    if (rc < 0)
+        goto fail;
+    rc = driver_core_shutdown_all();
+    if (rc < 0) {
+        kinfo("[KEXEC] device stop failed (%d); handoff refused\n", rc);
+        goto fail;
+    }
+    /* Device callbacks can depend on completions from another CPU. Park
+     * secondary CPUs only after every fallible device drain has succeeded. */
+    rc = machine_kexec_prepare(&g_kexec_image);
     if (rc < 0) {
         machine_kexec_cancel();
         goto fail;
     }
-    kinfo("[KEXEC] filesystems closed; resetting devices\n");
-    driver_core_shutdown_all();
     kinfo("[KEXEC] handoff entry=0x%lx segments=%u\n",
           (unsigned long)g_kexec_image.entry, g_kexec_image.nr);
     machine_kexec(&g_kexec_image);
