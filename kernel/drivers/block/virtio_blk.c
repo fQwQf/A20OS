@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include "drivers/block/virtio_blk.h"
 #include "drivers/block/virtio_blk_core.h"
 #include "drivers/bus/virtio_transport.h"
