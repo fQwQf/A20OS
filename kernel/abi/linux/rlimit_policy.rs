@@ -109,11 +109,13 @@ pub unsafe extern "C" fn a20_rlimit_set(t: *mut core::ffi::c_void, view: *const 
     if view.is_null() {
         return ESRCH;
     }
+    // Linux rejects an inverted pair; silently clamping it changes a valid
+    // existing limit despite reporting success for an invalid request.
+    if cur > max {
+        return EINVAL;
+    }
     let view = unsafe { &*view };
     if resource == RLIMIT_RTPRIO {
-        if cur > max {
-            return EINVAL;
-        }
         let flags = unsafe { a20_rl_park_lock(t) };
         if max > unsafe { *view.rtprio_max }
             && unsafe { a20_rl_has_cap(unsafe { a20_rl_current() }, CAP_SYS_RESOURCE) } == 0
@@ -272,12 +274,24 @@ mod tests {
         assert_eq!(unsafe { TASK.stack }, 4 * 1024 * 1024);
         assert_eq!(set(RLIMIT_STACK, 64 * 1024 * 1024, 64 * 1024 * 1024), 0);
         assert_eq!(unsafe { TASK.stack }, USER_STACK_MAX_SIZE);
-        // min(cur, max) applies before the ceiling.
-        assert_eq!(set(RLIMIT_STACK, 8 * 1024 * 1024, 2 * 1024 * 1024), 0);
-        assert_eq!(unsafe { TASK.stack }, 2 * 1024 * 1024);
+        assert_eq!(set(RLIMIT_STACK, 8 * 1024 * 1024, 2 * 1024 * 1024), EINVAL);
+        assert_eq!(unsafe { TASK.stack }, USER_STACK_MAX_SIZE);
         let (rc, pair) = get(RLIMIT_STACK, 0);
         assert_eq!(rc, 0);
-        assert_eq!(pair, [2 * 1024 * 1024, 2 * 1024 * 1024]);
+        assert_eq!(pair, [USER_STACK_MAX_SIZE, USER_STACK_MAX_SIZE]);
+    }
+
+    #[test]
+    fn inverted_pairs_leave_all_limits_unchanged() {
+        let _g = reset();
+        for resource in [RLIMIT_STACK, RLIMIT_CORE, RLIMIT_NOFILE,
+                         RLIMIT_AS, RLIMIT_NPROC, RLIMIT_RTPRIO] {
+            let before = get(resource, 0);
+            assert_eq!(set(resource, 3, 2), EINVAL);
+            assert_eq!(get(resource, 0), before);
+        }
+        assert_eq!(unsafe { CORE_SET }, 0);
+        assert_eq!(unsafe { TASK.park_depth }, 0);
     }
 
     #[test]

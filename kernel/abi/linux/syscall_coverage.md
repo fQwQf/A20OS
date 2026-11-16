@@ -247,9 +247,9 @@ strength of a boilerplate note.
 | `setpriority` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `reboot` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `prctl` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `prlimit64` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `prlimit64` | system | `partial` | `smoke-abi-linux`; `python3 -m unittest tools.tests.test_prlimit_abi` | shell/prlimit consumers: input/output pairs may alias; input is captured before output; inverted pairs return EINVAL without changing limits or output; explicit self-pid references are released; read and write of another task use the existing uid/CAP_SYS_RESOURCE policy; a nonexistent pid returns ESRCH even with both pointers NULL. Targeted production C/Rust host check with modeled lookup/usercopy; full Linux credential matching and concurrent pair atomicity are not established. |
 | `getrlimit` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `setrlimit` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `setrlimit` | system | `partial` | `smoke-abi-linux`; `python3 tools/tests/test_rlimit_policy_host.py` | shell ulimit consumers: every supported resource rejects soft > hard with EINVAL and leaves limits unchanged. Existing stack/nofile ceiling mapping and supported resource subset remain partial; most resources still store one effective value rather than an independent soft/hard pair. |
 | `getrusage` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `kill` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `tkill` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
