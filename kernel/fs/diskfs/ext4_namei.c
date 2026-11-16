@@ -68,6 +68,26 @@ static int ext4_dir_write_block(ext4_sb_info_t *sb, uint32_t dir_ino,
                            sb->block_size) < 0 ? -EIO : 0;
 }
 
+/* Publishing into an existing block may change cache bytes even on EIO.
+ * On a nojournal mount an ordinary error promises the old namespace is
+ * restored; EUCLEAN keeps
+ * callers from releasing an inode that might already have a new name. */
+static int ext4_dir_publish_block(ext4_sb_info_t *sb, uint32_t dir_ino,
+                                   uint32_t generation, uint64_t physical,
+                                   void *block, void *before)
+{
+    int ret = ext4_dir_write_block(sb, dir_ino, generation, physical, block);
+    if (ret >= 0) return ret;
+    if (sb->journal) {
+        (void)ext4_journal_poison(sb);
+        return ret;
+    }
+    int restore = ext4_dir_write_block(sb, dir_ino, generation, physical, before);
+    if (restore < 0)
+        restore = ext4_dir_write_block(sb, dir_ino, generation, physical, before);
+    return restore < 0 ? ext4_record_status(sb, -117) : ret;
+}
+
 /* Readers walk every directory block linearly. Before a mutation, convert
  * an imported HTree root (and any empty interior index blocks) to that same
  * representation. Treating '..' padding as free space while INDEX_FL stays
@@ -193,6 +213,9 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
              * the caller is told the name was added. */
             if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             if (de->inode == 0 && de->rec_len >= need) {
+                char *before = kmalloc(bs);
+                if (!before) { kfree(blk); return -ENOMEM; }
+                memcpy(before, blk, bs);
                 uint16_t old = de->rec_len;
                 uint16_t left = old - need;
                 de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
@@ -207,26 +230,31 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
                 } else {
                     de->rec_len = old;
                 }
-                int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
+                int wr = ext4_dir_publish_block(sb, dir_ino, di->i_generation,
+                                                  p, blk, before);
+                kfree(before);
                 kfree(blk); return wr;
             }
             if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             uint16_t slack = de->rec_len - actual;
             if (slack >= need + reserve) {
+                char *before = kmalloc(bs);
+                if (!before) { kfree(blk); return -ENOMEM; }
+                memcpy(before, blk, bs);
                 uint16_t old = de->rec_len; de->rec_len = actual;
                 ext4_dir_entry_t *nx = (ext4_dir_entry_t *)(blk + off + actual);
                 nx->inode = ino; nx->rec_len = old - actual;
                 nx->name_len = (uint8_t)nl; nx->file_type = ft;
                 memcpy(nx->name, name, nl);
-                int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
+                int wr = ext4_dir_publish_block(sb, dir_ino, di->i_generation,
+                                                  p, blk, before);
+                kfree(before);
                 kfree(blk); return wr;
             }
             off += de->rec_len;
         }
     }
     uint64_t nb_blk = ext4_alloc_block(sb); if (!nb_blk) { kfree(blk); return -ENOSPC; }
-    int gr = ext4_block_grow(sb, dir_ino, di, nb, nb_blk);
-    if (gr < 0) { ext4_free_block(sb, nb_blk); kfree(blk); return gr; }
     memset(blk, 0, bs);
     ext4_dir_entry_t *de = (ext4_dir_entry_t *)blk;
     de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
@@ -239,7 +267,31 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
     } else de->rec_len = (uint16_t)bs;
     int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, nb_blk, blk);
     kfree(blk);
-    if (wr < 0) return wr;
+    if (wr < 0) {
+        /* The new block is still private: discard it before any map update. */
+        if (sb->journal) {
+            (void)ext4_journal_poison(sb);
+            return wr;
+        }
+        int release = ext4_free_block(sb, nb_blk);
+        if (release < 0) release = ext4_free_block(sb, nb_blk);
+        return release < 0 ? ext4_record_status(sb, -117) : wr;
+    }
+    int gr = ext4_block_grow(sb, dir_ino, di, nb, nb_blk);
+    if (gr == -EOPNOTSUPP) {
+        /* The extent grower rejects unsupported depth before mutation. */
+        int release = ext4_free_block(sb, nb_blk);
+        if (release < 0) release = ext4_free_block(sb, nb_blk);
+        if (release >= 0) return gr;
+        if (sb->journal) (void)ext4_journal_poison(sb);
+        return ext4_record_status(sb, -117);
+    }
+    /* A mapping error can have modified an external extent/indirect block.
+     * Keep the allocation until that mapping can be recovered. */
+    if (gr < 0) {
+        if (sb->journal) (void)ext4_journal_poison(sb);
+        return ext4_record_status(sb, -117);
+    }
     *dsz += bs;
     return 0;
 }
@@ -1247,23 +1299,37 @@ int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
     ext4_inode_t inode;
     if (ext4_read_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
 
+    if (!inode.i_links_count || __atomic_load_n(&tp->unlinked, __ATOMIC_ACQUIRE))
+        return -ENOENT;
+    if (inode.i_links_count == 0xffffU) return -EMLINK;
+    ext4_inode_t before = inode;
     inode.i_links_count++;
     uint64_t now[2];
     timekeeping_get_realtime(now);
     inode.i_ctime = (uint32_t)now[0];
-    if (ext4_write_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
+    int r = ext4_write_inode(p->sb, tp->inode_num, &inode);
+    if (r < 0) {
+        if (p->sb->journal) (void)ext4_journal_poison(p->sb);
+        else if (ext4_restore_link_inode(p->sb, tp->inode_num, &before) < 0)
+            return -117;
+        return r;
+    }
 
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, tp->inode_num, (target->mode & S_IFMT) == S_IFIFO ? EXT4_FT_FIFO : EXT4_FT_REG_FILE);
+    r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, tp->inode_num, (target->mode & S_IFMT) == S_IFIFO ? EXT4_FT_FIFO : EXT4_FT_REG_FILE);
     if (r < 0) {
-        /* Roll back the link count on failure. */
-        inode.i_links_count--;
-        ext4_write_inode(p->sb, tp->inode_num, &inode);
+        if (p->sb->journal) (void)ext4_journal_poison(p->sb);
+        else if (r != -117 &&
+                 ext4_restore_link_inode(p->sb, tp->inode_num, &before) < 0)
+            return -117;
         return r;
     }
     if (dsz != ext4_inode_size(&di)) {
         ext4_inode_set_size(&di, dsz);
-        ext4_write_inode(p->sb, p->inode_num, &di);
+        if (ext4_write_inode(p->sb, p->inode_num, &di) < 0) {
+            if (p->sb->journal) (void)ext4_journal_poison(p->sb);
+            return ext4_record_status(p->sb, -117);
+        }
         p->file_size = dsz;
     }
     return 0;
