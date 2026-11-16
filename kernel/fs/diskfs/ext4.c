@@ -3007,7 +3007,7 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     fp->file_size = sz;
     fp->type      = type;
     fp->unlinked  = 0;
-    fp->orphan_next = 0;
+    fp->orphan_owner_next = NULL;
     fp->open_count = 0;
     vn->fs_data   = fp;
 

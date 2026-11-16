@@ -9,9 +9,9 @@ PRE=r'''
 #include <stdio.h>
 #define EIO 5
 #define EINVAL 22
-typedef struct {void *journal;int metadata_lock;} ext4_sb_info_t;
+typedef struct {void *journal;int metadata_lock;struct ext4_vnode_priv *orphan_vnodes;} ext4_sb_info_t;
 typedef struct {uint16_t i_links_count;uint32_t i_dtime;} ext4_inode_t;
-typedef struct {ext4_sb_info_t *sb;uint32_t inode_num,orphan_next;int unlinked;} ext4_vnode_priv_t;
+typedef struct ext4_vnode_priv {ext4_sb_info_t *sb;uint32_t inode_num;int unlinked;struct ext4_vnode_priv *orphan_owner_next;} ext4_vnode_priv_t;
 typedef struct vnode {void *fs_data,*mnt;struct vnode *parent;} vnode_t;
 static int read_error,reap_error,poisons,reaps,freed,identity_drops,durable_orphan=1;
 static int lock_depth;
@@ -28,7 +28,7 @@ static void reset(void){read_error=reap_error=poisons=reaps=freed=identity_drops
 MAIN=r'''
 int main(void){
  ext4_sb_info_t sb={.journal=&sb};ext4_vnode_priv_t p;vnode_t v;
- #define OWNER() do{p=(ext4_vnode_priv_t){.sb=&sb,.inode_num=12,.orphan_next=42,.unlinked=1};v=(vnode_t){.fs_data=&p};}while(0)
+ #define OWNER() do{p=(ext4_vnode_priv_t){.sb=&sb,.inode_num=12,.unlinked=1};v=(vnode_t){.fs_data=&p};sb.orphan_vnodes=&p;}while(0)
  reset();OWNER();read_error=1;ext4_release_vn(&v);
  assert(poisons==0&&reaps==0&&durable_orphan==1&&freed==2&&identity_drops==0);
  reset();OWNER();read_error=1;assert(ext4_vnode_finalize_unlinked(&v)==-EIO);
@@ -46,7 +46,7 @@ int main(void){
 class OrphanPreflight(unittest.TestCase):
  def test_release_and_explicit_retry(self):
   source=(ROOT/'kernel/fs/diskfs/ext4_namei.c').read_text()
-  code='\n'.join(function(source,name) for name in ('ext4_orphan_read_vnode_owner','ext4_release_vn','ext4_vnode_finalize_unlinked'))
+  code='\n'.join(function(source,name) for name in ('ext4_orphan_vnode_registered','ext4_orphan_unregister_vnode','ext4_orphan_read_vnode_owner','ext4_release_vn','ext4_vnode_finalize_unlinked'))
   old=code.replace('read_ok && sb->journal','sb->journal')
   with tempfile.TemporaryDirectory() as d:
    def run(body,name):

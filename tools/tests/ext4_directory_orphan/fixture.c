@@ -38,6 +38,48 @@ static int absent(const char *name)
     if (vn) vnode_put(vn);
     return ret == -ENOENT;
 }
+static int owner_order_and_reuse(void)
+{
+    vnode_t *tail = NULL, *head = NULL;
+    if (ext4_vn_create(g_root, "owner-tail", 0600, &tail) < 0 ||
+        ext4_vn_create(g_root, "owner-head", 0600, &head) < 0 ||
+        ext4_vn_unlink(g_root, "owner-tail") < 0 ||
+        ext4_vn_unlink(g_root, "owner-head") < 0) return -1;
+    /* Reaping the tail changes the head inode's i_dtime. Its owner persists. */
+    if (ext4_vnode_finalize_unlinked(tail) < 0 ||
+        ext4_vnode_finalize_unlinked(head) < 0) return -2;
+    ext4_vnode_priv_t *priv = head->fs_data;
+    ext4_sb_info_t *sb = priv->sb;
+    uint32_t chain = 1;
+    if (bcache_read_bytes(g_bc, EXT4_SB_OFFSET +
+        offsetof(ext4_superblock_t, s_last_orphan), &chain, sizeof(chain)) < 0 ||
+        chain != 0 || sb->orphan_vnodes) return -3;
+    vnode_put(tail); vnode_put(head);
+
+    vnode_t *old = NULL, *replacement = NULL;
+    if (ext4_vn_create(g_root, "owner-old", 0600, &old) < 0 ||
+        ext4_vn_unlink(g_root, "owner-old") < 0) return -4;
+    ext4_vnode_priv_t *old_priv = old->fs_data;
+    uint32_t reused = old_priv->inode_num;
+    rw_mutex_write_lock(&sb->metadata_lock);
+    int ret = ext4_orphan_recover(sb);
+    rw_mutex_write_unlock(&sb->metadata_lock);
+    if (ret < 0 || old_priv->unlinked || sb->orphan_vnodes) return -5;
+    if (ext4_vn_create(g_root, "owner-new", 0600, &replacement) < 0) return -6;
+    ext4_vnode_priv_t *new_priv = replacement->fs_data;
+    if (new_priv->inode_num != reused ||
+        ext4_vn_unlink(g_root, "owner-new") < 0 ||
+        ext4_vnode_finalize_unlinked(old) < 0) return -7;
+    ext4_inode_t inode;
+    if (!new_priv->unlinked || ext4_read_inode(sb, reused, &inode) < 0 ||
+        !inode.i_mode || inode.i_links_count != 0) return -8;
+    vnode_put(old);
+    if (ext4_vnode_finalize_unlinked(replacement) < 0) return -9;
+    vnode_put(replacement);
+    if (sb->orphan_vnodes) return -10;
+    host_report("ORPHAN_OWNER_ORDER_REUSE_PASS\n");
+    return 0;
+}
 int main(int argc, char **argv)
 {
     fscompat_log_sink = host_log_sink;
@@ -54,7 +96,13 @@ int main(int argc, char **argv)
         host_report("DIR_ORPHAN_RECOVERY_PASS\n");
         return 0;
     }
-    if (argc != 2 || ext4_vn_mkdir(g_root, "retry", 0700) < 0) return 5;
+    if (argc != 2) return 5;
+    int owner_ret = owner_order_and_reuse();
+    if (owner_ret < 0) {
+        printf("ORPHAN_OWNER_FAILED rc=%d\n", owner_ret);
+        return 15;
+    }
+    if (ext4_vn_mkdir(g_root, "retry", 0700) < 0) return 5;
     vnode_t *held = NULL;
     if (ext4_lookup(g_root, "retry", &held) < 0 || !held) return 6;
     ext4_vnode_priv_t *priv = held->fs_data;

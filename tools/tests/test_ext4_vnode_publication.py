@@ -19,7 +19,7 @@ PRE=r'''
 #define a20_perf_count(x) ((void)0)
 typedef struct {int unused;} ext4_sb_info_t;
 typedef struct {unsigned i_mode,i_uid,i_gid;} ext4_inode_t;
-typedef struct {ext4_sb_info_t *sb;uint32_t inode_num;uint64_t file_size;int type,unlinked;uint32_t orphan_next;unsigned open_count;} ext4_vnode_priv_t;
+typedef struct {ext4_sb_info_t *sb;uint32_t inode_num;uint64_t file_size;int type,unlinked;struct ext4_vnode_priv *orphan_owner_next;unsigned open_count;} ext4_vnode_priv_t;
 typedef struct vnode {uint64_t ino,size;int type;unsigned mode,uid,gid;int refs;struct vnode *parent;void *ops,*fs_data,*mnt;} vnode_t;
 static int live,orphan_reaps,g_ext4_vnode_ops;
 static void *kmalloc(size_t n){void*p=malloc(n);if(p)__atomic_add_fetch(&live,1,__ATOMIC_RELAXED);return p;}
