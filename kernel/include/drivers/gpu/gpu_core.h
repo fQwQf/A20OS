@@ -6,6 +6,19 @@
 struct class_device;
 struct gpu_dev_ops;
 struct vmo;
+struct mm_mapping_owner;
+struct gpu_device_access;
+
+/* Probe-only, before hardware use: install a per-binding physical mapping
+ * owner and fallible pre-consumer gate, selecting managed probe cleanup.
+ * Use for borrowed physical get_fb apertures. Existing VMAs make teardown
+ * return EBUSY until their last reference retires; new admission stays shut. */
+int gpu_device_physical_mapping_init(device_t *);
+/* Live scoped access required. Success owns one resource reference; pass it
+ * to MM as borrowed, then mm_mapping_owner_put. No lifecycle mutex or active
+ * call is retained by that reference. Failure clears out. */
+int gpu_device_physical_mapping_get(const struct gpu_device_access *,
+                                     struct mm_mapping_owner **);
 
 /* Default scanout policy over native class publications. Only SCANOUT roles
  * are eligible; prefer RENDER, then managed over BOOT_SCANOUT, with stable ties.

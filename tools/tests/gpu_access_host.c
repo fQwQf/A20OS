@@ -70,7 +70,8 @@ static int native_capabilities(device_t *d,struct gpu_capabilities *out){
  assert(!pthread_mutex_trylock(&g_gpu_lock.native));assert(!pthread_mutex_unlock(&g_gpu_lock.native));
  out->flags=s->caps_flags;return s->caps_error;
 }
-static int probe(device_t *d){return gpu_device_register(d);}
+static int physical_enabled;
+static int probe(device_t *d){if(physical_enabled){int r=gpu_device_physical_mapping_init(d);if(r)return r;}return gpu_device_register(d);}
 static int plain_probe(device_t *d){(void)d;return 0;}
 static int remove_gpu(device_t *d){((struct sample *)d->plat_data)->removes++;gpu_device_unregister(d);return 0;}
 static bus_type_t bus={.name="gpu-test",.match=match};
@@ -286,6 +287,32 @@ int main(int argc,char **argv) {
  } else if(!strcmp(name,"cap-election-error")) {
   struct sample *a=create(1,1),*bad=create(2,1),*fallback=create(3,0);bad->caps_error=1;
   dispose(a);struct gpu_device_access access;assert(!gpu_device_default_begin(&access)&&access.device==&fallback->device);gpu_device_access_end(&access);assert(!bad->device.class_dev->active_calls);dispose(bad);dispose(fallback);
+ } else if(!strcmp(name,"physical-owner")) {
+  struct gpu_device_access access;struct mm_mapping_owner *owner=(void *)1;
+  assert(gpu_device_physical_mapping_get(NULL,&owner)==-ENODEV&&!owner);
+  struct sample *legacy=create(1,0);class_device_t *plain=gpu_device_default_get();
+  assert(!gpu_device_access_begin(plain,&access));
+  assert(gpu_device_physical_mapping_get(&access,&owner)==-EOPNOTSUPP&&!owner);
+  gpu_device_access_end(&access);class_device_put(plain);dispose(legacy);
+  physical_enabled=1;struct sample *s=create(2,0);class_device_t *old=gpu_device_default_get();
+  assert(!gpu_device_access_begin(old,&access));
+  assert(!gpu_device_physical_mapping_get(&access,&owner)&&owner);
+  assert(refcount_read(&owner->references)==2);
+  gpu_device_access_end(&access);assert(!old->active_calls);
+  /* Model the independent VMA/split reference chain exercised by MM tests. */
+  mm_mapping_owner_get(owner);
+  assert(driver_unregister(&s->driver)==-EBUSY&&s->device.drv==&s->driver&&!s->removes);
+  assert(s->device.state==DEV_STATE_PREPARING&&!class_device_binding_stopped(old));
+  assert(gpu_device_access_begin(old,&access)==-ENODEV);
+  mm_mapping_owner_put(owner);
+  assert(driver_unregister(&s->driver)==-EBUSY&&!s->removes);
+  mm_mapping_owner_put(owner);
+  assert(!driver_unregister(&s->driver)&&s->removes==1&&class_device_binding_stopped(old));
+  assert(!driver_register(&s->driver));class_device_t *fresh=class_device_ref_for_device(&s->device);
+  assert(fresh&&fresh!=old&&!gpu_device_access_begin(fresh,&access));
+  assert(!gpu_device_physical_mapping_get(&access,&owner));gpu_device_access_end(&access);
+  assert(refcount_read(&owner->references)==2);mm_mapping_owner_put(owner);
+  class_device_put(fresh);class_device_put(old);dispose(s);
  } else if(!strcmp(name,"cap-providers")) {
   struct sample *s=create(1,0);class_device_t *c=gpu_device_default_get();struct gpu_device_access access;assert(!gpu_device_access_begin(c,&access));
   int (*providers[])(device_t *,struct gpu_capabilities *)={simplefb_get_capabilities,vmsvga_get_capabilities,lsdc_boot_get_capabilities};

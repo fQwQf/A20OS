@@ -85,6 +85,8 @@ static int probe(device_t *dev) {
         return rc;
     if (fb->physical > (uintptr_t)-1 || fb->aperture_bytes > (size_t)-1)
         return -EOVERFLOW;
+    rc = gpu_device_physical_mapping_init(dev);
+    if (rc) return rc;
     if (fw_node_valid(&boot->framebuffer_node)) {
         rc = firmware_device_retain_resources(dev);
         if (rc) return rc;

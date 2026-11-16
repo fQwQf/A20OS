@@ -63,6 +63,7 @@ int printf(const char *,...);int snprintf(char *,size_t,const char *,...);
 
     def run_case(self,name): subprocess.run([str(self.binary),name],check=True,timeout=15)
     def test_empty_invalid_and_unregistered_admission(self):self.run_case('arguments')
+    def test_physical_mapping_owner_blocks_unbind_until_last_view(self):self.run_case('physical-owner')
     def test_captured_selection_pins_device_until_class_lookup_finishes(self):self.run_case('captured-device')
     def test_policy_mutation_waits_for_lifecycle_and_revalidates_membership(self):self.run_case('mutation')
     def test_promotion_keeps_old_publication_and_exact_reference_balance(self):self.run_case('selection')

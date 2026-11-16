@@ -81,6 +81,7 @@ typedef struct {
 } __attribute__((packed)) svga3_update_t;
 
 typedef struct vmsvga_device {
+    device_t *owner;
     uintptr_t regs;
     uintptr_t fb_virt;
     uintptr_t fb_phys;
@@ -278,6 +279,15 @@ static const gpu_dev_ops_t vmsvga_ops = {
 };
 
 static int vmsvga_probe(device_t *dev) {
+    /* Existing single-device capacity: never overwrite a retained binding. */
+    if (g_vmsvga.owner) return -EBUSY;
+    int ownership = gpu_device_physical_mapping_init(dev);
+    if (ownership) return ownership;
+    vmsvga_device_t *svga = &g_vmsvga;
+    memset(svga, 0, sizeof(*svga));
+    svga->owner = dev;
+    dev->drv_priv = svga;
+    spin_init(&svga->lock);
     if (pci_enable_and_assign_bars(dev) < 0)
         return -1;
 
@@ -290,9 +300,6 @@ static int vmsvga_probe(device_t *dev) {
     if (!regs || !fb || regs->end < regs->start || fb->end < fb->start)
         return -1;
 
-    vmsvga_device_t *svga = &g_vmsvga;
-    memset(svga, 0, sizeof(*svga));
-    spin_init(&svga->lock);
     svga->legacy = pci_device_id(dev) ==
                    ((uint32_t)VMSVGA_VENDOR_ID << 16 | VMSVGA2_DEVICE_ID);
     svga->regs = (uintptr_t)device_map_resource(dev, regs);
@@ -329,7 +336,6 @@ static int vmsvga_probe(device_t *dev) {
         svga->fb_size = device_fb_size;
         dev->drv_priv = svga;
         if (gpu_device_register(dev) < 0) {
-            dev->drv_priv = NULL;
             return -1;
         }
         kinfo("[GPU] SVGAv2 ready: %ux%ux%u (VRAM: %lu MiB at 0x%lx)\n",
@@ -395,11 +401,9 @@ static int vmsvga_probe(device_t *dev) {
 
     dev->drv_priv = svga;
     if (gpu_device_register(dev) < 0) {
-        dev->drv_priv = NULL;
         return -1;
     }
     if (vmsvga_scanout_self_test(dev, svga) != 0) {
-        dev->drv_priv = NULL;
         return -1;
     }
 
@@ -414,10 +418,12 @@ static int vmsvga_remove(device_t *dev) {
     vmsvga_device_t *svga = dev ? dev->drv_priv : NULL;
     if (!svga)
         return 0;
-    if (svga->legacy)
-        vmsvga_write(svga, SVGA2_REG_ENABLE, 0);
-    else
-        vmsvga_write(svga, SVGA3_REG_ENABLE, 0);
+    if (svga->regs) {
+        if (svga->legacy)
+            vmsvga_write(svga, SVGA2_REG_ENABLE, 0);
+        else
+            vmsvga_write(svga, SVGA3_REG_ENABLE, 0);
+    }
     gpu_device_unregister(dev);
     dev->drv_priv = NULL;
     memset(svga, 0, sizeof(*svga));

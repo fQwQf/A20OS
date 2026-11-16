@@ -120,6 +120,13 @@ static int get_fb(struct device *d,uintptr_t *p,size_t *n){(void)d;*p=fb_phys;*n
 struct gpu_scanout {struct vmo *memory;uint64_t offset;size_t size;};
 typedef struct {int (*get_fb)(struct device *,uintptr_t *,size_t *);int (*get_scanout)(struct device *,struct gpu_scanout *);} gpu_dev_ops_t;
 struct gpu_device_access {struct device *device;const gpu_dev_ops_t *ops;};
+static struct mm_mapping_owner fb_owner;
+static int fb_owner_error;
+static int gpu_device_physical_mapping_get(const struct gpu_device_access *a,struct mm_mapping_owner **out){
+ assert(a&&a->device);*out=NULL;if(fb_owner_error)return fb_owner_error;
+ mm_mapping_owner_get(&fb_owner);*out=&fb_owner;return 0;
+}
+
 static int gpu_device_scanout_get(const struct gpu_device_access *a,struct gpu_scanout *out){(void)a;(void)out;assert(0);return -EOPNOTSUPP;}
 static void gpu_scanout_put(struct gpu_scanout *s){(void)s;assert(0);}
 static vaddr_t mm_mmap_vmo_cap(mm_struct_t *mm,vaddr_t addr,size_t len,int prot,int flags,struct vmo *vmo,uint64_t off,uint32_t cap){(void)mm;(void)addr;(void)len;(void)prot;(void)flags;(void)vmo;(void)off;(void)cap;assert(0);return (vaddr_t)-EINVAL;}
@@ -220,6 +227,7 @@ int main(int argc,char **argv){
   assert(refcount_read(&owner.references)==1&&!owner_releases);
   cleanup(&mm);assert(!refcount_read(&owner.references)&&owner_releases==1);return 0;
  }else if(!strcmp(name,"consumers")){
+  mm_mapping_owner_init(&fb_owner,owner_released);
   uint64_t out=0xfeed;assert(udriver_map_mmio(&mm,0x100001,PAGE_SIZE,3,&out)==-1&&out==0xfeed);
   record_oom=1;assert(udriver_map_mmio(&mm,0x100000,PAGE_SIZE,3,&out)==-1&&out==0xfeed);record_oom=0;
   assert(!udriver_map_mmio(&mm,0x100000,PAGE_SIZE,3,&out)&&mm.rss==1&&(leaf(&mm,out)&PTE_DEVICE));
@@ -232,7 +240,13 @@ int main(int argc,char **argv){
   assert(fbdev_linux_mmap_active(&access,va,3*PAGE_SIZE,3,MAP_SHARED|MAP_FIXED,0)==(intptr_t)va&&mm.rss==4);
   assert(!fb_ioctl_map(&access,(void *)0x10000)&&mm.rss==7);
   assert(fb_ioctl_map(&access,(void *)0x10000)==-EEXIST);
+  assert(refcount_read(&fb_owner.references)==3); /* Two installed fb views. */
+  fb_owner_error=-ENODEV;
+  assert(fbdev_linux_mmap_active(&access,0,PAGE_SIZE,3,MAP_SHARED,0)==-ENODEV);
+  assert(fb_ioctl_map(&access,(void *)0x20000)==-ENODEV);
+  assert(refcount_read(&fb_owner.references)==3);fb_owner_error=0;
+  mm_mapping_owner_put(&fb_owner);
   cache_error=-EOPNOTSUPP;assert(fbdev_linux_mmap_active(&access,0,PAGE_SIZE,3,MAP_SHARED,0)==-EOPNOTSUPP);assert(fb_ioctl_map(&access,(void *)0x20000)==-EOPNOTSUPP);cache_error=0;
  }else assert(0);
- cleanup(&mm);return 0;
+ cleanup(&mm);if(!strcmp(name,"consumers"))assert(owner_releases==1);return 0;
 }

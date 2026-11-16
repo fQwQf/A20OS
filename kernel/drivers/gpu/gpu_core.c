@@ -5,6 +5,91 @@
 #include "core/lock.h"
 #include "core/stdio.h"
 #include "mm/vmo.h"
+#include "mm/mapping_owner.h"
+#include "mm/slab.h"
+#include "drivers/core/protocol.h"
+
+struct gpu_physical_mapping_ops {
+    struct mm_mapping_owner *owner;
+};
+struct gpu_physical_mapping {
+    struct mm_mapping_owner owner; /* first: kernel-owned finalizer */
+    struct gpu_physical_mapping_ops ops;
+    device_t *device;
+    spinlock_t lock;
+    bool closing;
+};
+
+static void gpu_physical_mapping_release(struct mm_mapping_owner *owner) {
+    struct gpu_physical_mapping *mapping = (void *)owner;
+    device_put(mapping->device);
+    kfree(mapping);
+}
+
+static void gpu_physical_mapping_drop(void *context) {
+    struct gpu_physical_mapping *mapping = context;
+    mm_mapping_owner_put(&mapping->owner);
+}
+
+static int gpu_physical_mapping_prepare(void *context) {
+    struct gpu_physical_mapping *mapping = context;
+    uint64_t flags = spin_lock_irqsave(&mapping->lock);
+    mapping->closing = true;
+    /* The devres owner is the one reference which is not a borrowed view.
+     * Never enter the legacy class drain while a VMA needs this binding. */
+    int ret = refcount_read(&mapping->owner.references) > 1 ? -EBUSY : 0;
+    spin_unlock_irqrestore(&mapping->lock, flags);
+    return ret;
+}
+
+int gpu_device_physical_mapping_init(device_t *device) {
+    if (!device || !device->drv || device->drv->class_type != DEV_CLASS_DISPLAY)
+        return -EINVAL;
+    int ret = device_probe_use_remove(device);
+    if (ret) return ret;
+    struct gpu_physical_mapping *mapping = kcalloc(1, sizeof(*mapping));
+    if (!mapping) return -ENOMEM;
+    mapping->device = device_get(device);
+    if (!mapping->device) { kfree(mapping); return -ENODEV; }
+    spin_init(&mapping->lock);
+    mm_mapping_owner_init(&mapping->owner, gpu_physical_mapping_release);
+    mapping->ops.owner = &mapping->owner;
+    ret = device_add_resource_action(device, gpu_physical_mapping_drop, mapping);
+    if (ret) { gpu_physical_mapping_drop(mapping); return ret; }
+    ret = device_add_remove_prepare(device, gpu_physical_mapping_prepare, mapping);
+    if (ret) return ret; /* Managed probe cleanup owns the previous action. */
+    const struct driver_protocol_descriptor protocol = {
+        .info = {DRIVER_PROTOCOL_DISPLAY_MAPPING, 1, sizeof(mapping->ops), 0},
+        .ops = &mapping->ops,
+    };
+    return device_add_protocol(device, &protocol);
+}
+
+int gpu_device_physical_mapping_get(const struct gpu_device_access *access,
+                                     struct mm_mapping_owner **out) {
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!access || !access->publication || !access->device || !access->ops)
+        return -ENODEV;
+    const struct driver_protocol_requirement required = {
+        DRIVER_PROTOCOL_DISPLAY_MAPPING, 1, sizeof(struct gpu_physical_mapping_ops), 0,
+    };
+    struct driver_protocol_access protocol;
+    int ret = driver_protocol_begin(access->publication, &required, &protocol);
+    if (ret) return ret;
+    const struct gpu_physical_mapping_ops *ops = protocol.ops;
+    if (!ops->owner || protocol.device != access->device) {
+        driver_protocol_end(&protocol);
+        return -EIO;
+    }
+    struct gpu_physical_mapping *mapping = (void *)ops->owner;
+    uint64_t flags = spin_lock_irqsave(&mapping->lock);
+    ret = mapping->closing ? -ENODEV : 0;
+    if (!ret) { mm_mapping_owner_get(&mapping->owner); *out = &mapping->owner; }
+    spin_unlock_irqrestore(&mapping->lock, flags);
+    driver_protocol_end(&protocol);
+    return ret;
+}
 
 static device_t *g_default_gpu; /* owns one metadata reference */
 static unsigned g_default_rank;
