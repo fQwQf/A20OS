@@ -264,9 +264,23 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
             }
             if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
+                uint32_t old_inode = de->inode;
+                uint16_t old_previous_len = hp ?
+                    ((ext4_dir_entry_t *)(blk + prev))->rec_len : 0;
                 if (hp) ((ext4_dir_entry_t *)(blk + prev))->rec_len += de->rec_len;
                 else de->inode = 0;
                 int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
+                if (wr < 0 && !sb->journal) {
+                    /* A failed synchronous write can leave changed cache or
+                     * media bytes. Restore the same block before reporting an
+                     * ordinary retryable failure; checksum is recomputed. */
+                    if (hp) ((ext4_dir_entry_t *)(blk + prev))->rec_len = old_previous_len;
+                    else de->inode = old_inode;
+                    int restore = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
+                    if (restore < 0)
+                        restore = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
+                    if (restore < 0) wr = ext4_record_status(sb, -117);
+                }
                 kfree(blk); return wr;
             }
             prev = off; hp = 1; off += de->rec_len;
@@ -736,6 +750,9 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
                ino, victim.i_links_count);
         return -EOPNOTSUPP;
     }
+    uint32_t old_orphan_head;
+    r = ext4_orphan_read_head(sb, &old_orphan_head);
+    if (r < 0) return r;
     r = ext4_orphan_add_last_link(sb, ino);
     if (r < 0) {
         printf("[EXT4] orphan add failed ino=%u err=%d\n", ino, r);
@@ -744,7 +761,21 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
     r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
     if (r < 0) {
         printf("[EXT4] unlink dirent remove failed ino=%u err=%d\n", ino, r);
-        (void)ext4_journal_poison(sb);
+        if (sb->journal) {
+            (void)ext4_journal_poison(sb);
+            return r;
+        }
+        if (r == -117) return r; /* Directory publication is still uncertain. */
+        /* dir_remove restored its block (or failed before changing it).
+         * Restore a linked inode BEFORE removing its orphan-chain head: a
+         * failure cannot strand a named zero-link inode outside recovery. */
+        int restore = ext4_write_inode(sb, ino, &victim);
+        if (restore < 0) restore = ext4_write_inode(sb, ino, &victim);
+        if (restore == 0) {
+            restore = ext4_orphan_write_head(sb, old_orphan_head);
+            if (restore < 0) restore = ext4_orphan_write_head(sb, old_orphan_head);
+        }
+        if (restore < 0) return ext4_record_status(sb, -117);
         return r;
     }
 

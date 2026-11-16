@@ -39,6 +39,8 @@ def main():
                        help='check callback/owner lifetime when journal mount fails')
     modes.add_argument('--directory-orphan', action='store_true',
                        help='check held-rmdir cleanup failure and fresh-process recovery')
+    modes.add_argument('--unlink-rollback', action='store_true',
+                       help='check failed dirent removal restores named final-link inodes')
     parser.add_argument('--c-orphan', action='store_true',
                         help='use the C reference orphan controller')
     args = parser.parse_args()
@@ -58,7 +60,8 @@ def main():
             raise RuntimeError('Rust backend build failed')
         sources = ['kernel/fs/diskfs/' + n + '.c' for n in
                    ['ext4', 'ext4_namei', 'ext4_file', 'ext4_journal', 'ext4_csum', 'ext4_sync', 'ext4_xattr']]
-        fixture = ('tools/tests/ext4_directory_orphan/fixture.c' if args.directory_orphan else
+        fixture = ('tools/tests/ext4_unlink_rollback/fixture.c' if args.unlink_rollback else
+                   'tools/tests/ext4_directory_orphan/fixture.c' if args.directory_orphan else
                    'tools/tests/ext4_mount_abort/fixture.c' if args.mount_abort else
                    'tools/tests/ext4_directory_account/fixture.c' if args.directory_account
                    else 'tools/tests/ext4_orphan_compensation/fixture.c')
@@ -143,6 +146,7 @@ def main():
         report['orphan_controller'] = 'c' if args.c_orphan else 'rust'
         report['mount_abort'] = args.mount_abort
         report['directory_account'] = args.directory_account
+        report['unlink_rollback'] = args.unlink_rollback
         report['passed'] = True
     except Exception as error:
         report['error'] = str(error)
