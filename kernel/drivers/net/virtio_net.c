@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include "drivers/net/virtio_net.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/bus/pci_bus.h"
