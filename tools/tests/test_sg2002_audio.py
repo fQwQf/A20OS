@@ -14,7 +14,10 @@ uint64_t readq(const volatile void *p);
 void writeq(uint64_t v,volatile void *p);
 #include "PRODUCTION"
 static uint32_t i2s[64],dac[64];static uint64_t dma[512];
-static unsigned allocations,frees,syncs,prepare_count,tail_us;
+static unsigned allocations,frees,syncs,prepare_count,tail_us,alloc_calls,unmaps;
+static int dead_regs,stuck_signal,stuck_enable,stuck_i2s,fail_irq,fail_action,fail_map,fail_alloc,fail_probe_abort;
+static int stop_wait,busy_stops;
+static device_t *active_device;
 static int prepare_result,stuck_abort,progress=1,identity=1;
 static unsigned links;
 static device_t providers[7];
@@ -29,9 +32,10 @@ static void *payload,*descriptors;
 static int(*handler)(int,void*);static void *handler_arg;
 static int platform_prepare(void){prepare_count++;return prepare_result;}
 uint32_t readl(const volatile void*p){return *(const volatile uint32_t*)p;}
-void writel(uint32_t v,volatile void*p){*(volatile uint32_t*)p=v;}
-uint64_t readq(const volatile void*p){return *(const volatile uint64_t*)p;}
+void writel(uint32_t v,volatile void*p){if(stuck_i2s&&p==&i2s[0x18/4]&&!v)return;*(volatile uint32_t*)p=v;}
+uint64_t readq(const volatile void*p){if(dead_regs)return ~0ULL;return *(const volatile uint64_t*)p;}
 void writeq(uint64_t v,volatile void*p){
+ if(!v&&((stuck_signal&&p==&dma[SG_CH_INT_SIGNAL/8])||(stuck_enable&&p==&dma[SG_CH_INT_EN/8])))return;
  if(p==&dma[SG_DMA_ENABLE/8]){
   if(v&(SG_DMA_MASK<<40)){if(!stuck_abort)dma[SG_DMA_ENABLE/8]&=~SG_DMA_MASK;return;}
   if(v&(SG_DMA_MASK<<8))dma[SG_DMA_ENABLE/8]=(dma[SG_DMA_ENABLE/8]&~SG_DMA_MASK)|(v&SG_DMA_MASK);
@@ -45,6 +49,7 @@ uint64_t clock_get_ticks(void){return ticks;}
 uint64_t clock_ticks_per_sec(void){return 1000000;}
 void mdelay(unsigned ms){
  ticks+=ms*1000;
+ if(stop_wait){stop_wait=0;assert(active_device&&((struct sg2002_audio*)active_device->drv_priv)->writer.value);assert(active_device->execution(active_device->execution_ctx)==-EBUSY&&!frees&&!unmaps&&handler);busy_stops++;}
  struct sg2002_audio*s=handler_arg;
  if(progress&&s&&s->ring.running){
   ticks+=20000;
@@ -53,33 +58,71 @@ void mdelay(unsigned ms){
  }
 }
 void *arch_device_map_mmio(uint64_t pa,size_t n,uint32_t flags){
- (void)n;(void)flags;if(pa==0x04130000)return i2s;if(pa==0x0300a000)return dac;if(pa==0x04330000)return dma;abort();
+ (void)n;(void)flags;if((fail_map==1&&pa==0x04130000)||(fail_map==2&&pa==0x0300a000)||(fail_map==3&&pa==0x04330000))return NULL;if(pa==0x04130000)return i2s;if(pa==0x0300a000)return dac;if(pa==0x04330000)return dma;abort();
 }
-void arch_device_unmap_mmio(void*p,size_t n){assert(p&&n);}
+void arch_device_unmap_mmio(void*p,size_t n){assert(p&&n&&!handler);unmaps++;}
 void *dma_alloc_coherent_aligned(device_t*d,size_t n,size_t a,uint64_t*pa){
- (void)d;assert(a==64);void*p=aligned_alloc(64,n);assert(p);memset(p,0,n);
- if(!allocations){payload=p;*pa=0x81000000;}else{descriptors=p;*pa=0x82000000;}
+ assert(d->managed&&d->execution&&a==64);if(++alloc_calls==(unsigned)fail_alloc)return NULL;void*p=aligned_alloc(64,n);assert(p);memset(p,0,n);
+ if(alloc_calls==1){payload=p;*pa=0x81000000;}else{descriptors=p;*pa=0x82000000;}
  allocations++;return p;
 }
 void dma_free_coherent_aligned(void*p,size_t n,uint64_t pa){
- assert(!(dma[SG_DMA_ENABLE/8]&SG_DMA_MASK));assert(n&&pa);frees++;free(p);
+ assert(!(dma[SG_DMA_ENABLE/8]&SG_DMA_MASK)&&!handler);assert(n&&pa);frees++;free(p);
 }
 void dma_sync_for_device(void*p,size_t n){assert(p&&n);syncs++;}
 void dma_sync_for_cpu(void*p,size_t n){assert(p&&n);}
 int dma_set_mask(device_t*d,uint64_t m){(void)d;return m==DMA_MASK_32BIT?0:-1;}
-int request_irq(uint32_t n,int(*fn)(int,void*),unsigned long flags,void*p){assert(n==29&&flags==IRQF_SHARED);handler=fn;handler_arg=p;return 0;}
-void free_irq(uint32_t n,void*p){assert(n==29&&p==handler_arg);handler_arg=NULL;handler=NULL;}
+int request_irq(uint32_t n,int(*fn)(int,void*),unsigned long flags,void*p){assert(n==29&&flags==IRQF_SHARED);if(fail_irq){if(fail_probe_abort){stuck_abort=1;dma[SG_DMA_ENABLE/8]|=SG_DMA_MASK;}return -EBUSY;}handler=fn;handler_arg=p;return 0;}
+void free_irq(uint32_t n,void*p){assert(n==29&&p==handler_arg&&!(dma[SG_DMA_ENABLE/8]&SG_DMA_MASK));assert(!dma[SG_CH_INT_SIGNAL/8]&&!dma[SG_CH_INT_EN/8]);handler_arg=NULL;handler=NULL;}
 void irq_enable(uint32_t n){assert(n==29);}
+int device_probe_use_remove(device_t*d){d->managed=1;return 0;}
+int device_add_execution_action(device_t*d,int(*stop)(void*),void(*release)(void*),void*p){assert(d->managed&&d->drv_priv==p&&!release);if(fail_action)return -ENOMEM;d->execution=stop;d->execution_ctx=p;return 0;}
+/* Core action/class-drain ordering is represented by this adapter; the real
+ * provider functions, including failed-probe cleanup, execute unchanged. */
+static int unbind(device_t*d){if(d->drv_priv&&d->execution){int r=d->execution(d->execution_ctx);if(r)return r;}int r=remove_device(d);if(!r){d->execution=NULL;d->execution_ctx=NULL;links=0;}return r;}
+static int bind(device_t*d){assert(!d->drv_priv);int r=probe(d);if(r&&d->drv_priv)(void)unbind(d);if(r&&!d->drv_priv)links=0;return r;}
+static void reset_model(void){assert(!handler);memset(i2s,0,sizeof(i2s));memset(dac,0,sizeof(dac));memset(dma,0,sizeof(dma));allocations=frees=syncs=prepare_count=tail_us=alloc_calls=unmaps=links=0;prepare_result=stuck_abort=dead_regs=stuck_signal=stuck_enable=stuck_i2s=fail_irq=fail_action=fail_map=fail_alloc=fail_probe_abort=stop_wait=busy_stops=0;progress=identity=1;active_device=NULL;ticks=0;payload=descriptors=NULL;}
+static void lifecycle_failures(device_t *dev){
+ uint8_t data[PCM_BYTES*2]={0};
+ for(unsigned fault=0;fault<5;fault++){
+  reset_model();assert(!bind(dev));struct sg2002_audio *saved=dev->drv_priv;
+  assert(audio_write(dev,data,8192)==8192);dma[SG_DMA_ENABLE/8]|=4; /* peer channel remains live */
+  if(fault==0)dead_regs=1;
+  if(fault==1)stuck_signal=1;
+  if(fault==2)stuck_enable=1;
+  if(fault==3)stuck_i2s=1;
+  if(fault==4)stuck_abort=1;
+  assert(unbind(dev)<0&&dev->drv_priv==saved&&!frees&&!unmaps&&handler&&links==7);
+  assert(audio_write(dev,data,4)==-ENODEV&&audio_stop(dev)==-ENODEV&&audio_poll(dev,POLLOUT)==POLLERR);
+  if(!dead_regs){unsigned consumer=saved->ring.consumer;dma[SG_CH_INT_STATUS/8]=1;assert(handler(29,saved)==1&&saved->ring.consumer==consumer);}
+  dead_regs=stuck_signal=stuck_enable=stuck_i2s=stuck_abort=0;
+  assert(!unbind(dev)&&!dev->drv_priv&&frees==2&&unmaps==3&&dma[SG_DMA_ENABLE/8]==4);
+ }
+ for(unsigned drain=0;drain<2;drain++){
+  reset_model();assert(!bind(dev));active_device=dev;progress=0;stop_wait=1;
+  if(drain){assert(audio_write(dev,data,8192)==8192);assert(audio_drain(dev)==-ENODEV);}
+  else assert(audio_write(dev,data,sizeof(data))==PCM_BYTES);
+  assert(busy_stops==1&&!frees&&!unmaps&&handler);assert(!unbind(dev)&&frees==2);
+ }
+ reset_model();assert(!bind(dev));struct sg2002_audio*s=dev->drv_priv;uint64_t f=spin_lock_irqsave(&s->lock);
+ assert(dev->execution(s)==-EBUSY&&!frees&&!unmaps&&handler);spin_unlock_irqrestore(&s->lock,f);assert(!unbind(dev)&&frees==2);
+ for(unsigned allocation=1;allocation<3;allocation++){reset_model();fail_alloc=allocation;assert(bind(dev)==-ENOMEM&&!dev->drv_priv&&allocations==frees);}
+ for(unsigned mapping=1;mapping<4;mapping++){reset_model();fail_map=mapping;assert(bind(dev)==-ENXIO&&!dev->drv_priv&&!allocations&&unmaps==2);}
+ reset_model();fail_action=1;assert(bind(dev)==-ENOMEM&&!dev->drv_priv&&!prepare_count&&!unmaps);
+ reset_model();fail_irq=fail_probe_abort=1;assert(bind(dev)==-EBUSY&&dev->drv_priv&&!frees&&!unmaps&&links==7&&!handler);stuck_abort=0;assert(!unbind(dev)&&frees==2&&unmaps==3);
+ reset_model();dma[SG_DMA_ENABLE/8]=SG_DMA_MASK|4;i2s[0x18/4]=1;dac[0]=3;
+ assert(bind(dev)==-EBUSY&&!dev->drv_priv&&!allocations&&dma[SG_DMA_ENABLE/8]==(SG_DMA_MASK|4)&&i2s[0x18/4]==1&&dac[0]==3);
+}
 static sg2002_audio_platform_t platform={.magic=SG2002_AUDIO_PLATFORM_MAGIC,.dma_irq=29,.i2s_pa=0x04130000,.dac_pa=0x0300a000,.dma_pa=0x04330000,.prepare=platform_prepare};
 int main(void){
  (void)registered_driver;
  device_t dev={.plat_data=&platform,.resource={0x04130000,0x04131fff}};
  for(unsigned i=0;i<7;i++){platform.provider_pa[i]=provider_pa[i];platform.provider_bytes[i]=0x100;providers[i].resource=(resource_t){provider_pa[i],provider_pa[i]+0xfff};}
- identity=-EINVAL;assert(probe(&dev)==-ENODEV&&!links&&!allocations);identity=1;
- providers[1].drv=(void*)1;assert(probe(&dev)==-EBUSY&&!allocations);providers[1].drv=NULL;links=0;
- prepare_result=-EOPNOTSUPP;assert(probe(&dev)==-EOPNOTSUPP&&!allocations&&!handler);
- assert(links==7);links=0; /* Core clears dependency links before retry. */
- prepare_result=0;assert(!probe(&dev)&&allocations==2&&prepare_count==2&&links==7);
+ identity=-EINVAL;assert(bind(&dev)==-ENODEV&&!links&&!allocations);identity=1;
+ providers[1].drv=(void*)1;assert(bind(&dev)==-EBUSY&&!allocations);providers[1].drv=NULL;links=0;
+ prepare_result=-EOPNOTSUPP;assert(bind(&dev)==-EOPNOTSUPP&&!allocations&&!handler);
+ assert(!links); /* Completed failed-probe cleanup released dependencies. */
+ prepare_result=0;assert(!bind(&dev)&&allocations==2&&prepare_count==2&&links==7);
  struct sg2002_audio*s=dev.drv_priv;assert(!audio_drain(&dev));
  assert(i2s[4/4]==0x000f200f&&i2s[8/4]==0x000f0f01&&i2s[0x10/4]==2);
  assert(i2s[0x64/4]==0x00100002);
@@ -115,10 +158,9 @@ int main(void){
  progress=1;assert(audio_write(&dev,data,PCM_PERIOD_BYTES*2)==PCM_PERIOD_BYTES*2);
  s->ring.consumer=7;s->ring.count=1;s->ring.ready[7]=1;s->ring.draining=1;
  dma[SG_CH_SAR/8]=s->data_pa+PCM_BYTES;dma[SG_CH_INT_STATUS/8]=1;assert(handler(29,s)==1&&!s->ring.error&&!s->ring.count);
- stuck_abort=1;assert(remove_device(&dev)==-ETIMEDOUT&&!frees&&!handler_arg&&!dev.drv_priv&&!handler);
- /* Detached engine owns quarantined buffers; release only in this model after hardware reset. */
- dma[SG_DMA_ENABLE/8]=0;free(payload);free(descriptors);
- assert(!remove_device(&dev));
+ stuck_abort=1;assert(unbind(&dev)==-ETIMEDOUT&&!frees&&handler_arg==s&&dev.drv_priv==s&&handler&&!unmaps);
+ stuck_abort=0;assert(!unbind(&dev)&&!dev.drv_priv&&frees==2&&unmaps==3);
+ assert(!unbind(&dev));lifecycle_failures(&dev);
  puts("SG2002 PCM/DMA model: PASS");return 0;
 }
 '''
@@ -128,11 +170,11 @@ class Sg2002AudioModel(unittest.TestCase):
             stage=Path(directory)
             stub=STUB.replace('void *plat_data,*drv_priv;', 'void *plat_data,*drv_priv,*drv;int user_owned;').replace('#define TEST_SUNXI_STUB','#define TEST_SUNXI_STUB\n#define DMA_MASK_32BIT 0xffffffffULL')
             (stage/'test_stub.h').write_text(stub)
-            headers=('drivers/audio/audio_core.h','drivers/core/driver_register.h','drivers/core/driver_hwapi.h','drivers/bus/platform_bus.h','core/types.h','core/errno.h','core/lock.h','core/sync.h','core/string.h','core/stdio.h','core/poll.h','mm/slab.h','firmware/device.h')
+            headers=('drivers/audio/audio_core.h','drivers/core/driver_register.h','drivers/core/driver_hwapi.h','drivers/core/driver_core.h','drivers/bus/platform_bus.h','core/types.h','core/errno.h','core/lock.h','core/sync.h','core/string.h','core/stdio.h','core/poll.h','mm/slab.h','firmware/device.h')
             for h in headers:
                 p=stage/h;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('#include "test_stub.h"\n')
             (stage/'model.c').write_text(HARNESS.replace('PRODUCTION',str(ROOT/'kernel/drivers/audio/sg2002_audio.c')))
-            build=subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-fsanitize=undefined','-fno-sanitize-recover=all','-I',str(stage),'-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel'),str(stage/'model.c'),'-o',str(stage/'model')],capture_output=True,text=True)
+            build=subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer','-no-pie','-fno-sanitize-recover=all','-I',str(stage),'-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel'),str(stage/'model.c'),'-o',str(stage/'model')],capture_output=True,text=True)
             self.assertEqual(build.returncode,0,build.stderr)
             result=subprocess.run([str(stage/'model')],capture_output=True,text=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)

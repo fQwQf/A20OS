@@ -6,6 +6,7 @@
 #include "drivers/audio/sg2002_audio.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_core.h"
 #include "drivers/bus/platform_bus.h"
 #include "core/errno.h"
 #include "firmware/device.h"
@@ -27,7 +28,11 @@ struct sg2002_audio {
     pcm_period_ring_t ring;
     size_t partial;
     int irq_live, quarantined, dma_owned;
+    int channel_owned; /* Binding claim survives an ordinary stream stop. */
+    int closing;
 };
+static int execution_stop(void *context);
+
 static uint32_t rd(volatile uint8_t *p, unsigned r) {
     return readl(p + r);
 }
@@ -56,11 +61,23 @@ static void idle_locked(struct sg2002_audio *s, int error) {
 }
 static int halt_dma(struct sg2002_audio *s) {
     /* Per-channel abort+WE, without disturbing other DMA channels. */
+    if (dr(s, SG_DMA_ENABLE) == ~0ULL) {
+        s->quarantined = 1;
+        return -ENODEV;
+    }
     dw(s, SG_CH_INT_SIGNAL, 0);
+    dw(s, SG_CH_INT_EN, 0);
+    if (dr(s, SG_CH_INT_SIGNAL) || dr(s, SG_CH_INT_EN)) {
+        s->quarantined = 1;
+        return -EIO;
+    }
     dw(s, SG_DMA_ENABLE,
        (SG_DMA_MASK << 8) | (SG_DMA_MASK << 32) | (SG_DMA_MASK << 40));
     for (unsigned i = 0; i < 1000; i++) {
-        if (!(dr(s, SG_DMA_ENABLE) & SG_DMA_MASK)) {
+        uint64_t enabled = dr(s, SG_DMA_ENABLE);
+        if (enabled == ~0ULL) { s->quarantined = 1; return -ENODEV; }
+        if (!(enabled & SG_DMA_MASK)) {
+            dw(s, SG_CH_INT_CLEAR, ~0ULL);
             s->dma_owned = 0;
             return 0;
         }
@@ -107,7 +124,7 @@ static int audio_irq(int irq, void *arg) {
         return 0;
     }
     dw(s, SG_CH_INT_CLEAR, status);
-    if (!s->ring.running) {
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) || !s->ring.running) {
         spin_unlock_irqrestore(&s->lock, flags);
         return 1;
     }
@@ -161,7 +178,7 @@ static int audio_stop(device_t *dev) {
     if (!s)
         return -ENODEV;
     mutex_lock(&s->writer);
-    int rc = reset_stream(s);
+    int rc = __atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) ? -ENODEV : reset_stream(s);
     mutex_unlock(&s->writer);
     return rc;
 }
@@ -186,6 +203,11 @@ static int audio_write(device_t *dev, const void *buffer, size_t length) {
     uint64_t begin = clock_get_ticks();
     while (written < length) {
         uint64_t flags = spin_lock_irqsave(&s->lock);
+        if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) {
+            spin_unlock_irqrestore(&s->lock, flags);
+            mutex_unlock(&s->writer);
+            return written ? (int)written : -ENODEV;
+        }
         if (clock_get_ticks() - begin > clock_ticks_per_sec()) {
             idle_locked(s, -ETIMEDOUT);
         }
@@ -248,6 +270,10 @@ static int audio_drain(device_t *dev) {
     if (!s)
         return -ENODEV;
     mutex_lock(&s->writer);
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&s->writer);
+        return -ENODEV;
+    }
     uint64_t flags = spin_lock_irqsave(&s->lock);
     if (!s->ring.count && !s->partial && !s->dma_owned && !s->ring.error) {
         spin_unlock_irqrestore(&s->lock, flags);
@@ -270,6 +296,10 @@ static int audio_drain(device_t *dev) {
     uint64_t begin = clock_get_ticks();
     int rc = 0;
     for (;;) {
+        if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) {
+            mutex_unlock(&s->writer);
+            return -ENODEV;
+        }
         flags = spin_lock_irqsave(&s->lock);
         int count = s->ring.count;
         rc = s->ring.error;
@@ -316,7 +346,8 @@ static int audio_poll(device_t *dev, short events) {
     if (!s)
         return POLLERR;
     uint64_t f = spin_lock_irqsave(&s->lock);
-    int r = (s->ring.error || s->quarantined)
+    int r = (s->ring.error || s->quarantined ||
+             __atomic_load_n(&s->closing, __ATOMIC_ACQUIRE))
                 ? POLLERR
                 : (s->ring.count < PCM_PERIODS ? events & POLLOUT : 0);
     spin_unlock_irqrestore(&s->lock, f);
@@ -358,15 +389,18 @@ static int probe(device_t *dev) {
         if (linked)
             return linked;
     }
-    int rc = p->prepare();
-    if (rc)
-        return rc; /* No DMA allocation before cache proof. */
+    int rc = device_probe_use_remove(dev);
+    if (rc) return rc;
     struct sg2002_audio *s = kcalloc(1, sizeof(*s));
-    if (!s)
-        return -ENOMEM;
+    if (!s) return -ENOMEM;
     s->platform = p;
     spin_init(&s->lock);
     mutex_init(&s->writer);
+    dev->drv_priv = s;
+    rc = device_add_execution_action(dev, execution_stop, NULL, s);
+    if (rc) return rc;
+    rc = p->prepare();
+    if (rc) return rc; /* Still no DMA allocation before cache proof. */
     s->i2s = arch_device_map_mmio(p->i2s_pa, 0x100, 0);
     s->dac = arch_device_map_mmio(p->dac_pa, 0x100, 0);
     s->dma = arch_device_map_mmio(p->dma_pa, 0x1000, 0);
@@ -378,6 +412,7 @@ static int probe(device_t *dev) {
         rc = -EBUSY;
         goto fail;
     }
+    s->channel_owned = 1;
     if (dma_set_mask(dev, DMA_MASK_32BIT)) {
         rc = -EIO;
         goto fail;
@@ -416,51 +451,50 @@ static int probe(device_t *dev) {
            "PA\n");
     return 0;
 fail:
-    if (s->lli)
-        dma_free_coherent_aligned(s->lli, SG_LLI_COUNT * sizeof(*s->lli),
-                                  s->lli_pa);
-    if (s->data)
-        dma_free_coherent_aligned(s->data, PCM_BYTES, s->data_pa);
-    if (s->dma)
-        arch_device_unmap_mmio((void *)s->dma, 0x1000);
-    if (s->dac)
-        arch_device_unmap_mmio((void *)s->dac, 0x100);
-    if (s->i2s)
-        arch_device_unmap_mmio((void *)s->i2s, 0x100);
-    kfree(s);
-    return rc;
+    return rc; /* Core runs fallible stop before releasing a failed probe. */
 }
-static int remove_device(device_t *dev) {
-    struct sg2002_audio *s = dev->drv_priv;
-    if (!s)
-        return 0;
-    mutex_lock(&s->writer);
-    uint64_t flags = spin_lock_irqsave(&s->lock);
-    idle_locked(s, 0);
-    dw(s, SG_CH_INT_SIGNAL, 0);
+
+static int execution_stop(void *context) {
+    struct sg2002_audio *s = context;
+    __atomic_store_n(&s->closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&s->writer)) return -EBUSY;
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&s->lock, &flags)) {
+        mutex_unlock(&s->writer);
+        return -EBUSY;
+    }
+    int rc = 0;
+    if (s->channel_owned) {
+        idle_locked(s, 0);
+        update(s->dac, 0, 3, 0);
+        if ((rd(s->i2s, 0x18) & 1) || (rd(s->dac, 0) & 3) ||
+            (rd(s->dac, 0x28) & (3U << 16)) != (3U << 16)) rc = -EIO;
+    }
     spin_unlock_irqrestore(&s->lock, flags);
-    /* Removal must detach the callback even if the DMA engine is broken.
-     * The core cannot retain a bound device on a remove return value. */
-    if (s->irq_live) {
+    /* An idle stream still owns channel 7 until the binding is removed. */
+    if (!rc && s->channel_owned) rc = halt_dma(s);
+    if (!rc && s->irq_live) {
         free_irq(s->platform->dma_irq, s);
         s->irq_live = 0;
     }
-    int rc = s->dma_owned ? halt_dma(s) : 0;
-    if (!rc) {
-        dma_free_coherent_aligned(s->lli, SG_LLI_COUNT * sizeof(*s->lli),
-                                  s->lli_pa);
-        dma_free_coherent_aligned(s->data, PCM_BYTES, s->data_pa);
-    } else {
-        printf(
-            "[AUDIO] SG2002 DMA stop timed out; payload and LLI quarantined\n");
-    }
-    arch_device_unmap_mmio((void *)s->dma, 0x1000);
-    arch_device_unmap_mmio((void *)s->dac, 0x100);
-    arch_device_unmap_mmio((void *)s->i2s, 0x100);
     mutex_unlock(&s->writer);
+    return rc;
+}
+
+static int remove_device(device_t *dev) {
+    struct sg2002_audio *s = dev->drv_priv;
+    if (!s) return 0;
+    int rc = execution_stop(s);
+    if (rc) return rc;
+    if (s->lli)
+        dma_free_coherent_aligned(s->lli, SG_LLI_COUNT * sizeof(*s->lli), s->lli_pa);
+    if (s->data) dma_free_coherent_aligned(s->data, PCM_BYTES, s->data_pa);
+    if (s->dma) arch_device_unmap_mmio((void *)s->dma, 0x1000);
+    if (s->dac) arch_device_unmap_mmio((void *)s->dac, 0x100);
+    if (s->i2s) arch_device_unmap_mmio((void *)s->i2s, 0x100);
     dev->drv_priv = NULL;
     kfree(s);
-    return rc;
+    return 0;
 }
 static const firmware_device_id_t ids[] = {{.id = "cvitek,cv1835-i2s"}, {0}};
 static const audio_dev_ops_t ops = {
