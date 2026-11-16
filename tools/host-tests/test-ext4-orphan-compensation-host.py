@@ -47,6 +47,8 @@ def main():
                        help='check failed link count/publication and exhausted count rollback')
     modes.add_argument('--directory-grow', action='store_true',
                        help='check directory mapping and parent inode publication rollback')
+    modes.add_argument('--create-rollback', action='store_true',
+                       help='check file/symlink/mkdir initialization and publication rollback')
     parser.add_argument('--c-orphan', action='store_true',
                         help='use the C reference orphan controller')
     args = parser.parse_args()
@@ -66,7 +68,8 @@ def main():
             raise RuntimeError('Rust backend build failed')
         sources = ['kernel/fs/diskfs/' + n + '.c' for n in
                    ['ext4', 'ext4_namei', 'ext4_file', 'ext4_journal', 'ext4_csum', 'ext4_sync', 'ext4_xattr']]
-        fixture = ('tools/tests/ext4_directory_grow/fixture.c' if args.directory_grow else
+        fixture = ('tools/tests/ext4_create_rollback/fixture.c' if args.create_rollback else
+                   'tools/tests/ext4_directory_grow/fixture.c' if args.directory_grow else
                    'tools/tests/ext4_hardlink_create/fixture.c' if args.hardlink_create else
                    'tools/tests/ext4_hardlink_unlink/fixture.c' if args.hardlink_unlink else
                    'tools/tests/ext4_unlink_rollback/fixture.c' if args.unlink_rollback else
@@ -161,6 +164,7 @@ def main():
         report['hardlink_unlink'] = args.hardlink_unlink
         report['hardlink_create'] = args.hardlink_create
         report['directory_grow'] = args.directory_grow
+        report['create_rollback'] = args.create_rollback
         report['passed'] = True
     except Exception as error:
         report['error'] = str(error)
