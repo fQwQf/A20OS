@@ -34,8 +34,10 @@ static inline void spin_unlock_irqrestore(spinlock_t *p,uint64_t f){(void)f;asse
 static inline void mutex_init(mutex_t *p){p->value=0;}
 static inline void mutex_lock(mutex_t *p){assert(!p->value);p->value=1;}
 static inline void mutex_unlock(mutex_t *p){assert(p->value);p->value=0;}
+static inline int mutex_trylock(mutex_t *p){if(p->value)return 0;p->value=1;return 1;}
+static inline int spin_trylock_irqsave(spinlock_t*p,uint64_t*f){if(p->value)return 0;p->value=1;*f=0;return 1;}
 typedef struct {uint64_t start,end;} resource_t;
-typedef struct device {void *plat_data,*drv_priv;resource_t resource;int irq;int identity;int firmware_node;} device_t;
+typedef struct device {void *plat_data,*drv_priv;resource_t resource;int irq;int identity;int firmware_node;int managed;int(*execution)(void*);void*execution_ctx;} device_t;
 typedef struct {const char *id;} firmware_device_id_t;
 typedef struct {const char *name;void *bus;const firmware_device_id_t *firmware_ids;int(*probe)(device_t*);int(*remove)(device_t*);int class_type;const void *class_ops;int irq_optional;} driver_t;
 static int platform_bus;
@@ -63,6 +65,8 @@ device_t *device_find_get_by_mmio(uint64_t pa);
 int device_add_dependency(device_t *a,device_t *b);
 void device_put(device_t *d);
 resource_t *device_get_resource(device_t *d,int t,int index);
+int device_probe_use_remove(device_t *d);
+int device_add_execution_action(device_t *d,int(*stop)(void*),void(*release)(void*),void *p);
 int platform_device_irq(device_t *d);
 int firmware_device_irq(device_t *d,size_t index);
 int fw_node_match_id(const int *n,const char *id);
@@ -79,6 +83,8 @@ static uint64_t ticks,last_dma;
 static int (*handler)(int,void*);
 static void *handler_arg;
 static int dma_frees,stuck_stop,power_on,power_off,variant,fail_power,fail_irq;
+static int fail_power_off,fail_action,fail_probe_stop,dead_dma,stuck_mask,stuck_tx,unmaps,stop_wait,busy_stops;
+static device_t *active_device;
 static device_t providers[5];
 static const uint64_t provider_pas[]={0x400000,0x300000,0x200000,0x500000,0x600000};
 static int provider_refs[5],missing_provider,dependency_fail,prepare_calls;
@@ -86,6 +92,8 @@ static unsigned link_mask;
 static uint8_t *dma_data;
 static struct sunxi_lli *dma_lli;
 uint32_t readl(const volatile void *p){
+ if(dead_dma&&(uintptr_t)p>=(uintptr_t)dma_mmio&&(uintptr_t)p<(uintptr_t)dma_mmio+sizeof(dma_mmio))return UINT32_MAX;
+ if(p==&dma_mmio[DMA_EN/4]&&stuck_stop)return 1;
  if((variant==SUNXI_AUDIO_A64&&p==&dai_mmio[0x18/4]))return 128U<<16;
  if((variant==SUNXI_AUDIO_V3S&&p==&dai_mmio[0x08/4]))return (128U<<8)|(dai_mmio[0x08/4]&6);
 
@@ -93,6 +101,8 @@ uint32_t readl(const volatile void *p){
  return *(const volatile uint32_t*)p;
 }
 void writel(uint32_t v,volatile void *p){
+ if(p==&dma_mmio[0]&&stuck_mask&&!(v&DMA_IRQ_MASK))return;
+ if(stuck_tx&&((variant==SUNXI_AUDIO_A64&&p==&dai_mmio[0])||(variant==SUNXI_AUDIO_V3S&&p==&dai_mmio[1])))return;
  if((variant==SUNXI_AUDIO_A64&&p==&dai_mmio[0x0c/4])||(variant==SUNXI_AUDIO_V3S&&p==&dai_mmio[0x08/4])){*(volatile uint32_t*)p&=~v;return;}
  if(p==&analog_port){analog_port=v;analog_selected=(v>>16)&31;if(v&BIT(24))analog_regs[analog_selected]=(v>>8)&255;return;}
  if(p==&dma_mmio[0x10/4]){dma_mmio[0x10/4]&=~v;return;}
@@ -109,6 +119,7 @@ uint64_t clock_ticks_per_sec(void){return 1000000;}
 void udelay(unsigned us){ticks+=us;}
 void mdelay(unsigned ms){
  for(unsigned j=0;j<ms;j++){
+  if(stop_wait){stop_wait=0;assert(active_device&&((struct sunxi_audio*)active_device->drv_priv)->writer.value);assert(active_device->execution(active_device->execution_ctx)==-EBUSY&&!dma_frees&&!unmaps&&handler);busy_stops++;}
   ticks+=1000;
   if(dma_mmio[DMA_EN/4] && handler && ticks-last_dma>=21334){
    unsigned next=((dma_mmio[DMA_SRC/4]-0x44000000U)/4096+1)%PCM_PERIODS;
@@ -120,31 +131,34 @@ void mdelay(unsigned ms){
 void *arch_device_map_mmio(uint64_t pa,size_t n,uint32_t f){(void)n;(void)f;
  if(pa==0x100000)return dai_mmio;if(pa==0x200000)return digital_mmio;
  if(pa==0x300000)return &analog_port;if(pa==0x400000)return dma_mmio;return NULL;}
-void arch_device_unmap_mmio(void *p,size_t n){(void)p;(void)n;}
-void *dma_alloc_coherent_aligned(device_t *d,size_t n,size_t a,uint64_t *pa){(void)d;void *p=aligned_alloc(a,n);assert(p);if(n==4096){*pa=0x45000000;dma_lli=p;}else{*pa=0x44000000;dma_data=p;}return p;}
-void dma_free_coherent_aligned(void *p,size_t n,uint64_t pa){(void)n;(void)pa;dma_frees++;free(p);}
+void arch_device_unmap_mmio(void *p,size_t n){(void)p;(void)n;assert(!handler);unmaps++;}
+void *dma_alloc_coherent_aligned(device_t *d,size_t n,size_t a,uint64_t *pa){assert(d->managed&&d->execution);void *p=aligned_alloc(a,n);assert(p);if(n==4096){*pa=0x45000000;dma_lli=p;}else{*pa=0x44000000;dma_data=p;}return p;}
+void dma_free_coherent_aligned(void *p,size_t n,uint64_t pa){(void)n;(void)pa;assert(!handler&&!dma_mmio[DMA_EN/4]);dma_frees++;free(p);}
 void dma_sync_for_device(void *p,size_t n){(void)p;(void)n;}
 int dma_set_mask(device_t *d,uint64_t mask){(void)d;assert(mask==0xffffffffULL);return 0;}
-int request_irq(uint32_t n,int(*fn)(int,void*),unsigned long f,void *p){assert(n==82&&f==IRQF_SHARED);if(fail_irq)return -EBUSY;handler=fn;handler_arg=p;return 0;}
+int request_irq(uint32_t n,int(*fn)(int,void*),unsigned long f,void *p){assert(n==82&&f==IRQF_SHARED);if(fail_irq){if(fail_probe_stop)stuck_stop=1;return -EBUSY;}handler=fn;handler_arg=p;return 0;}
 void free_irq(uint32_t n,void *p){assert(n==82&&p==handler_arg);handler=NULL;handler_arg=NULL;}
 void irq_enable(uint32_t n){assert(n==82);}
 device_t *device_find_get_by_mmio(uint64_t pa){for(unsigned i=0;i<5;i++)if(pa==provider_pas[i]&&missing_provider!=(int)i+1){provider_refs[i]++;return &providers[i];}return NULL;}
 int device_add_dependency(device_t *a,device_t *b){assert(a&&b);unsigned i=(unsigned)(b-providers);assert(i<5);if(dependency_fail==(int)i+1)return -ENOMEM;if(!(link_mask&BIT(i))){link_mask|=BIT(i);provider_refs[i]++;}return 0;}
 void device_put(device_t *d){unsigned i=(unsigned)(d-providers);assert(i<5&&provider_refs[i]>0);provider_refs[i]--;}
+int device_probe_use_remove(device_t*d){d->managed=1;return 0;}
+int device_add_execution_action(device_t*d,int(*stop)(void*),void(*release)(void*),void*p){assert(d->managed&&d->drv_priv==p&&!release);if(fail_action)return -ENOMEM;d->execution=stop;d->execution_ctx=p;return 0;}
 static void release_model_dependencies(void){for(unsigned i=0;i<5;i++)if(link_mask&BIT(i))device_put(&providers[i]);link_mask=0;}
-/* Mirror the core's probe-attempt ownership boundary; the production probe
- * itself is compiled below and must reconstruct links on every retry. */
-static int probe_attempt(device_t*d){release_model_dependencies();int r=audio_probe(d);if(r&&r!=-EPROBE_DEFER)release_model_dependencies();return r;}
-static void remove_attempt(device_t*d){assert(audio_remove(d)==0);release_model_dependencies();for(unsigned i=0;i<5;i++)assert(provider_refs[i]==0);}
+/* Explicit core ordering adapter, not a second implementation of the driver. */
+static int unbind(device_t*d){if(d->drv_priv&&d->execution){int r=d->execution(d->execution_ctx);if(r)return r;}int r=audio_remove(d);if(!r){d->execution=NULL;d->execution_ctx=NULL;release_model_dependencies();}return r;}
+static int bind(device_t*d){assert(!d->drv_priv);int r=audio_probe(d);if(r&&d->drv_priv)(void)unbind(d);return r;}
+static int probe_attempt(device_t*d){release_model_dependencies();int r=bind(d);if(r&&r!=-EPROBE_DEFER&&!d->drv_priv)release_model_dependencies();return r;}
+static void remove_attempt(device_t*d){assert(unbind(d)==0);for(unsigned i=0;i<5;i++)assert(provider_refs[i]==0);}
 resource_t *device_get_resource(device_t *d,int t,int index){assert(t==RES_MMIO&&index==0);return &d->resource;}
 static int prepare(void){prepare_calls++;return 0;}
-static int power(int on){if(on){power_on++;if(fail_power)return -EIO;}else power_off++;return 0;}
-static void clear_model(void){memset(dai_mmio,0,sizeof(dai_mmio));memset(digital_mmio,0,sizeof(digital_mmio));memset(dma_mmio,0,sizeof(dma_mmio));memset(analog_regs,0,sizeof(analog_regs));ticks=0;last_dma=0;dma_frees=0;stuck_stop=0;power_on=power_off=fail_power=fail_irq=0;handler=NULL;memset(provider_refs,0,sizeof(provider_refs));link_mask=missing_provider=dependency_fail=prepare_calls=0;}
+static int power(int on){if(on){power_on++;if(fail_power)return -EIO;}else{power_off++;if(fail_power_off)return -EIO;}return 0;}
+static void clear_model(void){memset(dai_mmio,0,sizeof(dai_mmio));memset(digital_mmio,0,sizeof(digital_mmio));memset(dma_mmio,0,sizeof(dma_mmio));memset(analog_regs,0,sizeof(analog_regs));ticks=0;last_dma=0;dma_frees=0;stuck_stop=0;power_on=power_off=fail_power=fail_irq=0;handler=NULL;memset(provider_refs,0,sizeof(provider_refs));link_mask=missing_provider=dependency_fail=prepare_calls=0;fail_power_off=fail_action=fail_probe_stop=dead_dma=stuck_mask=stuck_tx=unmaps=stop_wait=busy_stops=0;active_device=NULL;}
 static sunxi_audio_platform_t platform(unsigned variant){return (sunxi_audio_platform_t){.magic=SUNXI_AUDIO_PLATFORM_MAGIC,.variant=variant,.digital_pa=variant==SUNXI_AUDIO_A64?0x200000:0,.analog_pa=0x300000,.dma_pa=0x400000,.ccu_pa=0x500000,.rsb_pa=variant==SUNXI_AUDIO_A64?0x600000:0,.dma_irq=82,.prepare=prepare,.power=power};}
 static void valid_playback(unsigned v){
  variant=v;
  clear_model();sunxi_audio_platform_t p=platform(variant);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};
- assert(registered_driver==&sunxi_audio_driver);assert(audio_probe(&d)==0);assert(power_on==1);
+ assert(registered_driver==&sunxi_audio_driver);assert(bind(&d)==0);assert(power_on==1);
  struct sunxi_audio *s=d.drv_priv;assert(s&&!s->ring.running);
  assert((analog_regs[variant==SUNXI_AUDIO_A64?0x0a:3]&12)==0); /* muted until valid PCM */
  assert(dma_lli[0].config==SUNXI_DMA_CFG&&dma_lli[0].destination==0x100020);
@@ -163,15 +177,16 @@ static void valid_playback(unsigned v){
  assert(s->ring.error==-EPIPE);assert(audio_poll(&d,POLLOUT)==POLLERR);assert(audio_write(&d,input,4)==-EPIPE);
  assert(audio_stop(&d)==0&&s->ring.error==0);assert(audio_write(&d,input,4)==4);assert(audio_drain(&d)==0);
  a20_audio_format_t bad={44100,2,A20_AUDIO_FORMAT_S16_LE};assert(audio_format(&d,&bad)==-EINVAL);
- assert(audio_remove(&d)==0&&d.drv_priv==NULL&&dma_frees==2&&power_off==1);
+ assert(unbind(&d)==0&&d.drv_priv==NULL&&dma_frees==2&&power_off==1);
 }
 static void busy_and_quarantine(void){
  variant=SUNXI_AUDIO_A64;clear_model();sunxi_audio_platform_t p=platform(SUNXI_AUDIO_A64);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};
- dma_mmio[DMA_EN/4]=1;dma_mmio[0x00/4]=4;assert(audio_probe(&d)==-EBUSY);assert(dma_mmio[DMA_EN/4]==1&&dma_mmio[0x00/4]==4&&dma_frees==0);
- clear_model();assert(audio_probe(&d)==0);uint8_t input[8192]={0};assert(audio_write(&d,input,sizeof(input))==sizeof(input));
+ dma_mmio[DMA_EN/4]=1;dma_mmio[0x00/4]=4;assert(bind(&d)==-EBUSY);assert(dma_mmio[DMA_EN/4]==1&&dma_mmio[0x00/4]==4&&dma_frees==0);
+ clear_model();assert(bind(&d)==0);uint8_t input[8192]={0};assert(audio_write(&d,input,sizeof(input))==sizeof(input));
  stuck_stop=1;assert(audio_stop(&d)==-ETIMEDOUT);assert(((struct sunxi_audio*)d.drv_priv)->quarantined);assert(audio_write(&d,input,4)==-EIO);
- assert(audio_remove(&d)==0&&dma_frees==0);/* DMA retains both buffers. */
- free(dma_data);free(dma_lli);/* Test-only hardware reset after quarantine check. */
+ struct sunxi_audio *saved=d.drv_priv;assert(unbind(&d)==-ETIMEDOUT&&d.drv_priv==saved&&!dma_frees&&!unmaps&&handler);
+ assert(audio_write(&d,input,4)==-ENODEV&&audio_poll(&d,POLLOUT)==POLLERR);
+ stuck_stop=0;assert(unbind(&d)==0&&!d.drv_priv&&dma_frees==2&&unmaps==4);
 }
 static void lifecycle(void){
  variant=SUNXI_AUDIO_A64;clear_model();sunxi_audio_platform_t p=platform(variant);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};
@@ -185,15 +200,36 @@ static void lifecycle(void){
 }
 static void failures(void){
  variant=SUNXI_AUDIO_A64;clear_model();sunxi_audio_platform_t p=platform(variant);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};
- fail_power=1;assert(audio_probe(&d)==-EIO&&d.drv_priv==NULL&&dma_frees==2&&power_off==1);
- clear_model();fail_irq=1;assert(audio_probe(&d)==-EBUSY&&d.drv_priv==NULL&&dma_frees==2&&power_off==1);
- clear_model();assert(audio_probe(&d)==0);uint8_t input[16384]={0};assert(audio_write(&d,input,sizeof(input))==sizeof(input));
+ fail_power=1;assert(bind(&d)==-EIO&&d.drv_priv==NULL&&dma_frees==2&&power_off==1);
+ clear_model();fail_irq=1;assert(bind(&d)==-EBUSY&&d.drv_priv==NULL&&dma_frees==2&&power_off==1);
+ clear_model();assert(bind(&d)==0);uint8_t input[16384]={0};assert(audio_write(&d,input,sizeof(input))==sizeof(input));
  ticks+=50000;dma_mmio[DMA_SRC/4]=0x44002000;dma_mmio[0x10/4]=DMA_IRQ_PACKAGE;handler(82,handler_arg);
- assert(((struct sunxi_audio*)d.drv_priv)->ring.error==-EPIPE&&dma_mmio[DMA_EN/4]==0);assert(audio_remove(&d)==0&&dma_frees==2);
- clear_model();assert(audio_probe(&d)==0);assert(audio_write(&d,input,sizeof(input))==sizeof(input));mdelay(22);
- dai_mmio[0x0c/4]|=BIT(6);mdelay(22);assert(((struct sunxi_audio*)d.drv_priv)->ring.error==-EPIPE);assert(audio_remove(&d)==0&&dma_frees==2);
+ assert(((struct sunxi_audio*)d.drv_priv)->ring.error==-EPIPE&&dma_mmio[DMA_EN/4]==0);assert(unbind(&d)==0&&dma_frees==2);
+ clear_model();assert(bind(&d)==0);assert(audio_write(&d,input,sizeof(input))==sizeof(input));mdelay(22);
+ dai_mmio[0x0c/4]|=BIT(6);mdelay(22);assert(((struct sunxi_audio*)d.drv_priv)->ring.error==-EPIPE);assert(unbind(&d)==0&&dma_frees==2);
 }
-int main(void){lifecycle();failures();valid_playback(SUNXI_AUDIO_A64);valid_playback(SUNXI_AUDIO_V3S);busy_and_quarantine();return 0;}
+static void stop_failures_and_cancellation(void){
+ for(unsigned fault=0;fault<4;fault++){
+  variant=SUNXI_AUDIO_A64;clear_model();sunxi_audio_platform_t p=platform(variant);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};
+  assert(bind(&d)==0);struct sunxi_audio *saved=d.drv_priv;uint8_t data[8192]={0};assert(audio_write(&d,data,sizeof(data))==sizeof(data));
+  if(fault==0)dead_dma=1;if(fault==1)stuck_mask=1;if(fault==2)stuck_tx=1;if(fault==3)fail_power_off=1;
+  assert(unbind(&d)<0&&d.drv_priv==saved&&!dma_frees&&!unmaps&&handler);
+  if(fault==3)assert(!dma_mmio[DMA_EN/4]&&saved->powered); /* power failure retains all owners too */
+  dead_dma=stuck_mask=stuck_tx=fail_power_off=0;assert(unbind(&d)==0&&!d.drv_priv&&dma_frees==2&&unmaps==4);
+ }
+ for(unsigned drain=0;drain<2;drain++){
+  variant=SUNXI_AUDIO_A64;clear_model();sunxi_audio_platform_t p=platform(variant);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};assert(bind(&d)==0);active_device=&d;
+  uint8_t data[PCM_BYTES+4096]={0};stop_wait=1;
+  if(drain){assert(audio_write(&d,data,8192)==8192);assert(audio_drain(&d)==-ENODEV);}
+  else{assert(audio_write(&d,data,sizeof(data))==PCM_BYTES);}
+  assert(busy_stops==1&&!dma_frees&&!unmaps&&handler);assert(unbind(&d)==0&&dma_frees==2);
+ }
+ variant=SUNXI_AUDIO_A64;clear_model();sunxi_audio_platform_t p=platform(variant);device_t d={.plat_data=&p,.resource={0x100000,0x1001ff}};
+ fail_irq=fail_probe_stop=1;assert(bind(&d)==-EBUSY&&d.drv_priv&&!dma_frees&&!unmaps&&link_mask==31);
+ stuck_stop=fail_irq=0;assert(unbind(&d)==0&&dma_frees==2&&link_mask==0);
+ clear_model();fail_action=1;assert(bind(&d)==-ENOMEM&&!d.drv_priv&&!prepare_calls&&!unmaps);
+}
+int main(void){lifecycle();failures();valid_playback(SUNXI_AUDIO_A64);valid_playback(SUNXI_AUDIO_V3S);busy_and_quarantine();stop_failures_and_cancellation();return 0;}
 '''
 
 GLUE_HARNESS = r'''

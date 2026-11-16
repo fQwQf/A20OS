@@ -10,6 +10,7 @@
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_core.h"
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/sync.h"
@@ -41,8 +42,11 @@ struct sunxi_audio {
     pcm_period_ring_t ring;
     size_t partial;
     int irq_live, powered, quarantined, dma_owned, seen_period;
+    int closing;
     uint64_t last_completion;
 };
+static int sunxi_execution_stop(void *context);
+
 static uint32_t reg_read(volatile uint8_t *base, unsigned reg) {
     return readl(base + reg);
 }
@@ -87,7 +91,9 @@ static void mute(struct sunxi_audio *s, int muted) {
 static int dma_stop(struct sunxi_audio *s) {
     reg_write(s->dma, DMA_EN, 0);
     for (unsigned i = 0; i < 1000; i++) {
-        if (!(reg_read(s->dma, DMA_EN) & 1)) return 0;
+        uint32_t enabled = reg_read(s->dma, DMA_EN);
+        if (enabled == 0xffffffffU) { s->quarantined = 1; return -ENODEV; }
+        if (!(enabled & 1)) return 0;
         udelay(10);
     }
     s->quarantined = 1;
@@ -136,7 +142,8 @@ static int sunxi_irq(int irq, void *opaque) {
         return 0;
     }
     reg_write(s->dma, 0x10, pending);
-    if (s->ring.running && (pending & DMA_IRQ_PACKAGE)) {
+    if (!__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) &&
+        s->ring.running && (pending & DMA_IRQ_PACKAGE)) {
         uint32_t source = reg_read(s->dma, DMA_SRC);
         unsigned expected = (s->ring.consumer + 1) % PCM_PERIODS;
         uint64_t delta = (uint64_t)source - s->data_pa;
@@ -240,12 +247,14 @@ static int audio_write(device_t *dev, const void *buffer, size_t count) {
     if (count % 4) return -EINVAL;
     if (count > 0x7ffffffcU) return -EOVERFLOW;
     mutex_lock(&s->writer);
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
     if (s->quarantined) { mutex_unlock(&s->writer); return -EIO; }
     if (s->ring.error) { int error = s->ring.error; mutex_unlock(&s->writer); return error; }
     size_t done = 0;
     unsigned waiting = 0;
     while (done < count) {
         uint64_t flags = spin_lock_irqsave(&s->lock);
+        if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) s->ring.error = -ENODEV;
         int error = s->ring.error;
         if (error) { spin_unlock_irqrestore(&s->lock, flags); break; }
         if (s->ring.count == PCM_PERIODS) {
@@ -285,7 +294,7 @@ static int audio_stop(device_t *dev) {
     struct sunxi_audio *s = dev->drv_priv;
     if (!s) return -ENODEV;
     mutex_lock(&s->writer);
-    int result = reset_stream(s);
+    int result = __atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) ? -ENODEV : reset_stream(s);
     mutex_unlock(&s->writer);
     return result;
 }
@@ -293,6 +302,7 @@ static int audio_drain(device_t *dev) {
     struct sunxi_audio *s = dev->drv_priv;
     if (!s) return -ENODEV;
     mutex_lock(&s->writer);
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
     uint64_t flags = spin_lock_irqsave(&s->lock);
     s->ring.draining = 1;
     if (s->partial && !s->ring.error) {
@@ -305,7 +315,11 @@ static int audio_drain(device_t *dev) {
     if (!s->ring.running && s->ring.count && !s->ring.error) { mute(s, 0); dma_start_locked(s); }
     spin_unlock_irqrestore(&s->lock, flags);
     unsigned ms;
-    for (ms = 0; ms < 1500 && s->ring.running && !s->ring.error; ms++) mdelay(1);
+    for (ms = 0; ms < 1500 && s->ring.running && !s->ring.error; ms++) {
+        if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
+        mdelay(1);
+    }
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
     int result = s->ring.error;
     if (ms == 1500) result = -ETIMEDOUT;
     int stopped = dma_stop(s);
@@ -315,7 +329,10 @@ static int audio_drain(device_t *dev) {
      * allow the final stereo frame to leave the serializer (42us at48k). */
     if (!result) {
         unsigned wait;
-        for (wait = 0; wait < 2000 && fifo_space(s) != 128; wait++) udelay(10);
+        for (wait = 0; wait < 2000 && fifo_space(s) != 128; wait++) {
+            if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
+            udelay(10);
+        }
         if (wait == 2000) result = -ETIMEDOUT;
         else udelay(50);
     }
@@ -333,24 +350,44 @@ static int audio_poll(device_t *dev, short events) {
     struct sunxi_audio *s = dev->drv_priv;
     if (!s) return POLLERR;
     uint64_t flags = spin_lock_irqsave(&s->lock);
-    int result = s->ring.error || s->quarantined ? POLLERR :
+    int result = s->ring.error || s->quarantined ||
+        __atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) ? POLLERR :
         (s->ring.count < PCM_PERIODS ? events & POLLOUT : 0);
     spin_unlock_irqrestore(&s->lock, flags);
     return result;
 }
-static void destroy(struct sunxi_audio *s) {
-    if (!s) return;
-    if (s->dma && s->dma_owned) {
-        reg_update(s->dma, 0x00, DMA_IRQ_MASK, 0);
-        if (s->data && dma_stop(s) < 0)
-            printf("[SUNXI-AUDIO] DMA failed to stop; quarantining coherent buffers\n");
+/* Execution stop precedes class drain. A failed stop keeps the complete
+ * context, mappings, IRQ and coherent allocations attached for retry. */
+static int sunxi_execution_stop(void *context) {
+    struct sunxi_audio *s = context;
+    __atomic_store_n(&s->closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&s->writer)) return -EBUSY;
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&s->lock, &flags)) { mutex_unlock(&s->writer); return -EBUSY; }
+    int result = 0;
+    if (s->dma_owned) {
+        uint32_t irq_mask = reg_read(s->dma, 0x00);
+        if (irq_mask == 0xffffffffU) result = -ENODEV;
+        else {
+            reg_write(s->dma, 0x00, irq_mask & ~DMA_IRQ_MASK);
+            if (reg_read(s->dma, 0x00) & DMA_IRQ_MASK) result = -EIO;
+        }
+        if (!result) {
+            transmitter(s, 0);
+            unsigned ctl = s->platform->variant == SUNXI_AUDIO_A64 ? 0x00 : 0x04;
+            unsigned drq = s->platform->variant == SUNXI_AUDIO_A64 ? 0x1c : 0x00;
+            uint32_t ctl_mask = s->platform->variant == SUNXI_AUDIO_A64 ? BIT(2) : BIT(4);
+            uint32_t drq_mask = s->platform->variant == SUNXI_AUDIO_A64 ? BIT(7) : BIT(31);
+            if ((reg_read(s->dai, ctl) & ctl_mask) || (reg_read(s->dai, drq) & drq_mask)) result = -EIO;
+        }
+        s->ring.running = 0;
     }
-    if (s->irq_live) free_irq(s->platform->dma_irq, s);
-    if (!s->quarantined) {
-        if (s->lli) dma_free_coherent_aligned(s->lli, 4096, s->lli_pa);
-        if (s->data) dma_free_coherent_aligned(s->data, PCM_BYTES, s->data_pa);
+    spin_unlock_irqrestore(&s->lock, flags);
+    if (!result && s->dma_owned) {
+        result = dma_stop(s); /* Bounded wait outside the IRQ spinlock. */
+        if (!result) reg_write(s->dma, 0x10, DMA_IRQ_MASK);
     }
-    if (s->powered) {
+    if (!result && s->powered) {
         mute(s, 1);
         if (s->platform->variant == SUNXI_AUDIO_A64) {
             analog_update(s, 0x00, BIT(7) | BIT(6), 0);
@@ -360,8 +397,21 @@ static void destroy(struct sunxi_audio *s) {
             analog_update(s, 0x07, BIT(7), 0);
             analog_update(s, 0x03, BIT(7) | BIT(6), 0);
         }
-        s->platform->power(0);
+        result = s->platform->power(0);
+        if (!result) s->powered = 0;
     }
+    if (!result && s->irq_live) {
+        free_irq(s->platform->dma_irq, s);
+        s->irq_live = 0;
+    }
+    mutex_unlock(&s->writer);
+    return result;
+}
+
+static void destroy(struct sunxi_audio *s) {
+    if (!s) return;
+    if (s->lli) dma_free_coherent_aligned(s->lli, 4096, s->lli_pa);
+    if (s->data) dma_free_coherent_aligned(s->data, PCM_BYTES, s->data_pa);
     if (s->dai) arch_device_unmap_mmio((void *)s->dai, 0x200);
     if (s->digital) arch_device_unmap_mmio((void *)s->digital, 0x600);
     if (s->analog) arch_device_unmap_mmio((void *)s->analog, 4);
@@ -386,13 +436,18 @@ static int audio_probe(device_t *dev) {
         device_put(provider);
         if (linked < 0) return linked;
     }
+    int managed = device_probe_use_remove(dev);
+    if (managed) return managed;
     struct sunxi_audio *s = kcalloc(1, sizeof(*s));
     if (!s) return -ENOMEM;
     s->platform = p;
     spin_init(&s->lock);
     mutex_init(&s->writer);
-    int result = p->prepare();
-    if (result < 0) { kfree(s); return result; }
+    dev->drv_priv = s;
+    int result = device_add_execution_action(dev, sunxi_execution_stop, NULL, s);
+    if (result) return result;
+    result = p->prepare();
+    if (result < 0) return result;
     s->dai = arch_device_map_mmio(resource->start, 0x200, 0);
     s->analog = arch_device_map_mmio(p->analog_pa, 4, 0);
     s->dma = arch_device_map_mmio(p->dma_pa, 0x1000, 0);
@@ -431,12 +486,13 @@ static int audio_probe(device_t *dev) {
     dev->drv_priv = s;
     return 0;
 fail:
-    destroy(s);
-    return result;
+    return result; /* Core performs checked stop before managed remove. */
 }
 static int audio_remove(device_t *dev) {
     struct sunxi_audio *s = dev->drv_priv;
-    if (s) { transmitter(s, 0); mute(s, 1); }
+    if (!s) return 0;
+    int result = sunxi_execution_stop(s);
+    if (result) return result;
     dev->drv_priv = NULL;
     destroy(s);
     return 0;
