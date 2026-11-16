@@ -172,12 +172,17 @@ int ext4_dir_entry_check(const ext4_dir_entry_t *de, uint32_t off,
                          uint32_t block_size, uint16_t *actual_len) ;
 int ext4_block_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
                             uint32_t lblk, uint64_t phys) ;
+/* metadata_lock held. Success persists mapping+size; an ordinary error
+ * leaves phys private to the caller; EUCLEAN requires retaining it. */
+int ext4_block_grow_commit(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
+                            uint32_t lblk, uint64_t phys, uint64_t new_size);
 void ext4_block_truncate(ext4_sb_info_t *sb, uint32_t ino,
                                 ext4_inode_t *inode) ;
 void ext4_block_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
                                    ext4_inode_t *inode, uint32_t lblk) ;
 int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                           const char *name, uint32_t *out_ino, uint8_t *out_ft) ;
+/* Success persists any directory growth and updates both di and dsz. */
 int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
                          uint64_t *dsz, const char *name, uint32_t ino,
                          uint8_t ft) ;
