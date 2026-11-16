@@ -2,12 +2,13 @@
 """Mirror session stderr to the persistent kernel log, without console spam."""
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
 
 
-def supervise(command, path, kmsg='/dev/kmsg'):
+def supervise(command, path, kmsg='/dev/kmsg', stop_timeout=3.0):
     log_error = None
     try:
         log = open(path, 'ab', buffering=0)
@@ -42,15 +43,50 @@ def supervise(command, path, kmsg='/dev/kmsg'):
                 pass
 
     child = None
+    stop_signal = None
+    old_handlers = {}
+
+    def request_stop(signum, frame):
+        nonlocal stop_signal
+        # Only publish the request here: logging and child control run in the
+        # normal loop, outside an interrupted file write/select operation.
+        if stop_signal is None:
+            stop_signal = signum
+
+    def signal_child(signum):
+        if child is not None and child.poll() is None:
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                child.send_signal(signum)
+
     try:
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            old_handlers[signum] = signal.signal(signum, request_stop)
         if log_error is not None:
             record(('session file unavailable errno=' + str(log_error)).encode())
-        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if stop_signal is not None:
+            return 128 + stop_signal
+        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
         record(('session child started pid=' + str(child.pid)).encode())
         pending = b''
         finished_at = None
+        stop_deadline = None
+        forced = False
+        pipe_open = True
         while True:
-            readable, _, _ = select.select([child.stdout], [], [], 0.2)
+            if stop_signal is not None and stop_deadline is None:
+                record(('session stop requested signal=' + str(stop_signal)).encode())
+                signal_child(stop_signal)
+                # Leave time for reaping and flushing within OpenRC's TERM/5.
+                stop_deadline = time.monotonic() + stop_timeout
+            if stop_deadline is not None and not forced and time.monotonic() >= stop_deadline:
+                if child.poll() is None:
+                    record(b'session stop timed out; sending SIGKILL')
+                    signal_child(signal.SIGKILL)
+                forced = True
+            readable, _, _ = select.select([child.stdout] if pipe_open else [], [], [], 0.2)
             if readable:
                 data = os.read(child.stdout.fileno(), 4096)
                 pending += data
@@ -61,13 +97,13 @@ def supervise(command, path, kmsg='/dev/kmsg'):
                     record(pending[:3000])
                     pending = pending[3000:]
                 if not data:
-                    break
+                    pipe_open = False
             if child.poll() is not None:
                 # Detached descendants may retain stdout after the session
                 # owner exits. Do not wait for their pipe EOF indefinitely.
                 if finished_at is None:
                     finished_at = time.monotonic()
-                if not readable or time.monotonic() - finished_at >= 1:
+                if not pipe_open or time.monotonic() - finished_at >= 1:
                     break
         if pending:
             record(pending)
@@ -79,11 +115,20 @@ def supervise(command, path, kmsg='/dev/kmsg'):
             pass
         return 128 - result if result < 0 else result
     finally:
-        if child is not None and child.stdout is not None:
-            child.stdout.close()
-        log.close()
-        if kernel >= 0:
-            os.close(kernel)
+        # Unexpected logger errors must not leave its direct session owner
+        # running without supervision. Never signal a reused/reaped PID.
+        try:
+            if child is not None and child.poll() is None:
+                signal_child(signal.SIGKILL)
+                child.wait(timeout=1)
+        finally:
+            if child is not None and child.stdout is not None:
+                child.stdout.close()
+            log.close()
+            if kernel >= 0:
+                os.close(kernel)
+            for signum, handler in old_handlers.items():
+                signal.signal(signum, handler)
 
 
 if __name__ == '__main__':
