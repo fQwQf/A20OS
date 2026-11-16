@@ -4,7 +4,6 @@ import re
 import subprocess
 import tempfile
 import unittest
-from tools.tests.test_usb_hid_readiness import function
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -69,35 +68,21 @@ int main(void){
 
     def test_hid_teardown_keeps_context_until_worker_has_exited(self):
         source = (ROOT / 'kernel/drivers/hid/i2c-hid.c').read_text()
-        run(r'''
-#include <assert.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <errno.h>
-typedef struct {int held;} mutex_t;
-typedef struct {void *queue,*work,*adapter,*report_desc,*input_buf;mutex_t io_lock;int present,running;} i2c_hid_device_t;
-typedef struct {i2c_hid_device_t *drv_priv;} device_t;
-static unsigned freed,put_work,put_adapter;static int fail;
-static mutex_t *io;
-#define MS_TO_TICKS(x) (x)
-static uint64_t timer_get_ticks(void){return 1;}
-static void mutex_lock(mutex_t *m){assert(!m->held);m->held=1;}
-static void mutex_unlock(mutex_t *m){assert(m->held);m->held=0;}
-static int driver_workqueue_destroy(void **q,uint64_t deadline){assert(!io->held && deadline>1);if(fail)return -ETIMEDOUT;*q=NULL;return 0;}
-static void driver_work_put(void *p){assert(p);put_work++;}
-static void i2c_adapter_put(void *p){assert(p);put_adapter++;}
-static void kfree(void *p){assert(p);freed++;}
-''' + function(source, 'ihid_remove') + r'''
-int main(void){
- int token;i2c_hid_device_t h={.queue=&token,.work=&token,.adapter=&token,.report_desc=&token,.input_buf=&token,.present=1,.running=1};
- device_t d={&h};io=&h.io_lock;fail=1;
- assert(ihid_remove(&d)==-ETIMEDOUT && d.drv_priv==&h && h.queue);
- assert(!h.present&&!h.running&&!freed&&!put_work&&!put_adapter);
- fail=0;assert(!ihid_remove(&d)&&!d.drv_priv&&!h.queue);
- assert(freed==3&&put_work==1&&put_adapter==1);
- assert(!ihid_remove(&d)&&freed==3);
-}
-''')
+        strip = lambda text: re.sub(r'^#include.*\n', '', text, flags=re.M)
+        generated = (ROOT / 'tools/tests/i2c_hid_lifecycle_host.c').read_text()
+        for marker, name in [('HEADER', 'kernel/include/drivers/i2c/i2c.h'),
+                             ('REGISTRY', 'kernel/drivers/i2c/i2c-core.c')]:
+            generated = generated.replace('/* ' + marker + ' */', strip((ROOT / name).read_text()))
+        names = ('ihid_xfer', 'ihid_stop', 'ihid_release', 'ihid_probe',
+                 'ihid_remove', 'ihid_poll_work')
+        callbacks = []
+        for name in names:
+            found = re.search(r'^static [^;{}]*\b' + name +
+                              r'\([^;{}]*\)\s*\{.*?^\}', source, re.M | re.S)
+            self.assertIsNotNone(found, name)
+            callbacks.append(found.group())
+        callbacks = '\n'.join(callbacks)
+        run(generated.replace('/* CALLBACKS */', callbacks))
 
 
 if __name__ == '__main__':
