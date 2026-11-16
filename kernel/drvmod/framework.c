@@ -671,6 +671,8 @@ const struct drv_export drv_export_table[] = {
     { "pfa_free",            (void *)pfa_free },
     /* GPU class registry (virtio-gpu / vmsvga) */
     { "gpu_device_register",   (void *)gpu_device_register },
+    { "gpu_device_physical_mapping_init", (void *)gpu_device_physical_mapping_init },
+    { "gpu_device_physical_mapping_get", (void *)gpu_device_physical_mapping_get },
     { "gpu_device_unregister", (void *)gpu_device_unregister },
     { "gpu_device_get_default", (void *)gpu_device_get_default },
     { "gpu_device_default_get", (void *)gpu_device_default_get },

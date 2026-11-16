@@ -99,6 +99,8 @@ static int probe(device_t *dev)
         return -EINVAL;
     aperture[0] = policy->aperture_base;
     aperture[1] = policy->aperture_bytes;
+    int ownership = gpu_device_physical_mapping_init(dev);
+    if (ownership) return ownership;
     struct lsdc_boot *s = kcalloc(1, sizeof(*s));
     if (!s) return -ENOMEM;
     s->registers = arch_device_map_mmio(res->start, LSDC_BOOT_REG_BYTES, res->flags);

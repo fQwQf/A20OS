@@ -13,6 +13,7 @@
 #include "core/errno.h"
 #include "core/mman.h"
 #include "mm/vm.h"
+#include "mm/mapping_owner.h"
 #include "mm/slab.h"
 #include "sys/usercopy.h"
 
@@ -145,7 +146,8 @@ out:
 
 /* Keep the boot scanout's CPU memory type, while the MM transaction owns
  * placement, PTE rollback, remote TLB invalidation and VMA publication. */
-static int64_t fb_map_physical(mm_struct_t *mm, uint64_t addr, uint64_t physical,
+static int64_t fb_map_physical(struct gpu_device_access *access,
+                               mm_struct_t *mm, uint64_t addr, uint64_t physical,
                                size_t len, int prot, int flags) {
     if (!len || len > SIZE_MAX - (PAGE_SIZE - 1)) return -EINVAL;
     if (addr != (vaddr_t)addr) return -EINVAL;
@@ -154,8 +156,12 @@ static int64_t fb_map_physical(mm_struct_t *mm, uint64_t addr, uint64_t physical
     int result = boot_framebuffer_user_flags(physical, rounded,
                     mm_prot_to_pte_flags(prot) | PTE_DEVICE, &pte_flags);
     if (result) return result;
-    vaddr_t mapped = mm_mmap_physical(mm, addr, rounded, prot, flags, physical,
-                                      pte_flags & (PTE_DEVICE | PTE_MAT1));
+    struct mm_mapping_owner *owner;
+    result = gpu_device_physical_mapping_get(access, &owner);
+    if (result) return result;
+    vaddr_t mapped = mm_mmap_physical_owned(mm, addr, rounded, prot, flags, physical,
+                                            pte_flags & (PTE_DEVICE | PTE_MAT1), owner);
+    mm_mapping_owner_put(owner);
     return mm_addr_is_error(mapped) ? mm_addr_error(mapped) : (int64_t)mapped;
 }
 #endif
@@ -204,7 +210,7 @@ static int64_t fbdev_linux_mmap_active(struct gpu_device_access *access,
 #else
     task_t *curr = proc_current();
     if (!curr || !curr->mm) return -EFAULT;
-    return fb_map_physical(curr->mm, addr, fb_phys + off, len, prot, flags);
+    return fb_map_physical(access, curr->mm, addr, fb_phys + off, len, prot, flags);
 #endif
 }
 
@@ -334,7 +340,7 @@ static int fb_ioctl_active(struct gpu_device_access *access, vfile_t *vf,
 #else
             task_t *curr = proc_current();
             if (!curr || !curr->mm) return -EFAULT;
-            int64_t mapped = fb_map_physical(curr->mm, (uintptr_t)arg, fb_phys,
+            int64_t mapped = fb_map_physical(access, curr->mm, (uintptr_t)arg, fb_phys,
                                 fb_size, PROT_READ | PROT_WRITE,
                                 MAP_SHARED | MAP_FIXED_NOREPLACE);
             return mapped < 0 ? (int)mapped : 0;
