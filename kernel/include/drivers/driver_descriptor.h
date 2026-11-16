@@ -44,7 +44,8 @@
 /* 11: gpu_dev_ops_t appends owning RAM scanout capture. */
 /* 12: gpu_dev_ops_t appends explicit native capability discovery. Old GPU
  * tables are shorter; all module/service descriptors must be rebuilt. */
-#define A20_DRIVER_ABI 12U
+/* 13: usb_urb_t appends synchronous bulk actual_length. Old URBs are shorter. */
+#define A20_DRIVER_ABI 13U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,

@@ -221,6 +221,9 @@ typedef struct usb_urb {
     int                status;
     void             (*complete)(struct usb_urb *urb);
     void              *ctx;               /* class-driver context */
+    /* Synchronous bulk output, valid on 0 or -EMSGSIZE; len stays requested.
+     * Only this prefix of an IN buffer is initialized. Module ABI 13. */
+    size_t             actual_length;
 } usb_urb_t;
 
 /* ------------------------------------------------------------------ */
@@ -265,8 +268,9 @@ typedef struct usb_hcd_ops {
                                uint16_t max_packet, uint8_t interval);
     /* Arm a periodic IN transfer; completion calls urb->complete(). */
     int  (*submit_interrupt)(struct usb_hcd *hcd, usb_urb_t *urb);
-    /* Exact-length synchronous bulk; no completion callback. 0 means all
-     * requested bytes transferred. On ANY return the HCD must no longer
+    /* Synchronous bulk; no completion callback. 0 means all requested bytes;
+     * -EMSGSIZE reports a short transfer and actual_length initialized bytes.
+     * STALL is -EPIPE. On ANY return the HCD must no longer
      * reference the caller's URB/buffer. Retain private staging on uncertain
      * hardware stop. xHCI accepts at most 64 KiB; short -> -EMSGSIZE. */
     int  (*submit_bulk)(struct usb_hcd *hcd, usb_urb_t *urb);

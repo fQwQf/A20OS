@@ -460,6 +460,7 @@ int usb_control_msg(usb_device_t *dev, uint8_t request_type, uint8_t request,
 
 int usb_submit_urb(usb_urb_t *urb)
 {
+    if (urb) urb->actual_length = 0;
     if (!urb || !urb->dev || !urb->dev->hcd || !urb->dev->hcd->ops)
         return -EINVAL;
     if (urb->transfer_type == USB_XFER_INTERRUPT) {

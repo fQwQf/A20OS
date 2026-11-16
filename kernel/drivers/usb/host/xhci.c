@@ -1455,6 +1455,7 @@ static int xhci_op_submit_interrupt(usb_hcd_t *hcd, usb_urb_t *urb) {
  * directly from the return value. */
 static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
     xhci_controller_t *xhci = hcd->priv;
+    if (urb) urb->actual_length = 0;
     if (!urb || !urb->dev || !urb->ep || !urb->dev->slot ||
         urb->dev->slot > xhci->max_slots || !(urb->ep->addr & 15U) ||
         (urb->len && !urb->buf))
@@ -1505,14 +1506,18 @@ static int xhci_op_submit_bulk(usb_hcd_t *hcd, usb_urb_t *urb) {
     spin_unlock_irqrestore(&xhci->lock, flags);
     xhci_trb_t event = {0};
     result = xhci_wait_event(xhci, XHCI_TRB_TRANSFER_EVENT, pointer, &event, NULL);
+    if (result && (event.status >> 24) == 6U) result = -EPIPE; /* STALL Error */
     if (!result) {
         uint32_t remaining = event.status & 0xffffffU;
         if (remaining > urb->len) result = -EIO;
-        else if (remaining) result = -EMSGSIZE; /* Exact-length synchronous API. */
+        else {
+            urb->actual_length = urb->len - remaining;
+            if (remaining) result = -EMSGSIZE;
+        }
     }
-    if (!result && urb->len && (addr & USB_DIR_IN)) {
-        arch_dma_sync_for_cpu(stage, urb->len);
-        memcpy(urb->buf, stage, urb->len);
+    if ((!result || result == -EMSGSIZE) && urb->actual_length && (addr & USB_DIR_IN)) {
+        arch_dma_sync_for_cpu(stage, urb->actual_length);
+        memcpy(urb->buf, stage, urb->actual_length);
     }
     if (result)
         kwarn("[XHCI] bulk slot=%u endpoint=%02x length=%u failed=%d trb=%llx\n",

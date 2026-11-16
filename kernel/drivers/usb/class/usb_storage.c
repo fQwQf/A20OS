@@ -156,7 +156,7 @@ static void msc_put_be32(uint8_t *p, uint32_t value) {
 
 /* One bulk transfer.  Synchronous: the HCD (xHCI) submits and waits. */
 static int msc_bulk(usb_storage_dev_t *st, usb_endpoint_t *ep,
-                    void *buf, size_t len) {
+                    void *buf, size_t len, size_t *actual) {
     usb_urb_t urb;
     memset(&urb, 0, sizeof(urb));
     urb.dev = st->dev;
@@ -165,7 +165,30 @@ static int msc_bulk(usb_storage_dev_t *st, usb_endpoint_t *ep,
     urb.direction = (ep->addr & USB_DIR_IN) ? USB_DIR_IN : USB_DIR_OUT;
     urb.buf = buf;
     urb.len = len;
-    return usb_submit_urb(&urb);
+    int ret = usb_submit_urb(&urb);
+    if (actual) *actual = 0;
+    if (!ret || ret == -EMSGSIZE) {
+        if (urb.actual_length > len) return -EIO;
+        if (actual) *actual = urb.actual_length;
+        if (!ret && urb.actual_length != len) ret = -EMSGSIZE;
+    }
+    return ret;
+}
+
+static int msc_recovery_begin(usb_storage_dev_t *st) {
+    /* Probe already owns lifecycle. Runtime calls must not wait for a
+     * lifecycle callback that might itself be waiting for block I/O. */
+    if (st->probing) driver_lifecycle_begin();
+    else {
+        int ret = driver_lifecycle_try_begin();
+        if (ret) return ret;
+    }
+    if (__atomic_load_n(&st->closing, __ATOMIC_ACQUIRE) ||
+        device_is_stopping(st->owner) || st->owner->plat_data != st->iface) {
+        driver_lifecycle_end();
+        return -ESHUTDOWN;
+    }
+    return 0;
 }
 
 /* BOT 1.0 section 5.3.4: Reset, Clear HALT IN, Clear HALT OUT.
@@ -175,17 +198,8 @@ static int msc_bulk(usb_storage_dev_t *st, usb_endpoint_t *ep,
  * https://www.usb.org/sites/default/files/usbmassbulk_10.pdf */
 static int msc_reset(usb_storage_dev_t *st) {
     st->recovery_pending = 1;
-    /* Probe already owns lifecycle. Runtime calls must not wait for a
-     * lifecycle callback that might itself be waiting for block I/O. */
-    if (st->probing) driver_lifecycle_begin();
-    else {
-        int ret = driver_lifecycle_try_begin();
-        if (ret) return ret;
-    }
-    int ret = -ESHUTDOWN;
-    if (__atomic_load_n(&st->closing, __ATOMIC_ACQUIRE) ||
-        device_is_stopping(st->owner) || st->owner->plat_data != st->iface)
-        goto out;
+    int ret = msc_recovery_begin(st);
+    if (ret) return ret;
     usb_hcd_t *hcd = st->dev->hcd;
     ret = hcd->ops->release_endpoint(hcd, st->dev, st->bulk_in->addr);
     if (ret) goto out;
@@ -208,6 +222,27 @@ static int msc_reset(usb_storage_dev_t *st) {
     if (ret) goto out;
     ret = hcd->ops->configure_endpoint(hcd, st->dev, st->bulk_in->addr,
                                       USB_XFER_BULK, st->bulk_in->max_packet, 0);
+    if (!ret) st->recovery_pending = 0;
+out:
+    driver_lifecycle_end();
+    return ret > 0 ? -EIO : ret;
+}
+
+/* Clear a stalled pipe without discarding the device's pending CSW. The
+ * retired host context is rebuilt with the reset device-side data toggle. */
+static int msc_clear_halt(usb_storage_dev_t *st, usb_endpoint_t *ep) {
+    st->recovery_pending = 1;
+    int ret = msc_recovery_begin(st);
+    if (ret) return ret;
+    usb_hcd_t *hcd = st->dev->hcd;
+    ret = hcd->ops->release_endpoint(hcd, st->dev, ep->addr);
+    if (ret) goto out;
+    ret = usb_control_msg(st->dev, USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
+                          USB_REQ_CLEAR_FEATURE, USB_FEAT_ENDPOINT_HALT,
+                          ep->addr, NULL, 0);
+    if (ret) goto out;
+    ret = hcd->ops->configure_endpoint(hcd, st->dev, ep->addr,
+                                      USB_XFER_BULK, ep->max_packet, 0);
     if (!ret) st->recovery_pending = 0;
 out:
     driver_lifecycle_end();
@@ -237,25 +272,41 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
     st->cbw.command_length = cdblen;
     memcpy(st->cbw.command, cdb, cdblen);
 
-    result = msc_bulk(st, st->bulk_out, &st->cbw, USB_MSC_CBW_SIZE);
+    result = msc_bulk(st, st->bulk_out, &st->cbw, USB_MSC_CBW_SIZE, NULL);
     if (result) goto recover;
 
     uint32_t transferred = 0;
+    int incomplete = 0;
     if (datalen) {
         usb_endpoint_t *dep = data_in ? st->bulk_in : st->bulk_out;
         while (transferred < datalen) {
             uint32_t chunk = datalen - transferred;
             if (chunk > USB_MSC_IO_CHUNK) chunk = USB_MSC_IO_CHUNK;
             if (!data_in) memcpy(st->data, (uint8_t *)data + transferred, chunk);
-            result = msc_bulk(st, dep, st->data, chunk);
-            if (result) goto recover;
-            if (data_in) memcpy((uint8_t *)data + transferred, st->data, chunk);
-            transferred += chunk;
+            size_t actual = 0;
+            result = msc_bulk(st, dep, st->data, chunk, &actual);
+            if (result == -EPIPE) {
+                incomplete = 1;
+                result = msc_clear_halt(st, dep);
+                if (result) goto recover;
+                break; /* Data terminated; collect this command's status. */
+            }
+            if (result && result != -EMSGSIZE) goto recover;
+            if (data_in) memcpy((uint8_t *)data + transferred, st->data, actual);
+            transferred += (uint32_t)actual;
+            if (result == -EMSGSIZE) { incomplete = 1; break; }
         }
     }
 
     memset(&st->csw, 0, sizeof(st->csw));
-    result = msc_bulk(st, st->bulk_in, &st->csw, USB_MSC_CSW_SIZE);
+    result = msc_bulk(st, st->bulk_in, &st->csw, USB_MSC_CSW_SIZE, NULL);
+    if (result == -EPIPE) {
+        result = msc_clear_halt(st, st->bulk_in);
+        if (result) goto recover;
+        /* BOT Figure 2: one retry after clearing a first CSW STALL. */
+        memset(&st->csw, 0, sizeof(st->csw));
+        result = msc_bulk(st, st->bulk_in, &st->csw, USB_MSC_CSW_SIZE, NULL);
+    }
     if (result) goto recover;
 
     /* A failed-command status is meaningful only in a valid CSW. Phase
@@ -264,7 +315,7 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
                   st->csw.tag != tag || st->csw.residue > datalen ||
                   st->csw.status > 2;
     result = !invalid && st->csw.status == USB_MSC_CSW_STATUS_PASS &&
-             !st->csw.residue ? 0 : -EIO;
+             !st->csw.residue && !incomplete ? 0 : -EIO;
     if (result) {
         static unsigned reports;
         if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 16)
