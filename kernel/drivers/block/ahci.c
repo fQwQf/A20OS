@@ -18,6 +18,7 @@
 #include "core/bootargs.h"
 #include "core/perf.h"
 #include "proc/proc.h"
+#include <stdint.h>
 
 #define AHCI_MAX_PORTS          32U
 #define AHCI_CMD_SLOTS          32U
@@ -116,6 +117,11 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
     uint8_t *transfer;
     uint64_t capacity;
     int read_only;
+    device_t *device;
+    uint32_t consumer_refs;
+    int stopping;
+    int stopped;
+    int port_selected;
     /* AHCI_IRQ_MODEL:
      * - The IRQ top-half write-clears PxIS and records the bits it
      *   consumed in last_is, because the waiter must still observe TFES
@@ -141,6 +147,11 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
 
 static ahci_port_t g_ahci_port;
 static int g_ahci_ready;
+/* Reserve the static instance until successful remove, including failed
+ * probes. Legacy consumers pin the binding, its module and its identity. */
+static spinlock_t g_ahci_instance_lock = SPINLOCK_INIT;
+static int g_ahci_claimed;
+static int ahci_stop(void *context);
 
 /*
  * a20.ahci.poll=1 forces the completion path to stay in bounded polling even
@@ -195,11 +206,14 @@ static void ahci_write(ahci_port_t *port, uint32_t off, uint32_t value) {
 
 static int ahci_wait_clear(ahci_port_t *port, uint32_t off, uint32_t mask) {
     for (unsigned ms = 0; ms < AHCI_TIMEOUT_MS; ms++) {
-        if ((ahci_read(port, off) & mask) == 0)
+        uint32_t value = ahci_read(port, off);
+        if (value == UINT32_MAX)
+            return -ENODEV;
+        if ((value & mask) == 0)
             return 0;
         mdelay(1);
     }
-    return -1;
+    return -ETIMEDOUT;
 }
 
 static int ahci_wait_ready(ahci_port_t *port) {
@@ -213,8 +227,19 @@ static int ahci_wait_ready(ahci_port_t *port) {
 
 static int ahci_stop_port(ahci_port_t *port) {
     uint32_t cmd = ahci_read(port, AHCI_PXCMD);
-    ahci_write(port, AHCI_PXCMD, cmd & ~(AHCI_PXCMD_ST | AHCI_PXCMD_FRE));
-    return ahci_wait_clear(port, AHCI_PXCMD, AHCI_PXCMD_CR | AHCI_PXCMD_FR);
+    if (cmd == UINT32_MAX)
+        return -ENODEV;
+    /* Stop command-list DMA before disabling received-FIS DMA. Neither a
+     * cleared enable bit nor an inaccessible register proves retirement. */
+    ahci_write(port, AHCI_PXCMD, cmd & ~AHCI_PXCMD_ST);
+    int ret = ahci_wait_clear(port, AHCI_PXCMD, AHCI_PXCMD_CR);
+    if (ret)
+        return ret;
+    cmd = ahci_read(port, AHCI_PXCMD);
+    if (cmd == UINT32_MAX)
+        return -ENODEV;
+    ahci_write(port, AHCI_PXCMD, cmd & ~AHCI_PXCMD_FRE);
+    return ahci_wait_clear(port, AHCI_PXCMD, AHCI_PXCMD_FR);
 }
 
 static int ahci_start_port(ahci_port_t *port) {
@@ -248,6 +273,8 @@ static void ahci_issue_slot0(ahci_port_t *port) {
 
 static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
                        uint16_t sectors, int write, uint64_t dma, size_t bytes) {
+    if (__atomic_load_n(&port->stopping, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (port->read_only && (write || command == ATA_CMD_WRITE_DMA_EXT))
         return -EROFS;
     if (!sectors || bytes > AHCI_TRANSFER_BYTES)
@@ -302,6 +329,8 @@ static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
  * CFLAGS bit 6 (Write) stays clear.
  */
 static int ahci_submit_nodata(ahci_port_t *port, uint8_t command) {
+    if (__atomic_load_n(&port->stopping, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (port->read_only)
         return -EROFS;
     if (ahci_wait_ready(port) != 0)
@@ -427,20 +456,27 @@ static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
 
 static int ahci_rw(ahci_port_t *port, uint64_t lba, void *buf, size_t count,
                    int write) {
+    if (port && __atomic_load_n(&port->stopping, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (port && port->read_only && write)
         return -EROFS;
     if (!port || !buf || !count || lba >= port->capacity || count > port->capacity - lba)
         return -EINVAL;
     mutex_lock(&port->lock);
     while (count) {
+        if (__atomic_load_n(&port->stopping, __ATOMIC_ACQUIRE)) {
+            mutex_unlock(&port->lock);
+            return -ENODEV;
+        }
         size_t sectors = count > AHCI_TRANSFER_SECTORS ? AHCI_TRANSFER_SECTORS : count;
         size_t bytes = sectors * AHCI_SECTOR_SIZE;
         if (write)
             memcpy(port->transfer, buf, bytes);
-        if (ahci_submit(port, write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT,
-                        lba, (uint16_t)sectors, write, port->transfer_dma, bytes) != 0) {
+        int ret = ahci_submit(port, write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT,
+                              lba, (uint16_t)sectors, write, port->transfer_dma, bytes);
+        if (ret != 0) {
             mutex_unlock(&port->lock);
-            return -1;
+            return ret;
         }
         if (!write)
             memcpy(buf, port->transfer, bytes);
@@ -469,13 +505,30 @@ static int ahci_block_flush(block_dev_t *dev) {
     mutex_lock(&port->lock);
     int r = ahci_submit_nodata(port, ATA_CMD_FLUSH_CACHE_EXT);
     mutex_unlock(&port->lock);
-    return r == 0 ? 0 : -EIO;
+    return r == -ENODEV ? r : (r == 0 ? 0 : -EIO);
+}
+
+static void ahci_block_release(block_dev_t *dev) {
+    ahci_port_t *port = (ahci_port_t *)dev->priv;
+    uint64_t flags = spin_lock_irqsave(&g_ahci_instance_lock);
+    if (port->consumer_refs)
+        port->consumer_refs--;
+    spin_unlock_irqrestore(&g_ahci_instance_lock, flags);
 }
 
 block_dev_t *ahci_get_dev(int idx) {
-    if (idx != 0 || !g_ahci_ready)
+    if (idx != 0)
         return NULL;
-    return &g_ahci_port.block;
+    uint64_t flags = spin_lock_irqsave(&g_ahci_instance_lock);
+    ahci_port_t *port = &g_ahci_port;
+    block_dev_t *block = NULL;
+    if (g_ahci_ready && !__atomic_load_n(&port->stopping, __ATOMIC_ACQUIRE) &&
+        port->consumer_refs != UINT32_MAX) {
+        port->consumer_refs++;
+        block = &port->block;
+    }
+    spin_unlock_irqrestore(&g_ahci_instance_lock, flags);
+    return block;
 }
 
 static int ahci_irq_handler(int irq, void *priv) {
@@ -640,8 +693,6 @@ static void ahci_pci_enable_ports(device_t *dev, uint32_t pi)
 static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
                              uint32_t port_map) {
     int ret = 0;
-    if (g_ahci_ready)
-        return -ENODEV;
 
     int is_pci = dev->bus == &pci_bus;
     resource_t *abar = is_pci ? pci_get_bar_resource(dev, 5) :
@@ -649,19 +700,35 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
     if (!abar || abar->end < abar->start || abar->end - abar->start < 0xffU)
         return -ENODEV;
 
+    ret = device_probe_use_remove(dev);
+    if (ret)
+        return ret;
     ahci_port_t *port = &g_ahci_port;
+    uint64_t instance_flags = spin_lock_irqsave(&g_ahci_instance_lock);
+    if (g_ahci_claimed) {
+        spin_unlock_irqrestore(&g_ahci_instance_lock, instance_flags);
+        return -EBUSY;
+    }
     memset(port, 0, sizeof(*port));
+    g_ahci_claimed = 1;
+    port->device = dev;
+    port->port_no = AHCI_MAX_PORTS;
+    port->irq = -1;
+    mutex_init(&port->lock);
+    wait_queue_init(&port->waiters);
+    dev->drv_priv = port;
+    spin_unlock_irqrestore(&g_ahci_instance_lock, instance_flags);
+    ret = device_add_execution_action(dev, ahci_stop, NULL, port);
+    if (ret)
+        return ret;
     port->host_regs = (uintptr_t)(is_pci ? pci_map_bar(dev, 5) :
                                          device_map_mmio(dev, 0));
     if (!port->host_regs) return -EIO;
     port->regs = port->host_regs;
-    port->irq = -1;
     port->read_only = !!(flags & AHCI_PLATFORM_F_READ_ONLY);
     int preserve_firmware_link =
         !!(flags & AHCI_PLATFORM_F_PRESERVE_FIRMWARE_LINK);
     int force_poll = ahci_poll_requested();
-    mutex_init(&port->lock);
-    wait_queue_init(&port->waiters);
 
     uint32_t cap = readl(ahci_reg(port->host_regs, AHCI_CAP));
     uint32_t version = readl(ahci_reg(port->host_regs, AHCI_VS));
@@ -738,6 +805,7 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
         printf("[AHCI] no ready SATA port found\n");
         return -ENODEV;
     }
+    port->port_selected = 1;
 
     port->cmd_list = dma_alloc_coherent_aligned(dev, 1024U, 1024U,
                                                 &port->cmd_list_dma);
@@ -799,8 +867,10 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
     port->block.capacity = port->capacity;
     port->block.sector_size = AHCI_SECTOR_SIZE;
     port->block.priv = port;
-    dev->drv_priv = port;
+    port->block.release = ahci_block_release;
+    instance_flags = spin_lock_irqsave(&g_ahci_instance_lock);
     g_ahci_ready = 1;
+    spin_unlock_irqrestore(&g_ahci_instance_lock, instance_flags);
     printf("[AHCI] device on port %u, capacity=%lu sectors%s completion=%s\n",
            port->port_no, (unsigned long)port->capacity,
            port->read_only ? ", writes blocked" : "",
@@ -809,12 +879,8 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
     return 0;
 
 fail:
-    (void)ahci_stop_port(port);
-    if (port->transfer) dma_free_coherent_aligned(port->transfer, AHCI_TRANSFER_BYTES, port->transfer_dma);
-    if (port->tables) dma_free_coherent_aligned(port->tables, AHCI_CMD_SLOTS * sizeof(*port->tables), port->tables_dma);
-    if (port->rfis) dma_free_coherent_aligned(port->rfis, 256U, port->rfis_dma);
-    if (port->cmd_list) dma_free_coherent_aligned(port->cmd_list, 1024U, port->cmd_list_dma);
-    memset(port, 0, sizeof(*port));
+    /* Core runs the same fallible stop/remove pipeline after failed probe.
+     * A failed stop retains the instance, mappings, IRQ and all DMA. */
     return ret;
 }
 
@@ -843,33 +909,66 @@ static int ahci_platform_probe(device_t *dev) {
     return ahci_probe_common(dev, irq, flags, port_map);
 }
 
+static int ahci_stop(void *context) {
+    ahci_port_t *port = (ahci_port_t *)context;
+    uint64_t flags = spin_lock_irqsave(&g_ahci_instance_lock);
+    __atomic_store_n(&port->stopping, 1, __ATOMIC_RELEASE);
+    g_ahci_ready = 0;
+    int pinned = port->consumer_refs != 0;
+    spin_unlock_irqrestore(&g_ahci_instance_lock, flags);
+    /* Raw block callbacks are module code. Keep the entire binding pinned
+     * until their final release, rather than leave callbacks after unload. */
+    if (pinned || !mutex_trylock(&port->lock))
+        return -EBUSY;
+    if (port->stopped) {
+        mutex_unlock(&port->lock);
+        return 0;
+    }
+    if (port->port_selected) {
+        if (ahci_read(port, AHCI_PXCMD) == UINT32_MAX) {
+            mutex_unlock(&port->lock);
+            return -ENODEV;
+        }
+        ahci_write(port, AHCI_PXIE, 0);
+        int ret = ahci_stop_port(port);
+        if (ret) {
+            mutex_unlock(&port->lock);
+            return ret;
+        }
+        uint32_t ghc = readl(ahci_reg(port->host_regs, AHCI_GHC));
+        if (ghc != UINT32_MAX)
+            writel(ghc & ~AHCI_GHC_IE, ahci_reg(port->host_regs, AHCI_GHC));
+    }
+    /* free_irq synchronizes the last handler before context/DMA retirement. */
+    if (port->irq_registered) {
+        free_irq((uint32_t)port->irq, port);
+        if (port->msi) {
+            pci_msi_disable(port->device);
+            irq_free_vectors((uint32_t)port->irq, 1);
+        }
+        port->irq_registered = 0;
+    }
+    port->stopped = 1;
+    mutex_unlock(&port->lock);
+    return 0;
+}
+
 static int ahci_remove(device_t *dev) {
     ahci_port_t *port = dev ? (ahci_port_t *)dev->drv_priv : NULL;
     if (!port)
         return 0;
-    g_ahci_ready = 0;
-    /* Mask device interrupts before releasing the handler so a completion
-     * racing the remove cannot wake a torn-down port.  Dropping GHC.IE
-     * afterwards takes the HBA off the host interrupt line entirely: on a
-     * shared INTx route a controller left asserting with its source masked
-     * keeps the line asserted for whoever shares that vector. */
-    ahci_write(port, AHCI_PXIE, 0);
-    if (port->irq_registered) {
-        free_irq((uint32_t)port->irq, port);
-        if (port->msi) {
-            pci_msi_disable(dev);
-            irq_free_vectors((uint32_t)port->irq, 1);
-        }
-        writel(AHCI_GHC_AE,
-               ahci_reg(port->host_regs, AHCI_GHC));
-    }
-    (void)ahci_stop_port(port);
+    int ret = ahci_stop(port);
+    if (ret)
+        return ret;
     if (port->transfer) dma_free_coherent_aligned(port->transfer, AHCI_TRANSFER_BYTES, port->transfer_dma);
     if (port->tables) dma_free_coherent_aligned(port->tables, AHCI_CMD_SLOTS * sizeof(*port->tables), port->tables_dma);
     if (port->rfis) dma_free_coherent_aligned(port->rfis, 256U, port->rfis_dma);
     if (port->cmd_list) dma_free_coherent_aligned(port->cmd_list, 1024U, port->cmd_list_dma);
     dev->drv_priv = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_ahci_instance_lock);
     memset(port, 0, sizeof(*port));
+    g_ahci_claimed = 0;
+    spin_unlock_irqrestore(&g_ahci_instance_lock, flags);
     return 0;
 }
 
@@ -900,7 +999,7 @@ static int ahci_class_flush(device_t *dev) {
     mutex_lock(&port->lock);
     int r = ahci_submit_nodata(port, ATA_CMD_FLUSH_CACHE_EXT);
     mutex_unlock(&port->lock);
-    return r == 0 ? 0 : -EIO;
+    return r == -ENODEV ? r : (r == 0 ? 0 : -EIO);
 }
 
 static const block_dev_ops_t ahci_class_ops = {

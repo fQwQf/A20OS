@@ -11,6 +11,9 @@
 
 
 
+/* Each successful get pins the binding. Keep the reference across cache/I/O
+ * use, then call dev->release(dev). Stop rejects new I/O and returns EBUSY
+ * until all such references are released; a retry can then unbind safely. */
 block_dev_t *ahci_get_dev(int idx);
 
 #endif
