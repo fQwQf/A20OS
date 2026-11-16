@@ -46,6 +46,7 @@ int  a20_net_poll_channel_writable(void *ch_ep);
 int  a20_net_poll_channel_peer_closed(void *ch_ep);
 int  a20_net_poll_peer_rx_count(void *peer);
 int  a20_net_poll_max_queue(void);
+int  a20_net_poll_error_pending(void *s);
 
 int  a20_net_poll_file(void *vf, short events);
 

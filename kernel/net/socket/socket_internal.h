@@ -154,6 +154,22 @@ typedef struct net_recv_meta {
     int32_t cred_gid;
 } net_recv_meta_t;
 
+/* Linux sock_extended_err wire shape; address and quoted payload are owned by
+ * the separate bounded error queue, never mixed into normal receive data. */
+typedef struct net_extended_error {
+    uint32_t error;
+    uint8_t origin, type, code, pad;
+    uint32_t info, data;
+} net_extended_error_t;
+typedef struct net_error_msg {
+    struct net_error_msg *next;
+    net_extended_error_t error;
+    uint8_t destination[28], offender[28];
+    uint32_t address_len;
+    size_t len;
+    uint8_t payload[];
+} net_error_msg_t;
+
 typedef struct net_socket {
     resource_namespace_t *net_ns;
     void *transport_private; /* Owned by the selected INET backend until final release. */
@@ -197,6 +213,10 @@ typedef struct net_socket {
     int tcp_connecting;
     int tcp_err;
     int pending_error; /* positive errno, consumed by SO_ERROR under socket lock */
+    int ipv4_recv_err;
+    net_error_msg_t *error_head, *error_tail;
+    int error_count;
+    size_t error_bytes;
     int tcp_nodelay;
     /* Congestion control requested via TCP_CONGESTION, as a TCP_CONG_*
      * backend algorithm identifier.  TCP_CONG_RENO is the default
@@ -1125,6 +1145,12 @@ void     net_inet_options_apply(net_socket_t *s, unsigned mask);
 uint32_t net_inet_buffer_default(int send);
 int      net_inet_option_validate(net_socket_t *, int, int, const void *, size_t);
 int      net_inet_pmtu_discover(net_socket_t *s, int mode, int set);
+int      net_inet_recverr(net_socket_t *s, int enable);
+int      net_error_enqueue(net_socket_t *s, const net_extended_error_t *error,
+                           const void *destination, const void *offender,
+                           size_t address_len, const void *payload, size_t len);
+net_error_msg_t *net_error_dequeue(net_socket_t *s);
+void     net_error_purge(net_socket_t *s);
 int      net_inet_bind_device(net_socket_t *s, const char *name);
 int      net_inet_bound_device(net_socket_t *s, char name[16]);
 uint64_t net_inet_socket_lane_lock(net_socket_t *s);

@@ -50,6 +50,7 @@ unsafe extern "C" {
     fn a20_net_recv_flags_check(flags: i32) -> i32;
     fn a20_net_recv_alg(s: *mut c_void, buf: *mut c_void, len: usize) -> i32;
     fn a20_net_recv_now() -> u64;
+    fn a20_net_recv_error_take_locked(s: *mut c_void) -> i32;
     fn a20_net_recv_poll_waiter();
     fn a20_net_recv_lock(s: *mut c_void) -> u64;
     fn a20_net_recv_unlock(s: *mut c_void, flags: u64);
@@ -224,6 +225,11 @@ unsafe fn recv_once(s: *mut c_void, v: &RecvView, buf: *mut c_void, len: usize,
         let mut wake_q = WakeQ::new();
         a20_net_recv_wakeq_init(wake_q.as_mut_ptr());
         let irq = a20_net_recv_lock(s);
+        let error = a20_net_recv_error_take_locked(s);
+        if error != 0 {
+            a20_net_recv_unlock(s, irq);
+            return -error;
+        }
         let rx_count_before = *v.rx_count;
         let head = *v.rx_head;
         /* The dequeue frees the head, so the datagram length MSG_TRUNC needs
@@ -420,6 +426,7 @@ mod tests {
     static mut T_NOW: u64 = 1000;
     static mut T_SIGNAL: i32 = 0;
     static mut T_EXPIRED: i32 = 0;
+    static mut T_ERROR: i32 = 0;
     static mut T_DEQ_RC: i32 = 0;
     static mut T_DEQ_CALLS: i32 = 0;
     static mut T_DEQ_TOTAL: usize = 0;
@@ -468,6 +475,7 @@ mod tests {
         T_NOW = 1000;
         T_SIGNAL = 0;
         T_EXPIRED = 0;
+        T_ERROR = 0;
         T_DEQ_RC = 0;
         T_DEQ_CALLS = 0;
         T_DEQ_TOTAL = 0;
@@ -561,6 +569,10 @@ mod tests {
     unsafe extern "C" fn a20_net_recv_wait_expired_locked(_s: *mut c_void,
                                                           _st: u64, _fw: i32) -> i32 {
         T_EXPIRED
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_recv_error_take_locked(_s: *mut c_void) -> i32 {
+        let e = T_ERROR; T_ERROR = 0; e
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_recv_dequeue(_s: *mut c_void, _b: *mut c_void,

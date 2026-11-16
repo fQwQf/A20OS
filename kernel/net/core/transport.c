@@ -146,6 +146,11 @@ int net_inet_send_udp_control(net_socket_t *s, const void *b, size_t n, int f,
                                      : -EOPNOTSUPP;
 }
 
+int net_inet_recverr(net_socket_t *s, int enable) {
+    const net_endpoint_ops_t *ops = endpoint_ops();
+    return (ops && ops->recverr) ? ops->recverr(s, enable) : -EOPNOTSUPP;
+}
+
 int net_inet_pmtu_discover(net_socket_t *s, int mode, int set) {
     const net_endpoint_ops_t *ops = endpoint_ops();
     if (!net_backend_has(NET_CAP_PMTU))

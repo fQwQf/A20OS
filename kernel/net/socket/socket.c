@@ -174,6 +174,7 @@ void net_socket_free(net_socket_t *s) {
         kfree(s->ch_buf);
         s->ch_buf = NULL;
     }
+    net_error_purge(s);
     net_inet_state_release(s);
     resource_ns_put(s->net_ns);
     obj_cache_free(&g_net_socket_cache, s);
@@ -1143,6 +1144,15 @@ size_t a20_net_recv_msg_avail(void *head) {
     return m->len - m->off;
 }
 
+int a20_net_recv_error_take_locked(void *sp) {
+    net_socket_t *s = sp;
+    if (s->type != SOCK_DGRAM ||
+        (s->domain != AF_INET && s->domain != AF_INET6)) return 0;
+    int error = s->pending_error;
+    s->pending_error = 0;
+    return error;
+}
+
 int a20_net_recv_dequeue(void *sp, void *buf, size_t len, void *addr,
                          size_t *addrlen, void *meta) {
     return net_dequeue_msg_locked_meta((net_socket_t *)sp, buf, len, addr,
@@ -1254,7 +1264,9 @@ int a20_net_recv_park(void *sp, uint64_t wait_deadline, int channel,
         }
     } else {
         if (s->rx_head || s->nonblock || dontwait || s->closed ||
-            s->peer_closed || s->shut_rd) {
+            s->peer_closed || s->shut_rd ||
+            (s->type == SOCK_DGRAM && (s->domain == AF_INET || s->domain == AF_INET6) &&
+             s->pending_error)) {
             net_sock_unlock(s, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
@@ -1290,6 +1302,22 @@ int a20_net_recv_park(void *sp, uint64_t wait_deadline, int channel,
 int net_recvfrom_socket_meta_until(net_socket_t *s, void *buf, size_t len,
                                    int flags, void *addr, size_t *addrlen,
                                    net_recv_meta_t *meta, uint64_t deadline) {
+    if (flags & MSG_ERRQUEUE) {
+        if (!s || s->type != SOCK_DGRAM ||
+            (s->domain != AF_INET && s->domain != AF_INET6)) return -EOPNOTSUPP;
+        net_error_msg_t *error = net_error_dequeue(s);
+        if (!error) return -EAGAIN;
+        size_t n = len < error->len ? len : error->len;
+        if (n) memcpy(buf, error->payload, n);
+        if (addr && addrlen) {
+            size_t an = *addrlen < error->address_len ? *addrlen : error->address_len;
+            if (an) memcpy(addr, error->destination, an);
+            *addrlen = error->address_len;
+        }
+        if (meta) memset(meta, 0, sizeof(*meta));
+        kfree(error);
+        return (int)n;
+    }
     return a20_net_recvfrom_socket_meta_until(s, buf, len, flags, addr, addrlen,
                                               meta, deadline);
 }

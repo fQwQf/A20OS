@@ -41,6 +41,7 @@ struct net_socket;
 #define MSG_PEEK       0x0002
 #define MSG_TRUNC      0x0020
 #define MSG_DONTWAIT   0x0040
+#define MSG_ERRQUEUE   0x2000
 #define MSG_WAITALL    0x0100
 #define MSG_CTRUNC     0x0008
 #define MSG_NOSIGNAL   0x4000

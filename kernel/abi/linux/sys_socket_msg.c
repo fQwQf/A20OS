@@ -908,6 +908,61 @@ int64_t sys_sendmsg(int fd, const void *msg, int flags)
     return linux_sendmsg_with_socket(fd, &mh, flags, NULL, NULL);
 }
 
+static int64_t linux_recvmsg_error_queue(net_socket_t *sock, void *msg,
+                                         socket_msghdr_t *mh,
+                                         const socket_iovec_t *iov, size_t total)
+{
+    if ((sock->domain != AF_INET && sock->domain != AF_INET6) ||
+        sock->type != SOCK_DGRAM) return -EOPNOTSUPP;
+    net_error_msg_t *error = net_error_dequeue(sock);
+    if (!error) return -EAGAIN;
+    size_t copied = error->len < total ? error->len : total;
+    int output_flags = MSG_ERRQUEUE | (copied < error->len ? MSG_TRUNC : 0);
+    int64_t result = -EFAULT;
+    size_t done = 0;
+    for (size_t i = 0; i < mh->msg_iovlen && done < copied; i++) {
+        size_t n = copied - done;
+        if (n > iov[i].len) n = iov[i].len;
+        if (n && copy_to_user(iov[i].base, error->payload + done, n) < 0) goto out;
+        done += n;
+    }
+    if (mh->msg_name) {
+        size_t n = mh->msg_namelen < error->address_len ?
+                   mh->msg_namelen : error->address_len;
+        if (n && copy_to_user(mh->msg_name, error->destination, n) < 0) goto out;
+        mh->msg_namelen = error->address_len;
+        if (copy_to_user(&((socket_msghdr_t *)msg)->msg_namelen,
+                         &mh->msg_namelen, sizeof(mh->msg_namelen)) < 0) goto out;
+    }
+    union { socket_cmsghdr_t align; uint8_t bytes[128]; } control = {0};
+    size_t payload_len = sizeof(error->error) + error->address_len;
+    size_t full_len = cmsg_len(payload_len), used = 0;
+    if (mh->msg_controllen < full_len || !mh->msg_control)
+        output_flags |= MSG_CTRUNC;
+    if (mh->msg_controllen >= sizeof(socket_cmsghdr_t)) {
+        socket_cmsghdr_t *cmsg = (void *)control.bytes;
+        cmsg->cmsg_level = sock->domain == AF_INET ? IPPROTO_IP : IPPROTO_IPV6;
+        cmsg->cmsg_type = sock->domain == AF_INET ? 11 : 25;
+        cmsg->cmsg_len = mh->msg_controllen < full_len ? mh->msg_controllen : full_len;
+        memcpy(cmsg_data(cmsg), &error->error, sizeof(error->error));
+        memcpy((uint8_t *)cmsg_data(cmsg) + sizeof(error->error),
+               error->offender, error->address_len);
+        used = cmsg_space(payload_len);
+        if (used > mh->msg_controllen) used = mh->msg_controllen;
+        if (copy_to_user(mh->msg_control, control.bytes, used) < 0) goto out;
+    }
+    mh->msg_controllen = used;
+    mh->msg_flags = output_flags;
+    if (copy_to_user(&((socket_msghdr_t *)msg)->msg_controllen,
+                     &mh->msg_controllen, sizeof(mh->msg_controllen)) < 0 ||
+        copy_to_user(&((socket_msghdr_t *)msg)->msg_flags,
+                     &mh->msg_flags, sizeof(mh->msg_flags)) < 0) goto out;
+    result = (int64_t)copied;
+out:
+    kfree(error);
+    return result;
+}
+
 static int64_t linux_recvmsg_with_socket_header(
     int fd, void *msg, const socket_msghdr_t *kernel_header, int flags,
     net_socket_t *pinned_sock, vfile_t *pinned_vf, uint64_t deadline)
@@ -918,7 +973,7 @@ static int64_t linux_recvmsg_with_socket_header(
         mh = *kernel_header;
     else if (copy_from_user(&mh, msg, sizeof(mh)) < 0)
         return -EFAULT;
-    if (mh.msg_iovlen == 0) return 0;
+    if (mh.msg_iovlen == 0 && !(flags & MSG_ERRQUEUE)) return 0;
     if (mh.msg_iovlen > 1024) return -EMSGSIZE;
 
     vfile_t *sock_vf = pinned_vf;
@@ -935,10 +990,10 @@ static int64_t linux_recvmsg_with_socket_header(
     }
 
     size_t iov_bytes = (size_t)mh.msg_iovlen * sizeof(socket_iovec_t);
-    socket_iovec_t *iov = (socket_iovec_t *)kmalloc(iov_bytes);
-    if (!iov)
+    socket_iovec_t *iov = iov_bytes ? (socket_iovec_t *)kmalloc(iov_bytes) : NULL;
+    if (iov_bytes && !iov)
         return linux_socket_unpin_result(sock, sock_vf, -ENOMEM);
-    if (copy_from_user(iov, mh.msg_iov, iov_bytes) < 0) {
+    if (iov_bytes && copy_from_user(iov, mh.msg_iov, iov_bytes) < 0) {
         kfree(iov);
         return linux_socket_unpin_result(sock, sock_vf, -EFAULT);
     }
@@ -968,6 +1023,11 @@ static int64_t linux_recvmsg_with_socket_header(
             kfree(iov);
             return linux_socket_unpin_result(sock, sock_vf, mr);
         }
+    }
+    if (flags & MSG_ERRQUEUE) {
+        int64_t r = linux_recvmsg_error_queue(sock, msg, &mh, iov, total);
+        kfree(iov);
+        return linux_socket_unpin_result(sock, sock_vf, r);
     }
     uint8_t kaddr[NET_SOCKADDR_MAX];
     size_t klen = 0;

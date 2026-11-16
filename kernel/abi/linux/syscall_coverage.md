@@ -157,12 +157,12 @@ strength of a boilerplate note.
 | `getsockname` | sockets | `partial` | `smoke-abi-linux`; `application_runtime_guest.py --check unix-names` (RV64 SMP2 / Linux reference) | unnamed Unix addresses include AF_UNIX; truncated buffers receive only their prefix while the returned length is complete. Other protocol edge semantics remain gaps. |
 | `getpeername` | sockets | `partial` | `smoke-abi-linux`; `application_runtime_guest.py --check unix-names` (RV64 SMP2 / Linux reference) | unnamed Unix addresses include AF_UNIX; truncated buffers receive only their prefix while the returned length is complete. Other protocol edge semantics remain gaps. |
 | `sendto` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `recvfrom` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `setsockopt` | sockets | `partial` | `smoke-abi-linux` | implemented subset; AF_NETLINK send/receive buffers use bounded native datagram limits; IP_RECVERR remains unsupported |
+| `recvfrom` | sockets | `partial` | `smoke-abi-linux` | UDP MSG_ERRQUEUE consumes the separate error queue; name copy respects input capacity while reporting the address length. Other Linux edge semantics remain partial. |
+| `setsockopt` | sockets | `partial` | `smoke-abi-linux` | implemented subset; AF_NETLINK buffers use bounded native limits; BSD initial-namespace UDP supports IP_RECVERR/IPV6_RECVERR for ICMP errors; unsupported backends/namespaces return an error |
 | `getsockopt` | sockets | `partial` | `smoke-abi-linux` | implemented subset; reports effective native buffer limits, without Linux skb accounting/doubling semantics |
 | `shutdown` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `sendmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `recvmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `recvmsg` | sockets | `partial` | `smoke-abi-linux`; `python3 -m unittest tools.tests.test_udp_error_queue` | bounded UDP MSG_ERRQUEUE, extended-error/offender cmsg, truncation and empty-queue EAGAIN; RV64 CLI IPv4/IPv6 ICMP and DNS checks passed. BSD initial network namespace only; local synchronous-error and mapped-IPv4 coverage remain partial. |
 | `sendmmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `recvmmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `recvmmsg_time64` | sockets | `partial` | `smoke-abi-linux` | 32-bit time64 alias of recvmmsg |

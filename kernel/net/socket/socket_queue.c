@@ -1,4 +1,5 @@
 #include "net/socket/socket_internal.h"
+#include "core/errno.h"
 #include "net/socket_side.h"
 #include "fs/file.h"
 #include "mm/objcache.h"
@@ -673,4 +674,72 @@ net_socket_t *net_accept_queue_pop_locked(net_socket_t *listener)
     listener->accept_count--;
     child->accept_next = NULL;
     return child;
+}
+
+/* Error records are bounded independently of the normal datagram queue. The
+ * charge includes metadata, so zero-length ICMP quotations remain bounded. */
+int net_error_enqueue(net_socket_t *s, const net_extended_error_t *error,
+                      const void *destination, const void *offender,
+                      size_t address_len, const void *payload, size_t len)
+{
+    if (!s || !error || address_len > 28 || len > NET_MAX_PAYLOAD)
+        return -EINVAL;
+    size_t charge = sizeof(net_error_msg_t) + len;
+    net_error_msg_t *m = kmalloc(charge);
+    if (!m) return -ENOMEM;
+    memset(m, 0, sizeof(*m));
+    m->error = *error;
+    m->address_len = address_len;
+    m->len = len;
+    memcpy(m->destination, destination, address_len);
+    memcpy(m->offender, offender, address_len);
+    if (len) memcpy(m->payload, payload, len);
+    uint64_t flags = net_sock_lock(s);
+    int enabled = s->domain == AF_INET ? s->ipv4_recv_err : s->ipv6_recv_err;
+    if (s->closed || !enabled || s->error_count >= 8 ||
+        charge > s->rcv_buf || s->error_bytes > s->rcv_buf - charge) {
+        net_sock_unlock(s, flags);
+        kfree(m);
+        return -ENOBUFS;
+    }
+    if (s->error_tail) s->error_tail->next = m;
+    else s->error_head = m;
+    s->error_tail = m;
+    s->error_count++;
+    s->error_bytes += charge;
+    s->pending_error = (int)error->error;
+    net_sock_unlock(s, flags);
+    wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
+    return 0;
+}
+
+net_error_msg_t *net_error_dequeue(net_socket_t *s)
+{
+    uint64_t flags = net_sock_lock(s);
+    net_error_msg_t *m = s->error_head;
+    if (m) {
+        s->error_head = m->next;
+        if (!s->error_head) s->error_tail = NULL;
+        s->error_count--;
+        s->error_bytes -= sizeof(*m) + m->len;
+        s->pending_error = s->error_head ? (int)s->error_head->error.error : 0;
+        m->next = NULL;
+    }
+    net_sock_unlock(s, flags);
+    return m;
+}
+
+void net_error_purge(net_socket_t *s)
+{
+    uint64_t flags = net_sock_lock(s);
+    net_error_msg_t *m = s->error_head;
+    s->error_head = s->error_tail = NULL;
+    s->error_count = 0;
+    s->error_bytes = 0;
+    net_sock_unlock(s, flags);
+    while (m) {
+        net_error_msg_t *next = m->next;
+        kfree(m);
+        m = next;
+    }
 }

@@ -844,3 +844,22 @@ int net_poll_events(int gfd, short events)
     vfs_put_file_ref(gfd, vf);
     return revents;
 }
+
+int a20_net_option_recverr(void *sp, int family, int value, int set)
+{
+    net_socket_t *s = sp;
+    if (!s || s->domain != family || s->type != SOCK_DGRAM)
+        return -EOPNOTSUPP;
+    if (set) return net_inet_recverr(s, value != 0);
+    uint64_t flags = net_sock_lock(s);
+    int enabled = family == AF_INET ? s->ipv4_recv_err : s->ipv6_recv_err;
+    net_sock_unlock(s, flags);
+    return enabled;
+}
+
+/* Called with the poller's socket lock already held. */
+int a20_net_poll_error_pending(void *sp)
+{
+    net_socket_t *s = sp;
+    return s->pending_error != 0 || s->error_count != 0;
+}

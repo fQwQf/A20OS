@@ -171,6 +171,7 @@ typedef struct net_endpoint_ops {
                        int flags, const void *addr, size_t addr_len,
                        const net_datagram_control_t *control);
     int (*pmtu)(struct net_socket *s, int mode, int set);
+    int (*recverr)(struct net_socket *s, int enable);
     int (*raw_send)(struct net_socket *s, const void *buf, size_t len,
                     const void *addr, size_t addr_len, int hdrincl,
                     int protocol);
