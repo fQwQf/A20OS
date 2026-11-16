@@ -89,7 +89,7 @@ int main(void){
  assert(borrowed->priv==old&&old->ever_published&&!virtio_blk_ready(old->slot));
  hw.fail_tx=1;
  assert(virtio_blk_driver_probe(&extra)==-EIO&&extra.drv_priv!=old);
- assert(borrowed->priv==old&&old->queue_dma_mem);
+ assert(borrowed->priv==old&&!old->queue_dma_mem&&old->closing);
  assert(!virtio_blk_driver_remove(&extra));
  return 0;
 }
@@ -107,8 +107,10 @@ class VirtioBlkProbeCleanup(unittest.TestCase):
         free_dma = function(source, 'virtio_blk_free_dma')
         names = ('virtio_blk_init_instance', 'virtio_blk_ready', 'virtio_blk_mmio_read32',
                  'virtio_blk_mmio_write32', 'virtio_blk_driver_probe', 'virtio_blk_driver_remove')
-        code = '\n'.join(function(source, name) for name in names)
+        stop = function(source[source.index('static int virtio_blk_stop(void *context)\n{'):], 'virtio_blk_stop')
+        code = stop + '\n' + '\n'.join(function(source, name) for name in names)
         model = TRANSPORT_MODEL.replace('assert(d->managed&&type==1)', 'assert(d->managed&&type==2)')
+        model += '\nstatic int device_add_execution_action(device_t *d,int (*stop)(void *),void (*release)(void *),void *context){assert(d->managed&&d->drv_priv==context&&stop&&!release);return 0;}\n'
         model = model.replace('int irq,msix_vectors,msix_base,shared_irq;', 'int irq,msix_vectors,msix_base,shared_irq,legacy;')
         with tempfile.TemporaryDirectory(prefix='a20-blk-probe-') as directory:
             path = Path(directory) / 'probe.c'

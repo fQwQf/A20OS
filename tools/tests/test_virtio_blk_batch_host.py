@@ -103,7 +103,8 @@ typedef struct virtio_blk_req {
 } virtio_blk_req_t;
 typedef struct virtio_blk_inst {
     int slot;
-    int ever_published;
+    int ever_published,closing;
+    uint32_t active_calls;
     size_t request_slots;
     struct { int valid; } blk;
     test_lock_t lock;
@@ -118,7 +119,7 @@ static unsigned kick_submits[32];
 static unsigned kick_waits[32];
 static unsigned max_live = VIRTIO_BLK_REQ_SLOTS;
 static unsigned full_on_alloc_call;
-static unsigned fail_submit_call, fail_wait_call;
+static unsigned fail_submit_call, fail_wait_call, close_on_submit;
 static int fallback_result;
 static int test_error;
 static unsigned lock_depth, lock_calls, unlock_calls, wake_init_calls, wake_flush_calls;
@@ -135,7 +136,7 @@ static void reset(void) {
     memset(kick_submits, 0, sizeof(kick_submits));
     memset(kick_waits, 0, sizeof(kick_waits));
     max_live = VIRTIO_BLK_REQ_SLOTS;
-    full_on_alloc_call = fail_submit_call = fail_wait_call = 0;
+    full_on_alloc_call = fail_submit_call = fail_wait_call = close_on_submit = 0;
     fallback_result = test_error = 0;
     lock_depth = lock_calls = unlock_calls = 0;
     wake_init_calls = wake_flush_calls = 0;
@@ -187,6 +188,8 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         int notify) {
     (void)inst; (void)sectors; (void)write; (void)flush;
     submit_calls++;
+    if (!inst->active_calls) fail("submission without call ownership");
+    if (close_on_submit == submit_calls) inst->closing = 1;
     if (notify) submit_notify_nonzero++;
     if (lock_depth != 1) fail("submission outside device lock");
     if (fail_submit_call == submit_calls) return -EIO;
@@ -333,6 +336,16 @@ int main(void) {
     failed |= check(blk_write_batch(&dev, four, 4) == -EINVAL && submit_calls == 0 &&
                     alloc_calls == 0 && common_clean(), "count overflow prevalidated");
 
+    reset();
+    writes_init(four, four_bufs, 4);
+    close_on_submit = 1;
+    failed |= check(blk_write_batch(&dev, four, 4) == -ESHUTDOWN &&
+                    submit_calls == 1 && wait_calls == 1 && kick_calls == 1 &&
+                    !g_insts[0].active_calls && common_clean(),
+                    "closing drains borrowed prefix and releases call ownership");
+    failed |= check(blk_write_batch(&dev, four, 4) == -ENODEV && submit_calls == 1,
+                    "closed admission rejects another call");
+
     if (failed) return 1;
     puts("virtio-blk-batch-host: extracted production function PASS");
     return 0;
@@ -346,7 +359,9 @@ class VirtioBlkBatchHostTests(unittest.TestCase):
         if not gcc:
             self.skipTest("gcc is required for this host oracle")
         source = SOURCE.read_text()
-        function = extract_c_function(source, "static int blk_write_batch(")
+        function = "\n".join(extract_c_function(source, signature) for signature in (
+            "static int virtio_blk_call_begin(", "static void virtio_blk_call_end(",
+            "static int blk_write_batch_impl(", "static int blk_write_batch("))
         with tempfile.TemporaryDirectory(prefix="a20-virtio-blk-batch-") as tmp:
             c_file = pathlib.Path(tmp) / "host.c"
             exe = pathlib.Path(tmp) / "test-virtio-blk-batch"
