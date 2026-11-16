@@ -1,6 +1,6 @@
 # 目标应用的 Linux ABI 契约与证据
 
-对应 [N08](../../status/gaps/triage-matrix.md)。按当前已开展的应用工作负载登记调用、关键错误和验证入口，不要求所有 syscall 标成 full，也不把应用所带依赖包的每个可选 API 都变成独立验收项。包清单、入口存在和历史运行记录均不能单独证明当前候选通过。
+原 N08 已按本页的[应用关键边界收口](#应用关键边界收口2026-11-17)关闭。正式支持平台与发布候选复验仍见 [N18/N20](../../status/gaps/triage-matrix.md)。按当前已开展的应用工作负载登记调用、关键错误和验证入口，不要求所有 syscall 标成 full，也不把应用所带依赖包的每个可选 API 都变成独立验收项。包清单、入口存在和历史运行记录均不能单独证明当前候选通过。
 
 ## 应用与关键行为
 
@@ -39,7 +39,7 @@
 | CLI 登录会话、尺寸、回收、respawn 与普通关机 | `cli-console/verified/report.json` 为 PASS，耗时 27.946 秒；同一启动中的两个 getty 会话 SID 11/91 均验证控制终端/前台组、120×40 尺寸、termios 恢复、当前 zsh 的 resize-console 变量更新和孤儿回收。exit 后新会话恢复；普通 poweroff 由 BusyBox init 完成，自然关机及 ext4/FAT 只读检查均为 0。 |
 | 原版 OpenRC PID 1、监督/控制 FIFO 与普通关机 | `openrc-runtime/control-verified/report.json` 为 PASS，耗时 11.335 秒；PID 1 的 `/proc/1/exe` 为 `/sbin/init`，文件哈希与 OpenRC 相同；default runlevel、proc environ、监督进程 161 的子进程 162→168→170、真实控制 FIFO 信号与服务停止通过；PID 1 接收普通关机 FIFO 命令并完成 TERM/KILL/sync，自然退出 0、ext4/FAT 只读检查均为 0。范围为精简 OpenRC world，不代表图形桌面、可选硬件服务或实机复位通过。 |
 
-此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失、UDP DNS 阻塞和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。CLI 启动控制终端与尺寸问题已关闭，契约和范围见[CLI 控制台](cli-console.md)。OpenRC 的上述有界服务生命周期不再列为未验证项；N08 继续跟踪未被上述应用运行证明的关键错误/权限边界与候选证据，N21 保留其已声明的其它恢复要求。
+此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失、UDP DNS 阻塞和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。CLI 启动控制终端与尺寸问题已关闭，契约和范围见[CLI 控制台](cli-console.md)。OpenRC 的上述有界服务生命周期不再列为未验证项；上述应用功能与下节关键错误/权限证据共同关闭 N08；N21 保留其已声明的其它恢复要求。
 
 ## x86_64 桌面与 JVM 的直接运行（2026-11-16）
 
@@ -81,16 +81,44 @@ NULL。临时测试 profile 显式恢复 false 后，原版 `im=wayland` 路径�
 [Mozilla 说明](https://firefox-source-docs.mozilla.org/remote/Prefs.html)明确用户偏好优先于
 自动化推荐值；公共浏览器探针现在使用上述正常焦点配置的临时 profile。
 
-剩余范围为表中尚未有直接证据的关键错误/权限语义及候选收口；不再把浏览器文本输入、
-正常退出或已经通过的 JVM/Minecraft 行为列为未完成，也不新增长驻留或穷尽矩阵。
+下节补齐本表关键错误/权限语义并关闭 N08。最终支持平台/候选收口仍归 N18/N20；
+不重复要求已通过的浏览器、JVM/Minecraft 行为，也不新增长驻留或穷尽矩阵。
+
+## 应用关键边界收口（2026-11-17）
+
+本轮在 x86_64 KVM/q35、ABI=both SMP4、真实 XFCE/OpenRC world 中补齐下列现有
+短检查；直接证据仍位于上述 `desktop-current/`。没有重跑浏览器、游戏或全量套件。
+
+| 契约边界 | 实际证据 |
+| --- | --- |
+| SA_RESTART/EINTR；线程共享处理表、SIGSYS siginfo/寄存器和 exec 分离 | `application-boundaries/report.json` 的 syscall_restart_test / seccomp_context_test 两个分项通过；该轮 sandbox 失败，整轮仍为 FAIL。VFS 修复不改这两个已通过的信号机制。 |
+| 沙箱错误/继承、dumpable/ptrace、proc 链接权限；SCM_RIGHTS 的截断/回滚/CLOEXEC/关闭复用 | `application-boundaries-fixed/report.json` 的 sandbox_test / scm_stress 通过；不可转储的同 uid 子进程 readlink/open exe 为 EACCES，允许状态可访问，不存在 PID 为 ENOENT。 |
+| poll/epoll 的错误/关闭；定时器与中断；网卡尺寸/短输出；终端与 FIFO 权限/断开 | 同一 fixed 报告的 poll_edge、timer_edge、net_iface_test（24 个断言）、tty_jobcontrol_test、tty_lifecycle_test、revocation 和 fifo 全部通过；FIFO 覆盖 `/tmp` 与 `/dev/shm`、ENXIO/EPIPE/EAGAIN、Landlock 直接/符号链接拒绝及两套 mknod 入口。 |
+| 子进程恰好一次收割/ECHILD、futex 超时/隔离、管道 EOF/EPIPE；真实 exec 的 CLOEXEC | `process-boundaries/report.json` 全部通过。exec 检查明确使用 close_fds=False：带 CLOEXEC 的 fd 在 exec 后消失，清除该位后同一验证器按预期失败，证明 fd 实际继承，未由 Python 替内核关闭。 |
+
+初次沙箱失败是 procfs 的 vnode 跟随路径返回了 chroot 外的全局可执行路径，而
+readlink 快捷入口已返回可见路径，两者不一致。实现提交 `90d63fe4e` 共用既有路径
+转换，并让数字 PID 的 exe/cwd 快捷入口执行既有访问检查，缺失进程返回 ENOENT。
+现有 sandbox_test 增补实际访问正反检查；宿主 Linux 对照与当前报告一致。
+
+两个最终补充运行分别耗时 37.892 / 31.017 秒，均自然关机、QEMU 退出 0、ext4/FAT
+只读检查 0，无 FATAL/内核异常。最初在桌面组件仍启动时立即请求关机，退出阶段曾出现
+xfsettingsd SIGSEGV，原始 FAIL 和日志保留；不把这条观察标为已修复，也不用该次早停
+支持正常桌面生命周期通过。系统关机验收仍检查 OpenRC 收敛、写回、实际退出与磁盘
+状态，不把被终止的每个用户进程零退出作为既有发布条件。
+
+上述关键边界与前文六组真实应用运行共同满足 N08 的有界关闭条件。逐项索引为
+`build/evidence/v1-closeout-20261116/proc-exe-follow/n08-closeout.json`，其中失败报告
+只引用明确通过的分项，不把整轮升级为 PASS。N08 从开放清单删除；覆盖表保留 partial，
+不声称支持所有 Linux syscall/flag，也不取代 N18/N20 的正式支持配置与发布候选验证。
 
 ## 证据与关闭规则
 
-以上路径来自现有 world、接口说明和应用记录，不新增全 syscall 或全架构穷尽矩阵。N08 尚未关闭：清单建立完成不等于表中关键契约全部完成。
+以上路径来自现有 world、接口说明和应用记录，不新增全 syscall 或全架构穷尽矩阵。N08 的关闭依据是上述实际应用与关键边界，不是清单建立或入口存在。
 
 - 保留 [syscall 覆盖表](../../../../kernel/abi/linux/syscall_coverage.md) 的 partial/拒绝边界；每个已确认的应用阻塞对应具体调用和可复现行为，再安排修复。
 - 复用仍适用的直接检查，不逐项重复历史全量。应用级运行与正式支持平台的关键验证合并到候选验收，记录内核/镜像、ABI、CPU/设备、命令、结果和跳过范围；平台矩阵仍归 N18/N20。
 - 2026-11-16 本地核对发现 `tty-control-desktop-regression`、`aarch64-desktop-supervision-rust`、`aarch64-desktop-supervision-c-public` 的原始报告目录已缺失。对应 Markdown 历史记录保留，但不能当作当前工作区可复核的候选报告。
 - Native 检查点通知另遵守[设计边界](../../native-abi/checkpoint-signals.md)，不在本条重新要求完整 Native 异步处理器。
 
-本页没有把依赖包安装、主机替代边界、历史通过或脚本存在升级为应用已通过。后续登记新证据时更新对应行，达到原要求后从缺口台账删除 N08。
+本页不把依赖包安装、主机替代边界、历史通过或脚本存在升级为应用通过。后续发现已承诺路径的实际回归时，按具体缺陷重新登记；发布候选仍按交付矩阵执行。
