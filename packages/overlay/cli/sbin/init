@@ -1,13 +1,9 @@
 #!/bin/sh
 # A20OS stage-2 init for the cli world.  The kernel already mounted
 # devtmpfs/proc/sysfs under /extra before the chroot, so /dev /proc /sys are
-# live here; this script only has to finish the runtime filesystems and hand
-# the console to an interactive zsh.
-#
-# Adapted from packages/overlay/server/sbin/init (same distro-mode contract,
-# see user/init.c:do_shutdown / detect_distro_rootfs).  Difference: no daemons
-# and no busybox ash — this world exists to be a usable command line, so the
-# login shell is the zsh the world installs.
+# live here. BusyBox init owns reaping, respawn and shutdown; getty establishes
+# the console session before cli-session queries its size and execs zsh.
+# The kernel's inherited stdio alone does not establish a controlling tty.
 
 export HOME=/root
 export SHELL=/bin/zsh
@@ -19,51 +15,12 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # host terminal is not xterm-compatible.
 export TERM=${TERM:-xterm-256color}
 
-# /dev/pts for tmux/ssh/script(1), /dev/shm for python3 and other runtimes.
-#
-# Measured on riscv64 (2026-10): in-guest `mount` currently does nothing for any
-# of these.  `mount -t tmpfs tmpfs /tmp` and `mount -t tmpfs -o size=64m tmpfs
-# /var/tmp` both return 32, and afterwards neither /dev/pts nor /tmp appears in
-# /proc/mounts.  A20OS only mounts filesystems itself, under /extra, before the
-# chroot -- that is where the kernel's own /extra/dev/shm and /extra/run tmpfs
-# entries come from.  So the four mounts below are best-effort: they are what a
-# normal distro init does, and they become load-bearing the day the kernel grows
-# a userspace mount path, but today they are no-ops.  Nothing here depends on
-# them: ptys work through /dev/ptmx, and /dev/shm and /run are already tmpfs.
+# Finish runtime mounts before starting the upstream PID 1 supervisor.
 mkdir -p /dev/pts /dev/shm /run /tmp
 mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 
-# The console tty reports a hardcoded 24x80, and the host terminal's real size
-# never reaches the guest.  zsh's line editor redraws against that 80, which is
-# what makes typing and history recall garble the screen on a wider terminal.
-# console-size asks the terminal itself (DSR) and prints COLUMNS/LINES; zsh's
-# ZLE honours $COLUMNS, so exporting it here is what fixes the redraw.  It
-# times out harmlessly when the console is not a real terminal.  See
-# /usr/lib/a20/console-size and /usr/local/bin/resize-console.
-if [ -x /usr/lib/a20/console-size ]; then
-    size=$(/usr/lib/a20/console-size)
-    if [ -n "$size" ]; then
-        eval "$size"
-        export COLUMNS LINES
-    fi
-fi
-
-echo
-echo "A20OS command-line workstation ($(uname -m), Alpine userland)"
-echo "  zsh $(zsh --version 2>/dev/null | awk '{print $2}')   " \
-     "coreutils $(ls --version 2>/dev/null | head -1 | awk '{print $NF}')"
-echo "  console ${COLUMNS:-?}x${LINES:-?}" \
-     "(run resize-console after resizing the window)"
-echo "  type 'help' for the A20OS builtins, 'poweroff' to leave."
-echo
-
-# Fall back to the busybox shell if the world was assembled without zsh, so a
-# broken world still lands on a prompt instead of panicking the console.
-if [ -x /bin/zsh ]; then
-    exec /bin/zsh -l
-fi
-echo "[cli-init] /bin/zsh missing; falling back to /bin/sh"
-exec /bin/sh -l
+# PID 1 stays a supervisor; the console shell is a getty child session.
+exec /bin/busybox init

@@ -54,9 +54,10 @@ if [ -z "$cols" ]; then
     if stty raw -echo < "$TTY" 2>/dev/null; then
         # ESC 7 = save cursor, ESC 8 = restore it.
         printf '\0337\033[9999;9999H\033[6n' > "$TTY"
-        # The reply has no newline, so read a bounded number of bytes and let
-        # the timeout close it.  A terminal that does not answer costs ~1s.
-        reply=$(timeout 1 dd if="$TTY" bs=1 count=24 2>/dev/null | tr -d '\033\r\n')
+        # Keep timeout/dd in the foreground group: a background tty reader
+        # would receive SIGTTIN once getty establishes real job control.
+        # The reply has no newline; the bounded read times out after ~1s.
+        reply=$(timeout --foreground 1 dd if="$TTY" bs=1 count=24 2>/dev/null | tr -d '\033\r\n')
         printf '\0338' > "$TTY"
         [ -n "$saved" ] && stty "$saved" < "$TTY" 2>/dev/null
         cols=$(printf '%s' "$reply" | sed -n 's/.*\[[0-9][0-9]*;\([0-9][0-9]*\)R.*/\1/p')
