@@ -85,6 +85,8 @@ typedef struct {
     device_t *owner;
     int closing;
     int endpoints_live;
+    int probing;
+    int recovery_pending;
     uint32_t active_calls;
     uint32_t consumer_refs;
 
@@ -166,21 +168,63 @@ static int msc_bulk(usb_storage_dev_t *st, usb_endpoint_t *ep,
     return usb_submit_urb(&urb);
 }
 
-/* Bulk-Only Mass Storage Reset (class control request). */
-static void msc_reset(usb_storage_dev_t *st) {
-    (void)usb_control_msg(st->dev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+/* BOT 1.0 section 5.3.4: Reset, Clear HALT IN, Clear HALT OUT.
+ * The BOT mutex spans the entire recovery. Retire host endpoint contexts first
+ * so their dequeue/toggle state cannot outlive the device-side reset. Rebuild
+ * only after all three control requests succeed. No failed command is replayed.
+ * https://www.usb.org/sites/default/files/usbmassbulk_10.pdf */
+static int msc_reset(usb_storage_dev_t *st) {
+    st->recovery_pending = 1;
+    /* Probe already owns lifecycle. Runtime calls must not wait for a
+     * lifecycle callback that might itself be waiting for block I/O. */
+    if (st->probing) driver_lifecycle_begin();
+    else {
+        int ret = driver_lifecycle_try_begin();
+        if (ret) return ret;
+    }
+    int ret = -ESHUTDOWN;
+    if (__atomic_load_n(&st->closing, __ATOMIC_ACQUIRE) ||
+        device_is_stopping(st->owner) || st->owner->plat_data != st->iface)
+        goto out;
+    usb_hcd_t *hcd = st->dev->hcd;
+    ret = hcd->ops->release_endpoint(hcd, st->dev, st->bulk_in->addr);
+    if (ret) goto out;
+    ret = hcd->ops->release_endpoint(hcd, st->dev, st->bulk_out->addr);
+    if (ret) goto out;
+    ret = usb_control_msg(st->dev, USB_TYPE_CLASS | USB_RECIP_INTERFACE,
                           USB_REQ_BULK_ONLY_RESET, 0,
                           st->iface->interface_number, NULL, 0);
+    if (ret) goto out;
+    ret = usb_control_msg(st->dev, USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
+                          USB_REQ_CLEAR_FEATURE, USB_FEAT_ENDPOINT_HALT,
+                          st->bulk_in->addr, NULL, 0);
+    if (ret) goto out;
+    ret = usb_control_msg(st->dev, USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
+                          USB_REQ_CLEAR_FEATURE, USB_FEAT_ENDPOINT_HALT,
+                          st->bulk_out->addr, NULL, 0);
+    if (ret) goto out;
+    ret = hcd->ops->configure_endpoint(hcd, st->dev, st->bulk_out->addr,
+                                      USB_XFER_BULK, st->bulk_out->max_packet, 0);
+    if (ret) goto out;
+    ret = hcd->ops->configure_endpoint(hcd, st->dev, st->bulk_in->addr,
+                                      USB_XFER_BULK, st->bulk_in->max_packet, 0);
+    if (!ret) st->recovery_pending = 0;
+out:
+    driver_lifecycle_end();
+    return ret > 0 ? -EIO : ret;
 }
 
 /* Send a SCSI CDB, transfer the data phase, read the CSW. */
 static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
                        uint8_t cdblen, void *data, uint32_t datalen,
                        int data_in) {
+    if (!cdb || !cdblen || cdblen > 16 || (datalen && !data)) return -EINVAL;
     mutex_lock(&st->lock);
-    if (__atomic_load_n(&st->closing, __ATOMIC_ACQUIRE)) {
-        mutex_unlock(&st->lock);
-        return -ESHUTDOWN;
+    int result = -ESHUTDOWN;
+    if (__atomic_load_n(&st->closing, __ATOMIC_ACQUIRE)) goto out;
+    if (st->recovery_pending) {
+        result = msc_reset(st);
+        if (result) goto out; /* No CBW until the previous recovery succeeds. */
     }
 
     uint32_t tag = ++st->tag;
@@ -191,64 +235,51 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
     st->cbw.flags = data_in ? 0x80 : 0x00;
     st->cbw.lun = 0;
     st->cbw.command_length = cdblen;
-    memcpy(st->cbw.command, cdb, cdblen > 16 ? 16 : cdblen);
+    memcpy(st->cbw.command, cdb, cdblen);
 
-    /* 1. CBW on bulk-OUT. */
-    if (msc_bulk(st, st->bulk_out, &st->cbw, USB_MSC_CBW_SIZE) < 0) {
-        mutex_unlock(&st->lock);
-        msc_reset(st);
-        return -EIO;
-    }
+    result = msc_bulk(st, st->bulk_out, &st->cbw, USB_MSC_CBW_SIZE);
+    if (result) goto recover;
 
-    /* 2. Data phase (chunked). */
     uint32_t transferred = 0;
     if (datalen) {
         usb_endpoint_t *dep = data_in ? st->bulk_in : st->bulk_out;
         while (transferred < datalen) {
             uint32_t chunk = datalen - transferred;
-            if (chunk > USB_MSC_IO_CHUNK)
-                chunk = USB_MSC_IO_CHUNK;
-            memcpy(st->data, (uint8_t *)data + transferred, chunk);
-            int r = msc_bulk(st, dep, st->data, chunk);
-            if (r < 0) {
-                mutex_unlock(&st->lock);
-                msc_reset(st);
-                return -EIO;
-            }
-            if (data_in)
-                memcpy((uint8_t *)data + transferred, st->data, chunk);
+            if (chunk > USB_MSC_IO_CHUNK) chunk = USB_MSC_IO_CHUNK;
+            if (!data_in) memcpy(st->data, (uint8_t *)data + transferred, chunk);
+            result = msc_bulk(st, dep, st->data, chunk);
+            if (result) goto recover;
+            if (data_in) memcpy((uint8_t *)data + transferred, st->data, chunk);
             transferred += chunk;
         }
     }
 
-    /* 3. CSW on bulk-IN. */
     memset(&st->csw, 0, sizeof(st->csw));
-    if (msc_bulk(st, st->bulk_in, &st->csw, USB_MSC_CSW_SIZE) < 0) {
-        mutex_unlock(&st->lock);
-        msc_reset(st);
-        return -EIO;
-    }
+    result = msc_bulk(st, st->bulk_in, &st->csw, USB_MSC_CSW_SIZE);
+    if (result) goto recover;
 
-    int result = -EIO;
-    if (st->csw.signature == USB_MSC_CSW_SIGNATURE &&
-        st->csw.tag == tag && st->csw.status == USB_MSC_CSW_STATUS_PASS) {
-        if (!st->csw.residue ||
-            (cdb[0] != SCSI_CMD_READ10 && cdb[0] != SCSI_CMD_WRITE10))
-            result = 0;
-        else
-            kwarn("[USB-STORAGE] incomplete block transfer: opcode=%02x residue=%u/%u\n",
-                  cdb[0], st->csw.residue, datalen);
-    }
-    else if (st->csw.status == 1)
-        result = -EIO;          /* command failed (see REQUEST SENSE) */
-
-    if (result < 0) {
+    /* A failed-command status is meaningful only in a valid CSW. Phase
+     * errors and malformed signatures/tags/residues require reset recovery. */
+    int invalid = st->csw.signature != USB_MSC_CSW_SIGNATURE ||
+                  st->csw.tag != tag || st->csw.residue > datalen ||
+                  st->csw.status > 2;
+    result = !invalid && st->csw.status == USB_MSC_CSW_STATUS_PASS &&
+             !st->csw.residue ? 0 : -EIO;
+    if (result) {
         static unsigned reports;
         if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 16)
             kwarn("[USB-STORAGE] command failed opcode=%02x tag=%u signature=%08x csw_tag=%u status=%u residue=%u length=%u\n",
                   cdb[0], tag, st->csw.signature, st->csw.tag,
                   st->csw.status, st->csw.residue, datalen);
     }
+    if (invalid || st->csw.status == 2) goto recover;
+    goto out;
+recover:
+    if (result > 0) result = -EIO;
+    /* Preserve this command's failure even if reset succeeds. A failed reset
+     * remains pending for the next caller, still under this same mutex. */
+    (void)msc_reset(st);
+out:
     mutex_unlock(&st->lock);
     return result;
 }
@@ -367,6 +398,7 @@ static int usb_storage_probe(device_t *dev) {
     st->bulk_in = bulk_in;
     st->sector_size = 512;
     st->tag = 0;
+    st->probing = 1;
 
     r = device_add_execution_action(dev, usb_storage_stop, NULL, st);
     if (r) return r;
@@ -416,6 +448,7 @@ static int usb_storage_probe(device_t *dev) {
     st->block.sector_size = st->sector_size;
     st->block.priv = st;
     st->block.release = msc_release;
+    st->probing = 0;
     uint64_t flags = spin_lock_irqsave(&g_storage_lock);
     st->ready = 1;
     spin_unlock_irqrestore(&g_storage_lock, flags);

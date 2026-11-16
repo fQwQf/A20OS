@@ -8,7 +8,7 @@ from .test_native_bus_lifetime import ROOT, C_FIXTURE
 
 
 class UsbStorageLifetime(unittest.TestCase):
-    def test_partial_probe_active_io_and_last_consumer_release(self):
+    def test_lifetime_and_serialized_bot_reset_recovery(self):
         machine = platform.machine().lower()
         if machine not in ("x86_64", "amd64"):
             self.skipTest("fixture uses x86 hardware headers")
@@ -31,7 +31,7 @@ class UsbStorageLifetime(unittest.TestCase):
                 "-I" + str(ROOT / "kernel/include"), "-I" + str(ROOT / "kernel"),
                 str(fixture), "-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for case in ("partial", "active", "reuse"):
+            for case in ("partial", "active", "reuse", "recovery"):
                 with self.subTest(case=case):
                     result = subprocess.run([str(binary), "storage-" + case],
                                             capture_output=True, text=True, timeout=15)
