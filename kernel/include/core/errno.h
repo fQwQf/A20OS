@@ -61,6 +61,7 @@
 #define ENOPROTOOPT  92
 #define ECONNABORTED 103
 #define ECONNRESET   104
+#define ENOBUFS      105
 #define EHOSTUNREACH 113
 #define ECONNREFUSED 111
 #define ETIMEDOUT    110

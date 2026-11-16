@@ -56,6 +56,7 @@ unsafe extern "C" {
     fn a20_net_poll_channel_peer_closed(ch_ep: *mut c_void) -> i32;
     fn a20_net_poll_peer_rx_count(peer: *mut c_void) -> i32;
     fn a20_net_poll_max_queue() -> i32;
+    fn a20_net_poll_error_pending(s: *mut c_void) -> i32;
 }
 
 fn zero_view() -> PollView {
@@ -94,6 +95,7 @@ pub unsafe extern "C" fn a20_net_poll_file(vf: *mut c_void, events: i16) -> i32 
     let v = view_of(s);
     let mut revents: i16 = 0;
     let irq = a20_net_poll_lock(s);
+    if a20_net_poll_error_pending(s) != 0 { revents |= POLLERR; }
 
     if !(*v.ch_ep).is_null() {
         let ch_ep = *v.ch_ep;
@@ -189,12 +191,20 @@ mod tests {
         connected: i32,
         local_tcp: i32,
         tcp_connecting: i32,
+        pending_error: i32,
+        error_count: i32,
         rx_count: i32,
         ch_ep: *mut c_void,
         ch_len: u32,
         rx_head: *mut c_void,
         accept_head: *mut c_void,
         peer: *mut c_void,
+    }
+
+    #[no_mangle]
+    extern "C" fn a20_net_poll_error_pending(s: *mut c_void) -> i32 {
+        let s = unsafe { &*(s as *const Sock) };
+        (s.pending_error != 0 || s.error_count != 0) as i32
     }
 
     impl Sock {
@@ -209,6 +219,8 @@ mod tests {
                 connected: 1,
                 local_tcp: 0,
                 tcp_connecting: 0,
+                pending_error: 0,
+                error_count: 0,
                 rx_count: 0,
                 ch_ep: 0x4000 as *mut c_void,
                 ch_len: 0,
@@ -317,6 +329,23 @@ mod tests {
     #[no_mangle]
     unsafe extern "C" fn a20_net_poll_max_queue() -> i32 {
         T_MAX_QUEUE
+    }
+
+    #[test]
+    fn error_queue_reports_pollerr_even_with_no_requested_events() {
+        unsafe {
+            let _serial = serial();
+            reset();
+            me().ch_ep = ptr::null_mut();
+            me().sock_type = 2;
+            me().error_count = 1;
+            assert_eq!(a20_net_poll_file(ptr::null_mut(), 0), POLLERR as i32);
+            me().pending_error = 111;
+            me().error_count = 0;
+            assert_eq!(a20_net_poll_file(ptr::null_mut(), POLLIN), POLLERR as i32);
+            me().pending_error = 0;
+            assert_eq!(a20_net_poll_file(ptr::null_mut(), 0), 0);
+        }
     }
 
     #[test]

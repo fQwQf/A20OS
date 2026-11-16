@@ -118,6 +118,7 @@ const IPV6_UNICAST_IF: i32 = 76;
 const IP_TOS: i32 = 1;
 const IP_TTL: i32 = 2;
 const IP_PKTINFO: i32 = 8;
+const IP_RECVERR: i32 = 11;
 const IP_MTU_DISCOVER: i32 = 10;
 const A20_IP_MULTICAST_TTL_WIRE: i32 = 33;
 const A20_IP_MULTICAST_LOOP_WIRE: i32 = 34;
@@ -246,6 +247,7 @@ const LIVE_KEEP_CNT: i32 = 3;
 
 unsafe extern "C" {
     fn a20_net_option_pmtu(s: *mut c_void, mode: i32, set: i32) -> i32;
+    fn a20_net_option_recverr(s: *mut c_void, family: i32, value: i32, set: i32) -> i32;
     /// Socket lock primitives; this module decides *when* they are taken.
     fn a20_net_option_lock(s: *mut c_void, flags: *mut u64);
     fn a20_net_option_unlock(s: *mut c_void, flags: u64);
@@ -460,6 +462,13 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
      * Returning 0 would let a caller believe a key was accepted. */
     if domain == AF_ALG && level == SOL_ALG && optname == ALG_SET_KEY {
         return -EOPNOTSUPP;
+    }
+
+    if (level == IPPROTO_IP && optname == IP_RECVERR)
+        || (level == IPPROTO_IPV6 && optname == IPV6_RECVERR) {
+        if optval.is_null() || optlen < 4 { return -EINVAL; }
+        let family = if level == IPPROTO_IP { AF_INET } else { AF_INET6 };
+        return unsafe { a20_net_option_recverr(v.s, family, read_i32(optval), 1) };
     }
 
     if level == IPPROTO_IP {
@@ -901,6 +910,12 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
     let sock_type = unsafe { *v.sock_type };
     let mut val;
 
+    if (level == IPPROTO_IP && optname == IP_RECVERR)
+        || (level == IPPROTO_IPV6 && optname == IPV6_RECVERR) {
+        let family = if level == IPPROTO_IP { AF_INET } else { AF_INET6 };
+        let value = unsafe { a20_net_option_recverr(v.s, family, 0, 0) };
+        return if value < 0 { value } else { report_int(rep, optlen, value) };
+    }
     if level == SOL_SOCKET {
         if optname == SO_PRIORITY {
             return report_int(rep, optlen, 0);

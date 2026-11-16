@@ -114,6 +114,7 @@ typedef struct net_option_view {
 void     a20_net_option_lock(void *s, uint64_t *flags);
 void     a20_net_option_unlock(void *s, uint64_t flags);
 uint32_t a20_net_option_buf_ceiling(void *s, int is_snd);
+int a20_net_option_recverr(void *s, int family, int value, int set);
 int      a20_net_option_group_membership(void *s, const void *mreq, int join);
 int      a20_net_option_tcp_live(void *s, int which);
 int      a20_net_option_ip_effective(void *s, int which);

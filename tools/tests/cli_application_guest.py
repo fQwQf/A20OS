@@ -157,6 +157,91 @@ def http(url):
     assert run(['curl', '--noproxy', '*', '--max-time', '10', '-fsS', url]) == 'A20_CLI_HTTP_OK\n'
 
 
+def udp_errors():
+    import ctypes
+    import errno
+    import select
+    import socket
+    import struct
+
+    errqueue = getattr(socket, 'MSG_ERRQUEUE', 0x2000)
+    for family, loop, level, option, origin, kind, code in (
+            (socket.AF_INET, '127.0.0.1', socket.IPPROTO_IP, 11, 2, 3, 3),
+            (socket.AF_INET6, '::1', socket.IPPROTO_IPV6, 25, 3, 1, 4)):
+        with socket.socket(family, socket.SOCK_DGRAM) as reserve:
+            reserve.bind((loop, 0))
+            port = reserve.getsockname()[1]
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.bind((loop, 0))
+            sock.setsockopt(level, option, 1)
+            assert sock.getsockopt(level, option) == 1
+            poll = select.poll()
+            poll.register(sock, 0)
+
+            def send():
+                payload = b'A20_ICMP_ERROR'
+                assert sock.sendto(payload, (loop, port)) == len(payload)
+                events = poll.poll(2000)
+                assert any(event & select.POLLERR for fd, event in events), events
+                assert not any(event & select.POLLHUP for fd, event in events), events
+                return payload
+
+            payload = send()
+            assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == errno.ECONNREFUSED
+            assert poll.poll(0), 'SO_ERROR must not consume the extended error queue'
+            data, ancillary, flags, address = sock.recvmsg(128, 128, errqueue)
+            assert data == payload and address[:2] == (loop, port), (data, address)
+            assert flags & errqueue
+            records = [c for c in ancillary if c[:2] == (level, option)]
+            assert len(records) == 1, ancillary
+            extended = struct.unpack_from('=IBBBBII', records[0][2])
+            assert extended == (errno.ECONNREFUSED, origin, kind, code, 0, 0, 0), extended
+            assert struct.unpack_from('=H', records[0][2], 16)[0] == family
+            assert not poll.poll(0), 'consumed error remained ready'
+            try:
+                sock.recvmsg(1, 128, errqueue)
+            except OSError as error:
+                assert error.errno == errno.EAGAIN, error
+            else:
+                raise AssertionError('empty error queue did not return EAGAIN')
+
+            payload = send()
+            try:
+                sock.recv(128, socket.MSG_DONTWAIT)
+            except OSError as error:
+                assert error.errno == errno.ECONNREFUSED, error
+            else:
+                raise AssertionError('ordinary receive missed the pending UDP error')
+            data, ancillary, flags, address = sock.recvmsg(1, 1, errqueue)
+            assert data == payload[:1] and not ancillary
+            assert flags & socket.MSG_TRUNC and flags & socket.MSG_CTRUNC and flags & errqueue
+            assert not poll.poll(0)
+
+            if family == socket.AF_INET:
+                send()
+                class Header(ctypes.Structure):
+                    _fields_ = [('name', ctypes.c_void_p), ('namelen', ctypes.c_uint),
+                                ('iov', ctypes.c_void_p), ('iovlen', ctypes.c_size_t),
+                                ('control', ctypes.c_void_p), ('controllen', ctypes.c_size_t),
+                                ('flags', ctypes.c_int)]
+                control = ctypes.create_string_buffer(128)
+                name = ctypes.create_string_buffer(1)
+                header = Header(ctypes.addressof(name), 0, None, 0,
+                                ctypes.addressof(control), len(control), 0)
+                libc = ctypes.CDLL(None, use_errno=True)
+                libc.recvmsg.restype = ctypes.c_ssize_t
+                assert libc.recvmsg(sock.fileno(), ctypes.byref(header), errqueue) == 0, ctypes.get_errno()
+                assert header.namelen == 16 and name.raw == b'\x00'
+                assert header.flags & errqueue and header.flags & socket.MSG_TRUNC
+                assert not poll.poll(0)
+                send()
+                sock.setsockopt(level, option, 0)
+                assert sock.getsockopt(level, option) == 0
+                sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                assert not poll.poll(0), 'disabling did not purge queued errors'
+            print('CLI_UDP_ERRORS:', family, 'PASS', flush=True)
+
+
 def dns(host, port):
     result = run(['dig', '@' + host, '-p', str(port), 'example.test', 'A',
                   '+short', '+time=2', '+tries=1'])
@@ -171,13 +256,13 @@ def main():
     parser.add_argument('--dns-host', default='10.0.2.2')
     parser.add_argument('--dns-port', type=int, required=True)
     parser.add_argument('--check', action='append', choices=(
-        'shells', 'mount', 'interfaces', 'http', 'udp-dns'),
+        'shells', 'mount', 'interfaces', 'http', 'udp-errors', 'udp-dns'),
         help='Run only the named checks (repeatable); defaults to all checks.')
     args = parser.parse_args()
     results = {}
     for name, operation in (
             ('shells', shells), ('mount', mount_tmpfs), ('interfaces', interfaces),
-            ('http', lambda: http(args.http_url)), ('udp-dns', lambda: dns(args.dns_host, args.dns_port))):
+            ('http', lambda: http(args.http_url)), ('udp-errors', udp_errors), ('udp-dns', lambda: dns(args.dns_host, args.dns_port))):
         if args.check and name not in args.check:
             continue
         try:

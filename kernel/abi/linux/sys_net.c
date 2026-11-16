@@ -232,6 +232,7 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
         int r = copy_sockaddr_len_from_user(addrlen, &klen);
         if (r < 0) return r;
     }
+    size_t address_capacity = klen;
     int r = net_recvfrom((int)gfd, kbuf, len, flags,
                          addr ? kaddr : NULL, addr ? &klen : NULL);
     /* MSG_TRUNC reports the complete datagram length, which can exceed the
@@ -242,7 +243,7 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
         return -EFAULT;
     }
     if (r >= 0 && addr && addrlen) {
-        if (copy_to_user(addr, kaddr, klen) < 0) return -EFAULT;
+        if (copy_to_user(addr, kaddr, klen < address_capacity ? klen : address_capacity) < 0) return -EFAULT;
         int lr = copy_sockaddr_len_to_user(addrlen, klen);
         if (lr < 0) return lr;
     }

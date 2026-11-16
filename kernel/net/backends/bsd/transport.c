@@ -15,6 +15,7 @@
 #include "net/stack.h"
 #include "nic.h"
 #include "net/interface.h"
+#include "net/icmp_error.h"
 
 #define BSD_KIND_TCP 1u
 #define BSD_KIND_UDP 2u
@@ -39,6 +40,12 @@ typedef struct bsd_socket {
     unsigned bound_if; /* private BSD index, owned by the executor */
     completion_t connect_done;
 } bsd_socket_t;
+
+/* One checksum-validated raw ICMP reader per address family, owned for the
+ * lifetime of the BSD executor. Kqueue only schedules readers with data. */
+static int error_readers[2] = {-1, -1};
+static net_socket_t *error_targets[NET_MAX_SOCKETS];
+static void receive_errors(int index);
 
 static void options_apply(net_socket_t *s, unsigned mask);
 static void connect_clear(bsd_socket_t *state);
@@ -773,6 +780,129 @@ static int bound_device(net_socket_t *s, char name[16])
     return 0;
 }
 
+typedef struct recverr_job { net_socket_t *s; int enable; } recverr_job_t;
+static int recverr_run(void *argument)
+{
+    recverr_job_t *job = argument;
+    net_socket_t *s = job->s;
+    bsd_socket_t *state = bsd(s);
+    if (!state || __atomic_load_n(&state->fd, __ATOMIC_ACQUIRE) < 0 ||
+        __atomic_load_n(&state->closing, __ATOMIC_ACQUIRE)) return -ENOTSOCK;
+    int index = s->domain == AF_INET ? 0 : 1;
+    if (job->enable && error_readers[index] < 0) {
+        int fd = a20_bsd_port_socket_create(s->domain, SOCK_RAW, index ? 58 : 1);
+        if (fd < 0) return fd;
+        error_readers[index] = fd;
+        if (a20_bsd_port_readiness_add(fd, &error_readers[index]) < 0)
+            __atomic_store_n(&readiness_broken, 1, __ATOMIC_RELEASE);
+    }
+    uint64_t flags = net_sock_lock(s);
+    if (s->domain == AF_INET) s->ipv4_recv_err = job->enable;
+    else s->ipv6_recv_err = job->enable;
+    net_sock_unlock(s, flags);
+    if (!job->enable) net_error_purge(s);
+    return 0;
+}
+
+static int recverr_transport(net_socket_t *s, int enable)
+{
+    if (!s || s->type != SOCK_DGRAM ||
+        (s->domain != AF_INET && s->domain != AF_INET6) ||
+        !resource_ns_is_initial(s->net_ns)) return -EOPNOTSUPP;
+    recverr_job_t job = {s, enable};
+    return a20_bsd_executor_call(recverr_run, &job);
+}
+
+static int error_address_matches(const uint8_t *address, size_t length,
+                                  int family, const uint8_t *ip,
+                                  const uint8_t port[2], int wildcard)
+{
+    size_t minimum = family == AF_INET ? 16 : 28;
+    size_t offset = family == AF_INET ? 4 : 8;
+    size_t bytes = family == AF_INET ? 4 : 16;
+    if (length < minimum || memcmp(address + 2, port, 2)) return 0;
+    if (!memcmp(address + offset, ip, bytes)) return 1;
+    if (!wildcard) return 0;
+    for (size_t i = 0; i < bytes; i++) if (address[offset+i]) return 0;
+    return 1;
+}
+
+static void deliver_error(int family, const uint8_t *packet, size_t length,
+                           const uint8_t *offender, size_t offender_len,
+                           const a20_bsd_pktinfo_t *pinfo)
+{
+    net_icmp_error_t parsed;
+    if (!net_icmp_error_parse(family, packet, length, &parsed)) return;
+    size_t count = 0;
+    uint64_t flags = spin_lock_irqsave(&sockets_lock);
+    for (bsd_socket_t *state = sockets; state && count < NET_MAX_SOCKETS;
+         state = state->next) {
+        net_socket_t *s = state->socket;
+        if (s->domain == family && s->type == SOCK_DGRAM &&
+            !__atomic_load_n(&state->closing, __ATOMIC_ACQUIRE)) {
+            net_socket_t *held = net_socket_ref(s);
+            if (held) error_targets[count++] = held;
+        }
+    }
+    spin_unlock_irqrestore(&sockets_lock, flags);
+    for (size_t i = 0; i < count; i++) {
+        net_socket_t *s = error_targets[i];
+        bsd_socket_t *state = bsd(s);
+        flags = net_sock_lock(s);
+        int enabled = family == AF_INET ? s->ipv4_recv_err : s->ipv6_recv_err;
+        net_sock_unlock(s, flags);
+        int fd = state ? __atomic_load_n(&state->fd, __ATOMIC_ACQUIRE) : -1;
+        if (!enabled || !state || __atomic_load_n(&state->closing, __ATOMIC_ACQUIRE) || fd < 0 ||
+            !resource_ns_is_initial(s->net_ns) ||
+            (state->bound_if && pinfo->ifindex != state->bound_if)) goto next;
+        uint8_t address[NET_SOCKADDR_MAX];
+        size_t n = sizeof(address);
+        if (a20_bsd_port_socket_getsockname(fd, address, &n) < 0 ||
+            !error_address_matches(address, n, family, parsed.source,
+                                   parsed.source_port, 1)) goto next;
+        n = sizeof(address);
+        int peer = a20_bsd_port_socket_getpeername(fd, address, &n);
+        if ((peer == 0 && !error_address_matches(address, n, family,
+                               parsed.destination, parsed.destination_port, 0)) ||
+            (peer < 0 && peer != -ENOTCONN)) goto next;
+        uint8_t destination[28] = {0}, origin[28] = {0};
+        uint16_t output_family = (uint16_t)family;
+        memcpy(destination, &output_family, sizeof(output_family));
+        memcpy(destination + 2, parsed.destination_port, 2);
+        memcpy(destination + (family == AF_INET ? 4 : 8), parsed.destination,
+               family == AF_INET ? 4 : 16);
+        size_t address_len = family == AF_INET ? 16 : 28;
+        if (offender_len >= address_len) memcpy(origin, offender, address_len);
+        origin[2] = origin[3] = 0;
+        scope_to_public(origin, address_len);
+        net_extended_error_t error = {
+            .error = parsed.error, .origin = parsed.origin,
+            .type = parsed.type, .code = parsed.code, .info = parsed.info,
+        };
+        if (net_error_enqueue(s, &error, destination, origin, address_len,
+                              packet + parsed.payload_offset, parsed.payload_len) == 0)
+            (void)a20_bsd_port_socket_error(fd);
+next:
+        net_socket_free(s);
+        error_targets[i] = NULL;
+    }
+}
+
+static void receive_errors(int index)
+{
+    if (error_readers[index] < 0 || !rx_datagram) return;
+    for (unsigned i = 0; i < BSD_RX_DRAIN; i++) {
+        uint8_t offender[NET_SOCKADDR_MAX] = {0};
+        size_t n = sizeof(offender);
+        a20_bsd_pktinfo_t info;
+        int got = a20_bsd_port_socket_recv_meta(error_readers[index], rx_datagram,
+            NET_MAX_PAYLOAD, MSG_DONTWAIT, offender, &n, &info);
+        if (got <= 0) return;
+        deliver_error(index ? AF_INET6 : AF_INET, rx_datagram, (size_t)got,
+                       offender, n, &info);
+    }
+}
+
 static void receive_one(bsd_socket_t *state)
 {
     net_socket_t *s = state->socket;
@@ -801,7 +931,7 @@ static void receive_one(bsd_socket_t *state)
             if (got == -ENOTCONN || got == -EINVAL) return;
             flags = net_sock_lock(s);
             s->pending_error = -got;
-            s->peer_closed = 1;
+            if (state->kind == BSD_KIND_TCP) s->peer_closed = 1;
             net_sock_unlock(s, flags);
             wait_queue_wake_all(&s->read_waitq, 0, PROC_WAKE_EVENT);
             return;
@@ -911,6 +1041,7 @@ static void progress_sweep(int do_io)
 void a20_bsd_socket_progress(void)
 {
     if (__atomic_load_n(&readiness_broken, __ATOMIC_ACQUIRE)) {
+        receive_errors(0); receive_errors(1);
         progress_sweep(1);
         return;
     }
@@ -928,6 +1059,8 @@ void a20_bsd_socket_progress(void)
         }
         if (count == 0) break;
         for (int i = 0; i < count; ++i) {
+            if (ready[i].tag == &error_readers[0]) { receive_errors(0); continue; }
+            if (ready[i].tag == &error_readers[1]) { receive_errors(1); continue; }
             bsd_socket_t *state = ready[i].tag;
             if (state && state->fd == ready[i].fd)
                 progress_socket(state, 1);
@@ -1334,6 +1467,7 @@ const net_endpoint_ops_t a20_bsd_endpoint_ops = {
     .bound_device = bound_device,
     .udp_control = send_udp_control,
     .pmtu = pmtu_transport,
+    .recverr = recverr_transport,
     .raw_send = raw_send_transport,
     .ioctl = interface_ioctl,
 };

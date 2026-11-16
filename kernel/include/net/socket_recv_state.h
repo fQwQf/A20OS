@@ -51,6 +51,7 @@ int  a20_net_recv_has_signal(void);
 int  a20_net_recv_wait_expired(void *s, uint64_t start, int for_write);
 int  a20_net_recv_wait_expired_locked(void *s, uint64_t start, int for_write);
 size_t a20_net_recv_msg_avail(void *head);
+int  a20_net_recv_error_take_locked(void *s);
 int  a20_net_recv_dequeue(void *s, void *buf, size_t len, void *addr,
                           size_t *addrlen, void *meta);
 void a20_net_recv_peek_msg(void *head, void *buf, size_t len, void *addr,
