@@ -110,6 +110,42 @@ int ext4_fread(vfile_t *vf, char *buf, size_t count) {
 }
 
 
+/* These blocks are still private when initialization or mapping fails. */
+static int ext4_discard_data_block(ext4_sb_info_t *sb, uint64_t block)
+{
+    int ret = ext4_free_block(sb, block);
+    if (ret < 0) ret = ext4_free_block(sb, block);
+    return ret < 0 ? ext4_record_status(sb, -117) : 0;
+}
+
+static int ext4_prepare_data_block(ext4_sb_info_t *sb, const char *data,
+                                     size_t offset, size_t count, uint64_t *out)
+{
+    char *image = kmalloc(sb->block_size);
+    if (!image) return -ENOMEM;
+    memset(image, 0, sb->block_size);
+    memcpy(image + offset, data, count);
+    uint64_t block = 0;
+    if (ext4_alloc_blocks_uninitialized(sb, 1, &block) != 1) {
+        kfree(image);
+        return ext4_is_inconsistent(sb) ? -117 : -ENOSPC;
+    }
+    /* A partial file block needs zero padding, but is still ordered DATA.
+     * ext4_alloc_block() logs its zeroed block as metadata; using it here
+     * fills a bounded JBD2 descriptor with ordinary file pages at writeback.
+     * Write the complete initialized image before publishing its mapping.
+     * The commit's ordered flush makes it durable before inode/extent metadata. */
+    int ret = bcache_write_bytes(sb->bc, block * sb->block_size, image,
+                                 sb->block_size);
+    kfree(image);
+    if (ret < 0) {
+        int discarded = ext4_discard_data_block(sb, block);
+        return discarded < 0 ? discarded : ret;
+    }
+    *out = block;
+    return 0;
+}
+
 static int ext4_fwrite_unlocked(vfile_t *vf, const char *buf, size_t count) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
     if (ext4_is_inconsistent(fc->sb)) return -117;
@@ -130,6 +166,7 @@ static int ext4_fwrite_unlocked(vfile_t *vf, const char *buf, size_t count) {
     uint32_t bs = fc->sb->block_size;
     size_t done = 0;
     int inode_dirty = 0;
+    int write_error = 0;
 
     while (done < count) {
         size_t foff = fc->file_off + done;
@@ -187,13 +224,19 @@ static int ext4_fwrite_unlocked(vfile_t *vf, const char *buf, size_t count) {
             }
         }
         if (!phys) {
-            uint64_t nb = ext4_alloc_block(fc->sb);
-            if (!nb) break;
+            uint64_t nb = 0;
+            write_error = ext4_prepare_data_block(fc->sb, buf + done, loff, chunk, &nb);
+            if (write_error < 0) break;
             int gr = ext4_block_grow(fc->sb, fc->inode_num, inode, lblk, nb);
-            if (gr < 0) { ext4_free_block(fc->sb, nb); break; }
-            phys = nb;
+            if (gr < 0) {
+                int discarded = ext4_discard_data_block(fc->sb, nb);
+                write_error = discarded < 0 ? discarded : gr;
+                break;
+            }
             fc->ext_valid = 0;
             inode_dirty = 1;
+            done += chunk;
+            continue; /* The prepared image already contains this payload. */
         }
 
         int r = bcache_write_bytes(fc->sb->bc, phys * bs + loff, buf + done, chunk);
@@ -221,7 +264,7 @@ static int ext4_fwrite_unlocked(vfile_t *vf, const char *buf, size_t count) {
     if (inode_dirty &&
         ext4_write_inode(fc->sb, fc->inode_num, inode) < 0)
         return -EIO;
-    return (int)done;
+    return done ? (int)done : write_error;
 }
 
 
