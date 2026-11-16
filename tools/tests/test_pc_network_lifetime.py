@@ -1,34 +1,43 @@
 """Production PCI network teardown and userspace transport ownership."""
 import re
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 from tools.tests.test_i2c_transport_lifetime import run, ROOT
-from tools.tests.test_usb_hid_readiness import function
 
 
 class PcNetworkLifetime(unittest.TestCase):
     def test_radio_rebind_cannot_overwrite_live_or_quarantined_owner(self):
         source = (ROOT / 'kernel/drivers/net/rtw89_broker.c').read_text()
-        run(r'''
-#include <assert.h>
-#include <stdint.h>
-#include <stddef.h>
-typedef struct {int dummy;} device_t;
-static struct {void *device,*owner;unsigned dma_bytes;int quarantined,carrier,control;} wifi;
-static int wifi_open_lock,master;
-static void mutex_lock(int *p){(void)p;}
-static void mutex_unlock(int *p){(void)p;}
-static void wifi_bus_master(int x){master=x;}
-''' + function(source, 'wifi_transport_available') +
-            function(source, 'wifi_remove') + r'''
-int main(void){
- int token;assert(wifi_transport_available());wifi.device=&token;
- assert(!wifi_transport_available());wifi_remove(NULL);assert(wifi_transport_available()&&!master);
- wifi.owner=&token;assert(!wifi_transport_available());wifi.device=&token;wifi_remove(NULL);
- assert(!wifi_transport_available()&&wifi.quarantined);
- wifi.owner=NULL;assert(!wifi_transport_available());wifi.quarantined=0;wifi.dma_bytes=4096;
- assert(!wifi_transport_available());wifi_remove(NULL);assert(wifi.quarantined);
-}
-''')
+        definitions = source[source.index('#define WIFI_DMA_SLOTS'):
+                             source.index('static int packet_push')]
+        names = ('packet_push', 'packet_pop', 'wifi_send', 'wifi_recv',
+                 'wifi_bus_master', 'wifi_transport_available', 'wifi_probe_locked',
+                 'wifi_probe', 'wifi_stop', 'wifi_remove', 'wifi_dma_free',
+                 'wifi_retire_closed_owner', 'wifi_ioctl', 'wifi_mmap', 'wifi_read',
+                 'wifi_write', 'wifi_close')
+        def extract(name):
+            found = re.search(r'^(?:static )?[^\n]*\b' + name +
+                              r'\([^;{}]*\)\s*\{.*?^\}', source, re.M | re.S)
+            self.assertIsNotNone(found, f'missing production function {name}')
+            return found.group()
+        production = '\n'.join(extract(name) for name in names)
+        production += source[source.index('static vfile_ops_t wifi_file_ops'):
+                             source.index('int rtw89_file_open')]
+        production += extract('rtw89_file_open')
+        generated = (ROOT / 'tools/tests/rtw89_broker_lifecycle_host.c').read_text()
+        generated = generated.replace('/* PRODUCTION_DEFINITIONS */', definitions)
+        generated = generated.replace('/* PRODUCTION_FUNCTIONS */', production)
+        with tempfile.TemporaryDirectory(prefix='a20-rtw89-lifetime-') as folder:
+            code = Path(folder) / 'broker.c'
+            code.write_text(generated)
+            binary = code.with_suffix('')
+            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                            '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                            '-fno-pie', '-no-pie', '-I', str(ROOT), str(code),
+                            '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=10)
 
     def test_nic_retains_dma_after_stop_timeout_and_retry_frees_once(self):
         source = (ROOT / 'kernel/drivers/net/r8169.c').read_text()

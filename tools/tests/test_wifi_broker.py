@@ -29,7 +29,7 @@ static unsigned char config[4096];
 static int device;
 struct wifi_dma {void *memory;size_t size;uint64_t bus,token,mapped;};
 static struct {
- void *device,*owner;size_t bar_size,dma_bytes;int control,carrier,mac_ready;
+ void *device,*owner;size_t bar_size,dma_bytes;int control,carrier,mac_ready,closing,pci_touched;
  uint64_t next_token;uint8_t mac[6];
  struct wifi_dma dma[WIFI_DMA_SLOTS];
 } wifi;
@@ -50,7 +50,9 @@ static void pci_cfg_write16(void*d,unsigned o,uint16_t v){(void)d;memcpy(config+
 static void *dma_alloc_coherent_aligned(void*d,size_t n,size_t a,uint64_t*b){
  (void)d;void *p=aligned_alloc(a,n);*b=0x100000;return p;
 }
-#define wifi_dma_free(b) do{free((b)->memory);wifi.dma_bytes-=(b)->size;memset((b),0,sizeof(*(b)));}while(0)
+static int wifi_dma_free(struct wifi_dma *b){
+ free(b->memory);wifi.dma_bytes-=b->size;memset(b,0,sizeof(*b));return 0;
+}
 static uint64_t dma_get_mask(void*d){(void)d;return UINT32_MAX;}
 static int master;
 static int mac_error;
@@ -58,7 +60,8 @@ static uint8_t published_mac[6];
 static int net_stack_device_hwaddr(void *d,const uint8_t *m){
  (void)d;if(mac_error)return mac_error;memcpy(published_mac,m,6);return 0;
 }
-static void wifi_bus_master(int x){master=x;}
+static int master_error;
+static int wifi_bus_master(int x){if(master_error)return master_error;master=x;return 0;}
 '''
 MAIN = r'''
 int main(void){
@@ -103,6 +106,12 @@ int main(void){
  assert(wifi_ioctl(NULL,A20_WIFI_LINK,NULL)==-EFAULT && wifi.carrier==1);
  link.authorized=2;assert(wifi_ioctl(NULL,A20_WIFI_LINK,&link)==-EINVAL && wifi.carrier==1);
  master=1;assert(wifi_ioctl(NULL,A20_WIFI_QUIESCE,NULL)==0 && !wifi.carrier && !master);
+ wifi.closing=1;master=1;master_error=-EIO;
+ assert(wifi_ioctl(NULL,A20_WIFI_INFO,&info)==-ENODEV);
+ assert(wifi_ioctl(NULL,A20_WIFI_CFG_WRITE,&bad)==-ENODEV);
+ assert(wifi_ioctl(NULL,A20_WIFI_DMA_ALLOC,&dma)==-ENODEV);
+ assert(wifi_ioctl(NULL,A20_WIFI_QUIESCE,NULL)==-EIO && master);
+ master_error=0;assert(!wifi_ioctl(NULL,A20_WIFI_QUIESCE,NULL) && !master);
  task.mm=NULL;assert(wifi_ioctl(NULL,A20_WIFI_INFO,&info)==-EPERM);
  return 0;
 }
