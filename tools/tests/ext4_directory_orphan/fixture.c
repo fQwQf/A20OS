@@ -38,6 +38,31 @@ static int absent(const char *name)
     if (vn) vnode_put(vn);
     return ret == -ENOENT;
 }
+static int inode_release_retry(void)
+{
+    vnode_t *held = NULL;
+    if (ext4_vn_mkdir(g_root, "inode-release", 0700) < 0 ||
+        ext4_lookup(g_root, "inode-release", &held) < 0 || !held) return -1;
+    ext4_vnode_priv_t *priv = held->fs_data;
+    ext4_sb_info_t *sb = priv->sb;
+    uint32_t group = (priv->inode_num - 1) / sb->inodes_per_group;
+    uint32_t bit = (priv->inode_num - 1) % sb->inodes_per_group;
+    bitmap_byte = (uint64_t)sb->group_descs[group].bg_inode_bitmap_lo * sb->block_size + bit / 8;
+    bitmap_mask = 1U << (bit % 8);
+    if (ext4_vn_rmdir(g_root, "inode-release") < 0) return -2;
+    armed = 1; hits = 0;
+    int ret = ext4_vnode_finalize_unlinked(held);
+    armed = 0;
+    ext4_inode_t inode;
+    if (ret != -EIO || hits != 1 || !priv->unlinked ||
+        ext4_read_inode(sb, priv->inode_num, &inode) < 0 ||
+        (inode.i_mode & S_IFMT) != S_IFDIR || !(inode.i_flags & EXT4_EXTENTS_FL))
+        return -3;
+    if (ext4_vnode_finalize_unlinked(held) < 0 || priv->unlinked) return -4;
+    vnode_put(held);
+    host_report("ORPHAN_INODE_RELEASE_RETRY_PASS\n");
+    return 0;
+}
 static int owner_order_and_reuse(void)
 {
     vnode_t *tail = NULL, *head = NULL;
@@ -97,6 +122,12 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc != 2) return 5;
+    int release_ret = inode_release_retry();
+    if (release_ret < 0) {
+        printf("ORPHAN_INODE_RELEASE_FAILED rc=%d\n", release_ret);
+        return 16;
+    }
+    hits = 0;
     int owner_ret = owner_order_and_reuse();
     if (owner_ret < 0) {
         printf("ORPHAN_OWNER_FAILED rc=%d\n", owner_ret);

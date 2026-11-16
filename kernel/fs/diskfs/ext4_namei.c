@@ -478,11 +478,20 @@ static int ext4_orphan_release_unlinked_inode(void *ctx, uint32_t ino)
     int ret = ext4_read_inode(sb, ino, &inode);
     if (ret < 0) return ret;
     if (inode.i_links_count != 0) return -EIO;
+    ext4_inode_t original = inode;
     ext4_inode_mark_deleted(&inode);
     ret = ext4_write_inode(sb, ino, &inode);
     if (ret == 0) ret = ext4_free_inode(sb, ino);
     if (ret == 0) ext4_orphan_retire_inode_owner(sb, ino);
-    if (ret < 0 && sb->journal) (void)ext4_journal_poison(sb);
+    if (ret < 0 && sb->journal) {
+        (void)ext4_journal_poison(sb);
+    } else if (ret < 0 && ret != -117) {
+        /* A compensated inode-free failure leaves this inode allocated.
+         * Restore its type and empty block map before the controller restores
+         * the orphan link; links/next alone cannot make mode=0 retryable. */
+        if (ext4_write_inode(sb, ino, &original) < 0)
+            ret = ext4_record_status(sb, -117);
+    }
     return ret;
 }
 
