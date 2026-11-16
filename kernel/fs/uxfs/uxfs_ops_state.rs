@@ -1746,7 +1746,8 @@ pub unsafe extern "C" fn a20_uxfs_ns_serve_mount(
 
     let mount_flags = if serve_flags & 1 != 0 { VFS_MOUNT_RDONLY } else { 0 };
     (n.mount_init)(mnt, path, mount_flags, root, sb as *mut c_void);
-    (n.vnode_get)(root); /* mount holds a persistent ref, like other FS do */
+    /* iget returns a caller reference. Transfer it to the mount; an extra
+     * pin would survive unmount and keep the static sb slot alive forever. */
     (n.mount_link_tree)(mnt);
     (n.dcache_invalidate_all)(ptr::null_mut());
     let f3 = (n.lock_mounts)();
@@ -2018,8 +2019,8 @@ pub unsafe extern "C" fn a20_uxfs_file_open(
 
 /// CLOSE: the close-token state machine.  A failed writeback retries later
 /// without touching the server's OPEN count; a CLOSE/CONFIRM whose ACK is
-/// ambiguous is only retryable when the request never reached the wire, and
-/// only the fctx is retired after a confirmed ACK.
+/// ambiguous is only retryable when the request never reached the wire. A
+/// proven dead peer retires local state with the error, without an ACK.
 #[no_mangle]
 pub unsafe extern "C" fn a20_uxfs_file_close(
     lc: *const A20UxfsLifecycle,
@@ -2997,6 +2998,7 @@ mod tests {
         peer_closed: c_int,
         log: Vec<String>,
         vpriv_sb: *mut c_void,
+        root_refs: usize,
     }
 
     thread_local! {
@@ -3020,6 +3022,7 @@ mod tests {
             b.peer_closed = 0;
             b.log.clear();
             b.vpriv_sb = ptr::null_mut();
+            b.root_refs = 0;
         });
     }
 
@@ -3065,9 +3068,11 @@ mod tests {
         _p: *mut c_void,
     ) -> *mut c_void {
         NW.with(|w| {
-            if w.borrow().iget_fail {
+            let mut b = w.borrow_mut();
+            if b.iget_fail {
                 ptr::null_mut()
             } else {
+                b.root_refs += 1; /* real factory's caller reference */
                 ROOT_VN
             }
         })
@@ -3096,11 +3101,19 @@ mod tests {
     extern "C" fn ns_clear_sb(_sb: *mut c_void) {
         NW.with(|w| w.borrow_mut().log.push("clear_sb".into()));
     }
-    extern "C" fn ns_vget(_v: *mut c_void) {
-        NW.with(|w| w.borrow_mut().log.push("vget".into()));
+    extern "C" fn ns_vget(v: *mut c_void) {
+        NW.with(|w| {
+            let mut b = w.borrow_mut();
+            b.log.push("vget".into());
+            if v == ROOT_VN { b.root_refs += 1; }
+        });
     }
-    extern "C" fn ns_vput(_v: *mut c_void) {
-        NW.with(|w| w.borrow_mut().log.push("vput".into()));
+    extern "C" fn ns_vput(v: *mut c_void) {
+        NW.with(|w| {
+            let mut b = w.borrow_mut();
+            b.log.push("vput".into());
+            if v == ROOT_VN { b.root_refs -= 1; }
+        });
     }
     extern "C" fn ns_fs_data(_v: *mut c_void) -> *mut c_void {
         NW.with(|w| w.borrow().vpriv_sb)
@@ -3212,7 +3225,10 @@ mod tests {
         assert!(ns_log_has("mount_init=0"));
         assert!(ns_log_has("link"));
         assert!(ns_log_has("dcache"));
-        assert!(ns_log_has("vget"));
+        assert_eq!(NW.with(|w| w.borrow().root_refs), 1);
+        // The UXFS unmount wrapper releases the transferred root exactly once.
+        ns_vput(ROOT_VN);
+        assert_eq!(NW.with(|w| w.borrow().root_refs), 0);
         assert!(ns_log_has("mount_log"));
     }
 

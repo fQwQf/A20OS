@@ -112,5 +112,88 @@ int main(void){
         run_c(self, fixture, source, main, mutation)
 
 
+    def test_actual_identity_clear_drops_only_retired_peer_cache_ownership(self):
+        text = (ROOT / 'kernel/fs/uxfs/uxfs.c').read_text()
+        source = text[text.index('static void uxfs_identity_forget('):text.index('/* Drop every cache-only')]
+        fixture = r'''
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+typedef struct {int refs,cache,dirty;} vnode_t;
+typedef struct {void *ep;} uxfs_sb_t;
+static int g_uxfs_identity_lock,indexed,invalidates,discards;
+static vnode_t node;
+static uint64_t spin_lock_irqsave(int*p){(void)p;return 0;}
+static void spin_unlock_irqrestore(int*p,uint64_t f){(void)p;(void)f;}
+static void vnode_put(vnode_t*v){assert(v==&node&&v->refs>0);v->refs--;}
+static void page_cache_invalidate(vnode_t*v){invalidates++;if(v->cache&&!v->dirty){v->cache=0;vnode_put(v);}}
+static void page_cache_discard_unlinked(vnode_t*v){discards++;if(v->cache){v->cache=0;vnode_put(v);}}
+static uintptr_t a20_vnode_identity_remove(uintptr_t sb,uint64_t ino){assert(sb&&ino==19);if(!indexed)return 0;indexed=0;return(uintptr_t)&node;}
+static size_t a20_vnode_identity_clear_sb(uintptr_t sb,uintptr_t*out,size_t n){assert(sb&&n);if(!indexed)return 0;indexed=0;out[0]=(uintptr_t)&node;return 1;}
+'''
+        main = r'''
+int main(void){
+ for(int live=0;live<=1;live++)for(int dirty=0;dirty<=1;dirty++)for(int mapped=0;mapped<=1;mapped++){
+  uxfs_sb_t sb={(void*)(uintptr_t)live};indexed=1;invalidates=discards=0;
+  node=(vnode_t){2+mapped,1,dirty};
+  uxfs_identity_clear_sb(&sb);
+  assert(!indexed&&node.refs==mapped+(live&&dirty));
+  assert(discards==!live&&invalidates==live);
+ }
+ uxfs_sb_t sb={(void*)1};indexed=1;node=(vnode_t){2,1,0};invalidates=discards=0;
+ uxfs_identity_forget(&sb,19);assert(node.refs==0&&invalidates==1&&!discards);
+ return 0;
+}
+'''
+        def mutation(code):
+            old = 'page_cache_discard_unlinked(victim);'
+            self.assertIn(old, code)
+            return code.replace(old, '(void)victim; /* missing old page ownership release */')
+        run_c(self, fixture, source, main, mutation)
+
+    def test_actual_unmount_drops_the_transferred_root_only_after_success(self):
+        text = (ROOT / 'kernel/fs/uxfs/uxfs.c').read_text()
+        release = text[text.index('void uxfs_release_vn('):text.index('/* ------------------------------------------------------------------ */', text.index('void uxfs_release_vn('))]
+        source = release + text[text.index('int uxfs_unmount('):text.index('int uxfs_block_io(')]
+        fixture = r'''
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+struct vnode;
+struct mount {struct vnode *root;};
+typedef struct {uint32_t live_vnodes;} uxfs_sb_t;
+typedef struct {uxfs_sb_t *sb;int is_dir;uint32_t mount_root_ref;} uxfs_vpriv_t;
+typedef struct vnode {struct mount *mnt;int refs;void *fs_data;struct vnode *parent;} vnode_t;
+static int g_uxfs_ns,backend_error,puts,frees;
+static int a20_uxfs_ns_unmount(void*n,void*r){(void)n;(void)r;return backend_error;}
+static void kfree(void*p){assert(p);frees++;}
+void uxfs_release_vn(vnode_t*v);
+static void vnode_put(vnode_t*v){assert(v->refs>0);v->refs--;puts++;if(!v->refs)uxfs_release_vn(v);}
+'''
+        main = r'''
+int main(void){
+ for(int external=0;external<=1;external++){
+  struct mount m={0};uxfs_sb_t sb={1};uxfs_vpriv_t priv={&sb,1,1};
+  vnode_t v={&m,1+external,&priv,0};m.root=&v;puts=frees=0;
+  backend_error=-5;assert(uxfs_unmount(&v)==-5&&m.root==&v&&v.refs==1+external&&!puts);
+  backend_error=0;assert(uxfs_unmount(&v)==0&&v.refs==external&&puts==1);
+  if(external){
+   assert(m.root==&v&&sb.live_vnodes==1&&!frees);
+   assert(uxfs_unmount(&v)==0&&v.refs==1&&puts==1);
+   vnode_put(&v);
+  }
+  assert(m.root==0&&v.fs_data==0&&sb.live_vnodes==0&&frees==2);
+  assert(uxfs_unmount(m.root)==0&&puts==1+external);
+ }
+ return 0;
+}
+'''
+        def mutation(code):
+            old = '            vnode_put(root);'
+            self.assertIn(old, code)
+            return code.replace(old, '            (void)root; /* missing mount root release */')
+        run_c(self, fixture, source, main, mutation)
+
+
 if __name__ == '__main__':
     unittest.main()
