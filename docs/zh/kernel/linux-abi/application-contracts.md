@@ -22,26 +22,18 @@
 
 ## 本轮真实客体运行（2026-11-16）
 
-使用当前工作树的 RV64 QEMU virt、ABI=both、SMP2、BSD 网络栈配置，重建内核、驱动、FAT 与 pynode world；运行使用私有磁盘副本，应用包/缓存为临时目录且不访问网络。入口为 `python3 /usr/lib/a20/application_runtime_guest.py`，其中脚本执行与 SysV 共享内存复用已有探针。
+以下证据均为 RV64 QEMU virt、ABI=both、SMP2；使用私有磁盘副本和离线临时安装，不访问网络。各报告记录实际冻结内核/镜像及脚本哈希；这些有界运行不自动代表全部正式支持配置的最终候选通过。证据目录前缀为 `build/evidence/v1-closeout-20261116/`。
 
-- shell 管道/子进程等待通过；脚本执行和 SysV IPC_RMID 后共享内存探针通过。
-- Python 本地 pip 安装与导入断言完成，随后临时目录 `installed` 的 rmdir 清理返回 `OSError(5, 'I/O error')`；整个安装期检查仍失败，定位日志见 `application-exec-diagnostic/guest.log`。
-- npm 安装期脚本启动的 `/usr/bin/node -e ...` 子进程触发 SIGSEGV，未以禁用功能或忽略子进程失败绕过。
-- 正常 poweroff 在文件写回时被 JBD2 record 的 ENOSPC/EIO 拒绝。保存日志后由宿主停止私有 guest；QEMU 返回码 0 不计为自然关机通过，整体结果为失败。
+| 已完成行为 | 可复核证据与范围 |
+| --- | --- |
+| shell 管道/等待、脚本执行、IPC_RMID 后共享内存 | `application-runtime/report.json` 的对应分项 PASS；该早期运行的其它分项失败，整体不计为通过。 |
+| madvise fork-policy 的范围、清零与继承恢复 | `madvise-fork-range/verified/report.json` 的 madvise 分项通过，另有宿主 Linux 对照；该轮尚未修复的 Node 输出失败不计为通过。 |
+| 无名 Unix 地址、npm 安装期子进程输出、定时器与文件 I/O | `ordered-file-data/verified/report.json` 的 unix-names/node-install 均 PASS，正常写回、自然关机，ext4/FAT 检查 0；宿主 Linux 地址对照另存于 `unix-socket-names/linux-reference.json`。 |
+| 目录跨父移动/替换/exchange、自身子树拒绝与同 inode no-op | `directory-rename/final/report.json` 为 PASS，自然关机、ext4/FAT 检查 0；有宿主 Linux 对照与旧内核错误计数/清理失败负控。 |
+| Python 离线构建、pip target 安装、模块导入及完整临时目录清理 | `directory-rename/pip-verified/report.json` 为 PASS，正常写回、自然关机，ext4/FAT 检查 0。 |
+| syscall trace 慢调用扫描与真实 Node 父/子进程 | `syscall-trace-race/verified/report.json` 为 PASS，实际 44 条慢扫描记录、预期子进程输出、无 UBSAN/内核故障，自然关机及 ext4/FAT 检查 0；另有确定性交错宿主检查。 |
 
-原始命令、内核/基线/注入脚本哈希、串口日志和报告位于 `build/evidence/v1-closeout-20261116/application-runtime/`；报告明确含 `forced_stop=true`、`shutdown_refused=true`。这是已复现的正常应用阻塞，不新增故障注入矩阵；优先定位上述失败，N08 尚未关闭。
-
-
-后续已关闭 madvise fork-policy 的范围扩大与 WIPEONFORK 错误移除映射两处缺陷。[定向回归](../../../../tools/tests/application_runtime_guest.py)的 `--check madvise-fork-range` 已在宿主 Linux 与实际 RV64 SMP2 guest 通过，Rust 策略宿主检查通过 236 个断言；旧内核负控复现范围外页面 SIGSEGV。最终同一 guest 的 Node 子进程 callback 无错误但输出为空，未达到预期标记，整体结果仍失败；该次自然关机与 FAT/ext4 检查均为 0，不关闭原 pip 负载写回故障。细节见[本轮记录](../../archive/v1-closeout-2026-11-16.md#linux-fork-advice-的范围与清零语义)，证据在 `build/evidence/v1-closeout-20261116/madvise-fork-range/verified/report.json`。诊断 trace 扫描器的 SMP 竞争尚待修复，不作为 Node 通过证据。
-
-
-Unix 地址修复阶段的结果：无名 AF_UNIX 地址补上 2 字节 family，getname 返回完整长度并仅复制输入容量内的前缀，Linux/Native 适配层均保存输入容量。`--check unix-names --check node-install` 的宿主 Linux 地址对照和 RV64 SMP2 guest 两项检查通过：npm 离线安装期 Node 子进程输出、定时器与文件读写均正常。报告为 `unix-socket-names/verified/report.json`。该次 poweroff 仍因 JBD2 写回拒绝而 forced_stop，整体仍失败；删除“Node 子进程输出缺失”的开放描述，保留安装后持久写回与 Python 清理阻塞。详见[修复记录](../../archive/v1-closeout-2026-11-16.md#unix-无名地址与-node-安装期输出)。
-
-
-目录 rename 修复阶段的结果：跨父目录 rename 原先漏改链接数和磁盘 `..`，造成 pip 安装后目录清理 EIO。修复后目录移动/替换/exchange/自身子树拒绝/同 inode no-op 的 Linux 对照与 RV64 SMP2 检查通过；原始 Python 离线安装检查也通过，含全部临时目录清理、自然关机和 FAT/ext4 检查 0。证据为 `directory-rename/final/report.json` 与 `directory-rename/pip-verified/report.json`，实现范围见[修复记录](../../archive/v1-closeout-2026-11-16.md#跨父目录-rename-与-python-安装清理)。Python 清理不再是当前阻塞。此前 npm 负载的 JBD2 写回拒绝及 trace 扫描器竞争仍待处理，不据此关闭 N08/N21。
-
-
-最新结果：部分文件新块的清零不再作为元数据日志记录；先写入完整初始化数据，再发布映射，保留 ordered 提交顺序。相同 `--check unix-names --check node-install` 在修复前应用通过但写回拒绝，修复后应用、文件数据写回、自然关机和 FAT/ext4 检查 0 全部通过（`ordered-file-data/verified/report.json`）。此前记录的 npm 写回关机拒绝已关闭，详见[修复记录](../../archive/v1-closeout-2026-11-16.md#普通文件新块误入元数据日志与-npm-关机)。保留其它目标应用与候选证据要求，以及 trace 慢调用扫描器竞争；不重开已关闭的 Python/Node 缺陷或扩大 ext4 故障矩阵。
+此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。N08 继续跟踪表中其余应用关键边界与候选证据，N21 保留其已声明的其它恢复要求。
 
 ## 证据与关闭规则
 
