@@ -14,6 +14,7 @@ MODEL = r'''
 #include <stdlib.h>
 #include <string.h>
 #define CONFIG_NET_ROUTER 0
+#define SPINLOCK_INIT 0
 #define kinfo(...) ((void)0)
 #define printf(...) ((void)0)
 #define IRQF_SHARED 1
@@ -50,6 +51,7 @@ static void *proc_current(void){return NULL;}
 static void proc_yield(void){}
 static int device_add_protocol(device_t *d,const struct driver_protocol_descriptor *p){assert(d&&p);return 0;}
 static int device_probe_use_remove(device_t *d){d->managed=1;return 0;}
+static int device_add_execution_action(device_t *d,int (*stop)(void *),void (*release)(void *),void *context){assert(d->managed&&d->drv_priv==context&&stop&&!release);return 0;}
 static int pci_virtio_transport_init(device_t *d,int type,virtio_transport_t *t){(void)t;assert(d->managed&&type==1);return -EIO;}
 static resource_t *device_get_resource(device_t *d,int type,int n){static resource_t res;(void)d;assert(!n);return type==RES_MMIO?&res:NULL;}
 static void *device_map_mmio(device_t *d,int n){assert(d->managed&&!n);return &hw;}
@@ -111,6 +113,9 @@ int main(void){
  for(unsigned round=0;round<VIRTIO_NET_MAX_DEVS+2;round++){
   assert(!virtio_net_driver_probe(&c)&&c.drv_priv==first);
   assert(virtio_net_ready(first->slot)&&first->published);
+  assert(!virtio_net_call_begin(first)&&first->active_calls==1);
+  assert(virtio_net_stop(first)==-EBUSY&&first->valid);
+  virtio_net_call_end(first);
   assert(!virtio_net_driver_remove(&c)&&!c.drv_priv&&!first->device);
  }
  assert(!virtio_net_driver_remove(&b)&&!b.drv_priv&&hw.allocated==hw.freed);
@@ -140,6 +145,7 @@ class VirtioNetProbeCleanup(unittest.TestCase):
                               if line.startswith('#define VIRTIO_MMIO_') or line.startswith('#define VIRTIO_STATUS_')
                               or line.startswith('#define VIRTIO_F_VERSION_1_BIT'))
         reset = function((ROOT / 'kernel/drivers/bus/virtio_transport.c').read_text(), 'virtio_transport_reset')
+        reset += function(source[source.index('static int virtio_net_stop(void *context)\n{'):], 'virtio_net_stop')
         names = ('virtio_net_init_instance', 'virtio_net_ready', 'virtio_net_mmio_read32',
                  'virtio_net_mmio_write32', 'virtio_net_driver_probe', 'virtio_net_driver_remove')
         code = '\n'.join(function(source, name) for name in names)

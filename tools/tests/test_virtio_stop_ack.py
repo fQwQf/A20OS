@@ -23,11 +23,11 @@ struct virtio_transport {
  int msix_vectors,msix_base,irq;
 };
 typedef struct {void *drv_priv;} device_t;
-typedef struct {virtio_transport_t vt;device_t *device;int valid,transport_live,published,irq_registered,irq;void *ring_mem;} virtio_net_inst_t;
+typedef struct {virtio_transport_t vt;device_t *device;int valid,transport_live,published,closing,irq_registered,irq;uint32_t active_calls;void *ring_mem;} virtio_net_inst_t;
 typedef struct {struct {int valid;} blk;virtio_transport_t vt;int in_flight,irq_registered,transport_live,ever_published,closing,lock;uint32_t active_calls,consumer_refs;device_t *device;void *queue_dma_mem;} virtio_blk_inst_t;
 static struct {unsigned reads,resets,acks,frees,teardowns,ring_frees,stack_calls,confirmed;int stuck;} hw;
 static uint64_t ticks;
-static int g_instance_lock;
+static int g_instance_lock,g_net_instance_lock;
 static uint64_t spin_lock_irqsave(int *lock){assert(!*lock);*lock=1;return 0;}
 static void spin_unlock_irqrestore(int *lock,uint64_t flags){(void)flags;assert(*lock);*lock=0;}
 static uint64_t clock_ticks_per_sec(void){return 1000;}
@@ -58,6 +58,10 @@ int main(void){
   hw=(__typeof__(hw)){.stuck=1};
   virtio_net_inst_t net={.vt=vt,.valid=1,.transport_live=1,.published=1,.irq_registered=1,.irq=7,.ring_mem=&net};
   device_t dev={.drv_priv=&net};net.device=&dev;
+  net.active_calls=1;
+  assert(virtio_net_stop(&net)==-EBUSY&&net.closing&&net.valid&&net.irq_registered);
+  assert(!hw.resets&&!hw.frees&&dev.drv_priv==&net);
+  net.active_calls=0;
   assert(virtio_net_driver_remove(&dev)==-ETIMEDOUT);
   assert(dev.drv_priv==&net&&!net.valid&&net.irq_registered&&net.ring_mem==&net);
   assert(!hw.frees&&!hw.teardowns&&!hw.ring_frees&&hw.resets==1);
@@ -128,6 +132,7 @@ class VirtioStopAck(unittest.TestCase):
         # Skip the IRQ forward declaration; compile its production definition.
         code += function(net[net.index('static int virtio_net_irq_handler(int irq, void *priv) {'):],
                          'virtio_net_irq_handler')
+        code += function(net[net.index('static int virtio_net_stop(void *context)\n{'):], 'virtio_net_stop')
         code += function(net, 'virtio_net_driver_remove')
         block = (ROOT / 'kernel/drivers/block/virtio_blk.c').read_text()
         code += function(block[block.index('static int virtio_blk_stop(void *context)\n{'):], 'virtio_blk_stop')

@@ -191,6 +191,8 @@ typedef struct {
     int valid;
     int transport_live;
     int published;
+    int closing;
+    uint32_t active_calls;
     int legacy;
     int slot;
     int irq;
@@ -221,23 +223,51 @@ typedef struct {
 } virtio_net_inst_t;
 
 static virtio_net_inst_t g_net[VIRTIO_NET_MAX_DEVS];
-static int g_nnet;
+static spinlock_t g_net_instance_lock = SPINLOCK_INIT;
 
 /* Probe/remove run under the core lifecycle mutex. A failed stop keeps device
  * non-NULL, so no new probe can overwrite a still-DMA-visible instance. */
 static virtio_net_inst_t *virtio_net_claim_instance(device_t *dev)
 {
+    uint64_t flags = spin_lock_irqsave(&g_net_instance_lock);
+    virtio_net_inst_t *claimed = NULL;
     for (int idx = 0; idx < VIRTIO_NET_MAX_DEVS; idx++) {
         virtio_net_inst_t *net = &g_net[idx];
-        if (net->device) continue;
+        if (net->device || net->active_calls) continue;
         memset(net, 0, sizeof(*net));
         net->device = dev;
         net->slot = idx;
         net->vt.irq = -1;
         dev->drv_priv = net;
-        return net;
+        claimed = net;
+        break;
     }
-    return NULL;
+    spin_unlock_irqrestore(&g_net_instance_lock, flags);
+    return claimed;
+}
+
+static int virtio_net_stop(void *context);
+
+/* Slot admission and reuse share one lock. Never hold it while using rings,
+ * waiting for completion or taking net->lock. */
+static int virtio_net_call_begin(virtio_net_inst_t *net)
+{
+    uint64_t flags = spin_lock_irqsave(&g_net_instance_lock);
+    int ret = 0;
+    if (!net->device || !net->published || net->closing || !net->valid)
+        ret = -ENODEV;
+    else if (net->active_calls == UINT32_MAX)
+        ret = -EOVERFLOW;
+    else net->active_calls++;
+    spin_unlock_irqrestore(&g_net_instance_lock, flags);
+    return ret;
+}
+
+static void virtio_net_call_end(virtio_net_inst_t *net)
+{
+    uint64_t flags = spin_lock_irqsave(&g_net_instance_lock);
+    if (net->active_calls) net->active_calls--;
+    spin_unlock_irqrestore(&g_net_instance_lock, flags);
 }
 
 static void virtio_net_select_queue(virtio_net_inst_t *net, int qidx) {
@@ -719,9 +749,12 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
 static int virtio_net_irq_handler(int irq, void *priv);
 
 int virtio_net_ready(int idx) {
-    return idx >= 0 && idx < __atomic_load_n(&g_nnet, __ATOMIC_ACQUIRE) &&
-           __atomic_load_n(&g_net[idx].published, __ATOMIC_ACQUIRE) &&
-           __atomic_load_n(&g_net[idx].valid, __ATOMIC_ACQUIRE);
+    if (idx < 0 || idx >= VIRTIO_NET_MAX_DEVS) return 0;
+    uint64_t flags = spin_lock_irqsave(&g_net_instance_lock);
+    virtio_net_inst_t *net = &g_net[idx];
+    int ready = net->device && net->published && !net->closing && net->valid;
+    spin_unlock_irqrestore(&g_net_instance_lock, flags);
+    return ready;
 }
 
 const uint8_t *virtio_net_mac(int idx) {
@@ -730,8 +763,8 @@ const uint8_t *virtio_net_mac(int idx) {
     return g_net[idx].mac;
 }
 
-/* Shared submit body for the linear and scatter-gather entry points. */
-static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *segs,
+/* Private segmented submit body used by the linear send wrapper. */
+static int virtio_net_send_iov_impl(virtio_net_inst_t *net, const uint8_t *const *segs,
                                const size_t *lens, unsigned nr, size_t total,
                                int nonblock)
 {
@@ -740,6 +773,10 @@ static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *seg
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&net->lock);
+        if (__atomic_load_n(&net->closing, __ATOMIC_ACQUIRE)) {
+            spin_unlock_irqrestore(&net->lock, flags);
+            return -ESHUTDOWN;
+        }
         virtio_net_complete_tx_locked(net);
         slot = virtio_net_tx_free_locked(net);
         if (slot >= 0) {
@@ -768,6 +805,12 @@ static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *seg
     }
 
     uint64_t flags = spin_lock_irqsave(&net->lock);
+    if (__atomic_load_n(&net->closing, __ATOMIC_ACQUIRE)) {
+        /* This slot was reserved in software but never published to DMA. */
+        net->tx_busy[slot] = 0;
+        spin_unlock_irqrestore(&net->lock, flags);
+        return -ESHUTDOWN;
+    }
     virtio_net_queue_t *q = &net->txq;
     virtq_desc_t *desc = queue_desc(net, q);
     virtio_net_avail_t *avail = queue_avail(net, q);
@@ -806,16 +849,27 @@ static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *seg
             net->tx_packets++;
             return (int)total;
         }
+        if (__atomic_load_n(&net->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
         if (timer_get_ticks() >= deadline) {
-            flags = spin_lock_irqsave(&net->lock);
-            if (slot >= 0 && slot < VIRTIO_NET_QUEUE_SIZE)
-                net->tx_busy[slot] = 0;
-            spin_unlock_irqrestore(&net->lock, flags);
+            /* A timeout does not return a published descriptor to software.
+             * Keep its driver-owned buffer busy until used completion/reset. */
             net->tx_drops++;
-            return -1;
+            return -ETIMEDOUT;
         }
         virtio_net_wait_for_tx_progress();
     }
+}
+
+static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *segs,
+                                const size_t *lens, unsigned nr, size_t total,
+                                int nonblock)
+{
+    int ret = virtio_net_call_begin(net);
+    if (ret) return ret;
+    ret = virtio_net_send_iov_impl(net, segs, lens, nr, total, nonblock);
+    virtio_net_call_end(net);
+    return ret;
 }
 
 /* lwIP linkoutput calls this to send a frame while holding g_lwip_lock.
@@ -826,7 +880,7 @@ static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *seg
 int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     if (!packet || len == 0 || len > VIRTIO_NET_FRAME_MAX)
         return -1;
-    if (!virtio_net_ready(idx))
+    if (idx < 0 || idx >= VIRTIO_NET_MAX_DEVS)
         return -1;
 
     virtio_net_inst_t *net = &g_net[idx];
@@ -837,13 +891,9 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     return virtio_net_send_iov(net, segs, lens, 1, len, nonblock);
 }
 
-int virtio_net_recv(int idx, void *packet, size_t maxlen) {
-    if (!packet || maxlen == 0)
-        return -1;
-    if (!virtio_net_ready(idx))
-        return -1;
-
-    virtio_net_inst_t *net = &g_net[idx];
+static int virtio_net_recv_instance(virtio_net_inst_t *net, void *packet,
+                                    size_t maxlen)
+{
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->rxq;
     virtio_net_used_t *used = queue_used(net, q);
@@ -983,6 +1033,16 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
     return ret;
 }
 
+int virtio_net_recv(int idx, void *packet, size_t maxlen) {
+    if (!packet || !maxlen || idx < 0 || idx >= VIRTIO_NET_MAX_DEVS) return -EINVAL;
+    virtio_net_inst_t *net = &g_net[idx];
+    int ret = virtio_net_call_begin(net);
+    if (ret) return ret;
+    ret = virtio_net_recv_instance(net, packet, maxlen);
+    virtio_net_call_end(net);
+    return ret;
+}
+
 /*
  * virtio_net_poll_rx_all:
  * Fallback RX progress path for transports that cannot raise a device IRQ
@@ -1054,6 +1114,8 @@ static int virtio_net_driver_probe(device_t *dev) {
     virtio_net_inst_t *net = virtio_net_claim_instance(dev);
     if (!net) return -ENOSPC;
 
+    int execution = device_add_execution_action(dev, virtio_net_stop, NULL, net);
+    if (execution) return execution;
     if (dev->bus == &pci_bus) {
         if (pci_virtio_transport_init(dev, 1, &net->vt) != 0)
             return -1;
@@ -1155,9 +1217,9 @@ static int virtio_net_driver_probe(device_t *dev) {
         kinfo("[VIRTIO-NET] No IRQ resource for device '%s'\n", dev->name);
     }
 
-    if (__atomic_load_n(&g_nnet, __ATOMIC_RELAXED) <= net->slot)
-        __atomic_store_n(&g_nnet, net->slot + 1, __ATOMIC_RELEASE);
+    uint64_t publication = spin_lock_irqsave(&g_net_instance_lock);
     __atomic_store_n(&net->published, 1, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_net_instance_lock, publication);
     kinfo("[VIRTIO-NET] Probed device '%s' (irq=%d msix=%d)\n",
           dev->name, net->irq_registered ? net->irq : -1, msix_vectors);
     return 0;
@@ -1175,7 +1237,7 @@ static int virtio_net_class_recv(struct device *dev, void *buf, size_t maxlen) {
 
 static const uint8_t *virtio_net_class_mac(struct device *dev) {
     virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
-    if (!net->valid)
+    if (!__atomic_load_n(&net->valid, __ATOMIC_ACQUIRE))
         return NULL;
     return net->mac;
 }
@@ -1207,7 +1269,7 @@ static int virtio_net_stats_read(struct device *dev, net_dev_stats_t *out) {
     if (!out) return -EINVAL;
     *out = (net_dev_stats_t){0};
     virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
-    if (!net || !net->valid) return -ENODEV;
+    if (!net || !__atomic_load_n(&net->valid, __ATOMIC_ACQUIRE)) return -ENODEV;
     uint64_t flags = spin_lock_irqsave(&net->lock);
     *out = (net_dev_stats_t){net->rx_packets, net->rx_drops, net->tx_packets, net->tx_drops};
     spin_unlock_irqrestore(&net->lock, flags);
@@ -1218,7 +1280,7 @@ static const struct driver_net_stats_ops virtio_net_stats_ops = {virtio_net_stat
 static int virtio_net_class_link_up(device_t *dev)
 {
     virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
-    if (!net || !net->valid)
+    if (!net || !__atomic_load_n(&net->valid, __ATOMIC_ACQUIRE))
         return 0;
     if (!net->have_status)
         return 1;
@@ -1249,12 +1311,18 @@ static const device_id_t virtio_net_ids[] = {
     { 0 },
 };
 
-static int virtio_net_driver_remove(device_t *dev) {
-    virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
-    if (!net)
-        return 0;
+static int virtio_net_stop(void *context)
+{
+    virtio_net_inst_t *net = context;
+    uint64_t flags = spin_lock_irqsave(&g_net_instance_lock);
     __atomic_store_n(&net->published, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&net->closing, 1, __ATOMIC_RELEASE);
+    if (net->active_calls) {
+        spin_unlock_irqrestore(&g_net_instance_lock, flags);
+        return -EBUSY;
+    }
     __atomic_store_n(&net->valid, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_net_instance_lock, flags);
     /* Retain every hardware-visible ring and the IRQ owner on reset timeout.
      * A later remove retries the same transport without allocating a new one. */
     if (net->transport_live) {
@@ -1272,12 +1340,23 @@ static int virtio_net_driver_remove(device_t *dev) {
         }
     }
     net->irq_registered = 0;
+    return 0;
+}
+
+static int virtio_net_driver_remove(device_t *dev) {
+    virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
+    if (!net)
+        return 0;
+    int ret = virtio_net_stop(net);
+    if (ret) return ret;
     /* After the device is stopped and the IRQ freed: the rings are what it was
      * writing into, and virtio_net_recv() must not reach them once they are
      * gone. */
     virtio_net_free_ring(net);
     dev->drv_priv = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_net_instance_lock);
     net->device = NULL;
+    spin_unlock_irqrestore(&g_net_instance_lock, flags);
     return 0;
 }
 

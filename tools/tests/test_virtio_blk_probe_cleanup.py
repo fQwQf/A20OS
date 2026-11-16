@@ -140,7 +140,6 @@ class VirtioBlkProbeCleanup(unittest.TestCase):
         stop = function(source[source.index('static int virtio_blk_stop(void *context)\n{'):], 'virtio_blk_stop')
         code = stop + '\n' + '\n'.join(function(source, name) for name in names)
         model = TRANSPORT_MODEL.replace('assert(d->managed&&type==1)', 'assert(d->managed&&type==2)')
-        model += '\nstatic int device_add_execution_action(device_t *d,int (*stop)(void *),void (*release)(void *),void *context){assert(d->managed&&d->drv_priv==context&&stop&&!release);return 0;}\n'
         model = model.replace('int irq,msix_vectors,msix_base,shared_irq;', 'int irq,msix_vectors,msix_base,shared_irq,legacy;')
         with tempfile.TemporaryDirectory(prefix='a20-blk-probe-') as directory:
             path = Path(directory) / 'probe.c'
