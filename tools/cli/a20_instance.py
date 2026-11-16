@@ -115,6 +115,7 @@ class MachineCfg:
     console: str | None = None
     vm_manager: bool | None = None
     accel: str | None = None
+    tcg_tb_size_mb: int | None = None
     smp: int | None = None
     memory: str | None = None
     allow_unverified_smp: bool | None = None
@@ -378,7 +379,7 @@ _SECTION_SPECS: Final = {
                                 "loader")
                 else "int" if f in ("partition_mb", "max_bytes") else "str")
             for f in LogCfg.__dataclass_fields__},
-    "machine": {f: ("int" if f == "smp" else "bool" if f in ("allow_unverified_smp", "gpu_3d", "vm_manager")
+    "machine": {f: ("int" if f in ("smp", "tcg_tb_size_mb") else "bool" if f in ("allow_unverified_smp", "gpu_3d", "vm_manager")
                     else "str_list" if f == "extra_qemu" else "str")
                 for f in MachineCfg.__dataclass_fields__},
     "gui": {f: ("bool" if f == "enabled" else "str")
