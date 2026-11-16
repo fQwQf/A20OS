@@ -791,8 +791,8 @@ int64_t sys_pivot_root(const char *new_root, const char *put_old) {
     }
 
     /* Cut the old root out of the namespace first: from here on nothing can
-     * reach it by path.  The mount object stays listed in mountinfo, flagged
-     * detached, so an open descriptor into it keeps working. */
+     * reach it by path. The detached object remains alive for its holders,
+     * but is omitted from mountinfo; an existing descriptor keeps working. */
     if (old_root_mnt && old_root_mnt != nr->mnt)
         vfs_mount_detach_root(old_root_mnt);
 

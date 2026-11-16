@@ -159,12 +159,14 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
      * pair, and refusing to apply a root that no longer resolves is a
      * behaviour change ns_apply does not currently have. */
     if (ns->root_path[0]) {
+        uint64_t root_flags = spin_lock_irqsave(&target->park_lock);
         strncpy(target->fs.root_path, ns->root_path,
                 sizeof(target->fs.root_path) - 1);
         target->fs.root_path[sizeof(target->fs.root_path) - 1] = '\0';
         strncpy(target->ns_ctx.fs_root, ns->root_path,
                 sizeof(target->ns_ctx.fs_root) - 1);
         target->ns_ctx.fs_root[sizeof(target->ns_ctx.fs_root) - 1] = '\0';
+        spin_unlock_irqrestore(&target->park_lock, root_flags);
     }
     target->ns_ctx.active_ns |= (1U << A20_NS_FILESYSTEM);
 

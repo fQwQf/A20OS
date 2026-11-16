@@ -32,10 +32,11 @@
 | 目录跨父移动/替换/exchange、自身子树拒绝与同 inode no-op | `directory-rename/final/report.json` 为 PASS，自然关机、ext4/FAT 检查 0；有宿主 Linux 对照与旧内核错误计数/清理失败负控。 |
 | Python 离线构建、pip target 安装、模块导入及完整临时目录清理 | `directory-rename/pip-verified/report.json` 为 PASS，正常写回、自然关机，ext4/FAT 检查 0。 |
 | syscall trace 慢调用扫描与真实 Node 父/子进程 | `syscall-trace-race/verified/report.json` 为 PASS，实际 44 条慢扫描记录、预期子进程输出、无 UBSAN/内核故障，自然关机及 ext4/FAT 检查 0；另有确定性交错宿主检查。 |
-| CLI 的 Netlink 缓冲区、ip 接口/地址/路由及本地 HTTP | `cli-application/netlink-fixed/report.json` 的 interfaces/http 分项 PASS；缓冲区设置/查询与超限发送拒绝均通过，HTTP 夹具实际收到请求。该次 CLI 整体 FAIL：当时的 bash 管道崩溃已由后续 NPROC 修复关闭；chroot mountinfo 暴露全局路径、dig 的 IP_RECVERR 不支持仍开放，DNS 夹具未收到查询。QEMU 自然退出，ext4/FAT 只读检查均为 0。 |
+| CLI 的 Netlink 缓冲区、ip 接口/地址/路由及本地 HTTP | `cli-application/netlink-fixed/report.json` 的 interfaces/http 分项 PASS；缓冲区设置/查询与超限发送拒绝均通过，HTTP 夹具实际收到请求。该次 CLI 整体 FAIL：当时的 bash 管道崩溃已由后续 NPROC 修复关闭；chroot mountinfo 已由后续挂载视图修复关闭；dig 的 IP_RECVERR 不支持仍开放，DNS 夹具未收到查询。QEMU 自然退出，ext4/FAT 只读检查均为 0。 |
 | CLI bash/zsh 的管道、命令替换、后台等待与 NPROC 边界 | `cli-application/bash-nproc-verified/report.json` 为 PASS，两个 shell 均输出明确通过标记；默认 NPROC 为无限制，降权子进程设置零上限后 fork 返回 EAGAIN。自然关机及 ext4/FAT 只读检查均为 0；仅选择 shells 分项，没有重跑无关网络或挂载路径。 |
+| CLI 挂载及 chroot / 目标进程挂载视图 | `cli-application/mount-view-verified/report.json` 为 PASS，耗时 11.366 秒；含空格的临时挂载点、文件写读/卸载、当前进程三个挂载文件，以及父进程读取具有私有 mount namespace 和独立 chroot 的子进程视图均通过。子进程卸载、退出与父命名空间隔离通过；正常关机及 ext4/FAT 只读检查均为 0。 |
 
-此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。N08 继续跟踪表中其余应用关键边界与候选证据，N21 保留其已声明的其它恢复要求。
+此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。N08 继续跟踪表中其余应用关键边界与候选证据，N21 保留其已声明的其它恢复要求。
 
 ## 证据与关闭规则
 

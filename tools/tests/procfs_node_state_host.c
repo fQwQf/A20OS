@@ -378,7 +378,7 @@ static int ref_child(int parent_type, int parent_pid, const char *name, int xlat
         else { out->ty = PF_ROOT; out->class_type = PF_ROOT; out->pid = (int)v; have = 1; }
     }
     BR(root_task && !strcmp(name, "cmdline"), PF_PID_CMDLINE, parent_pid, 0);
-    BR(root_task && !strcmp(name, "mounts"), PF_MOUNTS, 0, 0);
+    BR(root_task && !strcmp(name, "mounts"), PF_MOUNTS, parent_pid, 0);
     BR(root_task && !strcmp(name, "cgroup"), PF_PID_CGROUP, parent_pid, 0);
     if (!have && !err && root_task) {
         switch (type) {

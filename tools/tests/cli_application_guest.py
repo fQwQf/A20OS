@@ -57,14 +57,74 @@ printf 'CLI_SHELL_OK\\n'
 
 
 def mount_tmpfs():
-    with tempfile.TemporaryDirectory(prefix='a20-cli-mount-') as directory:
+    import ctypes
+    import os
+    import re
+    import select
+
+    def fields(path, column):
+        return [(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), row.split()[column]), row)
+                for row in Path(path).read_text().splitlines()]
+
+    def check_mount(path, expected, column):
+        entries = fields(path, column)
+        assert any(name == expected and 'tmpfs' in row.split()
+                   for name, row in entries), (path, expected, entries)
+        assert not any(name == '/extra' or name.startswith('/extra/')
+                       for name, row in entries), (path, entries)
+        return entries
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.unshare.argtypes = [ctypes.c_int]
+    libc.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    with tempfile.TemporaryDirectory(prefix='a20-cli mount-') as directory:
         run(['mount', '-t', 'tmpfs', '-o', 'size=4m', 'tmpfs', directory])
         try:
-            lines = Path('/proc/self/mountinfo').read_text().splitlines()
-            assert any(row.split()[4] == directory and ' - tmpfs ' in row for row in lines), '\n'.join(lines)
+            check_mount('/proc/self/mountinfo', directory, 4)
+            check_mount('/proc/self/mounts', directory, 1)
+            check_mount('/proc/mounts', directory, 1)
             path = Path(directory) / 'payload'
             path.write_text('CLI_MOUNT_OK')
             assert path.read_text() == 'CLI_MOUNT_OK'
+            private = Path(directory) / 'private-mount'
+            private.mkdir()
+            ready_r, ready_w = os.pipe()
+            stop_r, stop_w = os.pipe()
+            child = os.fork()
+            if child == 0:
+                os.close(ready_r)
+                os.close(stop_w)
+                try:
+                    assert libc.unshare(0x20000) == 0, ctypes.get_errno()
+                    run(['mount', '-t', 'tmpfs', 'tmpfs', str(private)])
+                    os.chroot(directory)
+                    os.chdir('/')
+                    os.write(ready_w, b'READY')
+                    os.read(stop_r, 1)
+                    assert libc.umount2(b'/private-mount', 0) == 0, ctypes.get_errno()
+                except Exception:
+                    traceback.print_exc()
+                    os._exit(1)
+                os._exit(0)
+            os.close(ready_w)
+            os.close(stop_r)
+            try:
+                assert select.select([ready_r], [], [], 10)[0], 'private mount child timed out'
+                assert os.read(ready_r, 32) == b'READY', 'private mount child failed'
+                # Reading another pid must use its namespace and its chroot.
+                child_info = check_mount(f'/proc/{child}/mountinfo', '/private-mount', 4)
+                child_mounts = check_mount(f'/proc/{child}/mounts', '/private-mount', 1)
+                assert {name for name, row in child_info} == {'/', '/private-mount'}, child_info
+                assert {name for name, row in child_mounts} == {'/', '/private-mount'}, child_mounts
+                assert str(private) not in {name for name, row in fields('/proc/self/mountinfo', 4)}
+                os.write(stop_w, b'X')
+            except BaseException:
+                os.kill(child, 9)
+                raise
+            finally:
+                os.close(ready_r)
+                os.close(stop_w)
+                assert os.waitpid(child, 0) == (child, 0), 'private mount child did not cleanly exit'
         finally:
             run(['umount', directory])
         assert not (Path(directory) / 'payload').exists()

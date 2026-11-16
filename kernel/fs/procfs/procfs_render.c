@@ -480,23 +480,53 @@ static void gen_meminfo_raw(struct a20_meminfo_raw *m)
     m->bcache_block_size = (uint64_t)BCACHE_BLOCK_SIZE;
 }
 
-static int gen_mount_count(void) { return vfs_mount_count(); }
-
-static int gen_mount_at(int index, struct a20_mount_ent *out)
+/* Copy one target namespace while its table lock is held. Formatting must
+ * not retain vfs_mount_at()'s unowned pointer across a concurrent removal. */
+static int gen_mount_snapshot(int pid, struct a20_mount_ent **out,
+                              size_t *count, char *root, size_t root_size)
 {
-    struct mount *m = vfs_mount_at(index);
-    if (!m || !m->path[0])
-        return 0;
-    snprintf(out->dev, sizeof(out->dev), "%s", m->dev[0] ? m->dev : "none");
-    snprintf(out->path, sizeof(out->path), "%s", m->path);
-    snprintf(out->fstype, sizeof(out->fstype), "%s",
-             m->fstype[0] ? m->fstype : "unknown");
-    snprintf(out->opts, sizeof(out->opts), "%s", m->opts[0] ? m->opts : "rw");
-    out->mnt_id = (uint32_t)m->mnt_id;
-    out->parent_id = (uint32_t)vfs_mount_parent_id(m);
-    out->detached = m->detached;
-    return 1;
+    *out = NULL;
+    *count = 0;
+    task_t *t = pid > 0 ? proc_find_get(pid) : proc_get(proc_current());
+    if (!t)
+        return -ESRCH;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    snprintf(root, root_size, "%s", t->fs.root_path[0] ? t->fs.root_path : "/");
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    mnt_namespace_t *ns = mntns_task_get(t);
+    proc_put(t);
+    struct a20_mount_ent *rows = kmalloc(MNTNS_MAX_MOUNTS * sizeof(*rows));
+    if (!rows) {
+        mntns_put(ns);
+        return -ENOMEM;
+    }
+    _Static_assert(sizeof(rows[0].path) >= MAX_PATH_LEN,
+                   "procfs mount paths must not truncate VFS paths");
+    size_t n = 0;
+    flags = mntns_mount_table_lock();
+    for (int i = 0; i < ns->nmounts; i++) {
+        mount_t *m = ns->mounts[i];
+        if (!m || !m->publish_ready || m->teardown_running ||
+            m->detached || !m->attached || !m->path[0])
+            continue;
+        struct a20_mount_ent *e = &rows[n++];
+        memset(e, 0, sizeof(*e));
+        snprintf(e->dev, sizeof(e->dev), "%s", m->dev[0] ? m->dev : "none");
+        snprintf(e->path, sizeof(e->path), "%s", m->path);
+        snprintf(e->fstype, sizeof(e->fstype), "%s",
+                 m->fstype[0] ? m->fstype : "unknown");
+        snprintf(e->opts, sizeof(e->opts), "%s", m->opts[0] ? m->opts : "rw");
+        e->mnt_id = (uint32_t)m->mnt_id;
+        e->parent_id = (uint32_t)vfs_mount_parent_id(m);
+    }
+    mntns_mount_table_unlock(flags);
+    mntns_put(ns);
+    *out = rows;
+    *count = n;
+    return 0;
 }
+
+static void gen_mount_snapshot_free(struct a20_mount_ent *rows) { kfree(rows); }
 
 static int gen_nr_cpus(void) { return CONFIG_NR_CPUS; }
 
@@ -1022,8 +1052,8 @@ static const struct a20_procfs_gen g_procfs_gen = {
     .lease_break_time = gen_lease_break_time,
     .max_files = gen_max_files,
     .meminfo_raw = gen_meminfo_raw,
-    .mount_count = gen_mount_count,
-    .mount_at = gen_mount_at,
+    .mount_snapshot = gen_mount_snapshot,
+    .mount_snapshot_free = gen_mount_snapshot_free,
     .nr_cpus = gen_nr_cpus,
     .cpu_times = gen_cpu_times,
     .realtime = gen_realtime,

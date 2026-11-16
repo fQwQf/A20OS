@@ -319,9 +319,9 @@ void vfs_mount_vfile_put(mount_t *mnt)
 /*
  * Cut @mnt out of the tree without consulting the busy rules.  This is the
  * pivot_root path, and it is exactly the operation that has to be allowed
- * to make a busy root unreachable: the object stays in the table so
- * mountinfo can still report it, but marked detached so no
- * absolute path resolves through it again.  Open file descriptors into the
+ * to make a busy root unreachable: the object stays tracked for existing
+ * holders, while procfs omits detached entries and no absolute path resolves
+ * through it again. Open file descriptors into the
  * old root keep working, which is the whole point.
  */
 void vfs_mount_detach_root(mount_t *mnt)
