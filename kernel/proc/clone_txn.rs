@@ -226,7 +226,7 @@ unsafe extern "C" fn stage_validate(ctx: *mut core::ffi::c_void) -> i32 {
     }
     unsafe { a20_clone_view_fill(tx.parent, &mut tx.parent_view) };
     let limit = unsafe { *tx.parent_view.nproc_limit };
-    if limit != 0 && unsafe { a20_clone_has_cap(tx.parent, CAP_SYS_RESOURCE) } == 0 {
+    if limit != u64::MAX && unsafe { a20_clone_has_cap(tx.parent, CAP_SYS_RESOURCE) } == 0 {
         let uid = unsafe { a20_clone_task_uid(tx.parent) };
         if u64::from(unsafe { count_tasks_for_uid(uid) }) >= limit {
             return EAGAIN;
@@ -562,7 +562,7 @@ mod tests {
                 exec_load_size: 0,
                 name: [0u8; 64],
                 sched_reset_on_fork: 0,
-                nproc_limit: 0,
+                nproc_limit: u64::MAX,
                 uid: 0,
             }
         }
@@ -663,7 +663,7 @@ mod tests {
         f.parent.pid = 100;
         f.parent.tgid = 100;
         f.parent.uid = 7;
-        f.parent.nproc_limit = 0;
+        f.parent.nproc_limit = u64::MAX;
         f.parent.abi_mode = 0;
         f.parent.sched_policy = SCHED_NORMAL;
         f.parent.priority = 0;
@@ -1136,13 +1136,25 @@ mod tests {
     #[test]
     fn validate_ignores_an_unlimited_nproc() {
         let _guard = reset();
-        fix().parent.nproc_limit = 0;
+        fix().parent.nproc_limit = u64::MAX;
         fix().walk_len = 4;
         fix().walk = [(2, 7), (2, 7), (2, 7), (2, 7)];
         let mut tx = CloneTxn::new(0, 0, core::ptr::null_mut(), 0, core::ptr::null_mut(),
                                    SIGCHLD_DEFAULT, core::ptr::null_mut());
         assert_eq!(run_stage(stage_validate, &mut tx), 0);
         assert_eq!(fix().walk_index, 0, "the walk is not entered at all");
+    }
+
+    #[test]
+    fn validate_zero_nproc_refuses_an_unprivileged_fork() {
+        let _guard = reset();
+        fix().parent.nproc_limit = 0;
+        fix().has_cap = 0;
+        let mut tx = CloneTxn::new(0, 0, core::ptr::null_mut(), 0, core::ptr::null_mut(),
+                                   SIGCHLD_DEFAULT, core::ptr::null_mut());
+        assert_eq!(run_stage(stage_validate, &mut tx), EAGAIN);
+        fix().has_cap = 1;
+        assert_eq!(run_stage(stage_validate, &mut tx), 0);
     }
 
     // ---- allocate --------------------------------------------------------

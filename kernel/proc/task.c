@@ -305,11 +305,11 @@ void proc_task_init_base(task_t *t, task_t *parent)
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->limits.memlock = parent ? parent->limits.memlock : (64 * 1024);
-    /* 0 means unlimited, so a child inherits its parent's policy rather than
-     * getting a fresh default.  RLIMIT_NPROC is per-uid, not per-task, so it
-     * is enforced at fork time against a uid-wide count. */
+    /* Inherit the parent's limits. AS still uses the legacy zero sentinel;
+     * NPROC uses UINT64_MAX so an explicit Linux zero remains a real limit.
+     * NPROC is enforced at fork time against a uid-wide count. */
     t->limits.as = parent ? parent->limits.as : 0;
-    t->limits.nproc = parent ? parent->limits.nproc : 0;
+    t->limits.nproc = parent ? parent->limits.nproc : UINT64_MAX;
     t->limits.rtprio = 0;
     t->limits.rtprio_max = 0;
     if (parent) {

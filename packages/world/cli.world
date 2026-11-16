@@ -125,7 +125,8 @@ man-pages
 #     nslookup 分项尚未运行，不能用 HTTP 成功代替 UDP DNS 验收。
 #   * mount tmpfs 实际成功，旧 mount no-op 描述已失效；当前阻塞为 chroot
 #     内的 /proc/self/mountinfo 暴露 /extra/... 等全局路径。
-#   * bash 简单 echo 成功，管道/命令替换 SIGSEGV；zsh 登录可用，脚本待验收。
+#   * bash 管道崩溃已修复（NPROC 默认无限制曾被报告为零）；bash/zsh 的
+#     管道、命令替换、后台等待及退出码通过，无特权零 NPROC 拒绝 fork。
 #
 # 普通 ext4 orphan 生命周期及其余已完成修复不再列为本 world 缺口。
 # 尚未关闭的恢复边界由 docs/zh/status/current/ext4-orphan-gap.md 跟踪；

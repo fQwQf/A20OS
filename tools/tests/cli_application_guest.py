@@ -17,6 +17,33 @@ def run(argv):
 
 
 def shells():
+    import errno
+    import os
+    import resource
+
+    # A20's default is unlimited; reporting its old internal zero sentinel
+    # makes bash size its child-status table to zero during command substitution.
+    assert resource.getrlimit(resource.RLIMIT_NPROC) == (resource.RLIM_INFINITY,) * 2
+    child = os.fork()
+    if child == 0:
+        try:
+            os.setuid(65534)
+            resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+            assert resource.getrlimit(resource.RLIMIT_NPROC) == (0, 0)
+            try:
+                unexpected = os.fork()
+            except OSError as error:
+                assert error.errno == errno.EAGAIN, error
+            else:
+                if unexpected == 0:
+                    os._exit(99)
+                os.waitpid(unexpected, 0)
+                raise AssertionError('zero NPROC permitted an unprivileged fork')
+        except Exception:
+            traceback.print_exc()
+            os._exit(1)
+        os._exit(0)
+    assert os.waitpid(child, 0) == (child, 0)
     command = '''set -e
 x=$(printf 'one\\ntwo\\n' | cat)
 test "$x" = "$(printf 'one\\ntwo')"
@@ -26,6 +53,7 @@ printf 'CLI_SHELL_OK\\n'
 '''
     for shell in ('/bin/bash', '/bin/zsh'):
         assert run([shell, '-fc', command]) == 'CLI_SHELL_OK\n', shell
+        print('CLI_SHELL:', shell, 'PASS', flush=True)
 
 
 def mount_tmpfs():
@@ -82,11 +110,16 @@ def main():
     parser.add_argument('--http-url', required=True)
     parser.add_argument('--dns-host', default='10.0.2.2')
     parser.add_argument('--dns-port', type=int, required=True)
+    parser.add_argument('--check', action='append', choices=(
+        'shells', 'mount', 'interfaces', 'http', 'udp-dns'),
+        help='Run only the named checks (repeatable); defaults to all checks.')
     args = parser.parse_args()
     results = {}
     for name, operation in (
             ('shells', shells), ('mount', mount_tmpfs), ('interfaces', interfaces),
             ('http', lambda: http(args.http_url)), ('udp-dns', lambda: dns(args.dns_host, args.dns_port))):
+        if args.check and name not in args.check:
+            continue
         try:
             operation()
             results[name] = {'status': 'PASS'}

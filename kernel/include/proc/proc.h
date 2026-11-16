@@ -157,7 +157,7 @@ typedef struct proc_limits {
     uint64_t nofile;
     uint64_t memlock;
     uint64_t as;      /* RLIMIT_AS: address-space bytes, 0 = unlimited */
-    uint64_t nproc;   /* RLIMIT_NPROC: processes per uid, 0 = unlimited */
+    uint64_t nproc;   /* RLIMIT_NPROC: processes per uid, UINT64_MAX = unlimited */
     uint64_t rtprio;  /* RLIMIT_RTPRIO: zero forbids unprivileged RT entry */
     uint64_t rtprio_max; /* Hard ceiling; both fields guarded by park_lock. */
 } proc_limits_t;
