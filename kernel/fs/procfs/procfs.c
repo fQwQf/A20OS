@@ -617,6 +617,18 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         const char *target = meta->type == PF_PID_EXE ?
             (exe_task->exec_path[0] ? exe_task->exec_path : "/sbin/init") :
             exe_task->fs.cwd;
+        /* The vnode walker follows this callback directly, bypassing the
+         * readlinkat syscall's procfs fast path. Both must return the same
+         * root-visible executable pathname or chrooted self-exec fails. */
+        char visible_exe[MAX_PATH_LEN];
+        if (meta->type == PF_PID_EXE) {
+            target = vfs_chroot_visible_path(proc_current(), target, visible_exe,
+                                             sizeof(visible_exe));
+            if (!target) {
+                proc_put(exe_task);
+                return -ENAMETOOLONG;
+            }
+        }
         size_t tlen = strlen(target);
         if (tlen > sz)
             tlen = sz;
