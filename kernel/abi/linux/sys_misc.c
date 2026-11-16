@@ -219,13 +219,16 @@ int64_t sys_getrandom(void *buf, size_t len, unsigned int flags) {
     if ((flags & (LINUX_GRND_RANDOM | LINUX_GRND_INSECURE)) ==
         (LINUX_GRND_RANDOM | LINUX_GRND_INSECURE))
         return -EINVAL;
+    if (!len) return 0;
     if (!buf) return -EFAULT;
     uint8_t tmp[128];
     size_t done = 0;
     while (done < len) {
         size_t chunk = len - done > sizeof(tmp) ? sizeof(tmp) : len - done;
         random_fill(tmp, chunk);
-        if (copy_to_user((char*)buf + done, tmp, chunk) < 0) return -EFAULT;
+        /* A later fault must not hide the bytes already returned to userland. */
+        if (copy_to_user((char*)buf + done, tmp, chunk) < 0)
+            return done ? (int64_t)done : -EFAULT;
         done += chunk;
     }
     return (int64_t)len;
