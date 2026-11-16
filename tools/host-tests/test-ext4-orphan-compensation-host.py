@@ -31,8 +31,11 @@ def run(argv, log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--directory-account', action='store_true',
-                        help='check mkdir/rmdir directory-count and unpublished-inode rollback')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--directory-account', action='store_true',
+                       help='check mkdir/rmdir directory-count and unpublished-inode rollback')
+    modes.add_argument('--mount-abort', action='store_true',
+                       help='check callback/owner lifetime when journal mount fails')
     args = parser.parse_args()
     out = Path(os.environ['EVIDENCE_DIR']).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -50,7 +53,8 @@ def main():
             raise RuntimeError('Rust backend build failed')
         sources = ['kernel/fs/diskfs/' + n + '.c' for n in
                    ['ext4', 'ext4_namei', 'ext4_file', 'ext4_journal', 'ext4_csum', 'ext4_sync', 'ext4_xattr']]
-        fixture = ('tools/tests/ext4_directory_account/fixture.c' if args.directory_account
+        fixture = ('tools/tests/ext4_mount_abort/fixture.c' if args.mount_abort else
+                   'tools/tests/ext4_directory_account/fixture.c' if args.directory_account
                    else 'tools/tests/ext4_orphan_compensation/fixture.c')
         sources += ['user/svc/fscompat/compat.c', 'user/svc/fscompat/bcache_user_rust_abi.c', fixture]
         binary = out / 'harness'
@@ -68,8 +72,10 @@ def main():
         base, pattern = out / 'base.img', out / 'pattern'
         with base.open('wb') as stream:
             stream.truncate(32 * 1024 * 1024)
+        features = ('has_journal,^metadata_csum,^64bit,^orphan_file' if args.mount_abort
+                    else '^has_journal,^metadata_csum,^64bit,^orphan_file')
         made = run(['/usr/sbin/mkfs.ext4', '-q', '-F', '-b', '4096', '-O',
-                    '^has_journal,^metadata_csum,^64bit,^orphan_file', base], out / 'mkfs.log')
+                    features, base], out / 'mkfs.log')
         if made.returncode:
             raise RuntimeError('mkfs failed')
         pattern.write_bytes(bytes((i * 37 + 19) % 251 for i in range(16384)))
@@ -78,7 +84,8 @@ def main():
             raise RuntimeError('seed file was not created')
         report['base_sha256'] = sha(base)
         report['cases'] = []
-        cases = ([('directories', [], 0)] if args.directory_account else
+        cases = ([('mount-abort', [], 0)] if args.mount_abort else
+                 [('directories', [], 0)] if args.directory_account else
                  [('transient', [], 0), ('persistent', ['persistent'], 117)])
         for name, extra, expected in cases:
             image = out / (name + '.img')
@@ -86,7 +93,8 @@ def main():
             result = run([binary, image, *extra], out / (name + '.log'))
             if result.returncode != expected:
                 raise RuntimeError(f'{name}: unexpected backend exit {result.returncode}')
-            marker = ('DIR_ACCOUNT_PASS' if args.directory_account else
+            marker = ('MOUNT_ABORT_PASS' if args.mount_abort else
+                      'DIR_ACCOUNT_PASS' if args.directory_account else
                       'ORPHAN_RETRY_PASS' if not extra else 'ORPHAN_QUARANTINE_PASS')
             if marker not in (result.stdout + result.stderr).splitlines():
                 raise RuntimeError(f'{name}: missing completed backend operation')
@@ -106,6 +114,7 @@ def main():
                     raise RuntimeError('rejected mount changed the quarantined image')
             report['cases'].append({'name': name, 'backend_exit': result.returncode,
                                     'e2fsck_exit': checked.returncode, 'postimage_sha256': post})
+        report['mount_abort'] = args.mount_abort
         report['directory_account'] = args.directory_account
         report['passed'] = True
     except Exception as error:

@@ -3026,6 +3026,25 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
  * Mount / Unmount
  * ================================================================ */
 
+/* After journal open, the cache hook owns a reference to this context.
+ * Mount failure must obey the same close-before-free rule as unmount. */
+static void ext4_mount_discard(ext4_sb_info_t *sb)
+{
+    int ret = ext4_journal_close(sb);
+    if (ret < 0) {
+        /* Failed transactions can still own dirty pages and the sync hook.
+         * Preserve the whole owner until its journal can safely retire. */
+        printf("[EXT4] retaining failed mount context for journal safety (%d)\n",
+               ret);
+        return;
+    }
+    bcache_set_sync_hook(sb->bc, NULL, NULL);
+    kfree(sb->block_alloc_hints);
+    kfree(sb->inode_alloc_hints);
+    kfree(sb->group_descs);
+    kfree(sb);
+}
+
 vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     ext4_superblock_t sb;
     if (bcache_read_bytes(bc, 1024, &sb, sizeof(sb)) < 0) {
@@ -3299,8 +3318,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         if (state_ret < 0) {
             printf("[EXT4] refusing writable mount: could not persist dirty state (%d)\n",
                    state_ret);
-            kfree(esi->group_descs);
-            kfree(esi);
+            ext4_mount_discard(esi);
             return NULL;
         }
         esi->mount_state_started = 1;
@@ -3308,8 +3326,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
 
     if (ext4_validate_group_counts(esi) < 0) {
         printf("[EXT4] Invalid per-group free counts or bitmap bounds\n");
-        kfree(esi->group_descs);
-        kfree(esi);
+        ext4_mount_discard(esi);
         return NULL;
     }
 
@@ -3317,10 +3334,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     esi->inode_alloc_hints = (uint32_t *)kcalloc(groups, sizeof(uint32_t));
     if (!esi->block_alloc_hints || !esi->inode_alloc_hints) {
         printf("[EXT4] Failed to allocate allocator hints\n");
-        kfree(esi->block_alloc_hints);
-        kfree(esi->inode_alloc_hints);
-        kfree(esi->group_descs);
-        kfree(esi);
+        ext4_mount_discard(esi);
         return NULL;
     }
 
@@ -3330,18 +3344,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     int orphan_ret = (flags & VFS_MOUNT_RDONLY) ? 0 : ext4_orphan_recover(esi);
     if (orphan_ret < 0) {
         printf("[EXT4] refusing mount: orphan recovery failed (%d)\n", orphan_ret);
-        if (ext4_journal_close(esi) == 0) {
-            bcache_set_sync_hook(esi->bc, NULL, NULL);
-            kfree(esi->block_alloc_hints);
-            kfree(esi->inode_alloc_hints);
-            kfree(esi->group_descs);
-            kfree(esi);
-        } else {
-            /* A poisoned transaction can still own dirty cache pages. Keep
-             * its ext4 context alive rather than leave a dangling hook or
-             * pretend its orphan cleanup committed. */
-            printf("[EXT4] retaining failed orphan recovery context for journal safety\n");
-        }
+        ext4_mount_discard(esi);
         return NULL;
     }
 
@@ -3351,20 +3354,14 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     ext4_inode_t root_inode;
     if (ext4_read_inode(esi, EXT4_ROOT_INO, &root_inode) < 0) {
         printf("[EXT4] Failed to read root inode\n");
-        kfree(esi->block_alloc_hints);
-        kfree(esi->inode_alloc_hints);
-        kfree(esi->group_descs);
-        kfree(esi);
+        ext4_mount_discard(esi);
         return NULL;
     }
 
     vnode_t *root = ext4_make_vnode(esi, EXT4_ROOT_INO,
                                      ext4_inode_size(&root_inode), VFS_FT_DIR, NULL);
     if (!root) {
-        kfree(esi->block_alloc_hints);
-        kfree(esi->inode_alloc_hints);
-        kfree(esi->group_descs);
-        kfree(esi);
+        ext4_mount_discard(esi);
         return NULL;
     }
     root->parent = root;
