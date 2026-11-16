@@ -1,4 +1,5 @@
 /* Shared NVME device implementation; module packaging is separate. */
+#include <stdint.h>
 #include "drivers/core/driver_register.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
@@ -122,6 +123,9 @@ typedef struct nvme_controller {
     uint64_t bounce_dma;
     mutex_t io_lock;
     volatile int failed;
+    int stopping;
+    int stopped;
+    int hardware_live;
     int irq;
     int irq_registered;
 } nvme_controller_t;
@@ -162,7 +166,11 @@ static int nvme_wait_ready(nvme_controller_t *ctrl, int ready)
 {
     for (unsigned ms = 0; ms < ctrl->ready_timeout_ms; ms++) {
         uint32_t csts = readl(nvme_reg(ctrl, NVME_REG_CSTS));
-        if (csts & NVME_CSTS_CFS)
+        if (csts == UINT32_MAX)
+            return -ENODEV;
+        /* Fatal status cannot certify enable, but RDY=0 still confirms a
+         * requested disable. Do not free storage merely because CFS is set. */
+        if (ready && (csts & NVME_CSTS_CFS))
             return -EIO;
         if (!!(csts & NVME_CSTS_RDY) == !!ready)
             return 0;
@@ -381,6 +389,8 @@ static int nvme_io_cmd(nvme_controller_t *ctrl, uint8_t opcode,
         cmd.cdw11 = (uint32_t)(lba >> 32);
         cmd.cdw12 = sectors - 1U;
     }
+    if (__atomic_load_n(&ctrl->stopping, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (__atomic_load_n(&ctrl->failed, __ATOMIC_ACQUIRE))
         return -EIO;
     return nvme_submit(ctrl, &ctrl->io, &cmd, NULL);
@@ -434,6 +444,10 @@ static int nvme_rw(device_t *dev, uint64_t lba, void *buffer,
     if (!max_sectors)
         return -EOPNOTSUPP;
     mutex_lock(&ctrl->io_lock);
+    if (__atomic_load_n(&ctrl->stopping, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&ctrl->io_lock);
+        return -ENODEV;
+    }
     while (sectors) {
         uint16_t chunk = sectors > max_sectors ? (uint16_t)max_sectors :
                                                   (uint16_t)sectors;
@@ -516,13 +530,11 @@ static int nvme_io_smoke_test(device_t *dev, nvme_controller_t *ctrl)
         written[i] = (uint8_t)(0x5aU + i * 37U);
     memset(read_back, 0, bytes);
 
-    dev->drv_priv = ctrl;
     int ret = nvme_write(dev, 0, written, sectors);
     if (ret == 0)
         ret = nvme_flush(dev);
     if (ret == 0)
         ret = nvme_read(dev, 0, read_back, sectors);
-    dev->drv_priv = NULL;
     if (ret == 0 && memcmp(written, read_back, bytes) != 0)
         ret = -EIO;
 
@@ -535,21 +547,40 @@ static int nvme_io_smoke_test(device_t *dev, nvme_controller_t *ctrl)
 }
 #endif
 
+/* Close admission first. A running/queued class call retains the instance;
+ * do not wait on its I/O mutex from teardown or free its DMA/IRQ on timeout. */
+static int nvme_stop(void *context)
+{
+    nvme_controller_t *ctrl = context;
+    if (!ctrl || ctrl->stopped)
+        return 0;
+    __atomic_store_n(&ctrl->stopping, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&ctrl->io_lock))
+        return -EBUSY;
+    int ret = 0;
+    if (ctrl->hardware_live) {
+        writel(0xffffffffU, nvme_reg(ctrl, NVME_REG_INTMS));
+        writel(0, nvme_reg(ctrl, NVME_REG_CC));
+        ret = nvme_wait_ready(ctrl, 0);
+    }
+    if (!ret) {
+        /* free_irq synchronizes the last wake callback. Keep its context
+         * and all queue storage until the controller has acknowledged. */
+        if (ctrl->irq_registered) {
+            free_irq((uint32_t)ctrl->irq, ctrl);
+            ctrl->irq_registered = 0;
+        }
+        ctrl->stopped = 1;
+    }
+    mutex_unlock(&ctrl->io_lock);
+    return ret;
+}
+
 static void nvme_release(nvme_controller_t *ctrl)
 {
     if (!ctrl)
         return;
-    if (ctrl->irq_registered) {
-        /* Mask every vector before releasing the handler so a completion
-         * racing the remove cannot wake a freed controller's waiters. */
-        writel(0xffffffffU, nvme_reg(ctrl, NVME_REG_INTMS));
-        free_irq((uint32_t)ctrl->irq, ctrl);
-        ctrl->irq_registered = 0;
-    }
-    if (ctrl->regs) {
-        writel(0, nvme_reg(ctrl, NVME_REG_CC));
-        (void)nvme_wait_ready(ctrl, 0);
-    }
+    /* Caller owns a successful nvme_stop; no hardware can use this storage. */
     if (ctrl->bounce)
         dma_free_coherent_aligned(ctrl->bounce, NVME_DMA_BYTES,
                                   ctrl->bounce_dma);
@@ -565,6 +596,9 @@ static int nvme_probe(device_t *dev)
 {
     if (pci_class_code(dev) != 0x010802U)
         return -ENODEV;
+    int ret = device_probe_use_remove(dev);
+    if (ret)
+        return ret;
     if (pci_enable_and_assign_bars(dev) < 0)
         return -ENODEV;
     resource_t *bar = pci_get_bar_resource(dev, 0);
@@ -578,6 +612,10 @@ static int nvme_probe(device_t *dev)
     ctrl->regs = (uintptr_t)pci_map_bar(dev, 0);
     if (!ctrl->regs) { kfree(ctrl); return -EIO; }
     mutex_init(&ctrl->io_lock);
+    dev->drv_priv = ctrl;
+    ret = device_add_execution_action(dev, nvme_stop, NULL, ctrl);
+    if (ret)
+        return ret;
     uint64_t cap = readq(nvme_reg(ctrl, NVME_REG_CAP));
     ctrl->ready_timeout_ms =
         (((uint32_t)(cap >> NVME_CAP_TO_SHIFT) & NVME_CAP_TO_MASK) + 1U) *
@@ -589,14 +627,12 @@ static int nvme_probe(device_t *dev)
     if (!nvme_capabilities_supported(cap)) {
         kinfo("[NVME] %s: unsupported command set or memory page size\n",
               dev->name);
-        kfree(ctrl);
         return -EOPNOTSUPP;
     }
     ctrl->stride = 4U << ((cap >> 32) & 0x0fU);
     uint64_t required_bar = NVME_REG_DBS + 3ULL * ctrl->stride + 4U;
     uint64_t bar_size = bar->end - bar->start + 1U;
     if (required_bar > bar_size) {
-        nvme_release(ctrl);
         return -ENODEV;
     }
     uint32_t max_entries = (uint32_t)(cap & 0xffffU) + 1U;
@@ -605,10 +641,10 @@ static int nvme_probe(device_t *dev)
     uint16_t io_depth = max_entries < NVME_IO_DEPTH ? (uint16_t)max_entries :
                                                        NVME_IO_DEPTH;
     if (admin_depth < 2 || io_depth < 2) {
-        nvme_release(ctrl);
         return -ENODEV;
     }
 
+    ctrl->hardware_live = 1;
     writel(0xffffffffU, nvme_reg(ctrl, NVME_REG_INTMS));
     writel(0, nvme_reg(ctrl, NVME_REG_CC));
     if (nvme_wait_ready(ctrl, 0) < 0 ||
@@ -673,7 +709,7 @@ static int nvme_probe(device_t *dev)
     return 0;
 
 fail:
-    nvme_release(ctrl);
+    /* Core runs the same fallible stop/remove for a partially armed device. */
     return -EIO;
 }
 
@@ -682,6 +718,9 @@ static int nvme_remove(device_t *dev)
     nvme_controller_t *ctrl = dev ? dev->drv_priv : NULL;
     if (!ctrl)
         return 0;
+    int ret = nvme_stop(ctrl);
+    if (ret)
+        return ret;
     dev->drv_priv = NULL;
     nvme_release(ctrl);
     return 0;
