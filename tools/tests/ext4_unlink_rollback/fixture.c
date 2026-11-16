@@ -6,12 +6,12 @@
 #undef main
 extern long pwrite(int, const void *, unsigned long, long);
 
-static uint64_t directory_offset;
+static uint64_t fault_offset;
 static unsigned armed, hits, failures = 1;
 long unlink_fault_pwrite(int fd, const void *buffer, unsigned long size, long off)
 {
-    if (armed && hits < failures && off <= (long)directory_offset &&
-        (uint64_t)off + size > directory_offset) {
+    if (armed && hits < failures && off <= (long)fault_offset &&
+        (uint64_t)off + size > fault_offset) {
         hits++;
         return -1;
     }
@@ -42,12 +42,25 @@ int main(int argc, char **argv)
     ext4_sb_info_t *sb = root->sb;
     ext4_inode_t directory;
     if (ext4_read_inode(sb, root->inode_num, &directory) < 0) return 3;
-    directory_offset = ext4_block_map(sb, &directory, 0) * sb->block_size;
+    fault_offset = ext4_block_map(sb, &directory, 0) * sb->block_size;
     vnode_t *file = NULL;
     if (ext4_lookup(g_root, "single", &file) < 0) return 4;
     uint32_t ino = ((ext4_vnode_priv_t *)file->fs_data)->inode_num;
+    const char *remove_name = "single";
+    unsigned original_links = 1;
+#ifdef EXT4_TEST_HARDLINK_UNLINK
+    if (ext4_vn_link(g_root, "alias", file) < 0) return 15;
+    remove_name = "alias";
+    original_links = 2;
+    uint32_t group = (ino - 1) / sb->inodes_per_group;
+    uint32_t index = (ino - 1) % sb->inodes_per_group;
+    /* The runner deliberately formats this fixture without the 64bit feature. */
+    uint64_t table = sb->group_descs[group].bg_inode_table_lo;
+    fault_offset = table * sb->block_size + (uint64_t)index * sb->inode_size +
+                   offsetof(ext4_inode_t, i_links_count);
+#endif
     armed = 1;
-    int rc = ext4_vn_unlink(g_root, "single");
+    int rc = ext4_vn_unlink(g_root, remove_name);
     armed = 0;
     printf("UNLINK_ROLLBACK: rc=%d hits=%u\n", rc, hits);
     if (hits != failures || rc != (failures == 1 ? -EIO : -117)) return 5;
@@ -61,17 +74,34 @@ int main(int argc, char **argv)
         ext4_inode_t restored;
         ext4_superblock_t disk;
         if (ext4_is_inconsistent(sb) || ext4_read_inode(sb, ino, &restored) < 0 ||
-            restored.i_links_count != 1 ||
+            restored.i_links_count != original_links ||
             bcache_read_bytes(g_bc, EXT4_SB_OFFSET, &disk, sizeof(disk)) < 0 ||
             disk.s_last_orphan != 0) return 7;
         vnode_t *found = NULL;
         if (ext4_lookup(g_root, "single", &found) < 0 || found != file) return 8;
         vnode_put(found);
+        if (ext4_lookup(g_root, remove_name, &found) < 0 || found != file) return 16;
+        vnode_put(found);
         uint8_t page[4096];
         if (ext4_vn_readpage(file, 0, page, sizeof(page)) < 0) return 10;
         for (unsigned i = 0; i < sizeof(page); i++)
             if (page[i] != (uint8_t)((i * 37 + 19) % 251)) return 11;
-        if (ext4_vn_unlink(g_root, "single") < 0) return 12;
+#ifdef EXT4_TEST_HARDLINK_UNLINK
+        /* Also fail after the count write was accepted, at name removal. */
+        fault_offset = ext4_block_map(sb, &directory, 0) * sb->block_size;
+        hits = 0; armed = 1;
+        rc = ext4_vn_unlink(g_root, remove_name);
+        armed = 0;
+        if (rc != -EIO || hits != 1 ||
+            ext4_read_inode(sb, ino, &restored) < 0 || restored.i_links_count != 2)
+            return 18;
+        if (ext4_lookup(g_root, remove_name, &found) < 0 || found != file) return 19;
+        vnode_put(found);
+#endif
+        if (ext4_vn_unlink(g_root, remove_name) < 0) return 12;
+#ifdef EXT4_TEST_HARDLINK_UNLINK
+        if (ext4_vn_unlink(g_root, "single") < 0) return 17;
+#endif
         vnode_put(file);
         if (ext4_unmount(g_root) < 0) return 13;
         g_root = NULL;

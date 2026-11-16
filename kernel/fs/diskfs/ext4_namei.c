@@ -719,6 +719,17 @@ int ext4_orphan_recover(ext4_sb_info_t *sb)
 #endif
 }
 
+/* Restore a full inode preimage, including cache bytes left by failed IO.
+ * Caller holds metadata_lock; failed bounded compensation forbids recovery
+ * from trusting a link count whose namespace update did not complete. */
+static int ext4_restore_link_inode(ext4_sb_info_t *sb, uint32_t ino,
+                                     ext4_inode_t *before)
+{
+    int ret = ext4_write_inode(sb, ino, before);
+    if (ret < 0) ret = ext4_write_inode(sb, ino, before);
+    return ret < 0 ? ext4_record_status(sb, -117) : 0;
+}
+
 int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
                                uint32_t dir_ino __attribute__((unused)),
                                ext4_inode_t *di, const char *name, uint32_t ino,
@@ -731,14 +742,25 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
 
     /* Drop one link.  Hard-linked files survive until the last link is gone. */
     if (victim.i_links_count > 1) {
-        r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
-        if (r < 0) return r;
+        ext4_inode_t before = victim;
         victim.i_links_count--;
         uint64_t now[2];
         timekeeping_get_realtime(now);
         victim.i_ctime = (uint32_t)now[0];
         r = ext4_write_inode(sb, ino, &victim);
-        if (r < 0 && sb->journal) (void)ext4_journal_poison(sb);
+        if (r < 0) {
+            if (sb->journal) (void)ext4_journal_poison(sb);
+            else if (ext4_restore_link_inode(sb, ino, &before) < 0) return -117;
+            return r;
+        }
+        /* Keep the directory slot intact until its new count was accepted.
+         * Ordinary dir_remove errors now restore that block themselves. */
+        r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
+        if (r < 0) {
+            if (sb->journal) (void)ext4_journal_poison(sb);
+            else if (r != -117 && ext4_restore_link_inode(sb, ino, &before) < 0)
+                return -117;
+        }
         return r;
     }
 
@@ -769,12 +791,10 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
         /* dir_remove restored its block (or failed before changing it).
          * Restore a linked inode BEFORE removing its orphan-chain head: a
          * failure cannot strand a named zero-link inode outside recovery. */
-        int restore = ext4_write_inode(sb, ino, &victim);
-        if (restore < 0) restore = ext4_write_inode(sb, ino, &victim);
-        if (restore == 0) {
-            restore = ext4_orphan_write_head(sb, old_orphan_head);
-            if (restore < 0) restore = ext4_orphan_write_head(sb, old_orphan_head);
-        }
+        int restore = ext4_restore_link_inode(sb, ino, &victim);
+        if (restore < 0) return restore;
+        restore = ext4_orphan_write_head(sb, old_orphan_head);
+        if (restore < 0) restore = ext4_orphan_write_head(sb, old_orphan_head);
         if (restore < 0) return ext4_record_status(sb, -117);
         return r;
     }

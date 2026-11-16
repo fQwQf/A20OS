@@ -41,6 +41,8 @@ def main():
                        help='check held-rmdir cleanup failure and fresh-process recovery')
     modes.add_argument('--unlink-rollback', action='store_true',
                        help='check failed dirent removal restores named final-link inodes')
+    modes.add_argument('--hardlink-unlink', action='store_true',
+                       help='check failed non-final unlink count restores both names')
     parser.add_argument('--c-orphan', action='store_true',
                         help='use the C reference orphan controller')
     args = parser.parse_args()
@@ -60,7 +62,8 @@ def main():
             raise RuntimeError('Rust backend build failed')
         sources = ['kernel/fs/diskfs/' + n + '.c' for n in
                    ['ext4', 'ext4_namei', 'ext4_file', 'ext4_journal', 'ext4_csum', 'ext4_sync', 'ext4_xattr']]
-        fixture = ('tools/tests/ext4_unlink_rollback/fixture.c' if args.unlink_rollback else
+        fixture = ('tools/tests/ext4_hardlink_unlink/fixture.c' if args.hardlink_unlink else
+                   'tools/tests/ext4_unlink_rollback/fixture.c' if args.unlink_rollback else
                    'tools/tests/ext4_directory_orphan/fixture.c' if args.directory_orphan else
                    'tools/tests/ext4_mount_abort/fixture.c' if args.mount_abort else
                    'tools/tests/ext4_directory_account/fixture.c' if args.directory_account
@@ -77,6 +80,8 @@ def main():
             raise RuntimeError('C backend build failed')
         inputs = sources + [p for _, p in modules] + [
             'kernel/fs/diskfs/tests/ext4_partial_trunc_host.c', 'kernel/include/fs/ext4.h']
+        if args.hardlink_unlink:
+            inputs.append('tools/tests/ext4_unlink_rollback/fixture.c')
         report['source_sha256'] = {p: sha(ROOT / p) for p in inputs}
         report['gate_sha256'] = sha(Path(__file__))
         report['harness_sha256'] = sha(binary)
@@ -147,6 +152,7 @@ def main():
         report['mount_abort'] = args.mount_abort
         report['directory_account'] = args.directory_account
         report['unlink_rollback'] = args.unlink_rollback
+        report['hardlink_unlink'] = args.hardlink_unlink
         report['passed'] = True
     except Exception as error:
         report['error'] = str(error)
