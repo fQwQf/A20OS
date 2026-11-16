@@ -10,7 +10,7 @@
 | OpenRC PID 1 / supervise-daemon；[XFCE world](../../../../packages/world/xfce.world) | mknodat/openat/read/write/poll、kill/wait4、procfs、mount/reboot。FIFO 无对端的非阻塞写打开为 ENXIO，断开写为 EPIPE；PID 1 保留、监督重启、正常关机和停止错误须如实交付。 | [init 接口契约](init-compatibility.md)，[FIFO 客体检查](../../../../tools/tests/fifo_guest.py)、[环境读取检查](../../../../tools/tests/proc_environ_guest.py)、[OpenRC 监督检查](../../../../tools/tests/openrc_supervision_guest.py)。AArch64 实际 world 的历史监督恢复见[桌面状态](../../status/current/desktop-minecraft-status.md#aarch64-原生服务恢复2026-11-16)；本轮原版 OpenRC 0.63-r1 的 RV64 PID 1/default runlevel、环境读取、两次子进程退出/重启、控制 FIFO 信号、状态/停止与普通关机通过，见下方直接证据。不把精简镜像通过计为桌面/设备恢复通过。 |
 | Python 3 / Node.js/npm；[pynode world](../../../../packages/world/pynode.world) | execve、mmap/mprotect、futex、poll/epoll、clock_gettime/timerfd、socket 与基础文件 I/O。事件循环的超时/中断、关闭描述符、错误路径和安装期子进程退出须有可观察结果。 | `make smoke-poll-edge`、`make smoke-timer-edge`、`make smoke-futex-stress` 提供共享机制入口；[脚本执行与共享内存探针](../../../../tools/tests/desktop_abi_probe.py)提供客体/宿主对照。新增[离线安装期应用检查](../../../../tools/tests/application_runtime_guest.py)。Python 离线构建/安装/导入/清理、Node/npm 子进程/定时器/I/O 及各自正常写回关机均有 RV64 SMP2 通过记录，见下方运行记录。 |
 | labwc / XFCE / Firefox；[XFCE world](../../../../packages/world/xfce.world) | clone(CLONE_SIGHAND)、execve、Linux 信号与 syscall restart、seccomp、poll/epoll、Unix socket 的 SCM_RIGHTS、mmap 与设备 ioctl。线程共享处理表、SIGSYS 处理、正确的架构重启长度、共享对象关闭与沙箱拒绝是关键边界。 | [syscall 重启程序](../../../../user/cmds/core/syscall_restart_test.c)、`make smoke-scm-stress`、[桌面 ABI 探针](../../../../tools/tests/desktop_abi_probe.py)、[浏览器客体入口](../../../../tools/tests/xfce-web-smoke.sh)。[x86_64 历史修复记录](../../status/history/desktop-regressions-2026-10-22.md)记录了真实浏览器交互；脚本本身注明视觉交互需另行确认，不能仅凭启动标记关闭应用路径。 |
-| OpenJDK 21 / Minecraft；[客户端范围](../../distro/minecraft.md) | clone/TLS/futex、Linux 信号、文件映射、动态库加载、socket/ioctl(SIOCGIFCONF)、设备 ioctl 与共享描述符。接口尺寸查询、短缓冲区不越界、线程与共享映射寿命、退出及存档重载需保持一致。 | [网卡枚举契约](interface-enumeration.md)、`make smoke-net-iface`；[客户端客体入口](../../../../tools/tests/xfce-minecraft-smoke.sh)与[实际保存/重载步骤](../../distro/minecraft.md#验证方法)。[历史桌面记录](../../status/history/desktop-regressions-2026-10-22.md)不升级为当前候选或所有架构通过；账号登录、Realms 和联机仍按现有应用范围披露。本轮 x86_64 OpenJDK 的映射 I/O、线程/TLS、Java 子进程、网卡枚举、回环 TCP、LWJGL/GLFW 加载与正常退出钩子已直接通过；Minecraft 保存/重载仍待本轮证据，见下表。 |
+| OpenJDK 21 / Minecraft；[客户端范围](../../distro/minecraft.md) | clone/TLS/futex、Linux 信号、文件映射、动态库加载、socket/ioctl(SIOCGIFCONF)、设备 ioctl 与共享描述符。接口尺寸查询、短缓冲区不越界、线程与共享映射寿命、退出及存档重载需保持一致。 | [网卡枚举契约](interface-enumeration.md)、`make smoke-net-iface`；[客户端客体入口](../../../../tools/tests/xfce-minecraft-smoke.sh)与[实际保存/重载步骤](../../distro/minecraft.md#验证方法)。[历史桌面记录](../../status/history/desktop-regressions-2026-10-22.md)不升级为当前候选或所有架构通过；账号登录、Realms 和联机仍按现有应用范围披露。本轮 x86_64 OpenJDK 的映射 I/O、线程/TLS、Java 子进程、网卡枚举、回环 TCP、LWJGL/GLFW 加载与正常退出钩子已直接通过；Minecraft 的移动/跳跃、背包、鼠标转向、保存/退出及同盘冷启动重载也已通过，见下方本轮记录。 |
 | CLI/桌面的 curl 与网络查询工具；[CLI world](../../../../packages/world/cli.world) | socket/connect/send/recv、setsockopt/getsockopt、接口 ioctl/netlink 与地址族校验。TCP 连通、接口枚举和 UDP DNS 是不同契约，不能互相替代；不支持的选项/地址族必须给出真实错误。 | [上游用户态接口探针](../../../../user/tests/test_upstream_userland.c)、`make smoke-net-iface`及[HTTP/HTTPS 入口](../../../../tools/tests/xfce-web-smoke.sh)。本轮 CLI 的 ip 接口/地址/路由、本地 HTTP 及 dig/nslookup 的真实 UDP DNS 查询均通过；[UDP 错误队列](udp-error-queue.md)的 IPv4/IPv6 ICMP 拒绝、就绪与消费边界通过。测试范围为本地服务与回环错误，不扩大为公网/全部后端认证。 |
 
 ## 本轮直接验证的共享调用
@@ -55,15 +55,21 @@ virtio-gpu/virgl、虚拟键鼠与 HDA。输入哈希、参数与客体源码记
 - 修复桌面 overlay 的 `libdl.so.2`：旧链接指向无效的 Windows reparse 错误文本，
   现恢复既有设计的 `libc.so.6` 别名，与镜像的 gcompat/musl 路径配合；没有增加任意
   glibc native 兼容承诺。上述 JVM native 装载及 Minecraft 真实欢迎画面有直接证据。
-- **整轮仍为 FAIL**：Firefox HTTP/HTTPS DOM、标签页和刷新已运行，但硬件输入阶段
+- `third/report.json` **整轮仍为 FAIL**：Firefox HTTP/HTTPS DOM、标签页和刷新已运行，但硬件输入阶段
   Marionette 连接关闭；缺少该次视觉输入通过证据。桌面 D-Bus 经 OpenRC 正常 S5，
   QEMU 自然退出 0、ext4/FAT 只读检查 0，不能用这些成功项覆盖浏览器失败。
-- `minecraft-first` 到达实际欢迎画面，VNC 截图保存于该目录；宿主观察进程以 143
-  退出，客体随后也终止，尚未进入世界。该次不计保存、正常退出或冷启动重载通过。
+- Minecraft 完整的本轮应用行为见 `minecraft-contract.json`，对应
+  `minecraft-second` 与 `minecraft-reload` 两次真实启动：移动/跳跃、背包、相对鼠标
+  转向、Save and Quit / Quit Game 均通过。首轮离线 level.dat 哈希与客体一致；
+  同盘冷启动以相同哈希重入世界，服务器在精确保存位置登录。两次正常退出 0、桌面
+  D-Bus/OpenRC 自然关机及 ext4/FAT 检查 0；OpenAL ALSA Default 与非静音 WAV
+  有直接证据。此前指针在客户端外的尝试不计转向通过；指针进入客户端后激活锁定，
+  三次实际相对事件将朝向从 0/0 改为 6/-1.5，F3、Wayland trace 与磁盘 NBT 一致。
 
 首个 `first` 尝试在 QEMU 启动参数处失败；`second` 的宿主截图检查失败后未完成输入，
-均保留原始记录。N08 继续保留浏览器图形输入/稳定退出、Minecraft 实际保存/重载和其余
-已声明的候选范围；不新增长驻留或全 syscall/全架构矩阵。
+均保留原始记录。`minecraft-first` 在欢迎界面后观察进程/客体终止，也不升级为通过。
+N08 不再重复要求上述 Minecraft 保存/重载与实际交互；继续保留浏览器图形输入/稳定退出
+和其余已声明的候选范围，不新增长驻留或全 syscall/全架构矩阵。
 
 ## 证据与关闭规则
 
