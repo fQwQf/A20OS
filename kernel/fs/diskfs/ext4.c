@@ -1691,9 +1691,63 @@ static int ext4_extent_insert(ext4_extent_t *ext, unsigned *count,
     return 0;
 }
 
+/* One block insertion touches at most one extent leaf or two indirect
+ * blocks, and allocates at most two mapping blocks. Directory publication
+ * keeps these preimages until the enlarged inode itself has been written.
+ * The caller holds metadata_lock; allocator operations take alloc_lock. */
+typedef struct {
+    unsigned saved_count, allocated_count;
+    struct { uint64_t block; void *before; } saved[2];
+    uint64_t allocated[2];
+} ext4_grow_txn_t;
+
+static uint64_t ext4_grow_alloc(ext4_sb_info_t *sb, ext4_grow_txn_t *txn)
+{
+    if (txn && txn->allocated_count == 2) return 0;
+    uint64_t block = ext4_alloc_block(sb);
+    if (txn && block) txn->allocated[txn->allocated_count++] = block;
+    return block;
+}
+
+static int ext4_grow_save(ext4_sb_info_t *sb, ext4_grow_txn_t *txn,
+                           uint64_t block)
+{
+    if (!txn) return 0;
+    for (unsigned i = 0; i < txn->allocated_count; i++)
+        if (txn->allocated[i] == block) return 0;
+    for (unsigned i = 0; i < txn->saved_count; i++)
+        if (txn->saved[i].block == block) return 0;
+    if (txn->saved_count == 2) return -EOPNOTSUPP;
+    void *before = kmalloc(sb->block_size);
+    if (!before) return -ENOMEM;
+    int ret = bcache_read_bytes(sb->bc, block * sb->block_size,
+                                 before, sb->block_size);
+    if (ret < 0) { kfree(before); return ret; }
+    txn->saved[txn->saved_count].block = block;
+    txn->saved[txn->saved_count++].before = before;
+    return 0;
+}
+
+static int ext4_grow_extent_write(ext4_sb_info_t *sb, uint32_t ino,
+                                   ext4_inode_t *inode, uint64_t block,
+                                   void *bytes, ext4_grow_txn_t *txn)
+{
+    int ret = ext4_grow_save(sb, txn, block);
+    return ret < 0 ? ret : ext4_extent_block_write(sb, ino, inode, block, bytes);
+}
+
+static int ext4_grow_indirect_write(ext4_sb_info_t *sb, uint64_t block,
+                                     void *bytes, ext4_grow_txn_t *txn)
+{
+    int ret = ext4_grow_save(sb, txn, block);
+    return ret < 0 ? ret : ext4_meta_write(sb, block * sb->block_size,
+                                          bytes, sb->block_size);
+}
+
 static int ext4_extent_grow_inner(ext4_sb_info_t *sb, uint32_t ino,
                                    ext4_inode_t *inode,
-                                   uint32_t lblk, uint64_t pb)
+                                   uint32_t lblk, uint64_t pb,
+                                   ext4_grow_txn_t *txn)
 {
     uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
     ext4_extent_header_t hdr;
@@ -1718,15 +1772,18 @@ static int ext4_extent_grow_inner(ext4_sb_info_t *sb, uint32_t ino,
         }
         char *leaf = kcalloc(1, sb->block_size);
         if (!leaf) return -ENOMEM;
-        uint64_t block = ext4_alloc_block(sb);
+        uint64_t block = ext4_grow_alloc(sb, txn);
         if (!block) { kfree(leaf); return -ENOSPC; }
         ext4_extent_header_t lh = { .eh_magic = EXT4_EXT_MAGIC,
             .eh_entries = n, .eh_max = epb, .eh_depth = 0 };
         memcpy(leaf, &lh, sizeof(lh));
         memcpy(leaf + sizeof(lh), ext, n * sizeof(*ext));
-        r = ext4_extent_block_write(sb, ino, inode, block, leaf);
+        r = ext4_grow_extent_write(sb, ino, inode, block, leaf, txn);
         kfree(leaf);
-        if (r < 0) { ext4_free_block(sb, block); return r; }
+        if (r < 0) {
+            if (!txn) ext4_free_block(sb, block);
+            return r;
+        }
         ext4_extent_idx_t idx = { .ei_block = ext[0].ee_block,
             .ei_leaf_lo = (uint32_t)block, .ei_leaf_hi = (uint16_t)(block >> 32) };
         hdr.eh_depth = 1;
@@ -1766,24 +1823,24 @@ static int ext4_extent_grow_inner(ext4_sb_info_t *sb, uint32_t ino,
     if (n <= epb) {
         lh.eh_entries = n;
         memcpy(leaf, &lh, sizeof(lh));
-        r = ext4_extent_block_write(sb, ino, inode, block, leaf);
+        r = ext4_grow_extent_write(sb, ino, inode, block, leaf, txn);
     } else if (ni == EXT_ROOT_MAX) {
         r = -ENOSPC;
     } else {
         char *right = kcalloc(1, sb->block_size);
         if (!right) { kfree(leaf); return -ENOMEM; }
-        uint64_t new_block = ext4_alloc_block(sb);
+        uint64_t new_block = ext4_grow_alloc(sb, txn);
         if (!new_block) { kfree(right); kfree(leaf); return -ENOSPC; }
         unsigned left_count = n / 2;
         ext4_extent_header_t rh = lh;
         rh.eh_entries = n - left_count;
         memcpy(right, &rh, sizeof(rh));
         memcpy(right + sizeof(rh), ext + left_count, rh.eh_entries * sizeof(*ext));
-        r = ext4_extent_block_write(sb, ino, inode, new_block, right);
+        r = ext4_grow_extent_write(sb, ino, inode, new_block, right, txn);
         if (r == 0) {
             lh.eh_entries = left_count;
             memcpy(leaf, &lh, sizeof(lh));
-            r = ext4_extent_block_write(sb, ino, inode, block, leaf);
+            r = ext4_grow_extent_write(sb, ino, inode, block, leaf, txn);
         }
         if (r == 0) {
             for (unsigned i = ni; i > slot + 1; i--) idx[i] = idx[i - 1];
@@ -1792,7 +1849,7 @@ static int ext4_extent_grow_inner(ext4_sb_info_t *sb, uint32_t ino,
                 .ei_leaf_lo = (uint32_t)new_block,
                 .ei_leaf_hi = (uint16_t)(new_block >> 32) };
             hdr.eh_entries = ++ni;
-        } else {
+        } else if (!txn) {
             ext4_free_block(sb, new_block);
         }
         kfree(right);
@@ -1808,7 +1865,7 @@ static int ext4_extent_grow_inner(ext4_sb_info_t *sb, uint32_t ino,
 int ext4_extent_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
                      uint32_t lblk, uint64_t pb)
 {
-    int r = ext4_extent_grow_inner(sb, ino, inode, lblk, pb);
+    int r = ext4_extent_grow_inner(sb, ino, inode, lblk, pb, NULL);
     if (r == 0)
         ext4_inode_sync_i_blocks(sb, inode);
     return r;
@@ -2111,36 +2168,73 @@ uint64_t ext4_indirect_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lbl
 }
 
 static int ext4_indirect_grow_inner(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                    uint32_t lblk, uint64_t phys) {
+                                    uint32_t lblk, uint64_t phys,
+                                    ext4_grow_txn_t *txn)
+{
     uint32_t b[15]; memcpy(b, inode->i_block.i_data.i_block, sizeof(b));
     uint32_t apb = sb->addr_per_block;
+    if (phys > 0xffffffffULL) return -EOPNOTSUPP;
     if (lblk < 12) {
+        if (b[lblk]) return -EEXIST;
         b[lblk] = (uint32_t)phys;
     } else if ((lblk - 12) < apb) {
-        if (!b[12]) { uint64_t nb = ext4_alloc_block(sb); if (!nb) return -ENOSPC; b[12] = (uint32_t)nb; }
-        uint32_t *ind = (uint32_t *)kmalloc(sb->block_size); if (!ind) return -ENOMEM;
-        bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
-        ind[lblk - 12] = (uint32_t)phys;
-        ext4_meta_write(sb, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+        int fresh = !b[12];
+        if (fresh) {
+            uint64_t nb = ext4_grow_alloc(sb, txn);
+            if (!nb) return -ENOSPC;
+            b[12] = (uint32_t)nb;
+        }
+        uint32_t *ind = kmalloc(sb->block_size);
+        if (!ind) return -ENOMEM;
+        int ret = 0;
+        if (fresh) memset(ind, 0, sb->block_size);
+        else ret = bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size,
+                                      ind, sb->block_size);
+        if (ret >= 0 && ind[lblk - 12]) ret = -EEXIST;
+        if (ret >= 0) {
+            ind[lblk - 12] = (uint32_t)phys;
+            ret = ext4_grow_indirect_write(sb, b[12], ind, txn);
+        }
         kfree(ind);
+        if (ret < 0) return ret;
     } else if ((lblk - 12 - apb) < apb * apb) {
         uint32_t li = lblk - 12 - apb;
-        if (!b[13]) { uint64_t nb = ext4_alloc_block(sb); if (!nb) return -ENOSPC; b[13] = (uint32_t)nb; }
-        uint32_t *di = (uint32_t *)kmalloc(sb->block_size); if (!di) return -ENOMEM;
-        bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+        int fresh = !b[13];
+        if (fresh) {
+            uint64_t nb = ext4_grow_alloc(sb, txn);
+            if (!nb) return -ENOSPC;
+            b[13] = (uint32_t)nb;
+        }
+        uint32_t *di = kmalloc(sb->block_size);
+        if (!di) return -ENOMEM;
+        int ret = 0;
+        if (fresh) memset(di, 0, sb->block_size);
+        else ret = bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size,
+                                      di, sb->block_size);
+        if (ret < 0) { kfree(di); return ret; }
         uint32_t ii = li / apb;
-        if (!di[ii]) {
-            uint64_t nb = ext4_alloc_block(sb);
+        int fresh_leaf = !di[ii];
+        if (fresh_leaf) {
+            uint64_t nb = ext4_grow_alloc(sb, txn);
             if (!nb) { kfree(di); return -ENOSPC; }
             di[ii] = (uint32_t)nb;
-            ext4_meta_write(sb, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+            ret = ext4_grow_indirect_write(sb, b[13], di, txn);
+            if (ret < 0) { kfree(di); return ret; }
         }
-        uint32_t ib = di[ii]; kfree(di);
-        uint32_t *ind = (uint32_t *)kmalloc(sb->block_size); if (!ind) return -ENOMEM;
-        bcache_read_bytes(sb->bc, (uint64_t)ib * sb->block_size, ind, sb->block_size);
-        ind[li % apb] = (uint32_t)phys;
-        ext4_meta_write(sb, (uint64_t)ib * sb->block_size, ind, sb->block_size);
+        uint32_t ib = di[ii];
+        kfree(di);
+        uint32_t *ind = kmalloc(sb->block_size);
+        if (!ind) return -ENOMEM;
+        if (fresh_leaf) memset(ind, 0, sb->block_size);
+        else ret = bcache_read_bytes(sb->bc, (uint64_t)ib * sb->block_size,
+                                      ind, sb->block_size);
+        if (ret >= 0 && ind[li % apb]) ret = -EEXIST;
+        if (ret >= 0) {
+            ind[li % apb] = (uint32_t)phys;
+            ret = ext4_grow_indirect_write(sb, ib, ind, txn);
+        }
         kfree(ind);
+        if (ret < 0) return ret;
     } else return -ENOSPC;
     memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
     return 0;
@@ -2150,7 +2244,7 @@ int ext4_indirect_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
                        uint32_t lblk, uint64_t phys)
 {
     (void)ino;
-    int r = ext4_indirect_grow_inner(sb, inode, lblk, phys);
+    int r = ext4_indirect_grow_inner(sb, inode, lblk, phys, NULL);
     if (r == 0)
         ext4_inode_sync_i_blocks(sb, inode);
     return r;
@@ -2313,6 +2407,66 @@ int ext4_block_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
         return ext4_extent_grow(sb, ino, inode, lblk, phys);
     return ext4_indirect_grow(sb, ino, inode, lblk, phys);
 }
+
+/* Publish a directory's new mapping and size together. On an ordinary
+ * nojournal failure restore precisely the blocks touched by this insertion,
+ * preserving preallocated mappings beyond EOF. Only after every preimage is
+ * restored may the new mapping blocks (and caller's data block) be freed.
+ * EUCLEAN means ownership is uncertain and the caller must retain its block. */
+int ext4_block_grow_commit(ext4_sb_info_t *sb, uint32_t ino,
+                            ext4_inode_t *inode, uint32_t lblk,
+                            uint64_t phys, uint64_t new_size)
+{
+    if (ext4_is_inconsistent(sb)) return -117;
+    ext4_grow_txn_t txn = {0};
+    ext4_inode_t before = *inode;
+    int inode_attempted = 0;
+    int ret = (inode->i_flags & EXT4_EXTENTS_FL) ?
+        ext4_extent_grow_inner(sb, ino, inode, lblk, phys, &txn) :
+        ext4_indirect_grow_inner(sb, inode, lblk, phys, &txn);
+    if (ret >= 0) {
+        ext4_inode_sync_i_blocks(sb, inode);
+        ext4_inode_set_size(inode, new_size);
+        inode_attempted = 1;
+        ret = ext4_write_inode(sb, ino, inode);
+    }
+    if (ret < 0) {
+        if (ext4_is_inconsistent(sb) || ret == -117 ||
+            (sb->journal && (inode_attempted || txn.saved_count ||
+                             txn.allocated_count))) {
+            if (sb->journal) (void)ext4_journal_poison(sb);
+            ret = ext4_record_status(sb, -117);
+        } else {
+            int failed = 0;
+            for (unsigned i = txn.saved_count; i > 0; i--) {
+                uint64_t offset = txn.saved[i - 1].block * sb->block_size;
+                void *bytes = txn.saved[i - 1].before;
+                int restore = ext4_meta_write(sb, offset, bytes, sb->block_size);
+                if (restore < 0)
+                    restore = ext4_meta_write(sb, offset, bytes, sb->block_size);
+                if (restore < 0) failed = 1;
+            }
+            if (!failed && inode_attempted) {
+                int restore = ext4_write_inode(sb, ino, &before);
+                if (restore < 0) restore = ext4_write_inode(sb, ino, &before);
+                if (restore < 0) failed = 1;
+            }
+            if (!failed) {
+                *inode = before;
+                for (unsigned i = txn.allocated_count; i > 0; i--) {
+                    int release = ext4_free_block(sb, txn.allocated[i - 1]);
+                    if (release < 0)
+                        release = ext4_free_block(sb, txn.allocated[i - 1]);
+                    if (release < 0) { failed = 1; break; }
+                }
+            }
+            if (failed) ret = ext4_record_status(sb, -117);
+        }
+    }
+    for (unsigned i = 0; i < txn.saved_count; i++) kfree(txn.saved[i].before);
+    return ret;
+}
+
 void ext4_block_truncate(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode) {
     if (inode->i_flags & EXT4_EXTENTS_FL) ext4_extent_truncate(sb, ino, inode);
     else ext4_indirect_truncate(sb, ino, inode);

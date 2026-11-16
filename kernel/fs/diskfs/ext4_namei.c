@@ -277,20 +277,18 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
         if (release < 0) release = ext4_free_block(sb, nb_blk);
         return release < 0 ? ext4_record_status(sb, -117) : wr;
     }
-    int gr = ext4_block_grow(sb, dir_ino, di, nb, nb_blk);
-    if (gr == -EOPNOTSUPP) {
-        /* The extent grower rejects unsupported depth before mutation. */
+    int gr = ext4_block_grow_commit(sb, dir_ino, di, nb, nb_blk, *dsz + bs);
+    if (gr < 0) {
+        if (gr == -117 || ext4_is_inconsistent(sb))
+            return ext4_record_status(sb, -117);
+        /* Mapping/inode preimages were restored, so this block is private. */
         int release = ext4_free_block(sb, nb_blk);
         if (release < 0) release = ext4_free_block(sb, nb_blk);
-        if (release >= 0) return gr;
-        if (sb->journal) (void)ext4_journal_poison(sb);
-        return ext4_record_status(sb, -117);
-    }
-    /* A mapping error can have modified an external extent/indirect block.
-     * Keep the allocation until that mapping can be recovered. */
-    if (gr < 0) {
-        if (sb->journal) (void)ext4_journal_poison(sb);
-        return ext4_record_status(sb, -117);
+        if (release < 0) {
+            if (sb->journal) (void)ext4_journal_poison(sb);
+            return ext4_record_status(sb, -117);
+        }
+        return gr;
     }
     *dsz += bs;
     return 0;
@@ -1120,12 +1118,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
         return r;
     }
 
-    if (dsz != ext4_inode_size(&di)) {
-        ext4_inode_set_size(&di, dsz);
-        if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
-            return -EIO;
-        p->file_size = dsz;
-    }
+    p->file_size = dsz;
 
     if (out) {
         *out = ext4_make_vnode(p->sb, new_ino, 0, (ni.i_mode & S_IFMT) == S_IFIFO ? VFS_FT_FIFO : VFS_FT_REGULAR, dir);
@@ -1261,10 +1254,7 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
      * the inode disagrees, so the parent is written back even when the entry
      * fitted in the block it already had. */
     di.i_links_count++;
-    if (dsz != ext4_inode_size(&di)) {
-        ext4_inode_set_size(&di, dsz);
-        p->file_size = dsz;
-    }
+    p->file_size = dsz;
     if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
         return ext4_record_status(p->sb, -117);
     return 0;
@@ -1324,14 +1314,7 @@ int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
             return -117;
         return r;
     }
-    if (dsz != ext4_inode_size(&di)) {
-        ext4_inode_set_size(&di, dsz);
-        if (ext4_write_inode(p->sb, p->inode_num, &di) < 0) {
-            if (p->sb->journal) (void)ext4_journal_poison(p->sb);
-            return ext4_record_status(p->sb, -117);
-        }
-        p->file_size = dsz;
-    }
+    p->file_size = dsz;
     return 0;
 }
 
@@ -1523,11 +1506,7 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
     uint64_t ndsz = ext4_inode_size(&ndi);
     r = ext4_dir_add(np->sb, &ndi, np->inode_num, &ndsz, new_name, src_ino, src_ft);
     if (r < 0) return r;
-    if (ndsz != ext4_inode_size(&ndi)) {
-        ext4_inode_set_size(&ndi, ndsz);
-        ext4_write_inode(np->sb, np->inode_num, &ndi);
-        np->file_size = ndsz;
-    }
+    np->file_size = ndsz;
 
     if (ext4_read_inode(op->sb, op->inode_num, &odi) < 0)
         return -EIO;
@@ -1610,11 +1589,7 @@ int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
         ext4_free_inode(p->sb, new_ino);
         return r;
     }
-    if (dsz != ext4_inode_size(&di)) {
-        ext4_inode_set_size(&di, dsz);
-        ext4_write_inode(p->sb, p->inode_num, &di);
-        p->file_size = dsz;
-    }
+    p->file_size = dsz;
     return 0;
 }
 
