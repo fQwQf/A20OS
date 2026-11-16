@@ -148,6 +148,7 @@ typedef struct i2c_hid_device {
     uint32_t poll_ms;
     volatile int present;
     volatile int running;
+    int closing;
 
     /* Last absolute position, for change detection. */
     int32_t last_x, last_y;
@@ -187,6 +188,8 @@ static int ihid_attention_pending(const i2c_hid_device_t *h)
 /* ---- register access ----------------------------------------------------- */
 static int ihid_xfer(i2c_hid_device_t *h, i2c_msg_t *msgs, int n)
 {
+    if (__atomic_load_n(&h->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
     if (!h->adapter || !h->adapter->transfer)
         return -ENODEV;
     return h->adapter->transfer(h->adapter, msgs, n);
@@ -893,7 +896,7 @@ static int ihid_recover(i2c_hid_device_t *h)
 static int ihid_poll_device(i2c_hid_device_t *h)
 {
     mutex_lock(&h->io_lock);
-    if (!h->present) {
+    if (!h->present || __atomic_load_n(&h->closing, __ATOMIC_ACQUIRE)) {
         mutex_unlock(&h->io_lock);
         return -ENODEV;
     }
@@ -966,7 +969,8 @@ static void ihid_poll_work(void *context)
     i2c_hid_device_t *h = context;
     (void)ihid_poll_device(h);
     mutex_lock(&h->io_lock);
-    if (h->running && h->present) {
+    if (h->running && h->present &&
+        !__atomic_load_n(&h->closing, __ATOMIC_ACQUIRE)) {
         if (timer_get_ticks() >= h->report_at) {
             klog_record_only(KLOG_INFO, "[I2C-HID] runtime: gpio=%08x reads=%llu reports=%llu errors=%llu skips=%llu events=%u touch_frames=%llu move_frames=%llu drops=%llu recoveries=%llu pending=%u\n",
                 h->attention.reg ? readl(h->attention.reg) : 0,
@@ -1161,6 +1165,36 @@ static int ihid_probe_descriptor(i2c_hid_device_t *h, const fw_node_t *node)
     return rc;
 }
 
+/* Close I/O/rearm before waiting for the worker. Never acquire io_lock here:
+ * the callback may own it while blocked in transport I/O. Queue destruction
+ * has a bounded deadline and retains all callback storage on failure. */
+static int ihid_stop(void *context)
+{
+    i2c_hid_device_t *h = context;
+    __atomic_store_n(&h->closing, 1, __ATOMIC_RELEASE);
+    if (h->queue) {
+        int ret = driver_workqueue_destroy(&h->queue,
+                                          timer_get_ticks() + MS_TO_TICKS(2000));
+        if (ret)
+            return ret;
+    }
+    h->present = 0;
+    h->running = 0;
+    return 0;
+}
+
+static void ihid_release(void *context)
+{
+    i2c_hid_device_t *h = context;
+    if (h->work)
+        driver_work_put(h->work);
+    if (h->adapter)
+        i2c_adapter_put(h->adapter);
+    kfree(h->report_desc);
+    kfree(h->input_buf);
+    kfree(h);
+}
+
 static int ihid_probe(device_t *dev)
 {
 #ifdef CONFIG_DRIVER_MODULE
@@ -1169,12 +1203,15 @@ static int ihid_probe(device_t *dev)
     if (!ihid_scheduler_ready)
         return -EPROBE_DEFER;
     ihid_parse_cmdline();
+    int error = device_probe_use_remove(dev);
+    if (error)
+        return error;
 
     i2c_adapter_t *adapter = i2c_adapter_get_for_device(dev->parent);
     if (!adapter)
         return -EPROBE_DEFER;
 
-    int error = device_add_dependency(dev, dev->parent);
+    error = device_add_dependency(dev, dev->parent);
     if (error) { i2c_adapter_put(adapter); return error; }
     i2c_hid_device_t *h = kcalloc(1, sizeof(*h));
     if (!h) { i2c_adapter_put(adapter); return -ENOMEM; }
@@ -1184,6 +1221,13 @@ static int ihid_probe(device_t *dev)
     spin_init(&h->event_lock);
     mutex_init(&h->io_lock);
     h->f_x = h->f_y = h->f_tip = h->f_button = h->f_contact_id = -1;
+    dev->drv_priv = h;
+    error = device_add_execution_action(dev, ihid_stop, ihid_release, h);
+    if (error) {
+        dev->drv_priv = NULL;
+        ihid_release(h);
+        return error;
+    }
 
     int probe_rc = ihid_probe_descriptor(h, &dev->firmware_node);
     if (probe_rc) { error = probe_rc; goto fail; }
@@ -1261,27 +1305,22 @@ static int ihid_probe(device_t *dev)
     h->queue = driver_workqueue_create();
     if (!h->queue) { error = -ENOMEM; goto fail; }
     h->work = driver_work_create(h->queue, ihid_poll_work, h);
-    if (!h->work) {
-        (void)driver_workqueue_destroy(&h->queue, 0);
-        error = -ENOMEM;
-        goto fail;
-    }
+    if (!h->work) { error = -ENOMEM; goto fail; }
     h->report_at = timer_get_ticks() + MS_TO_TICKS(10000);
-    dev->drv_priv = h;
 
     kinfo("[I2C-HID] ready: addr=0x%02x vid=0x%04x pid=0x%04x "
           "report=%u fields=%u poll=%ums%s\n",
           h->addr, h->hd.vendor_id, h->hd.product_id, h->active_report_id,
           h->field_count, (unsigned)h->poll_ms,
           h->f_tip >= 0 ? " touch" : " mouse");
-    (void)driver_work_schedule(h->work, 0);
+    error = driver_work_schedule(h->work, 0);
+    if (error < 0)
+        goto fail;
     kinfo("[I2C-HID] polling worker started\n");
     return 0;
 fail:
-    kfree(h->report_desc);
-    kfree(h->input_buf);
-    i2c_adapter_put(adapter);
-    kfree(h);
+    /* Managed stop/remove retains the dependency, adapter and callback code
+     * if a partially created worker cannot be joined yet. */
     return error;
 }
 
@@ -1290,22 +1329,9 @@ static int ihid_remove(device_t *dev)
     i2c_hid_device_t *h = dev ? dev->drv_priv : NULL;
     if (!h)
         return 0;
-    mutex_lock(&h->io_lock);
-    h->present = 0;
-    h->running = 0;
-    mutex_unlock(&h->io_lock);
-    /* Close submissions and wait outside io_lock: the callback takes it.
-     * A failed teardown retains context, work and adapter for a safe retry. */
-    int ret = driver_workqueue_destroy(&h->queue,
-                                       timer_get_ticks() + MS_TO_TICKS(2000));
-    if (ret)
-        return ret;
-    driver_work_put(h->work);
-    i2c_adapter_put(h->adapter);
+    if (h->queue)
+        return -EBUSY; /* Execution stop must have joined the worker first. */
     dev->drv_priv = NULL;
-    kfree(h->report_desc);
-    kfree(h->input_buf);
-    kfree(h);
     return 0;
 }
 
