@@ -8,16 +8,17 @@ The [application contract register](../../../docs/zh/kernel/linux-abi/applicatio
 links the existing shell/service, Python/Node, desktop/browser, JVM and network-tool
 workloads to their required calls, error boundaries and checks. It distinguishes
 current direct host checks from historical application runs and missing original
-reports. N08 remains open; neither a registered workload nor a historical PASS
-establishes acceptance of the current release candidate. The current RV64 SMP2
+reports. N08 is closed by the registered current application runs plus the
+critical boundary evidence linked below; this does not certify the final platform
+candidate. The earlier RV64 SMP2
 pynode application run exposed a pip-cleanup EIO, a Node child SIGSEGV and a refused
 filesystem shutdown. Fork-advice range/wipe regressions now pass a direct RV64 SMP2
 check. Unix unnamed-address and offline Node/npm child/timer/I/O checks now pass,
 and the Python build/install/import/cleanup workload now shuts down cleanly after
 fixing directory rename parent metadata. Ordered file-data initialization also fixes
 the npm workload writeback refusal; both application workloads now have bounded
-RV64 SMP2 clean-shutdown and filesystem-check evidence. Other application and
-release-candidate requirements remain open in the register.
+RV64 SMP2 clean-shutdown and filesystem-check evidence. Final supported-platform
+and release-candidate validation remains N18/N20.
 
 The x86_64 SMP4 OpenJDK and Minecraft application paths now have direct execution,
 interaction, normal exit and saved-world cold-reload evidence. Firefox native
@@ -26,7 +27,15 @@ browser exit and desktop shutdown pass in `desktop-current/firefox-focus-verifie
 Its prior input crash was triggered by Marionette's synthetic focus test mode;
 the disposable test profile now retains normal native focus. Production input
 modules and sandbox policy are unchanged. These bounded application results do
-not certify every error/permission boundary or the final platform candidate.
+not certify every possible Linux error/permission boundary or the final platform candidate.
+
+The [N08 closeout](../../../docs/zh/kernel/linux-abi/application-contracts.md#应用关键边界收口2026-11-17)
+adds direct sandbox/procfs access, SCM_RIGHTS, poll/timer, interface-buffer,
+TTY/FIFO, child-reap, futex, pipe and actual exec CLOEXEC evidence. Chrooted
+`/proc/self/exe` following now agrees with readlink; numeric exe/cwd shortcuts
+check access and return ENOENT for absent tasks. Existing partial rows retain
+unsupported Linux edge semantics; bounded target-application acceptance does not
+upgrade them to full.
 
 ## Coverage Legend
 
@@ -184,7 +193,7 @@ strength of a boilerplate note.
 | `getcwd` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fstat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fstatat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `readlinkat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `readlinkat` | path/fs | `partial` | `smoke-vfs-stress`, `sandbox_test` | proc executable links honor reader chroot; numeric exe/cwd check access and missing tasks; remaining Linux magic-link/path semantics are partial |
 | `faccessat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `faccessat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fchmod` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
