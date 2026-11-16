@@ -73,6 +73,7 @@ typedef struct uxfs_sb {
 typedef struct uxfs_vpriv {
     uxfs_sb_t *sb;
     int        is_dir;
+    uint32_t   mount_root_ref; /* factory reference transferred to a mount */
 } uxfs_vpriv_t;
 
 typedef struct uxfs_fctx {
@@ -631,8 +632,13 @@ static void uxfs_identity_forget(uxfs_sb_t *sb, uint64_t ino)
     flags = spin_lock_irqsave(&g_uxfs_identity_lock);
     victim = (vnode_t *)a20_vnode_identity_remove((uintptr_t)sb, ino);
     spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
-    if (victim)
+    if (victim) {
+        /* Reused inode numbers must not leave clean cache pages pinning the
+         * retired identity and its parent. The transferred registry reference
+         * keeps the vnode alive throughout invalidation. */
+        page_cache_invalidate(victim);
         vnode_put(victim);
+    }
 }
 
 /* Remove every canonical entry of one superblock (unmount and failed mount).
@@ -647,8 +653,19 @@ static void uxfs_identity_clear_sb(uxfs_sb_t *sb)
         spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
         if (!n)
             break;
-        for (size_t i = 0; i < n; i++)
-            vnode_put((vnode_t *)victims[i]);
+        for (size_t i = 0; i < n; i++) {
+            vnode_t *victim = (vnode_t *)victims[i];
+            /* Detach withdrew the old peer's block authority before clearing
+             * identities. No retry may send its cached writes to a future
+             * server generation. Drop unpinned pages while the transferred
+             * registry reference protects the vnode; mappings retain their
+             * independent vnode/frame references. */
+            if (!sb->ep)
+                page_cache_discard_unlinked(victim);
+            else
+                page_cache_invalidate(victim);
+            vnode_put(victim);
+        }
     }
 }
 
@@ -860,6 +877,8 @@ void uxfs_release_vn(vnode_t *vn)
     }
     if (vn->parent)
         vnode_put(vn->parent);
+    if (vn->mnt && vn->mnt->root == vn)
+        vn->mnt->root = NULL;
     kfree(vn);
     /* Keep this as the final access: zero permits another mount to reuse sb. */
     if (sb)
@@ -989,6 +1008,7 @@ static void ops_ns_mount_init(void *mnt, const char *path, uint32_t flags,
     strncpy(m->opts, "rw", sizeof(m->opts) - 1);
     m->opts[sizeof(m->opts) - 1] = '\0';
     r->mnt = m;
+    ((uxfs_vpriv_t *)r->fs_data)->mount_root_ref = 1;
 }
 static void ops_ns_mount_link_tree(void *mnt) { vfs_mount_link_tree((mount_t *)mnt); }
 static void ops_ns_dcache_invalidate_all(void *x) { (void)x; vfs_dcache_invalidate_all(); }
@@ -1271,7 +1291,17 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
 
 int uxfs_unmount(struct vnode *root)
 {
-    return a20_uxfs_ns_unmount(&g_uxfs_ns, root);
+    int result = a20_uxfs_ns_unmount(&g_uxfs_ns, root);
+    if (result == 0 && root && root->fs_data) {
+        uxfs_vpriv_t *p = (uxfs_vpriv_t *)root->fs_data;
+        /* Backend teardown owns the factory reference; VFS removal only
+         * drops namespace counters. Retire it once, while external children,
+         * opens or mappings keep the old root and sb slot alive as needed.
+         * release_vn withdraws the graveyard pointer on the actual last put. */
+        if (__atomic_exchange_n(&p->mount_root_ref, 0, __ATOMIC_ACQ_REL))
+            vnode_put(root);
+    }
+    return result;
 }
 
 int uxfs_block_io(struct task_t *task, int block_index, int write,
