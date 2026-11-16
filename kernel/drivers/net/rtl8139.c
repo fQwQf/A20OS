@@ -85,9 +85,10 @@
 #define RTL8139_TXPOLL   0xD9U  /* 8-bit: transmit poll (C+ mode) */
 
 /* CR bits (hw/net/rtl8139.c:146-151). */
-#define RTL8139_CR_RST   0x10U  /* reset; self-clearing in the model */
+#define RTL8139_CR_RST   0x10U  /* reset; self-clearing after completion */
 #define RTL8139_CR_TE    0x04U  /* transmitter enable */
 #define RTL8139_CR_RE    0x08U  /* receiver enable */
+#define RTL8139_CR_BUFE  0x01U  /* receiver ring is empty */
 
 /* TSD bits.  Named per the RTL8139C datasheet; the QEMU model names the same
  * bits differently (hw/net/rtl8139.c:174-181 calls 0x2000 TxHostOwns and
@@ -239,6 +240,10 @@ static void rtl8139_parse_cmdline(void)
 
 typedef struct {
     uintptr_t regs;
+    device_t *device;
+    int closing;
+    int hardware_live;
+    int stopped;
     uint8_t mac[6];
     /* LOCK_ORDER: nic->lock is the innermost lock.  It protects the receive
      * ring pointer, the transmit descriptor busy mask, the TSAD/TSD programming
@@ -250,8 +255,10 @@ typedef struct {
     spinlock_t lock;
     uint8_t *rx;                  /* RTL8139_RX_BUF_SIZE ring */
     uint8_t (*tx)[RTL8139_TX_BUF_SIZE];
-    /* The kmalloc() pointer itself, because that is what kfree() takes. */
+    /* One coherent allocation owns RX and TX. Keep its DMA handle for
+     * device addresses and retirement under the declared 32-bit mask. */
     void *buf_mem;
+    uint64_t buf_dma;
     uint32_t rx_read;             /* ring offset the next frame starts at */
     uint32_t tx_next;             /* next descriptor send() will try */
     uint32_t tx_busy;             /* bit i set: descriptor i still owned */
@@ -268,6 +275,7 @@ typedef struct {
 } rtl8139_device_t;
 
 static rtl8139_device_t g_rtl8139;
+static int rtl8139_stop(void *context);
 
 static inline uint8_t rtl8139_readb(rtl8139_device_t *nic, uint32_t reg)
 {
@@ -305,12 +313,31 @@ static inline void rtl8139_writel(rtl8139_device_t *nic, uint32_t reg,
 #define RTL8139_ALIGN_UP(p, a) \
     ((p) = (void *)(((uintptr_t)(p) + ((a) - 1)) & ~(uintptr_t)((a) - 1)))
 
+static int rtl8139_reset(rtl8139_device_t *nic)
+{
+    if (rtl8139_readb(nic, RTL8139_CR) == 0xFFU)
+        return -ENODEV;
+    rtl8139_writeb(nic, RTL8139_CR, RTL8139_CR_RST);
+    /* A posted reset is not a DMA retirement acknowledgement. Poll outside
+     * the ring spinlock, at most 1,000 times with 10us between checks. */
+    for (unsigned i = 0; i < 1000U; i++) {
+        uint8_t cmd = rtl8139_readb(nic, RTL8139_CR);
+        if (cmd == 0xFFU)
+            return -ENODEV;
+        if (!(cmd & (RTL8139_CR_RST | RTL8139_CR_TE | RTL8139_CR_RE)))
+            return 0;
+        udelay(10);
+    }
+    return -ETIMEDOUT;
+}
+
 /* Defined below; alloc_buffers() calls it on the out-of-window path. */
 static void rtl8139_free_buffers(rtl8139_device_t *nic);
 
 static int rtl8139_alloc_buffers(rtl8139_device_t *nic, device_t *dev)
 {
-    void *raw = kmalloc(RTL8139_BUF_TOTAL);
+    void *raw = dma_alloc_coherent_aligned(dev, RTL8139_BUF_TOTAL,
+                                           RTL8139_TX_STRIDE, &nic->buf_dma);
     if (!raw) {
         kinfo("[RTL8139] no memory for the %u byte ring + %u transmit "
               "buffers (%u bytes total)\n",
@@ -329,18 +356,17 @@ static int rtl8139_alloc_buffers(rtl8139_device_t *nic, device_t *dev)
      * the transmit path leaking kernel memory to the wire, the receive path
      * letting the device DMA over an unrelated page.  One range check over
      * the whole block covers every programmed address. */
-    if (!dma_range_ok(dev, va_to_pa(raw), RTL8139_BUF_TOTAL)) {
+    if (!dma_range_ok(dev, nic->buf_dma, RTL8139_BUF_TOTAL)) {
         kinfo("[RTL8139] ring block 0x%lx..0x%lx is outside the 32-bit DMA "
-              "window\n", (unsigned long)va_to_pa(raw),
-              (unsigned long)(va_to_pa(raw) + RTL8139_BUF_TOTAL - 1U));
+              "window\n", (unsigned long)nic->buf_dma,
+              (unsigned long)(nic->buf_dma + RTL8139_BUF_TOTAL - 1U));
         rtl8139_free_buffers(nic);
         return -EOPNOTSUPP;
     }
 
-    /* The block came from the buddy allocator (it is far above SLAB_MAX_OBJ),
-     * so it is page aligned and both the ring base and every transmit buffer
-     * that follows it inherit the alignment the hardware requires.  Aligning
-     * anyway keeps that a property of this function rather than of kmalloc(). */
+    /* The coherent allocator selects physical pages within the DMA mask;
+     * ordinary kmalloc can choose high memory even when low pages are free.
+     * The requested alignment covers both the ring and every TX buffer. */
     RTL8139_ALIGN_UP(raw, RTL8139_TX_STRIDE);
     nic->rx = raw;
     raw += RTL8139_RX_BUF_SIZE;
@@ -352,8 +378,9 @@ static int rtl8139_alloc_buffers(rtl8139_device_t *nic, device_t *dev)
 static void rtl8139_free_buffers(rtl8139_device_t *nic)
 {
     if (nic->buf_mem)
-        kfree(nic->buf_mem);
+        dma_free_coherent_aligned(nic->buf_mem, RTL8139_BUF_TOTAL, nic->buf_dma);
     nic->buf_mem = NULL;
+    nic->buf_dma = 0;
     nic->rx = NULL;
     nic->tx = NULL;
 }
@@ -446,13 +473,18 @@ static int rtl8139_irq_handler(int irq, void *priv)
     (void)irq;
     device_t *dev = (device_t *)priv;
     rtl8139_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic || !nic->ready)
+    if (!nic || !nic->regs)
         return 0;
 
     uint16_t isr = rtl8139_readw(nic, RTL8139_ISR);
-    if (!isr)
+    if (!isr || isr == 0xFFFFU)
         return 0;
     rtl8139_writew(nic, RTL8139_ISR, isr);
+    /* A busy/failed stop retains the registered handler. Acknowledge pending
+     * causes to avoid a shared-line storm, but never enter a closing stack. */
+    if (!__atomic_load_n(&nic->ready, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE))
+        return 0;
 
     net_stack_device_interrupt(dev);
 
@@ -483,6 +515,10 @@ static void rtl8139_poll(device_t *dev)
         return;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return;
+    }
     rtl8139_reclaim_tx_locked(nic);
     spin_unlock_irqrestore(&nic->lock, flags);
 }
@@ -506,6 +542,10 @@ static int rtl8139_send(device_t *dev, const void *packet, size_t length)
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
 
     rtl8139_reclaim_tx_locked(nic);
     if (nic->tx_busy == (1U << RTL8139_TX_DESC_COUNT) - 1U) {
@@ -526,7 +566,8 @@ static int rtl8139_send(device_t *dev, const void *packet, size_t length)
     /* TSAD before TSD.  Writing TSD is what makes the device look at the
      * descriptor, so the address has to be visible first; the writel() barrier
      * in rtl8139_writel() is that ordering. */
-    rtl8139_writel(nic, RTL8139_TSAD(slot), (uint32_t)va_to_pa(buf));
+    rtl8139_writel(nic, RTL8139_TSAD(slot),
+                   (uint32_t)(nic->buf_dma + (uintptr_t)buf - (uintptr_t)nic->buf_mem));
     rtl8139_writel(nic, RTL8139_TSD(slot),
                    (uint32_t)(length < RTL8139_MIN_FRAME ?
                               RTL8139_MIN_FRAME : length));
@@ -557,7 +598,16 @@ static int rtl8139_recv(device_t *dev, void *buffer, size_t max_length)
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
 
+    uint8_t cmd = rtl8139_readb(nic, RTL8139_CR);
+    if (cmd == 0xFFU || (cmd & RTL8139_CR_BUFE)) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return cmd == 0xFFU ? -ENODEV : 0;
+    }
     uint32_t slot = nic->rx_read;
     rtl8139_ring_sync_read(nic, slot, 4);
     uint16_t hdr[2];
@@ -594,13 +644,10 @@ static int rtl8139_recv(device_t *dev, void *buffer, size_t max_length)
         }
     }
 
-    /* Advance past header + payload + FCS on every path, delivered or not --
-     * otherwise the next call reads the same header again.  The device aligns
-     * the next slot to 4 bytes (hw/net/rtl8139.c:1161); an Ethernet frame is
-     * always at least 60 bytes, so 4 + (payload + 4) is already a multiple of 4
-     * and the align is a no-op -- spelled out anyway so a future change cannot
-     * silently desynchronise the two. */
-    nic->rx_read = ((slot + 4U + length) & (RTL8139_RX_BUF_SIZE - 1U)) & ~3U;
+    /* The device rounds UP past header, payload and FCS to the next four-byte
+     * slot. Frame lengths need not be multiples of four; rounding down reads
+     * padding/FCS as the next header and stalls ordinary full-size TCP frames. */
+    nic->rx_read = ((slot + 4U + length + 3U) & (RTL8139_RX_BUF_SIZE - 1U)) & ~3U;
     rtl8139_release_ring_locked(nic);
     a20_perf_count(A20_PERF_RTL8139_RX_DRAINED);
 
@@ -647,7 +694,8 @@ static uint32_t rtl8139_caps(device_t *dev)
 static int rtl8139_rx_irq_driven(device_t *dev)
 {
     rtl8139_device_t *nic = dev ? dev->drv_priv : NULL;
-    return nic && nic->irq_registered;
+    return nic && !__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&nic->irq_registered, __ATOMIC_ACQUIRE);
 }
 
 static int rtl8139_stats_read(struct device *dev, net_dev_stats_t *out)
@@ -655,8 +703,12 @@ static int rtl8139_stats_read(struct device *dev, net_dev_stats_t *out)
     if (!out) return -EINVAL;
     *out = (net_dev_stats_t){0};
     rtl8139_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic || !nic->ready) return -ENODEV;
+    if (!nic) return -ENODEV;
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
     *out = (net_dev_stats_t){nic->rx_packets, nic->rx_drops, nic->tx_packets, nic->tx_drops};
     spin_unlock_irqrestore(&nic->lock, flags);
     return 0;
@@ -665,6 +717,9 @@ static const struct driver_net_stats_ops rtl8139_stats_ops = {rtl8139_stats_read
 
 static int rtl8139_probe(device_t *dev)
 {
+    int managed = device_probe_use_remove(dev);
+    if (managed)
+        return managed;
     const struct driver_protocol_descriptor stats = {
         .info = {DRIVER_PROTOCOL_NET_STATS, 1, sizeof(rtl8139_stats_ops), 0},
         .ops = &rtl8139_stats_ops,
@@ -693,16 +748,28 @@ static int rtl8139_probe(device_t *dev)
         return -ENODEV;
 
     rtl8139_device_t *nic = &g_rtl8139;
+    /* Probe/remove are serialized by the core lifecycle mutex. Failed stop
+     * keeps this owner, so another controller cannot overwrite live DMA. */
+    if (nic->device)
+        return -EBUSY;
     memset(nic, 0, sizeof(*nic));
+    nic->device = dev;
     nic->irq = -1;
     spin_init(&nic->lock);
+    dev->drv_priv = nic;
+    int execution = device_add_execution_action(dev, rtl8139_stop, NULL, nic);
+    if (execution)
+        return execution;
     nic->regs = (uintptr_t)pci_map_bar(dev, 1);
     if (!nic->regs) return -EIO;
+    nic->hardware_live = 1;
 
     /* Reset before reading anything else: the reset restores the MAC from the
      * EEPROM shadow, so a MAC read before it would report whatever the previous
      * boot left in IDR0..5. */
-    rtl8139_writeb(nic, RTL8139_CR, RTL8139_CR_RST);
+    int reset = rtl8139_reset(nic);
+    if (reset)
+        return reset;
     /* Mask every cause and acknowledge whatever the device latched while the
      * line was not owned by anyone, before a handler can be installed. */
     rtl8139_writew(nic, RTL8139_IMR, 0);
@@ -740,7 +807,8 @@ static int rtl8139_probe(device_t *dev)
                                         RTL8139_RCR_ACCEPT_BROADCAST |
                                         RTL8139_RCR_ACCEPT_ERR);
     rtl8139_writel(nic, RTL8139_RXMISSED, 0xFFFFFFFFU);
-    rtl8139_writel(nic, RTL8139_RBSTART, (uint32_t)va_to_pa(nic->rx));
+    rtl8139_writel(nic, RTL8139_RBSTART,
+                   (uint32_t)(nic->buf_dma + (uintptr_t)nic->rx - (uintptr_t)nic->buf_mem));
     arch_dma_sync_for_device(nic->rx, RTL8139_RX_BUF_SIZE);
     nic->rx_read = 0;
     rtl8139_release_ring_locked(nic);
@@ -751,7 +819,8 @@ static int rtl8139_probe(device_t *dev)
     for (uint32_t i = 0; i < RTL8139_TX_DESC_COUNT; i++) {
         nic->tx_busy &= ~(1U << i);
         rtl8139_writel(nic, RTL8139_TSAD(i),
-                       (uint32_t)va_to_pa(nic->tx[i]));
+                       (uint32_t)(nic->buf_dma + (uintptr_t)nic->tx[i] -
+                                  (uintptr_t)nic->buf_mem));
     }
 
     /* Transmitter before receiver: the device must never DMA into a ring this
@@ -760,20 +829,16 @@ static int rtl8139_probe(device_t *dev)
     rtl8139_writeb(nic, RTL8139_CR, rtl8139_readb(nic, RTL8139_CR) |
                                     RTL8139_CR_TE | RTL8139_CR_RE);
 
-    /* Publish the instance before the line is armed: request_irq() opens a
-     * window in which an interrupt can be delivered, and the handler resolves
-     * the instance through dev->drv_priv.  ready stays 0 until the causes are
-     * unmasked, so an interrupt that arrives in that window is acknowledged
-     * and ignored rather than acting on a half-configured ring. */
-    dev->drv_priv = nic;
-
+    /* drv_priv already owns the instance. request_irq() can deliver an
+     * interrupt immediately; ready stays zero until ring setup and handler
+     * registration finish, then is published before causes are unmasked. */
     if (!rtl8139_poll_mode) {
         int irq = pci_intx_irq(dev);
         if (irq >= 0) {
             if (request_irq((uint32_t)irq, rtl8139_irq_handler, IRQF_SHARED,
                             dev) == 0) {
                 nic->irq = irq;
-                nic->irq_registered = 1;
+                __atomic_store_n(&nic->irq_registered, 1, __ATOMIC_RELEASE);
             } else {
                 kinfo("[RTL8139] IRQ %d registration failed; using "
                       "polling\n", irq);
@@ -782,9 +847,9 @@ static int rtl8139_probe(device_t *dev)
     }
     /* Unmask only with a handler in place; with a20.rtl8139.poll=1 this is
      * never reached and .poll is the only progress path. */
+    __atomic_store_n(&nic->ready, 1, __ATOMIC_RELEASE);
     if (nic->irq_registered)
         rtl8139_writew(nic, RTL8139_IMR, RTL8139_IMR_USED);
-    nic->ready = 1;
 
     kinfo("[RTL8139] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x mode=%s "
           "irq=%d rxring=%u txdesc=%u\n",
@@ -795,26 +860,44 @@ static int rtl8139_probe(device_t *dev)
     return 0;
 }
 
+static int rtl8139_stop(void *context)
+{
+    rtl8139_device_t *nic = context;
+    __atomic_store_n(&nic->closing, 1, __ATOMIC_RELEASE);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&nic->lock, &flags))
+        return -EBUSY;
+    __atomic_store_n(&nic->ready, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&nic->lock, flags);
+    if (nic->stopped)
+        return 0;
+    if (nic->hardware_live) {
+        if (rtl8139_readb(nic, RTL8139_CR) == 0xFFU)
+            return -ENODEV;
+        rtl8139_writew(nic, RTL8139_IMR, 0);
+        int ret = rtl8139_reset(nic);
+        if (ret)
+            return ret;
+        rtl8139_writew(nic, RTL8139_ISR, 0xFFFFU);
+    }
+    /* Keep the handler and buffers until reset was acknowledged; free_irq
+     * synchronizes the last callback before remove can retire the context. */
+    if (nic->irq_registered) {
+        free_irq((uint32_t)nic->irq, nic->device);
+        __atomic_store_n(&nic->irq_registered, 0, __ATOMIC_RELEASE);
+    }
+    nic->stopped = 1;
+    return 0;
+}
+
 static int rtl8139_remove(device_t *dev)
 {
     rtl8139_device_t *nic = dev ? dev->drv_priv : NULL;
     if (!nic)
         return 0;
-
-    /* Stop new work first: ready gates the IRQ handler, and the class layer has
-     * already marked the class device offline, so no new send/recv can start. */
-    nic->ready = 0;
-    /* Mask device causes before releasing the handler, so a message in flight
-     * has nowhere to land. */
-    rtl8139_writew(nic, RTL8139_IMR, 0);
-    rtl8139_writew(nic, RTL8139_ISR, 0xFFFFU);
-    if (nic->irq_registered)
-        free_irq((uint32_t)nic->irq, dev);
-
-    /* Stop the data plane before the memory goes away: CR[1] and CR[0] are the
-     * transmitter and receiver enables, and clearing them is what stops the
-     * device DMAing into the buffers that kfree() is about to release. */
-    rtl8139_writeb(nic, RTL8139_CR, 0);
+    int ret = rtl8139_stop(nic);
+    if (ret)
+        return ret;
     rtl8139_free_buffers(nic);
 
     dev->drv_priv = NULL;
