@@ -23,7 +23,7 @@ struct virtio_transport {
  int msix_vectors,msix_base,irq;
 };
 typedef struct {void *drv_priv;} device_t;
-typedef struct {virtio_transport_t vt;device_t *device;int valid,irq_registered,irq;void *ring_mem;} virtio_net_inst_t;
+typedef struct {virtio_transport_t vt;device_t *device;int valid,transport_live,published,irq_registered,irq;void *ring_mem;} virtio_net_inst_t;
 typedef struct {struct {int valid;} blk;virtio_transport_t vt;int in_flight,irq_registered;void *queue_dma_mem;} virtio_blk_inst_t;
 static struct {unsigned reads,resets,acks,frees,teardowns,ring_frees,stack_calls,confirmed;int stuck;} hw;
 static uint64_t ticks;
@@ -52,7 +52,7 @@ int main(void){
   virtio_transport_t vt={.read32=read32,.write32=write32,.msix_teardown=teardown,
    .msix_vectors=msix?2:0,.msix_base=32,.irq=7};
   hw=(__typeof__(hw)){.stuck=1};
-  virtio_net_inst_t net={.vt=vt,.valid=1,.irq_registered=1,.irq=7,.ring_mem=&net};
+  virtio_net_inst_t net={.vt=vt,.valid=1,.transport_live=1,.published=1,.irq_registered=1,.irq=7,.ring_mem=&net};
   device_t dev={.drv_priv=&net};net.device=&dev;
   assert(virtio_net_driver_remove(&dev)==-ETIMEDOUT);
   assert(dev.drv_priv==&net&&!net.valid&&net.irq_registered&&net.ring_mem==&net);

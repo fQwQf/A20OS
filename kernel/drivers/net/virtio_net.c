@@ -154,7 +154,7 @@ typedef struct {
 
 typedef struct {
     virtio_transport_t vt;
-    device_t *device; /* Borrowed until IRQ unregistration during removal. */
+    device_t *device; /* Reserves this slot until successful binding cleanup. */
     virtio_net_queue_t rxq;
     virtio_net_queue_t txq;
     /* Owns every ring, buffer and side table below, in one piece.  Must be the
@@ -189,6 +189,8 @@ typedef struct {
      * tx_packets, rx_drops, tx_drops, rx_mrg_frames, rx_mrg_reported. */
     spinlock_t lock;
     int valid;
+    int transport_live;
+    int published;
     int legacy;
     int slot;
     int irq;
@@ -220,6 +222,23 @@ typedef struct {
 
 static virtio_net_inst_t g_net[VIRTIO_NET_MAX_DEVS];
 static int g_nnet;
+
+/* Probe/remove run under the core lifecycle mutex. A failed stop keeps device
+ * non-NULL, so no new probe can overwrite a still-DMA-visible instance. */
+static virtio_net_inst_t *virtio_net_claim_instance(device_t *dev)
+{
+    for (int idx = 0; idx < VIRTIO_NET_MAX_DEVS; idx++) {
+        virtio_net_inst_t *net = &g_net[idx];
+        if (net->device) continue;
+        memset(net, 0, sizeof(*net));
+        net->device = dev;
+        net->slot = idx;
+        net->vt.irq = -1;
+        dev->drv_priv = net;
+        return net;
+    }
+    return NULL;
+}
 
 static void virtio_net_select_queue(virtio_net_inst_t *net, int qidx) {
     net->vt.write32(&net->vt, VIRTIO_MMIO_QUEUE_SEL, (uint32_t)qidx);
@@ -548,8 +567,8 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
     int idx = net->slot;
     virtio_transport_t *vt = &net->vt;
 
-    vt->write32(vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
+    int reset = virtio_transport_reset(vt, 100);
+    if (reset) return reset;
 
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     vt->write32(vt, VIRTIO_MMIO_STATUS, status);
@@ -665,20 +684,16 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
      * Without it the count is the ring depth and no frame ever spans two. */
     unsigned rx_desc = net->mrg_rxbuf ? VIRTIO_NET_RX_DESC_MAX : VIRTIO_NET_QUEUE_SIZE;
 
-    /* Allocated before either queue is programmed, and freed on every path out
-     * of this function below: a probe that fails after the rings exist must not
-     * leak the ring block, and the instance is memset() by its next probe
-     * attempt. */
+    /* A programmed queue may already own this storage when later setup
+     * fails. The managed remove path frees it only after reset ACK. */
     if (virtio_net_alloc_ring(net) < 0)
         return -1;
 
     if (virtio_net_setup_queue(net, &net->rxq, VIRTIO_NET_QUEUE_RX, rx_desc) < 0) {
-        virtio_net_free_ring(net);
         return -1;
     }
     if (virtio_net_setup_queue(net, &net->txq, VIRTIO_NET_QUEUE_TX,
                                VIRTIO_NET_TX_DESC_MAX) < 0) {
-        virtio_net_free_ring(net);
         return -1;
     }
 
@@ -691,7 +706,7 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
     mb();
     virtio_net_kick(net, VIRTIO_NET_QUEUE_RX);
 
-    net->valid = 1;
+    __atomic_store_n(&net->valid, 1, __ATOMIC_RELEASE);
     printf("[VIRTIO-NET%d] ready legacy=%d mac=%02x:%02x:%02x:%02x:%02x:%02x "
            "qsize=%u hdr=%u mrg_rxbuf=%d rxbuf=%u offered(mq=%d csum=%d guest_csum=%d)\n",
            idx, net->legacy, net->mac[0], net->mac[1], net->mac[2],
@@ -704,7 +719,9 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
 static int virtio_net_irq_handler(int irq, void *priv);
 
 int virtio_net_ready(int idx) {
-    return idx >= 0 && idx < g_nnet && g_net[idx].valid;
+    return idx >= 0 && idx < __atomic_load_n(&g_nnet, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&g_net[idx].published, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&g_net[idx].valid, __ATOMIC_ACQUIRE);
 }
 
 const uint8_t *virtio_net_mac(int idx) {
@@ -1025,11 +1042,6 @@ static void virtio_net_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_
 static const struct driver_net_stats_ops virtio_net_stats_ops;
 
 static int virtio_net_driver_probe(device_t *dev) {
-    if (g_nnet >= VIRTIO_NET_MAX_DEVS) {
-        kinfo("[VIRTIO-NET] Too many devices (max %d)\n", VIRTIO_NET_MAX_DEVS);
-        return -1;
-    }
-
     const struct driver_protocol_descriptor stats = {
         .info = {DRIVER_PROTOCOL_NET_STATS, 1, sizeof(virtio_net_stats_ops), 0},
         .ops = &virtio_net_stats_ops,
@@ -1037,10 +1049,10 @@ static int virtio_net_driver_probe(device_t *dev) {
     int protocol = device_add_protocol(dev, &stats);
     if (protocol) return protocol;
 
-    int idx = g_nnet;
-    virtio_net_inst_t *net = &g_net[idx];
-    memset(net, 0, sizeof(*net));
-    net->vt.irq = -1;
+    int managed = device_probe_use_remove(dev);
+    if (managed) return managed;
+    virtio_net_inst_t *net = virtio_net_claim_instance(dev);
+    if (!net) return -ENOSPC;
 
     if (dev->bus == &pci_bus) {
         if (pci_virtio_transport_init(dev, 1, &net->vt) != 0)
@@ -1059,8 +1071,6 @@ static int virtio_net_driver_probe(device_t *dev) {
         if (mmio_irq)
             net->vt.irq = (int)mmio_irq->start;
     }
-    net->device     = dev;
-    net->slot       = idx;
     net->legacy     = (net->vt.read32(&net->vt, VIRTIO_MMIO_VERSION) == 1);
     spin_init(&net->lock);
 
@@ -1071,11 +1081,11 @@ static int virtio_net_driver_probe(device_t *dev) {
         return -1;
     }
 
-    dev->drv_priv = net;
-
-    if (virtio_net_init_instance(net) != 0) {
+    net->transport_live = 1;
+    int initialized = virtio_net_init_instance(net);
+    if (initialized != 0) {
         kinfo("[VIRTIO-NET] Init failed for device '%s'\n", dev->name);
-        return -1;
+        return initialized;
     }
 
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
@@ -1145,7 +1155,9 @@ static int virtio_net_driver_probe(device_t *dev) {
         kinfo("[VIRTIO-NET] No IRQ resource for device '%s'\n", dev->name);
     }
 
-    g_nnet++;
+    if (__atomic_load_n(&g_nnet, __ATOMIC_RELAXED) <= net->slot)
+        __atomic_store_n(&g_nnet, net->slot + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&net->published, 1, __ATOMIC_RELEASE);
     kinfo("[VIRTIO-NET] Probed device '%s' (irq=%d msix=%d)\n",
           dev->name, net->irq_registered ? net->irq : -1, msix_vectors);
     return 0;
@@ -1241,11 +1253,15 @@ static int virtio_net_driver_remove(device_t *dev) {
     virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
     if (!net)
         return 0;
+    __atomic_store_n(&net->published, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&net->valid, 0, __ATOMIC_RELEASE);
     /* Retain every hardware-visible ring and the IRQ owner on reset timeout.
      * A later remove retries the same transport without allocating a new one. */
-    int ret = virtio_transport_reset(&net->vt, 100);
-    if (ret) return ret;
+    if (net->transport_live) {
+        int ret = virtio_transport_reset(&net->vt, 100);
+        if (ret) return ret;
+        net->transport_live = 0;
+    }
     if (net->irq_registered) {
         if (net->vt.msix_vectors > 0) {
             for (int i = 0; i < net->vt.msix_vectors; i++)
@@ -1261,6 +1277,7 @@ static int virtio_net_driver_remove(device_t *dev) {
      * gone. */
     virtio_net_free_ring(net);
     dev->drv_priv = NULL;
+    net->device = NULL;
     return 0;
 }
 
