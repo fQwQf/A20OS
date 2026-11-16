@@ -998,7 +998,7 @@ void virtio_net_poll_rx_all(void) {
 static int virtio_net_irq_handler(int irq, void *priv) {
     (void)irq;
     virtio_net_inst_t *net = (virtio_net_inst_t *)priv;
-    if (!net || !net->valid)
+    if (!net)
         return 0;
 
     uint32_t isr = net->vt.read32(&net->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
@@ -1007,7 +1007,10 @@ static int virtio_net_irq_handler(int irq, void *priv) {
      * interrupt line asserted otherwise.  Matches virtio_blk_irq_handler. */
     net->vt.write32(&net->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
-    net_stack_device_interrupt(net->device);
+    /* A failed reset retains this handler and its MMIO owner. Acknowledge
+     * late causes without entering the offline network stack. */
+    if (__atomic_load_n(&net->valid, __ATOMIC_ACQUIRE))
+        net_stack_device_interrupt(net->device);
     return 0;
 }
 
@@ -1238,7 +1241,11 @@ static int virtio_net_driver_remove(device_t *dev) {
     virtio_net_inst_t *net = dev ? dev->drv_priv : NULL;
     if (!net)
         return 0;
-    net->valid = 0;
+    __atomic_store_n(&net->valid, 0, __ATOMIC_RELEASE);
+    /* Retain every hardware-visible ring and the IRQ owner on reset timeout.
+     * A later remove retries the same transport without allocating a new one. */
+    int ret = virtio_transport_reset(&net->vt, 100);
+    if (ret) return ret;
     if (net->irq_registered) {
         if (net->vt.msix_vectors > 0) {
             for (int i = 0; i < net->vt.msix_vectors; i++)
@@ -1249,8 +1256,6 @@ static int virtio_net_driver_remove(device_t *dev) {
         }
     }
     net->irq_registered = 0;
-    net->vt.write32(&net->vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
     /* After the device is stopped and the IRQ freed: the rings are what it was
      * writing into, and virtio_net_recv() must not reach them once they are
      * gone. */
