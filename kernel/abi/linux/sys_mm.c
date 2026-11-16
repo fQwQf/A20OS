@@ -202,7 +202,14 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     uint64_t start = addr;
     uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
     if (end < start) return -EINVAL;
-    if (advice == MADV_PAGEOUT) return mm_madvise(t->mm, addr, len, advice);
+    /* Fork policy applies to the requested pages, not every page in each
+     * overlapping VMA. The shared transaction validates coverage and splits
+     * both boundaries before changing flags; mmap may have merged this range
+     * with unrelated allocator storage that must survive fork. */
+    if (advice == MADV_PAGEOUT || advice == MADV_DONTFORK ||
+        advice == MADV_DOFORK || advice == MADV_WIPEONFORK ||
+        advice == MADV_KEEPONFORK)
+        return mm_madvise(t->mm, addr, len, advice);
 
     mm_tlb_invalidate_begin(t->mm);
     uint64_t mm_flags = linux_mm_lock(t);
@@ -346,17 +353,6 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
         }
         break;
 #endif
-    case MADV_DONTFORK:
-    case MADV_DOFORK:
-    case MADV_WIPEONFORK:
-    case MADV_KEEPONFORK:
-        for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
-            if (advice == MADV_DONTFORK) vma->vm_flags |= VM_DONTFORK;
-            else if (advice == MADV_DOFORK) vma->vm_flags &= ~VM_DONTFORK;
-            else if (advice == MADV_WIPEONFORK) vma->vm_flags |= VM_WIPEONFORK;
-            else vma->vm_flags &= ~VM_WIPEONFORK;
-        }
-        break;
     case MADV_MERGEABLE:
     case MADV_UNMERGEABLE:
     case MADV_DONTDUMP:

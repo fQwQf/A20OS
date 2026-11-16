@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import traceback
 
 
 def run(argv, *, cwd=None, env=None):
@@ -92,6 +93,42 @@ const {promisify} = require('node:util');
         assert (root / "installed-marker").read_text() == "42"
 
 
+def madvise_fork_range():
+    import ctypes
+    import errno
+    import mmap
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    page = mmap.PAGESIZE
+    with mmap.mmap(-1, 3 * page, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
+                   prot=mmap.PROT_READ | mmap.PROT_WRITE) as region:
+        region[:] = b"x" * len(region)
+        address = ctypes.addressof(ctypes.c_char.from_buffer(region))
+        for advice, middle in ((10, None), (11, b"x"), (18, b"\0"), (19, b"x")):
+            assert libc.madvise(address + page, page, advice) == 0, ctypes.get_errno()
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    # Both ends must survive even when the middle is excluded.
+                    assert region[0:1] == region[-1:] == b"x"
+                    if middle is None:
+                        resident = ctypes.c_ubyte()
+                        ctypes.set_errno(0)
+                        assert libc.mincore(address + page, page,
+                                            ctypes.byref(resident)) == -1
+                        assert ctypes.get_errno() == errno.ENOMEM
+                    else:
+                        assert region[page:page + 1] == middle
+                    os._exit(0)
+                except BaseException:
+                    os._exit(1)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (advice, status)
+            assert region[:] == b"x" * len(region)
+
+
 def desktop_abi():
     import desktop_abi_probe
     desktop_abi_probe.exec_scripts()
@@ -101,23 +138,26 @@ def desktop_abi():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="append",
-                        choices=("shell", "python-install", "node-install", "desktop-abi"))
+                        choices=("shell", "python-install", "node-install",
+                                 "desktop-abi", "madvise-fork-range"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     checks = {"shell": shell_pipeline, "python-install": python_install,
-              "node-install": node_install, "desktop-abi": desktop_abi}
+              "node-install": node_install, "desktop-abi": desktop_abi,
+              "madvise-fork-range": madvise_fork_range}
     results = {}
     for name in args.check or checks:
         try:
             checks[name]()
             results[name] = {"status": "PASS"}
         except Exception as error:
-            results[name] = {"status": "FAIL", "error": repr(error)}
+            results[name] = {"status": "FAIL", "error": repr(error),
+                             "traceback": traceback.format_exc()}
         print("APPLICATION_RUNTIME:", name, results[name]["status"], flush=True)
     report = json.dumps(results, indent=2)
+    print(report, flush=True)
     if args.output:
         args.output.write_text(report + "\n")
-    print(report, flush=True)
     passed = all(item["status"] == "PASS" for item in results.values())
     print("APPLICATION_RUNTIME: " + ("PASS" if passed else "FAIL"), flush=True)
     return 0 if passed else 1

@@ -473,8 +473,8 @@ static void advice_table(void)
     add_rec(0x10000, 0x12000, 0);
     check(a20_madvise_dispatch(g_mm_token, 0x10000, 0x2000, 18) == 0,
           "table: MADV_WIPEONFORK succeeds");
-    check(g_set_flags_last == (VM_DONTFORK | VM_WIPEONFORK) && g_set_on_last == 1,
-          "table: MADV_WIPEONFORK sets DONTFORK too");
+    check(g_set_flags_last == VM_WIPEONFORK && g_set_on_last == 1,
+          "table: MADV_WIPEONFORK preserves the child mapping");
 
     model_reset();
     add_rec(0x10000, 0x12000, 0);
@@ -486,6 +486,18 @@ static void advice_table(void)
 
 static void fork_flags_transaction(void)
 {
+    /* Wiping only makes sense for private anonymous storage. Refuse before
+     * splitting/marking any prefix of a mixed range. */
+    const uint64_t nonprivate[] = { 1ULL << 3, 1ULL << 13, VM_VMO };
+    for (unsigned i = 0; i < sizeof(nonprivate) / sizeof(nonprivate[0]); i++) {
+        model_reset();
+        add_rec(0x10000, 0x11000, 0);
+        add_rec(0x11000, 0x12000, nonprivate[i]);
+        check(a20_madvise_dispatch(g_mm_token, 0x10000, 0x2000, 18) == -22,
+              "WIPEONFORK refuses nonprivate storage");
+        check(split_calls == 0 && set_flags_calls == 0,
+              "WIPEONFORK refusal leaves the prefix unchanged");
+    }
     /* PFNMAP is refused before anything moves. */
     model_reset();
     add_rec(0x10000, 0x12000, VM_PFNMAP);
