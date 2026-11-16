@@ -17,6 +17,7 @@ typedef struct sunxi_mmc_binding {
     uintptr_t base;
     mutex_t lock;
     sunxi_mmc_host_t host;
+    int hardware_stopped;
 } sunxi_mmc_binding_t;
 
 static uint32_t mmio_read(void *context, uint32_t offset) {
@@ -31,10 +32,19 @@ static uint64_t mmio_ticks(void *context) {
     (void)context;
     return clock_get_ticks();
 }
-static void release_binding(void *context) {
+static int stop_binding(void *context) {
     sunxi_mmc_binding_t *binding = context;
-    sunxi_mmc_stop(&binding->host);
-    kfree(binding);
+    __atomic_store_n(&binding->host.closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&binding->lock))
+        return -EBUSY;
+    int rc = 0;
+    /* Before the engine accepts its callbacks/config, no host was touched. */
+    if (!binding->hardware_stopped && binding->host.io.write)
+        rc = sunxi_mmc_stop(&binding->host);
+    if (!rc)
+        binding->hardware_stopped = 1;
+    mutex_unlock(&binding->lock);
+    return rc;
 }
 static int sunxi_probe(device_t *dev) {
     const sunxi_mmc_platform_t *platform = dev->plat_data;
@@ -44,19 +54,20 @@ static int sunxi_probe(device_t *dev) {
     if (!resource || resource->end < resource->start ||
         resource->end - resource->start < (uint64_t)platform->fifo_offset + 3)
         return -EINVAL;
-    void *mapped = device_map_mmio(dev, 0);
-    if (!mapped)
-        return -EIO;
+    int rc = device_probe_use_remove(dev);
+    if (rc)
+        return rc;
     sunxi_mmc_binding_t *binding = kcalloc(1, sizeof(*binding));
     if (!binding)
         return -ENOMEM;
-    binding->base = (uintptr_t)mapped;
     mutex_init(&binding->lock);
-    int rc = device_add_resource_action(dev, release_binding, binding);
-    if (rc) {
-        kfree(binding);
+    dev->drv_priv = binding;
+    rc = device_add_execution_action(dev, stop_binding, NULL, binding);
+    if (rc)
         return rc;
-    }
+    binding->base = (uintptr_t)device_map_mmio(dev, 0);
+    if (!binding->base)
+        return -EIO;
     sunxi_mmc_io_t io = {
         .context = binding,
         .read = mmio_read,
@@ -77,7 +88,6 @@ static int sunxi_probe(device_t *dev) {
 #ifdef CONFIG_STORAGE_READ_ONLY
     binding->host.write_protected = 1;
 #endif
-    dev->drv_priv = binding;
     kinfo("[SUNXI-MMC] %s: %lu sectors, %s, 1-bit PIO %u Hz%s\n", dev->name,
           (unsigned long)binding->host.sectors,
           binding->host.high_capacity ? "SDHC/SDXC" : "SDSC",
@@ -89,11 +99,11 @@ static int sunxi_remove(device_t *dev) {
     sunxi_mmc_binding_t *binding = dev->drv_priv;
     if (!binding)
         return 0;
-    /* Class publication has already been revoked and active calls drained. */
-    mutex_lock(&binding->lock);
-    sunxi_mmc_stop(&binding->host);
+    int rc = stop_binding(binding);
+    if (rc)
+        return rc;
     dev->drv_priv = NULL;
-    mutex_unlock(&binding->lock);
+    kfree(binding);
     return 0;
 }
 static int transfer(device_t *dev, uint64_t lba, void *buffer, size_t sectors,
@@ -102,7 +112,8 @@ static int transfer(device_t *dev, uint64_t lba, void *buffer, size_t sectors,
     if (!binding)
         return -ENODEV;
     mutex_lock(&binding->lock);
-    int rc = sunxi_mmc_transfer(&binding->host, lba, buffer, sectors, write);
+    int rc = __atomic_load_n(&binding->host.closing, __ATOMIC_ACQUIRE) ? -ENODEV :
+             sunxi_mmc_transfer(&binding->host, lba, buffer, sectors, write);
     mutex_unlock(&binding->lock);
     return rc;
 }
@@ -119,13 +130,15 @@ static int sunxi_flush(device_t *dev) {
     if (!binding)
         return -ENODEV;
     mutex_lock(&binding->lock);
-    int rc = sunxi_mmc_flush(&binding->host);
+    int rc = __atomic_load_n(&binding->host.closing, __ATOMIC_ACQUIRE) ? -ENODEV :
+             sunxi_mmc_flush(&binding->host);
     mutex_unlock(&binding->lock);
     return rc;
 }
 static uint64_t sunxi_capacity(device_t *dev) {
     sunxi_mmc_binding_t *binding = dev->drv_priv;
-    return binding ? binding->host.sectors : 0;
+    return binding && !__atomic_load_n(&binding->host.closing, __ATOMIC_ACQUIRE) ?
+           binding->host.sectors : 0;
 }
 static uint32_t sunxi_sector_size(device_t *dev) {
     (void)dev;

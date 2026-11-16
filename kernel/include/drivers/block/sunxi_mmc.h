@@ -33,11 +33,15 @@ typedef struct sunxi_mmc_host {
     int high_capacity;
     int write_protected;
     int ready;
+    /* Atomic lifecycle cancellation; other state is caller-serialized. */
+    int closing;
 } sunxi_mmc_host_t;
 
 int sunxi_mmc_start(sunxi_mmc_host_t *, const sunxi_mmc_io_t *,
                     const sunxi_mmc_platform_t *);
-void sunxi_mmc_stop(sunxi_mmc_host_t *);
+/* Drain PIO execution first. A failed start also needs checked stop before
+ * the caller releases its mapped host or callback context. */
+int sunxi_mmc_stop(sunxi_mmc_host_t *);
 int sunxi_mmc_transfer(sunxi_mmc_host_t *, uint64_t lba, void *, size_t sectors,
                        int write);
 int sunxi_mmc_flush(sunxi_mmc_host_t *);

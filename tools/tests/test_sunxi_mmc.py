@@ -12,7 +12,7 @@ SCENARIOS = (
     "invalid_rca", "reject_non_sd_card", "acmd41_power_timeout", "data_timeout",
     "sdxc_maximum_lba", "reject_unsafe_clock_and_config", "transfer_state_timeout",
     "non_error_card_status", "locked_card", "fractional_counter_frequency",
-    "reject_incompatible_voltage",
+    "reject_incompatible_voltage", "failed_stop_retry", "cancel_pio", "lost_registers",
 )
 
 
@@ -52,12 +52,17 @@ BINDING = r'''
 #include "kernel/drivers/block/sunxi_mmc.c"
 #include <stdarg.h>
 static hardware_t hardware;
-static int allocations, fail_allocation, fail_action, read_only;
-static void (*cleanup)(void *);
+static int allocations, fail_allocation, fail_action, fail_map, read_only, managed, cancel_binding;
+static int (*cleanup)(void *);
 static void *cleanup_context;
 int host_trylock_blocked;
 uint32_t host_readl(const volatile void *p) {
- return read_register(&hardware,(uintptr_t)p-(uintptr_t)hardware.registers);
+ uint32_t value=read_register(&hardware,(uintptr_t)p-(uintptr_t)hardware.registers);
+ if(cancel_binding&&hardware.fifo_words==16) {
+  cancel_binding=0;assert(((sunxi_mmc_binding_t*)cleanup_context)->lock.depth==1);
+  assert(stop_binding(cleanup_context)==-EBUSY&&allocations==1);
+ }
+ return value;
 }
 void host_writel(uint32_t v,volatile void *p) {
  write_register(&hardware,(uintptr_t)p-(uintptr_t)hardware.registers,v);
@@ -65,21 +70,41 @@ void host_writel(uint32_t v,volatile void *p) {
 uint64_t clock_get_ticks(void) { return ticks(&hardware); }
 uint64_t clock_ticks_per_sec(void) { return 1000; }
 void *kcalloc(size_t n,size_t s) { if(fail_allocation)return NULL;allocations++;return calloc(n,s); }
-void kfree(void *p) { assert(allocations>0);allocations--;free(p); }
+void kfree(void *data) {
+ sunxi_mmc_binding_t *p=data;
+ assert(allocations>0&&p->host.closing&&p->hardware_stopped&&!p->lock.depth);
+ allocations--;free(p);
+}
 void host_log(const char *fmt,...) { (void)fmt; }
 static resource_t registers={.type=RES_MMIO,.start=0x1000,.end=0x1fff};
 resource_t *device_get_resource(device_t *d,enum resource_type type,int index) {
  (void)d; assert(type==RES_MMIO&&index==0);return &registers;
 }
-void *device_map_mmio(device_t *d,int index) { (void)d;assert(index==0);return hardware.registers; }
-int device_add_resource_action(device_t *d,void (*action)(void *),void *context) {
- (void)d;if(fail_action)return -ENOMEM;assert(!cleanup);cleanup=action;cleanup_context=context;return 0;
+void *device_map_mmio(device_t *d,int index) {
+ assert(index==0&&managed&&cleanup&&d->drv_priv);return fail_map?NULL:hardware.registers;
+}
+int device_probe_use_remove(device_t *d) {(void)d;managed=1;return 0;}
+int device_add_execution_action(device_t *d,int (*action)(void *),void (*release)(void *),void *context) {
+ assert(managed&&d->drv_priv==context&&!release);
+ if(fail_action)return -ENOMEM;
+ assert(!cleanup);cleanup=action;cleanup_context=context;return 0;
 }
 int fw_node_has_property(const fw_node_t *n,const char *name) {
  (void)n;assert(!strcmp(name,"read-only"));return read_only;
 }
 bus_type_t platform_bus;
-static void release_resources(void) { if(cleanup){cleanup(cleanup_context);cleanup=NULL;}assert(!allocations); }
+static int release_resources(device_t *dev) {
+ int rc=cleanup?cleanup(cleanup_context):0;
+ if(!rc)rc=sunxi_remove(dev);
+ if(!rc){cleanup=NULL;cleanup_context=NULL;assert(!allocations);}
+ return rc;
+}
+static void closed_io(device_t *dev) {
+ unsigned reads=hardware.mmio_reads,writes=hardware.mmio_writes;uint8_t data[512];
+ assert(sunxi_read(dev,0,data,1)==-ENODEV&&sunxi_write(dev,0,data,1)==-ENODEV);
+ assert(sunxi_flush(dev)==-ENODEV&&!sunxi_capacity(dev));
+ assert(reads==hardware.mmio_reads&&writes==hardware.mmio_writes);
+}
 int main(int argc,char **argv) {
  assert(argc==2);int scenario=atoi(argv[1]); init(&hardware);
  /* Refer to the shared fixture helper so -Werror still checks every source. */
@@ -89,27 +114,55 @@ int main(int argc,char **argv) {
   assert(!sunxi_probe(&device));assert(device.drv_priv&&allocations==1);
   assert(sunxi_capacity(&device)==74566ULL*1024&&sunxi_sector_size(&device)==512);
   uint8_t data[512];assert(!sunxi_read(&device,4,data,1));assert(hardware.arguments[0]==4);
-  assert(!sunxi_flush(&device));assert(!sunxi_remove(&device));
+  assert(!sunxi_flush(&device));assert(!release_resources(&device));
   assert(!device.drv_priv&&sunxi_read(&device,0,data,1)==-ENODEV);
-  release_resources();assert(!hardware.registers[0x04/4]);
+  assert(!hardware.registers[0x04/4]);
  } else if(scenario==1) {
   hardware.no_card=1;assert(sunxi_probe(&device)==-ETIMEDOUT);
-  assert(!device.drv_priv);release_resources();assert(!hardware.registers[0x04/4]);
+  assert(device.drv_priv&&allocations==1);assert(!release_resources(&device));assert(!hardware.registers[0x04/4]);
  } else if(scenario==2) {
-  fail_action=1;assert(sunxi_probe(&device)==-ENOMEM);release_resources();
+  fail_action=1;assert(sunxi_probe(&device)==-ENOMEM&&device.drv_priv);assert(!release_resources(&device));
  } else if(scenario==3) {
-  fail_allocation=1;assert(sunxi_probe(&device)==-ENOMEM);release_resources();
+  fail_allocation=1;assert(sunxi_probe(&device)==-ENOMEM);assert(!release_resources(&device));
  } else if(scenario==4) {
-  device.plat_data=NULL;assert(sunxi_probe(&device)==-ENODEV);release_resources();
+  device.plat_data=NULL;assert(sunxi_probe(&device)==-ENODEV);assert(!release_resources(&device));
  } else if(scenario==5) {
   read_only=1;assert(!sunxi_probe(&device));uint8_t data[512];
   assert(sunxi_write(&device,0,data,1)==-EROFS&&!hardware.write_commands);
-  sunxi_remove(&device);release_resources();
+  assert(!release_resources(&device));
  } else if(scenario==6) {
   read_only=-EINVAL;assert(sunxi_probe(&device)==-EINVAL);
-  assert(!device.drv_priv);release_resources();assert(!hardware.registers[0x04/4]);
+  assert(device.drv_priv&&allocations==1);assert(!release_resources(&device));assert(!hardware.registers[0x04/4]);
+ } else if(scenario==7) {
+  for(unsigned failure=0;failure<6;failure++) {
+   init(&hardware);assert(!sunxi_probe(&device));void *held=device.drv_priv;
+   hardware.clock_stuck=failure==0;hardware.reset_stuck=failure==1;
+   hardware.mask_stuck=failure==2;hardware.disable_stuck=failure==3;hardware.gone=failure==4;
+   hardware.clock_error=failure==5;
+   if(hardware.mask_stuck)hardware.registers[0x30/4]=1;
+   assert(release_resources(&device)==(hardware.gone?-ENODEV:hardware.clock_error?-EIO:-ETIMEDOUT));
+   assert(device.drv_priv==held&&allocations==1);closed_io(&device);
+   hardware.clock_stuck=hardware.reset_stuck=hardware.mask_stuck=hardware.disable_stuck=hardware.gone=hardware.clock_error=0;
+   assert(!release_resources(&device)&&!device.drv_priv);
+  }
+ } else if(scenario==8) {
+  assert(!sunxi_probe(&device));sunxi_mmc_binding_t *p=device.drv_priv;
+  mutex_lock(&p->lock);assert(stop_binding(p)==-EBUSY&&allocations==1);mutex_unlock(&p->lock);
+  closed_io(&device);assert(!release_resources(&device));
+ } else if(scenario==9) {
+  assert(!sunxi_probe(&device));cancel_binding=1;uint8_t data[512];
+  assert(sunxi_read(&device,0,data,1)==-ENODEV&&hardware.fifo_words==16&&allocations==1);
+  closed_io(&device);assert(!release_resources(&device));
+ } else if(scenario==10) {
+  hardware.clock_stuck=1;assert(sunxi_probe(&device)==-ETIMEDOUT);
+  void *held=device.drv_priv;assert(held&&release_resources(&device)==-ETIMEDOUT);
+  assert(device.drv_priv==held&&allocations==1);hardware.clock_stuck=0;
+  assert(!release_resources(&device));
+ } else if(scenario==11) {
+  fail_map=1;assert(sunxi_probe(&device)==-EIO&&device.drv_priv&&allocations==1);
+  assert(!release_resources(&device)&&!hardware.mmio_writes);
  } else assert(!"invalid scenario");
- return 0;
+ assert(!allocations&&!device.drv_priv&&!sunxi_remove(&device));return 0;
 }
 '''
 
@@ -155,7 +208,9 @@ uint64_t clock_ticks_per_sec(void);
 
 
 for index, name in enumerate(("class_remove", "probe_no_card_rollback", "action_failure",
-                             "allocation_failure", "unprepared_board", "read_only", "property_failure")):
+                             "allocation_failure", "unprepared_board", "read_only", "property_failure",
+                             "failed_stop_retains_binding", "busy_stop", "cancel_inflight_pio",
+                             "failed_probe_retained_until_retry", "mapping_failure")):
     setattr(SunxiBinding, "test_" + name, scenario(index))
 
 

@@ -17,27 +17,45 @@ typedef struct hardware {
     unsigned fifo_words, written_words;
     int sdsc, no_card, bad_echo, crc_error, fifo_stuck, clock_stuck;
     int bad_r1, bad_rca, no_ready, no_app, power_stuck, data_timeout;
+    int reset_stuck, mask_stuck, disable_stuck, gone, clock_error;
+    unsigned mmio_reads, mmio_writes, cancel_word;
+    sunxi_mmc_host_t *cancel_host;
     unsigned resets;
     uint64_t ticks;
 } hardware_t;
 static uint32_t read_register(void *context, uint32_t reg) {
     hardware_t *hw = context;
+    hw->mmio_reads++;
+    if (hw->gone)
+        return 0xffffffffU;
     if (reg == 0x3c)
         return hw->fifo_stuck ? (1U << 2) | (1U << 3) : 0;
     if (reg == 0x38 && hw->crc_error && hw->fifo_words == 64)
         return 1U << 7;
-    if (reg == 0x200)
-        return 0xa5000000U | hw->fifo_words++;
+    if (reg == 0x200) {
+        uint32_t value = 0xa5000000U | hw->fifo_words++;
+        if (hw->cancel_word && hw->fifo_words == hw->cancel_word)
+            __atomic_store_n(&hw->cancel_host->closing, 1, __ATOMIC_RELEASE);
+        return value;
+    }
     return hw->registers[reg / 4];
 }
 static void write_register(void *context, uint32_t reg, uint32_t value) {
     hardware_t *hw = context;
+    assert(!hw->gone);
+    hw->mmio_writes++;
     if (reg == 0) {
         if (value & 7)
             hw->resets++;
-        hw->registers[0] = value & ~7U;
+        hw->registers[0] = hw->reset_stuck ? value : value & ~7U;
+        if ((value & 1) && !hw->reset_stuck)
+            hw->registers[0x18 / 4] = 0;
         return;
     }
+    if (reg == 0x30 && !value && hw->mask_stuck)
+        return;
+    if (reg == 0x04 && !value && hw->disable_stuck)
+        return;
     if (reg == 0x38) {
         hw->registers[reg / 4] &= ~value;
         return;
@@ -53,6 +71,8 @@ static void write_register(void *context, uint32_t reg, uint32_t value) {
     if (value & (1U << 21)) {
         if (!hw->clock_stuck)
             hw->registers[reg / 4] &= ~(1U << 31);
+        if (hw->clock_error)
+            hw->registers[0x38 / 4] |= 1U << 12;
         return;
     }
     hw->registers[reg / 4] &= ~(1U << 31);
@@ -157,7 +177,7 @@ int main(int argc, char **argv) {
             assert(value == (0xa5000000U | i));
         }
         assert(!sunxi_mmc_flush(&host));
-        sunxi_mmc_stop(&host);
+        assert(!sunxi_mmc_stop(&host));
         assert(!host.ready && !hw.registers[0x30 / 4] &&
                !hw.registers[0x04 / 4]);
         assert(sunxi_mmc_transfer(&host, 0, data, 1, 0) == -ENODEV);
@@ -180,6 +200,7 @@ int main(int argc, char **argv) {
         hw.no_card = 1;
         assert(start(&hw, &host) == -ETIMEDOUT);
         assert(!host.ready);
+        assert(!sunxi_mmc_stop(&host));
         assert(!hw.registers[0x04 / 4]);
     } else if (scenario == 3) {
         hw.bad_echo = 1;
@@ -260,11 +281,38 @@ int main(int argc, char **argv) {
         hw.clock_stuck = 1;
         sunxi_mmc_io_t io = {&hw, read_register, write_register, ticks, 1999};
         assert(sunxi_mmc_start(&host, &io, &platform) == -ETIMEDOUT);
+        assert(sunxi_mmc_stop(&host) == -ETIMEDOUT);
         /* Both the failed start handshake and stop handshake wait full 2s. */
         assert(hw.ticks >= 7996 && hw.ticks < 8020);
     } else if (scenario == 21) {
         hw.voltage = 1U << 15; /* card cannot operate on the fixed 3.3V rail */
         assert(start(&hw, &host) == -EOPNOTSUPP);
+    } else if (scenario == 22) {
+        for (unsigned problem = 0; problem < 6; problem++) {
+            init(&hw);platform.a64_timing=problem&1;
+            assert(!start(&hw,&host));
+            hw.clock_stuck=problem==0;hw.reset_stuck=problem==1;
+            hw.mask_stuck=problem==2;hw.disable_stuck=problem==3;hw.gone=problem==4;
+            hw.clock_error=problem==5;
+            if(hw.mask_stuck)hw.registers[0x30/4]=1;
+            unsigned writes=hw.mmio_writes;
+            assert(sunxi_mmc_stop(&host)==(hw.gone?-ENODEV:hw.clock_error?-EIO:-ETIMEDOUT));
+            assert(host.closing&&!host.ready);
+            if(hw.gone)assert(writes==hw.mmio_writes);
+            unsigned reads=hw.mmio_reads;writes=hw.mmio_writes;
+            assert(sunxi_mmc_transfer(&host,0,data,1,0)==-ENODEV&&sunxi_mmc_flush(&host)==-ENODEV);
+            assert(reads==hw.mmio_reads&&writes==hw.mmio_writes);
+            hw.clock_stuck=hw.reset_stuck=hw.mask_stuck=hw.disable_stuck=hw.gone=hw.clock_error=0;
+            assert(!sunxi_mmc_stop(&host)&&!hw.registers[0x30/4]&&!hw.registers[0x04/4]);
+        }
+    } else if (scenario == 23) {
+        assert(!start(&hw,&host));hw.cancel_host=&host;hw.cancel_word=16;
+        assert(sunxi_mmc_transfer(&host,0,data,1,0)==-ENODEV&&hw.fifo_words==16&&!host.ready);
+        assert(!sunxi_mmc_stop(&host));
+    } else if (scenario == 24) {
+        hw.gone=1;
+        assert(start(&hw,&host)==-ENODEV&&!hw.mmio_writes);
+        assert(sunxi_mmc_stop(&host)==-ENODEV&&!hw.mmio_writes);
     } else
         assert(!"unknown scenario");
     return 0;
