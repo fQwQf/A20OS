@@ -806,7 +806,7 @@ int vfs_finalize_closed_vfile(vfile_t *vf)
     }
     if (!vf->backend_close_done)
         close_error = vfile_backend_close(vf);
-    if (close_error < 0) {
+    if (close_error < 0 && !vf->backend_close_done) {
         /* fdtable already consumed the descriptor. Retain an internal vfile
          * reference and its mount ownership so system shutdown can retry a
          * known pre-CLOSE flush failure or fail closed on an ambiguous RPC. */
@@ -821,6 +821,8 @@ int vfs_finalize_closed_vfile(vfile_t *vf)
         vfile_finalize_done();
         return close_error;
     }
+    /* A backend may retire local state after a proven peer death while
+     * returning EIO. Preserve the error and release ownership exactly once. */
     vf->backend_close_done = 1;
     if (vf->mount_open_counted && vn && vn->mnt) {
         vf->mount_open_counted = 0;

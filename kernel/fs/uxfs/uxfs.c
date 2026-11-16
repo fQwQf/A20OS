@@ -142,10 +142,24 @@ static void a20_uxfs_bridge_unlock(void *ctx)
     mutex_unlock(&((uxfs_sb_t *)ctx)->req_lock);
 }
 
+/* req_lock protects endpoint/server withdrawal. The mount owns a proc ref,
+ * so a reaped server's state remains readable until detach. A closed peer can
+ * retain channel references; the task state is the authoritative death proof. */
+static int uxfs_peer_gone_locked(uxfs_sb_t *sb)
+{
+    if (!sb->ep || !sb->server)
+        return 1;
+    int state = __atomic_load_n(&sb->server->state, __ATOMIC_ACQUIRE);
+    return state == PROC_UNUSED || state == PROC_ZOMBIE ||
+           a20_channel_peer_closed(sb->ep);
+}
+
 static int a20_uxfs_bridge_send(void *ctx, const uint8_t *msg, uint32_t len,
                                 uint64_t deadline_ns, int nonblock)
 {
     uxfs_sb_t *sb = (uxfs_sb_t *)ctx;
+    if (uxfs_peer_gone_locked(sb))
+        return 2; /* SEND_ERROR: no live server can consume this request */
     uint32_t flags = (deadline_ns && nonblock) ? A20_MSG_NONBLOCK : 0;
     int64_t r = a20_channel_send(sb->ep, (void *)msg, len, NULL, 0, NULL, flags);
     if (r >= 0)
@@ -160,6 +174,8 @@ static int a20_uxfs_bridge_recv(void *ctx, uint8_t *buf, uint32_t cap,
                                 uint32_t *out_len)
 {
     uxfs_sb_t *sb = (uxfs_sb_t *)ctx;
+    if (uxfs_peer_gone_locked(sb))
+        return -2; /* RECV_ERROR: do not wait for a dead serving task */
     uint32_t in_len = cap;
     a20_ch_handle_info_t hinfos[1];
     uint32_t nh = 0;
@@ -1129,6 +1145,21 @@ static void ops_lc_fc_release(void *vf, void *fc)
     kfree(fc);
     ((vfile_t *)vf)->priv = NULL;
 }
+static int ops_lc_peer_gone(void *opaque)
+{
+    uxfs_sb_t *sb = (uxfs_sb_t *)opaque;
+    mutex_lock(&sb->req_lock);
+    int gone = uxfs_peer_gone_locked(sb);
+    mutex_unlock(&sb->req_lock);
+    return gone;
+}
+static void ops_lc_vf_retire(void *opaque)
+{
+    /* Local resources retired, not a fabricated CLOSE acknowledgement. The
+     * caller still receives the original error; disk recovery belongs to the
+     * next mount, after the dead peer's block authority has been revoked. */
+    ((vfile_t *)opaque)->backend_close_done = 1;
+}
 static int ops_lc_pc_writeback(void *vn)
 {
     return page_cache_writeback_vnode((vnode_t *)vn, NULL, NULL);
@@ -1186,8 +1217,10 @@ static const struct a20_uxfs_lifecycle g_uxfs_lifecycle = {
     .lifetime_close = ops_lc_lifetime_close,
     .lifetime_close_confirm = ops_lc_lifetime_close_confirm,
     .trace = ops_lc_trace,
+    .peer_gone = ops_lc_peer_gone,
+    .vf_retire = ops_lc_vf_retire,
 };
-_Static_assert(sizeof(g_uxfs_lifecycle) / sizeof(void *) == 27,
+_Static_assert(sizeof(g_uxfs_lifecycle) / sizeof(void *) == 29,
                "uxfs lifecycle mirror: bridge table field count");
 
 /* Native block-backed mounts consult this before attaching a second cache to

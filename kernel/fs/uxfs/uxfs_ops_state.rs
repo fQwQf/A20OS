@@ -1879,6 +1879,8 @@ pub struct A20UxfsLifecycle {
     pub lifetime_close: Option<CloseOpFn>,
     pub lifetime_close_confirm: Option<CloseOpFn>,
     pub trace: Option<TraceFn>,
+    pub peer_gone: Option<PeerClosedFn>,
+    pub vf_retire: Option<OnePtrFn>,
 }
 
 struct Lc<'a> {
@@ -1909,6 +1911,8 @@ struct Lc<'a> {
     lifetime_close: &'a CloseOpFn,
     lifetime_close_confirm: &'a CloseOpFn,
     trace: &'a TraceFn,
+    peer_gone: &'a PeerClosedFn,
+    vf_retire: &'a OnePtrFn,
 }
 
 impl<'a> Lc<'a> {
@@ -1946,6 +1950,8 @@ impl<'a> Lc<'a> {
             lifetime_close: t.lifetime_close.as_ref()?,
             lifetime_close_confirm: t.lifetime_close_confirm.as_ref()?,
             trace: t.trace.as_ref()?,
+            peer_gone: t.peer_gone.as_ref()?,
+            vf_retire: t.vf_retire.as_ref()?,
         })
     }
 }
@@ -2030,6 +2036,18 @@ pub unsafe extern "C" fn a20_uxfs_file_close(
     if fc.is_null() {
         return 0;
     }
+    let sb = (l.fc_sb)(fc);
+    let result = unsafe { close_live_peer(&l, vf, fc) };
+    if result < 0 && (l.peer_gone)(sb) != 0 {
+        // No backend can consume a retry. Release the local context without
+        // claiming an ACK; VFS returns the error while retiring mount refs.
+        (l.fc_release)(vf, fc);
+        (l.vf_retire)(vf);
+    }
+    result
+}
+
+unsafe fn close_live_peer(l: &Lc<'_>, vf: *mut c_void, fc: *mut c_void) -> c_int {
     (l.trace)(vf, fc);
     (l.vf_set_close_attempt)(vf, 0, 0, 0);
 
@@ -3423,6 +3441,7 @@ mod tests {
 
     #[derive(Default)]
     struct LWorld {
+        peer_gone: bool,
         fc_alloc_ok: bool,
         vfile_alloc_ok: bool,
         vn_size: u64,
@@ -3631,6 +3650,12 @@ mod tests {
             b.confirm_rc
         })
     }
+    extern "C" fn lc_peer_gone(_sb: *mut c_void) -> c_int {
+        LW.with(|w| w.borrow().peer_gone as c_int)
+    }
+    extern "C" fn lc_retire(_vf: *mut c_void) {
+        LW.with(|w| w.borrow_mut().log.push("retire".into()));
+    }
     extern "C" fn lc_trace(_vf: *mut c_void, _fc: *mut c_void) {
         LW.with(|w| w.borrow_mut().log.push("trace".into()));
     }
@@ -3664,6 +3689,8 @@ mod tests {
             lifetime_close: Some(lc_lifetime_close),
             lifetime_close_confirm: Some(lc_lifetime_close_confirm),
             trace: Some(lc_trace),
+            peer_gone: Some(lc_peer_gone),
+            vf_retire: Some(lc_retire),
         }
     }
 
@@ -3784,6 +3811,34 @@ mod tests {
         assert_eq!(sent, 1);
         assert_eq!(retry, 0); /* on-wire, ambiguous: not retry safe */
         assert!(!llog("release"));
+    }
+
+    #[test]
+    fn dead_peer_retires_local_state_but_preserves_error() {
+        for stage in 0..3 {
+            lc_reset();
+            let l = ltable();
+            LW.with(|w| {
+                let mut b = w.borrow_mut();
+                b.vf_priv = fc_ptr();
+                b.peer_gone = true;
+                if stage == 0 { b.pc_writeback_rc = -EIO; }
+                else if stage == 1 { b.close_rc = -EIO; }
+                else {
+                    b.close_acked = 1;
+                    b.close_sent = 1;
+                    b.confirm_rc = -EIO;
+                    b.confirm_sent = 1;
+                }
+            });
+            if stage == 2 {
+                FC.with(|f| f.borrow_mut().close_confirm_mode = 1);
+            }
+            assert_eq!(unsafe { a20_uxfs_file_close(&l, VFIL) }, -EIO);
+            assert!(llog("release"));
+            assert!(llog("retire"));
+            assert!(LW.with(|w| w.borrow().vf_priv.is_null()));
+        }
     }
 
     #[test]
