@@ -1,10 +1,10 @@
 /*
  * Native ABI checkpoint-based signal simulation smoke test.
  *
- * Signals are never delivered asynchronously in A20OS: a20_task_kill()
- * records the signal and wakes a thread parked at a checkpoint, and the
- * handler runs when the thread calls a20_signal_check() at the next explicit
- * checkpoint.  This test verifies:
+ * Catchable Native notifications use explicit checkpoints: a20_task_kill()
+ * records the signal and wakes the waiter; userland consumes it through
+ * a20_signal_check(). Linux ABI asynchronous signals and kernel-forced
+ * termination are separate contracts. This test verifies:
  *   1. Cross-thread kill wakes a futex-waiting thread (INTERRUPTED).
  *   2. A blocked signal is not delivered at the checkpoint and stays
  *      pending; it becomes deliverable after unmasking.
