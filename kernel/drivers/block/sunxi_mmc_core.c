@@ -67,23 +67,36 @@ static uint64_t interval(sunxi_mmc_host_t *h, unsigned ms) {
     uint64_t ticks = (hz / 1000U) * ms + ((hz % 1000U) * ms + 999U) / 1000U;
     return ticks ? ticks : 1;
 }
+static int cancelled(sunxi_mmc_host_t *h) {
+    return __atomic_load_n(&h->closing, __ATOMIC_ACQUIRE);
+}
 static int delay_ms(sunxi_mmc_host_t *h, unsigned ms) {
     uint64_t begin = now(h), limit = interval(h, ms);
-    for (unsigned polls = 0; polls < POLL_LIMIT; polls++)
+    for (unsigned polls = 0; polls < POLL_LIMIT; polls++) {
+        if (cancelled(h))
+            return -ENODEV;
         if (now(h) - begin >= limit)
             return 0;
+    }
     return -ETIMEDOUT;
 }
 static int error_status(uint32_t status) {
+    if (status == (~0U))
+        return -ENODEV;
     if (status & (RESPONSE_TIMEOUT | DATA_TIMEOUT))
         return -ETIMEDOUT;
     return status & ERRORS ? -EIO : 0;
 }
 static int wait_clear(sunxi_mmc_host_t *h, uint32_t reg, uint32_t mask,
-                      unsigned ms) {
+                      unsigned ms, int stopping) {
     uint64_t begin = now(h), limit = interval(h, ms);
     for (unsigned polls = 0; polls < POLL_LIMIT; polls++) {
-        if (!(rd(h, reg) & mask))
+        if (!stopping && cancelled(h))
+            return -ENODEV;
+        uint32_t value = rd(h, reg);
+        if (value == (~0U))
+            return -ENODEV;
+        if (!(value & mask))
             return 0;
         if (now(h) - begin >= limit)
             break;
@@ -93,6 +106,8 @@ static int wait_clear(sunxi_mmc_host_t *h, uint32_t reg, uint32_t mask,
 static int wait_interrupt(sunxi_mmc_host_t *h, uint32_t mask) {
     uint64_t begin = now(h), limit = interval(h, 2000);
     for (unsigned polls = 0; polls < POLL_LIMIT; polls++) {
+        if (cancelled(h))
+            return -ENODEV;
         uint32_t status = rd(h, RINT);
         int rc = error_status(status);
         if (rc)
@@ -104,12 +119,23 @@ static int wait_interrupt(sunxi_mmc_host_t *h, uint32_t mask) {
     }
     return -ETIMEDOUT;
 }
-static int clock_update(sunxi_mmc_host_t *h) {
+static int clock_update(sunxi_mmc_host_t *h, int stopping) {
+    if (!stopping && cancelled(h))
+        return -ENODEV;
     uint32_t clock = rd(h, CLKCR);
+    if (clock == (~0U))
+        return -ENODEV;
     if (h->mask_data0)
         wr(h, CLKCR, clock | (1U << 31));
+    wr(h, RINT, (~0U));
     wr(h, CMD, START | UPDATE_CLOCK | WAIT_PREVIOUS);
-    int rc = wait_clear(h, CMD, START, 2000);
+    int rc = wait_clear(h, CMD, START, 2000, stopping);
+    if (rc == -ENODEV || (!stopping && cancelled(h)))
+        return -ENODEV;
+    if (!rc)
+        rc = error_status(rd(h, RINT));
+    if (rc == -ENODEV)
+        return rc;
     wr(h, RINT, (~0U));
     if (h->mask_data0)
         wr(h, CLKCR, clock & ~(1U << 31));
@@ -117,13 +143,13 @@ static int clock_update(sunxi_mmc_host_t *h) {
 }
 static int command(sunxi_mmc_host_t *h, unsigned index, uint32_t argument,
                    uint32_t flags, void *data, uint32_t response[4]) {
-    int rc = wait_clear(h, STATUS, BUSY, 2000);
+    int rc = wait_clear(h, STATUS, BUSY, 2000, 0);
     if (rc)
         return rc;
     wr(h, RINT, (~0U));
     if (data) {
         wr(h, GCTRL, CPU_ACCESS | (1U << 1));
-        if ((rc = wait_clear(h, GCTRL, 1U << 1, 100)))
+        if ((rc = wait_clear(h, GCTRL, 1U << 1, 100, 0)))
             return rc;
         wr(h, BLKSZ, SECTOR_SIZE);
         wr(h, BCNT, SECTOR_SIZE);
@@ -137,11 +163,16 @@ static int command(sunxi_mmc_host_t *h, unsigned index, uint32_t argument,
         unsigned word = 0;
         for (unsigned polls = 0; word < SECTOR_SIZE / 4 && polls < POLL_LIMIT;
              polls++) {
+            if (cancelled(h))
+                return -ENODEV;
             rc = error_status(rd(h, RINT));
             if (rc)
                 return rc;
             uint32_t unavailable = flags & WRITE ? FIFO_FULL : FIFO_EMPTY;
-            if (!(rd(h, STATUS) & unavailable)) {
+            uint32_t status = rd(h, STATUS);
+            if (status == (~0U))
+                return -ENODEV;
+            if (!(status & unavailable)) {
                 uint32_t value;
                 if (flags & WRITE) {
                     memcpy(&value, bytes + word * 4, 4);
@@ -216,13 +247,36 @@ static int capacity(sunxi_mmc_host_t *h, const uint32_t csd[4]) {
     h->write_protected = (csd[3] & (3U << 12)) != 0;
     return h->sectors ? 0 : -EINVAL;
 }
-void sunxi_mmc_stop(sunxi_mmc_host_t *h) {
-    if (!h || !h->io.write)
-        return;
+int sunxi_mmc_stop(sunxi_mmc_host_t *h) {
+    if (!h || !h->io.read || !h->io.write || !h->io.ticks ||
+        !h->io.ticks_per_second)
+        return -EINVAL;
+    __atomic_store_n(&h->closing, 1, __ATOMIC_RELEASE);
     h->ready = 0;
+    if (rd(h, GCTRL) == (~0U))
+        return -ENODEV;
+    wr(h, IMASK, 0);
+    /* Normal PIO is drained; reset/clock acknowledgement must still run with
+     * cancellation set. Finite poll budgets cover a stopped timer counter. */
+    wr(h, GCTRL, RESET);
+    int rc = wait_clear(h, GCTRL, RESET, 100, 1);
+    if (rc)
+        return rc;
+    wr(h, GCTRL, CPU_ACCESS);
     wr(h, IMASK, 0);
     wr(h, CLKCR, 0);
-    (void)clock_update(h);
+    rc = clock_update(h, 1);
+    if (rc)
+        return rc;
+    uint32_t control = rd(h, GCTRL);
+    uint32_t mask = rd(h, IMASK);
+    uint32_t clock = rd(h, CLKCR);
+    if (control == (~0U) || mask == (~0U) || clock == (~0U))
+        return -ENODEV;
+    if ((control & (RESET | (1U << 4) | (1U << 5))) ||
+        !(control & CPU_ACCESS) || mask || (clock & CLOCK_ENABLE))
+        return -ETIMEDOUT;
+    return 0;
 }
 int sunxi_mmc_start(sunxi_mmc_host_t *h, const sunxi_mmc_io_t *io,
                     const sunxi_mmc_platform_t *platform) {
@@ -235,16 +289,18 @@ int sunxi_mmc_start(sunxi_mmc_host_t *h, const sunxi_mmc_io_t *io,
     h->io = *io;
     h->fifo_offset = platform->fifo_offset;
     h->mask_data0 = platform->a64_timing;
+    if (rd(h, GCTRL) == (~0U))
+        return -ENODEV;
     wr(h, IMASK, 0);
     wr(h, GCTRL, RESET);
-    int rc = wait_clear(h, GCTRL, RESET, 100);
+    int rc = wait_clear(h, GCTRL, RESET, 100, 0);
     if (rc)
         goto fail;
     wr(h, GCTRL, CPU_ACCESS);
     wr(h, TMOUT, (~0U));
     wr(h, WIDTH, 0); /* 1-bit mode after CMD0; no ACMD6 is issued. */
     wr(h, CLKCR, 0);
-    if ((rc = clock_update(h)))
+    if ((rc = clock_update(h, 0)))
         goto fail;
     if (platform->a64_timing) {
         wr(h, NTSR,
@@ -254,7 +310,7 @@ int sunxi_mmc_start(sunxi_mmc_host_t *h, const sunxi_mmc_io_t *io,
     }
     wr(h, CLKCR,
        CLOCK_ENABLE); /* divider zero: use the board's <=400kHz module clock */
-    if ((rc = clock_update(h)))
+    if ((rc = clock_update(h, 0)))
         goto fail;
     if ((rc = command(h, 0, 0, 0, NULL, NULL)))
         goto fail;
@@ -320,7 +376,7 @@ int sunxi_mmc_start(sunxi_mmc_host_t *h, const sunxi_mmc_io_t *io,
     h->ready = 1;
     return 0;
 fail:
-    sunxi_mmc_stop(h);
+    h->ready = 0;
     return rc;
 }
 int sunxi_mmc_transfer(sunxi_mmc_host_t *h, uint64_t lba, void *buffer,
@@ -328,7 +384,7 @@ int sunxi_mmc_transfer(sunxi_mmc_host_t *h, uint64_t lba, void *buffer,
     if (!h || !buffer || !sectors || (write != 0 && write != 1) ||
         sectors > SIZE_MAX / SECTOR_SIZE)
         return -EINVAL;
-    if (!h->ready)
+    if (!h->ready || cancelled(h))
         return -ENODEV;
     if (lba >= h->sectors || sectors > h->sectors - lba)
         return -ERANGE;
@@ -354,7 +410,7 @@ int sunxi_mmc_transfer(sunxi_mmc_host_t *h, uint64_t lba, void *buffer,
     return 0;
 }
 int sunxi_mmc_flush(sunxi_mmc_host_t *h) {
-    if (!h || !h->ready)
+    if (!h || !h->ready || cancelled(h))
         return -ENODEV;
     int rc = card_ready(h);
     if (rc)
