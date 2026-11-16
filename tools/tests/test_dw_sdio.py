@@ -32,18 +32,19 @@ typedef struct {int unused;} proc_wake_q_t;
 #define PROC_WAKE_EVENT 1
 static inline void mutex_init(mutex_t *m) {m->depth=0;}
 static inline void mutex_lock(mutex_t *m) {m->depth++;}
+static inline int mutex_trylock(mutex_t *m) {if(m->depth)return 0;m->depth=1;return 1;}
 static inline void mutex_unlock(mutex_t *m) {m->depth--;}
 static inline void wait_queue_init(wait_queue_t *q) {(void)q;}
 static inline int proc_park_prepare(int n,uint64_t t) {(void)n;(void)t;return 0;}
 static inline void wait_queue_link(wait_queue_t *q,wait_queue_entry_t *e,int t,int n) {(void)q;(void)e;(void)t;(void)n;}
-static inline void proc_park_commit(int t) {(void)t;}
+void proc_park_commit(int t);
 static inline void wait_queue_unlink(wait_queue_t *q,wait_queue_entry_t *e) {(void)q;(void)e;}
 static inline void proc_park_finish(int t) {(void)t;}
 static inline void proc_wake_q_init(proc_wake_q_t *q) {(void)q;}
 static inline void wait_queue_collect_all(wait_queue_t *q,int k,int r,proc_wake_q_t *w,void *v) {(void)q;(void)k;(void)r;(void)w;(void)v;}
 static inline void proc_wake_q_flush(proc_wake_q_t *q) {(void)q;}
 ''',
-    'proc/proc.h': '#pragma once\nstatic inline void *proc_current(void) {return 0;}\n',
+    'proc/proc.h': '#pragma once\nvoid *proc_current(void);\n',
     'core/klog.h': '#pragma once\n#define kinfo(...) ((void)0)\n',
     'core/timer.h': '#pragma once\n#include "core/types.h"\nuint64_t timer_get_ticks(void);\nuint64_t clock_ticks_per_sec(void);\n',
     'drivers/core/driver_hwapi.h': '''#pragma once
@@ -65,15 +66,27 @@ struct hardware {
  uint32_t r[0x400/4],csd[4],last_cmd,last_arg;
  unsigned clocks,commands,reads,writes,status_reads,cmd13,delayed;
  int legacy,stuck_reset,stuck_clock,crc_error,fifo_stuck,write,low_voltage;
+ int gone,mask_stuck,cancel_io,cancel_park;
+ unsigned mmio_reads,mmio_writes,busy_stop;
+ sdio_priv_t *owner;
  unsigned clock_div[8];
 };
 static struct hardware hw[2];
 static uint64_t ticks;
 static unsigned freed,allocated,irq_claims,irq_frees;
-static int with_irq, read_only, locked_card, nonerror_status;
-struct action {void (*fn)(void *);void *data;};
+static int with_irq, read_only, locked_card, nonerror_status, fail_action, fail_map, fail_alloc, irq_error;
+struct action {int (*stop)(void *);void *data;};
 static struct action actions[2];
+static int managed[2];
 bus_type_t platform_bus;
+void *proc_current(void) {return with_irq?(void *)1:NULL;}
+void proc_park_commit(int token) {
+ (void)token;
+ if(hw[0].cancel_park) {
+  hw[0].cancel_park=0;assert(hw[0].owner->lock.depth==1);
+  assert(sdio_stop(hw[0].owner)==-EBUSY&&!freed&&!irq_frees);hw[0].busy_stop++;
+ }
+}
 static unsigned slot(uintptr_t address) {
  assert(address>=BASE && address<BASE+0x20000);return (address-BASE)/0x10000;
 }
@@ -83,7 +96,12 @@ void mdelay(unsigned n) {ticks+=n;}
 static void response(struct hardware *h,uint32_t r) {h->r[SDIO_RESP0/4]=r;}
 uint32_t readl(const volatile void *address) {
  uintptr_t a=(uintptr_t)address;struct hardware *h=&hw[slot(a)];unsigned off=(a-BASE)%0x10000;
+ h->mmio_reads++;if(h->gone)return 0xffffffffU;
  if(off==SDIO_STATUS) {
+  if(h->cancel_io&&(h->last_cmd&CMD_DATA_EXPECTED)) {
+   h->cancel_io=0;assert(h->owner->lock.depth==1);
+   assert(sdio_stop(h->owner)==-EBUSY&&!freed&&!irq_frees);h->busy_stop++;
+  }
   h->status_reads++;
   if(h->fifo_stuck) return h->write?STATUS_FIFO_FULL:STATUS_FIFO_EMPTY;
   if(h->delayed) {h->delayed--;return h->write?STATUS_FIFO_FULL:STATUS_FIFO_EMPTY;}
@@ -99,8 +117,14 @@ uint32_t readl(const volatile void *address) {
 }
 void writel(uint32_t value,volatile void *address) {
  uintptr_t a=(uintptr_t)address;struct hardware *h=&hw[slot(a)];unsigned off=(a-BASE)%0x10000;
+ assert(!h->gone);h->mmio_writes++;
  if(off==SDIO_RINTSTS) {h->r[off/4]&=~value;return;}
- if(off==SDIO_CTRL) {h->r[off/4]=h->stuck_reset?value:value&~7U;return;}
+ if(off==SDIO_CTRL) {
+  h->r[off/4]=h->stuck_reset?value:value&~7U;
+  if((value&CTRL_RESET)&&!h->stuck_reset)h->r[SDIO_CMD/4]&=~CMD_START;
+  return;
+ }
+ if(off==SDIO_INTMASK&&h->mask_stuck&&!value)return;
  if(off==0x200||off==0x100) {
   assert(h->write&&h->writes<128);assert(value==0x12340000+h->writes);h->writes++;
   if(h->writes==128) h->r[SDIO_RINTSTS/4]|=INT_DTO;
@@ -133,17 +157,37 @@ void writel(uint32_t value,volatile void *address) {
  }
  h->r[SDIO_RINTSTS/4]|=INT_CD;
 }
-void *kcalloc(size_t n,size_t size) {allocated++;return calloc(n,size);}
-void kfree(void *p) {freed++;free(p);}
+void *kcalloc(size_t n,size_t size) {if(fail_alloc)return NULL;allocated++;return calloc(n,size);}
+void kfree(void *data) {
+ sdio_priv_t *p=data;assert(p->stopped&&p->hardware_stopped&&!p->irq_registered&&!p->lock.depth);
+ if(p->base)hw[slot(p->base)].owner=NULL;
+ freed++;free(p);
+}
 int fw_node_has_property(const fw_node_t *node,const char *name) {(void)node;assert(!strcmp(name,"read-only"));return read_only;}
 int fw_node_read_u32(const fw_node_t *node,const char *name,uint32_t *out) {(void)node;(void)name;(void)out;return -ENOENT;}
 const char *bootargs_get(void) {return "";}
 resource_t *device_get_resource(device_t *d,enum resource_type type,int index) {(void)index;return type==RES_MMIO?d->res:NULL;}
-void *device_map_mmio(device_t *d,int index) {(void)index;return (void *)(uintptr_t)(BASE+d->res->start*0x10000);}
-int device_add_resource_action(device_t *d,void (*fn)(void *),void *data) {actions[d->res->start]=(struct action){fn,data};return 0;}
-int platform_device_irq(device_t *d) {(void)d;return with_irq?130:-ENODEV;}
-int request_irq(uint32_t irq,int (*fn)(int,void *),uint32_t flags,void *p) {assert(irq==130&&fn&&p&&!flags);irq_claims++;return 0;}
-void free_irq(uint32_t irq,void *p) {assert(irq==130&&p);irq_frees++;}
+void *device_map_mmio(device_t *d,int index) {
+ (void)index;assert(managed[d->res->start]&&actions[d->res->start].stop);
+ if(fail_map)return NULL;
+ hw[d->res->start].owner=d->drv_priv;
+ return (void *)(uintptr_t)(BASE+d->res->start*0x10000);
+}
+int device_probe_use_remove(device_t *d) {managed[d->res->start]=1;return 0;}
+int device_add_execution_action(device_t *d,int (*stop)(void *),void (*release)(void *),void *data) {
+ assert(managed[d->res->start]&&d->drv_priv==data&&stop&&!release);
+ if(fail_action)return -ENOMEM;
+ actions[d->res->start]=(struct action){stop,data};return 0;
+}
+int platform_device_irq(device_t *d) {return irq_error?-EINVAL:with_irq?130+(int)d->res->start:-ENODEV;}
+int request_irq(uint32_t irq,int (*fn)(int,void *),uint32_t flags,void *p) {assert((irq==130||irq==131)&&fn&&p&&!flags);irq_claims++;return 0;}
+void free_irq(uint32_t irq,void *data) {
+ sdio_priv_t *p=data;assert(irq==130+slot(p->base)&&p->stopped&&p->hardware_stopped&&!p->lock.depth);
+ struct hardware *h=&hw[slot(p->base)];assert(!h->gone&&!(h->r[SDIO_CTRL/4]&7)&&!h->r[SDIO_INTMASK/4]);
+ h->r[SDIO_RINTSTS/4]=INT_CD;uint32_t latched=p->irq_status;
+ assert(!sdio_irq_handler((int)irq,p)&&!h->r[SDIO_RINTSTS/4]&&p->irq_status==latched);
+ irq_frees++;
+}
 static void bits(uint32_t csd[4],unsigned low,unsigned count,uint32_t value) {
  for(unsigned i=0;i<count;i++) if(value&(1U<<i))csd[(low+i)/32]|=1U<<((low+i)%32);
 }
@@ -153,9 +197,11 @@ static void setup(unsigned i,int legacy) {
  if(legacy) {bits(h->csd,80,4,9);bits(h->csd,62,12,1023);bits(h->csd,47,3,5);}
  else {bits(h->csd,126,2,1);bits(h->csd,48,22,0x12345);}
 }
-static void cleanup(unsigned i,device_t *dev) {
- if(dev->drv_priv)assert(!sdio_remove(dev));
- assert(actions[i].fn);actions[i].fn(actions[i].data);actions[i].fn=NULL;
+static int cleanup(unsigned i,device_t *dev) {
+ int rc=actions[i].stop?actions[i].stop(actions[i].data):0;
+ if(!rc)rc=sdio_remove(dev);
+ if(!rc)actions[i]=(struct action){0};
+ return rc;
 }
 int main(int argc,char **argv) {
  assert(argc==2);const char *mode=argv[1];
@@ -168,7 +214,12 @@ int main(int argc,char **argv) {
  if(!strcmp(mode,"low-voltage"))hw[0].low_voltage=1;
  if(!strcmp(mode,"wrong-width"))hw[0].r[SDIO_HCON/4]=2<<7;
  if(!strcmp(mode,"missing-clock"))cfg.input_hz=0;
- if(!strcmp(mode,"irq"))with_irq=1;
+ if(!strcmp(mode,"irq")||!strncmp(mode,"stop-",5)||!strncmp(mode,"cancel-",7))with_irq=1;
+ if(!strcmp(mode,"action-failure"))fail_action=1;
+ if(!strcmp(mode,"map-failure"))fail_map=1;
+ if(!strcmp(mode,"allocation-failure"))fail_alloc=1;
+ if(!strcmp(mode,"irq-error"))irq_error=1;
+ if(!strcmp(mode,"property-error"))read_only=-EIO;
  if(!strcmp(mode,"firmware-read-only"))read_only=1;
  if(!strcmp(mode,"locked-card"))locked_card=1;
  if(!strcmp(mode,"nonerror-status"))nonerror_status=1;
@@ -176,30 +227,64 @@ int main(int argc,char **argv) {
  if(!strcmp(mode,"temporary-wp"))hw[0].csd[0]|=1U<<12;
  int rc=sdio_probe(&dev[0]);
  if(!strcmp(mode,"missing-clock")) {assert(rc==-EINVAL&&!allocated);return 0;}
- if(!strcmp(mode,"reset-timeout")||!strcmp(mode,"clock-timeout")) {assert(rc==-ETIMEDOUT);cleanup(0,&dev[0]);return 0;}
- if(!strcmp(mode,"wrong-width")) {assert(rc==-EOPNOTSUPP);cleanup(0,&dev[0]);return 0;}
- if(!strcmp(mode,"low-voltage")) {assert(rc==-EIO);cleanup(0,&dev[0]);return 0;}
- if(!strcmp(mode,"locked-card")) {assert(rc==-EOPNOTSUPP);cleanup(0,&dev[0]);return 0;}
+ if(!strcmp(mode,"allocation-failure")) {assert(rc==-ENOMEM&&!dev[0].drv_priv&&!allocated);return 0;}
+ if(!strcmp(mode,"reset-timeout")) {
+  assert(rc==-ETIMEDOUT&&dev[0].drv_priv);
+  assert(cleanup(0,&dev[0])==-ETIMEDOUT&&dev[0].drv_priv&&!freed);
+  hw[0].stuck_reset=0;assert(!cleanup(0,&dev[0])&&allocated==freed);return 0;
+ }
+ if(!strcmp(mode,"action-failure")||!strcmp(mode,"map-failure")||!strcmp(mode,"irq-error")||!strcmp(mode,"property-error")||
+    !strcmp(mode,"clock-timeout")||!strcmp(mode,"wrong-width")||!strcmp(mode,"low-voltage")||!strcmp(mode,"locked-card")) {
+  int expected=(!strcmp(mode,"action-failure"))?-ENOMEM:!strcmp(mode,"irq-error")?-EINVAL:!strcmp(mode,"clock-timeout")?-ETIMEDOUT:
+               (!strcmp(mode,"wrong-width")||!strcmp(mode,"locked-card"))?-EOPNOTSUPP:-EIO;
+  assert(rc==expected&&dev[0].drv_priv&&!freed);
+  assert(!cleanup(0,&dev[0])&&!dev[0].drv_priv&&allocated==freed);return 0;
+ }
  assert(!rc);sdio_priv_t *p=dev[0].drv_priv;
  assert(p&&p->base==BASE&&p->ready&&p->input_hz==12000000);
  assert(hw[0].clocks==6&&hw[0].clock_div[2]==15&&hw[0].r[SDIO_CLKDIV/4]==0);
  assert(hw[0].r[SDIO_FIFOTH/4]==((2U<<28)|(127<<16)|128));
  assert(p->sectors==(legacy?131072ULL:((0x12345ULL+1)*1024)));
  assert(!!p->block_addressed==!legacy);
- if(!strcmp(mode,"multi-host")) {setup(1,0);assert(!sdio_probe(&dev[1]));assert(dev[0].drv_priv!=dev[1].drv_priv);assert(sdio_capacity(&dev[1])==p->sectors);cleanup(1,&dev[1]);assert(p->ready);}
+ if(!strcmp(mode,"multi-host")) {setup(1,0);assert(!sdio_probe(&dev[1]));assert(dev[0].drv_priv!=dev[1].drv_priv);assert(sdio_capacity(&dev[1])==p->sectors);assert(!cleanup(1,&dev[1]));assert(p->ready);}
+ if(!strncmp(mode,"stop-",5)) {
+  if(!strcmp(mode,"stop-reset"))hw[0].stuck_reset=1;
+  if(!strcmp(mode,"stop-gone"))hw[0].gone=1;
+  if(!strcmp(mode,"stop-mask"))hw[0].mask_stuck=1;
+  if(!strcmp(mode,"stop-busy"))mutex_lock(&p->lock);
+  int expected=hw[0].gone?-ENODEV:p->lock.depth?-EBUSY:-ETIMEDOUT;
+  assert(cleanup(0,&dev[0])==expected&&dev[0].drv_priv==p&&p->stopped&&!freed&&!irq_frees);
+  if(p->lock.depth)mutex_unlock(&p->lock);
+  unsigned reads=hw[0].mmio_reads,writes=hw[0].mmio_writes;uint8_t bytes[512];
+  assert(sdio_read(&dev[0],0,bytes,1)==-ENODEV&&sdio_write(&dev[0],0,bytes,1)==-ENODEV&&!sdio_capacity(&dev[0]));
+  assert(sdio_wait_clear(p,SDIO_CTRL,1)==-ENODEV&&sdio_wait_cond(p,p->base,INT_CD,0,sdio_deadline(10))==-ENODEV);
+  assert(sdio_fifo_word(p,bytes,0,sdio_deadline(10))==-ENODEV&&sdio_reset(p,1)==-ENODEV);
+  assert(hw[0].mmio_reads==reads&&hw[0].mmio_writes==writes);
+  setup(1,0);assert(!sdio_probe(&dev[1])&&dev[1].drv_priv!=p&&p==dev[0].drv_priv);
+  assert(!cleanup(1,&dev[1]));
+  hw[0].gone=hw[0].stuck_reset=hw[0].mask_stuck=0;
+  assert(!cleanup(0,&dev[0])&&!dev[0].drv_priv&&allocated==freed&&irq_claims==irq_frees);return 0;
+ }
  if(!strcmp(mode,"crc-error"))hw[0].crc_error=1;
  if(!strcmp(mode,"fifo-timeout"))hw[0].fifo_stuck=1;
+ if(!strcmp(mode,"cancel-io"))hw[0].cancel_io=1;
+ if(!strcmp(mode,"cancel-park"))hw[0].cancel_park=hw[0].fifo_stuck=1;
  uint8_t bytes[514];memset(bytes,0,sizeof(bytes));rc=sdio_read(&dev[0],7,bytes+1,1);
- if(!strcmp(mode,"crc-error")) {assert(rc==-EIO&&!p->ready);cleanup(0,&dev[0]);return 0;}
- if(!strcmp(mode,"fifo-timeout")) {assert(rc==-ETIMEDOUT&&!p->ready);cleanup(0,&dev[0]);return 0;}
+ if(!strncmp(mode,"cancel-",7)) {
+  assert(rc==-ENODEV&&p->stopped&&hw[0].busy_stop==1&&!freed&&!irq_frees);
+  assert((hw[0].last_cmd&CMD_DATA_EXPECTED)&&!hw[0].reads);
+  assert(!cleanup(0,&dev[0])&&allocated==freed&&irq_claims==irq_frees);return 0;
+ }
+ if(!strcmp(mode,"crc-error")) {assert(rc==-EIO&&!p->ready);assert(!cleanup(0,&dev[0]));return 0;}
+ if(!strcmp(mode,"fifo-timeout")) {assert(rc==-ETIMEDOUT&&!p->ready);assert(!cleanup(0,&dev[0]));return 0;}
  assert(!rc&&hw[0].reads==128&&hw[0].status_reads>=130);
  assert(hw[0].last_arg==(legacy?7*512:7));
  for(unsigned i=0;i<128;i++) {uint32_t word;memcpy(&word,bytes+1+4*i,4);assert(word==0xabc00000+i);word=0x12340000+i;memcpy(bytes+1+4*i,&word,4);}
- if(strstr(mode,"-wp")||!strcmp(mode,"firmware-read-only")) {assert(p->write_protected&&sdio_write(&dev[0],8,bytes+1,1)==-EROFS&&p->ready&&!hw[0].writes);cleanup(0,&dev[0]);return 0;}
+ if(strstr(mode,"-wp")||!strcmp(mode,"firmware-read-only")) {assert(p->write_protected&&sdio_write(&dev[0],8,bytes+1,1)==-EROFS&&p->ready&&!hw[0].writes);assert(!cleanup(0,&dev[0]));return 0;}
  unsigned status=hw[0].cmd13;assert(!sdio_write(&dev[0],8,bytes+1,1));assert(hw[0].writes==128&&hw[0].cmd13>status);
  assert(sdio_read(&dev[0],p->sectors,bytes,1)==-EINVAL&&p->ready);
  assert(sdio_read(&dev[0],0,bytes,0)==-EINVAL&&p->ready);
- cleanup(0,&dev[0]);assert(allocated==freed);assert(irq_claims==irq_frees);
+ assert(!cleanup(0,&dev[0]));assert(allocated==freed);assert(irq_claims==irq_frees);
  return 0;
 }
 '''
@@ -226,7 +311,9 @@ class DwSdioTests(unittest.TestCase):
             for mode in ['sdhc', 'legacy', 'multi-host', 'irq', 'crc-error',
                          'fifo-timeout', 'reset-timeout', 'clock-timeout',
                          'low-voltage', 'wrong-width', 'missing-clock', 'permanent-wp',
-                         'temporary-wp', 'firmware-read-only', 'nonerror-status', 'locked-card']:
+                         'temporary-wp', 'firmware-read-only', 'nonerror-status', 'locked-card',
+                         'stop-reset', 'stop-gone', 'stop-mask', 'stop-busy', 'cancel-io', 'cancel-park',
+                         'action-failure', 'map-failure', 'allocation-failure', 'irq-error', 'property-error']:
                 with self.subTest(mode=mode):
                     subprocess.run([str(executable), mode], check=True, timeout=5)
 
