@@ -33,7 +33,7 @@ class UsbEndpointRelease(unittest.TestCase):
         model = model.replace('/* HID_FUNCTIONS */', '\n'.join(function(hid, name) for name in (
             'usb_hid_probe', 'usb_hid_quiesce', 'usb_hid_remove')))
         hub = (ROOT / 'kernel/drivers/usb/class/usb_hub.c').read_text()
-        model = model.replace('/* HUB_FUNCTIONS */', function(hub, 'usb_hub_remove'))
+        model = model.replace('/* HUB_FUNCTIONS */', function(hub, 'usb_hub_prepare') + '\n' + function(hub, 'usb_hub_remove'))
         source = LOCKS + C_FIXTURE[C_FIXTURE.index('#include "drivers/core/driver_core.c"'):]
         marker = 'int main(int argc,char **argv) {'
         source = source.replace(marker, model + '\n' + marker)

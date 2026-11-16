@@ -7,6 +7,7 @@
 #define XHCI_BULK_HOLD_BUDGET_MS 5000U
 #define XHCI_TRB_TYPE(t) ((uint32_t)(t)<<10)
 #define XHCI_TRB_CYCLE 1U
+#define XHCI_TRB_CHAIN 16U
 #define XHCI_TRB_ENT 2U
 #define XHCI_TRB_LINK 6U
 #define XHCI_TRB_NORMAL 1U

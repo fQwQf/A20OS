@@ -13,7 +13,7 @@ class UsbDisconnectTree(unittest.TestCase):
   if not arch:self.skipTest('host architecture headers required')
   hub=(ROOT/'kernel/drivers/usb/class/usb_hub.c').read_text()
   a=hub.index('typedef struct usb_hub');b=hub.index('} usb_hub_t;',a)+len('} usb_hub_t;')
-  remove=function(hub,'usb_hub_remove')
+  remove=function(hub,'usb_hub_prepare')+'\n'+function(hub,'usb_hub_remove')
   model=(ROOT/'tools/tests/usb_disconnect_tree_host.c').read_text().replace('/* HUB_SHAPE */',hub[a:b])
   core=(ROOT/'kernel/drivers/usb/core/usb_core.c').read_text()
   abort='int ret = hcd->ops->abort_slot(hcd, udev->slot);'
