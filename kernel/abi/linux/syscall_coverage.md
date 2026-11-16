@@ -13,8 +13,9 @@ establishes acceptance of the current release candidate. The current RV64 SMP2
 pynode application run exposed a pip-cleanup EIO, a Node child SIGSEGV and a refused
 filesystem shutdown. Fork-advice range/wipe regressions now pass a direct RV64 SMP2
 check. Unix unnamed-address and offline Node/npm child/timer/I/O checks now pass,
-but installation workload shutdown still refuses writeback and the pip cleanup
-fails; see the register for the bounded evidence.
+and the Python build/install/import/cleanup workload now shuts down cleanly after
+fixing directory rename parent metadata. The earlier npm writeback refusal remains
+open; see the register for bounded evidence.
 
 ## Coverage Legend
 
