@@ -6,6 +6,7 @@
 #include "drivers/block/virtio_blk.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/virtio_transport.h"
+#include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "core/defs.h"
@@ -25,7 +26,6 @@
 #define VIRTIO_SND_FRAME_BYTES        4U
 #define VIRTIO_SND_PREBUFFER_PERIODS  2U
 #define VIRTIO_SND_CONTROL_REQ_BYTES 64U
-#define VIRTIO_SND_RESET_SPINS   1000000U
 #define VIRTIO_SND_CONTROL_RESP_BYTES \
     (sizeof(uint32_t) + VIRTIO_SND_MAX_STREAMS * sizeof(virtio_snd_pcm_info_t))
 
@@ -80,16 +80,18 @@ typedef struct virtio_snd_dev {
     int started;
     int valid;
     int broken;
+    int closing;
+    int reset_required;
+    int hardware_stopped;
     volatile uint32_t generation;
     mutex_t lock;
     /* Parked waiters woken by the completion IRQ; internally locked so
      * the IRQ top-half may collect without taking snd->lock. */
     wait_queue_t waiters;
     int irq_registered;
-    struct virtio_snd_dev *quarantine_next;
 } virtio_snd_dev_t;
 
-static virtio_snd_dev_t *g_virtio_snd_quarantine;
+static int virtio_snd_stop(void *context);
 
 _Static_assert(sizeof(virtio_snd_queue_mem_t) <= PAGE_SIZE,
                "VirtIO sound queue memory must fit in one page");
@@ -132,19 +134,22 @@ static int virtio_snd_status_error(uint32_t status)
 
 static int virtio_snd_reset(virtio_snd_dev_t *snd)
 {
-    snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS, 0);
-    mb();
-    unsigned spins = VIRTIO_SND_RESET_SPINS;
-    while (snd->vt.read32(&snd->vt, VIRTIO_MMIO_STATUS) != 0 && --spins)
-        arch_cpu_relax();
-    return spins ? 0 : -ETIMEDOUT;
+    if (snd->vt.read32(&snd->vt, VIRTIO_MMIO_STATUS) == 0xffffffffU)
+        return -ENODEV;
+    return virtio_transport_reset(&snd->vt, 100);
 }
 
 static int virtio_snd_health(virtio_snd_dev_t *snd)
 {
+    if (__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     uint32_t status = snd->vt.read32(&snd->vt, VIRTIO_MMIO_STATUS);
+    if (status == 0xffffffffU) {
+        snd->broken = 1;
+        return -ENODEV;
+    }
     if (status & VIRTIO_STATUS_DEVICE_NEEDS_RESET) {
-        (void)virtio_snd_reset(snd);
+        /* The managed stop owns reset and preserves every queue on failure. */
         snd->broken = 1;
         return -EIO;
     }
@@ -159,7 +164,7 @@ static void virtio_snd_ack_interrupt(virtio_snd_dev_t *snd)
 {
     uint32_t status = snd->vt.read32(&snd->vt,
                                     VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!snd->vt.legacy && status)
+    if (!snd->vt.legacy && status && status != 0xffffffffU)
         snd->vt.write32(&snd->vt, VIRTIO_MMIO_INTERRUPT_ACK, status);
 }
 
@@ -186,6 +191,8 @@ static int virtio_snd_irq_handler(int irq, void *priv)
 
 static void virtio_snd_wait_step(virtio_snd_dev_t *snd)
 {
+    if (__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE))
+        return;
     if (!proc_current()) {
         arch_cpu_relax();
         return;
@@ -217,8 +224,9 @@ static int virtio_snd_wait_used(virtio_snd_dev_t *snd,
         timeout = 1;
 
     for (;;) {
-        if (virtio_snd_health(snd) < 0)
-            return -EIO;
+        int health = virtio_snd_health(snd);
+        if (health < 0)
+            return health;
         dma_sync_for_cpu(&queue->mem->used, sizeof(queue->mem->used));
         if (((volatile virtq_used_t *)&queue->mem->used)->idx != before)
             return 0;
@@ -289,13 +297,6 @@ static void virtio_snd_free_dma(virtio_snd_dev_t *snd)
     }
 }
 
-static void virtio_snd_quarantine(virtio_snd_dev_t *snd)
-{
-    /* A device that did not acknowledge reset may still own every DMA buffer. */
-    snd->quarantine_next = g_virtio_snd_quarantine;
-    g_virtio_snd_quarantine = snd;
-}
-
 static int virtio_snd_alloc_dma(virtio_snd_dev_t *snd, device_t *dev)
 {
     for (uint32_t i = 0; i < VIRTIO_SND_QUEUE_COUNT; i++) {
@@ -334,8 +335,9 @@ static int virtio_snd_control(virtio_snd_dev_t *snd, const void *request,
         response_bytes < sizeof(uint32_t) ||
         response_bytes > sizeof(snd->control->response))
         return -EINVAL;
-    if (virtio_snd_health(snd) < 0)
-        return -EIO;
+    int health = virtio_snd_health(snd);
+    if (health < 0)
+        return health;
 
     virtio_snd_queue_t *queue = &snd->queues[VIRTIO_SND_QUEUE_CONTROL];
     dma_sync_for_cpu(&queue->mem->used, sizeof(queue->mem->used));
@@ -449,8 +451,12 @@ static int virtio_snd_poll_events(virtio_snd_dev_t *snd)
 
 static int virtio_snd_tx_reap(virtio_snd_dev_t *snd)
 {
-    if (virtio_snd_health(snd) < 0 || virtio_snd_poll_events(snd) < 0)
-        return -EIO;
+    int health = virtio_snd_health(snd);
+    if (health < 0)
+        return health;
+    int events = virtio_snd_poll_events(snd);
+    if (events < 0)
+        return events;
     virtio_snd_queue_t *queue = &snd->queues[VIRTIO_SND_QUEUE_TX];
     dma_sync_for_cpu(&queue->mem->used, sizeof(queue->mem->used));
     uint16_t used_idx = ((volatile virtq_used_t *)&queue->mem->used)->idx;
@@ -732,7 +738,8 @@ static int virtio_snd_write(device_t *dev, const void *buffer, size_t count)
         return -EINVAL;
 
     mutex_lock(&snd->lock);
-    if (!snd->valid || snd->broken) {
+    if (__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE) ||
+        !snd->valid || snd->broken) {
         mutex_unlock(&snd->lock);
         return -ENODEV;
     }
@@ -774,10 +781,13 @@ static int virtio_snd_stop_device(device_t *dev)
     virtio_snd_dev_t *snd = dev ? dev->drv_priv : NULL;
     if (!snd)
         return -ENODEV;
+    if (__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     uint32_t generation = __atomic_add_fetch(&snd->generation, 1U,
                                               __ATOMIC_ACQ_REL);
     mutex_lock(&snd->lock);
-    int ret = snd->valid ? virtio_snd_stop_locked(snd, generation) : -ENODEV;
+    int ret = snd->valid && !__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE) ?
+              virtio_snd_stop_locked(snd, generation) : -ENODEV;
     mutex_unlock(&snd->lock);
     return ret;
 }
@@ -788,7 +798,8 @@ static int virtio_snd_drain_device(device_t *dev)
     if (!snd)
         return -ENODEV;
     mutex_lock(&snd->lock);
-    if (!snd->valid || snd->broken) {
+    if (__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE) ||
+        !snd->valid || snd->broken) {
         mutex_unlock(&snd->lock);
         return -ENODEV;
     }
@@ -838,7 +849,8 @@ static int virtio_snd_drain_device(device_t *dev)
 static int virtio_snd_close(device_t *dev)
 {
     virtio_snd_dev_t *snd = dev ? dev->drv_priv : NULL;
-    return snd && snd->valid ? 0 : -ENODEV;
+    return snd && !__atomic_load_n(&snd->closing, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&snd->valid, __ATOMIC_ACQUIRE) ? 0 : -ENODEV;
 }
 
 static int virtio_snd_discover_stream(virtio_snd_dev_t *snd,
@@ -880,16 +892,23 @@ static int virtio_snd_init_transport(device_t *dev,
         return -ENOMEM;
     snd->vt = *transport;
     mutex_init(&snd->lock);
+    wait_queue_init(&snd->waiters);
+    dev->drv_priv = snd;
+    int ret = device_add_execution_action(dev, virtio_snd_stop, NULL, snd);
+    if (ret)
+        return ret;
 
     uint32_t magic = snd->vt.read32(&snd->vt, VIRTIO_MMIO_MAGIC);
     uint32_t version = snd->vt.read32(&snd->vt, VIRTIO_MMIO_VERSION);
     uint32_t device_id = snd->vt.read32(&snd->vt, VIRTIO_MMIO_DEVICE_ID);
     if (magic != 0x74726976U || version != 2U ||
         device_id != VIRTIO_SND_DEVICE_ID || snd->vt.legacy)
-        goto fail_nodev;
+        return -ENODEV;
 
-    if (virtio_snd_reset(snd) < 0)
-        goto fail_nodev;
+    snd->reset_required = 1;
+    ret = virtio_snd_reset(snd);
+    if (ret < 0)
+        return ret;
     uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS, status);
     mb();
@@ -901,8 +920,10 @@ static int virtio_snd_init_transport(device_t *dev,
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
     uint32_t features_hi = snd->vt.read32(&snd->vt,
                                           VIRTIO_MMIO_DEVICE_FEATURES);
-    if (!(features_hi & VIRTIO_F_VERSION_1_BIT))
+    if (!(features_hi & VIRTIO_F_VERSION_1_BIT)) {
+        ret = -EOPNOTSUPP;
         goto fail;
+    }
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 1);
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_DRIVER_FEATURES,
                     VIRTIO_F_VERSION_1_BIT);
@@ -911,15 +932,20 @@ static int virtio_snd_init_transport(device_t *dev,
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS, status);
     mb();
     if (!(snd->vt.read32(&snd->vt, VIRTIO_MMIO_STATUS) &
-          VIRTIO_STATUS_FEATURES_OK))
+          VIRTIO_STATUS_FEATURES_OK)) {
+        ret = -EIO;
         goto fail;
+    }
 
     uint32_t streams = snd->vt.read32(&snd->vt,
                                       VIRTIO_MMIO_CONFIG +
                                       VIRTIO_SND_CONFIG_STREAMS);
-    if (!streams || streams > VIRTIO_SND_MAX_STREAMS)
+    if (!streams || streams > VIRTIO_SND_MAX_STREAMS) {
+        ret = -ENODEV;
         goto fail;
-    if (virtio_snd_alloc_dma(snd, dev) < 0)
+    }
+    ret = virtio_snd_alloc_dma(snd, dev);
+    if (ret < 0)
         goto fail;
     virtio_snd_populate_events(snd);
 
@@ -927,7 +953,6 @@ static int virtio_snd_init_transport(device_t *dev,
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS, status);
     mb();
 
-    wait_queue_init(&snd->waiters);
     if (snd->vt.irq >= 0) {
         unsigned long irq_flags = snd->vt.shared_irq ? IRQF_SHARED : 0;
         if (request_irq((uint32_t)snd->vt.irq, virtio_snd_irq_handler,
@@ -945,37 +970,30 @@ static int virtio_snd_init_transport(device_t *dev,
     snd->vt.write32(&snd->vt, VIRTIO_MMIO_QUEUE_NOTIFY,
                     VIRTIO_SND_QUEUE_EVENT);
     mb();
-    if (virtio_snd_discover_stream(snd, streams) < 0)
+    ret = virtio_snd_discover_stream(snd, streams);
+    if (ret < 0)
         goto fail;
 
-    snd->valid = 1;
-    dev->drv_priv = snd;
+    __atomic_store_n(&snd->valid, 1, __ATOMIC_RELEASE);
     kinfo("[VIRTIO-SND] %s stream=%u, 48000 Hz stereo S16_LE\n",
           dev->name, snd->stream_id);
     return 0;
 
 fail:
     status = snd->vt.read32(&snd->vt, VIRTIO_MMIO_STATUS);
-    snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS,
-                    status | VIRTIO_STATUS_FAILED);
-    mb();
-    if (virtio_snd_reset(snd) < 0) {
-        kerr("[VIRTIO-SND] reset timeout; retaining live DMA\n");
-        if (snd->irq_registered)
-            free_irq((uint32_t)snd->vt.irq, snd);
-        virtio_snd_quarantine(snd);
-        return -EIO;
+    if (status != 0xffffffffU) {
+        snd->vt.write32(&snd->vt, VIRTIO_MMIO_STATUS,
+                        status | VIRTIO_STATUS_FAILED);
+        mb();
     }
-    if (snd->irq_registered)
-        free_irq((uint32_t)snd->vt.irq, snd);
-fail_nodev:
-    virtio_snd_free_dma(snd);
-    kfree(snd);
-    return -ENODEV;
+    return ret;
 }
 
 static int virtio_snd_probe(device_t *dev)
 {
+    int managed = device_probe_use_remove(dev);
+    if (managed)
+        return managed;
     if (dev->bus == &pci_bus) {
         virtio_transport_t transport;
         if (pci_virtio_transport_init(dev, VIRTIO_SND_DEVICE_ID,
@@ -1001,29 +1019,41 @@ static int virtio_snd_probe(device_t *dev)
     return virtio_snd_init_transport(dev, &transport);
 }
 
+static int virtio_snd_stop(void *context)
+{
+    virtio_snd_dev_t *snd = context;
+    if (!__atomic_exchange_n(&snd->closing, 1, __ATOMIC_ACQ_REL))
+        __atomic_add_fetch(&snd->generation, 1U, __ATOMIC_ACQ_REL);
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    wait_queue_collect_all(&snd->waiters, 0, PROC_WAKE_EVENT, &wake_q, NULL);
+    proc_wake_q_flush(&wake_q);
+    if (!mutex_trylock(&snd->lock))
+        return -EBUSY;
+    __atomic_store_n(&snd->valid, 0, __ATOMIC_RELEASE);
+    int ret = 0;
+    if (snd->reset_required && !snd->hardware_stopped)
+        ret = virtio_snd_reset(snd);
+    if (!ret)
+        snd->hardware_stopped = 1;
+    mutex_unlock(&snd->lock);
+    if (ret)
+        return ret;
+    if (snd->irq_registered) {
+        free_irq((uint32_t)snd->vt.irq, snd);
+        __atomic_store_n(&snd->irq_registered, 0, __ATOMIC_RELEASE);
+    }
+    return 0;
+}
+
 static int virtio_snd_remove(device_t *dev)
 {
     virtio_snd_dev_t *snd = dev ? dev->drv_priv : NULL;
     if (!snd)
         return 0;
-    snd->valid = 0;
-    uint32_t generation = __atomic_add_fetch(&snd->generation, 1U,
-                                              __ATOMIC_ACQ_REL);
-    mutex_lock(&snd->lock);
-    (void)virtio_snd_stop_locked(snd, generation);
-    mutex_unlock(&snd->lock);
-
-    if (virtio_snd_reset(snd) < 0) {
-        kerr("[VIRTIO-SND] %s reset timeout; retaining live DMA\n",
-             dev->name);
-        if (snd->irq_registered)
-            free_irq((uint32_t)snd->vt.irq, snd);
-        virtio_snd_quarantine(snd);
-        dev->drv_priv = NULL;
-        return -EIO;
-    }
-    if (snd->irq_registered)
-        free_irq((uint32_t)snd->vt.irq, snd);
+    int ret = virtio_snd_stop(snd);
+    if (ret)
+        return ret;
     dev->drv_priv = NULL;
     virtio_snd_free_dma(snd);
     kfree(snd);
