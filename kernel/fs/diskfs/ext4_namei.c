@@ -776,6 +776,10 @@ static int ext4_restore_link_inode(ext4_sb_info_t *sb, uint32_t ino,
                                      ext4_inode_t *before)
 {
     int ret = ext4_write_inode(sb, ino, before);
+    if (ret < 0 && sb->journal) {
+        (void)ext4_journal_poison(sb);
+        return ext4_record_status(sb, -117);
+    }
     if (ret < 0) ret = ext4_write_inode(sb, ino, before);
     return ret < 0 ? ext4_record_status(sb, -117) : 0;
 }
@@ -1059,7 +1063,46 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
 }
 
 
+/* Release only an object whose name was never published (or was restored).
+ * Clear the inode before returning its allocation bit. Every step is checked;
+ * an uncertain cleanup retains the remaining resources and quarantines the
+ * volume rather than making a possibly referenced inode reusable. */
+static int ext4_discard_unpublished(ext4_sb_info_t *sb, uint32_t ino,
+                                      uint64_t block, int accounted,
+                                      int error)
+{
+    if (error == -117 || ext4_is_inconsistent(sb))
+        return ext4_record_status(sb, -117);
+    if (sb->journal && error == -EIO) {
+        (void)ext4_journal_poison(sb);
+        return error;
+    }
+    ext4_inode_t deleted;
+    ext4_inode_mark_deleted(&deleted);
+    int ret = ext4_write_inode(sb, ino, &deleted);
+    if (ret < 0 && !sb->journal) ret = ext4_write_inode(sb, ino, &deleted);
+    if (ret < 0) goto uncertain;
+    if (accounted) {
+        ret = ext4_account_directory(sb, ino, -1);
+        if (ret < 0 && !sb->journal) ret = ext4_account_directory(sb, ino, -1);
+        if (ret < 0) goto uncertain;
+    }
+    if (block) {
+        ret = ext4_free_block(sb, block);
+        if (ret < 0 && !sb->journal) ret = ext4_free_block(sb, block);
+        if (ret < 0) goto uncertain;
+    }
+    ret = ext4_free_inode(sb, ino);
+    if (ret < 0 && !sb->journal) ret = ext4_free_inode(sb, ino);
+    if (ret < 0) goto uncertain;
+    return error;
+uncertain:
+    if (sb->journal) (void)ext4_journal_poison(sb);
+    return ext4_record_status(sb, -117);
+}
+
 int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **out) {
+    if (out) *out = NULL;
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
     if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
@@ -1077,7 +1120,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
         return lookup;
 
     uint32_t new_ino = ext4_alloc_inode(p->sb);
-    if (!new_ino) return -ENOSPC;
+    if (!new_ino) return ext4_is_inconsistent(p->sb) ? -117 : -ENOSPC;
 
     /* Initialize new inode */
     ext4_inode_t ni;
@@ -1105,49 +1148,37 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
         memcpy(raw, &hdr, sizeof(hdr));
     }
     }
-    if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
-        ext4_free_inode(p->sb, new_ino);
-        return -EIO;
+    if (ext4_write_inode(p->sb, new_ino, &ni) < 0)
+        return ext4_discard_unpublished(p->sb, new_ino, 0, 0, -EIO);
+
+    vnode_t *created = NULL;
+    if (out) {
+        created = ext4_make_vnode(p->sb, new_ino, 0,
+            (ni.i_mode & S_IFMT) == S_IFIFO ? VFS_FT_FIFO : VFS_FT_REGULAR, dir);
+        if (!created)
+            return ext4_discard_unpublished(p->sb, new_ino, 0, 0, -ENOMEM);
     }
 
     /* Add dir entry */
     uint64_t dsz = ext4_inode_size(&di);
     int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, (ni.i_mode & S_IFMT) == S_IFIFO ? EXT4_FT_FIFO : EXT4_FT_REG_FILE);
     if (r < 0) {
-        ext4_free_inode(p->sb, new_ino);
-        return r;
+        /* This unpublished vnode is not an orphan and cannot re-enter
+         * metadata_lock during release; dir still has the caller's ref. */
+        if (created) vnode_put(created);
+        return ext4_discard_unpublished(p->sb, new_ino, 0, 0, r);
     }
 
     p->file_size = dsz;
-
-    if (out) {
-        *out = ext4_make_vnode(p->sb, new_ino, 0, (ni.i_mode & S_IFMT) == S_IFIFO ? VFS_FT_FIFO : VFS_FT_REGULAR, dir);
-        if (!*out) return -ENOMEM;
-    }
+    if (out) *out = created;
     return 0;
 }
 
 
-/* Before a new directory entry is published, every resource is private to
- * this operation. Undo its directory count as well as its block/inode. */
-static int ext4_mkdir_discard_unpublished(ext4_sb_info_t *sb, uint32_t ino,
-                                         uint64_t block, int accounted,
-                                         int error)
-{
-    ext4_inode_t deleted;
-    ext4_inode_mark_deleted(&deleted);
-    if (ext4_write_inode(sb, ino, &deleted) < 0)
-        return ext4_record_status(sb, -117);
-    int count = accounted ? ext4_account_directory(sb, ino, -1) : 0;
-    int blocks = ext4_free_block(sb, block);
-    int inode = ext4_free_inode(sb, ino);
-    if (count < 0 || blocks < 0 || inode < 0)
-        return ext4_record_status(sb, -117);
-    return error;
-}
 
 int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
+    if (ext4_is_inconsistent(p->sb)) return -117;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
     if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
@@ -1162,12 +1193,15 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     if (lookup != -ENOENT)
         return lookup;
 
+    if (di.i_links_count == 0xffffU) return -EMLINK;
     uint32_t new_ino = ext4_alloc_inode(p->sb);
-    if (!new_ino) return -ENOSPC;
+    if (!new_ino) return ext4_is_inconsistent(p->sb) ? -117 : -ENOSPC;
 
     /* Allocate a block for the new directory */
     uint64_t blk = ext4_alloc_block(p->sb);
-    if (!blk) { ext4_free_inode(p->sb, new_ino); return -ENOSPC; }
+    if (!blk)
+        return ext4_discard_unpublished(p->sb, new_ino, 0, 0,
+            ext4_is_inconsistent(p->sb) ? -117 : -ENOSPC);
 
     /* Initialize new directory inode */
     ext4_inode_t ni;
@@ -1186,7 +1220,7 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
      * recounts them and reports the group whose descriptor disagrees. */
     int account = ext4_account_directory(p->sb, new_ino, 1);
     if (account < 0)
-        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 0, account);
+        return ext4_discard_unpublished(p->sb, new_ino, blk, 0, account);
 
     /* Write extent for the one block */
     uint8_t *raw = (uint8_t *)&ni + offsetof(ext4_inode_t, i_block);
@@ -1203,12 +1237,12 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ext4_inode_sync_i_blocks(p->sb, &ni);
 
     if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
-        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, -EIO);
+        return ext4_discard_unpublished(p->sb, new_ino, blk, 1, -EIO);
     }
 
     /* Write "." and ".." entries in the new directory block */
     char *buf = (char *)kmalloc(p->sb->block_size);
-    if (!buf) return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, -ENOMEM);
+    if (!buf) return ext4_discard_unpublished(p->sb, new_ino, blk, 1, -ENOMEM);
     memset(buf, 0, p->sb->block_size);
 
     /* "." entry */
@@ -1234,29 +1268,41 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     int wr = ext4_dir_write_block(p->sb, new_ino, ni.i_generation, blk, buf);
     kfree(buf);
     if (wr < 0) {
-        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, wr);
+        return ext4_discard_unpublished(p->sb, new_ino, blk, 1, wr);
     }
 
-    /* Add entry in parent directory */
-    uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_DIR);
-    if (r < 0) {
-        /* An I/O error can leave the new entry in a dirty cache page.
-         * Retain its inode/block rather than free a possibly named object. */
-        if (r == -EIO || r == -117)
-            return ext4_record_status(p->sb, -117);
-        return ext4_mkdir_discard_unpublished(p->sb, new_ino, blk, 1, r);
-    }
-
-    /* The parent gains a subdirectory, and a directory's link count is the
-     * number of its own "." plus one per subdirectory's "..".  e2fsck recounts
-     * the tree in pass 4 and reports "Inode 2 ref count is 4, should be 10" when
-     * the inode disagrees, so the parent is written back even when the entry
-     * fitted in the block it already had. */
+    /* Accept the parent's extra ".." reference before publishing the name.
+     * A failed inode write must restore its cache/media image too. */
+    ext4_inode_t parent_before = di;
     di.i_links_count++;
+    int r = ext4_write_inode(p->sb, p->inode_num, &di);
+    if (r < 0) {
+        if (p->sb->journal) {
+            (void)ext4_journal_poison(p->sb);
+            return r;
+        }
+        if (ext4_restore_link_inode(p->sb, p->inode_num, &parent_before) < 0)
+            return -117;
+        return ext4_discard_unpublished(p->sb, new_ino, blk, 1, r);
+    }
+
+    uint64_t dsz = ext4_inode_size(&di);
+    r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_DIR);
+    if (r < 0) {
+        if (r == -117 || ext4_is_inconsistent(p->sb))
+            return ext4_record_status(p->sb, -117);
+        if (p->sb->journal && r == -EIO) {
+            (void)ext4_journal_poison(p->sb);
+            return r;
+        }
+        /* Keep any successful HTree-to-linear conversion in di. Restoring
+         * the old INDEX_FL after that conversion would corrupt the directory. */
+        di.i_links_count = parent_before.i_links_count;
+        if (ext4_restore_link_inode(p->sb, p->inode_num, &di) < 0)
+            return -117;
+        return ext4_discard_unpublished(p->sb, new_ino, blk, 1, r);
+    }
     p->file_size = dsz;
-    if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
-        return ext4_record_status(p->sb, -117);
     return 0;
 }
 
@@ -1552,6 +1598,7 @@ int ext4_readlink(vnode_t *vn, char *buf, size_t sz) {
 
 int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
                                     const char *target) {    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)dir->fs_data;
+    if (ext4_is_inconsistent(p->sb)) return -117;
     if (p->type != VFS_FT_DIR) return -ENOTDIR;
     if (__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return -ENOENT;
 
@@ -1570,7 +1617,7 @@ int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
     if (tlen > 60) return -ENAMETOOLONG; /* fast symlink only */
 
     uint32_t new_ino = ext4_alloc_inode(p->sb);
-    if (!new_ino) return -ENOSPC;
+    if (!new_ino) return ext4_is_inconsistent(p->sb) ? -117 : -ENOSPC;
 
     ext4_inode_t ni;
     memset(&ni, 0, sizeof(ni));
@@ -1581,14 +1628,13 @@ int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
     ni.i_links_count = 1;
     ext4_inode_set_size(&ni, tlen);
     memcpy(ni.i_block.i_data.i_block, target, tlen);
-    ext4_write_inode(p->sb, new_ino, &ni);
+    if (ext4_write_inode(p->sb, new_ino, &ni) < 0)
+        return ext4_discard_unpublished(p->sb, new_ino, 0, 0, -EIO);
 
     uint64_t dsz = ext4_inode_size(&di);
     int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_SYMLINK);
-    if (r < 0) {
-        ext4_free_inode(p->sb, new_ino);
-        return r;
-    }
+    if (r < 0)
+        return ext4_discard_unpublished(p->sb, new_ino, 0, 0, r);
     p->file_size = dsz;
     return 0;
 }
