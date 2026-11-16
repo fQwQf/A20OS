@@ -149,7 +149,7 @@ int ext4_orphan_recover(ext4_sb_info_t *sb);
 
 /* Add (delta > 0) or remove (delta < 0) a directory from the used-directory
  * count of the group that owns the inode. */
-void ext4_account_directory(ext4_sb_info_t *sb, uint32_t ino, int delta);
+int ext4_account_directory(ext4_sb_info_t *sb, uint32_t ino, int delta);
 int ext4_extent_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
                                    ext4_inode_t *inode, uint32_t lblk) ;
 uint64_t ext4_indirect_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) ;

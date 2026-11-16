@@ -7,6 +7,7 @@ both restoration attempts must quarantine and refuse a fresh-process mount.
 Requires Linux/glibc, cc, rustc and e2fsprogs. Set EVIDENCE_DIR for the outputs.
 """
 from pathlib import Path
+import argparse
 import hashlib
 import json
 import os
@@ -29,6 +30,10 @@ def run(argv, log):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--directory-account', action='store_true',
+                        help='check mkdir/rmdir directory-count and unpublished-inode rollback')
+    args = parser.parse_args()
     out = Path(os.environ['EVIDENCE_DIR']).resolve()
     out.mkdir(parents=True, exist_ok=True)
     report = {'passed': False, 'scope': 'shared Native backend with real file/block I/O; not Native ABI or guest crash certification'}
@@ -45,8 +50,9 @@ def main():
             raise RuntimeError('Rust backend build failed')
         sources = ['kernel/fs/diskfs/' + n + '.c' for n in
                    ['ext4', 'ext4_namei', 'ext4_file', 'ext4_journal', 'ext4_csum', 'ext4_sync', 'ext4_xattr']]
-        sources += ['user/svc/fscompat/compat.c', 'user/svc/fscompat/bcache_user_rust_abi.c',
-                    'tools/tests/ext4_orphan_compensation/fixture.c']
+        fixture = ('tools/tests/ext4_directory_account/fixture.c' if args.directory_account
+                   else 'tools/tests/ext4_orphan_compensation/fixture.c')
+        sources += ['user/svc/fscompat/compat.c', 'user/svc/fscompat/bcache_user_rust_abi.c', fixture]
         binary = out / 'harness'
         built = run(['cc', '-std=gnu11', '-O1', '-DCONFIG_EXT4_RUST_EXTENT_TXN',
                      '-DCONFIG_UFSD_RUST_EXT4_ORPHAN', '-ffunction-sections', '-fdata-sections',
@@ -72,13 +78,16 @@ def main():
             raise RuntimeError('seed file was not created')
         report['base_sha256'] = sha(base)
         report['cases'] = []
-        for name, extra, expected in [('transient', [], 0), ('persistent', ['persistent'], 117)]:
+        cases = ([('directories', [], 0)] if args.directory_account else
+                 [('transient', [], 0), ('persistent', ['persistent'], 117)])
+        for name, extra, expected in cases:
             image = out / (name + '.img')
             shutil.copyfile(base, image)
             result = run([binary, image, *extra], out / (name + '.log'))
             if result.returncode != expected:
                 raise RuntimeError(f'{name}: unexpected backend exit {result.returncode}')
-            marker = 'ORPHAN_RETRY_PASS' if not extra else 'ORPHAN_QUARANTINE_PASS'
+            marker = ('DIR_ACCOUNT_PASS' if args.directory_account else
+                      'ORPHAN_RETRY_PASS' if not extra else 'ORPHAN_QUARANTINE_PASS')
             if marker not in (result.stdout + result.stderr).splitlines():
                 raise RuntimeError(f'{name}: missing completed backend operation')
             checked = run(['/usr/sbin/e2fsck', '-fn', image], out / (name + '.fsck'))
@@ -97,6 +106,7 @@ def main():
                     raise RuntimeError('rejected mount changed the quarantined image')
             report['cases'].append({'name': name, 'backend_exit': result.returncode,
                                     'e2fsck_exit': checked.returncode, 'postimage_sha256': post})
+        report['directory_account'] = args.directory_account
         report['passed'] = True
     except Exception as error:
         report['error'] = str(error)
