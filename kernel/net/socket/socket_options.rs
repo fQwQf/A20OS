@@ -38,6 +38,7 @@ const EOPNOTSUPP: i32 = 95;
 
 const AF_INET: i32 = 2;
 const AF_INET6: i32 = 10;
+const AF_NETLINK: i32 = 16;
 const AF_ALG: i32 = 38;
 const SOCK_STREAM: i32 = 1;
 const SOCK_RAW: i32 = 3;
@@ -837,7 +838,7 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
          * reports and what the datagram send paths compare against -- a report
          * and an enforcement cannot drift apart. */
         let is_snd = (optname == SO_SNDBUF) as i32;
-        if domain != AF_INET && domain != AF_INET6 {
+        if domain != AF_INET && domain != AF_INET6 && domain != AF_NETLINK {
             return -EOPNOTSUPP;
         }
         let want = unsafe { a20_net_option_buf_ceiling(v.s, is_snd) };
@@ -852,9 +853,15 @@ pub unsafe extern "C" fn a20_net_setsockopt_state(
             } else {
                 *v.rcv_buf = val as u32;
             }
-            *v.tcp_opts_generation = (*v.tcp_opts_generation).wrapping_add(1);
+            if domain != AF_NETLINK {
+                *v.tcp_opts_generation = (*v.tcp_opts_generation).wrapping_add(1);
+            }
             a20_net_option_unlock(v.s, flags);
         }
+        /* Netlink uses the bounded native message queue, not an INET pcb.
+         * Its receive queue enforces rcv_buf and its dispatcher enforces the
+         * send-datagram limit. Never apply these changes to a transport pcb. */
+        if domain == AF_NETLINK { return 0; }
         /* Only this buffer field is applied: snd_buf is available credit, so an
          * unrelated option must never reset it. */
         return if is_snd != 0 { APPLY_SNDBUF } else { APPLY_RCVBUF };

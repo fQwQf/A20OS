@@ -6,12 +6,12 @@
 
 | 应用 / 来源 | 必需调用与关键边界 | 入口和当前证据状态 |
 | --- | --- | --- |
-| BusyBox shell、CLI 的 zsh/bash；[CLI world](../../../../packages/world/cli.world) | clone/execve/wait4、pipe2/dup/close、rt_sigaction/rt_sigprocmask、setsid/setpgid、终端 ioctl、get/setrlimit/prlimit64。管道 EOF/EPIPE、子进程收割、CLOEXEC、后台读写拒绝及非法限制组合必须有明确结果。 | `make smoke-child-exit-matrix`、`make smoke-sigchld-group`；[TTY 生产程序](../../../../user/cmds/core/tty_jobcontrol_test.c)及[运行契约](tty-jobcontrol.md)。RV64 SMP2/AArch64 SMP4 的历史记录见[本轮归档](../../archive/v1-closeout-2026-11-16.md#控制终端与作业控制)；本轮 prlimit 主机检查见下表，不能替代完整 shell 客体运行。 |
+| BusyBox shell、CLI 的 zsh/bash；[CLI world](../../../../packages/world/cli.world) | clone/execve/wait4、pipe2/dup/close、rt_sigaction/rt_sigprocmask、setsid/setpgid、终端 ioctl、get/setrlimit/prlimit64。管道 EOF/EPIPE、子进程收割、CLOEXEC、后台读写拒绝及非法限制组合必须有明确结果。 | `make smoke-child-exit-matrix`、`make smoke-sigchld-group`；[TTY 生产程序](../../../../user/cmds/core/tty_jobcontrol_test.c)及[运行契约](tty-jobcontrol.md)。RV64 SMP2/AArch64 SMP4 的历史记录见[本轮归档](../../archive/v1-closeout-2026-11-16.md#控制终端与作业控制)；本轮 prlimit 主机检查见下表，不能替代完整 shell 客体运行。本轮 CLI 的 bash 管道/命令替换触发 SIGSEGV，简单 echo 成功；zsh 登录可用，其脚本分项尚未运行。 |
 | OpenRC PID 1 / supervise-daemon；[XFCE world](../../../../packages/world/xfce.world) | mknodat/openat/read/write/poll、kill/wait4、procfs、mount/reboot。FIFO 无对端的非阻塞写打开为 ENXIO，断开写为 EPIPE；PID 1 保留、监督重启、正常关机和停止错误须如实交付。 | [init 接口契约](init-compatibility.md)，[FIFO 客体检查](../../../../tools/tests/fifo_guest.py)、[环境读取检查](../../../../tools/tests/proc_environ_guest.py)、[OpenRC 监督检查](../../../../tools/tests/openrc_supervision_guest.py)。AArch64 实际 world 的历史监督恢复见[桌面状态](../../status/current/desktop-minecraft-status.md#aarch64-原生服务恢复2026-11-16)；不把进程存活当作服务恢复通过。 |
 | Python 3 / Node.js/npm；[pynode world](../../../../packages/world/pynode.world) | execve、mmap/mprotect、futex、poll/epoll、clock_gettime/timerfd、socket 与基础文件 I/O。事件循环的超时/中断、关闭描述符、错误路径和安装期子进程退出须有可观察结果。 | `make smoke-poll-edge`、`make smoke-timer-edge`、`make smoke-futex-stress` 提供共享机制入口；[脚本执行与共享内存探针](../../../../tools/tests/desktop_abi_probe.py)提供客体/宿主对照。新增[离线安装期应用检查](../../../../tools/tests/application_runtime_guest.py)。Python 离线构建/安装/导入/清理、Node/npm 子进程/定时器/I/O 及各自正常写回关机均有 RV64 SMP2 通过记录，见下方运行记录。 |
 | labwc / XFCE / Firefox；[XFCE world](../../../../packages/world/xfce.world) | clone(CLONE_SIGHAND)、execve、Linux 信号与 syscall restart、seccomp、poll/epoll、Unix socket 的 SCM_RIGHTS、mmap 与设备 ioctl。线程共享处理表、SIGSYS 处理、正确的架构重启长度、共享对象关闭与沙箱拒绝是关键边界。 | [syscall 重启程序](../../../../user/cmds/core/syscall_restart_test.c)、`make smoke-scm-stress`、[桌面 ABI 探针](../../../../tools/tests/desktop_abi_probe.py)、[浏览器客体入口](../../../../tools/tests/xfce-web-smoke.sh)。[x86_64 历史修复记录](../../status/history/desktop-regressions-2026-10-22.md)记录了真实浏览器交互；脚本本身注明视觉交互需另行确认，不能仅凭启动标记关闭应用路径。 |
 | OpenJDK 21 / Minecraft；[客户端范围](../../distro/minecraft.md) | clone/TLS/futex、Linux 信号、文件映射、动态库加载、socket/ioctl(SIOCGIFCONF)、设备 ioctl 与共享描述符。接口尺寸查询、短缓冲区不越界、线程与共享映射寿命、退出及存档重载需保持一致。 | [网卡枚举契约](interface-enumeration.md)、`make smoke-net-iface`；[客户端客体入口](../../../../tools/tests/xfce-minecraft-smoke.sh)与[实际保存/重载步骤](../../distro/minecraft.md#验证方法)。[历史桌面记录](../../status/history/desktop-regressions-2026-10-22.md)不升级为当前候选或所有架构通过；账号登录、Realms 和联机仍按现有应用范围披露。 |
-| CLI/桌面的 curl 与网络查询工具；[CLI world](../../../../packages/world/cli.world) | socket/connect/send/recv、setsockopt/getsockopt、接口 ioctl/netlink 与地址族校验。TCP 连通、接口枚举和 UDP DNS 是不同契约，不能互相替代；不支持的选项/地址族必须给出真实错误。 | [上游用户态接口探针](../../../../user/tests/test_upstream_userland.c)、`make smoke-net-iface`及[HTTP/HTTPS 入口](../../../../tools/tests/xfce-web-smoke.sh)。CLI world 中保留的旧网络失败描述须与当前实现核对，不能直接当作现行故障，也不能用一次 HTTP 200 宣称网络工具全部可用。 |
+| CLI/桌面的 curl 与网络查询工具；[CLI world](../../../../packages/world/cli.world) | socket/connect/send/recv、setsockopt/getsockopt、接口 ioctl/netlink 与地址族校验。TCP 连通、接口枚举和 UDP DNS 是不同契约，不能互相替代；不支持的选项/地址族必须给出真实错误。 | [上游用户态接口探针](../../../../user/tests/test_upstream_userland.c)、`make smoke-net-iface`及[HTTP/HTTPS 入口](../../../../tools/tests/xfce-web-smoke.sh)。本轮 CLI 的 ip 接口/地址/路由与本地 HTTP 通过；dig 在 IP_RECVERR 返回 EOPNOTSUPP 后退出，尚未发出 UDP 查询，nslookup 分项尚未执行。不能以 HTTP 通过代替 DNS 验收。 |
 
 ## 本轮直接验证的共享调用
 
@@ -22,7 +22,7 @@
 
 ## 本轮真实客体运行（2026-11-16）
 
-以下证据均为 RV64 QEMU virt、ABI=both、SMP2；使用私有磁盘副本和离线临时安装，不访问网络。各报告记录实际冻结内核/镜像及脚本哈希；这些有界运行不自动代表全部正式支持配置的最终候选通过。证据目录前缀为 `build/evidence/v1-closeout-20261116/`。
+以下证据均为 RV64 QEMU virt、ABI=both、SMP2；使用私有磁盘副本；安装期检查使用离线临时包，CLI 网络检查仅访问宿主本地 HTTP/UDP DNS 夹具。各报告记录实际冻结内核/镜像及脚本哈希；这些有界运行不自动代表全部正式支持配置的最终候选通过。证据目录前缀为 `build/evidence/v1-closeout-20261116/`。
 
 | 已完成行为 | 可复核证据与范围 |
 | --- | --- |
@@ -32,6 +32,7 @@
 | 目录跨父移动/替换/exchange、自身子树拒绝与同 inode no-op | `directory-rename/final/report.json` 为 PASS，自然关机、ext4/FAT 检查 0；有宿主 Linux 对照与旧内核错误计数/清理失败负控。 |
 | Python 离线构建、pip target 安装、模块导入及完整临时目录清理 | `directory-rename/pip-verified/report.json` 为 PASS，正常写回、自然关机，ext4/FAT 检查 0。 |
 | syscall trace 慢调用扫描与真实 Node 父/子进程 | `syscall-trace-race/verified/report.json` 为 PASS，实际 44 条慢扫描记录、预期子进程输出、无 UBSAN/内核故障，自然关机及 ext4/FAT 检查 0；另有确定性交错宿主检查。 |
+| CLI 的 Netlink 缓冲区、ip 接口/地址/路由及本地 HTTP | `cli-application/netlink-fixed/report.json` 的 interfaces/http 分项 PASS；缓冲区设置/查询与超限发送拒绝均通过，HTTP 夹具实际收到请求。CLI 整体仍 FAIL：bash 管道 SIGSEGV、chroot mountinfo 暴露全局路径、dig 的 IP_RECVERR 不支持；DNS 夹具未收到查询。QEMU 自然退出，ext4/FAT 只读检查均为 0。 |
 
 此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。N08 继续跟踪表中其余应用关键边界与候选证据，N21 保留其已声明的其它恢复要求。
 
