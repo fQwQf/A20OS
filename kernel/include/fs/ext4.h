@@ -291,6 +291,8 @@ typedef struct ext4_sb_info {
     /* No-journal RW mounts clear VALID_FS before exposing the filesystem and
      * set it only after a successful checked flush at unmount. */
     int mount_state_started;
+    /* Intrusive list of live orphan owners, guarded by metadata_lock. */
+    struct ext4_vnode_priv *orphan_vnodes;
     bcache_t *bc;
     mutex_t alloc_lock;
     /* Namespace lock: read mode for lookups (concurrent cold lookups through
@@ -317,11 +319,9 @@ typedef struct ext4_vnode_priv {
     uint64_t        file_size;
     int             type;
     int             unlinked;   /* dirent removed; free blocks+inode on release */
-    /* The orphan-chain "next" this vnode's unlink wrote into the inode's
-     * i_dtime.  The deferred reap only acts when the inode still carries this
-     * exact value: once the entry is gone, or the inode number has been
-     * reused, this vnode no longer owns a chain entry. */
-    uint32_t        orphan_next;
+    /* Ownership survives predecessor/next edits. Reap retires the owner
+     * before this inode number can be allocated to another vnode. */
+    struct ext4_vnode_priv *orphan_owner_next;
     uint32_t        open_count;  /* live vfiles sharing this canonical vnode */
 } ext4_vnode_priv_t;
 

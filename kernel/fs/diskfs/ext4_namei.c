@@ -427,6 +427,50 @@ static int ext4_orphan_truncate_unlinked_inode(void *ctx, uint32_t ino)
     return 0;
 }
 
+/* All owner-list operations run under metadata_lock. An inode's on-disk
+ * i_dtime is a mutable list link, not an identity token for its live vnode. */
+static int ext4_orphan_vnode_registered(ext4_sb_info_t *sb,
+                                        ext4_vnode_priv_t *owner)
+{
+    for (ext4_vnode_priv_t *p = sb->orphan_vnodes; p; p = p->orphan_owner_next)
+        if (p == owner) return 1;
+    return 0;
+}
+
+static void ext4_orphan_unregister_vnode(ext4_sb_info_t *sb,
+                                          ext4_vnode_priv_t *owner)
+{
+    ext4_vnode_priv_t **link = &sb->orphan_vnodes;
+    while (*link && *link != owner) link = &(*link)->orphan_owner_next;
+    if (*link) *link = owner->orphan_owner_next;
+    owner->orphan_owner_next = NULL;
+}
+
+static void ext4_orphan_register_vnode(ext4_sb_info_t *sb,
+                                        ext4_vnode_priv_t *owner)
+{
+    if (!ext4_orphan_vnode_registered(sb, owner)) {
+        owner->orphan_owner_next = sb->orphan_vnodes;
+        sb->orphan_vnodes = owner;
+    }
+    __atomic_store_n(&owner->unlinked, 1, __ATOMIC_RELEASE);
+}
+
+static void ext4_orphan_retire_inode_owner(ext4_sb_info_t *sb, uint32_t ino)
+{
+    ext4_vnode_priv_t **link = &sb->orphan_vnodes;
+    while (*link) {
+        ext4_vnode_priv_t *owner = *link;
+        if (owner->inode_num != ino) {
+            link = &owner->orphan_owner_next;
+            continue;
+        }
+        *link = owner->orphan_owner_next;
+        owner->orphan_owner_next = NULL;
+        __atomic_store_n(&owner->unlinked, 0, __ATOMIC_RELEASE);
+    }
+}
+
 static int ext4_orphan_release_unlinked_inode(void *ctx, uint32_t ino)
 {
     ext4_sb_info_t *sb = ctx;
@@ -437,6 +481,7 @@ static int ext4_orphan_release_unlinked_inode(void *ctx, uint32_t ino)
     ext4_inode_mark_deleted(&inode);
     ret = ext4_write_inode(sb, ino, &inode);
     if (ret == 0) ret = ext4_free_inode(sb, ino);
+    if (ret == 0) ext4_orphan_retire_inode_owner(sb, ino);
     if (ret < 0 && sb->journal) (void)ext4_journal_poison(sb);
     return ret;
 }
@@ -706,16 +751,7 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
         printf("[EXT4] unlink orphan ino=%u refs=%d vfile_opens=%u\n", ino,
                vnode_ref_read(live), vp ?
                __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) : 0);
-        if (vp) {
-            /* Remember which chain link this vnode owns, so the deferred reap
-             * can tell "still mine" from "already reaped" or "this inode
-             * number now belongs to another file". */
-            ext4_inode_t cur;
-            if (ext4_read_inode(sb, ino, &cur) == 0)
-                __atomic_store_n(&vp->orphan_next, cur.i_dtime,
-                                 __ATOMIC_RELEASE);
-            __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
-        }
+        if (vp) ext4_orphan_register_vnode(sb, vp);
         /* The final link is gone, but open descriptors must retain dirty data
          * until their last close.  With no open descriptor, discard unpinned
          * pages so deleted temporary files do not consume writeback bandwidth;
@@ -837,7 +873,6 @@ void ext4_release_vn(vnode_t *vn) {
         /* Inode was unlinked while still referenced: reclaim its blocks
          * and the inode itself now that the last reference is gone. */
         ext4_sb_info_t *sb = p->sb;
-        p->unlinked = 0;
         rw_mutex_write_lock(&sb->metadata_lock);
         ext4_inode_t cur;
         int read_ok = ext4_orphan_read_vnode_owner(sb, p->inode_num, &cur) == 0;
@@ -845,8 +880,7 @@ void ext4_release_vn(vnode_t *vn) {
          * number has been reused: the reap would fail noisily (and poison a
          * healthy journal) or free another file's inode. */
         int owned = read_ok && cur.i_links_count == 0 &&
-                    cur.i_dtime == __atomic_load_n(&p->orphan_next,
-                                                   __ATOMIC_ACQUIRE);
+                    ext4_orphan_vnode_registered(sb, p);
         int ret = !read_ok ? -EIO : (owned ? ext4_orphan_reap(sb, p->inode_num)
                                            : 0);
         if (ret < 0) {
@@ -863,6 +897,10 @@ void ext4_release_vn(vnode_t *vn) {
         } else {
             vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         }
+        /* No callback may retain a pointer to the vnode after last put.
+         * An unsuccessful reap still has its durable orphan for recovery. */
+        ext4_orphan_unregister_vnode(sb, p);
+        __atomic_store_n(&p->unlinked, 0, __ATOMIC_RELEASE);
         rw_mutex_write_unlock(&sb->metadata_lock);
     }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
@@ -891,8 +929,7 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
     ext4_inode_t cur;
     int read_ok = ext4_orphan_read_vnode_owner(sb, p->inode_num, &cur) == 0;
     int owned = read_ok && cur.i_links_count == 0 &&
-                cur.i_dtime == __atomic_load_n(&p->orphan_next,
-                                               __ATOMIC_ACQUIRE);
+                ext4_orphan_vnode_registered(sb, p);
     if (!read_ok) {
         ret = -EIO;
     } else if (!owned) {
@@ -903,6 +940,7 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
     if (ret < 0) {
         if (read_ok && sb->journal) (void)ext4_journal_poison(sb);
     } else {
+        ext4_orphan_unregister_vnode(sb, p);
         __atomic_store_n(&p->unlinked, 0, __ATOMIC_RELEASE);
         vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
     }
@@ -1245,9 +1283,6 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     /* An empty directory loses its parent entry and its self link together.
      * Record that zero-link inode on disk before it becomes unreachable. */
     if (cdi.i_links_count != 2) return -EIO;
-    uint32_t orphan_next;
-    r = ext4_orphan_read_head(p->sb, &orphan_next);
-    if (r < 0) return r;
     /* Reject a count-write failure before removing the directory name. */
     r = ext4_account_directory(p->sb, child_ino, -1);
     if (r < 0) return r;
@@ -1272,10 +1307,7 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     vnode_t *live = ext4_vnode_cache_remove(p->sb, child_ino);
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
-        if (vp) {
-            __atomic_store_n(&vp->orphan_next, orphan_next, __ATOMIC_RELEASE);
-            __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
-        }
+        if (vp) ext4_orphan_register_vnode(p->sb, vp);
         if (!vp || __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) == 0)
             page_cache_discard_unlinked(live);
         if (deferred_put) *deferred_put = live;
