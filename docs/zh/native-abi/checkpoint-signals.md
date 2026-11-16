@@ -26,4 +26,4 @@ Native mlibc 可以把部分 POSIX 信号 API 映射到检查点协议，但不�
 
 1.0 保留现有通知、屏蔽、等待唤醒、任务权限和强制终止的正确性要求。通知丢失、错误作用域、无法终止任务或资源泄漏属于现有功能缺陷，继续处理；不再新增“实现完整 Native 异步信号”的发布门槛。
 
-现有实现与运行范围见 [Native 运行时现状](../status/current/native-abi-runtime-status.md)，事件接入边界见 [Channel / Event Queue](05-ipc.md)。本次范围决定没有新增实现或运行验证，也不改变尚未关闭的目标应用 ABI 与正式支持配置要求。
+现有实现与运行范围见 [Native 运行时现状](../status/current/native-abi-runtime-status.md)，事件接入边界见 [Channel / Event Queue](05-ipc.md)。本次范围决定没有新增实现或运行验证。目标应用 ABI 的原 N08 已按[应用契约记录](../kernel/linux-abi/application-contracts.md#应用关键边界收口2026-11-17)关闭；正式支持平台与候选验收仍按 [N18/N20](../status/gaps/triage-matrix.md) 单独跟踪。
