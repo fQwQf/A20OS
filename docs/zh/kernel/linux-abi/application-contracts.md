@@ -9,7 +9,7 @@
 | BusyBox shell、CLI 的 zsh/bash；[CLI world](../../../../packages/world/cli.world) | clone/execve/wait4、pipe2/dup/close、rt_sigaction/rt_sigprocmask、setsid/setpgid、终端 ioctl、get/setrlimit/prlimit64。管道 EOF/EPIPE、子进程收割、CLOEXEC、后台读写拒绝及非法限制组合必须有明确结果。 | `make smoke-child-exit-matrix`、`make smoke-sigchld-group`；[TTY 生产程序](../../../../user/cmds/core/tty_jobcontrol_test.c)及[运行契约](tty-jobcontrol.md)。RV64 SMP2/AArch64 SMP4 的历史记录见[本轮归档](../../archive/v1-closeout-2026-11-16.md#控制终端与作业控制)；本轮 prlimit 主机检查见下表，不能替代完整 shell 客体运行。CLI 的[控制台会话](cli-console.md)、bash/zsh 管道、命令替换、后台子进程等待和退出码已在 RV64 SMP2 通过；NPROC 默认无限制与无特权零上限拒绝也通过，见下方运行记录。 |
 | OpenRC PID 1 / supervise-daemon；[XFCE world](../../../../packages/world/xfce.world) | mknodat/openat/read/write/poll、kill/wait4、procfs、mount/reboot。FIFO 无对端的非阻塞写打开为 ENXIO，断开写为 EPIPE；PID 1 保留、监督重启、正常关机和停止错误须如实交付。 | [init 接口契约](init-compatibility.md)，[FIFO 客体检查](../../../../tools/tests/fifo_guest.py)、[环境读取检查](../../../../tools/tests/proc_environ_guest.py)、[OpenRC 监督检查](../../../../tools/tests/openrc_supervision_guest.py)。AArch64 实际 world 的历史监督恢复见[桌面状态](../../status/current/desktop-minecraft-status.md#aarch64-原生服务恢复2026-11-16)；本轮原版 OpenRC 0.63-r1 的 RV64 PID 1/default runlevel、环境读取、两次子进程退出/重启、控制 FIFO 信号、状态/停止与普通关机通过，见下方直接证据。不把精简镜像通过计为桌面/设备恢复通过。 |
 | Python 3 / Node.js/npm；[pynode world](../../../../packages/world/pynode.world) | execve、mmap/mprotect、futex、poll/epoll、clock_gettime/timerfd、socket 与基础文件 I/O。事件循环的超时/中断、关闭描述符、错误路径和安装期子进程退出须有可观察结果。 | `make smoke-poll-edge`、`make smoke-timer-edge`、`make smoke-futex-stress` 提供共享机制入口；[脚本执行与共享内存探针](../../../../tools/tests/desktop_abi_probe.py)提供客体/宿主对照。新增[离线安装期应用检查](../../../../tools/tests/application_runtime_guest.py)。Python 离线构建/安装/导入/清理、Node/npm 子进程/定时器/I/O 及各自正常写回关机均有 RV64 SMP2 通过记录，见下方运行记录。 |
-| labwc / XFCE / Firefox；[XFCE world](../../../../packages/world/xfce.world) | clone(CLONE_SIGHAND)、execve、Linux 信号与 syscall restart、seccomp、poll/epoll、Unix socket 的 SCM_RIGHTS、mmap 与设备 ioctl。线程共享处理表、SIGSYS 处理、正确的架构重启长度、共享对象关闭与沙箱拒绝是关键边界。 | [syscall 重启程序](../../../../user/cmds/core/syscall_restart_test.c)、`make smoke-scm-stress`、[桌面 ABI 探针](../../../../tools/tests/desktop_abi_probe.py)、[浏览器客体入口](../../../../tools/tests/xfce-web-smoke.sh)。[x86_64 历史修复记录](../../status/history/desktop-regressions-2026-10-22.md)记录了真实浏览器交互；脚本本身注明视觉交互需另行确认，不能仅凭启动标记关闭应用路径。 |
+| labwc / XFCE / Firefox；[XFCE world](../../../../packages/world/xfce.world) | clone(CLONE_SIGHAND)、execve、Linux 信号与 syscall restart、seccomp、poll/epoll、Unix socket 的 SCM_RIGHTS、mmap 与设备 ioctl。线程共享处理表、SIGSYS 处理、正确的架构重启长度、共享对象关闭与沙箱拒绝是关键边界。 | [syscall 重启程序](../../../../user/cmds/core/syscall_restart_test.c)、`make smoke-scm-stress`、[桌面 ABI 探针](../../../../tools/tests/desktop_abi_probe.py)、[浏览器客体入口](../../../../tools/tests/xfce-web-smoke.sh)。[x86_64 历史修复记录](../../status/history/desktop-regressions-2026-10-22.md)记录了真实浏览器交互；脚本本身注明视觉交互需另行确认，不能仅凭启动标记关闭应用路径。本轮 x86_64 原版 Wayland 路径的真实鼠标/英文/Rime 中文输入、HTTP/TLS、标签页/刷新和正常退出已通过，见下方记录。 |
 | OpenJDK 21 / Minecraft；[客户端范围](../../distro/minecraft.md) | clone/TLS/futex、Linux 信号、文件映射、动态库加载、socket/ioctl(SIOCGIFCONF)、设备 ioctl 与共享描述符。接口尺寸查询、短缓冲区不越界、线程与共享映射寿命、退出及存档重载需保持一致。 | [网卡枚举契约](interface-enumeration.md)、`make smoke-net-iface`；[客户端客体入口](../../../../tools/tests/xfce-minecraft-smoke.sh)与[实际保存/重载步骤](../../distro/minecraft.md#验证方法)。[历史桌面记录](../../status/history/desktop-regressions-2026-10-22.md)不升级为当前候选或所有架构通过；账号登录、Realms 和联机仍按现有应用范围披露。本轮 x86_64 OpenJDK 的映射 I/O、线程/TLS、Java 子进程、网卡枚举、回环 TCP、LWJGL/GLFW 加载与正常退出钩子已直接通过；Minecraft 的移动/跳跃、背包、鼠标转向、保存/退出及同盘冷启动重载也已通过，见下方本轮记录。 |
 | CLI/桌面的 curl 与网络查询工具；[CLI world](../../../../packages/world/cli.world) | socket/connect/send/recv、setsockopt/getsockopt、接口 ioctl/netlink 与地址族校验。TCP 连通、接口枚举和 UDP DNS 是不同契约，不能互相替代；不支持的选项/地址族必须给出真实错误。 | [上游用户态接口探针](../../../../user/tests/test_upstream_userland.c)、`make smoke-net-iface`及[HTTP/HTTPS 入口](../../../../tools/tests/xfce-web-smoke.sh)。本轮 CLI 的 ip 接口/地址/路由、本地 HTTP 及 dig/nslookup 的真实 UDP DNS 查询均通过；[UDP 错误队列](udp-error-queue.md)的 IPv4/IPv6 ICMP 拒绝、就绪与消费边界通过。测试范围为本地服务与回环错误，不扩大为公网/全部后端认证。 |
 
@@ -39,7 +39,7 @@
 | CLI 登录会话、尺寸、回收、respawn 与普通关机 | `cli-console/verified/report.json` 为 PASS，耗时 27.946 秒；同一启动中的两个 getty 会话 SID 11/91 均验证控制终端/前台组、120×40 尺寸、termios 恢复、当前 zsh 的 resize-console 变量更新和孤儿回收。exit 后新会话恢复；普通 poweroff 由 BusyBox init 完成，自然关机及 ext4/FAT 只读检查均为 0。 |
 | 原版 OpenRC PID 1、监督/控制 FIFO 与普通关机 | `openrc-runtime/control-verified/report.json` 为 PASS，耗时 11.335 秒；PID 1 的 `/proc/1/exe` 为 `/sbin/init`，文件哈希与 OpenRC 相同；default runlevel、proc environ、监督进程 161 的子进程 162→168→170、真实控制 FIFO 信号与服务停止通过；PID 1 接收普通关机 FIFO 命令并完成 TERM/KILL/sync，自然退出 0、ext4/FAT 只读检查均为 0。范围为精简 OpenRC world，不代表图形桌面、可选硬件服务或实机复位通过。 |
 
-此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失、UDP DNS 阻塞和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。CLI 启动控制终端与尺寸问题已关闭，契约和范围见[CLI 控制台](cli-console.md)。OpenRC 的上述有界服务生命周期不再列为未验证项；N08 继续跟踪桌面/浏览器、JVM/客户端等剩余应用关键边界与候选证据，N21 保留其已声明的其它恢复要求。
+此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失、UDP DNS 阻塞和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。CLI 启动控制终端与尺寸问题已关闭，契约和范围见[CLI 控制台](cli-console.md)。OpenRC 的上述有界服务生命周期不再列为未验证项；N08 继续跟踪未被上述应用运行证明的关键错误/权限边界与候选证据，N21 保留其已声明的其它恢复要求。
 
 ## x86_64 桌面与 JVM 的直接运行（2026-11-16）
 
@@ -68,8 +68,21 @@ virtio-gpu/virgl、虚拟键鼠与 HDA。输入哈希、参数与客体源码记
 
 首个 `first` 尝试在 QEMU 启动参数处失败；`second` 的宿主截图检查失败后未完成输入，
 均保留原始记录。`minecraft-first` 在欢迎界面后观察进程/客体终止，也不升级为通过。
-N08 不再重复要求上述 Minecraft 保存/重载与实际交互；继续保留浏览器图形输入/稳定退出
-和其余已声明的候选范围，不新增长驻留或全 syscall/全架构矩阵。
+N08 不再重复要求上述 Minecraft 保存/重载与实际交互。Firefox 的真实输入/正常退出也已
+通过 `firefox-focus-verified/report.json`（77.723 秒）：HTTP 与验证证书的 HTTPS DOM、
+标签页/刷新、可信鼠标点击、真实键盘 `a20` 和 Rime `你好`，浏览器正常退出 0，
+桌面 D-Bus/OpenRC 自然关机，ext4/FAT 只读检查 0；实际截图已核对。
+
+此前 `firefox-english` 的 SIGSEGV（-11）和其它失败保持原记录；它们使用的 Marionette
+默认把 `focusmanager.testmode` 设为 true，DOM 虽有焦点，GTK IME 的窗口指针却始终为
+NULL。临时测试 profile 显式恢复 false 后，原版 `im=wayland` 路径收到 OnFocusWindow，
+英文与中文提交均通过；不是更改生产信号、沙箱或输入法策略。IBus GTK 模块的候选启动器
+只能避开崩溃，未解决中文输入，已经撤掉，未进入生产 overlay。
+[Mozilla 说明](https://firefox-source-docs.mozilla.org/remote/Prefs.html)明确用户偏好优先于
+自动化推荐值；公共浏览器探针现在使用上述正常焦点配置的临时 profile。
+
+剩余范围为表中尚未有直接证据的关键错误/权限语义及候选收口；不再把浏览器文本输入、
+正常退出或已经通过的 JVM/Minecraft 行为列为未完成，也不新增长驻留或穷尽矩阵。
 
 ## 证据与关闭规则
 
