@@ -9,11 +9,13 @@
 #include "core/bootargs.h"
 #include "core/cpu.h"
 #include "core/defs.h"
+#include "core/errno.h"
 #include "core/klog.h"
 #include "core/lock.h"
 #include "core/perf.h"
 #include "core/string.h"
 #include "mm/mm.h"
+#include <stdint.h>
 
 #define E1000_VENDOR_INTEL 0x8086U
 /* Common e1000 / e1000e PCI device IDs (Linux e1000/e1000e supported set). */
@@ -28,6 +30,9 @@
 #define E1000_ICR    0x00C0U
 #define E1000_IMS    0x00D0U
 #define E1000_IMC    0x00D8U
+#define E1000_CTRL_RST (1U << 26)
+#define E1000_CTRL_GIO_MASTER_DISABLE (1U << 2)
+#define E1000_STATUS_GIO_MASTER_ENABLE (1U << 19)
 /* ITR (interrupt throttle control) exists only on the e1000e-generation parts;
  * on the 82540EM / 82545EM / 82546EB / 82541PI it is a reserved hole in the
  * register file.  e1000_itr_init() gates every write to it on the device id, so
@@ -111,14 +116,8 @@
 #define E1000_TXD_CMD_IFCS   (1U << 1)
 #define E1000_TXD_CMD_RS     (1U << 3)
 #define E1000_TXD_STAT_DD    (1U << 0)
-/* DD in a *transmit* descriptor is software-owned: this driver never relies on
- * the device setting it, only on the TDH/TDT pair, so ownership is decided
- * entirely by comparing nic->tx_done against nic->tx_next (see
- * e1000_reclaim_tx_locked()).  DD = 1 is still written on every slot the
- * reclaim path hands back, and probe pre-arms the whole ring, because the
- * descriptor is then in the exact shape the device expects to find free and a
- * slot left zeroed is the one state from which the device must not be asked
- * to transmit. */
+/* RS requests the device's DD writeback. Only that writeback returns the
+ * descriptor and payload to software; a TDH read can pass buffered DMA writes. */
 
 /* Interrupt causes enabled in IMS when a line is registered: TX descriptor
  * write-back, link status change, RX overrun, and the RX timer.  ICR is
@@ -243,16 +242,16 @@ typedef struct {
 
 typedef struct {
     uintptr_t regs;
+    device_t *device;
+    int pcie;
+    int ready;
+    int closing;
+    int hardware_stopped;
     uint8_t mac[6];
     uint32_t rx_next;
     uint32_t tx_next;
-    /* The TX descriptor the device has not yet retired, i.e. our own mirror of
-     * TDH.  Everything from here up to tx_next is in flight and e1000_send()
-     * must not touch it; e1000_reclaim_tx_locked() advances it.  Without this
-     * the ring had no notion of "done" at all: send() only ever checked the
-     * per-descriptor DD bit, which a descriptor cleared once and nothing in
-     * the file ever set again, so a ring that wrapped once had no free slot
-     * left and every later send returned -1. */
+    /* Oldest submitted descriptor not yet observed with device-written DD.
+     * [tx_done, tx_next) remains device-owned, independent of TDH prefetch. */
     uint32_t tx_done;
     /* LOCK_ORDER: per-NIC lock protects MMIO register sequencing and the
      * TX/RX descriptor rings plus their bounce buffers.  It is innermost:
@@ -305,6 +304,8 @@ typedef struct {
     int rx_multi_reported;
 } e1000_device_t;
 
+static int e1000_stop(void *context);
+
 static inline uint32_t e1000_read(e1000_device_t *nic, uint32_t reg)
 {
     return readl((const volatile void *)(nic->regs + reg));
@@ -313,6 +314,61 @@ static inline uint32_t e1000_read(e1000_device_t *nic, uint32_t reg)
 static inline void e1000_write(e1000_device_t *nic, uint32_t reg, uint32_t value)
 {
     writel(value, (volatile void *)(nic->regs + reg));
+}
+
+static int e1000_hardware_stop(e1000_device_t *nic)
+{
+    if (nic->hardware_stopped || !nic->regs)
+        return 0;
+    uint32_t ctrl = e1000_read(nic, E1000_CTRL);
+    if (ctrl == UINT32_MAX)
+        return -ENODEV;
+    e1000_write(nic, E1000_IMC, UINT32_MAX);
+    e1000_write(nic, E1000_RCTL, 0);
+    e1000_write(nic, E1000_TCTL, E1000_TCTL_PSP);
+    if (e1000_read(nic, E1000_STATUS) == UINT32_MAX)
+        return -ENODEV;
+    if (nic->pcie) {
+        /* Only 82574 implements this pending-master acknowledgement. */
+        e1000_write(nic, E1000_CTRL, ctrl | E1000_CTRL_GIO_MASTER_DISABLE);
+        for (unsigned i = 0; i < 1000U; i++) {
+            uint32_t status = e1000_read(nic, E1000_STATUS);
+            if (status == UINT32_MAX)
+                return -ENODEV;
+            /* A later bind may re-enable the master. Keep the old binding
+             * if either engine ignored disable, even after PCIe DMA drained. */
+            if (!(status & E1000_STATUS_GIO_MASTER_ENABLE) &&
+                !(e1000_read(nic, E1000_RCTL) & E1000_RCTL_EN) &&
+                !(e1000_read(nic, E1000_TCTL) & E1000_TCTL_EN)) {
+                nic->hardware_stopped = 1;
+                return 0;
+            }
+            udelay(100);
+        }
+    } else {
+        /* Legacy PCI uses the documented engine-disable/10ms drain followed
+         * by global MAC reset and a 5ms settle interval. RDLEN/TDLEN are not
+         * DMA-pending status (QEMU also preserves them across CTRL.RST). */
+        mdelay(10);
+        ctrl = e1000_read(nic, E1000_CTRL);
+        if (ctrl == UINT32_MAX)
+            return -ENODEV;
+        e1000_write(nic, E1000_CTRL, ctrl | E1000_CTRL_RST);
+        mdelay(5);
+        for (unsigned i = 0; i < 1000U; i++) {
+            ctrl = e1000_read(nic, E1000_CTRL);
+            if (ctrl == UINT32_MAX)
+                return -ENODEV;
+            if (!(ctrl & E1000_CTRL_RST) &&
+                !(e1000_read(nic, E1000_RCTL) & E1000_RCTL_EN) &&
+                !(e1000_read(nic, E1000_TCTL) & E1000_TCTL_EN)) {
+                nic->hardware_stopped = 1;
+                return 0;
+            }
+            udelay(100);
+        }
+    }
+    return -ETIMEDOUT;
 }
 
 /*
@@ -392,29 +448,17 @@ static int e1000_alloc_rings(e1000_device_t *nic, device_t *dev)
     return 0;
 }
 
-/* Hand every descriptor the device has retired back to software.
- *
- * TDH is the descriptor the device is about to read, so everything from the
- * software mirror tx_done up to TDH has left the wire.  Each one is re-armed
- * with DD = 1 (see the note on E1000_TXD_STAT_DD) and pushed to the device,
- * and tx_done catches up.  The walk is bounded by the ring so a device that
- * never advances TDH costs one pass and then stops rather than spinning.
- *
- * Called from two places, both holding nic->lock: the IRQ handler (on the TXDW
- * cause) and the class .poll hook.  That is the whole completion path -- an
- * interrupt-driven run reclaims here and a polling run reclaims from the same
- * function, so the ring cannot be starved by a cause that never fires. */
+/* IRQ and polling share this bounded walk under nic->lock. Intel's RS/DD
+ * protocol orders descriptor writeback after data DMA; reading TDH does not
+ * provide that ownership guarantee. Never synthesize a completion in software. */
 static unsigned e1000_reclaim_tx_locked(e1000_device_t *nic)
 {
-    uint32_t head = e1000_read(nic, E1000_TDH) % E1000_RING_SIZE;
     unsigned freed = 0;
-    while (nic->tx_done != head && freed < E1000_RING_SIZE) {
+    while (nic->tx_done != nic->tx_next && freed < E1000_RING_SIZE) {
         uint32_t slot = nic->tx_done;
         arch_dma_sync_for_cpu(&nic->tx[slot], sizeof(nic->tx[slot]));
-        nic->tx[slot].status = E1000_TXD_STAT_DD;
-        nic->tx[slot].css = 0;
-        nic->tx[slot].special = 0;
-        arch_dma_sync_for_device(&nic->tx[slot], sizeof(nic->tx[slot]));
+        if (!(__atomic_load_n(&nic->tx[slot].status, __ATOMIC_ACQUIRE) & E1000_TXD_STAT_DD))
+            break;
         nic->tx_done = (slot + 1U) % E1000_RING_SIZE;
         freed++;
     }
@@ -458,6 +502,11 @@ static int e1000_irq_handler(int irq, void *priv) {
         a20_perf_count(A20_PERF_E1000_IRQ_EMPTY);
         return 0;
     }
+    /* ICR is read-to-clear even while closing. Keep pending causes from
+     * holding a shared line asserted, without touching a retiring ring. */
+    if (icr == UINT32_MAX || __atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&nic->ready, __ATOMIC_ACQUIRE))
+        return 0;
 
     if (icr & E1000_ICR_RX_CAUSES) {
         nic->irq_rx++;
@@ -471,11 +520,13 @@ static int e1000_irq_handler(int irq, void *priv) {
          * receive traffic under g_lwip_lock would stop the transmit side
          * retiring and eventually stall e1000_send(). */
         uint64_t lf = spin_lock_irqsave(&nic->lock);
-        e1000_reclaim_tx_locked(nic);
+        if (!__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE))
+            e1000_reclaim_tx_locked(nic);
         spin_unlock_irqrestore(&nic->lock, lf);
     }
 
-    net_stack_device_interrupt(dev);
+    if (!__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE))
+        net_stack_device_interrupt(dev);
     return 0;
 }
 
@@ -497,20 +548,28 @@ static void e1000_poll(device_t *dev)
     if (!nic || !nic->tx)
         return;
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return;
+    }
     (void)e1000_read(nic, E1000_ICR);
     e1000_reclaim_tx_locked(nic);
-    spin_unlock_irqrestore(&nic->lock, flags);
 
     /* Process context, so this is the one place per-vector delivery may be
      * printed.  Reporting only once both entries have fired keeps the line
      * meaningful: it is the evidence that the IVAR mapping sends RX and TX
      * down different table entries, not just that one vector is alive. */
-    if (nic->msix_vectors > 0 && !nic->irq_vec_reported &&
-        nic->irq_vec[0] && nic->irq_vec[1]) {
+    int report = nic->msix_vectors > 0 && !nic->irq_vec_reported &&
+                 nic->irq_vec[0] && nic->irq_vec[1];
+    int base = nic->msix_base;
+    uint64_t rx_irqs = nic->irq_vec[0], tx_irqs = nic->irq_vec[1];
+    if (report)
         nic->irq_vec_reported = 1;
+    spin_unlock_irqrestore(&nic->lock, flags);
+    if (report) {
         kinfo("[E1000] MSI-X vectors carried traffic: v%d=%llu v%d=%llu\n",
-              nic->msix_base, (unsigned long long)nic->irq_vec[0],
-              nic->msix_base + 1, (unsigned long long)nic->irq_vec[1]);
+              base, (unsigned long long)rx_irqs,
+              base + 1, (unsigned long long)tx_irqs);
     }
 }
 
@@ -522,7 +581,8 @@ static void e1000_poll(device_t *dev)
 static int e1000_class_rx_irq_driven(device_t *dev)
 {
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
-    return nic && nic->irq_registered && !nic->poll_only;
+    return nic && !__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&nic->irq_registered, __ATOMIC_ACQUIRE) && !nic->poll_only;
 }
 
 static int e1000_send(device_t *dev, const void *packet, size_t length)
@@ -532,6 +592,10 @@ static int e1000_send(device_t *dev, const void *packet, size_t length)
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
     /* Reclaim before deciding the slot is busy.  Waiting for the completion
      * interrupt or for the next poll hook to run first would turn a transient
      * ring-full into a dropped frame, and the caller has no way to retry: the
@@ -545,7 +609,7 @@ static int e1000_send(device_t *dev, const void *packet, size_t length)
          * inventing an EAGAIN the net path does not act on.
          *
          * The test is against slot + 1, not slot, because the two indices can
-         * only describe the ring between them.  tx_done mirrors TDH and
+         * only describe the ring between them. tx_done follows device DD and
          * tx_next is what TDT is published as, so the descriptors the device
          * still owns are exactly [tx_done, tx_next): equal indices therefore
          * mean an EMPTY ring, and the last free slot is the one whose successor
@@ -587,6 +651,10 @@ static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
+    if (__atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE) || !nic->ready) {
+        spin_unlock_irqrestore(&nic->lock, flags);
+        return -ENODEV;
+    }
     uint32_t slot = nic->rx_next;
     arch_dma_sync_for_cpu(&nic->rx[slot], sizeof(nic->rx[slot]));
     if (!(nic->rx[slot].status & E1000_RXD_STAT_DD)) {
@@ -860,7 +928,7 @@ static void e1000_setup_interrupts(device_t *dev, e1000_device_t *nic)
              * the function enabled. */
             e1000_msix_commit(dev, nic);
             nic->irq = nic->msix_base;
-            nic->irq_registered = 1;
+            __atomic_store_n(&nic->irq_registered, 1, __ATOMIC_RELEASE);
         }
     }
     /* MSI is the next step down from MSI-X, not a replacement for it: one
@@ -873,7 +941,7 @@ static void e1000_setup_interrupts(device_t *dev, e1000_device_t *nic)
                 if (request_irq((uint32_t)vec, e1000_irq_handler, 0,
                                 dev) == 0) {
                     nic->irq = vec;
-                    nic->irq_registered = 1;
+                    __atomic_store_n(&nic->irq_registered, 1, __ATOMIC_RELEASE);
                     nic->msi = 1;
                 } else {
                     pci_msi_disable(dev);
@@ -890,7 +958,7 @@ static void e1000_setup_interrupts(device_t *dev, e1000_device_t *nic)
             if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
                             dev) == 0) {
                 nic->irq = irq;
-                nic->irq_registered = 1;
+                __atomic_store_n(&nic->irq_registered, 1, __ATOMIC_RELEASE);
             } else {
                 kinfo("[E1000] IRQ %d registration failed; using polling\n",
                       irq);
@@ -909,6 +977,9 @@ static void e1000_setup_interrupts(device_t *dev, e1000_device_t *nic)
 
 static int e1000_probe(device_t *dev)
 {
+    int managed = device_probe_use_remove(dev);
+    if (managed)
+        return managed;
     if (pci_enable_and_assign_bars(dev) < 0)
         return -1;
     resource_t *bar = pci_get_bar_resource(dev, 0);
@@ -918,16 +989,22 @@ static int e1000_probe(device_t *dev)
     if (!bar || bar->end < bar->start || bar->end - bar->start + 1U < 0x6000U)
         return -1;
 
-    uintptr_t regs = (uintptr_t)pci_map_bar(dev, 0);
-    if (!regs)
-        return -EIO;
     e1000_device_t *nic = kmalloc(sizeof(*nic));
     if (!nic)
         return -ENOMEM;
     memset(nic, 0, sizeof(*nic));
+    nic->device = dev;
+    nic->pcie = (uint16_t)pci_device_id(dev) == E1000_DEVICE_82574L;
+    nic->irq = -1;
     nic->msix_base = -1;
     spin_init(&nic->lock);
-    nic->regs = regs;
+    dev->drv_priv = nic;
+    int execution = device_add_execution_action(dev, e1000_stop, NULL, nic);
+    if (execution)
+        return execution;
+    nic->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!nic->regs)
+        return -EIO;
 
     uint32_t ral = e1000_read(nic, E1000_RAL0);
     uint32_t rah = e1000_read(nic, E1000_RAH0);
@@ -943,6 +1020,9 @@ static int e1000_probe(device_t *dev)
      * unprogrammed device is told apart from a live one. */
     int rc = -EINVAL;
     if (!(rah & (1U << 31)))
+        goto free_nic;
+    rc = e1000_hardware_stop(nic);
+    if (rc)
         goto free_nic;
 
     /* 64-bit, from what this driver itself programs rather than from a
@@ -976,7 +1056,19 @@ static int e1000_probe(device_t *dev)
      * become a pending interrupt before the handler is registered below. */
     e1000_write(nic, E1000_IMC, 0xFFFFFFFFU);
     (void)e1000_read(nic, E1000_ICR);
-    e1000_write(nic, E1000_CTRL, e1000_read(nic, E1000_CTRL) | E1000_CTRL_SLU);
+    uint32_t ctrl = e1000_read(nic, E1000_CTRL);
+    if (ctrl == UINT32_MAX) {
+        rc = -ENODEV;
+        goto free_nic;
+    }
+    nic->hardware_stopped = 0;
+    if (nic->pcie)
+        ctrl &= ~E1000_CTRL_GIO_MASTER_DISABLE;
+    e1000_write(nic, E1000_CTRL, ctrl | E1000_CTRL_SLU);
+    /* Legacy reset reloads the RARs. Restore the validated firmware MAC before
+     * enabling the data plane, independent of EEPROM reload timing. */
+    e1000_write(nic, E1000_RAL0, ral);
+    e1000_write(nic, E1000_RAH0, rah);
 
     for (uint32_t i = 0; i < E1000_RING_SIZE; i++) {
         nic->rx[i].address = va_to_pa(nic->rx_buf[i]);
@@ -1041,7 +1133,7 @@ static int e1000_probe(device_t *dev)
     e1000_write(nic, E1000_RCTL, E1000_RCTL_EN | E1000_RCTL_BAM |
                 E1000_RCTL_SECRC | E1000_RCTL_LPE);
 
-    dev->drv_priv = nic;
+    __atomic_store_n(&nic->ready, 1, __ATOMIC_RELEASE);
     /* Throttle before the causes are unmasked below, so the first interrupt
      * this device can raise is already governed by ITR. */
     e1000_itr_init(dev, nic);
@@ -1058,17 +1150,25 @@ static int e1000_probe(device_t *dev)
     return 0;
 
 free_nic:
-    kfree(nic);
+    /* Core owns the partial context and runs fallible stop/remove on error. */
     return rc;
 }
 
-static int e1000_remove(device_t *dev)
+static int e1000_stop(void *context)
 {
-    e1000_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic)
+    e1000_device_t *nic = context;
+    __atomic_store_n(&nic->closing, 1, __ATOMIC_RELEASE);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&nic->lock, &flags))
+        return -EBUSY;
+    __atomic_store_n(&nic->ready, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&nic->lock, flags);
+    int ret = e1000_hardware_stop(nic);
+    if (ret)
+        return ret;
+    if (!nic->irq_registered)
         return 0;
-    /* Mask device causes before releasing the handler. */
-    e1000_write(nic, E1000_IMC, 0xFFFFFFFFU);
+    device_t *dev = nic->device;
     if (nic->msix_vectors > 0) {
         /* Both table entries have to go away while their handlers are still
          * installed, otherwise a message in flight lands on a line that has no
@@ -1083,10 +1183,18 @@ static int e1000_remove(device_t *dev)
             irq_free_vectors((uint32_t)nic->irq, 1);
         }
     }
-    e1000_write(nic, E1000_RCTL, 0);
-    e1000_write(nic, E1000_TCTL, 0);
-    /* Rings go last: they are what the device was DMAing into, and RCTL/TCTL
-     * above are what stop it. */
+    __atomic_store_n(&nic->irq_registered, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+static int e1000_remove(device_t *dev)
+{
+    e1000_device_t *nic = dev ? dev->drv_priv : NULL;
+    if (!nic)
+        return 0;
+    int ret = e1000_stop(nic);
+    if (ret)
+        return ret;
     e1000_free_rings(nic);
     dev->drv_priv = NULL;
     kfree(nic);
@@ -1096,7 +1204,10 @@ static int e1000_remove(device_t *dev)
 static int e1000_link_up(device_t *dev)
 {
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
-    return nic && (e1000_read(nic, E1000_STATUS) & 2U) != 0;
+    if (!nic || __atomic_load_n(&nic->closing, __ATOMIC_ACQUIRE))
+        return 0;
+    uint32_t status = e1000_read(nic, E1000_STATUS);
+    return status != UINT32_MAX && (status & 2U) != 0;
 }
 
 static const net_dev_ops_t e1000_ops = {
@@ -1122,18 +1233,12 @@ static const device_id_t e1000_ids[] = {
     { 0 },
 };
 
-static void e1000_shutdown(device_t *dev)
-{
-    (void)e1000_remove(dev);
-}
-
 static driver_t e1000_driver = {
     .name = "e1000",
     .id_table = e1000_ids,
     .bus = &pci_bus,
     .probe = e1000_probe,
     .remove = e1000_remove,
-    .shutdown = e1000_shutdown,
     .class_ops = &e1000_ops,
     .class_type = DEV_CLASS_NET,
 };
