@@ -9,7 +9,9 @@ links the existing shell/service, Python/Node, desktop/browser, JVM and network-
 workloads to their required calls, error boundaries and checks. It distinguishes
 current direct host checks from historical application runs and missing original
 reports. N08 remains open; neither a registered workload nor a historical PASS
-establishes acceptance of the current release candidate.
+establishes acceptance of the current release candidate. The current RV64 SMP2
+pynode application run exposed a pip-flow EIO, a Node child SIGSEGV and a refused
+filesystem shutdown; those are recorded failures in the register, not PASS evidence.
 
 ## Coverage Legend
 
