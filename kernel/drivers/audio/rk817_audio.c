@@ -11,6 +11,7 @@
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/driver_core.h"
 #include "core/errno.h"
 #include "core/lock.h"
 #include "core/sync.h"
@@ -36,8 +37,11 @@ struct rk817_audio {
     size_t partial;
     unsigned irq_live;
     int owned, quarantined, seen_period, codec_touched;
+    int closing;
     uint8_t saved[0x50], saved_valid[0x50];
 };
+static int rk817_execution_stop(void *context);
+
 static uint32_t rk_read(volatile uint8_t *p, unsigned r) {
     return readl(p + r);
 }
@@ -101,11 +105,14 @@ static void transmitter(struct rk817_audio *s, int run) {
     rk_update(s->i2s, 0x10, 1U << 8, run ? 1U << 8 : 0);
     rk_update(s->i2s, 0x1c, 1, run ? 1 : 0);
 }
-/* Caller holds the controller/ring lock across every debug transaction. */
+/* Debug transactions are serialized by the ring lock, or by a closed
+ * execution context holding writer after IRQs have stopped using debug. */
 static int dma_debug(struct rk817_audio *s, uint32_t instruction,
                      uint32_t argument) {
     for (unsigned i = 0; i < 1000; i++) {
-        if (!(rk_read(s->dma, 0xd00) & 1)) {
+        uint32_t debug = rk_read(s->dma, 0xd00);
+        if (debug == 0xffffffffU) return -ENODEV;
+        if (!(debug & 1)) {
             rk_write(s->dma, 0xd08, instruction);
             rk_write(s->dma, 0xd0c, argument);
             rk_write(s->dma, 0xd04, 0);
@@ -116,17 +123,22 @@ static int dma_debug(struct rk817_audio *s, uint32_t instruction,
     return -ETIMEDOUT;
 }
 static int dma_manager_stop(struct rk817_audio *s) {
-    if (!(rk_read(s->dma, 0x30) & 1) && !(rk_read(s->dma, 0x00) & 15))
-        return 0;
+    uint32_t fault = rk_read(s->dma, 0x30), state = rk_read(s->dma, 0x00);
+    if (fault == 0xffffffffU || state == 0xffffffffU) {
+        s->quarantined = 1;
+        return -ENODEV;
+    }
+    if (!(fault & 1) && !(state & 15)) return 0;
     int r = dma_debug(s, 1U << 16, 0); /* manager DMAKILL */
     if (!r)
         for (unsigned i = 0; i < 1000; i++) {
-            if (!(rk_read(s->dma, 0x30) & 1) && !(rk_read(s->dma, 0x00) & 15))
-                return 0;
+            fault = rk_read(s->dma, 0x30); state = rk_read(s->dma, 0x00);
+            if (fault == 0xffffffffU || state == 0xffffffffU) { r = -ENODEV; break; }
+            if (!(fault & 1) && !(state & 15)) return 0;
             udelay(10);
         }
     s->quarantined = 1;
-    return -ETIMEDOUT;
+    return r ? r : -ETIMEDOUT;
 }
 static void dma_quarantine_irqs(struct rk817_audio *s) {
     /* This board topology owns this whole PL330, including both IRQ lines.
@@ -136,17 +148,19 @@ static void dma_quarantine_irqs(struct rk817_audio *s) {
     s->quarantined = 1;
 }
 static int dma_stop(struct rk817_audio *s) {
-    if ((rk_read(s->dma, 0x100) & 15) == 0)
-        return 0;
+    uint32_t state = rk_read(s->dma, 0x100), fault = rk_read(s->dma, 0x34);
+    if (state == 0xffffffffU || fault == 0xffffffffU) { s->quarantined = 1; return -ENODEV; }
+    if (!(state & 15) && !(fault & 1)) return 0;
     int r = dma_debug(s, (1U << 16) | 1, 0); /* channel0 DMAKILL */
     if (!r)
         for (unsigned i = 0; i < 1000; i++) {
-            if ((rk_read(s->dma, 0x100) & 15) == 0)
-                return 0;
+            state = rk_read(s->dma, 0x100); fault = rk_read(s->dma, 0x34);
+            if (state == 0xffffffffU || fault == 0xffffffffU) { r = -ENODEV; break; }
+            if (!(state & 15) && !(fault & 1)) return 0;
             udelay(10);
         }
     s->quarantined = 1;
-    return -ETIMEDOUT;
+    return r ? r : -ETIMEDOUT;
 }
 static int fifo_reset(struct rk817_audio *s) {
     rk_write(s->i2s, 0x20, 1);
@@ -229,6 +243,10 @@ static int rk817_irq(int irq, void *opaque) {
     }
     if (pending)
         rk_write(s->dma, 0x2c, 1);
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&s->lock, f);
+        return 1;
+    }
     if (fault) {
         transmitter(s, 0);
         s->ring.running = 0;
@@ -287,6 +305,10 @@ static int rk817_write(device_t *dev, const void *buffer, size_t count) {
     if (count > 0x7ffffffc)
         return -EOVERFLOW;
     mutex_lock(&s->writer);
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&s->writer);
+        return -ENODEV;
+    }
     if (s->quarantined) {
         mutex_unlock(&s->writer);
         return -EIO;
@@ -300,6 +322,7 @@ static int rk817_write(device_t *dev, const void *buffer, size_t count) {
     unsigned waiting = 0;
     while (done < count) {
         uint64_t f = spin_lock_irqsave(&s->lock);
+        if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) s->ring.error = -ENODEV;
         if (s->ring.error) {
             spin_unlock_irqrestore(&s->lock, f);
             break;
@@ -359,7 +382,7 @@ static int rk817_stop(device_t *d) {
     if (!s)
         return -ENODEV;
     mutex_lock(&s->writer);
-    int r = stream_reset(s);
+    int r = __atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) ? -ENODEV : stream_reset(s);
     mutex_unlock(&s->writer);
     return r;
 }
@@ -368,6 +391,7 @@ static int rk817_drain(device_t *d) {
     if (!s)
         return -ENODEV;
     mutex_lock(&s->writer);
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
     uint64_t f = spin_lock_irqsave(&s->lock);
     s->ring.draining = 1;
     if (s->partial && !s->ring.error) {
@@ -392,8 +416,11 @@ static int rk817_drain(device_t *d) {
         spin_unlock_irqrestore(&s->lock, f);
     }
     unsigned ms;
-    for (ms = 0; ms < 1500 && s->ring.running && !s->ring.error; ms++)
+    for (ms = 0; ms < 1500 && s->ring.running && !s->ring.error; ms++) {
+        if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
         mdelay(1);
+    }
+    if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
     int r = s->ring.error;
     if (ms == 1500)
         r = -ETIMEDOUT;
@@ -410,8 +437,10 @@ static int rk817_drain(device_t *d) {
     spin_unlock_irqrestore(&s->lock, f);
     if (!r) {
         unsigned i;
-        for (i = 0; i < 2000 && (rk_read(s->i2s, 0x0c) & 63); i++)
+        for (i = 0; i < 2000 && (rk_read(s->i2s, 0x0c) & 63); i++) {
+            if (__atomic_load_n(&s->closing, __ATOMIC_ACQUIRE)) { mutex_unlock(&s->writer); return -ENODEV; }
             udelay(10);
+        }
         if (i == 2000)
             r = -ETIMEDOUT;
         else
@@ -437,66 +466,82 @@ static int rk817_poll(device_t *d, short e) {
     if (!s)
         return POLLERR;
     uint64_t f = spin_lock_irqsave(&s->lock);
-    int r = s->ring.error || s->quarantined ? POLLERR
+    int r = s->ring.error || s->quarantined ||
+        __atomic_load_n(&s->closing, __ATOMIC_ACQUIRE) ? POLLERR
             : s->ring.count < PCM_PERIODS   ? e & POLLOUT
                                             : 0;
     spin_unlock_irqrestore(&s->lock, f);
     return r;
 }
-static void rk817_destroy(struct rk817_audio *s) {
-    if (!s)
-        return;
-    uint64_t flags = spin_lock_irqsave(&s->lock);
-    if (s->i2s && s->owned)
-        transmitter(s, 0);
-    s->ring.running = 0;
-    if (s->dma && s->owned) {
-        rk_update(s->dma, 0x20, 1, 0);
-        int manager = dma_manager_stop(s);
-        int channel = dma_stop(s);
-        if (manager < 0 || channel < 0) {
-            dma_quarantine_irqs(s);
-            printf("[RK817] DMA stop failed; buffers quarantined\n");
+static int codec_restore_register(struct rk817_audio *s, unsigned reg) {
+    uint8_t wanted = s->saved[reg];
+    int r = s->platform->codec_register(reg, &wanted, 1);
+    if (r < 0) return r;
+    uint8_t check = 0;
+    r = s->platform->codec_register(reg, &check, 0);
+    return r < 0 ? r : check == s->saved[reg] ? 0 : -EIO;
+}
+static int codec_restore(struct rk817_audio *s) {
+    if (!s->codec_touched) return 0;
+    /* Keep the saved image intact until all writes and readbacks succeed. */
+    int r = codec_mute(s, 1);
+    static const uint8_t off[][3] = {
+        {0x15, 15, 0}, {0x3d, 0x60, 0x60}, {0x3f, 0x18, 8},
+        {0x2f, 0x0b, 0x0b}, {0x47, 1, 1}};
+    for (unsigned i = 0; !r && i < sizeof(off) / sizeof(off[0]); i++)
+        r = codec_set(s, off[i][0], off[i][1], off[i][2]);
+    for (unsigned reg = 0x50; !r && reg-- > 0;)
+        if (s->saved_valid[reg] && reg != 0x38) r = codec_restore_register(s, reg);
+    if (!r && s->saved_valid[0x38]) {
+        mdelay(20);
+        r = codec_restore_register(s, 0x38); /* Restore mute last. */
+    }
+    if (r) {
+        (void)codec_mute(s, 1); /* Best effort only; retain owner even if bus is gone. */
+        return r;
+    }
+    s->codec_touched = 0;
+    return 0;
+}
+static int rk817_execution_stop(void *context) {
+    struct rk817_audio *s = context;
+    __atomic_store_n(&s->closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&s->writer)) return -EBUSY;
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&s->lock, &flags)) { mutex_unlock(&s->writer); return -EBUSY; }
+    int r = 0;
+    if (s->owned) {
+        uint32_t enable = rk_read(s->dma, 0x20);
+        if (enable == 0xffffffffU) r = -ENODEV;
+        else {
+            transmitter(s, 0);
+            s->ring.running = 0;
+            rk_write(s->dma, 0x20, enable & ~1U);
+            if ((rk_read(s->dma, 0x20) & 1) || (rk_read(s->i2s, 0x10) & (1U << 8)) ||
+                (rk_read(s->i2s, 0x1c) & 1)) r = -EIO;
         }
     }
     spin_unlock_irqrestore(&s->lock, flags);
-    for (unsigned i = 0; i < s->irq_live; i++)
-        free_irq(s->platform->dma_irq[i], s);
-    if (!s->quarantined) {
-        if (s->program)
-            dma_free_coherent_aligned(s->program, 4096, s->program_pa);
-        if (s->data)
-            dma_free_coherent_aligned(s->data, DATA_BYTES, s->data_pa);
+    if (!r && s->owned) {
+        /* closing plus writer exclude all other debug users while IRQ only acks. */
+        int manager = dma_manager_stop(s), channel = dma_stop(s);
+        r = manager ? manager : channel;
+        if (!r) rk_write(s->dma, 0x2c, 1);
     }
-    if (s->codec_touched) {
-        codec_mute(s, 1);
-        /* Reverse the path before restoring unrelated pre-probe settings. */
-        codec_set(s, 0x15, 15, 0);
-        codec_set(s, 0x3d, 0x60, 0x60);
-        codec_set(s, 0x3f, 0x18, 8);
-        codec_set(s, 0x2f, 0x0b, 0x0b);
-        codec_set(s, 0x47, 1, 1);
-        int restore_error = 0;
-        for (unsigned r = 0x50; r-- > 0;) {
-            if (!s->saved_valid[r] || r == 0x38)
-                continue;
-            if (s->platform->codec_register(r, &s->saved[r], 1) < 0)
-                restore_error = 1;
-        }
-        if (!restore_error && s->saved_valid[0x38]) {
-            mdelay(20);
-            if (s->platform->codec_register(0x38, &s->saved[0x38], 1) < 0)
-                restore_error = 1;
-        }
-        if (restore_error) {
-            codec_mute(s, 1);
-            printf("[RK817] Codec restore failed; retaining digital mute\n");
-        }
+    if (r && s->owned) dma_quarantine_irqs(s);
+    if (!r) r = codec_restore(s);
+    if (!r) {
+        for (unsigned i = 0; i < s->irq_live; i++) free_irq(s->platform->dma_irq[i], s);
+        s->irq_live = 0;
     }
-    if (s->i2s)
-        arch_device_unmap_mmio((void *)s->i2s, 0x1000);
-    if (s->dma)
-        arch_device_unmap_mmio((void *)s->dma, 0x4000);
+    mutex_unlock(&s->writer);
+    return r;
+}
+static void rk817_destroy(struct rk817_audio *s) {
+    if (s->program) dma_free_coherent_aligned(s->program, 4096, s->program_pa);
+    if (s->data) dma_free_coherent_aligned(s->data, DATA_BYTES, s->data_pa);
+    if (s->i2s) arch_device_unmap_mmio((void *)s->i2s, 0x1000);
+    if (s->dma) arch_device_unmap_mmio((void *)s->dma, 0x4000);
     kfree(s);
 }
 static int rk817_probe(device_t *d) {
@@ -517,22 +562,28 @@ static int rk817_probe(device_t *d) {
         device_t *provider = device_find_get_by_mmio(pas[i]);
         if (!provider)
             return -EPROBE_DEFER;
+        if (i == 0 && (provider->drv || provider->user_owned)) {
+            device_put(provider);
+            return -EBUSY;
+        }
         int e = device_add_dependency(d, provider);
         device_put(provider);
         if (e < 0)
             return e;
     }
+    int managed = device_probe_use_remove(d);
+    if (managed) return managed;
     struct rk817_audio *s = kcalloc(1, sizeof(*s));
     if (!s)
         return -ENOMEM;
     s->platform = p;
     spin_init(&s->lock);
     mutex_init(&s->writer);
-    int e = p->prepare();
-    if (e < 0) {
-        kfree(s);
-        return e;
-    }
+    d->drv_priv = s;
+    int e = device_add_execution_action(d, rk817_execution_stop, NULL, s);
+    if (e) return e;
+    e = p->prepare();
+    if (e < 0) return e;
     s->i2s = arch_device_map_mmio(r->start, 0x1000, 0);
     s->dma = arch_device_map_mmio(p->dma_pa, 0x4000, 0);
     if (!s->i2s || !s->dma) {
@@ -617,11 +668,13 @@ static int rk817_probe(device_t *d) {
     d->drv_priv = s;
     return 0;
 fail:
-    rk817_destroy(s);
-    return e;
+    return e; /* Managed core cleanup retains the binding when stop fails. */
 }
 static int rk817_remove(device_t *d) {
     struct rk817_audio *s = d->drv_priv;
+    if (!s) return 0;
+    int r = rk817_execution_stop(s);
+    if (r) return r;
     d->drv_priv = NULL;
     rk817_destroy(s);
     return 0;
