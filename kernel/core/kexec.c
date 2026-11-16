@@ -460,6 +460,12 @@ int kexec_execute(void)
     if (rc < 0)
         return rc;
 
+    /* Reject platforms with no handoff backend before closing persistent
+     * state or touching devices. The actual CPU park must still run last. */
+    if (!machine_kexec_backend_id()) {
+        rc = -EOPNOTSUPP;
+        goto fail;
+    }
     rc = driver_core_kexec_prepare();
     if (rc < 0)
         goto fail;

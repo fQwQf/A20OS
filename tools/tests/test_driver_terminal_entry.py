@@ -24,6 +24,8 @@ static int proc_has_cap(task_t *t,int c){(void)t;(void)c;return 1;}
 static a20_elf_kexec_ledger_t g_kexec_image;
 static int g_kexec_lock,g_kexec_executing,g_kexec_loading;
 static unsigned events[8],count,fail_stage,cancels,firmware_calls;
+static int backend_available=1;
+static uint32_t machine_kexec_backend_id(void){return backend_available;}
 static jmp_buf terminal;
 static uint64_t spin_lock_irqsave(int *p){(void)p;return 0;}
 static void spin_unlock_irqrestore(int *p,uint64_t f){(void)p;(void)f;}
@@ -46,6 +48,9 @@ static void reset(unsigned failed){count=cancels=firmware_calls=0;fail_stage=fai
 '''
 MAIN = r'''
 int main(void){
+ reset(0);backend_available=0;
+ assert(kexec_execute()==-EOPNOTSUPP&&!count&&!cancels&&!g_kexec_executing);
+ backend_available=1;
  for(unsigned failed=1;failed<=4;failed++){
   reset(failed);assert(kexec_execute()==-ETIMEDOUT&&!g_kexec_executing);
   assert(count==failed&&cancels==(failed==4));
