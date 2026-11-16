@@ -32,7 +32,7 @@ class XhciBulkLifetime(unittest.TestCase):
 #define XHCI_TRB_TRANSFER_EVENT 32U
 typedef struct {uint64_t parameter;uint32_t status,control;} xhci_trb_t;
 typedef struct {xhci_trb_t trbs[XHCI_RING_TRBS];uint16_t enqueue;uint8_t cycle;} xhci_ring_t;
-static unsigned bulk_bells,bulk_waits;static int wait_rc,sync_race;static uint32_t wait_remaining;static void *bulk_caller;
+static unsigned bulk_bells,bulk_waits;static int wait_rc,sync_race;static uint32_t wait_remaining,wait_cc;static void *bulk_caller;
 #undef wmb
 #define wmb() ((void)0)
 static uint64_t bulk_address(const void *p) {return (uintptr_t)p;}
@@ -58,7 +58,7 @@ static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xh
    if(wait_remaining<=trb->status)memset(small_memory,0x3c,trb->status-wait_remaining);
   }else{assert(small_memory[0]==0x55&&small_memory[trb->status-1]==0x55);}
  }
- event->status=wait_remaining;
+ event->status=wait_remaining|(wait_cc<<24);
  if(wait_rc==-ETIMEDOUT){x->fatal=1;x->running=0;}
  return wait_rc;
 }
@@ -87,7 +87,7 @@ static int xhci_wait_event(xhci_controller_t *x,uint8_t type,uint64_t pointer,xh
 
     def test_in_out_zero_and_maximum_transfer_use_private_dma(self): self.run_case('copies')
     def test_late_dma_and_failed_halt_keep_private_storage_after_caller_free(self): self.run_case('timeout')
-    def test_short_and_invalid_residual_never_publish_incomplete_input(self): self.run_case('short')
+    def test_short_reports_only_transferred_prefix_and_stall_is_distinct(self): self.run_case('short')
     def test_invalid_stopped_busy_and_missing_owner_do_not_submit(self): self.run_case('admission')
     def test_exit_during_copy_is_rechecked_before_doorbell(self): self.run_case('copy-race')
     def test_another_transfer_keeps_sole_staging_ownership(self): self.run_case('busy')

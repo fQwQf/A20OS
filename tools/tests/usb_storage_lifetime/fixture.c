@@ -5,6 +5,7 @@ static unsigned storage_configures, storage_releases, storage_interfaces;
 static unsigned storage_owned, storage_phase, storage_transferred;
 static int storage_configure_fail, storage_release_fail, storage_stop_in_io;
 static int storage_control_fail, storage_bulk_fail_stage, storage_csw_fault;
+static int storage_stall_stage, storage_stalls, storage_short_once, storage_short_csw;
 static unsigned storage_cbws, storage_trace_len;
 static char storage_trace[32];
 static usb_msc_cbw_t storage_cbw;
@@ -24,18 +25,20 @@ static int storage_control(usb_hcd_t *h, uint8_t slot,
         return 0;
     }
     usb_storage_dev_t *st = h->port_devices[0]->ifaces[0].device->drv_priv;
-    assert(st && st->lock.held && st->recovery_pending && !storage_owned);
+    assert(st && st->lock.held && st->recovery_pending);
     assert(g_driver_core_ops.held && !setup->value);
     int stage;
     if (setup->request == USB_REQ_BULK_ONLY_RESET) {
         assert(setup->request_type == (USB_TYPE_CLASS | USB_RECIP_INTERFACE));
         assert(setup->index == 0);
+        assert(!storage_owned);
         storage_record('R');
         stage = 1;
     } else {
         assert(setup->request == USB_REQ_CLEAR_FEATURE);
         assert(setup->request_type == (USB_TYPE_STANDARD | USB_RECIP_ENDPOINT));
         assert(setup->index == 0x81 || setup->index == 2);
+        assert(!(storage_owned & (setup->index == 0x81 ? 2U : 1U)));
         storage_record(setup->index == 0x81 ? 'i' : 'o');
         stage = setup->index == 0x81 ? 2 : 3;
     }
@@ -79,6 +82,11 @@ static int storage_bulk(usb_hcd_t *h, usb_urb_t *urb) {
     assert(!g_storage_lock.held);
     usb_storage_dev_t *st = urb->dev->ifaces[0].device->drv_priv;
     assert(st && st->lock.held);
+    if ((int)storage_phase + 1 == storage_stall_stage && storage_stalls) {
+        storage_stalls--;
+        if (storage_phase == 1) storage_phase = 2;
+        return -EPIPE;
+    }
     if (!storage_phase) storage_cbws++;
     if ((int)storage_phase + 1 == storage_bulk_fail_stage) {
         storage_bulk_fail_stage = 0;
@@ -102,6 +110,14 @@ static int storage_bulk(usb_hcd_t *h, usb_urb_t *urb) {
         }
     } else if (storage_phase == 1) {
         assert(urb->len <= USB_MSC_IO_CHUNK);
+        if (storage_short_once) {
+            storage_short_once = 0;
+            urb->actual_length = urb->len / 2;
+            memset(urb->buf, 0x7c, urb->actual_length);
+            storage_transferred += urb->actual_length;
+            storage_phase = 2;
+            return -EMSGSIZE;
+        }
         if (storage_cbw.command[0] == SCSI_CMD_READ_CAPACITY10) {
             assert(urb->len == 8);
             msc_put_be32(urb->buf, 127);
@@ -116,7 +132,8 @@ static int storage_bulk(usb_hcd_t *h, usb_urb_t *urb) {
     } else {
         assert(urb->ep->addr == 0x81 && urb->len == USB_MSC_CSW_SIZE);
         usb_msc_csw_t csw = { .signature = USB_MSC_CSW_SIGNATURE,
-                              .tag = storage_cbw.tag };
+                              .tag = storage_cbw.tag,
+                              .residue = storage_cbw.transfer_length - storage_transferred };
         switch (storage_csw_fault) {
         case 1: csw.tag++; break;
         case 2: csw.signature++; csw.status = 1; break;
@@ -127,9 +144,17 @@ static int storage_bulk(usb_hcd_t *h, usb_urb_t *urb) {
         case 7: csw.residue = 1; break;
         }
         storage_csw_fault = 0;
+        if (storage_short_csw) {
+            storage_short_csw = 0;
+            urb->actual_length = USB_MSC_CSW_SIZE - 1;
+            memcpy(urb->buf, &csw, urb->actual_length);
+            storage_phase = 0;
+            return -EMSGSIZE;
+        }
         memcpy(urb->buf, &csw, sizeof(csw));
         storage_phase = 0;
     }
+    urb->actual_length = urb->len;
     return 0;
 }
 
@@ -269,6 +294,47 @@ static void storage_case(const char *name) {
         assert(!block->read_sector(block, 0, data, 1) && !st->recovery_pending);
         block->release(block);
         assert(dev->drv_priv == st && !st->active_calls);
+    } else if (!strcmp(name, "phases")) {
+        storage_publish(&h);
+        block_dev_t *block = usb_storage_get_dev(0);
+        assert(block);
+        usb_storage_dev_t *st = block->priv;
+        uint8_t data[512]; memset(data, 0x55, sizeof(data));
+        storage_short_once = 1;
+        assert(block->read_sector(block, 0, data, 1) == -EIO);
+        assert(!st->recovery_pending && !storage_phase && !storage_trace_len);
+        for (unsigned i = 0; i < sizeof(data); i++) assert(data[i] == (i < 256 ? 0x7c : 0x55));
+        assert(!block->read_sector(block, 0, data, 1));
+        storage_stall_stage = 2; storage_stalls = 1;
+        assert(block->read_sector(block, 0, data, 1) == -EIO);
+        assert(!st->recovery_pending && !storage_phase && !strcmp(storage_trace, "IiB"));
+        storage_trace_len = 0; storage_trace[0] = 0;
+        storage_stalls = 1;
+        assert(block->write_sector(block, 0, data, 1) == -EIO);
+        assert(!st->recovery_pending && !storage_phase && !strcmp(storage_trace, "OoA"));
+        storage_trace_len = 0; storage_trace[0] = 0;
+        storage_stall_stage = 3; storage_stalls = 1;
+        unsigned cbws = storage_cbws;
+        assert(!block->read_sector(block, 0, data, 1));
+        assert(storage_cbws == cbws + 1 && !strcmp(storage_trace, "IiB"));
+        storage_trace_len = 0; storage_trace[0] = 0;
+        storage_stalls = 2;
+        assert(block->read_sector(block, 0, data, 1) == -EPIPE);
+        assert(!st->recovery_pending && !storage_phase && !strcmp(storage_trace, "IiBIORioAB"));
+        storage_trace_len = 0; storage_trace[0] = 0;
+        storage_short_csw = 1;
+        assert(block->read_sector(block, 0, data, 1) == -EMSGSIZE);
+        assert(!st->recovery_pending && !strcmp(storage_trace, "IORioAB"));
+        storage_trace_len = 0; storage_trace[0] = 0;
+        storage_stall_stage = 2; storage_stalls = 1; storage_control_fail = 2;
+        assert(block->read_sector(block, 0, data, 1) == -ETIMEDOUT && st->recovery_pending);
+        cbws = storage_cbws;
+        storage_trace_len = 0; storage_trace[0] = 0;
+        assert(block->read_sector(block, 0, data, 1) == -ETIMEDOUT && storage_cbws == cbws);
+        storage_control_fail = 0;
+        storage_trace_len = 0; storage_trace[0] = 0;
+        assert(!block->read_sector(block, 0, data, 1) && !st->recovery_pending);
+        block->release(block);
     } else {
         assert(!strcmp(name, "reuse"));
         for (unsigned i = 0; i < USB_STORAGE_MAX_DEVS + 2; i++) {

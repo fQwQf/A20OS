@@ -31,7 +31,7 @@ class UsbStorageLifetime(unittest.TestCase):
                 "-I" + str(ROOT / "kernel/include"), "-I" + str(ROOT / "kernel"),
                 str(fixture), "-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for case in ("partial", "active", "reuse", "recovery"):
+            for case in ("partial", "active", "reuse", "recovery", "phases"):
                 with self.subTest(case=case):
                     result = subprocess.run([str(binary), "storage-" + case],
                                             capture_output=True, text=True, timeout=15)

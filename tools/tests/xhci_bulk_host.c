@@ -31,7 +31,7 @@ static void bulk_case(const char *name) {
  uint8_t *caller=kmalloc(65536);assert(caller);memset(caller,0x55,65536);bulk_caller=caller;
  usb_urb_t urb={.dev=u,.ep=ep,.transfer_type=USB_XFER_BULK,.buf=caller,.len=64};
  if(!strcmp(name,"copies")) {
-  assert(!xhci_op_submit_bulk(&x->hcd,&urb)&&caller[0]==0x3c&&caller[63]==0x3c);
+  assert(!xhci_op_submit_bulk(&x->hcd,&urb)&&caller[0]==0x3c&&caller[63]==0x3c&&urb.actual_length==64);
   assert(x->eps->ring.trbs[0].parameter==driver_dma_buffer_address(x->bulk_buffer));
   assert(x->eps->ring.trbs[0].parameter!=(uintptr_t)caller);
   ep->addr=1;x->eps->dci=2;memset(caller,0x55,64);
@@ -53,9 +53,13 @@ static void bulk_case(const char *name) {
   assert(!device_unregister(&d));driver_dma_buffer_put(held_buffer);assert(page_frees==1&&freed_order==4);
   bus_unregister(&bus);return;
  } else if(!strcmp(name,"short")) {
-  wait_remaining=8;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE&&caller[0]==0x55&&caller[63]==0x55);
-  wait_remaining=65;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EIO&&caller[0]==0x55);
-  wait_remaining=0;wait_rc=-EIO;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EIO&&caller[0]==0x55);
+  wait_remaining=8;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE&&urb.actual_length==56&&urb.len==64);
+  for(unsigned i=0;i<64;i++)assert(caller[i]==(i<56?0x3c:0x55));
+  memset(caller,0x55,64);
+  wait_remaining=64;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE&&!urb.actual_length&&caller[0]==0x55);
+  wait_remaining=65;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EIO&&!urb.actual_length&&caller[0]==0x55);
+  wait_remaining=0;wait_rc=-EIO;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EIO&&!urb.actual_length&&caller[0]==0x55);
+  wait_rc=-6;wait_cc=6;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EPIPE&&!urb.actual_length&&caller[0]==0x55);
  } else if(!strcmp(name,"admission")) {
   urb.len=65537;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EMSGSIZE);urb.len=64;
   urb.buf=NULL;assert(xhci_op_submit_bulk(&x->hcd,&urb)==-EINVAL);urb.buf=caller;
