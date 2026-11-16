@@ -15,6 +15,7 @@
  */
 #include "drivers/usb/usb.h"
 #include "drivers/usb/usb_storage.h"
+#include <stdint.h>
 
 #include "core/klog.h"
 #include "core/lock.h"
@@ -81,6 +82,11 @@ typedef struct {
     uint64_t capacity;
     uint32_t sector_size;
     int ready;
+    device_t *owner;
+    int closing;
+    int endpoints_live;
+    uint32_t active_calls;
+    uint32_t consumer_refs;
 
     /* Each BOT stage fits in one xHCI Normal TRB and must not cross a
      * 64 KiB boundary. Align each buffer to its containing power of two. */
@@ -90,7 +96,49 @@ typedef struct {
 } usb_storage_dev_t;
 
 static usb_storage_dev_t g_storage[USB_STORAGE_MAX_DEVS];
-static int g_storage_count;
+/* Slot admission/reuse only; never nest with the BOT mutex or HCD calls. */
+static spinlock_t g_storage_lock = SPINLOCK_INIT;
+
+static int usb_storage_stop(void *context);
+
+static usb_storage_dev_t *msc_claim(device_t *dev) {
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    usb_storage_dev_t *st = NULL;
+    for (unsigned i = 0; i < USB_STORAGE_MAX_DEVS; i++) {
+        if (g_storage[i].owner || g_storage[i].consumer_refs ||
+            g_storage[i].active_calls) continue;
+        st = &g_storage[i];
+        memset(st, 0, sizeof(*st));
+        st->owner = dev;
+        dev->drv_priv = st;
+        break;
+    }
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+    return st;
+}
+
+static int msc_call_begin(usb_storage_dev_t *st) {
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    int ret = 0;
+    if (!st->owner || !st->ready || st->closing) ret = -ENODEV;
+    else if (st->active_calls == UINT32_MAX) ret = -EOVERFLOW;
+    else st->active_calls++;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+    return ret;
+}
+
+static void msc_call_end(usb_storage_dev_t *st) {
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    if (st->active_calls) st->active_calls--;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+}
+
+static void msc_release(block_dev_t *block) {
+    usb_storage_dev_t *st = block->priv;
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    if (st->consumer_refs) st->consumer_refs--;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+}
 
 static uint32_t msc_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -130,6 +178,10 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
                        uint8_t cdblen, void *data, uint32_t datalen,
                        int data_in) {
     mutex_lock(&st->lock);
+    if (__atomic_load_n(&st->closing, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&st->lock);
+        return -ESHUTDOWN;
+    }
 
     uint32_t tag = ++st->tag;
     memset(&st->cbw, 0, sizeof(st->cbw));
@@ -201,33 +253,38 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
     return result;
 }
 
+/* Hold one active call across the full BOT command, including its recovery.
+ * A queued command observes closing after acquiring the BOT mutex. */
+static int msc_rw(block_dev_t *block, uint64_t lba, void *buf,
+                   size_t sectors, int write) {
+    usb_storage_dev_t *st = block ? block->priv : NULL;
+    if (!st || !buf) return -EINVAL;
+    int ret = msc_call_begin(st);
+    if (ret) return ret;
+    if (!sectors || sectors > 0xffffU || lba > 0xffffffffU ||
+        lba >= st->capacity || sectors > st->capacity - lba) {
+        ret = -EIO;
+    } else {
+        uint8_t cdb[10] = { 0 };
+        cdb[0] = write ? SCSI_CMD_WRITE10 : SCSI_CMD_READ10;
+        msc_put_be32(&cdb[2], (uint32_t)lba);
+        cdb[7] = (uint8_t)(sectors >> 8);
+        cdb[8] = (uint8_t)sectors;
+        ret = msc_command(st, cdb, 10, buf,
+                          (uint32_t)sectors * st->sector_size, !write);
+    }
+    msc_call_end(st);
+    return ret;
+}
+
 static int msc_read_sectors(block_dev_t *block, uint64_t lba, void *buf,
                             size_t sectors) {
-    usb_storage_dev_t *st = (usb_storage_dev_t *)block->priv;
-    if (!st || !st->ready || sectors == 0 || sectors > 0xffffU ||
-        lba > 0xffffffffU || lba + sectors > st->capacity)
-        return -EIO;
-    uint8_t cdb[10] = { 0 };
-    cdb[0] = SCSI_CMD_READ10;
-    msc_put_be32(&cdb[2], (uint32_t)lba);
-    cdb[7] = (uint8_t)(sectors >> 8);
-    cdb[8] = (uint8_t)sectors;
-    return msc_command(st, cdb, 10, buf, (uint32_t)sectors * st->sector_size, 1);
+    return msc_rw(block, lba, buf, sectors, 0);
 }
 
 static int msc_write_sectors(block_dev_t *block, uint64_t lba, const void *buf,
                              size_t sectors) {
-    usb_storage_dev_t *st = (usb_storage_dev_t *)block->priv;
-    if (!st || !st->ready || sectors == 0 || sectors > 0xffffU ||
-        lba > 0xffffffffU || lba + sectors > st->capacity)
-        return -EIO;
-    uint8_t cdb[10] = { 0 };
-    cdb[0] = SCSI_CMD_WRITE10;
-    msc_put_be32(&cdb[2], (uint32_t)lba);
-    cdb[7] = (uint8_t)(sectors >> 8);
-    cdb[8] = (uint8_t)sectors;
-    return msc_command(st, cdb, 10, (void *)buf,
-                       (uint32_t)sectors * st->sector_size, 0);
+    return msc_rw(block, lba, (void *)buf, sectors, 1);
 }
 
 /* Clear a stale unit attention with REQUEST SENSE (unparsed). */
@@ -280,7 +337,7 @@ static const block_dev_ops_t usb_storage_ops = {
 
 static int usb_storage_probe(device_t *dev) {
     usb_interface_t *iface = (usb_interface_t *)dev->plat_data;
-    if (!iface || !iface->dev || !iface->dev->hcd)
+    if (!iface || !iface->dev || !iface->dev->hcd || !iface->dev->hcd->ops)
         return -EINVAL;
     usb_device_t *udev = iface->dev;
 
@@ -297,10 +354,12 @@ static int usb_storage_probe(device_t *dev) {
     if (!bulk_out || !bulk_in)
         return -ENODEV;
 
-    if (g_storage_count >= USB_STORAGE_MAX_DEVS)
-        return -ENOMEM;
-    usb_storage_dev_t *st = &g_storage[g_storage_count];
-    memset(st, 0, sizeof(*st));
+    if (!udev->hcd->ops->configure_endpoint || !udev->hcd->ops->release_endpoint)
+        return -EOPNOTSUPP;
+    int r = device_probe_use_remove(dev);
+    if (r) return r;
+    usb_storage_dev_t *st = msc_claim(dev);
+    if (!st) return -ENOSPC;
     st->lock = (mutex_t)MUTEX_INIT;
     st->iface = iface;
     st->dev = udev;
@@ -309,23 +368,23 @@ static int usb_storage_probe(device_t *dev) {
     st->sector_size = 512;
     st->tag = 0;
 
-    /* Configure both bulk endpoints.  The transfer type is the bmAttributes
-     * spelling; the direction comes from the endpoint address and the HCD
-     * translates the pair into the controller's own EP Type encoding. */
-    int r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_out->addr,
-                                               USB_XFER_BULK,
-                                               bulk_out->max_packet, 0);
-    if (r) {
-        memset(st, 0, sizeof(*st));
-        return r;
-    }
+    r = device_add_execution_action(dev, usb_storage_stop, NULL, st);
+    if (r) return r;
+    /* Reset device-side endpoint state before creating new host contexts,
+     * including when a previously stopped interface is rebound. */
+    r = usb_control_msg(udev, USB_TYPE_STANDARD | USB_RECIP_INTERFACE,
+                        USB_REQ_SET_INTERFACE, iface->alt_setting,
+                        iface->interface_number, NULL, 0);
+    if (r) return r;
+
+    /* A failed configure may already have published a host cleanup owner. */
+    st->endpoints_live = 1;
+    r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_out->addr,
+                                         USB_XFER_BULK, bulk_out->max_packet, 0);
+    if (r) return r;
     r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_in->addr,
-                                           USB_XFER_BULK,
-                                           bulk_in->max_packet, 0);
-    if (r) {
-        memset(st, 0, sizeof(*st));
-        return r;
-    }
+                                         USB_XFER_BULK, bulk_in->max_packet, 0);
+    if (r) return r;
 
     /* TEST UNIT READY with a couple of retries (unit attention). */
     uint8_t tur[6] = { SCSI_CMD_TEST_UNIT_READY };
@@ -340,14 +399,12 @@ static int usb_storage_probe(device_t *dev) {
     uint8_t rccdb[10] = { SCSI_CMD_READ_CAPACITY10 };
     if (msc_command(st, rccdb, 10, cap, 8, 1) < 0) {
         kinfo("[USB-STORAGE] READ CAPACITY failed; no disk\n");
-        memset(st, 0, sizeof(*st));
         return -ENODEV;
     }
     uint64_t last_lba = msc_be32(cap);
     uint32_t blk_size = msc_be32(cap + 4);
     if (blk_size < 512 || blk_size > 65536 || (blk_size & (blk_size - 1))) {
         kinfo("[USB-STORAGE] unsupported sector size %u\n", blk_size);
-        memset(st, 0, sizeof(*st));
         return -ENODEV;
     }
     st->capacity = last_lba + 1;
@@ -358,9 +415,10 @@ static int usb_storage_probe(device_t *dev) {
     st->block.capacity = st->capacity;
     st->block.sector_size = st->sector_size;
     st->block.priv = st;
+    st->block.release = msc_release;
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
     st->ready = 1;
-    dev->drv_priv = st;
-    g_storage_count++;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
 
     kinfo("[USB-STORAGE] disk ready: %llu sectors (%llu MiB), sector=%u\n",
           (unsigned long long)st->capacity,
@@ -369,12 +427,37 @@ static int usb_storage_probe(device_t *dev) {
     return 0;
 }
 
-static int usb_storage_remove(device_t *dev) {
-    usb_storage_dev_t *st = (usb_storage_dev_t *)dev->drv_priv;
-    if (st) {
-        st->ready = 0;
-        dev->drv_priv = NULL;
+static int usb_storage_stop(void *context) {
+    usb_storage_dev_t *st = context;
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    __atomic_store_n(&st->closing, 1, __ATOMIC_RELEASE);
+    st->ready = 0;
+    int busy = st->active_calls != 0;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+    /* Do not wait under lifecycle: an active transfer may need USB progress. */
+    if (busy) return -EBUSY;
+    if (st->endpoints_live) {
+        int ret = usb_interface_release_endpoints(st->iface);
+        if (ret) return ret;
+        st->endpoints_live = 0;
     }
+    return 0;
+}
+
+static int usb_storage_remove(device_t *dev) {
+    usb_storage_dev_t *st = dev ? dev->drv_priv : NULL;
+    if (!st) return 0;
+    int ret = usb_storage_stop(st);
+    if (ret) return ret;
+    /* Endpoints are stopped and class calls drained. Consumer references
+     * retain only the old closed block identity until their final release. */
+    st->iface = NULL;
+    st->dev = NULL;
+    st->bulk_in = st->bulk_out = NULL;
+    dev->drv_priv = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    st->owner = NULL;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
     return 0;
 }
 
@@ -402,11 +485,23 @@ DRIVER_REGISTER(usb_storage_driver);
 /* ------------------------------------------------------------------ */
 
 block_dev_t *usb_storage_get_dev(int index) {
-    if (index < 0 || index >= g_storage_count || !g_storage[index].ready)
-        return NULL;
-    return &g_storage[index].block;
+    if (index < 0 || index >= USB_STORAGE_MAX_DEVS) return NULL;
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    usb_storage_dev_t *st = &g_storage[index];
+    block_dev_t *block = NULL;
+    if (st->owner && st->ready && !st->closing && st->consumer_refs != UINT32_MAX) {
+        st->consumer_refs++;
+        block = &st->block;
+    }
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+    return block;
 }
 
 int usb_storage_ready(int index) {
-    return usb_storage_get_dev(index) != NULL;
+    if (index < 0 || index >= USB_STORAGE_MAX_DEVS) return 0;
+    uint64_t flags = spin_lock_irqsave(&g_storage_lock);
+    usb_storage_dev_t *st = &g_storage[index];
+    int ready = st->owner && st->ready && !st->closing;
+    spin_unlock_irqrestore(&g_storage_lock, flags);
+    return ready;
 }
