@@ -161,10 +161,11 @@ static inline a20_status_t a20_thread_get_name(a20_handle_t thread,
 }
 
 /*
- * Checkpoint-based signal simulation.  Signals are never delivered
- * asynchronously: they are recorded by a20_task_kill() and consumed here at
- * explicit checkpoints (event_wait return, pthread_testcancel).  Returns the
- * bitmap of delivered signals (pending & ~blocked) and clears them.
+ * Native catchable notifications are recorded by a20_task_kill() and
+ * consumed at runtime-defined checkpoints. This does not implement POSIX
+ * asynchronous user handlers; Linux ABI signals have their own contract.
+ * Kernel preemption and forced termination do not depend on checkpoints.
+ * Returns and clears the process-wide deliverable bitmap (pending & ~blocked).
  */
 static inline int64_t a20_signal_check(void)
 {
