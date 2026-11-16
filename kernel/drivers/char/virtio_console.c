@@ -190,11 +190,39 @@ typedef struct {
     int        irq;
     int        irq_registered;
     int        valid;
+    int        closing;
+    int        reset_required;
+    int        hardware_stopped;
+    unsigned   active_calls; /* includes lock-free RX notify/console delivery */
+    device_t  *owner;
 } vport_inst_t;
 
 /* One port, one instance: a second virtio-serial function stays unbound
  * rather than getting a second port nothing multiplexes. */
 static vport_inst_t g_vport;
+static int vport_stop(void *context);
+
+static int vport_call_begin(vport_inst_t *p)
+{
+    if (!p) return -ENODEV;
+    uint64_t flags = spin_lock_irqsave(&p->lock);
+    int ret = -ENODEV;
+    if (__atomic_load_n(&p->valid, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) {
+        p->active_calls++;
+        ret = 0;
+    }
+    spin_unlock_irqrestore(&p->lock, flags);
+    return ret;
+}
+
+static void vport_call_end(vport_inst_t *p)
+{
+    uint64_t flags = spin_lock_irqsave(&p->lock);
+    p->active_calls--;
+    spin_unlock_irqrestore(&p->lock, flags);
+}
+
 
 /* ------------------------------------------------------------------ */
 /* Ring helpers                                                        */
@@ -239,7 +267,8 @@ static void vport_console_flush(vport_inst_t *p)
     for (;;) {
         uint32_t n;
         uint64_t flags = spin_lock_irqsave(&p->lock);
-        if (p->echo_pos >= p->echo_len) {
+        if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE) ||
+            p->echo_pos >= p->echo_len) {
             p->echo_len = 0;
             p->echo_pos = 0;
             spin_unlock_irqrestore(&p->lock, flags);
@@ -266,7 +295,8 @@ static void vport_rx_pump(vport_inst_t *p)
     int repost = 0;
 
     uint64_t flags = spin_lock_irqsave(&p->lock);
-    if (!p->valid || !p->rx_mem) {
+    if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&p->valid, __ATOMIC_ACQUIRE) || !p->rx_mem) {
         spin_unlock_irqrestore(&p->lock, flags);
         return;
     }
@@ -335,14 +365,17 @@ static int vport_irq_handler(int irq, void *priv)
 {
     (void)irq;
     vport_inst_t *p = priv;
-    if (!p || !p->valid)
+    if (!p)
         return 0;
 
     uint32_t status = p->vt.read32(&p->vt, VPORT_MMIO_INTR_STATUS);
-    if (!p->vt.legacy && status)
+    if (status && status != 0xffffffffU)
         p->vt.write32(&p->vt, VPORT_MMIO_INTR_ACK, status);
 
-    vport_rx_pump(p);
+    if (!vport_call_begin(p)) {
+        vport_rx_pump(p);
+        vport_call_end(p);
+    }
     return 0;
 }
 
@@ -402,20 +435,13 @@ static void vport_free_dma(vport_inst_t *p)
     }
 }
 
-/* Full rollback for every probe failure: the core only clears pointers, so
- * IRQ, DMA and the device state have to be undone here. */
-static void vport_fail(vport_inst_t *p, int irq_registered, int irq)
+/* Managed stop owns fallible reset and release, including partial probe. */
+static int vport_fail(vport_inst_t *p, int error)
 {
-    if (irq_registered && irq >= 0)
-        free_irq((uint32_t)irq, p);
-    p->vt.write32(&p->vt, VPORT_MMIO_STATUS,
-                  p->vt.read32(&p->vt, VPORT_MMIO_STATUS) |
-                  VPORT_STATUS_FAILED);
-    /* Control queues may already own descriptors when the handshake fails. */
-    p->vt.write32(&p->vt, VPORT_MMIO_STATUS, 0);
-    mb();
-    vport_free_dma(p);
-    memset(p, 0, sizeof(*p));
+    uint32_t status = p->vt.read32(&p->vt, VPORT_MMIO_STATUS);
+    if (status != 0xffffffffU)
+        p->vt.write32(&p->vt, VPORT_MMIO_STATUS, status | VPORT_STATUS_FAILED);
+    return error;
 }
 
 static int vport_boot_option(const char *option)
@@ -484,6 +510,7 @@ static int vport_control_send(vport_inst_t *p, uint16_t event)
     p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_CTRL_TX);
     uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
     do {
+        if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) return -ENODEV;
         dma_sync_for_cpu(&p->ctrl_tx->used, sizeof(p->ctrl_tx->used));
         if (p->ctrl_tx->used.idx != before) return 0;
         proc_yield();
@@ -495,6 +522,7 @@ static int vport_control_wait(vport_inst_t *p, uint16_t event)
 {
     uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
     do {
+        if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) return -ENODEV;
         dma_sync_for_cpu(p->ctrl_rx, sizeof(*p->ctrl_rx));
         uint16_t used = p->ctrl_rx->used.idx;
         if ((uint16_t)(used - p->ctrl_last_used) > VPORT_RX_SLOTS) return -EIO;
@@ -522,17 +550,23 @@ static int vport_control_wait(vport_inst_t *p, uint16_t event)
 
 static int vport_probe(device_t *dev)
 {
-    if (g_vport.valid)
-        return -EBUSY; /* single instance, documented limit */
-
-    virtio_transport_t vt;
-    if (pci_virtio_transport_init(dev, VPORT_DEVICE_ID, &vt) < 0)
-        return -ENODEV;
-
+    if (g_vport.owner)
+        return -EBUSY; /* single instance, including failed-stop bindings */
+    int managed = device_probe_use_remove(dev);
+    if (managed) return managed;
     vport_inst_t *p = &g_vport;
     memset(p, 0, sizeof(*p));
     spin_init(&p->lock);
     mutex_init(&p->tx_lock);
+    p->owner = dev;
+    p->irq = -1;
+    dev->drv_priv = p;
+    int execution = device_add_execution_action(dev, vport_stop, NULL, p);
+    if (execution) return execution;
+    virtio_transport_t vt = {0};
+    if (pci_virtio_transport_init(dev, VPORT_DEVICE_ID, &vt) < 0 || vt.legacy)
+        return -ENODEV;
+
     p->vt = vt;
     p->console_mirror = !vport_is_management();
     p->console_output = p->console_mirror && vport_boot_option("a20.console=vport0");
@@ -543,8 +577,10 @@ static int vport_probe(device_t *dev)
 
     /* Negotiate modern split rings and, for the bulk terminal only, the
      * control protocol needed by a flow-controlled host serial port. */
-    p->vt.write32(&p->vt, VPORT_MMIO_STATUS, 0);
-    mb();
+    p->reset_required = 1;
+    if (p->vt.read32(&p->vt, VPORT_MMIO_STATUS) == 0xffffffffU) return -ENODEV;
+    int reset = virtio_transport_reset(&p->vt, 100);
+    if (reset) return reset;
     uint32_t status = VPORT_STATUS_ACK | VPORT_STATUS_DRIVER;
     p->vt.write32(&p->vt, VPORT_MMIO_STATUS, status);
     mb();
@@ -552,8 +588,7 @@ static int vport_probe(device_t *dev)
     p->vt.write32(&p->vt, VPORT_MMIO_DEV_FEATURES_SEL, 1);
     uint32_t features_hi = p->vt.read32(&p->vt, VPORT_MMIO_DEV_FEATURES);
     if (!(features_hi & VPORT_F_VERSION_1)) {
-        vport_fail(p, 0, -1);
-        return -EOPNOTSUPP;
+        return vport_fail(p, -EOPNOTSUPP);
     }
     p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES_SEL, 1);
     p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES, VPORT_F_VERSION_1);
@@ -561,8 +596,7 @@ static int vport_probe(device_t *dev)
     p->vt.write32(&p->vt, VPORT_MMIO_DEV_FEATURES_SEL, 0);
     uint32_t features_lo = p->vt.read32(&p->vt, VPORT_MMIO_DEV_FEATURES);
     if (p->console_output && !(features_lo & 2U)) {
-        vport_fail(p, 0, -1);
-        return -EOPNOTSUPP;
+        return vport_fail(p, -EOPNOTSUPP);
     }
     p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES, p->console_output ? 2U : 0U);
     mb();
@@ -571,22 +605,19 @@ static int vport_probe(device_t *dev)
     p->vt.write32(&p->vt, VPORT_MMIO_STATUS, status);
     mb();
     if (!(p->vt.read32(&p->vt, VPORT_MMIO_STATUS) & VPORT_STATUS_FEATURES_OK)) {
-        vport_fail(p, 0, -1);
-        return -ENODEV;
+        return vport_fail(p, -ENODEV);
     }
 
     p->rx_mem = dma_alloc_coherent_aligned(dev, sizeof(*p->rx_mem),
                                            PAGE_SIZE, &p->rx_dma);
     if (!p->rx_mem) {
-        vport_fail(p, 0, -1);
-        return -ENOMEM;
+        return vport_fail(p, -ENOMEM);
     }
     memset(p->rx_mem, 0, sizeof(*p->rx_mem));
     p->tx_mem = dma_alloc_coherent_aligned(dev, sizeof(*p->tx_mem),
                                            PAGE_SIZE, &p->tx_dma);
     if (!p->tx_mem) {
-        vport_fail(p, 0, -1);
-        return -ENOMEM;
+        return vport_fail(p, -ENOMEM);
     }
     memset(p->tx_mem, 0, sizeof(*p->tx_mem));
     /* TX is retired by writers/drain. Completion IRQs for every short TTY
@@ -597,8 +628,7 @@ static int vport_probe(device_t *dev)
 
     if (vport_setup_queue(p, p->rx_queue, VPORT_RX_SLOTS) < 0 ||
         vport_setup_queue(p, p->tx_queue, VPORT_TX_SLOTS) < 0) {
-        vport_fail(p, 0, -1);
-        return -ENODEV;
+        return vport_fail(p, -ENODEV);
     }
     vport_program_queue(p, p->rx_queue,
                         p->rx_dma + offsetof(vport_rx_mem_t, desc),
@@ -611,16 +641,14 @@ static int vport_probe(device_t *dev)
 
     if (p->console_output) {
         int error = vport_control_setup(p, dev);
-        if (error) { vport_fail(p, 0, -1); return error; }
+        if (error) return vport_fail(p, error);
     }
 
-    int irq_registered = 0;
     if (p->vt.irq >= 0) {
         unsigned long irq_flags = p->vt.shared_irq ? IRQF_SHARED : 0;
         if (request_irq((uint32_t)p->vt.irq, vport_irq_handler, irq_flags,
                         p) == 0) {
             p->irq_registered = 1;
-            irq_registered = 1;
         } else {
             kinfo("[VPORT] INTx %d unavailable, receive falls back to "
                   "read/poll\n", p->vt.irq);
@@ -628,22 +656,16 @@ static int vport_probe(device_t *dev)
         }
     }
 
-    p->valid = 1;
-    dev->drv_priv = p;
     /* The core publishes the class device right after this returns 0; asking
      * for the node name here is the only place a driver may choose one. */
     int ret = drv_device_set_devfs_name(dev, "vport0");
-    if (ret < 0) {
-        p->valid = 0;
-        vport_fail(p, irq_registered, p->vt.irq);
-        dev->drv_priv = NULL;
-        return ret;
-    }
+    if (ret < 0) return vport_fail(p, ret);
 
     status |= VPORT_STATUS_DRIVER_OK;
     p->vt.write32(&p->vt, VPORT_MMIO_STATUS, status);
     mb();
 
+    __atomic_store_n(&p->valid, 1, __ATOMIC_RELEASE);
     vport_rx_post_all(p);
     p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, p->rx_queue);
 
@@ -655,10 +677,8 @@ static int vport_probe(device_t *dev)
         if (!error) error = vport_control_wait(p, 6); /* host PORT_OPEN */
         if (!error) error = vport_control_send(p, 6); /* guest PORT_OPEN */
         if (error) {
-            p->valid = 0;
-            vport_fail(p, irq_registered, p->irq);
-            dev->drv_priv = NULL;
-            return error;
+            __atomic_store_n(&p->valid, 0, __ATOMIC_RELEASE);
+            return vport_fail(p, error);
         }
         kinfo("[VPORT] bulk TTY ready (flow-controlled port 1, %u TX slots)\n",
               VPORT_TX_SLOTS);
@@ -669,21 +689,35 @@ static int vport_probe(device_t *dev)
     return 0;
 }
 
+static int vport_stop(void *context)
+{
+    vport_inst_t *p = context;
+    __atomic_store_n(&p->closing, 1, __ATOMIC_RELEASE);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&p->lock, &flags)) return -EBUSY;
+    __atomic_store_n(&p->valid, 0, __ATOMIC_RELEASE);
+    if (p->active_calls) {
+        spin_unlock_irqrestore(&p->lock, flags);
+        return -EBUSY;
+    }
+    spin_unlock_irqrestore(&p->lock, flags);
+    if (p->reset_required && !p->hardware_stopped) {
+        if (p->vt.read32(&p->vt, VPORT_MMIO_STATUS) == 0xffffffffU) return -ENODEV;
+        int ret = virtio_transport_reset(&p->vt, 100);
+        if (ret) return ret;
+    }
+    p->hardware_stopped = 1;
+    if (p->irq_registered && p->irq >= 0) free_irq((uint32_t)p->irq, p);
+    __atomic_store_n(&p->irq_registered, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
 static int vport_remove(device_t *dev)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p)
-        return 0;
-
-    uint64_t flags = spin_lock_irqsave(&p->lock);
-    p->valid = 0;
-    spin_unlock_irqrestore(&p->lock, flags);
-
-    if (p->irq_registered && p->irq >= 0)
-        free_irq((uint32_t)p->irq, p);
-
-    p->vt.write32(&p->vt, VPORT_MMIO_STATUS, 0);
-    mb();
+    if (!p) return 0;
+    int ret = vport_stop(p);
+    if (ret) return ret;
     vport_free_dma(p);
     dev->drv_priv = NULL;
     memset(p, 0, sizeof(*p));
@@ -697,8 +731,9 @@ static int vport_remove(device_t *dev)
 static int vport_class_read(device_t *dev, void *buf, size_t count)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->valid || !buf || !count)
-        return -EINVAL;
+    if (!buf || !count) return -EINVAL;
+    int result = vport_call_begin(p);
+    if (result) return result;
 
     /* Drain first: a client that only reads must still see data that arrived
      * before the last interrupt was acknowledged (and this is the whole
@@ -713,6 +748,7 @@ static int vport_class_read(device_t *dev, void *buf, size_t count)
     p->tail = (uint32_t)((p->tail + n) % VPORT_RING_SIZE);
     spin_unlock_irqrestore(&p->lock, flags);
 
+    vport_call_end(p);
     return n ? (int)n : -EAGAIN;
 }
 
@@ -740,6 +776,7 @@ static int vport_tx_wait(vport_inst_t *p, int all, int interruptible)
     uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
     unsigned spins = 0;
     for (;;) {
+        if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) return -ENODEV;
         uint64_t flags = spin_lock_irqsave(&p->lock);
         int error = vport_tx_reap_locked(p);
         int ready = all ? !p->tx_busy : p->tx_busy != (1U << VPORT_TX_SLOTS) - 1;
@@ -764,7 +801,8 @@ static int vport_tx_wait(vport_inst_t *p, int all, int interruptible)
 static int vport_write_locked(device_t *dev, const void *buf, size_t count)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->valid || !buf || !count) return -EINVAL;
+    if (!buf || !count) return -EINVAL;
+    if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) return -ENODEV;
     int error = vport_tx_wait(p, 0, 1);
     if (error) return error;
     size_t len = count > VPORT_BUF_SIZE ? VPORT_BUF_SIZE : count;
@@ -802,10 +840,12 @@ static int vport_write_locked(device_t *dev, const void *buf, size_t count)
 static int vport_class_write(device_t *dev, const void *buf, size_t count)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p) return -ENODEV;
+    int n = vport_call_begin(p);
+    if (n) return n;
     mutex_lock(&p->tx_lock);
-    int n = vport_write_locked(dev, buf, count);
+    n = vport_write_locked(dev, buf, count);
     mutex_unlock(&p->tx_lock);
+    vport_call_end(p);
     return n;
 }
 
@@ -813,20 +853,19 @@ static int vport_class_poll(device_t *dev, short events)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
     (void)events;
-    if (!p || !p->valid)
-        return 0;
+    if (vport_call_begin(p)) return 0;
     vport_rx_pump(p);
     uint64_t flags = spin_lock_irqsave(&p->lock);
     int ready = p->head != p->tail;
     spin_unlock_irqrestore(&p->lock, flags);
+    vport_call_end(p);
     return ready;
 }
 
-static int vport_class_ioctl(device_t *dev, unsigned long req, void *arg)
+static int vport_ioctl_impl(device_t *dev, unsigned long req, void *arg)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->valid)
-        return -ENODEV;
+    if (__atomic_load_n(&p->closing, __ATOMIC_ACQUIRE)) return -ENODEV;
 
     if (req == VPORT_IOCTL_CONSOLE_READY)
         return p->console_output && p->port_id == 1 ? 0 : -ENODEV;
@@ -870,6 +909,16 @@ static int vport_class_ioctl(device_t *dev, unsigned long req, void *arg)
     }
 
     return -ENOTTY;
+}
+
+static int vport_class_ioctl(device_t *dev, unsigned long req, void *arg)
+{
+    vport_inst_t *p = dev ? dev->drv_priv : NULL;
+    int ret = vport_call_begin(p);
+    if (ret) return ret;
+    ret = vport_ioctl_impl(dev, req, arg);
+    vport_call_end(p);
+    return ret;
 }
 
 static const char_dev_ops_t vport_class_ops = {

@@ -12,6 +12,7 @@ class VportTransmitTest(unittest.TestCase):
         text = (ROOT/'kernel/drivers/char/virtio_console.c').read_text()
         constants = text[text.index('#define VPORT_Q_RX'):text.index('typedef struct {')]
         structs = text[text.index('typedef struct {'):text.index('/* One port, one instance')]
+        helpers = text[text.index('static int vport_call_begin('):text.index('/* ------------------------------------------------------------------ */', text.index('static int vport_call_begin('))]
         functions = text[text.index('/* Called with the instance lock and tx_lock held.'):text.index('static int vport_class_poll(')]
         prefix = r'''
 #include "drivers/char/virtio_console_config.h"
@@ -51,7 +52,7 @@ static void proc_yield(void) {}
 #define wmb() __sync_synchronize()
 #define mb() __sync_synchronize()
 '''
-        fixture = prefix + constants + '\n#define TEST_BYTES ((VPORT_BUF_SIZE < 512) ? VPORT_BUF_SIZE : 512)\n' + structs + functions + r'''
+        fixture = prefix + constants + '\n#define TEST_BYTES ((VPORT_BUF_SIZE < 512) ? VPORT_BUF_SIZE : 512)\n' + structs + helpers + functions + r'''
 static vport_inst_t port;
 static device_t dev={&port};
 static unsigned notifications, consumed;
