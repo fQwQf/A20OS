@@ -44,8 +44,12 @@ int ext4_record_status(ext4_sb_info_t *sb, int status)
         ext4_mark_inconsistent(sb);
         /* This is deliberately a raw superblock update: ext4_meta_write is
          * already fail-closed for an inconsistent in-memory mount. */
-        if (!sb->journal && sb->mount_state_started)
-            (void)ext4_persist_state_transition(sb->bc, EXT4_STATE_ERROR);
+        if (!sb->journal && sb->mount_state_started) {
+            /* A transient state write/barrier failure must not strand the
+             * quarantine in cache. Retry once, keeping EUCLEAN either way. */
+            if (ext4_persist_state_transition(sb->bc, EXT4_STATE_ERROR) < 0)
+                (void)ext4_persist_state_transition(sb->bc, EXT4_STATE_ERROR);
+        }
     }
     return status;
 }
@@ -232,9 +236,10 @@ static int ext4_persist_state_transition(bcache_t *bc, int transition)
     uint16_t next = ext4_state_transition(state, transition);
     if (transition == EXT4_STATE_CLEAN && (state & EXT4_ERROR_FS))
         return -117;
+    /* Matching cache bytes do not prove a prior barrier succeeded. This
+     * includes ERROR: quarantine must survive losing the in-memory mount. */
     if (next == state)
-        return transition == EXT4_STATE_CLEAN || transition == EXT4_STATE_BEGIN
-            ? ext4_state_io_flush(bc) : 0;
+        return ext4_state_io_flush(bc);
     ret = ext4_state_io_write(bc, next);
     if (ret < 0) return ret;
     return ext4_state_io_flush(bc);
