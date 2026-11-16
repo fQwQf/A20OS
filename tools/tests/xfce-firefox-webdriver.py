@@ -28,6 +28,10 @@ def launch_firefox(url):
         profile = '/tmp/bsd-firefox-profile'
         shutil.rmtree(profile, ignore_errors=True)
         os.makedirs(profile, exist_ok=True)
+        # Marionette's recommended test mode bypasses native widget focus.
+        # Real desktop keyboard/IME input needs the normal focus path.
+        with open(os.path.join(profile, 'user.js'), 'w') as preferences:
+            preferences.write('user_pref("focusmanager.testmode", false);\n')
         args += ['--profile', profile]
     args.append(url)
     command = ' '.join(shlex.quote(x) for x in args)

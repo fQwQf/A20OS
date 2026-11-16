@@ -52,6 +52,9 @@ results=[];seen_pids=set()
 for lap in ('cold','warm'):
  profile='/tmp/platform-firefox-'+lap
  os.makedirs(profile,exist_ok=False)
+ # Keep native focus when observing a real desktop browser.
+ with open(profile+'/user.js','w') as preferences:
+  preferences.write('user_pref("focusmanager.testmode", false);\n')
  command=['/usr/lib/firefox/firefox','--marionette','--no-remote','--profile',profile,'about:blank']
  assert not listening(),'old Marionette listener still active'
  before=firefox_tasks()

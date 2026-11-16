@@ -19,6 +19,15 @@ the npm workload writeback refusal; both application workloads now have bounded
 RV64 SMP2 clean-shutdown and filesystem-check evidence. Other application and
 release-candidate requirements remain open in the register.
 
+The x86_64 SMP4 OpenJDK and Minecraft application paths now have direct execution,
+interaction, normal exit and saved-world cold-reload evidence. Firefox native
+Wayland HTTP/TLS, tabs/refresh, real Latin and Rime Chinese keyboard input, normal
+browser exit and desktop shutdown pass in `desktop-current/firefox-focus-verified`.
+Its prior input crash was triggered by Marionette's synthetic focus test mode;
+the disposable test profile now retains normal native focus. Production input
+modules and sandbox policy are unchanged. These bounded application results do
+not certify every error/permission boundary or the final platform candidate.
+
 ## Coverage Legend
 
 - `full`: intended complete behavior for supported objects and flags.
