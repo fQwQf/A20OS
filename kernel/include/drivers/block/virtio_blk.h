@@ -165,7 +165,10 @@ int  virtio_blk_flush(int idx);
 /* Total sector count for device idx */
 uint64_t virtio_blk_capacity(int idx);
 
-/* Get block_dev pointer for VFS/FS use by device index */
+/* Acquire one consumer reference for VFS/FS use by device index. Keep it
+ * across all cache/I/O use; after destroying the cache, pair each successful
+ * call with dev->release(dev). Retired devices reject I/O and keep their old
+ * identity until the last reference is returned. */
 block_dev_t *virtio_blk_get_dev(int idx);
 
 /* Check if device idx is ready */
