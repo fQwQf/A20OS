@@ -12,8 +12,10 @@
  * coredump.c keep working.
  *
  * Boundaries of the basic implementation:
- * - 64-bit architectures only (riscv64 primary; the gregset layout mapping is
- *   exact for riscv64, best-effort generic for the others).
+ * - 64-bit architectures only. x86_64 emits its Linux GPR/PRPSINFO wire
+ *   layouts, saved CS/SS and TLS bases; other selectors are zero and no FP note is
+ *   advertised. riscv64 retains its GPR mapping; other ports retain the
+ *   legacy best-effort generic notes, not debugger-compatible regset claims.
  * - core_pattern "|pipe" mode is not supported (the dump is skipped and a
  *   klog note is emitted).
  * - Placeholder subset: %p %e %s %u %g %t %%; other % sequences are dropped.

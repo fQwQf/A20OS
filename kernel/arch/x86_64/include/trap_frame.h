@@ -389,6 +389,18 @@ static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
     out->orig_syscall = ctx->rax;
 }
 
+/* Core notes additionally need saved selectors and TLS bases, which are not
+ * part of the generic GPR export. Keep those facts in the architecture. */
+#define ARCH_COREDUMP_EXPORT_REGS arch_coredump_export_regs
+static inline void arch_coredump_export_regs(const trap_context_t *ctx,
+                                            proc_debug_regs_t *out) {
+    arch_ptrace_export_regs(ctx, out);
+    out->regs[16] = ctx->cs;
+    out->regs[17] = ctx->ss;
+    out->regs[18] = ctx->user_fs_base;
+    out->regs[19] = ctx->user_gs_base;
+}
+
 static inline void arch_ptrace_import_regs(trap_context_t *ctx,
                                            const proc_debug_regs_t *in) {
     ctx->rax = in->regs[0];

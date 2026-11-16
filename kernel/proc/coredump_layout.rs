@@ -73,7 +73,7 @@ struct Phdr {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Prstatus {
+struct Prstatus<const N: usize> {
     si_signo: i32,
     si_code: i32,
     si_errno: i32,
@@ -89,26 +89,9 @@ struct Prstatus {
     pr_stime: [u64; 2],
     pr_cutime: [u64; 2],
     pr_cstime: [u64; 2],
-    pr_reg: [u64; 32],
+    pr_reg: [u64; N],
     pr_fpvalid: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Prpsinfo {
-    pr_state: u8,
-    pr_sname: u8,
-    pr_zomb: u8,
-    pr_nice: u8,
-    pr_flag: u32,
-    pr_uid: u32,
-    pr_gid: u32,
-    pr_pid: i32,
-    pr_ppid: i32,
-    pr_pgrp: i32,
-    pr_sid: i32,
-    pr_fname: [u8; 16],
-    pr_psargs: [u8; 80],
+    _pad1: u32,
 }
 
 #[repr(C)]
@@ -116,6 +99,7 @@ struct Prpsinfo {
 struct Fpregset {
     f: [u64; 32],
     fcsr: u32,
+    _pad: u32,
 }
 
 /// Everything the note blob needs, read from the crashing task by the adapter.
@@ -132,6 +116,10 @@ pub struct NoteInput {
     pub fp: [u64; 32],
     pub fcsr: u64,
     pub name: [u8; 64],
+    pub pc: u64,
+    pub sp: u64,
+    pub status: u64,
+    pub orig_syscall: u64,
 }
 
 /// One dumped VMA, snapshotted by the adapter under `mm->lock`.
@@ -163,7 +151,7 @@ pub struct SegmentOut {
 const _: () = {
     assert!(core::mem::size_of::<Ehdr>() == COREDUMP_EHDR_SIZE);
     assert!(core::mem::size_of::<Phdr>() == COREDUMP_PHDR_SIZE);
-    assert!(core::mem::size_of::<Prpsinfo>() == 128);
+    assert!(core::mem::size_of::<NoteInput>() == 648);
 };
 
 struct Blob {
@@ -364,11 +352,59 @@ pub unsafe extern "C" fn a20_coredump_expand_pattern(
     0
 }
 
-/// Build the note blob.  Returns the byte length, or a negative errno when the
-/// caller's buffer cannot hold it.
+fn emit_prstatus<const N: usize>(blob: &mut Blob, input: &NoteInput,
+                                regs: [u64; N], fpvalid: i32) {
+    let mut prs: Prstatus<N> = unsafe { core::mem::zeroed() };
+    prs.si_signo = input.sig;
+    prs.si_code = SI_KERNEL;
+    prs.pr_cursig = input.sig as i16;
+    prs.pr_pid = input.pid;
+    prs.pr_ppid = input.ppid;
+    prs.pr_pgrp = input.pgid;
+    prs.pr_sid = input.sid;
+    prs.pr_reg = regs;
+    prs.pr_fpvalid = fpvalid;
+    let prs_bytes = unsafe {
+        core::slice::from_raw_parts(&prs as *const Prstatus<N> as *const u8,
+                                    core::mem::size_of::<Prstatus<N>>())
+    };
+    blob.note(b"CORE", CORE_NT_PRSTATUS, prs_bytes);
+}
+
+fn emit_prpsinfo(blob: &mut Blob, input: &NoteInput, wide_flag: bool) {
+    // Write bytes explicitly: the 64-bit pr_flag has four preceding padding
+    // bytes, which must never expose uninitialized kernel stack storage.
+    let mut psi = [0u8; 136];
+    let uid = if wide_flag { 16 } else { 8 };
+    let pid = uid + 8;
+    let name = pid + 16;
+    let args = name + 16;
+    psi[1] = b'R';
+    psi[uid..uid + 4].copy_from_slice(&input.uid.to_ne_bytes());
+    psi[uid + 4..uid + 8].copy_from_slice(&input.gid.to_ne_bytes());
+    psi[pid..pid + 4].copy_from_slice(&input.pid.to_ne_bytes());
+    psi[pid + 4..pid + 8].copy_from_slice(&input.ppid.to_ne_bytes());
+    psi[pid + 8..pid + 12].copy_from_slice(&input.pgid.to_ne_bytes());
+    psi[pid + 12..pid + 16].copy_from_slice(&input.sid.to_ne_bytes());
+    let mut n = 0;
+    while n < 15 && n < input.name.len() && input.name[n] != 0 {
+        psi[name + n] = input.name[n];
+        n += 1;
+    }
+    n = 0;
+    while n < 79 && n < input.name.len() && input.name[n] != 0 {
+        psi[args + n] = input.name[n];
+        n += 1;
+    }
+    blob.note(b"CORE", CORE_NT_PRPSINFO, &psi[..if wide_flag { 136 } else { 128 }]);
+}
+
+/// Serialize the machine's note format. This wire-format choice is independent
+/// of the ISA compiling the host tests. Unsupported ports retain legacy notes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn a20_coredump_notes(
     input: *const NoteInput,
+    e_machine: u16,
     buf: *mut u8,
     cap: usize,
     out_len: *mut u64,
@@ -378,64 +414,31 @@ pub unsafe extern "C" fn a20_coredump_notes(
     }
     let input = unsafe { &*input };
     let mut blob = Blob { buf, cap, len: 0, overflow: false };
-
-    let mut prs: Prstatus = unsafe { core::mem::zeroed() };
-    prs.si_signo = input.sig;
-    prs.si_code = SI_KERNEL;
-    prs.pr_cursig = input.sig as i16;
-    prs.pr_pid = input.pid;
-    prs.pr_ppid = input.ppid;
-    prs.pr_pgrp = input.pgid;
-    prs.pr_sid = input.sid;
-    // The generic export puts the pc first and the remaining registers in
-    // order, which is both Linux's user_regs_struct order and this kernel's
-    // regs[] order on riscv64.
-    prs.pr_reg[0] = input.regs[0];
-    for i in 1..32 {
-        prs.pr_reg[i] = input.regs[i];
+    if e_machine == 62 { // EM_X86_64: Linux struct user_regs_struct, 27 u64.
+        let r = &input.regs;
+        let regs = [r[15], r[14], r[13], r[12], r[6], r[1], r[11], r[10],
+                    r[9], r[8], r[0], r[2], r[3], r[4], r[5], input.orig_syscall,
+                    input.pc, r[16], input.status, input.sp, r[17], r[18], r[19],
+                    0, 0, 0, 0];
+        // The core-specific export supplies saved CS/SS and TLS bases. The
+        // other selectors and x87/SSE are unavailable; do not invent FP data.
+        emit_prstatus(&mut blob, input, regs, 0);
+        emit_prpsinfo(&mut blob, input, true);
+    } else {
+        // Preserve the old RISC-V note and documented best-effort other ports.
+        let mut regs = input.regs;
+        regs[0] = input.pc;
+        emit_prstatus(&mut blob, input, regs, 1);
+        let mut fprs: Fpregset = unsafe { core::mem::zeroed() };
+        fprs.f.copy_from_slice(&input.fp);
+        fprs.fcsr = input.fcsr as u32;
+        let fprs_bytes = unsafe {
+            core::slice::from_raw_parts(&fprs as *const Fpregset as *const u8,
+                                        core::mem::size_of::<Fpregset>())
+        };
+        blob.note(b"CORE", CORE_NT_FPREGSET, fprs_bytes);
+        emit_prpsinfo(&mut blob, input, false);
     }
-    prs.pr_fpvalid = 1;
-    let prs_bytes = unsafe {
-        core::slice::from_raw_parts(&prs as *const Prstatus as *const u8,
-                                    core::mem::size_of::<Prstatus>())
-    };
-    blob.note(b"CORE", CORE_NT_PRSTATUS, prs_bytes);
-
-    let mut fprs: Fpregset = unsafe { core::mem::zeroed() };
-    for i in 0..32 {
-        fprs.f[i] = input.fp[i];
-    }
-    fprs.fcsr = input.fcsr as u32;
-    let fprs_bytes = unsafe {
-        core::slice::from_raw_parts(&fprs as *const Fpregset as *const u8,
-                                    core::mem::size_of::<Fpregset>())
-    };
-    blob.note(b"CORE", CORE_NT_FPREGSET, fprs_bytes);
-
-    let mut psi: Prpsinfo = unsafe { core::mem::zeroed() };
-    psi.pr_state = 0;
-    psi.pr_sname = b'R';
-    psi.pr_uid = input.uid;
-    psi.pr_gid = input.gid;
-    psi.pr_pid = input.pid;
-    psi.pr_ppid = input.ppid;
-    psi.pr_pgrp = input.pgid;
-    psi.pr_sid = input.sid;
-    let mut n = 0;
-    while n < psi.pr_fname.len() - 1 && n < input.name.len() && input.name[n] != 0 {
-        psi.pr_fname[n] = input.name[n];
-        n += 1;
-    }
-    n = 0;
-    while n < psi.pr_psargs.len() - 1 && n < input.name.len() && input.name[n] != 0 {
-        psi.pr_psargs[n] = input.name[n];
-        n += 1;
-    }
-    let psi_bytes = unsafe {
-        core::slice::from_raw_parts(&psi as *const Prpsinfo as *const u8,
-                                    core::mem::size_of::<Prpsinfo>())
-    };
-    blob.note(b"CORE", CORE_NT_PRPSINFO, psi_bytes);
 
     if blob.overflow {
         return ENOMEM;
@@ -584,7 +587,7 @@ mod tests {
     fn notes(input: &NoteInput) -> std::vec::Vec<u8> {
         let mut buf = std::vec![0u8; CORE_NOTES_CAP];
         let mut len = 0u64;
-        let rc = unsafe { a20_coredump_notes(input, buf.as_mut_ptr() as *mut u8, buf.len(), &mut len) };
+        let rc = unsafe { a20_coredump_notes(input, 243, buf.as_mut_ptr() as *mut u8, buf.len(), &mut len) };
         assert_eq!(rc, 0);
         buf.truncate(len as usize);
         buf
@@ -600,8 +603,8 @@ mod tests {
     fn wire_sizes_match_the_elf64_abi() {
         assert_eq!(core::mem::size_of::<Ehdr>(), 64);
         assert_eq!(core::mem::size_of::<Phdr>(), 56);
-        assert_eq!(core::mem::size_of::<Prpsinfo>(), 128);
-        assert_eq!(core::mem::size_of::<Prstatus>(), 376);
+        assert_eq!(core::mem::size_of::<Prstatus<32>>(), 376);
+        assert_eq!(core::mem::size_of::<Prstatus<27>>(), 336);
         assert_eq!(core::mem::size_of::<Fpregset>(), 264);
     }
 
@@ -667,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_carry_the_three_linux_note_descriptors() {
+    fn notes_preserve_the_legacy_riscv_descriptors() {
         let _guard = TEST_LOCK.lock().unwrap();
         let mut input = zeroed_input();
         input.sig = 11;
@@ -678,7 +681,7 @@ mod tests {
         input.uid = 1000;
         input.gid = 1000;
         input.name[..4].copy_from_slice(b"bash");
-        input.regs[0] = 0xdead;
+        input.pc = 0xdead;
         input.fp[0] = 0xbeef;
         input.fcsr = 5;
         let blob = notes(&input);
@@ -721,7 +724,7 @@ mod tests {
         let input = zeroed_input();
         let mut buf = [0u8; 64];
         let mut len = 0u64;
-        let rc = unsafe { a20_coredump_notes(&input, buf.as_mut_ptr() as *mut u8, buf.len(), &mut len) };
+        let rc = unsafe { a20_coredump_notes(&input, 243, buf.as_mut_ptr() as *mut u8, buf.len(), &mut len) };
         assert_eq!(rc, ENOMEM);
     }
 

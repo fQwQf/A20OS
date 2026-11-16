@@ -28,10 +28,14 @@ typedef struct coredump_note_input {
     int32_t  sid;
     uint32_t uid;
     uint32_t gid;
-    uint64_t regs[32];
+    uint64_t regs[32]; /* Generic GPR order; core-only auxiliary slots per arch. */
     uint64_t fp[32];
     uint64_t fcsr;
     char     name[COREDUMP_NAME_MAX];
+    uint64_t pc;
+    uint64_t sp;
+    uint64_t status;
+    uint64_t orig_syscall;
 } coredump_note_input_t;
 
 typedef struct coredump_vma_input {
@@ -63,11 +67,16 @@ _Static_assert(__builtin_offsetof(coredump_note_input_t, fcsr) == 544,
                "coredump_note_input_t.fcsr offset");
 _Static_assert(__builtin_offsetof(coredump_note_input_t, name) == 552,
                "coredump_note_input_t.name offset");
+_Static_assert(__builtin_offsetof(coredump_note_input_t, pc) == 616,
+               "coredump_note_input_t.pc offset");
+_Static_assert(sizeof(coredump_note_input_t) == 648,
+               "coredump_note_input_t size");
 
 int a20_coredump_expand_pattern(const char *pattern, const char *name, int32_t pid,
                                 int32_t tgid, int32_t uid, int32_t gid, int32_t sig,
                                 uint64_t seconds, char *out, size_t outsz);
-int a20_coredump_notes(const coredump_note_input_t *input, char *buf, size_t cap,
+int a20_coredump_notes(const coredump_note_input_t *input, uint16_t e_machine,
+                       char *buf, size_t cap,
                        uint64_t *out_len);
 int a20_coredump_layout(const coredump_vma_input_t *vmas, uint32_t nvma,
                         uint64_t notes_len, uint64_t rlim, uint64_t page_size,
