@@ -12,6 +12,11 @@ if [ -z "$assign" ]; then
     echo "   A20_CONSOLE_COLS/A20_CONSOLE_ROWS to force a size)" >&2
     exit 1
 fi
+# The zsh function requests assignments and applies them in the calling shell.
+if [ "${1:-}" = --shell ]; then
+    printf '%s\n' "$assign"
+    exit 0
+fi
 eval "$assign"
 export COLUMNS LINES
-echo "console is now ${COLUMNS}x${LINES} (COLUMNS/LINES exported; tty updated)"
+echo "console is now ${COLUMNS}x${LINES}"

@@ -5,20 +5,12 @@
 # A20OS-specific: it is the same set of conveniences a normal Alpine install
 # would give an interactive user.
 
-# History is kept in /dev/shm, which the kernel already mounts as tmpfs under
-# /extra before the chroot.  $HOME is on the world image's journal-less ext4, and
-# that is exactly where history must not go -- see the setopt note below.
+# Keep history in tmpfs and write it at shell exit. The ordinary ext4 orphan
+# lifecycle has been repaired; this remains the workstation's history policy.
 HISTFILE=/dev/shm/.zsh_history
 HISTSIZE=5000
 SAVEHIST=5000
-# Deliberately NOT setting SHARE_HISTORY / INC_APPEND_HISTORY.  Both make zsh
-# rewrite the history file after *every* command, and on riscv64 each rewrite
-# leaves an unreaped orphan inode on the world image's ext4 (measured: one per
-# command, zero with them off).  Enough of them and the image refuses to mount
-# on the next boot -- "[EXT4] refusing mount: orphan recovery failed (-95)";
-# the cause is A20OS' ext4 orphan reap, see packages/world/cli.world.
-# Plain zsh history (in-memory, written only at shell exit) produces no churn,
-# and it still gives a working `history` within the session.
+# SHARE_HISTORY / INC_APPEND_HISTORY remain optional shell preferences.
 setopt HIST_IGNORE_DUPS HIST_IGNORE_SPACE
 setopt AUTO_CD NO_BEEP INTERACTIVE_COMMENTS
 
@@ -34,6 +26,16 @@ autoload -Uz compinit && compinit -u 2>/dev/null
 # terminal (see /usr/lib/a20/console-size).  Without it zsh would wrap against
 # the console tty's hardcoded 80 columns and garble anything longer.
 PROMPT='%F{green}%n@%m%f %F{blue}%~%f %# '
+
+# An external command cannot export dimensions back into its parent shell.
+# Keep the interactive update here; the helper owns query/error handling.
+resize-console() {
+    local resize_assign
+    resize_assign=$(/usr/local/bin/resize-console --shell) || return
+    eval "$resize_assign"
+    export COLUMNS LINES
+    print -r -- "console is now ${COLUMNS}x${LINES}"
+}
 
 # GNU tools live in /usr/bin, busybox applets in /bin; this ordering is what
 # makes the GNU versions win (see packages/world/cli.world).

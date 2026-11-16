@@ -16,6 +16,60 @@ def run(argv):
     return result.stdout
 
 
+def console():
+    import array
+    import fcntl
+    import os
+    import struct
+    import termios
+    import time
+
+    fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+    try:
+        assert os.isatty(0) and os.isatty(fd)
+        sid = array.array('i', [0])
+        fcntl.ioctl(fd, getattr(termios, 'TIOCGSID', 0x5429), sid, True)
+        assert sid[0] == os.getsid(0) and sid[0] > 1, (sid[0], os.getsid(0))
+        assert os.tcgetpgrp(fd) == os.getpgrp()
+        rows, columns, _, _ = struct.unpack('HHHH', fcntl.ioctl(fd, termios.TIOCGWINSZ, b'\0' * 8))
+        assert (rows, columns) == (40, 120), (rows, columns)
+        assert (os.environ.get('LINES'), os.environ.get('COLUMNS')) == ('40', '120')
+        assert str(Path('/proc/1/exe').readlink()).endswith('/busybox')
+        saved = termios.tcgetattr(fd)
+        assert run(['/usr/lib/a20/console-size']) == 'COLUMNS=120; LINES=40\n'
+        assert termios.tcgetattr(fd) == saved, 'size query did not restore terminal mode'
+        resized = run(['/bin/zsh', '-fc',
+                       'source /root/.zshrc\nCOLUMNS=80\nLINES=24\nresize-console\n'
+                       'test "$COLUMNS,$LINES" = "120,40"\n'])
+        assert resized == 'console is now 120x40\n', resized
+
+
+        # PID 1 must reap a descendant orphaned after the shell's child exits.
+        read_fd, write_fd = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(read_fd)
+            grandchild = os.fork()
+            if grandchild == 0:
+                os.write(write_fd, str(os.getpid()).encode())
+                os.close(write_fd)
+                time.sleep(.1)
+            os._exit(0)
+        os.close(write_fd)
+        assert os.waitpid(child, 0) == (child, 0)
+        orphan = int(os.read(read_fd, 32))
+        os.close(read_fd)
+        deadline = time.monotonic() + 3
+        while Path(f'/proc/{orphan}/stat').exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        assert not Path(f'/proc/{orphan}/stat').exists(), 'PID 1 left an orphan zombie'
+        print('CLI_CONSOLE:', json.dumps({'sid': sid[0], 'pgrp': os.getpgrp(),
+                                         'rows': rows, 'columns': columns,
+                                         'orphan_reaped': orphan}), flush=True)
+    finally:
+        os.close(fd)
+
+
 def shells():
     import errno
     import os
@@ -256,12 +310,12 @@ def main():
     parser.add_argument('--dns-host', default='10.0.2.2')
     parser.add_argument('--dns-port', type=int, required=True)
     parser.add_argument('--check', action='append', choices=(
-        'shells', 'mount', 'interfaces', 'http', 'udp-errors', 'udp-dns'),
+        'console', 'shells', 'mount', 'interfaces', 'http', 'udp-errors', 'udp-dns'),
         help='Run only the named checks (repeatable); defaults to all checks.')
     args = parser.parse_args()
     results = {}
     for name, operation in (
-            ('shells', shells), ('mount', mount_tmpfs), ('interfaces', interfaces),
+            ('console', console), ('shells', shells), ('mount', mount_tmpfs), ('interfaces', interfaces),
             ('http', lambda: http(args.http_url)), ('udp-errors', udp_errors), ('udp-dns', lambda: dns(args.dns_host, args.dns_port))):
         if args.check and name not in args.check:
             continue

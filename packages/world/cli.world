@@ -9,7 +9,7 @@
 #
 # 配套 packages/overlay/cli/（a20-distro 标记 + stage-2 init + 账号文件），
 # 内核把镜像挂到 /extra，A20OS 的 init 检测到标记后 chroot 进去 exec
-# /sbin/init，由它接管并开出 zsh 登录 shell（与 server / xfce world 同一模式）。
+# /sbin/init。CLI 交给 BusyBox init/getty，由独立控制台会话启动 zsh 登录 shell。
 #
 # 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk
 # 缓存。上游是 Alpine v3.23 的 main（见 tools/packaging/mkrootfs.py 的
@@ -105,89 +105,24 @@ mandoc
 man-pages
 
 # ---------------------------------------------------------------------------
-# 验证记录与已知内核问题（riscv64，2026-10）
+# 当前运行状态（RV64 QEMU virt / ABI=both / SMP2 / BSD，2026-11-16）
 # ---------------------------------------------------------------------------
 #
-# 启动链路已验证：内核把 build/images/cli-riscv64.img 挂到 /extra，A20OS 的
-# init 检测到 /etc/a20-distro 后 chroot 进去 exec /sbin/init，落在 zsh 上。
-# guest 内实测通过：zsh 5.9、coreutils 9.8、findutils 4.10、grep 3.12、
-# sed 4.9、git 2.52、Python 3.12.15、tmux 3.6、vim 9.2、htop 3.4.1、
-# tree/jq/less/mandoc 均在；tmux 能起 session；python3 的 ssl/json/sqlite3
-# 可导入；`curl https://dl-cdn.alpinelinux.org/...` 返回 200；`poweroff` 走
-# [SD] POWER_OFF 正常关机。同一张镜像连续启动两次，第二次仍能正常挂载。
+#   * BusyBox init 为 PID 1，getty 建立控制终端后由 cli-session exec zsh。
+#     两个先后会话均完成 120x40 尺寸查询、termios 恢复和孤儿回收；shell
+#     exit 后 respawn 新会话，普通 poweroff 经 init 停止进程后自然关机。
+#   * console-size 的读取保持在前台组；交互 resize-console 函数会在当前
+#     zsh 更新 COLUMNS/LINES。无宿主窗口尺寸事件时需手动重新查询。
+#   * bash/zsh 的管道、命令替换、后台等待及退出码通过；NPROC 默认无限值
+#     的错误已修复，无特权零上限拒绝 fork。
+#   * tmpfs 挂载、文件写读和卸载通过；当前进程及私有 namespace/chroot
+#     子进程的 procfs 挂载视图通过。
+#   * ip link/address/route、本地 HTTP 和 dig/nslookup UDP DNS 查询通过；
+#     IPv4/IPv6 回环 ICMP 错误队列、POLLERR 与错误消费通过。
 #
-# 2026-11-16 当前定向运行（RV64 QEMU virt / ABI=both / SMP2 / BSD）：
-#
-#   * ip 的 SO_SNDBUF 拒绝已修复，link/address/route JSON 查询通过。
-#   * curl 实际访问宿主本地 HTTP 服务通过；不等于本轮已验证公网 HTTPS。
-#   * dig/nslookup 实际 UDP DNS 查询通过；IP_RECVERR 阻塞已由真实 ICMP
-#     错误队列修复，IPv4/IPv6 回环错误、POLLERR 和错误消费检查通过。
-#     范围为 BSD 初始网络命名空间的 UDP，非所有后端/扩展的完整 Linux 兼容。
-#   * 启动 console-size 仍无法打开 /dev/tty，banner 尺寸为 ?x?；
-#     下文控制台查询的历史通过记录不代表当前候选已恢复。
-#   * tmpfs 挂载、文件写读和卸载通过；procfs 挂载视图的 chroot 路径及
-#     目标 PID 选择已修复，当前进程与私有 namespace/chroot 子进程检查通过。
-#   * bash 管道崩溃已修复（NPROC 默认无限制曾被报告为零）；bash/zsh 的
-#     管道、命令替换、后台等待及退出码通过，无特权零 NPROC 拒绝 fork。
-#
-# 普通 ext4 orphan 生命周期及其余已完成修复不再列为本 world 缺口。
-# 尚未关闭的恢复边界由 docs/zh/status/current/ext4-orphan-gap.md 跟踪；
-# 保留 HISTFILE=/dev/shm 是当前配置，不代表旧 orphan EOPNOTSUPP 仍然存在。
-# 实际命令、证据与剩余契约：docs/zh/kernel/linux-abi/application-contracts.md；
-# 原始运行：build/evidence/v1-closeout-20261116/cli-application/。
-#
-# **四、控制台尺寸（历史查询方案，当前启动仍失败）**
-#
-#   A20OS 的控制台 tty 把窗口尺寸写死成 24x80（kernel/fs/devfs/tty.c:235），
-#   而 QEMU 的 `-serial stdio` 没有任何通道把宿主终端的真实尺寸带进 guest。
-#   zsh 的行编辑器按它以为的宽度折行和重绘，于是在宽度不是 80 的终端上：
-#
-#     * 输入超过第 80 列后光标位置就错了（"输入重叠"）；
-#     * 按上键调历史时按同一个错误宽度重定位光标，重绘会盖住之前的输出。
-#
-#   实测两个杠杆都能用：ZLE 认 $COLUMNS（把 COLUMNS 设成 120，它的擦除行长度
-#   立刻从 79 变成 119），tty 认 TIOCSWINSZ（`stty cols 120` 后 `stty size`
-#   报 40 120）。但 ZLE 不会主动重读 tty —— A20OS 不发 SIGWINCH —— 所以真正
-#   起作用的是 $COLUMNS；`stty` 一并设上是为了让 vim/tmux/htop 也一致。
-#
-#   尺寸由 packages/overlay/cli/usr/lib/a20/console-size 用 resize(1) 的办法问
-#   出来：存光标、移到右下角、发 DSR（ESC[6n）、读回 ESC[<row>;<col>R。stage-2
-#   init 在 exec zsh 之前调它并导出 COLUMNS/LINES。实测：
-#
-#     * 终端 120x40 → banner 报 `console 120x40`，ZLE 擦除行 119；
-#     * 终端 200x50 → banner 报 `console 200x50`，`stty size` 报 `50 200`，
-#       `COLUMNS/LINES` = 200/50，ZLE 擦除行 199；
-#     * 终端不回答（管道 / CI 日志 / `-serial file:`）→ 查询 1 秒超时，什么
-#       也不设，启动照常完成，ZLE 退回 80（不比改动前差）。
-#
-#   注意查询与应答必须走终端本身，不能走 stdout：调用方是用命令替换捕获
-#   console-size 的输出的，把查询写到 stdout 会交给 shell 而不是终端（这个
-#   错误产生过 `/sbin/init: eval: line 49: ^[[9999C^[[6n: not found`）。所以
-#   脚本里用 /dev/tty，stdout 只留给赋值。
-#
-#   另外只往右移（ESC[9999C）不够：那样读回的 row 是光标当时所在的行，高度
-#   永远是错的。必须移到右下角（ESC[9999;9999H）才能同时拿到宽和高。
-#
-#   改了终端窗口大小之后没有 SIGWINCH，shell 自己不会察觉；用
-#   `/usr/local/bin/resize-console` 手动重问一次（实测输出 `console is now
-#   200x50`）。
-#
-# **五、Ctrl-C（已在内核修好，本 world 不再需要任何规避）**
-#
-#   原先 UART 驱动直接吞掉 `0x03` 并从 RX 路径发 SIGINT，行规（ISIG）没有
-#   实现位置，而且阻塞在控制台读上的任务不响应信号（实测 `timeout 1 dd
-#   if=/dev/tty` 要 11.98 秒才被 SIGTERM 杀掉）。现在：
-#
-#     * ISIG 由 tty 行规在**接收路径**上处理（`tty_console_isig_signal()` /
-#       `tty_console_isig_raise()`，见 kernel/fs/devfs/tty.c 与
-#       kernel/include/fs/tty.h），pty 侧同样（kernel/drivers/char/pty.c）；
-#     * 驱动不再看控制字节，`0x03` 作为普通数据到达行规；
-#     * 控制台读在有待处理信号时返回 `-ERESTARTSYS`，所以阻塞读可被中断。
-#
-#   实测（riscv64，cli world / zsh）：行内按 ^C 会放弃当前输入行（连
-#   `echo PARTIAL $((111` 这种续行提示也一并放弃）；前台 `sleep 20` 在 **3.3 秒**
-#   被 ^C 打断，不是等满 20 秒；shell 本身存活。
-#
-#   这也是 `tools/a20 test smoke-riscv64` 仍然 PASS 的前提（测试harness 通过
-#   控制台注入命令）。
-
+# 控制台契约：docs/zh/kernel/linux-abi/cli-console.md。
+# 实际命令、证据及保留范围：docs/zh/kernel/linux-abi/application-contracts.md。
+# 原始运行：build/evidence/v1-closeout-20261116/cli-application/ 与 cli-console/。
+# 这些定向结果不扩大为全部终端、应用或平台的正式支持认证。
+# HISTFILE=/dev/shm 与关闭逐命令历史同步是当前 shell 偏好；旧 ext4 orphan
+# EOPNOTSUPP 不再列为当前缺陷。其它恢复边界按 ext4-orphan-gap.md 跟踪。

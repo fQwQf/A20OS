@@ -1,0 +1,4 @@
+# The local workstation opens its existing root console without a login prompt.
+# getty supplies setsid, TIOCSCTTY and the foreground process group.
+::respawn:/bin/busybox getty -L -n -i -l /usr/lib/a20/cli-session 115200 console xterm-256color
+::shutdown:/bin/busybox sync
