@@ -1086,6 +1086,11 @@ probe 在端口访问前 claim 完整 index/data 资源，拒绝越过 16 位窗
 公共接口、夹具、模块、导入和日志。本轮 RTC 软件缺口已关闭，正式候选继续归
 N18/N20，其余驱动按常见 PC/QEMU 范围处理。
 
+后续冻结候选 `261deecb113e` 的 x86_64 q35/KVM 单 CPU 实跑中，新 CMOS 模块
+读出 epoch `1794886522` 并被内核墙钟采用，随后 QEMU 正常 S5 退出 0。证据见
+`build/evidence/v1-closeout-20261116/candidate-runtime/x86_64-bringup/`。这是正常
+硬件读取与关机，不补记此前未执行的 fallback guest，也不声称用户态日期命令覆盖。
+
 
 ### Goldfish RTC 只读探针边界（2026-11-17）
 
@@ -1098,6 +1103,13 @@ Goldfish RTC 内核探针只作同步诊断；现在先检查两个 32 位时间
 （0.639 秒、无警告），覆盖非法/最小/正常/全宽声明、映射失败、寄存器读取顺序、
 纳秒拼接及退出。未重跑 guest，正式候选设备验证仍归 N18/N20。
 证据为 `build/evidence/v1-closeout-20261116/goldfish-rtc-probe/report.json`。
+
+后续冻结候选 `261deecb113e` 的 RISC-V64 单 CPU QEMU 实跑中，新模块绑定
+`rtc@101000`，读出 `epoch_ns=1794886303158320000`，与宿主日志时间相差
+0.108 秒；系统就绪后自然关机退出 0。
+`candidate-runtime/riscv64-rtc/goldfish-bringup-observation.json` 记录这次正常读取
+与关机。首次脚本误要求 bringup 提供 shell，其失败结果原样保留；从同一日志提取
+的 RTC 观察不算用户态或块数据 I/O 通过，没有因此重跑一次 guest。
 
 
 ### 用户驱动输入探针窗口与退出（2026-11-17）
