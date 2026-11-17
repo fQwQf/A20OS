@@ -45,6 +45,8 @@ typedef struct hda_controller {
     int closing;
     int hardware_stopped;
     volatile uint32_t generation;
+    struct driver_workqueue *progress_queue;
+    struct driver_work *progress_work;
     spinlock_t state_lock;
     mutex_t lock;
 } hda_controller_t;

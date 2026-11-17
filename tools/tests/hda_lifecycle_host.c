@@ -30,6 +30,7 @@ struct hardware {
     int dead, stuck_reset, stuck_run, dead_on_enable, fail_action, fail_map, fail_mask;
     int fail_codec, fail_alloc, allocs, frees, writes, reads, reset_requests, advance;
     int stop_on_yield, busy_stop, bad_gcap, dma32, bad_dma;
+    int fail_queue, fail_work, fail_join, fail_schedule;
     hda_controller_t *controller;
 };
 static struct hardware hardware[2], *allocating_hw;
@@ -90,9 +91,51 @@ static void writew(uint16_t v, volatile void *p) {
     struct hardware *h = owner(p); assert(!h->dead); h->writes++; memcpy((void *)p, &v, sizeof(v));
 }
 static uint64_t ticks;
+static unsigned delay_calls;
 static uint64_t timer_get_ticks(void) { return ticks += 10; }
+/* Workqueue lifecycle is the modeled scheduler boundary. The real progress
+ * callback and PCM cursor/stop functions execute below without a new write. */
+struct driver_workqueue { struct hardware *hw; int closed; struct driver_work *work; };
+struct driver_work { struct driver_workqueue *queue; void (*callback)(void *); void *context; int pending; };
+static unsigned queues_created, queues_freed, works_created, works_freed;
+static struct driver_workqueue *driver_workqueue_create(void) {
+    if (allocating_hw->fail_queue) return NULL;
+    struct driver_workqueue *q = calloc(1, sizeof(*q)); assert(q);
+    q->hw = allocating_hw; queues_created++; return q;
+}
+static struct driver_work *driver_work_create(struct driver_workqueue *q, void (*fn)(void *), void *ctx) {
+    if (q->hw->fail_work) return NULL;
+    struct driver_work *w = calloc(1, sizeof(*w)); assert(w);
+    w->queue = q; w->callback = fn; w->context = ctx; q->work = w; works_created++; return w;
+}
+static int driver_work_schedule(struct driver_work *w, uint64_t deadline) {
+    assert(w && deadline);
+    if (w->queue->closed) return -ESHUTDOWN;
+    if (w->queue->hw->fail_schedule) return -EBUSY;
+    int pending = w->pending; w->pending = 1; return !pending;
+}
+static int driver_workqueue_destroy(struct driver_workqueue **pointer, uint64_t deadline) {
+    struct driver_workqueue *q = *pointer;
+    /* Another PCM caller may hold its mutex. The callback uses trylock and
+     * closing suppresses rearm, so joining does not wait for that caller. */
+    assert(q && deadline && !q->hw->controller->state_lock.held);
+    q->closed = 1;
+    if (q->hw->fail_join) return -ETIMEDOUT;
+    if (q->work) q->work->pending = 0;
+    else { queues_freed++; free(q); }
+    *pointer = NULL; return 0;
+}
+static void driver_work_put(struct driver_work *w) {
+    assert(w && w->queue->closed && !w->pending);
+    queues_freed++; works_freed++; free(w->queue); free(w);
+}
+static void run_progress(hda_controller_t *h) {
+    struct driver_work *w = h->progress_work;
+    assert(w && w->pending && !w->queue->closed); w->pending = 0; w->callback(w->context);
+}
 static void mdelay(unsigned ms) {
     assert(ms == 1);
+    delay_calls++;
     for (unsigned i = 0; i < 2; i++) if (hardware[i].controller)
         assert(!hardware[i].controller->state_lock.held);
 }
@@ -176,6 +219,56 @@ static void submit(device_t *d) {
     assert(d->hw->controller->stream_running && !memcmp(d->hw->controller->pcm, data, sizeof(data)));
 }
 int main(void) {
+    /* Producer returns and performs no query/write/drain. Progress still
+     * silences consumed samples, preserves queued samples, and stops empty. */
+    device_t idle = fresh(0, 0); assert(!hda_probe(&idle));
+    hda_controller_t *idle_h = idle.drv_priv; submit(&idle);
+    run_progress(idle_h);
+    assert(idle_h->queued_bytes == 8192 && idle_h->progress_work->pending);
+    for (unsigned i = 0; i < 8192; i++) assert(idle_h->pcm[i] == 0x5a);
+    *(uint32_t *)(idle_h->stream + HDA_SD_LPIB) = 4096;
+    run_progress(idle_h);
+    assert(idle_h->queued_bytes == 4096 && idle_h->progress_work->pending);
+    for (unsigned i = 0; i < 8192; i++) assert(idle_h->pcm[i] == (i < 4096 ? 0 : 0x5a));
+    /* A competing writer never makes the worker block on its mutex. */
+    idle_h->lock.held = 1; run_progress(idle_h);
+    assert(idle_h->progress_work->pending && idle_h->queued_bytes == 4096); idle_h->lock.held = 0;
+    *(uint32_t *)(idle_h->stream + HDA_SD_LPIB) = 8192;
+    run_progress(idle_h);
+    assert(!idle_h->stream_running && !idle_h->queued_bytes && !idle_h->progress_work->pending);
+    assert(idle_h->stream_underruns == 1);
+    /* Played bytes crossing the ring end are cleared without touching the
+     * queued interval starting at the new cursor. */
+    memset(idle_h->pcm, 0x5a, HDA_DMA_BYTES);
+    idle_h->stream_running = 1; idle_h->last_lpib = HDA_DMA_BYTES - 16;
+    idle_h->queued_bytes = 64;
+    *(uint32_t *)(idle_h->stream + HDA_SD_LPIB) = 16;
+    assert(driver_work_schedule(idle_h->progress_work, ticks + 10) >= 0); run_progress(idle_h);
+    assert(idle_h->queued_bytes == 32 && idle_h->last_lpib == 16);
+    for (unsigned i = 0; i < HDA_DMA_BYTES; i++)
+        assert(idle_h->pcm[i] == (i < 16 || i >= HDA_DMA_BYTES - 16 ? 0 : 0x5a));
+    assert(!cleanup(&idle));
+    /* A failed callback join cannot free the owner or DMA. Closing prevents
+     * a retained callback from touching registers or rearming itself. */
+    idle = fresh(0, 0); assert(!hda_probe(&idle)); submit(&idle); idle_h = idle.drv_priv;
+    idle.hw->fail_join = 1;
+    assert(cleanup(&idle) == -ETIMEDOUT && idle.drv_priv == idle_h && !idle.hw->frees);
+    unsigned idle_reads = idle.hw->reads, idle_writes = idle.hw->writes;
+    idle_h->progress_work->pending = 0; hda_progress(idle_h);
+    assert(idle.hw->reads == (int)idle_reads && idle.hw->writes == (int)idle_writes && !idle_h->progress_work->pending);
+    idle.hw->fail_join = 0; assert(!cleanup(&idle));
+    idle = fresh(0, 0); assert(!hda_probe(&idle)); idle_h = idle.drv_priv;
+    idle.hw->fail_schedule = 1;
+    assert(hda_stream_run(idle_h, idle_h->generation) == -EBUSY && !idle_h->stream_running);
+    assert(!cleanup(&idle));
+    /* Runtime STOP has an independent poll/delay bound: no clock progress
+     * is needed when RUN refuses to clear, and DMA remains owned. */
+    idle = fresh(0, 0); assert(!hda_probe(&idle)); submit(&idle); idle_h = idle.drv_priv;
+    idle.hw->stuck_run = 1; unsigned delay_before = delay_calls;
+    uint64_t ticks_before = ticks;
+    assert(hda_stream_stop(idle_h) == -ETIMEDOUT && idle_h->stream_running && idle_h->queued_bytes == 8192);
+    assert(delay_calls - delay_before == HDA_TIMEOUT_MS && ticks == ticks_before);
+    idle.hw->stuck_run = 0; assert(!cleanup(&idle));
     for (int dma32 = 0; dma32 <= 1; dma32++) {
         device_t d = fresh(0, dma32); assert(!hda_probe(&d)); hda_controller_t *h = d.drv_priv;
         submit(&d); d.hw->advance = 1; assert(!hda_drain_device(&d) && !h->stream_running);
@@ -216,7 +309,13 @@ int main(void) {
         d.hw->dead = d.hw->dead_on_enable = 0;
         assert(!cleanup(&d) && !d.drv_priv);
     }
+    for (unsigned fail = 0; fail < 2; fail++) {
+        d = fresh(0, 0); d.hw->fail_queue = fail == 0; d.hw->fail_work = fail == 1;
+        assert(hda_probe(&d) == -ENOMEM && d.drv_priv);
+        assert(!cleanup(&d) && !d.drv_priv && d.hw->frees == 3);
+    }
     for (unsigned i = 0; i < 8; i++) assert(!allocations[i].p);
+    assert(queues_created == queues_freed && works_created == works_freed);
     puts("PASS: HDA controller/stream ACK, retained binding, canceled writer, closed PCM admission and partial probe");
     return 0;
 }

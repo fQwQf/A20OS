@@ -22,7 +22,7 @@ class HdaLifecycleTests(unittest.TestCase):
         defines = '\n'.join(re.findall(r'^#define HDA_.*$', source, re.M))
         names = ('hda_stream_reg', 'hda_wait32', 'hda_reset', 'hda_stream_reset',
                  'hda_stream_stop', 'hda_stream_prepare', 'hda_stream_run',
-                 'hda_stream_refresh', 'hda_ring_copy', 'hda_queue_pcm',
+                 'hda_stream_refresh', 'hda_progress', 'hda_ring_copy', 'hda_queue_pcm',
                  'hda_drain', 'hda_discard_queued', 'hda_adopt_generation',
                  'hda_write', 'hda_stop_device', 'hda_drain_device',
                  'hda_backend_ioctl', 'hda_poll', 'hda_quiesce', 'hda_stop',

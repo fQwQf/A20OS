@@ -30,6 +30,7 @@ MODEL = r'''
 #include "drivers/audio/backend.h"
 #define POLLOUT 4
 #define POLLERR 8
+#define MS_TO_TICKS(ms) (ms)
 typedef struct {int held;} mutex_t;
 typedef struct {int held;} spinlock_t;
 static int mutex_trylock(mutex_t*m){if(m->held)return 0;m->held=1;return 1;}
@@ -39,6 +40,10 @@ static void spin_unlock_irqrestore(spinlock_t*l,uint64_t f){(void)f;assert(l->he
 #include "drivers/audio/hda_internal.h"
 typedef struct {void *drv_priv;} device_t;
 static unsigned stopped,prepared,syncs;
+struct driver_work { int pending; };
+static struct driver_work progress_work;
+static uint64_t timer_get_ticks(void){return 100;}
+static int driver_work_schedule(struct driver_work*w,uint64_t deadline){assert(w&&deadline);w->pending=1;return 1;}
 static uint32_t mmio[64];
 static uint32_t readl(const volatile void*p){return *(const volatile uint32_t*)p;}
 static uint8_t readb(const volatile void*p){return *(const volatile uint8_t*)p;}
@@ -68,7 +73,7 @@ static int user_forward(device_t*d,unsigned long r,void*p){(void)d;(void)r;(void
 MAIN = r'''
 int main(void){
  uint8_t pcm[HDA_DMA_BYTES],data[HDA_DMA_BYTES];memset(data,0x5a,sizeof(data));
- hda_controller_t h={.stream=(uintptr_t)mmio,.pcm=pcm};device_t d={&h};
+ hda_controller_t h={.stream=(uintptr_t)mmio,.pcm=pcm,.progress_work=&progress_work};device_t d={&h};
  audio_dev_ops_t user_ops={.ioctl=user_forward};
  /* Real user-facing dispatcher must reject private requests before touching
   * this deliberately invalid pointer or calling the driver's callback. */
