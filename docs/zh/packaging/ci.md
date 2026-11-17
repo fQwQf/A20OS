@@ -45,4 +45,4 @@ gh workflow run release.yml --ref <candidate-branch> -f devel=true
 
 ## 当前状态
 
-2026-11-17 按项目负责人要求收敛到上述规模，取消原完整 Native/压力矩阵和发布逐镜像认证的强制要求。历史失败记录保留在[候选记录](../status/current/v1.0-candidate.md)，不改写成通过。本轮只核对配置、文档及受影响测试，不继续派发整套云端验收；精简后的 CI 尚无新云端通过结果。
+2026-11-17 按项目负责人要求收敛到上述规模，取消原完整 Native/压力矩阵和发布逐镜像认证的强制要求。历史失败记录保留在[候选记录](../status/current/v1.0-candidate.md)，不改写成通过。随后在候选 `94bbdbb12` 上运行一次精简流程，[基础 CI](https://github.com/fQwQf/A20OS/actions/runs/44072919246)的 9 个 job 全部通过：基础检查、六架构内核编译、一次启动及准备步骤。未运行专项矩阵或发布流程；原 N02 已关闭。

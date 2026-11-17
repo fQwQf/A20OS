@@ -2,7 +2,7 @@
 
 2026-11-17 只读核对 GitHub Actions、固定提交的工作流/自检源码及 GHCR manifest。
 原 DELIVERY-05、DOCS-04 的“镜像未发布、真实 job 尚未执行”已不符合远端事实。
-本页关闭这两项环境缺口，当前工作树的候选 CI 仍归 N02/DELIVERY-03。
+本页关闭这两项环境缺口，N02/DELIVERY-03 也已由[候选记录](v1.0-candidate.md)中的精简基础 CI 关闭。
 
 ## 已发布镜像
 

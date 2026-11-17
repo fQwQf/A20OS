@@ -12,4 +12,4 @@
 
 设计边界（有意不做，写在参考文档而非缺口）：keyring 的 `nsproxy`/keyring namespace 与未实现的 `keyctl` 命令、Linux/Native handle 空间差异、Native rights 与 Linux uid/gid 权限模型的差异，以及 [Native 检查点式通知](../../native-abi/checkpoint-signals.md)。任意执行点的 Native 异步处理器不列为未完成项，也不转入后续功能队列。
 
-本领域的编号条目已清空。控制终端、后台作业访问与特权挂断/夺取已在 RV64 SMP2 / AArch64 SMP4 重复冷启动验证，契约与入口见[控制终端与作业控制](../../kernel/linux-abi/tty-jobcontrol.md)。目标应用所需的关键 syscall 边界已按[应用契约记录](../../kernel/linux-abi/application-contracts.md#应用关键边界收口2026-11-17)关闭原 N08；本地候选 N18/N20 已按[候选记录](../current/v1.0-candidate.md)关闭，当前候选云端验收仍归 [N02](triage-matrix.md)。
+本领域的编号条目已清空。控制终端、后台作业访问与特权挂断/夺取已在 RV64 SMP2 / AArch64 SMP4 重复冷启动验证，契约与入口见[控制终端与作业控制](../../kernel/linux-abi/tty-jobcontrol.md)。目标应用所需的关键 syscall 边界已按[应用契约记录](../../kernel/linux-abi/application-contracts.md#应用关键边界收口2026-11-17)关闭原 N08；本地候选 N18/N20 已按[候选记录](../current/v1.0-candidate.md)关闭，N02 基础 CI 现已按[候选记录](../current/v1.0-candidate.md)关闭。
