@@ -13,13 +13,15 @@ on:
 jobs:
   native:
     name: native-${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
     container:
       image: ${{ inputs.buildenv-image }}
     timeout-minutes: 60
     env:
       LC_ALL: C
       BSD_CLANG: clang-19
+      A20_WAIT_TIMEOUT: "120"
+      A20_BUILD_JOBS: "2"
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +38,7 @@ jobs:
           key: ccache-native-${{ matrix.arch }}-${{ github.sha }}
           restore-keys: ccache-native-${{ matrix.arch }}-
       - name: Build Native programs for the target architecture
-        run: make ARCH=${{ matrix.arch }} ABI=both native-programs
+        run: make -j2 ARCH=${{ matrix.arch }} ABI=both native-programs
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
       - name: Run shared Native assertions

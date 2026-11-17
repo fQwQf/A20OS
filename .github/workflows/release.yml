@@ -36,11 +36,12 @@ jobs:
           fi
 
   # Reuse the same checks. Dispatching this workflow does not require a second
-  # concurrent CI run for the same commit. Tags opt into the longer tier.
+  # concurrent CI run for the same commit. Long qualification is explicit;
+  # tags require core checks and both frozen base/devel artifact checks.
   checks:
     uses: ./.github/workflows/ci.yml
     with:
-      extended: ${{ github.ref_type == 'tag' || inputs.extended || false }}
+      extended: ${{ inputs.extended || false }}
 
   build:
     name: release-${{ matrix.arch }}

@@ -7,9 +7,9 @@ CI 回答“这次修改是否破坏保留目标的编译和关键行为”；�
 | 层次 / 文件 | 触发 | 必须证明的内容 |
 | --- | --- | --- |
 | 常规 `ci.yml` | PR、main、手动、供 release 调用 | 冷 checkout 的宿主检查；六个 hosted 架构的内核/用户态编译；RISC-V64 Linux/网络/SMP 与 RV64/AArch64 Native 代表性契约；x86 FP 状态回归 |
-| 扩展 `ci.yml` | 手动 `extended=true`；正式 tag 发布调用 | 全 Native 套件、额外压力变体、独立集群与 MCU 模拟、Alpine guest 工具链。结果单列；未执行不计覆盖 |
+| 扩展 `ci.yml` | 手动 `extended=true`，需配置大容量 runner | 全 Native 套件、额外压力变体、独立集群与 MCU 模拟、Alpine guest 工具链。结果单列；未执行不计覆盖 |
 | 候选 `release.yml` | 手动，默认常规检查 + base | 复用同一 CI，四个发行版架构打包、签名、组 base 镜像；直接启动冻结后的内核/FAT/world，确认镜像中程序执行、读写和自然关机 |
-| 正式 `release.yml` | tag `v*` | 扩展 CI、base/devel 产物检查均成功后，发布同一批冻结文件；仅发布 job 有 `contents: write` |
+| 正式 `release.yml` | tag `v*` | 常规 CI、base/devel 产物检查均成功后，发布同一批冻结文件；仅发布 job 有 `contents: write` |
 | `buildenv.yml` | `tools/ci/**` 变更、手动 | 构建并自检声明的工具环境，不代替 OS 源码/运行验证 |
 | `quickstart.yml` | PR、main、手动 | Ubuntu 24.04 按文档安装单架构依赖，从无构建缓存的源码进入 shell 并关机 |
 
@@ -91,8 +91,12 @@ CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，`restore
 1. resolver 从 Makefile 读取 `CI_KERNEL_ARCHES`，保留六架构唯一来源；另解析小写构建镜像名。
 2. 宿主 job 先检查实例、工具和公共行为。它失败时，不启动后续重量级构建/运行。
 3. 六个架构各执行 `check-<arch>-bringup` 和 `check-user-build-stamp`；ARM32 行另跑 STM32 固件门禁，x86 行另跑已有 FP 状态回归。内核/用户态构建不是该架构的所有运行行为认证。
-4. RV64 运行 Linux ABI、调度/进程 SMP2、futex SMP4、MM、VFS SMP2 和两项网络检查；RV64/AArch64 各运行 Native contract、deepen、MM、IPC。不要求每个架构重复全部负载。
+4. RV64 运行 Linux ABI、调度/进程 SMP2、futex SMP2、MM、VFS SMP2 和两项网络检查；RV64/AArch64 各运行 Native contract、deepen、MM、IPC。不要求每个架构重复全部负载。
 5. 仅扩展层再运行完整 Native 套件、额外单核/swap 变体、AArch64 压力、集群模拟与 guest 工具链。TCG 下的结果不外推到实板。
+
+常规 CI 的并发来客使用 SMP2，包括 x86 FP 回归；四核 runner 留出宿主余量。资源保护不变，等待上限为 120 秒，避免不匹配的配置空等 15 分钟。smoke 构建显式限制为两个并行任务，避免 Python 子进程丢失 make jobserver 后退化为串行。
+
+扩展层包含 SMP4 和更大组合，运行前需设置 repository variable `A20_EXTENDED_RUNNER` 为已配置且有足够余量的 runner 标签（按所选最大来客和并发数配置 CPU/内存）。未配置时在 resolver 明确失败，不自动购买或创建 runner。正式 tag 默认依赖常规 CI 和实际 base/devel 产物验证；长时压力不隐式成为每次发布的必需组合。
 
 源码构建缓存用于加速，不能代替冷检出的依赖准备。CI 使用并发组淘汰同一分支的过时检查；发布 job 不放进该组。运行日志即使失败也上传，job 与步骤的 skipped 分别分类。
 
@@ -105,7 +109,7 @@ gh workflow run ci.yml --ref <candidate-branch> -f extended=true
 
 ## release.yml 的工作分解
 
-1. 检查源码版本，tag 还须匹配版本号；调用上述 CI，正式 tag 使用扩展层。
+1. 检查源码版本，tag 还须匹配版本号；调用上述常规 CI；长时扩展验收仅由 `extended=true` 显式选择。
 2. CI 成功后，四个发行版架构构建内核/用户态、bootstrap FAT、签名仓库和 base world；tag 或显式扩展模式再制作 devel。保留正式发布的四架构和 base/devel 能力。
 3. 把最终内核、FAT、world、公钥和仓库复制到本次交付目录。此后不再构建这些文件。
 4. `check_release_image.py` 直接启动这些文件：base 在 `/extra` 执行镜像内 BusyBox 并复制/比较/删除镜像内文件；devel 要进入 Alpine 根。两者还检查普通命令、文件操作、sync、正常退出。QEMU snapshot 写入临时覆盖层，检查前后输入散列必须相同；本条不是断电持久化验收。
@@ -116,7 +120,7 @@ gh workflow run ci.yml --ref <candidate-branch> -f extended=true
 
 ```bash
 gh workflow run release.yml --ref <candidate-branch>
-# 若需要完整 tag 前演练：
+# 已配置扩展 runner，且需要额外长时验收时：
 gh workflow run release.yml --ref <candidate-branch> -f extended=true
 ```
 

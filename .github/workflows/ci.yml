@@ -31,6 +31,8 @@ concurrency:
 env:
   LC_ALL: C
   BSD_CLANG: clang-19
+  A20_WAIT_TIMEOUT: "120"
+  A20_BUILD_JOBS: "2"
 
 jobs:
   # ghcr 镜像名必须全小写，而 github.repository_owner 可能含大写（如 fQwQf）。
@@ -44,6 +46,10 @@ jobs:
     steps:
       - id: resolve
         run: |
+          if [ "${{ inputs.extended }}" = true ] && [ -z "${{ vars.A20_EXTENDED_RUNNER }}" ]; then
+            echo '::error::Extended qualification requires A20_EXTENDED_RUNNER with capacity for its larger guests'
+            exit 1
+          fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
           else
@@ -146,7 +152,7 @@ jobs:
     if: ${{ inputs.extended }}
     name: cluster-independent-kernel-runtime
     needs: [buildenv-image, host-tests]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
     container:
       image: ${{ needs.buildenv-image.outputs.image }}
     timeout-minutes: 60
@@ -206,7 +212,7 @@ jobs:
   kernel-build:
     name: kernel-build-${{ matrix.arch }}
     needs: [buildenv-image, ci-kernel-arches, host-tests]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
     container:
       image: ${{ needs.buildenv-image.outputs.image }}
     timeout-minutes: 60
@@ -244,7 +250,7 @@ jobs:
 
       - name: x86 kernel driver FP-state regression
         if: matrix.arch == 'x86_64'
-        run: make smoke-x86-fp-preserve
+        run: python3 tools/smoke.py smoke-x86-fp-preserve --nr-cpus 2
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
 
@@ -268,7 +274,7 @@ jobs:
   smoke:
     name: smoke-riscv64
     needs: [buildenv-image, host-tests]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
     container:
       image: ${{ needs.buildenv-image.outputs.image }}
       options: --privileged
@@ -313,7 +319,7 @@ jobs:
           make smoke-abi-linux
           make smoke-sched-stress-smp2
           make smoke-proc-stress-smp2
-          make smoke-futex-stress-smp4
+          python3 tools/smoke.py smoke-futex-stress --nr-cpus 2
           make smoke-mm-stress
           make smoke-vfs-stress-smp2
         timeout-minutes: 35
@@ -322,6 +328,7 @@ jobs:
         if: ${{ inputs.extended }}
         run: |
           make smoke-syscall-ext
+          make smoke-futex-stress-smp4
           make smoke-sched-stress smoke-proc-stress smoke-futex-stress
           make smoke-swap smoke-swap-smp4
           make smoke-vfs-stress smoke-smp-bringup
