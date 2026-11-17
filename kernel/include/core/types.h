@@ -33,9 +33,12 @@ typedef __UINTPTR_TYPE__   vaddr_t;
 
 typedef pte_t pt_root_t;
 
+/* C23 (including the compiler's C2x mode) provides these as keywords. */
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202000L
 typedef _Bool bool;
 #define true  1
 #define false 0
+#endif
 #ifndef NULL
 #define NULL  ((void *)0)
 #endif
