@@ -637,8 +637,11 @@ fastfetch: build_dir $(FF_CMD)
 build_dir: $(ARCH_STAMP)
 	@mkdir -p $(BUILD_DIR) $(OBJ_DIR)
 
+# GNU make executes the whole recursive recipe under -n. Check only compact
+# flags (not long options like --no-print-directory) before any lock or write.
 musl_prepare:
-	@set -e; \
+	@case '$(filter-out --%,$(firstword $(MAKEFLAGS)))' in *n*) exit 0 ;; esac; \
+	set -e; \
 	lock_file="$(MUSL_BUILD).lock"; \
 	if command -v flock >/dev/null 2>&1; then \
 		mkdir -p "$(dir $(MUSL_BUILD))"; \
