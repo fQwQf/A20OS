@@ -225,17 +225,13 @@ jobs:
   # 内核 bring-up 构建门禁。RISC-V32、ARM32 均保留在矩阵；LoongArch32/PPC64LE
   # 按 1.0 平台决策退出活跃矩阵，历史源码与验证记录仍保留。
   #
-  # 与 build 分开是有原因的，不是重复：build 要产出发布打包产物（apk 仓库 +
-  # world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前构建不过
-  # （user/cmds/stress/poll_edge.c 在 riscv32 上引用了 musl 未声明的
-  # SYS_pselect6/SYS_ppoll）。下面这条是纯内核门禁，与
+  # build 负责四个发行版架构的 apk 仓库与 world 镜像；本矩阵单独覆盖六个
+  # hosted 架构的内核，与
   # check-kernel-build-all / check-build-matrix 迭代的是同一个
   # check-<arch>-bringup 目标。
   #
-  # 不拉 submodule：bring-up 构建只编译 vendored 源（kernel/external/lwip
-  # 是 tracked tree），本矩阵里的每个架构都已在无 submodule 的 checkout 上
-  # 实测通过；唯一的 gitlink 是 fastfetch，拉它只会把时间花在
-  # 与这个门禁无关的下载上。
+  # bring-up 也会编译引用上游 lwIP 头文件的网络适配器。检出固定的源码
+  # 子模块，与其它构建 job 一致，避免只有已初始化依赖的本地树能够通过。
   kernel-build:
     name: kernel-build-${{ matrix.arch }}
     needs: [buildenv-image, ci-kernel-arches]
@@ -249,6 +245,8 @@ jobs:
         arch: ${{ fromJSON(needs.ci-kernel-arches.outputs.arches) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Trust workspace ownership (container runs as root)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
