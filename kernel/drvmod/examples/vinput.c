@@ -48,6 +48,8 @@ extern void input_mux_wake(void);
 #ifdef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
 #define drv_device_get_resource device_get_resource
 #else
+#undef kinfo
+#undef kerr
 #define kinfo(...) drv_log(__VA_ARGS__)
 #define kerr(...) drv_log(__VA_ARGS__)
 #endif
@@ -103,7 +105,15 @@ typedef struct {
 #define VIN_DMA_AVAIL_OFF  0x200U
 #define VIN_DMA_USED_OFF   0x280U
 #define VIN_DMA_EVENTS_OFF 0x400U
-#define VIN_DMA_BYTES      0x600U
+#define VIN_DMA_BYTES (VIN_DMA_EVENTS_OFF + VIRTIO_INPUT_QUEUE_SIZE * \
+                       sizeof(virtio_input_event_slot_t))
+
+_Static_assert(VIN_DMA_DESC_OFF + sizeof(vinput_desc_t) * VIRTIO_INPUT_QUEUE_SIZE <=
+               VIN_DMA_AVAIL_OFF, "input descriptor/available overlap");
+_Static_assert(VIN_DMA_AVAIL_OFF + sizeof(vinput_avail_t) <= VIN_DMA_USED_OFF,
+               "input available/used overlap");
+_Static_assert(VIN_DMA_USED_OFF + sizeof(vinput_used_t) <= VIN_DMA_EVENTS_OFF,
+               "input used/event overlap");
 
 typedef struct {
     virtio_transport_t vt;
@@ -111,6 +121,11 @@ typedef struct {
     uint64_t           dma_phys;
     spinlock_t         lock ALIGNED(64);
     int                valid;
+    device_t          *owner;
+    int                closing;
+    int                ready;
+    int                transport_live;
+    int                stopped;
     uint16_t           last_used;
     struct input_event user_ring[256];
     uint32_t           head;
@@ -121,8 +136,6 @@ typedef struct {
 
 #define MAX_VIRTIO_INPUT_DEVS 4
 static virtio_input_inst_t g_input_insts[MAX_VIRTIO_INPUT_DEVS];
-static int g_ninputs = 0;
-static uint8_t g_input_irq_registered[256];
 static unsigned g_input_trace_events;
 
 static inline vinput_desc_t *vinput_desc(virtio_input_inst_t *inst) {
@@ -145,7 +158,7 @@ static void vinput_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t va
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
 }
 
-static void vinput_submit_all(virtio_input_inst_t *inst) {
+static void vinput_prepare_queue(virtio_input_inst_t *inst) {
     vinput_desc_t *desc = vinput_desc(inst);
     vinput_avail_t *avail = vinput_avail(inst);
     virtio_input_event_slot_t *events = vinput_events(inst);
@@ -164,42 +177,60 @@ static void vinput_submit_all(virtio_input_inst_t *inst) {
                                      VIRTIO_INPUT_QUEUE_SIZE);
     arch_dma_sync_for_device(avail, sizeof(*avail));
     arch_dma_sync_for_device(vinput_used(inst), sizeof(vinput_used_t));
-    inst->vt.write32(&inst->vt, VMMIO_QUEUE_NOTIFY, 0);
-    mb();
 }
 
-static void vinput_handle_inst(virtio_input_inst_t *inst) {
-    if (!inst->valid)
-        return;
-
+static int vinput_ack(virtio_input_inst_t *inst)
+{
     uint32_t isr = inst->vt.read32(&inst->vt, VMMIO_INTR_STATUS);
-    if (!inst->vt.legacy)
-        inst->vt.write32(&inst->vt, VMMIO_INTR_ACK, isr);
+    if (isr == 0xFFFFFFFFU) {
+        __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&inst->ready, 0, __ATOMIC_RELEASE);
+        return -ENODEV;
+    }
+    inst->vt.write32(&inst->vt, VMMIO_INTR_ACK, isr);
+    return 0;
+}
 
+static void vinput_handle_inst(virtio_input_inst_t *inst)
+{
     uint64_t flags = spin_lock_irqsave(&inst->lock);
-
+    if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&inst->ready, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&inst->lock, flags);
+        return;
+    }
+    if (vinput_ack(inst)) {
+        spin_unlock_irqrestore(&inst->lock, flags);
+        return;
+    }
     volatile vinput_used_t *used = vinput_used(inst);
     arch_dma_sync_for_cpu((void *)used, sizeof(*used));
     uint16_t used_idx = used->idx;
-
+    unsigned completed = (uint16_t)(used_idx - inst->last_used);
+    uint32_t seen = 0;
+    /* Validate the complete snapshot before consuming or re-publishing any
+     * buffer. Narrowing id to 16 bits could accept an invalid 32-bit id. */
+    if (completed > VIRTIO_INPUT_QUEUE_SIZE)
+        goto malformed;
+    for (unsigned n = 0; n < completed; n++) {
+        unsigned at = (inst->last_used + n) % VIRTIO_INPUT_QUEUE_SIZE;
+        uint32_t id = used->ring[at].id;
+        if (id >= VIRTIO_INPUT_QUEUE_SIZE ||
+            used->ring[at].len != sizeof(struct virtio_input_event) ||
+            (seen & (1U << id)))
+            goto malformed;
+        seen |= 1U << id;
+    }
     int waked = 0;
-    int resubmitted = 0;
     while (inst->last_used != used_idx) {
-        uint16_t ring_idx = inst->last_used % VIRTIO_INPUT_QUEUE_SIZE;
-        uint16_t id = (uint16_t)used->ring[ring_idx].id;
-        if (id >= VIRTIO_INPUT_QUEUE_SIZE)
-            break;
-
-        struct virtio_input_event *evt =
-            &vinput_events(inst)[id].event;
+        unsigned at = inst->last_used % VIRTIO_INPUT_QUEUE_SIZE;
+        uint32_t id = used->ring[at].id;
+        struct virtio_input_event *evt = &vinput_events(inst)[id].event;
         arch_dma_sync_for_cpu(evt, sizeof(*evt));
-
-        if (g_input_trace_events < 8) {
+        if (__atomic_fetch_add(&g_input_trace_events, 1, __ATOMIC_RELAXED) < 8) {
             kinfo("[INPUT] event type=%u code=%u value=%d\n",
                   evt->type, evt->code, (int)evt->value);
-            g_input_trace_events++;
         }
-
         uint32_t next_head = (inst->head + 1) % ARRAY_SIZE(inst->user_ring);
         if (next_head != inst->tail) {
             uint64_t now = timer_get_ticks();
@@ -212,17 +243,14 @@ static void vinput_handle_inst(virtio_input_inst_t *inst) {
             inst->head = next_head;
             waked = 1;
         }
-
         vinput_avail_t *avail = vinput_avail(inst);
-        avail->ring[avail->idx % VIRTIO_INPUT_QUEUE_SIZE] = id;
+        avail->ring[avail->idx % VIRTIO_INPUT_QUEUE_SIZE] = (uint16_t)id;
         arch_dma_sync_for_device(evt, sizeof(*evt));
+        wmb();
         avail->idx++;
-
         inst->last_used++;
-        resubmitted = 1;
     }
-
-    if (resubmitted) {
+    if (completed) {
         wmb();
         arch_dma_sync_for_device(vinput_avail(inst), sizeof(vinput_avail_t));
         inst->vt.write32(&inst->vt, VMMIO_QUEUE_NOTIFY, 0);
@@ -231,188 +259,195 @@ static void vinput_handle_inst(virtio_input_inst_t *inst) {
     spin_unlock_irqrestore(&inst->lock, flags);
     if (waked)
         input_mux_wake();
+    return;
+malformed:
+    __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&inst->ready, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&inst->lock, flags);
 }
 
-static int vinput_irq(int irq, void *priv) {
+static int vinput_irq(int irq, void *priv)
+{
     (void)irq;
     virtio_input_inst_t *inst = priv;
-    if (inst && inst->valid)
+    if (!inst)
+        return 0;
+    if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&inst->ready, __ATOMIC_ACQUIRE)) {
+        /* A refused reset retains this handler and its transport. Quench late
+         * causes without touching or returning any queue storage. */
+        if (inst->transport_live)
+            (void)vinput_ack(inst);
+    } else {
         vinput_handle_inst(inst);
+    }
     return 1;
 }
 
-static int vinput_init_transport(device_t *dev,
-                                 const virtio_transport_t *transport) {
-    if (g_ninputs >= MAX_VIRTIO_INPUT_DEVS)
-        return -1;
+static int vinput_stop(void *context)
+{
+    virtio_input_inst_t *inst = context;
+    __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&inst->lock, &flags))
+        return -EBUSY;
+    __atomic_store_n(&inst->ready, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&inst->lock, flags);
+    /* No spinlock or IRQ-off wait across transport reset/free_irq drain. */
+    if (inst->transport_live) {
+        int ret = virtio_transport_reset(&inst->vt, 100);
+        if (ret)
+            return ret;
+        inst->transport_live = 0;
+    }
+    if (inst->irq_registered) {
+        free_irq(inst->irq, inst);
+        inst->irq_registered = 0;
+    }
+    inst->stopped = 1;
+    return 0;
+}
+
+static void vinput_release(void *context)
+{
+    virtio_input_inst_t *inst = context;
+    /* Final devres release follows checked stop, IRQ drain, class active-call
+     * drain and remove. Until then even a failed probe owns its exact slot. */
+    if (inst->dma)
+        dma_free_coherent_aligned(inst->dma, VIN_DMA_BYTES, inst->dma_phys);
+    memset(inst, 0, sizeof(*inst));
+}
+
+static int vinput_init_transport(device_t *dev, virtio_input_inst_t *inst)
+{
+    virtio_transport_t *vt = &inst->vt;
+    uint32_t magic = vt->read32(vt, VMMIO_MAGIC);
+    uint32_t version = vt->read32(vt, VMMIO_VERSION);
+    uint32_t device_id = vt->read32(vt, VMMIO_DEVICE_ID);
+    if (magic != 0x74726976U || version != 2U || device_id != 18U)
+        return -ENODEV;
+    inst->transport_live = 1;
+    int ret = virtio_transport_reset(vt, 100);
+    if (ret)
+        return ret;
+    ret = dma_set_mask(dev, DMA_MASK_64BIT);
+    if (ret)
+        return ret;
+    uint32_t status = VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER;
+    vt->write32(vt, VMMIO_STATUS, status);
+    vt->write32(vt, VMMIO_DRV_FEATURES_SEL, 0);
+    vt->write32(vt, VMMIO_DRV_FEATURES, 0);
+    vt->write32(vt, VMMIO_DEV_FEATURES_SEL, 1);
+    uint32_t features_hi = vt->read32(vt, VMMIO_DEV_FEATURES);
+    if (!(features_hi & VIRTIO_F_VERSION_1_BIT))
+        return -EOPNOTSUPP;
+    vt->write32(vt, VMMIO_DRV_FEATURES_SEL, 1);
+    vt->write32(vt, VMMIO_DRV_FEATURES, VIRTIO_F_VERSION_1_BIT);
+    status |= VIRTIO_STATUS_FEATURES_OK;
+    vt->write32(vt, VMMIO_STATUS, status);
+    mb();
+    if (vt->read32(vt, VMMIO_STATUS) != status)
+        return -EIO;
+    vt->write32(vt, VMMIO_QUEUE_SEL, 0);
+    uint32_t qmax = vt->read32(vt, VMMIO_QUEUE_NUM_MAX);
+    if (qmax == 0xFFFFFFFFU || qmax < VIRTIO_INPUT_QUEUE_SIZE ||
+        vt->read32(vt, VMMIO_QUEUE_READY) != 0)
+        return -ENODEV;
+    vt->write32(vt, VMMIO_QUEUE_NUM, VIRTIO_INPUT_QUEUE_SIZE);
+    inst->dma = dma_alloc_coherent_aligned(dev, VIN_DMA_BYTES, PAGE_SIZE,
+                                           &inst->dma_phys);
+    if (!inst->dma)
+        return -ENOMEM;
+    memset(inst->dma, 0, VIN_DMA_BYTES);
+    arch_dma_sync_for_device(inst->dma, VIN_DMA_BYTES);
+    vinput_prepare_queue(inst);
+    uint64_t desc_pa = inst->dma_phys + VIN_DMA_DESC_OFF;
+    uint64_t avail_pa = inst->dma_phys + VIN_DMA_AVAIL_OFF;
+    uint64_t used_pa = inst->dma_phys + VIN_DMA_USED_OFF;
+    vt->write32(vt, VMMIO_QUEUE_DESC_LOW, (uint32_t)desc_pa);
+    vt->write32(vt, VMMIO_QUEUE_DESC_HIGH, (uint32_t)(desc_pa >> 32));
+    vt->write32(vt, VMMIO_QUEUE_DRIVER_LOW, (uint32_t)avail_pa);
+    vt->write32(vt, VMMIO_QUEUE_DRIVER_HIGH, (uint32_t)(avail_pa >> 32));
+    vt->write32(vt, VMMIO_QUEUE_DEVICE_LOW, (uint32_t)used_pa);
+    vt->write32(vt, VMMIO_QUEUE_DEVICE_HIGH, (uint32_t)(used_pa >> 32));
+    mb();
+    vt->write32(vt, VMMIO_QUEUE_READY, 1);
+    if (vt->read32(vt, VMMIO_QUEUE_READY) != 1)
+        return -EIO;
+    if (vt->irq >= 0) {
+        unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
+        ret = request_irq((uint32_t)vt->irq, vinput_irq, irq_flags, inst);
+        if (ret)
+            return ret;
+        inst->irq = (uint32_t)vt->irq;
+        inst->irq_registered = 1;
+    }
+    status |= VIRTIO_STATUS_DRIVER_OK;
+    vt->write32(vt, VMMIO_STATUS, status);
+    mb();
+    if (vt->read32(vt, VMMIO_STATUS) != status)
+        return -EIO;
+    __atomic_store_n(&inst->ready, 1, __ATOMIC_RELEASE);
+    vt->write32(vt, VMMIO_QUEUE_NOTIFY, 0);
+    kinfo("[INPUT] virtio-input ready (irq=%d)\n", vt->irq);
+    return 0;
+}
+
+static int vinput_probe(device_t *dev)
+{
+    int ret = device_probe_use_remove(dev);
+    if (ret)
+        return ret;
     virtio_input_inst_t *inst = NULL;
     for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
-        if (!g_input_insts[i].valid && !g_input_insts[i].irq_registered) {
+        if (!g_input_insts[i].valid) {
             inst = &g_input_insts[i];
             break;
         }
     }
     if (!inst)
-        return -1;
-
+        return -ENOSPC;
     memset(inst, 0, sizeof(*inst));
     spin_init(&inst->lock);
-    inst->vt = *transport;
-
-    virtio_transport_t *vt = &inst->vt;
-    int registered_irq = 0;
-
-    uint32_t magic = vt->read32(vt, VMMIO_MAGIC);
-    uint32_t version = vt->read32(vt, VMMIO_VERSION);
-    uint32_t device_id = vt->read32(vt, VMMIO_DEVICE_ID);
-    if (magic != 0x74726976U || version != 2U || device_id != 18U)
-        return -1;
-
-    vt->write32(vt, VMMIO_STATUS, 0);
-    mb();
-    uint32_t status = VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER;
-    vt->write32(vt, VMMIO_STATUS, status);
-    mb();
-
-    vt->write32(vt, VMMIO_DEV_FEATURES_SEL, 0);
-    vt->read32(vt, VMMIO_DEV_FEATURES);
-    vt->write32(vt, VMMIO_DRV_FEATURES_SEL, 0);
-    vt->write32(vt, VMMIO_DRV_FEATURES, 0);
-
-    vt->write32(vt, VMMIO_DEV_FEATURES_SEL, 1);
-    uint32_t features_hi = vt->read32(vt, VMMIO_DEV_FEATURES);
-    if (!(features_hi & VIRTIO_F_VERSION_1_BIT))
-        goto fail;
-    uint32_t driver_hi = features_hi & VIRTIO_F_VERSION_1_BIT;
-    vt->write32(vt, VMMIO_DRV_FEATURES_SEL, 1);
-    vt->write32(vt, VMMIO_DRV_FEATURES, driver_hi);
-    mb();
-
-    status |= VIRTIO_STATUS_FEATURES_OK;
-    vt->write32(vt, VMMIO_STATUS, status);
-    mb();
-    if (!(vt->read32(vt, VMMIO_STATUS) & VIRTIO_STATUS_FEATURES_OK))
-        goto fail;
-
-    vt->write32(vt, VMMIO_QUEUE_SEL, 0);
-    uint32_t qmax = vt->read32(vt, VMMIO_QUEUE_NUM_MAX);
-    if (qmax < VIRTIO_INPUT_QUEUE_SIZE)
-        goto fail;
-    if (vt->read32(vt, VMMIO_QUEUE_READY) != 0)
-        goto fail;
-    vt->write32(vt, VMMIO_QUEUE_NUM, VIRTIO_INPUT_QUEUE_SIZE);
-
-    inst->dma = dma_alloc_coherent_aligned(dev, VIN_DMA_BYTES, PAGE_SIZE,
-                                           &inst->dma_phys);
-    if (!inst->dma)
-        goto fail;
-    memset(inst->dma, 0, VIN_DMA_BYTES);
-    arch_dma_sync_for_device(inst->dma, VIN_DMA_BYTES);
-
-    uint64_t desc_pa  = inst->dma_phys + VIN_DMA_DESC_OFF;
-    uint64_t avail_pa = inst->dma_phys + VIN_DMA_AVAIL_OFF;
-    uint64_t used_pa  = inst->dma_phys + VIN_DMA_USED_OFF;
-    vt->write32(vt, VMMIO_QUEUE_DESC_LOW,   (uint32_t)(desc_pa));
-    vt->write32(vt, VMMIO_QUEUE_DESC_HIGH,  (uint32_t)(desc_pa >> 32));
-    vt->write32(vt, VMMIO_QUEUE_DRIVER_LOW, (uint32_t)(avail_pa));
-    vt->write32(vt, VMMIO_QUEUE_DRIVER_HIGH,(uint32_t)(avail_pa >> 32));
-    vt->write32(vt, VMMIO_QUEUE_DEVICE_LOW, (uint32_t)(used_pa));
-    vt->write32(vt, VMMIO_QUEUE_DEVICE_HIGH,(uint32_t)(used_pa >> 32));
-    mb();
-    vt->write32(vt, VMMIO_QUEUE_READY, 1);
-    mb();
-
-    if (vt->irq >= 0 && vt->irq < (int)sizeof(g_input_irq_registered) &&
-        !g_input_irq_registered[vt->irq]) {
-        unsigned long irq_flags = vt->shared_irq ? IRQF_SHARED : 0;
-        if (request_irq((uint32_t)vt->irq, vinput_irq, irq_flags, inst) != 0) {
-            kinfo("[INPUT] Failed to register IRQ\n");
-            goto fail;
-        }
-        g_input_irq_registered[vt->irq] = 1;
-        registered_irq = 1;
-    }
-    inst->irq = vt->irq >= 0 ? (uint32_t)vt->irq : 0;
-    inst->irq_registered = registered_irq;
-
-    status |= VIRTIO_STATUS_DRIVER_OK;
-    vt->write32(vt, VMMIO_STATUS, status);
-    mb();
-
     inst->valid = 1;
+    inst->owner = dev;
+    inst->vt.irq = -1;
     dev->drv_priv = inst;
-    vinput_submit_all(inst);
-    g_ninputs++;
-
-    kinfo("[INPUT] virtio-input ready (irq=%d)\n", vt->irq);
-    return 0;
-
-fail:
-    if (registered_irq) {
-        free_irq((uint32_t)vt->irq, inst);
-        g_input_irq_registered[vt->irq] = 0;
+    ret = device_add_execution_action(dev, vinput_stop, vinput_release, inst);
+    if (ret) {
+        dev->drv_priv = NULL;
+        vinput_release(inst);
+        return ret;
     }
-    if (inst->dma)
-        dma_free_coherent_aligned(inst->dma, VIN_DMA_BYTES, inst->dma_phys);
-    vt->write32(vt, VMMIO_STATUS,
-                vt->read32(vt, VMMIO_STATUS) | VIRTIO_STATUS_FAILED);
-    memset(inst, 0, sizeof(*inst));
-    return -1;
-}
-
-static int vinput_probe(device_t *dev) {
     if (dev->bus == &pci_bus) {
-        virtio_transport_t vt;
-        if (pci_virtio_transport_init(dev, 18, &vt) != 0)
-            return -1;
-        if (!vt.priv) return -ENODEV;
-    return vinput_init_transport(dev, &vt);
+        ret = pci_virtio_transport_init(dev, 18, &inst->vt);
+        if (ret)
+            return ret;
+    } else {
+        resource_t *mmio = drv_device_get_resource(dev, RES_MMIO, 0);
+        resource_t *irq = drv_device_get_resource(dev, RES_IRQ, 0);
+        if (!mmio || mmio->end < mmio->start ||
+            mmio->end - mmio->start < VMMIO_CONFIG + 135)
+            return -ENODEV;
+        inst->vt.priv = device_map_mmio(dev, 0);
+        if (!inst->vt.priv)
+            return -ENODEV;
+        inst->vt.read32 = vinput_mmio_read32;
+        inst->vt.write32 = vinput_mmio_write32;
+        inst->vt.irq = irq ? (int)irq->start : -1;
     }
-
-    resource_t *mmio_res = drv_device_get_resource(dev, RES_MMIO, 0);
-    resource_t *irq_res = drv_device_get_resource(dev, RES_IRQ, 0);
-    if (!mmio_res || !irq_res)
-        return -1;
-
-    virtio_transport_t vt = {
-        .read32 = vinput_mmio_read32,
-        .write32 = vinput_mmio_write32,
-        .priv = device_map_mmio(dev, 0),
-        .legacy = 0,
-        .irq = (int)irq_res->start,
-    };
-    return vinput_init_transport(dev, &vt);
+    if (!inst->vt.priv)
+        return -ENODEV;
+    return vinput_init_transport(dev, inst);
 }
 
-static int vinput_remove(device_t *dev) {
+static int vinput_remove(device_t *dev)
+{
     virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
-    if (!inst)
-        return 0;
-    inst->valid = 0;
-    if (inst->irq_registered && inst->irq < sizeof(g_input_irq_registered)) {
-        virtio_input_inst_t *new_owner = NULL;
-        for (int i = 0; i < MAX_VIRTIO_INPUT_DEVS; i++) {
-            if (&g_input_insts[i] != inst && g_input_insts[i].valid &&
-                g_input_insts[i].vt.irq == (int)inst->irq) {
-                new_owner = &g_input_insts[i];
-                break;
-            }
-        }
-        if (new_owner) {
-            new_owner->irq_registered = 1;
-        } else {
-            free_irq(inst->irq, inst);
-            g_input_irq_registered[inst->irq] = 0;
-        }
-    }
-    inst->vt.write32(&inst->vt, VMMIO_STATUS, 0);
-    mb();
-    if (g_ninputs > 0)
-        g_ninputs--;
-    if (inst->dma)
-        dma_free_coherent_aligned(inst->dma, VIN_DMA_BYTES, inst->dma_phys);
-    dev->drv_priv = NULL;
-    memset(inst, 0, sizeof(*inst));
+    if (inst && !inst->stopped)
+        return -EBUSY;
+    if (dev)
+        dev->drv_priv = NULL;
     return 0;
 }
 
@@ -428,15 +463,20 @@ static const device_id_t vinput_ids[] = {
 
 static int vinput_class_read(device_t *dev, void *buf, size_t count) {
     virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
-    if (!inst || !inst->valid || !buf || count < sizeof(struct input_event))
+    if (!inst || !buf || count < sizeof(struct input_event))
         return -EINVAL;
 
     vinput_handle_inst(inst);
     uint64_t flags = spin_lock_irqsave(&inst->lock);
+    if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&inst->ready, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&inst->lock, flags);
+        return -ESHUTDOWN;
+    }
     size_t copied = 0;
     while (inst->head != inst->tail &&
            copied + sizeof(struct input_event) <= count) {
-        *(struct input_event *)((char *)buf + copied) = inst->user_ring[inst->tail];
+        memcpy((char *)buf + copied, &inst->user_ring[inst->tail], sizeof(struct input_event));
         inst->tail = (inst->tail + 1U) % ARRAY_SIZE(inst->user_ring);
         copied += sizeof(struct input_event);
     }
@@ -448,9 +488,17 @@ static int vinput_class_read(device_t *dev, void *buf, size_t count) {
 static unsigned vinput_config(virtio_input_inst_t *inst, unsigned select,
                               unsigned subselect, void *out, unsigned capacity)
 {
+    if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE))
+        return 0;
     virtio_transport_t *vt = &inst->vt;
     vt->write32(vt, VMMIO_CONFIG, select | (subselect << 8));
-    unsigned size = (vt->read32(vt, VMMIO_CONFIG) >> 16) & 0xff;
+    uint32_t config = vt->read32(vt, VMMIO_CONFIG);
+    if (config == 0xFFFFFFFFU) {
+        __atomic_store_n(&inst->closing, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&inst->ready, 0, __ATOMIC_RELEASE);
+        return 0;
+    }
+    unsigned size = (config >> 16) & 0xff;
     if (size > capacity)
         size = capacity;
     for (unsigned i = 0; i < size; i += 4) {
@@ -466,11 +514,16 @@ static int vinput_class_ioctl(device_t *dev, unsigned long req, void *arg)
     virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (req != INPUT_IOCTL_GET_INFO)
         return -ENOTTY;
-    if (!inst || !inst->valid || !arg)
+    if (!inst || !arg)
         return -ENODEV;
     struct input_device_info *info = arg;
     memset(info, 0, sizeof(*info));
     uint64_t flags = spin_lock_irqsave(&inst->lock);
+    if (__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&inst->ready, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&inst->lock, flags);
+        return -ESHUTDOWN;
+    }
     vinput_config(inst, 1, 0, info->name, sizeof(info->name) - 1);
     vinput_config(inst, 3, 0, &info->id, sizeof(info->id));
     vinput_config(inst, 0x10, 0, info->properties, sizeof(info->properties));
@@ -487,18 +540,20 @@ static int vinput_class_ioctl(device_t *dev, unsigned long req, void *arg)
         /* virtio absinfo omits Linux input_absinfo.value. */
         vinput_config(inst, 0x12, axis, &info->abs[axis].minimum, 20);
     }
+    int ret = __atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) ? -ENODEV : 0;
     spin_unlock_irqrestore(&inst->lock, flags);
-    return 0;
+    return ret;
 }
 
 static int vinput_class_poll(device_t *dev, short events) {
     virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
     (void)events;
-    if (!inst || !inst->valid)
+    if (!inst)
         return 0;
     vinput_handle_inst(inst);
     uint64_t flags = spin_lock_irqsave(&inst->lock);
-    int ready = inst->head != inst->tail;
+    int ready = !__atomic_load_n(&inst->closing, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&inst->ready, __ATOMIC_ACQUIRE) && inst->head != inst->tail;
     spin_unlock_irqrestore(&inst->lock, flags);
     return ready;
 }
@@ -511,6 +566,7 @@ static const input_dev_ops_t vinput_class_ops = {
 
 static driver_t vinput_driver = {
     .name       = "virtio-input",
+    .irq_optional = 1,
     .id_table   = vinput_ids,
     .bus        = NULL,
     .probe      = vinput_probe,
