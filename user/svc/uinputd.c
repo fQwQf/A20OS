@@ -52,6 +52,22 @@ static void log_dec(uint32_t v)
         a20_hdl_write_buf(g_out, b, (uint64_t)n, (void *)0);
 }
 
+static void uinputd_stop(uint64_t base)
+{
+    /* Task exit closes the DMA VMO. Stop the device first, including exits
+     * after publishing a queue but before IRQ/event registration succeeds. */
+    drv_mmio_write32(base, VMMIO_STATUS, 0);
+    int reported = 0;
+    while (drv_mmio_read32(base, VMMIO_STATUS) != 0) {
+        if (!reported) {
+            log_str("UINPUTD: reset pending; retaining DMA\n");
+            reported = 1;
+        }
+        a20_thread_sleep((a20_time_t){ .nsecs = 1000000 });
+    }
+    log_str("UINPUTD: stopped reset=0\n");
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc;
@@ -64,7 +80,7 @@ int main(int argc, char **argv, char **envp)
         return 1;
 
     /* Exclusive ownership: destructive init belongs to the claimant.
-     * Auto-released at task death (crash-safe). */
+     * The claim is auto-released at task death; normal exits first stop DMA. */
     a20_status_t cr = a20_device_claim(VINPUT_DUAL_PHYS);
     if (cr != A20_OK) {
         log_str("UINPUTD: claim failed\n");
@@ -113,6 +129,7 @@ int main(int argc, char **argv, char **envp)
         log_str(" pa=");
         log_dec((uint32_t)drv_dma_phys(&dma, 0));
         log_str("\n");
+        uinputd_stop(base);
         return 7;
     }
 
@@ -125,10 +142,13 @@ int main(int argc, char **argv, char **envp)
     virtq_notify(&evq);
 
     a20_handle_t eq;
-    if (a20_event_queue_create(&eq) != A20_OK)
+    if (a20_event_queue_create(&eq) != A20_OK) {
+        uinputd_stop(base);
         return 8;
+    }
     if (a20_device_irq_listen(VINPUT_DUAL_IRQ, eq, IRQ_TAG) != A20_OK) {
         log_str("UINPUTD: irq listen failed\n");
+        uinputd_stop(base);
         return 9;
     }
     log_str("UINPUTD: ready\n");
@@ -178,6 +198,7 @@ int main(int argc, char **argv, char **envp)
                 log_dec(e->value);
                 log_str("\n");
                 if (e->type == EV_KEY && e->value == 1) {
+                    uinputd_stop(base);
                     log_str("UINPUTD: PASS\n");
                     return 0;
                 }
