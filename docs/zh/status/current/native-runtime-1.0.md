@@ -76,10 +76,10 @@ make smoke-mlibc-dynamic   # 动态 $ORIGIN / dlopen / TLS
 | 平台 | 结果 | 依据 |
 |------|------|------|
 | riscv64 NOMMU (QEMU virt) | ELF exec 已验证 | `smoke-nommu-exec` |
-| aarch64 NOMMU | 待独立运行 | 保留实例 `qemu-aarch64-nommu`；独立于当前验证路径 |
-| riscv32 NOMMU | 待独立运行 | 保留实例 `qemu-riscv32-nommu`；独立于当前验证路径 |
-| arm32 NOMMU | 用户态运行时阻塞 | 与本页无关的 fork/reap 问题见 [gaps/core.md](../gaps/core.md) |
+| aarch64 NOMMU | 构建通过，运行未验收 | N20 候选的内核/用户态 build-only 行；保留实例 `qemu-aarch64-nommu` |
+| riscv32 NOMMU | 构建通过，运行未验收 | N20 候选的内核/用户态 build-only 行；保留实例 `qemu-riscv32-nommu` |
+| arm32 NOMMU | 构建通过，用户态运行未复验 | 历史 fork/reap 限制未在本轮重新定位；N20 只证明内核/用户态构建 |
 | x86_64 / loongarch64 NOMMU | N/A | `run-nommu-*` 明确标注 “not supported” |
-| MCU profile | build-only | 只验证对象构建，不作为 guest 运行证据 |
+| MCU profile | 固件构建与预算通过 | STM32F103 64 KiB Flash / 20 KiB SRAM；见[候选记录](v1.0-candidate.md)，不作为 guest 或实板运行证据 |
 
 2026-11-16 当前 RV64 `ABI=both NOMMU=1 NR_CPUS=2` 默认镜像已通过 `make -j4 smoke-nommu-exec`：连续运行两次外部 `/bin/echo`，父 shell 继续接受 `poweroff`，正常关机且 QEMU 退出 0。门禁拆分输入中的标记并匹配独立输出行，负控拒绝只含命令回显的日志；原 CORE-RUNTIME-05 已关闭。当前 init 使用 BusyBox 用户工具并 exec `sh`，此结果对应当前发布配置，不将历史 mksh 镜像或所有 NOMMU 架构计作覆盖。证据见 [本轮进度](v1.0-progress.md#本轮完成与验证2026-11-16)。

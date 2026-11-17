@@ -48,8 +48,8 @@ multi 日志同样记录各架构头文件检查及最终 PASS。2026-11-17 的�
 ## 仍保留的候选验收
 
 上述 CI 的整体 conclusion 是 failure，后续被跳过的步骤不计通过；它验证的是旧远端
-提交，不包含 2026-11-17 本地修复。当前候选仍需冻结、完成 N18/N20 支持矩阵并取得
-自己的云端结果。此轮没有 push、派发 workflow、推送镜像或重跑整个 CI。
+提交，不包含 2026-11-17 本地修复。当前候选的 N18/N20 本地矩阵已按[候选记录](v1.0-candidate.md)关闭，仍须取得
+自己的云端结果（N02）。此轮没有 push、派发 workflow、推送镜像或重跑整个 CI。
 
 原始 job 元数据、选定日志、固定源码及 8 个 registry manifest 保存在
 `build/evidence/v1-closeout-20261116/cloud-image-audit/`；索引与哈希见其 `report.json`。

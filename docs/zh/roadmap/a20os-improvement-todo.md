@@ -1,6 +1,6 @@
 # A20OS 改进 TODO
 
-1.0 的总范围与完成标准以 [发布计划](../releases/v1.0.md) 为准：本页不是全部工作包，集群、虚拟化、运行时、桌面等已推进子系统还须按各自设计完成。Rust 重写与这些缺口一起收口；既有行为和性能按 [对照规范](../releases/v1.0-validation.md) 验收。 LoongArch32/PPC64LE 已退出 1.0；其源码、实例、构建和 CI 清理归入 V1-DELIVERY。
+1.0 的总范围与完成标准以 [发布计划](../releases/v1.0.md) 为准：本页不是全部工作包，集群、虚拟化、运行时、桌面等已推进子系统还须按各自设计完成。Rust 重写与这些缺口一起收口；既有行为和性能按 [对照规范](../releases/v1.0-validation.md) 验收。 LoongArch32/PPC64LE 已退出 1.0；其活跃实例、构建和 CI 配置清理已完成，历史源码与复现入口保留。
 
 本文记录尚未完成的工程瓶颈与剩余规划。实现细节与验证入口见事实文档（[../testing-gates.md](../testing-gates.md)、[../security/hardening.md](../security/hardening.md)、[../../kernel/abi/linux/syscall_coverage.md](../../../kernel/abi/linux/syscall_coverage.md)），远期方向评估见 [next-horizon.md](next-horizon.md)。
 
@@ -10,7 +10,7 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 当前已完成单核/SMP2 调度进展的有界负载验收，记录见 [本轮进度](../status/current/v1.0-progress.md#本轮完成与验证2026-11-16)；默认 ABI=both 的云端候选复验仍保留。
 
-N18 关键并发已按[当前候选矩阵](../status/current/v1.0-candidate.md)关闭；六架构 SMP2、共享 VFS/MM 的 SMP8 和近期 PC/QEMU 驱动 I/O 分别记录，不要求每个架构重复所有负载。剩余交付项如下。
+N18 关键并发和 N20 本地交付已按[当前候选矩阵](../status/current/v1.0-candidate.md)关闭；六架构用户态/SMP2、共享 VFS/MM 的 SMP8、两个发布档位、NOMMU build-only 和 MCU 预算分别记录，不要求每个架构重复所有负载。剩余交付项如下。
 
 ## P0：默认 ABI=both 的运行验收
 
@@ -19,13 +19,6 @@ N18 关键并发已按[当前候选矩阵](../status/current/v1.0-candidate.md)�
 - [ ] 在云端复验 Native CI 与发布前置门禁
   - `.github/workflows/native.yml` 已接线；当前仅验证本地配方，未触发云端 CI 或发布。
   - RTC、服务注册表 RTC 重启和 UBD 依赖 RISC-V 私有 MMIO/IRQ，AArch64 明确跳过，跳过不计为覆盖。AArch64 PTY 与 timeout 新增入口本地已通过。
-
-## P1：发布配置与工具链
-
-- [ ] 正式支持矩阵内的发布配置与工具链复核
-  - 历史构建记录已包含 x86_64、LoongArch64、 RISC-V32 等内核构建；这些是指定工作区的构建证据，不是完整运行或所有板级零警告证明。
-  - 在候选工具链上按正式支持矩阵逐行复核，记录配置、警告策略和产物；实验配置单列验证状态，正式支持行缺少证据时仍列待验收。
-  - LoongArch32/PPC64LE 不再作为待补支持项，转为 V1-DELIVERY 的活跃配置清理。
 
 ## 验证环境说明
 
