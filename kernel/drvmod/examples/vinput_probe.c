@@ -17,6 +17,7 @@
 
 #define DRV_ENV_DRVMOD 1
 #include "drvmod/drvmod.h"
+#include <stdint.h>
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
                       A20_DRIVER_TYPE_INPUT, "virtio-input-probe", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO,
@@ -30,16 +31,19 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/bus/platform_bus.h"
 #include "core/errno.h"
 
-#define VINPUT_DUAL_SIZE 0x1000ULL
+/* Only transport identity and the input config latch are queried. AArch64
+ * virt slots are 0x200 bytes; a fixed 4KiB window spans neighboring devices. */
+#define VINPUT_PROBE_SIZE (VMMIO_CONFIG + VINPUT_CFG_DATA + VINPUT_CFG_DATA_MAX)
 
 static int vinput_probe(device_t *dev)
 {
     if (!dev)
         return -ENODEV;
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
-    if (!res || res->end < res->start)
+    if (!res || res->end < res->start || res->end > UINTPTR_MAX ||
+        (res->start & 3u) || res->end - res->start < VINPUT_PROBE_SIZE - 1u)
         return -ENODEV;
-    uint64_t base = drv_mmio_map(res->start, VINPUT_DUAL_SIZE, 3);
+    uint64_t base = drv_mmio_map(res->start, VINPUT_PROBE_SIZE, 3);
     if (!base)
         return -EIO;
     vmmio_probe_t p;
@@ -53,10 +57,18 @@ static int vinput_probe(device_t *dev)
                 p.device_id, p.version, n ? name : "?");
         found = 1;
     }
-    drv_mmio_unmap(base, VINPUT_DUAL_SIZE);
+    drv_mmio_unmap(base, VINPUT_PROBE_SIZE);
     return found ? 0 : -ENODEV;
 }
 
+static int vinput_probe_remove(device_t *dev)
+{
+    /* Probe unmaps synchronously and never owns queues, IRQs or workers.
+     * Publish this empty retirement contract so terminal shutdown can drain
+     * the diagnostic binding without inventing a destructive device reset. */
+    (void)dev;
+    return 0;
+}
 
 static const firmware_device_id_t firmware_ids[] = {
     {.id = "virtio,mmio"}, {0}
@@ -67,6 +79,7 @@ static driver_t vinput_probe_driver = {
     .bus = &platform_bus,
     .read_only_probe = 1,   /* user service uinputd owns the slot */
     .probe = vinput_probe,
+    .remove = vinput_probe_remove,
     .class_type = DEV_CLASS_NONE,
 };
 
