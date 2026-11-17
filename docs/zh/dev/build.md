@@ -39,7 +39,7 @@ cd A20OS
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
     build-essential git curl ca-certificates xz-utils file python3 \
-    dosfstools e2fsprogs mtools util-linux \
+    dosfstools e2fsprogs mtools util-linux clang-19 \
     gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
     gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
 
@@ -49,7 +49,7 @@ sudo apt-get install -y qemu-system-riscv
 # sudo apt-get install -y qemu-system-misc
 ```
 
-Python 必须为 3.11 或更新版本，仅需标准库；此路径不需要 pip、Conda、CMake 或 GRUB。`riscv64-unknown-elf-gcc` 编译内核和静态用户态；Linux 交叉工具链与交叉头文件供包括 fastfetch 在内的构建使用。显式安装交叉 libc 头，避免 `--no-install-recommends`下出现编译器在而头文件不在的情况。
+Python 必须为 3.11 或更新版本，仅需标准库；此路径不需要 pip、Conda、CMake 或 GRUB。`riscv64-unknown-elf-gcc` 编译内核和静态用户态；默认 BSD 网络后端需要 `clang-19` 前端；Linux 交叉工具链与交叉头文件供包括 fastfetch 在内的构建使用。显式安装交叉 libc 头，避免 `--no-install-recommends`下出现编译器在而头文件不在的情况。
 
 Rust 使用 rustup 管理。尚未安装 rustup 时执行：
 

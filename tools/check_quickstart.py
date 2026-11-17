@@ -16,6 +16,7 @@ TOOLS = {
     "git": "git",
     "make": "build-essential",
     "cc": "build-essential",
+    "clang-19": "clang-19 (BSD network backend frontend)",
     "riscv64-unknown-elf-gcc": "gcc-riscv64-unknown-elf",
     "riscv64-unknown-elf-objcopy": "binutils-riscv64-unknown-elf",
     "riscv64-linux-gnu-gcc": "gcc-riscv64-linux-gnu libc6-dev-riscv64-cross",
@@ -95,6 +96,12 @@ def main():
             c.write_text("#include <limits.h>\n#include <stdint.h>\n#include <linux/fb.h>\n")
             ok = probe("RISC-V libc and Linux headers", [cc, "-E", str(c), "-o", str(tmp / "probe.i")],
                        "Install libc6-dev-riscv64-cross, including linux-libc-dev-riscv64-cross") and ok
+        if available["clang-19"]:
+            c.write_text("int probe(void) { return 0; }\n")
+            ok = probe("BSD Clang frontend", [available["clang-19"],
+                       "--target=riscv64-linux-gnu", "-march=rv64g", "-mabi=lp64d",
+                       "-ffreestanding", "-c", str(c), "-o", str(tmp / "bsd.o")],
+                       "Install clang-19 for the default BSD backend") and ok
         if available["qemu-system-riscv64"]:
             ok = probe("QEMU executable", [available["qemu-system-riscv64"], "--version"],
                        "Install the RISC-V system emulator") and ok
