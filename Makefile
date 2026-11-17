@@ -193,7 +193,7 @@ CONFIG_KERNEL_PREEMPT ?= 1
 SMP_SELFTEST ?= 0
 # Explicit freestanding BSD bootstrap diagnostic artifact; never a fallback backend.
 BSD_BOOTSTRAP_OBJECT ?=
-BSD_CLANG ?= $(if $(wildcard $(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang),$(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang,clang)
+BSD_CLANG ?= $(or $(wildcard $(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang),$(shell command -v clang-19 2>/dev/null),$(shell command -v clang 2>/dev/null),clang-19)
 # Optional shared-RAM multi-process QEMU platform; ordinary builds unchanged.
 QEMU_SHARED_SMP ?= 0
 ifneq ($(filter $(QEMU_SHARED_SMP),0 1),$(QEMU_SHARED_SMP))

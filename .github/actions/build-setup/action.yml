@@ -1,0 +1,19 @@
+name: Prepare the A20OS build container
+description: Prepare source ownership and the BSD frontend in existing build images
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        # Older published images predate the BSD backend's Clang dependency.
+        # New images declare it in tools/ci/Dockerfile; keep them usable while
+        # the image publication pipeline rolls forward.
+        if ! command -v clang-19 >/dev/null; then
+          apt-get update -qq
+          apt-get install -y --no-install-recommends clang-19
+        fi
+        clang-19 --version
+        gcc -dumpfullversion
+        rustc --version
