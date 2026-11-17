@@ -657,6 +657,8 @@ const struct drv_export drv_export_table[] = {
     { "x86_64_apic_to_cpu", (void *)x86_64_apic_to_cpu },
     { "ioport_read8", (void *)ioport_read8 },
     { "ioport_write8", (void *)ioport_write8 },
+    { "ioport_read32", (void *)ioport_read32 },
+    { "ioport_write32", (void *)ioport_write32 },
     /* Legacy i8042 routing: PS/2 is a loadable x86 module and must be able
      * to program GSI1/GSI12 before request_irq() unmasks the line. */
     { "arch_firmware_irq_map", (void *)arch_firmware_irq_map },

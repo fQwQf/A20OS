@@ -68,6 +68,26 @@ void ioport_write8(uint16_t port, uint8_t value)
 #endif
 }
 
+uint32_t ioport_read32(uint16_t port)
+{
+#ifdef CONFIG_IOPORT
+    return inl(port);
+#else
+    (void)port;
+    return 0xffffffffU;
+#endif
+}
+
+void ioport_write32(uint16_t port, uint32_t value)
+{
+#ifdef CONFIG_IOPORT
+    outl(port, value);
+#else
+    (void)port;
+    (void)value;
+#endif
+}
+
 /* DRIVER_IRQ_TABLE_FIXED_LIMIT: platform IRQ lines are capped at 256 until the
  * irq registry is replaced by a dynamically sized irqdomain-style structure. */
 
