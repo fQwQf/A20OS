@@ -11,6 +11,23 @@ from tools.smoke import CASES
 
 
 class OrderedExpectationTests(unittest.TestCase):
+    def test_aarch64_drvmod_requires_real_module_binding_and_clean_exit(self):
+        case = dict(CASES['smoke-drvmod-aarch64'])
+        lines = ["[DRVMOD] loaded 'virtio-blk.a20drv' id=0 base=0xffff0000",
+                 "[VIRTIO0] Block device ready: capacity=65536 sectors (32 MB)",
+                 "[DRIVER] device 'virtio-mmio.0' bound to driver 'virtio-blk'",
+                 "System is going down for power-off NOW"]
+        scenarios = [(lines, 0, 0), (lines, 124, 1), (lines, 1, 1)]
+        scenarios += [(lines[:i] + lines[i + 1:], 0, 1) for i in range(len(lines))]
+        scenarios += [(["[GOLDFISH-RTC] probe ok: epoch_ns=123", lines[-1]], 0, 1)]
+        for output, status, wanted in scenarios:
+            with self.subTest(output=output, status=status), tempfile.NamedTemporaryFile(mode='w+') as f:
+                f.write('\n'.join(output))
+                f.flush()
+                case['log'] = f.name
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(report('smoke-drvmod-aarch64', case, status), wanted)
+
     def test_nommu_gate_requires_child_output_not_command_echo(self):
         case = dict(CASES['smoke-nommu-exec'])
         for output, status, wanted in (

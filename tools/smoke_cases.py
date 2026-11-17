@@ -229,10 +229,16 @@ CASES: dict[str, dict] = {
         'timeout': '20s',
         'qemu': 'qemu-system-aarch64',
         'argv': ['qemu-system-aarch64', '-machine', 'virt', '-cpu', 'cortex-a57', '-m', '1G', '-nographic', '-smp', '1', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/aarch64-qemu-virt-aarch64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-kernel', '.kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf'],
-        'expect': ['\\[GOLDFISH-RTC\\] probe ok', 'System is going down for power-off'],
+        # QEMU virt describes a PL031, not a Goldfish RTC. The configured
+        # boot disk exercises an actual loadable driver on this platform.
+        'expect': [r"\[DRVMOD\] loaded 'virtio-blk\.a20drv'",
+                   r"\[DRIVER\] device '[^']+' bound to driver 'virtio-blk'",
+                   r'\[VIRTIO[0-9]+\] Block device ready: capacity=[1-9][0-9]* sectors',
+                   'System is going down for power-off'],
+        'require_exit_zero': True,
         'forbid': [],
         'timeout_msg': False,
-        'pass_msg': 'smoke-drvmod-aarch64: PASS (rtc.a20drv loaded and bound); log saved to $log',
+        'pass_msg': 'smoke-drvmod-aarch64: PASS (virtio-blk.a20drv loaded, bound and ready; natural shutdown); log saved to $log',
     },
     'smoke-drvmod-loongarch64': {
         'gate': {'mem': '1G', 'cpus': '1'},
