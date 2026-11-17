@@ -89,6 +89,11 @@ sys.exit(subprocess.call(cmd))
                 "FEATURE_SH_EMBEDDED_SCRIPTS": "n", "USE_BB_CRYPT": "y", "USE_BB_CRYPT_SHA": "y",
                 "FEATURE_MOUNT_NFS": "n", "FEATURE_INETD_RPC": "n", "SEEDRNG": "n", "TC": "n",
                 "SHA1_HWACCEL": "n", "SHA256_HWACCEL": "n"}
+            # RV32 is time64-only: upstream hwclock unconditionally calls the
+            # absent legacy settimeofday syscall for kernel timezone handling.
+            # It is outside our staged applet list; keep other ISAs unchanged.
+            if args.arch == "riscv32":
+                changes["HWCLOCK"] = "n"
             lines = (out / ".config").read_text().splitlines()
             for key, value in changes.items():
                 lines = [line for line in lines if not line.startswith(f"CONFIG_{key}=") and line != f"# CONFIG_{key} is not set"]

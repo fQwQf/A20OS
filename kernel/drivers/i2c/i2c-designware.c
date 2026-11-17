@@ -219,7 +219,7 @@ static int dw_i2c_wait_enable(dw_i2c_controller_t *i2c, int enabled)
 {
     for (unsigned i = 0; i < DW_I2C_TIMEOUT_US; i++) {
         uint32_t st = dw_read(i2c, DW_IC_ENABLE_STATUS);
-        if (st == UINT32_MAX)
+        if (st == 0xffffffffU)
             return -ENODEV;
         if (!!(st & 1U) == !!enabled)
             return 0;
@@ -254,7 +254,7 @@ static int dw_i2c_abort_transfer(dw_i2c_controller_t *i2c)
     dw_write(i2c, DW_IC_ENABLE, 1U | DW_ENABLE_ABORT);
     for (unsigned i = 0; i < 1000; i++) {
         uint32_t enable = dw_read(i2c, DW_IC_ENABLE);
-        if (enable == UINT32_MAX)
+        if (enable == 0xffffffffU)
             return -ENODEV;
         if (!(enable & DW_ENABLE_ABORT))
             return dw_i2c_disable(i2c);
@@ -280,7 +280,7 @@ static int dw_i2c_abort_status(dw_i2c_controller_t *i2c)
     if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE))
         return -ESHUTDOWN;
     uint32_t src = dw_read(i2c, DW_IC_TX_ABRT_SOURCE);
-    if (src == UINT32_MAX)
+    if (src == 0xffffffffU)
         return -ENODEV;
     if (!src && !(dw_read(i2c, DW_IC_RAW_INTR_STAT) & DW_INTR_TX_ABRT))
         return 0;
@@ -346,7 +346,7 @@ static int dw_i2c_read_msg(dw_i2c_controller_t *i2c, i2c_msg_t *msg, int first,
         if (__atomic_load_n(&i2c->closing, __ATOMIC_ACQUIRE))
             return -ESHUTDOWN;
         uint32_t status = dw_read(i2c, DW_IC_STATUS);
-        if (status == UINT32_MAX)
+        if (status == 0xffffffffU)
             return -ENODEV;
         if (drained < pushed && (status & DW_STATUS_RFNE)) {
             msg->buf[drained++] =
@@ -519,7 +519,7 @@ static int dw_i2c_stop(void *context)
         dw_write(i2c, DW_IC_INTR_MASK, 0);
         uint32_t mask = dw_read(i2c, DW_IC_INTR_MASK);
         if (mask) {
-            ret = mask == UINT32_MAX ? -ENODEV : -EIO;
+            ret = mask == 0xffffffffU ? -ENODEV : -EIO;
             goto out;
         }
         ret = dw_i2c_disable(i2c);
@@ -583,7 +583,7 @@ static int dw_i2c_probe(device_t *dev)
     i2c->hardware_owned = 1;
 
     uint32_t comp = dw_read(i2c, DW_IC_COMP_PARAM_1);
-    if (comp == UINT32_MAX)
+    if (comp == 0xffffffffU)
         return -ENODEV;
     i2c->tx_fifo_depth = ((comp >> 16) & 0xffU) + 1U;
     i2c->rx_fifo_depth = ((comp >> 8) & 0xffU) + 1U;
