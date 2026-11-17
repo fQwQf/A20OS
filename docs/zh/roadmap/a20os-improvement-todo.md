@@ -10,6 +10,8 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 当前已完成单核/SMP2 调度进展的有界负载验收，记录见 [本轮进度](../status/current/v1.0-progress.md#本轮完成与验证2026-11-16)；默认 ABI=both 的云端候选复验仍保留。
 
+N18 关键并发已按[当前候选矩阵](../status/current/v1.0-candidate.md)关闭；六架构 SMP2、共享 VFS/MM 的 SMP8 和近期 PC/QEMU 驱动 I/O 分别记录，不要求每个架构重复所有负载。剩余交付项如下。
+
 ## P0：默认 ABI=both 的运行验收
 
 已运行的 handle、MM、deepen、contract 用例覆盖权限上限、区域约束、对象生命周期和 `remap-owner-rollback PASS`，通过结果与配置见测试日志。

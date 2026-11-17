@@ -5,10 +5,11 @@
 | ID | 工作包 / 需求链接 | 来源与子系统 | 要求的行为 | 当前 C/Rust 归属 | 下一步可验证交付 |
 | --- | --- | --- | --- | --- | --- |
 | N02 | V1-DELIVERY | [路线图 TODO §P0](../../roadmap/a20os-improvement-todo.md)，CI/发布 | 在配置好的云端 CI 里重跑 Native CI 与发布前置流程，记录确切的候选版本与被跳过的硬件专属 job。 | 现有 C/Rust 构建与工作流文件；由 CI 操作者执行。 | 取得该候选的完整工作流结果；对每个被跳过的 job 分类，跳过的不得计为覆盖。 |
-| N18 | V1-DELIVERY | [路线图 TODO §P1](../../roadmap/a20os-improvement-todo.md)，其余 smoke 的 SMP 矩阵 | 为正式支持的 SMP 配置覆盖共享状态、任务生命周期、内存、文件系统和驱动的关键并发路径，并记录架构/设备适用范围。 | C 内核测试与 Make smoke target；无 Rust owner。 | 复用已有 SMP2/SMP8 变体，补齐正式支持矩阵的关键路径；分别保留单 CPU、SMP 结果与跳过分类。 |
-| N20 | V1-DELIVERY | [路线图 TODO §P2](../../roadmap/a20os-improvement-todo.md)，交付/平台矩阵 | 用显式宿主编译器变量，复核正式支持矩阵内的构建、工具链与运行档位；实验配置单独记录构建及验证状态。 | C/Rust 构建系统与架构工具链；需要 build/release owner。 | 按记录的工具链版本运行保留构建矩阵，区分构建证据与运行证据，并单独保留已退役架构的历史。 |
+| N20 | V1-DELIVERY | [路线图 TODO §P1](../../roadmap/a20os-improvement-todo.md)，发布配置与工具链 | 用显式宿主编译器变量，复核正式支持矩阵内的构建、工具链与运行档位；实验配置单独记录构建及验证状态。 | C/Rust 构建系统与架构工具链；需要 build/release owner。 | 按记录的工具链版本运行保留构建矩阵，区分构建证据与运行证据，并单独保留已退役架构的历史。 |
 
-N18/N20 中的驱动验证按[常见 PC/QEMU 范围](../../drivers/meta/v1-pc-qemu-scope.md)执行，不因此重新引入全部 SoC/开发板驱动完善或实板故障认证。
+N20 中的驱动验证按[常见 PC/QEMU 范围](../../drivers/meta/v1-pc-qemu-scope.md)执行，不因此重新引入全部 SoC/开发板驱动完善或实板故障认证。
+
+原 N18 已按[候选关键并发矩阵](../current/v1.0-candidate.md)关闭：六架构 SMP2 的跨 CPU 唤醒/定时器/IPI/引用回收、RISC-V64 SMP8 的 VFS/活跃 PTE 拆映射，以及近期 PC SMP4 设备 I/O 均有实际运行结果；单 CPU 与各行范围分别保留。综合交付与云端仍归 N20/N02，编号不回收。
 
 原 N08 已按[目标应用与关键边界记录](../../kernel/linux-abi/application-contracts.md#应用关键边界收口2026-11-17)关闭；编号不回收，正式候选配置仍归 N18/N20。
 
