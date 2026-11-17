@@ -6,7 +6,7 @@
 #include "drivers/gpu/gpu_core.h"
 #include "core/defs.h"
 #include "core/klog.h"
-#include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "mm/mm.h"
 
@@ -19,12 +19,12 @@
 /* Legacy SVGA-II register indices.  VBox still exposes this device ID on
  * several ARM builds even when the display controller is called VMSVGA. */
 #define SVGA2_REG_ID           0U
-#define SVGA2_REG_ENABLE       2U
-#define SVGA2_REG_WIDTH        3U
-#define SVGA2_REG_HEIGHT       4U
+#define SVGA2_REG_ENABLE       1U
+#define SVGA2_REG_WIDTH        2U
+#define SVGA2_REG_HEIGHT       3U
 #define SVGA2_REG_BPP          7U
 #define SVGA2_REG_FB_START     13U
-#define SVGA2_REG_FB_SIZE      14U
+#define SVGA2_REG_FB_SIZE      16U
 #define SVGA2_REG_CONFIG_DONE  20U
 #define SVGA2_ID               0x90000002U
 
@@ -91,7 +91,9 @@ typedef struct vmsvga_device {
     uint32_t bpp;
     uint32_t pitch;
     int legacy;
-    spinlock_t lock;
+    mutex_t lock;
+    int closing, pending, pending_stop, context_live;
+    int pci_touched, configured, published, stopped;
     /* One page is sufficient for the command-buffer header and the small
      * device-context/update commands used by this framebuffer driver. */
     uint8_t command_page[PAGE_SIZE] ALIGNED(PAGE_SIZE);
@@ -150,45 +152,73 @@ static uint32_t vmsvga_read(vmsvga_device_t *svga, uint32_t offset) {
     return readl((const volatile void *)(svga->regs + offset));
 }
 
-static int vmsvga_submit(vmsvga_device_t *svga, const void *command,
-                         size_t command_size, uint32_t context) {
-    if (!svga || !command || command_size == 0 ||
-        sizeof(svga3_command_buffer_t) + command_size > PAGE_SIZE)
-        return -1;
+/* A timeout/cancel is not device retirement. Preserve this page verbatim
+ * until the host reports a known terminal status; no later submit may reuse it. */
+static int vmsvga_wait_pending(vmsvga_device_t *svga, int cleanup) {
+    if (!svga->pending)
+        return 0;
+    svga3_command_buffer_t *header = (void *)svga->command_page;
+    uint64_t start = clock_get_ticks();
+    uint64_t limit = clock_ticks_per_sec() / 10U;
+    if (!limit) limit = 1;
+    for (uint32_t i = 0; i < SVGA3_CMD_WAIT_LOOPS; i++) {
+        if (!cleanup && __atomic_load_n(&svga->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
+        arch_dma_sync_for_cpu(header, sizeof(*header));
+        uint32_t status = header->status;
+        if (status != SVGA3_CB_STATUS_NONE) {
+            /* 1..6 are defined terminal statuses in the base protocol.
+             * Unknown/partial status cannot authorize reuse or release. */
+            if (status > 6U)
+                return -EIO;
+            svga->pending = 0;
+            if (status == SVGA3_CB_STATUS_COMPLETED && svga->pending_stop)
+                svga->context_live = 0;
+            svga->pending_stop = 0;
+            return status == SVGA3_CB_STATUS_COMPLETED ? 0 : -EIO;
+        }
+        if (clock_get_ticks() - start >= limit)
+            return -ETIMEDOUT;
+        arch_cpu_relax();
+    }
+    return -ETIMEDOUT;
+}
 
-    svga3_command_buffer_t *header = (svga3_command_buffer_t *)svga->command_page;
+static int vmsvga_submit(vmsvga_device_t *svga, const void *command,
+                         size_t command_size, uint32_t context, int cleanup) {
+    if (!svga || !command || command_size == 0 ||
+        command_size > PAGE_SIZE - sizeof(svga3_command_buffer_t))
+        return -EINVAL;
+    if (!cleanup && __atomic_load_n(&svga->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
+    if (svga->pending)
+        return -EBUSY;
+
+    svga3_command_buffer_t *header = (void *)svga->command_page;
     uint8_t *payload = svga->command_page + sizeof(*header);
     memset(svga->command_page, 0, sizeof(svga->command_page));
     memcpy(payload, command, command_size);
-    header->status = SVGA3_CB_STATUS_NONE;
     header->flags = SVGA3_CB_FLAG_NO_IRQ;
     header->length = (uint32_t)command_size;
     header->physical_address = va_to_pa(payload);
-
-    arch_dma_sync_for_device(svga->command_page,
-                             sizeof(*header) + command_size);
+    if (context == SVGA3_CB_CONTEXT_DEVICE && command_size == sizeof(svga3_start_context_t)) {
+        svga3_start_context_t control;
+        memcpy(&control, command, sizeof(control));
+        if (control.command == SVGA3_CMD_DC_START_STOP) {
+            if (control.enable) svga->context_live = 1; /* may be accepted */
+            svga->pending_stop = !control.enable;
+        }
+    }
+    arch_dma_sync_for_device(svga->command_page, sizeof(*header) + command_size);
     wmb();
     uint64_t header_pa = va_to_pa(header);
+    svga->pending = 1;
     vmsvga_write(svga, SVGA3_REG_COMMAND_HI, (uint32_t)(header_pa >> 32));
-    vmsvga_write(svga, SVGA3_REG_COMMAND_LO,
-                 (uint32_t)header_pa | context);
-
-    for (uint32_t i = 0; i < SVGA3_CMD_WAIT_LOOPS; i++) {
-        arch_dma_sync_for_cpu(header, sizeof(*header));
-        if (header->status != SVGA3_CB_STATUS_NONE) {
-            if (header->status == SVGA3_CB_STATUS_COMPLETED)
-                return 0;
-            kerr("[GPU] SVGAv3 command rejected: context=%u command=%u "
-                 "status=%u error-offset=%u\n",
-                 context, *(const uint32_t *)command, header->status,
-                 header->error_offset);
-            return -1;
-        }
-        arch_cpu_relax();
-    }
-    kerr("[GPU] SVGAv3 command timeout (context=%u, command=%u)\n",
-         context, *(const uint32_t *)command);
-    return -1;
+    vmsvga_write(svga, SVGA3_REG_COMMAND_LO, (uint32_t)header_pa | context);
+    int ret = vmsvga_wait_pending(svga, cleanup);
+    if (ret && !cleanup)
+        __atomic_store_n(&svga->closing, 1, __ATOMIC_RELEASE);
+    return ret;
 }
 
 static int vmsvga_update_locked(vmsvga_device_t *svga, uint32_t x, uint32_t y,
@@ -197,7 +227,7 @@ static int vmsvga_update_locked(vmsvga_device_t *svga, uint32_t x, uint32_t y,
         .command = SVGA3_CMD_UPDATE,
         .x = x, .y = y, .width = width, .height = height,
     };
-    return vmsvga_submit(svga, &update, sizeof(update), SVGA3_CB_CONTEXT_0);
+    return vmsvga_submit(svga, &update, sizeof(update), SVGA3_CB_CONTEXT_0, 0);
 }
 
 static int vmsvga_get_info(device_t *dev, uint32_t *width, uint32_t *height,
@@ -237,9 +267,11 @@ static int vmsvga_flush(device_t *dev, uint32_t x, uint32_t y, uint32_t width,
     if (height > svga->height - y)
         height = svga->height - y;
 
-    uint64_t flags = spin_lock_irqsave(&svga->lock);
+    if (__atomic_load_n(&svga->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
+    mutex_lock(&svga->lock);
     int result = vmsvga_update_locked(svga, x, y, width, height);
-    spin_unlock_irqrestore(&svga->lock, flags);
+    mutex_unlock(&svga->lock);
     return result;
 }
 
@@ -278,6 +310,56 @@ static const gpu_dev_ops_t vmsvga_ops = {
     .get_features = vmsvga_get_features,
 };
 
+static int vmsvga_stop(void *context) {
+    vmsvga_device_t *svga = context;
+    __atomic_store_n(&svga->closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&svga->lock))
+        return -EBUSY;
+    int ret = vmsvga_wait_pending(svga, 1);
+    if (ret) goto out;
+    if (svga->configured) {
+        uint32_t id_reg = svga->legacy ? SVGA2_REG_ID : SVGA3_REG_ID;
+        uint32_t id = svga->legacy ? SVGA2_ID : SVGA3_ID;
+        if (vmsvga_read(svga, id_reg) != id) { ret = -ENODEV; goto out; }
+        if (!svga->legacy) {
+            vmsvga_write(svga, SVGA3_REG_IRQ_MASK, 0);
+            if (vmsvga_read(svga, SVGA3_REG_IRQ_MASK) != 0) { ret = -EIO; goto out; }
+            if (svga->context_live) {
+                svga3_start_context_t stop = {SVGA3_CMD_DC_START_STOP, 0, SVGA3_CB_CONTEXT_0};
+                ret = vmsvga_submit(svga, &stop, sizeof(stop), SVGA3_CB_CONTEXT_DEVICE, 1);
+                if (ret) goto out;
+            }
+        }
+        uint32_t enable = svga->legacy ? SVGA2_REG_ENABLE : SVGA3_REG_ENABLE;
+        uint32_t done = svga->legacy ? SVGA2_REG_CONFIG_DONE : SVGA3_REG_CONFIG_DONE;
+        vmsvga_write(svga, enable, 0);
+        vmsvga_write(svga, done, 0);
+        if (vmsvga_read(svga, enable) != 0 || vmsvga_read(svga, done) != 0) {
+            ret = -EIO;
+            goto out;
+        }
+    }
+    if (svga->pci_touched) {
+        uint16_t command = pci_cfg_read16(svga->owner, 0x04);
+        if (command == 0xffffU) { ret = -ENODEV; goto out; }
+        command = (command & (uint16_t)~0x04U) | 0x400U;
+        pci_cfg_write16(svga->owner, 0x04, command);
+        command = pci_cfg_read16(svga->owner, 0x04);
+        if (command == 0xffffU || (command & 0x404U) != 0x400U) {
+            ret = -EIO;
+            goto out;
+        }
+    }
+    svga->stopped = 1;
+out:
+    mutex_unlock(&svga->lock);
+    return ret;
+}
+
+static void vmsvga_release(void *context) {
+    memset(context, 0, sizeof(vmsvga_device_t));
+}
+
 static int vmsvga_probe(device_t *dev) {
     /* Existing single-device capacity: never overwrite a retained binding. */
     if (g_vmsvga.owner) return -EBUSY;
@@ -287,9 +369,12 @@ static int vmsvga_probe(device_t *dev) {
     memset(svga, 0, sizeof(*svga));
     svga->owner = dev;
     dev->drv_priv = svga;
-    spin_init(&svga->lock);
-    if (pci_enable_and_assign_bars(dev) < 0)
-        return -1;
+    mutex_init(&svga->lock);
+    int ret = device_add_execution_action(dev, vmsvga_stop, vmsvga_release, svga);
+    if (ret) { dev->drv_priv = NULL; memset(svga, 0, sizeof(*svga)); return ret; }
+    svga->pci_touched = 1;
+    ret = pci_enable_and_assign_bars(dev);
+    if (ret) return ret;
 
     /* The SVGAv3 PCI layout is fixed: BAR0 is its MMIO register aperture and
      * BAR2 is VRAM.  Looking them up by BAR number is essential on ARM. */
@@ -314,6 +399,7 @@ static int vmsvga_probe(device_t *dev) {
             kerr("[GPU] SVGAv2 ID negotiation failed\n");
             return -1;
         }
+        svga->configured = 1;
         vmsvga_write(svga, SVGA2_REG_ENABLE, 0);
         vmsvga_write(svga, SVGA2_REG_WIDTH, 1024U);
         vmsvga_write(svga, SVGA2_REG_HEIGHT, 768U);
@@ -338,6 +424,7 @@ static int vmsvga_probe(device_t *dev) {
         if (gpu_device_register(dev) < 0) {
             return -1;
         }
+        svga->published = 1;
         kinfo("[GPU] SVGAv2 ready: %ux%ux%u (VRAM: %lu MiB at 0x%lx)\n",
               svga->width, svga->height, svga->bpp,
               (unsigned long)(svga->fb_size / 1024U / 1024U),
@@ -353,6 +440,7 @@ static int vmsvga_probe(device_t *dev) {
         kerr("[GPU] SVGAv3 ID negotiation failed\n");
         return -1;
     }
+    svga->configured = 1;
     vmsvga_write(svga, SVGA3_REG_IRQ_MASK, 0);
     vmsvga_write(svga, SVGA3_REG_IRQ_STATUS, 0);
 
@@ -363,8 +451,10 @@ static int vmsvga_probe(device_t *dev) {
         .enable = 1,
         .context = SVGA3_CB_CONTEXT_0,
     };
-    if (vmsvga_submit(svga, &start, sizeof(start), SVGA3_CB_CONTEXT_DEVICE) != 0)
-        return -1;
+    mutex_lock(&svga->lock);
+    ret = vmsvga_submit(svga, &start, sizeof(start), SVGA3_CB_CONTEXT_DEVICE, 0);
+    mutex_unlock(&svga->lock);
+    if (ret) return ret;
 
     vmsvga_write(svga, SVGA3_REG_ENABLE, 0);
     vmsvga_write(svga, SVGA3_REG_CONFIG_DONE, 0);
@@ -403,6 +493,7 @@ static int vmsvga_probe(device_t *dev) {
     if (gpu_device_register(dev) < 0) {
         return -1;
     }
+    svga->published = 1;
     if (vmsvga_scanout_self_test(dev, svga) != 0) {
         return -1;
     }
@@ -418,15 +509,11 @@ static int vmsvga_remove(device_t *dev) {
     vmsvga_device_t *svga = dev ? dev->drv_priv : NULL;
     if (!svga)
         return 0;
-    if (svga->regs) {
-        if (svga->legacy)
-            vmsvga_write(svga, SVGA2_REG_ENABLE, 0);
-        else
-            vmsvga_write(svga, SVGA3_REG_ENABLE, 0);
-    }
-    gpu_device_unregister(dev);
+    if (!svga->stopped || svga->pending)
+        return -EBUSY;
+    if (svga->published)
+        gpu_device_unregister(dev);
     dev->drv_priv = NULL;
-    memset(svga, 0, sizeof(*svga));
     return 0;
 }
 
