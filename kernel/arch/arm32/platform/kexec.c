@@ -28,7 +28,9 @@ static uintptr_t g_kexec_control_pa;
 static uint32_t *g_kexec_l1;       /* 16 KiB short-descriptor table */
 static uintptr_t g_kexec_l1_pa;
 static volatile int g_kexec_stop_pending;
+#if defined(CONFIG_BOARD_QEMU_VIRT_ARM32) && !defined(CONFIG_NOMMU)
 static volatile int g_kexec_stop_error;
+#endif
 static uint32_t g_kexec_saved_affinity;
 static int g_kexec_affinity_changed;
 
@@ -46,6 +48,7 @@ void arm32_kexec_ipi(void)
 #endif
 }
 
+#if defined(CONFIG_BOARD_QEMU_VIRT_ARM32) && !defined(CONFIG_NOMMU)
 static int stop_other_cpus(void)
 {
     uint32_t online = smp_online_cpu_mask();
@@ -80,6 +83,7 @@ static int stop_other_cpus(void)
     }
     return 0;
 }
+#endif
 
 void machine_kexec_cancel(void)
 {
