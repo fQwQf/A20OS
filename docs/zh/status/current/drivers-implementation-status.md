@@ -10,6 +10,8 @@
 
 按项目负责人要求，当前只完善[已有支持的常见 PC 与 QEMU 设备](../../drivers/meta/v1-pc-qemu-scope.md)。下文各设备记录保留实际实现与证据边界，其中“其它 provider、实体停止/失效仍开放”等旧范围表述不再要求所有 SoC、开发板或厂商逐项验收。Hi3861 外设和其它板级专用路径不再进入当前收尾队列；已完成改进保留。PC/QEMU 的具体已知缺陷仍按直接相关的检查修复，不把缺少全厂商实板故障记录单独作为发布阻塞。
 
+本页的能力限制和未实测记录不是额外任务清单；常见 PC/QEMU 驱动独立收尾已关闭，剩余综合交付不要求补齐全部型号、开发板或外设功能。
+
 ## 用户 MMIO 的失败契约
 
 `udriver_map_mmio()` 对页取整后的完整范围授权，仅在全部页成功后发布 VMA。逐页映射失败会撤销已安装 PTE、回收失败遍历留下的空中间页表、完成 TLB 事务并释放临时 VMA。`tools/tests/test_udriver_mmio_rollback_host.py` 运行生产 mapper/unmap，在跨两级页表边界时注入分配失败，保留邻接映射，并以移除回滚/空表清理为负控。 RV64 guest 的 Native MMIO 用例另覆盖正常访问、release 和输出拷贝失败清理。这不是 guest 全局 OOM 或实板 DMA 故障注入结论。锁序见[锁顺序契约](../../drivers/guide/lock-order.md)。
