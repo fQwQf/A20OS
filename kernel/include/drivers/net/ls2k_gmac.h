@@ -8,7 +8,8 @@
 #define LS2K_GMAC_PLATFORM_VENDOR 0x1C00U
 #define LS2K_GMAC_PLATFORM_DEVICE 3U
 
-int  ls2k_gmac_init(uintptr_t base);
+/* Initialization/stop belong to the managed platform binding. These polling
+ * adapters require a live binding; a failed stop keeps its DMA slot reserved. */
 int  ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len);
 int  ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen);
 void ls2k_gmac_get_mac(uintptr_t base, uint8_t *mac);

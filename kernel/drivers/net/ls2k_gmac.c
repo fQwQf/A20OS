@@ -5,12 +5,12 @@
  * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md and
  * docs/platforms/physical-boards.md.
  *
- * LOCK_ORDER: each instance owns a private spinlock (g_ls2k_gmac_insts[i].lock)
- * serializing descriptor-ring access in send/recv/poll.  The data path is
- * poll-driven; the MMIO base is the identity-mapped physical address the board
- * provides (0x40040000 on the LS2K1000).  The descriptor bit layout follows
- * the pre-existing A20OS port and must be confirmed against the 2K1000's
- * stmmac variant before any IRQ-driven rework.
+ * LOCK_ORDER: control_lock serializes task-context PHY/control accesses;
+ * lock protects short descriptor operations. Stop closes admission before
+ * trying either lock, and never polls hardware with interrupts disabled.
+ * A managed execution action pins the static DMA slot until checked stop,
+ * class drain and remove have all succeeded. The polling data path uses the
+ * LS2K1000 DWMAC 3.7 enhanced four-word descriptor format in chained mode.
  */
 
 #include "drivers/net/ls2k_gmac.h"
@@ -25,6 +25,7 @@
 #include "core/string.h"
 #include "core/klog.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/timer.h"
 
 #define GMAC_MAC_BASE  0x0000
@@ -86,8 +87,9 @@
 #define DMA_STATUS_RWT    (1U << 9)
 #define DMA_STATUS_ETI    (1U << 10)
 #define DMA_STATUS_FBI    (1U << 13)
-#define DMA_STATUS_AIS    (1U << 14)
-#define DMA_STATUS_NIS    (1U << 15)
+#define DMA_STATUS_AIS    (1U << 15)
+#define DMA_STATUS_NIS    (1U << 16)
+#define DMA_STATUS_PROCESS_MASK ((7U << 20) | (7U << 17))
 
 /* DMA_BUS_MODE[0] SWR is a self-clearing reset: the DMA clears it once the
  * reset has completed, and every DMA register holds its reset value at that
@@ -109,22 +111,30 @@
 
 #define GMAC_DESC_NUM 16
 #define GMAC_BUF_SIZE 1536
+#define GMAC_WAIT_LOOPS 1000000U
 
 typedef struct {
     uint32_t status;
     uint32_t length;
     uint32_t buffer1;
     uint32_t buffer2;
+    /* Separate CPU-owned and device-owned descriptors by a full LS2K cache
+     * line. Chained buffer2 addresses, not array stride, advance the DMA. */
+    uint32_t padding[12];
 } gmac_desc_t;
+
+_Static_assert(sizeof(gmac_desc_t) == 64, "GMAC descriptor cache isolation");
 
 #define TX_DESC_OWN (1U << 31)
 #define TX_DESC_IC  (1U << 30)
 #define TX_DESC_LS  (1U << 29)
 #define TX_DESC_FS  (1U << 28)
-#define TX_DESC_TER (1U << 21)
+#define TX_DESC_TCH (1U << 20)
 #define RX_DESC_OWN (1U << 31)
 #define RX_DESC_ES  (1U << 15)
-#define RX_DESC_RER (1U << 15)
+#define RX_DESC_RCH (1U << 14)
+#define RX_DESC_FS  (1U << 9)
+#define RX_DESC_LS  (1U << 8)
 #define RX_DESC_FRAME_LEN(status) (((status) >> 16) & 0x3FFFU)
 
 /* Link is re-read at 4 Hz rather than on every poll because each check costs
@@ -138,9 +148,16 @@ typedef struct {
 typedef struct {
     uintptr_t base;
     int       valid;
+    device_t *owner;
+    int closing;
+    int ready;
+    int hardware_owned;
+    int stopped;
+    uint32_t version;
+    mutex_t control_lock;
     spinlock_t lock;
-    gmac_desc_t tx_desc[GMAC_DESC_NUM] ALIGNED(16);
-    gmac_desc_t rx_desc[GMAC_DESC_NUM] ALIGNED(16);
+    gmac_desc_t tx_desc[GMAC_DESC_NUM] ALIGNED(64);
+    gmac_desc_t rx_desc[GMAC_DESC_NUM] ALIGNED(64);
     uint8_t     tx_buf[GMAC_DESC_NUM][GMAC_BUF_SIZE] ALIGNED(64);
     uint8_t     rx_buf[GMAC_DESC_NUM][GMAC_BUF_SIZE] ALIGNED(64);
     uint32_t    tx_busy;
@@ -163,19 +180,17 @@ static ls2k_gmac_priv_t *gmac_instance(uintptr_t base)
     return NULL;
 }
 
-static ls2k_gmac_priv_t *gmac_alloc_instance(uintptr_t base)
+static ls2k_gmac_priv_t *gmac_alloc_instance(device_t *owner)
 {
-    ls2k_gmac_priv_t *inst = gmac_instance(base);
-    if (inst)
-        return inst;
     for (int i = 0; i < GMAC_MAX_INSTANCES; i++) {
         if (!g_ls2k_gmac_insts[i].valid) {
-            inst = &g_ls2k_gmac_insts[i];
+            ls2k_gmac_priv_t *inst = &g_ls2k_gmac_insts[i];
             memset(inst, 0, sizeof(*inst));
-            inst->base = base;
+            inst->owner = owner;
             inst->phy_addr = -1;
             inst->valid = 1;
             spin_init(&inst->lock);
+            mutex_init(&inst->control_lock);
             return inst;
         }
     }
@@ -190,52 +205,64 @@ static inline void gmac_write(uintptr_t base, uint32_t off, uint32_t val) {
     writel(val, (volatile void *)(base + off));
 }
 
-static int gmac_mdio_wait(uintptr_t base) {
+/* All polling has both a timer deadline and a finite fallback for early boot
+ * or a stalled clock. The control mutex, never the ring spinlock, owns MDIO. */
+static int gmac_wait_clear(ls2k_gmac_priv_t *priv, uint32_t reg,
+                           uint32_t mask, uint64_t timeout, int cleanup)
+{
     uint64_t start = timer_get_ticks();
-    while (gmac_read(base, MAC_MII_ADDR) & MII_ADDR_GB) {
-        if (timer_get_ticks() - start > clock_ticks_per_sec() / 100)
-            return -1;
+    for (unsigned i = 0; i < GMAC_WAIT_LOOPS; i++) {
+        if (!cleanup && __atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
+        uint32_t value = gmac_read(priv->base, reg);
+        if (value == 0xFFFFFFFFU)
+            return -ENODEV;
+        if (!(value & mask))
+            return 0;
+        if (timer_get_ticks() - start >= timeout)
+            break;
     }
-    return 0;
+    return -ETIMEDOUT;
 }
 
-static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
-    if (gmac_mdio_wait(base) != 0) return 0xFFFF;
-    /* A read is issued by clearing MW and setting GB in one store; the payload
-     * is only valid in MAC_MII_DATA after the second gmac_mdio_wait() observes
-     * GB clear, so a stale MII_DATA is never mistaken for an answer. */
-    uint32_t val = MII_ADDR_GB |
-                   (phy_addr << MII_ADDR_PA_SHIFT) |
-                   (reg << MII_ADDR_GR_SHIFT) |
-                   (4 << MII_ADDR_CR_SHIFT);
-    gmac_write(base, MAC_MII_ADDR, val);
-    if (gmac_mdio_wait(base) != 0) return 0xFFFF;
-    return (uint16_t)gmac_read(base, MAC_MII_DATA);
+static int gmac_mdio_wait(ls2k_gmac_priv_t *priv)
+{
+    return gmac_wait_clear(priv, MAC_MII_ADDR, MII_ADDR_GB,
+                           clock_ticks_per_sec() / 100 + 1, 0);
 }
 
-static int gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data) {
-    if (gmac_mdio_wait(base) != 0)
-        return -1;
-    /* MII_DATA is loaded before MII_ADDR: an MW-armed transfer takes its
-     * payload from the register at the moment the opcode is issued, so the
-     * reverse order pushes the register index out as data. */
-    gmac_write(base, MAC_MII_DATA, data);
+static uint16_t gmac_mdio_read(ls2k_gmac_priv_t *priv, int phy_addr, int reg)
+{
+    if (gmac_mdio_wait(priv) != 0)
+        return 0xFFFF;
+    uint32_t val = MII_ADDR_GB | (phy_addr << MII_ADDR_PA_SHIFT) |
+                   (reg << MII_ADDR_GR_SHIFT) | (4 << MII_ADDR_CR_SHIFT);
+    gmac_write(priv->base, MAC_MII_ADDR, val);
+    if (gmac_mdio_wait(priv) != 0)
+        return 0xFFFF;
+    return (uint16_t)gmac_read(priv->base, MAC_MII_DATA);
+}
+
+static int gmac_mdio_write(ls2k_gmac_priv_t *priv, int phy_addr, int reg,
+                            uint16_t data)
+{
+    int ret = gmac_mdio_wait(priv);
+    if (ret)
+        return ret;
+    gmac_write(priv->base, MAC_MII_DATA, data);
     uint32_t val = MII_ADDR_GB | MII_ADDR_MW |
                    (phy_addr << MII_ADDR_PA_SHIFT) |
-                   (reg << MII_ADDR_GR_SHIFT) |
-                   (4 << MII_ADDR_CR_SHIFT);
-    gmac_write(base, MAC_MII_ADDR, val);
-    return gmac_mdio_wait(base);
+                   (reg << MII_ADDR_GR_SHIFT) | (4 << MII_ADDR_CR_SHIFT);
+    gmac_write(priv->base, MAC_MII_ADDR, val);
+    return gmac_mdio_wait(priv);
 }
 
-static int ls2k_gmac_read_link(uintptr_t base, int phy_addr)
+static int ls2k_gmac_read_link(ls2k_gmac_priv_t *priv)
 {
-    /* 0xFFFF is what a timed-out MDIO access returns, and a real PHY register
-     * can legitimately read 0xFFFF, so the explicit != 0xFFFFU test is the only
-     * thing separating "no PHY answered" from "the link bit is down". */
-    /* BMSR link is latched low, so the current value is the second read. */
-    (void)gmac_mdio_read(base, phy_addr, MII_BMSR);
-    uint16_t bmsr = gmac_mdio_read(base, phy_addr, MII_BMSR);
+    /* BMSR is latched low: the second read reports current carrier. A missing
+     * PHY or failed MDIO returns all ones, never a live link. */
+    (void)gmac_mdio_read(priv, priv->phy_addr, MII_BMSR);
+    uint16_t bmsr = gmac_mdio_read(priv, priv->phy_addr, MII_BMSR);
     return bmsr != 0xFFFFU && (bmsr & BMSR_LINK_STATUS) != 0;
 }
 
@@ -247,26 +274,14 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     paddr_t rx_desc_pa = va_to_pa((const void *)priv->rx_desc);
 
     for (int i = 0; i < GMAC_DESC_NUM; i++) {
-        paddr_t tx_buf_pa = va_to_pa((const void *)priv->tx_buf[i]);
-        paddr_t rx_buf_pa = va_to_pa((const void *)priv->rx_buf[i]);
-
-        /* The first word of a transmit descriptor is the status/control word:
-         * OWN hands it to the DMA and TER is the ring-end marker, set on the
-         * *last* descriptor of the ring and on no other.  Leave the marker off
-         * and the DMA walks the array once and never comes back. */
-        priv->tx_desc[i].status = i == GMAC_DESC_NUM - 1 ? TX_DESC_TER : 0;
-        priv->tx_desc[i].buffer1 = (uint32_t)tx_buf_pa;
-
-        /* An RX descriptor is handed over with OWN already set: that means the
-         * buffer is available for the hardware to fill, and the DMA clearing
-         * OWN is the only completion notification the CPU ever receives. */
+        int next = (i + 1) % GMAC_DESC_NUM;
+        priv->tx_desc[i].status = TX_DESC_TCH;
+        priv->tx_desc[i].buffer1 = (uint32_t)va_to_pa(priv->tx_buf[i]);
+        priv->tx_desc[i].buffer2 = (uint32_t)va_to_pa(&priv->tx_desc[next]);
         priv->rx_desc[i].status = RX_DESC_OWN;
-        /* The third word of an RX descriptor carries the receive buffer size
-         * together with RX_DESC_RER, the ring-end marker, which again belongs on
-         * the last descriptor only. */
-        priv->rx_desc[i].length = GMAC_BUF_SIZE |
-                                  (i == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
-        priv->rx_desc[i].buffer1 = (uint32_t)rx_buf_pa;
+        priv->rx_desc[i].length = GMAC_BUF_SIZE | RX_DESC_RCH;
+        priv->rx_desc[i].buffer1 = (uint32_t)va_to_pa(priv->rx_buf[i]);
+        priv->rx_desc[i].buffer2 = (uint32_t)va_to_pa(&priv->rx_desc[next]);
     }
     dma_sync_for_device(priv->rx_buf, sizeof(priv->rx_buf));
     dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
@@ -275,7 +290,7 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     /* 32-bit physical addresses only.  This DMA revision has no descriptor-list
      * high-address register -- the EQOS part in starfive_gmac.c has a HADDR
      * pair for exactly this -- so a ring placed above 4 GiB cannot be
-     * programmed at all and the casts would truncate silently. */
+     * programmed at all. Probe validates every full DMA span before this point. */
     gmac_write(base, DMA_TX_BASE_ADDR, (uint32_t)tx_desc_pa);
     gmac_write(base, DMA_RX_BASE_ADDR, (uint32_t)rx_desc_pa);
 
@@ -283,15 +298,17 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     priv->rx_busy = 0;
 }
 
-static int ls2k_gmac_phy_init(uintptr_t base, ls2k_gmac_priv_t *priv) {
+static int ls2k_gmac_phy_init(ls2k_gmac_priv_t *priv) {
     int phy_addr = -1;
     uint16_t id1, id2;
     uint32_t phy_id;
 
     for (int i = 0; i < 32; i++) {
-        id1 = gmac_mdio_read(base, i, MII_PHYSID1);
-        id2 = gmac_mdio_read(base, i, MII_PHYSID2);
-        if (id1 == 0xFFFF && id2 == 0xFFFF)
+        if (__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
+        id1 = gmac_mdio_read(priv, i, MII_PHYSID1);
+        id2 = gmac_mdio_read(priv, i, MII_PHYSID2);
+        if ((id1 == 0xFFFF && id2 == 0xFFFF) || (!id1 && !id2))
             continue;
         phy_id = ((uint32_t)id1 << 16) | id2;
         if ((phy_id & 0x1FFFFFFF) == 0x1FFFFFFF)
@@ -307,25 +324,28 @@ static int ls2k_gmac_phy_init(uintptr_t base, ls2k_gmac_priv_t *priv) {
         return -1;
     }
 
-    if (gmac_mdio_write(base, phy_addr, MII_BMCR, BMCR_RESET) != 0)
+    if (gmac_mdio_write(priv, phy_addr, MII_BMCR, BMCR_RESET) != 0)
         return -1;
     uint64_t start = timer_get_ticks();
-    while (1) {
-        uint16_t val = gmac_mdio_read(base, phy_addr, MII_BMCR);
+    for (unsigned i = 0; ; i++) {
+        if (__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
+        uint16_t val = gmac_mdio_read(priv, phy_addr, MII_BMCR);
         if (!(val & BMCR_RESET))
             break;
-        if (timer_get_ticks() - start > clock_ticks_per_sec() * 2) {
+        if (i == GMAC_WAIT_LOOPS - 1 ||
+            timer_get_ticks() - start >= clock_ticks_per_sec() * 2) {
             kinfo("[LS2K-GMAC] PHY reset timeout\n");
             return -1;
         }
     }
 
-    if (gmac_mdio_write(base, phy_addr, MII_BMCR,
+    if (gmac_mdio_write(priv, phy_addr, MII_BMCR,
                         BMCR_ANENABLE | BMCR_ANRESTART) != 0)
         return -1;
     mdelay(100);
 
-    int link_up = ls2k_gmac_read_link(base, phy_addr);
+    int link_up = ls2k_gmac_read_link(priv);
     __atomic_store_n(&priv->link_up, link_up, __ATOMIC_RELEASE);
     priv->last_link_check = timer_get_ticks();
     kinfo("[LS2K-GMAC] PHY carrier %s at addr %d%s\n",
@@ -334,71 +354,68 @@ static int ls2k_gmac_phy_init(uintptr_t base, ls2k_gmac_priv_t *priv) {
     return 0;
 }
 
-static int ls2k_gmac_dma_reset(uintptr_t base)
+static int ls2k_gmac_dma_reset(ls2k_gmac_priv_t *priv, int cleanup)
 {
-    gmac_write(base, DMA_BUS_MODE, DMA_BUS_MODE_SWR);
-    uint64_t start = timer_get_ticks();
-    while (gmac_read(base, DMA_BUS_MODE) & DMA_BUS_MODE_SWR) {
-        if (timer_get_ticks() - start > clock_ticks_per_sec()) {
-            kinfo("[LS2K-GMAC] DMA reset timeout\n");
-            return -1;
-        }
-    }
-    return 0;
+    gmac_write(priv->base, DMA_BUS_MODE, DMA_BUS_MODE_SWR);
+    return gmac_wait_clear(priv, DMA_BUS_MODE, DMA_BUS_MODE_SWR,
+                           clock_ticks_per_sec() / 10 + 1, cleanup);
 }
 
-int ls2k_gmac_init(uintptr_t base) {
-    ls2k_gmac_priv_t *priv = gmac_alloc_instance(base);
-    if (!priv)
-        return -1;
+static int ls2k_gmac_hw_init(ls2k_gmac_priv_t *priv)
+{
+    uintptr_t base = priv->base;
     memcpy(priv->mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
-
-    /* MAC_VERSION is the IP identity: [15:8] is the user id and [7:0] the
-     * Synopsys id, so 0x0000d137 is the DWMAC 1000 core this board carries
-     * (0x37, user id 0xd1).  A window that reads 0 or all-ones is not a GMAC at
-     * all, and every offset used below is then meaningless. */
-    uint32_t version = gmac_read(base, MAC_VERSION);
-    kinfo("[LS2K-GMAC] MAC version 0x%08x\n", version);
-    if (ls2k_gmac_dma_reset(base) != 0)
-        return -1;
-    mdelay(10);
-
+    priv->version = gmac_read(base, MAC_VERSION);
+    /* The board contract is DWMAC 3.7, not EQOS or an absent register file. */
+    if (priv->version == 0xFFFFFFFFU || (priv->version & 0xFFU) != 0x37U)
+        return -ENODEV;
+    priv->hardware_owned = 1;
+    int ret = ls2k_gmac_dma_reset(priv, 0);
+    if (ret)
+        return ret;
     gmac_write(base, MAC_CONFIGURATION, 0);
     ls2k_gmac_init_desc(base, priv);
 
-    /* Bit 0 is RA (receive all) and bit 31 is PC, the controller's separate
-     * promiscuous switch, so the address filter stops rejecting in either
-     * direction: both are set for bring-up, when a frame has to be accepted
-     * regardless of what happened to the MAC_ADDR0 pair programmed next. */
+    /* Preserve the existing receive-all (bit 31) / promiscuous (bit 0)
+     * bring-up policy. Address filtering is independent of DMA ownership. */
     gmac_write(base, MAC_FRAME_FILTER, 0x80000001);
     gmac_write(base, MAC_FLOW_CTRL, 0);
-    /* MAC_INTERRUPT_MASK is write-1-to-clear over the MAC interrupt-status
-     * bits, so writing all ones masks every MAC-level source. */
+    /* MAC interrupt mask uses one to mask; DMA interrupt enable uses zero. */
     gmac_write(base, MAC_INTERRUPT_MASK, 0xFFFFFFFFU);
 
     uint32_t high = (priv->mac[5] << 8) | priv->mac[4] | (1U << 31);
-    uint32_t low  = (priv->mac[3] << 24) | (priv->mac[2] << 16) |
-                    (priv->mac[1] << 8)  | priv->mac[0];
+    uint32_t low  = ((uint32_t)priv->mac[3] << 24) | ((uint32_t)priv->mac[2] << 16) |
+                    ((uint32_t)priv->mac[1] << 8)  | priv->mac[0];
     gmac_write(base, MAC_ADDR0_HIGH, high);
     gmac_write(base, MAC_ADDR0_LOW, low);
 
-    if (ls2k_gmac_phy_init(base, priv) != 0)
-        return -1;
+    ret = ls2k_gmac_phy_init(priv);
+    if (ret)
+        return ret;
+    if (__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
 
     gmac_write(base, MAC_CONFIGURATION,
                MAC_CONF_RE | MAC_CONF_TE | MAC_CONF_DM | MAC_CONF_IPC);
 
-    /* Polling is the deliberate Phase 3 baseline. Device IRQ sources remain
-     * masked in LIOINTC until the data path is validated with a cable. */
-    /* DMA_STATUS is write-1-to-clear as well, so the all-ones write erases
-     * every status bit the reset left latched.  The control word goes last and
-     * whole: SR and ST are the receive and transmit store-and-forward enables,
-     * and until that final store the DMA is not walking either ring, so it
-     * cannot touch a descriptor that is still being armed. */
+    /* Polling only. ST/SR start the engines; TSF selects TX store-and-forward. */
     gmac_write(base, DMA_INTR_ENABLE, 0);
-    gmac_write(base, DMA_STATUS, 0xFFFFFFFFU);
+    ret = gmac_wait_clear(priv, DMA_INTR_ENABLE, 0xFFFFFFFFU,
+                           clock_ticks_per_sec() / 10 + 1, 0);
+    if (ret)
+        return ret;
+    gmac_write(base, DMA_STATUS, 0x1FFFFU);
     gmac_write(base, DMA_CONTROL,
                DMA_CONTROL_TSF | DMA_CONTROL_ST | DMA_CONTROL_SR);
+    uint32_t control = gmac_read(base, DMA_CONTROL);
+    uint32_t mac = gmac_read(base, MAC_CONFIGURATION);
+    if (control == 0xFFFFFFFFU || mac == 0xFFFFFFFFU)
+        return -ENODEV;
+    if ((control & (DMA_CONTROL_ST | DMA_CONTROL_SR)) !=
+        (DMA_CONTROL_ST | DMA_CONTROL_SR) ||
+        (mac & (MAC_CONF_RE | MAC_CONF_TE)) != (MAC_CONF_RE | MAC_CONF_TE))
+        return -EIO;
+    __atomic_store_n(&priv->ready, 1, __ATOMIC_RELEASE);
 
     kinfo("[LS2K-GMAC] Initialized at 0x%lx\n", (unsigned long)base);
     return 0;
@@ -410,7 +427,9 @@ int ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len) {
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&priv->lock);
-    if (!__atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&priv->ready, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE)) {
         spin_unlock_irqrestore(&priv->lock, flags);
         return -1;
     }
@@ -437,15 +456,9 @@ int ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len) {
 
     desc->length = (uint32_t)dma_len;
     __sync_synchronize();
-    /* FS and LS mark the descriptor as both the first and the last segment of
-     * the frame.  This driver puts one whole frame in one descriptor, so they
-     * are always set together: only one of the two makes the DMA wait for the
-     * rest of a frame that is never submitted and the descriptor never retires.
-     * IC requests the checksum that MAC_CONF_IPC enables at the MAC, and TER is
-     * repeated here only for the ring's last descriptor.  The whole handoff is
-     * one store, so the DMA cannot see a half-armed descriptor. */
-    desc->status = TX_DESC_OWN | TX_DESC_IC | TX_DESC_FS | TX_DESC_LS |
-                   (idx == GMAC_DESC_NUM - 1 ? TX_DESC_TER : 0);
+    /* Enhanced four-word format: controls live in word 0. IC requests an
+     * interrupt, not a checksum; polling needs no IC. Keep chained ownership. */
+    desc->status = TX_DESC_OWN | TX_DESC_FS | TX_DESC_LS | TX_DESC_TCH;
     dma_sync_for_device(desc, sizeof(*desc));
 
     /* This DMA revision has no tail pointer: writing the poll-demand register
@@ -464,7 +477,9 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&priv->lock);
-    if (!__atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&priv->ready, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE)) {
         spin_unlock_irqrestore(&priv->lock, flags);
         return -1;
     }
@@ -477,62 +492,39 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
         return -1;
     }
 
-    /* ES is the error-summary bit in the status word: whatever the DMA put in
-     * the buffer is unusable, so the descriptor is re-armed and the poll keeps
-     * going instead of handing a corrupt frame up.  Nothing on this path reads
-     * the buffer, so it needs no invalidate-for-CPU at all. */
-    if (desc->status & RX_DESC_ES) {
-        dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
-        desc->length = GMAC_BUF_SIZE |
-                       (idx == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
-        desc->status = RX_DESC_OWN;
-        dma_sync_for_device(desc, sizeof(*desc));
-        priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
-        gmac_write(base, DMA_RX_POLL_DEMAND, 1);
-        spin_unlock_irqrestore(&priv->lock, flags);
-        return -1;
+    uint32_t status = desc->status;
+    uint32_t frame_len = RX_DESC_FRAME_LEN(status);
+    int result = -EIO;
+    /* One buffer must contain a complete frame including its four-byte FCS.
+     * Reject bad device lengths before synchronizing or touching the buffer. */
+    if (!(status & RX_DESC_ES) &&
+        (status & (RX_DESC_FS | RX_DESC_LS)) == (RX_DESC_FS | RX_DESC_LS) &&
+        frame_len >= 4 && frame_len <= GMAC_BUF_SIZE) {
+        size_t len = frame_len - 4;
+        if (len > maxlen)
+            len = maxlen;
+        if (len) {
+            dma_sync_for_cpu(priv->rx_buf[idx], len);
+            memcpy(buf, priv->rx_buf[idx], len);
+        }
+        result = (int)len;
     }
-
-    /* FRM is the frame-length field in the upper half of the status word, above
-     * the ownership and error bits, and the count includes the 4-byte FCS the
-     * DMA copied in behind the frame, so the payload is four bytes shorter. */
-    uint32_t frame_len = RX_DESC_FRAME_LEN(desc->status);
-    uint32_t len = frame_len >= 4 ? frame_len - 4 : 0;
-    if (len > maxlen) len = maxlen;
-
-    /* Invalidate only what is about to be read.  The descriptor carrying FRM
-     * was synced above, so the length is known before the buffer is touched;
-     * invalidating the whole GMAC_BUF_SIZE instead spends a dsb sy and a
-     * dc ivac per cache line across ~24 lines on every frame, of which only
-     * the two to four covering the payload are ever read. */
-    if (len > 0) {
-        dma_sync_for_cpu(priv->rx_buf[idx], len);
-        memcpy(buf, priv->rx_buf[idx], len);
-    }
-
-    /* The hand-back keeps the full-width sync-for-device even though this
-     * driver never writes the buffer: on aarch64 that is dc civac, so it is
-     * also the invalidate the DMA needs before overwriting the lines the CPU
-     * just read.  It is not redundant on a non-coherent port. */
     dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
-    /* The hand-back rewrites the whole descriptor: status (OWN) and the third
-     * word (buffer size plus the ring-end marker on the last descriptor) are
-     * re-armed together, exactly as the error path above does, so both exits
-     * leave the ring in the same armed state. */
-    desc->length = GMAC_BUF_SIZE |
-                   (idx == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
+    desc->length = GMAC_BUF_SIZE | RX_DESC_RCH;
+    desc->buffer1 = (uint32_t)va_to_pa(priv->rx_buf[idx]);
+    desc->buffer2 = (uint32_t)va_to_pa(&priv->rx_desc[(idx + 1) % GMAC_DESC_NUM]);
+    __sync_synchronize();
     desc->status = RX_DESC_OWN;
     dma_sync_for_device(desc, sizeof(*desc));
     gmac_write(base, DMA_RX_POLL_DEMAND, 1);
-
     priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
     spin_unlock_irqrestore(&priv->lock, flags);
-    return (int)len;
+    return result;
 }
 
 void ls2k_gmac_get_mac(uintptr_t base, uint8_t *mac) {
     ls2k_gmac_priv_t *priv = gmac_instance(base);
-    if (priv)
+    if (priv && mac && !__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE))
         memcpy(mac, priv->mac, 6);
 }
 
@@ -541,27 +533,28 @@ int ls2k_gmac_poll(uintptr_t base) {
     if (!priv)
         return -1;
 
-    uint64_t flags = spin_lock_irqsave(&priv->lock);
-    /* DMA_STATUS is write-1-to-clear, so the value that was read has to go back
-     * unmodified: the 1 bits are what clear, and inverting them leaves every
-     * status bit latched for the life of the driver. */
+    if (!mutex_trylock(&priv->control_lock))
+        return -EBUSY;
+    if (__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&priv->ready, __ATOMIC_ACQUIRE)) {
+        mutex_unlock(&priv->control_lock);
+        return -ESHUTDOWN;
+    }
     uint32_t status = gmac_read(base, DMA_STATUS);
-    if (status)
-        gmac_write(base, DMA_STATUS, status);
+    if (status == 0xFFFFFFFFU) {
+        mutex_unlock(&priv->control_lock);
+        return -ENODEV;
+    }
+    if (status & 0x1FFFFU)
+        gmac_write(base, DMA_STATUS, status & 0x1FFFFU);
     uint64_t now = timer_get_ticks();
     uint64_t interval = clock_ticks_per_sec() / GMAC_LINK_POLL_HZ;
     if (priv->phy_addr >= 0 && now - priv->last_link_check >= interval) {
-        int link_up = ls2k_gmac_read_link(base, priv->phy_addr);
+        int link_up = ls2k_gmac_read_link(priv);
         priv->last_link_check = now;
-        int old_link_up = __atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE);
-        if (link_up != old_link_up) {
-            __atomic_store_n(&priv->link_up, link_up, __ATOMIC_RELEASE);
-            kinfo("[LS2K-GMAC] PHY carrier %s (rgmii=0x%08x)\n",
-                  link_up ? "up" : "down",
-                  gmac_read(base, MAC_RGMII_STATUS));
-        }
+        __atomic_store_n(&priv->link_up, link_up, __ATOMIC_RELEASE);
     }
-    spin_unlock_irqrestore(&priv->lock, flags);
+    mutex_unlock(&priv->control_lock);
     return 0;
 }
 
@@ -569,29 +562,121 @@ int ls2k_gmac_poll(uintptr_t base) {
  * driver_t integration
  * ============================================================ */
 
+static int ls2k_gmac_stop(void *context)
+{
+    ls2k_gmac_priv_t *priv = context;
+    __atomic_store_n(&priv->closing, 1, __ATOMIC_RELEASE);
+    if (!mutex_trylock(&priv->control_lock))
+        return -EBUSY;
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&priv->lock, &flags)) {
+        mutex_unlock(&priv->control_lock);
+        return -EBUSY;
+    }
+    __atomic_store_n(&priv->ready, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&priv->link_up, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&priv->lock, flags);
+
+    int ret = 0;
+    if (!priv->stopped && priv->hardware_owned) {
+        uintptr_t base = priv->base;
+        if (gmac_read(base, MAC_VERSION) != priv->version) {
+            ret = -ENODEV;
+            goto out;
+        }
+        /* Do not release on a posted store alone. A refused mask, live DMA
+         * process, inaccessible register or stuck reset retains this slot. */
+        gmac_write(base, DMA_INTR_ENABLE, 0);
+        ret = gmac_wait_clear(priv, DMA_INTR_ENABLE, 0xFFFFFFFFU,
+                               clock_ticks_per_sec() / 10 + 1, 1);
+        if (ret)
+            goto out;
+        uint32_t control = gmac_read(base, DMA_CONTROL);
+        uint32_t mac = gmac_read(base, MAC_CONFIGURATION);
+        if (control == 0xFFFFFFFFU || mac == 0xFFFFFFFFU) {
+            ret = -ENODEV;
+            goto out;
+        }
+        gmac_write(base, DMA_CONTROL, control & ~(DMA_CONTROL_ST | DMA_CONTROL_SR));
+        gmac_write(base, MAC_CONFIGURATION, mac & ~(MAC_CONF_TE | MAC_CONF_RE));
+        ret = gmac_wait_clear(priv, DMA_CONTROL, DMA_CONTROL_ST | DMA_CONTROL_SR,
+                               clock_ticks_per_sec() / 10 + 1, 1);
+        if (!ret)
+            ret = gmac_wait_clear(priv, MAC_CONFIGURATION, MAC_CONF_TE | MAC_CONF_RE,
+                                   clock_ticks_per_sec() / 10 + 1, 1);
+        if (!ret)
+            ret = gmac_wait_clear(priv, DMA_STATUS, DMA_STATUS_PROCESS_MASK,
+                                   clock_ticks_per_sec() / 10 + 1, 1);
+        if (!ret)
+            ret = ls2k_gmac_dma_reset(priv, 1);
+        if (!ret)
+            ret = gmac_wait_clear(priv, DMA_INTR_ENABLE, 0xFFFFFFFFU,
+                                   clock_ticks_per_sec() / 10 + 1, 1);
+        if (!ret)
+            ret = gmac_wait_clear(priv, DMA_CONTROL, DMA_CONTROL_ST | DMA_CONTROL_SR,
+                                   clock_ticks_per_sec() / 10 + 1, 1);
+        if (!ret)
+            ret = gmac_wait_clear(priv, MAC_CONFIGURATION, MAC_CONF_TE | MAC_CONF_RE,
+                                   clock_ticks_per_sec() / 10 + 1, 1);
+    }
+    if (!ret)
+        priv->stopped = 1;
+out:
+    mutex_unlock(&priv->control_lock);
+    return ret;
+}
+
+static void ls2k_gmac_release(void *context)
+{
+    ls2k_gmac_priv_t *priv = context;
+    /* Devres reaches here only after checked stop, active-call drain and
+     * remove. Until then even a failed probe owns its exact static slot. */
+    memset(priv, 0, sizeof(*priv));
+}
+
 static int ls2k_gmac_driver_probe(device_t *dev) {
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
-    if (!res)
-        return -1;
-
-    uintptr_t base = (uintptr_t)device_map_mmio(dev, 0);
-    if (!base) return -ENODEV;
-
-    if (ls2k_gmac_init(base) != 0) {
-        kinfo("[LS2K-GMAC] Failed to init at 0x%lx\n", (unsigned long)base);
-        return -1;
+    if (!res || res->end < res->start || res->end - res->start < DMA_INTR_ENABLE + 3)
+        return -ENODEV;
+    int ret = device_probe_use_remove(dev);
+    if (ret)
+        return ret;
+    ls2k_gmac_priv_t *priv = gmac_alloc_instance(dev);
+    if (!priv)
+        return -ENOSPC;
+    dev->drv_priv = priv;
+    ret = device_add_execution_action(dev, ls2k_gmac_stop, ls2k_gmac_release, priv);
+    if (ret) {
+        dev->drv_priv = NULL;
+        ls2k_gmac_release(priv);
+        return ret;
     }
 
-    ls2k_gmac_priv_t *priv = gmac_instance(base);
-    dev->drv_priv = priv;
+    uintptr_t base = (uintptr_t)device_map_mmio(dev, 0);
+    if (!base)
+        return -ENODEV;
+    priv->base = base;
+    ret = dma_set_mask(dev, DMA_MASK_32BIT);
+    if (ret)
+        return ret;
+    if (!dma_range_ok(dev, va_to_pa(priv->tx_desc), sizeof(priv->tx_desc)) ||
+        !dma_range_ok(dev, va_to_pa(priv->rx_desc), sizeof(priv->rx_desc)) ||
+        !dma_range_ok(dev, va_to_pa(priv->tx_buf), sizeof(priv->tx_buf)) ||
+        !dma_range_ok(dev, va_to_pa(priv->rx_buf), sizeof(priv->rx_buf)))
+        return -ERANGE;
+    mutex_lock(&priv->control_lock);
+    ret = ls2k_gmac_hw_init(priv);
+    mutex_unlock(&priv->control_lock);
+    if (ret)
+        return ret;
     kinfo("[LS2K-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)base);
     return 0;
 }
 
 static int ls2k_gmac_driver_remove(device_t *dev) {
     ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
-    if (priv)
-        priv->valid = 0;
+    if (priv && !priv->stopped)
+        return -EBUSY;
     dev->drv_priv = NULL;
     return 0;
 }
@@ -612,12 +697,13 @@ static int ls2k_gmac_class_recv(struct device *dev, void *buf, size_t maxlen) {
 
 static const uint8_t *ls2k_gmac_class_mac(struct device *dev) {
     ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
-    return priv ? priv->mac : NULL;
+    return priv && !__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE) ? priv->mac : NULL;
 }
 
 static int ls2k_gmac_class_link_up(struct device *dev) {
     ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
-    return priv ? __atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE) : 0;
+    return priv && !__atomic_load_n(&priv->closing, __ATOMIC_ACQUIRE) ?
+        __atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE) : 0;
 }
 
 static void ls2k_gmac_class_poll(struct device *dev) {
