@@ -77,12 +77,12 @@ static int connect_timeout_test(void) {
     /*
      * SO_SNDTIMEO must bound a blocking connect: it must fail with a proper
      * error instead of hanging.  The exact error depends on the sandbox
-     * gateway: an ICMP network-unreachable reply surfaces as ENETUNREACH in
-     * ~1ms (Linux-conformant), a silent black hole surfaces as ETIMEDOUT at
-     * the deadline.  Both are valid; the only invariant is the bound.
+     * gateway: an ICMP network-unreachable reply can surface immediately;
+     * SO_SNDTIMEO on a silent connection attempt returns EINPROGRESS at the
+     * deadline on Linux, leaving the connection pending. Keep the time bound.
      */
     if (r < 0 && elapsed <= 500) {
-        if (errno == ETIMEDOUT && elapsed >= 150)
+        if ((errno == ETIMEDOUT || errno == EINPROGRESS) && elapsed >= 150)
             return 0;
         if (errno == ENETUNREACH || errno == EHOSTUNREACH ||
             errno == ECONNREFUSED || errno == EAGAIN ||
@@ -96,6 +96,8 @@ static int connect_timeout_test(void) {
 
 int main(void) {
     int r1 = recv_timeout_test();
+    printf("TIMEOUT_TEST: recv-bound=%d\n", r1);
+    fflush(stdout);
     int r2 = connect_timeout_test();
 
     if (r1 == 0 && r2 == 0) {
