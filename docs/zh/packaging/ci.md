@@ -67,7 +67,7 @@ docker run --rm -it -v "$PWD:/src" -w /src a20os-buildenv:riscv bash
 
 `buildenv.yml` 发布后会拉取公开镜像自检；日常 job 使用 resolver 给出的镜像，并在日志记录真实拉取的 digest 和工具版本。旧镜像尚未包含新声明的 Clang 依赖时，版本化的 `build-setup` action 在 job 内安装 `clang-19`；这不等于旧 registry tag 已更新。Dockerfile 和镜像自检已声明该依赖，后续构建镜像时会直接携带它。
 
-每个构建都检出固定子模块。宿主检查使用稳定的 Ubuntu 24.04，并显式安装 Markdown、FAT 工具和所用的 RISC-V 交叉编译器；测试不依赖开发机 `.git` 里的私有脚本。运行镜像仍可按已有架构 tag 选择，当前多架构 job 使用 multi。
+每个构建都检出固定子模块。宿主检查使用稳定的 Ubuntu 24.04，并显式安装 Markdown、MkDocs、FAT 工具和所用的 RISC-V 交叉编译器；测试不依赖开发机 `.git` 里的私有脚本。运行镜像仍可按已有架构 tag 选择，当前多架构 job 使用 multi。
 
 ### 首次启用 / 更新镜像
 

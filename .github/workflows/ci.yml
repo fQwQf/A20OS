@@ -65,7 +65,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            ripgrep python3-markdown mtools dosfstools \
+            ripgrep python3-markdown mkdocs mtools dosfstools \
             gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
 
       - name: Validate instances, arch matrix and component registries
