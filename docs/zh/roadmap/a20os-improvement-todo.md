@@ -18,13 +18,6 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
   - `.github/workflows/native.yml` 已接线；当前仅验证本地配方，未触发云端 CI 或发布。
   - RTC、服务注册表 RTC 重启和 UBD 依赖 RISC-V 私有 MMIO/IRQ，AArch64 明确跳过，跳过不计为覆盖。AArch64 PTY 与 timeout 新增入口本地已通过。
 
-## P1：既有驱动的安全与恢复
-
-- [ ] 完成冻结候选中常见 PC/QEMU 驱动的正常 I/O、退出与关机集成
-  - 范围以[常见 PC/QEMU 驱动](../drivers/meta/v1-pc-qemu-scope.md)为准，不逐项完善 Hi3861 等开发板外设，也不要求所有厂商的实体故障认证。
-  - 当前实现与已通过的样板见 [驱动现状](../status/current/drivers-implementation-status.md)。
-  - 已关闭的软件缺陷不重复列为旧驱动迁移；候选集成关闭条件见 [驱动缺口](../status/gaps/drivers.md)，同源双态、MSI-X 扩展与 DRM/GPU 新功能另见 [后续路线](next-horizon.md#后续版本功能强化)。
-
 ## P1：发布配置与工具链
 
 - [ ] 正式支持矩阵内的发布配置与工具链复核

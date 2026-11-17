@@ -1168,3 +1168,23 @@ ASan/UBSan）通过；保留原失败日志，不把初次聚合改写成成功�
 本轮没有追加 guest、WAV 或实体声卡播放；旧正常播放证据保持历史范围。新的整体
 播放链路和候选配置仍归 N18/N20。10 ms 是任务调度目标，不保证任意调度停滞下的
 音频连续性；软件回收修复不升级为 period IRQ 或实体时序认证。
+
+
+### 常见 PC/QEMU 近期集成关闭（2026-11-17）
+
+冻结候选分支的新 HDA、VirtIO input、PC speaker 在 x86_64 q35/KVM SMP4 完成
+实际 PCM 写入/暂停生产/drain/STOP/重开、tone/STOP，以及 QMP 键鼠注入到 evdev
+读取；正常 OpenRC 关机、QEMU 自然退出 0，25.032 秒。实际 HDA WAV 有 440 与
+880 Hz 两段音调，生产者暂停 0.75 秒未持续重播旧数据。模块文件在来客逐一核对散列。
+
+RISC-V64 的既有 `smoke-dual-input` 首次暴露服务重启丢 IRQ 唤醒：注册过早启用
+中断，事件 watch 尚未建立。`f2062241b` 改为 masked 注册、watch 后首次 arm，
+使用 oneshot 保持用户确认协议，并补 request_irq 失败计数回滚。两项定向宿主检查
+通过；最终提交 `a50937976` 的真实入口中，探针识别键盘，用户服务两次读取按键、
+确认队列 reset=0 后退出并正常关机，56.162 秒，无 runner traceback。普通退出
+停止 DMA 由 `5203527b8` 补齐，不新增双态能力或任意 MMIO 崩溃认证。
+
+共享模块输出未跟踪 NR_CPUS 等编译参数的问题同时由 `f1dd57537` 修复，配置切换
+不再沿用旧内联 CPU 路径；相同配置保持增量构建。证据汇总在
+`build/evidence/v1-closeout-20261116/candidate-pc-io/report.json`，适用范围与保留
+失败见[候选记录](v1.0-candidate.md)。本领域独立缺口已清空，综合矩阵仍归 N18/N20。
