@@ -543,9 +543,14 @@ int udriver_irq_listen(uint32_t irq, a20_eventq_t *queue,
     spin_unlock_irqrestore(&g_udr_lock, flags);
 
     refcount_inc(&queue->refcount);
-    if (request_irq(irq, udriver_irq_thunk, 0, slot) < 0) {
+    /* The syscall installs the event watch before its first ack unmasks the
+     * line. A pending interrupt must not be delivered into an unwatched queue.
+     * Keep the line masked after dispatch until the user acknowledges it. */
+    if (request_irq(irq, udriver_irq_thunk,
+                    IRQF_NO_AUTO_ENABLE | IRQF_ONESHOT, slot) < 0) {
         flags = spin_lock_irqsave(&g_udr_lock);
         slot->active = 0;
+        a20_objstat_add(&g_a20_objstats.irq_bindings, -1);
         spin_unlock_irqrestore(&g_udr_lock, flags);
         a20_eventq_release(queue);
         return -1;

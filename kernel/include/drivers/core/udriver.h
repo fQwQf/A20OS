@@ -60,6 +60,7 @@ int  udriver_dma_unmap(struct vmo *vmo, int pid);
 int  udriver_claim(uint64_t phys, int pid);
 int  udriver_release(uint64_t phys, int pid);
 int  udriver_claim_owner(uint64_t phys);
+/* Register masked; install the event watch, then use irq_ack for first arm. */
 int  udriver_irq_listen(uint32_t irq, struct a20_eventq *queue,
                         uint64_t user_data, int owner_pid);
 int  udriver_irq_ack(uint32_t irq);
