@@ -1887,6 +1887,8 @@ $(error ARCH=armv7m with clang requires llvm-objcopy)
 endif
 CC := $(CCACHE_PREFIX)$(CLANG_ARMV7M) --target=arm-none-eabi
 OBJCOPY := $(LLVM_OBJCOPY_ARMV7M)
+# The automatic fallback compiles the same GNU C as TOOLCHAIN=llvm.
+ARCH_CFLAGS += $(LLVM_KERNEL_WARNINGS)
 ARCH_LDFLAGS += -fuse-ld=lld
 else
 CC := $(CCACHE_PREFIX)$(CROSS_PREFIX)gcc
