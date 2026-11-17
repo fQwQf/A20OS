@@ -1282,6 +1282,9 @@ endif
 ifeq ($(USER_COPY_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-usercopy-test
 endif
+ifeq ($(CONFIG_DEBUG_SHUTDOWN_AUDIT),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-shutdown-audit
+endif
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
