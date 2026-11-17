@@ -847,10 +847,16 @@ static int tty_task_live(task_t *t) {
     return state != PROC_UNUSED && state != PROC_ZOMBIE && (t->mm || t->pgdir);
 }
 int proc_tty_group_session(int pgid, int *sid) {
+    if (pgid <= 0) return 0;
     int found = 0;
     uint64_t f = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t))
-        if (t->pgid == pgid && tty_task_live(t)) { *sid = t->sid; found = 1; break; }
+        /* An unreaped zombie still keeps its process group alive. In a short
+         * shell pipeline the first child can exit before the next child joins;
+         * its released address space must not make setpgid/TIOCSPGRP fail. */
+        if (t->pgid == pgid && proc_task_state_get(t) != PROC_UNUSED) {
+            *sid = t->sid; found = 1; break;
+        }
     spin_unlock_irqrestore(&tasklist_lock, f);
     return found;
 }
