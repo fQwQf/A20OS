@@ -8,9 +8,8 @@
  * There is no second registration route and no private bus.
  *
  * Scope of this driver, deliberately narrow:
- *   - read-only: it never writes a CMOS register.  A driver that pokes 0x70/
- *     0x71 also owns the update-inhibit bit and therefore the machine's
- *     clock, which nothing in A20OS can yet write back through a class;
+ *   - read-only: index selection writes port 0x70; CMOS data and the SET
+ *     update-inhibit bit are never written. The clock remains firmware-set;
  *   - no IRQ.  The MC146818 update-complete interrupt is not wired up, so the
  *     wall clock is sampled once at bind time rather than tracked;
  *   - no time zone conversion.  The registers hold whatever the firmware/VM
@@ -47,11 +46,9 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "core/string.h"
 #include "core/timekeeping.h"
 
-/* UIP is asserted for the last 244us of the update cycle, so a couple of
- * milliseconds of polling is plenty; the bound is what keeps a wedged or
- * absent RTC from spinning forever in probe. */
+/* Retry at most 20ms of delays; never hold an IRQ-off lock across UIP waits. */
 #define CMOS_UIP_POLL_US    10U
-#define CMOS_UIP_POLL_MAX   2000U /* 20ms */
+#define CMOS_UIP_POLL_MAX   20000U
 
 /* Plausible window for a wall clock.  Wider than "after 1970" so a machine
  * with a dead battery (which lands on 2000-01-01) still seeds instead of
@@ -77,11 +74,10 @@ typedef struct {
 
 static void cmos_select(cmos_rtc_t *rtc, uint8_t reg)
 {
-    /* Bit 7 of the index register is NMI mask, not part of the register
-     * number: writing the index without preserving it would unblock the NMI
-     * the firmware may have deliberately masked. */
-    uint8_t cur = drv_in8(rtc->index_port);
-    drv_out8(rtc->index_port, (uint8_t)((cur & 0x80u) | (reg & 0x7fu)));
+    /* Port 0x70 readback is not a saved index/NMI state (QEMU returns 0xff).
+     * Select with bit 7 clear, the normal PC OS NMI-enabled policy; never
+     * turn an open-bus read into an unintended permanent NMI mask. */
+    drv_out8(rtc->index_port, reg & 0x7fu);
 }
 
 static uint8_t cmos_read(cmos_rtc_t *rtc, uint8_t reg)
@@ -90,14 +86,47 @@ static uint8_t cmos_read(cmos_rtc_t *rtc, uint8_t reg)
     return drv_in8(rtc->data_port);
 }
 
-/* Wait for the update cycle to finish before touching the time registers.
- * Returns -ETIMEDOUT rather than reading a half-updated calendar. */
-static int cmos_wait_uip_clear(cmos_rtc_t *rtc)
+typedef struct {
+    uint8_t sec, min, hour, mday, month, year, century, control;
+} cmos_calendar_t;
+
+/* Two matching complete samples, each bracketed by seconds/UIP/mode checks,
+ * reject both a live update and a rollover hidden by preemption. */
+static int cmos_snapshot(cmos_rtc_t *rtc, cmos_calendar_t *out)
 {
-    unsigned waited;
-    for (waited = 0; waited < CMOS_UIP_POLL_MAX; waited += CMOS_UIP_POLL_US) {
-        if (!(cmos_read(rtc, CMOS_RTC_REG_A) & CMOS_RTC_REGA_UIP))
+    cmos_calendar_t previous = {0};
+    int have_previous = 0;
+    for (unsigned waited = 0; waited < CMOS_UIP_POLL_MAX; waited += CMOS_UIP_POLL_US) {
+        cmos_calendar_t sample = {0};
+        sample.sec = cmos_read(rtc, CMOS_RTC_SEC);
+        uint8_t reg_a = cmos_read(rtc, CMOS_RTC_REG_A);
+        sample.control = cmos_read(rtc, CMOS_RTC_REG_B);
+        if (reg_a == 0xff && sample.control == 0xff)
+            return -ENODEV;
+        if (reg_a & CMOS_RTC_REGA_UIP)
+            goto retry;
+        if (sample.sec != cmos_read(rtc, CMOS_RTC_SEC))
+            goto retry;
+        sample.min = cmos_read(rtc, CMOS_RTC_MIN);
+        sample.hour = cmos_read(rtc, CMOS_RTC_HOUR);
+        sample.mday = cmos_read(rtc, CMOS_RTC_MDAY);
+        sample.month = cmos_read(rtc, CMOS_RTC_MONTH);
+        sample.year = cmos_read(rtc, CMOS_RTC_YEAR);
+        sample.century = cmos_read(rtc, CMOS_RTC_CENTURY);
+        if ((cmos_read(rtc, CMOS_RTC_REG_A) & CMOS_RTC_REGA_UIP) ||
+            sample.sec != cmos_read(rtc, CMOS_RTC_SEC) ||
+            sample.control != cmos_read(rtc, CMOS_RTC_REG_B))
+            goto retry;
+        if (have_previous && memcmp(&previous, &sample, sizeof(sample)) == 0) {
+            *out = sample;
             return 0;
+        }
+        previous = sample;
+        have_previous = 1;
+        drv_udelay(CMOS_UIP_POLL_US);
+        continue;
+retry:
+        have_previous = 0;
         drv_udelay(CMOS_UIP_POLL_US);
     }
     return -ETIMEDOUT;
@@ -139,9 +168,9 @@ static int cmos_days_in_month(int year, int month)
  * userspace with it left at 0x00/0xff, holding a two-digit year from a
  * different century, or holding garbage that happens to look like BCD.
  * Trusting any of those silently produces a wall clock that is wrong by a
- * century -- a failure no later log line explains.  So: decode it, accept it
- * only when it yields a year in the plausible window, and otherwise keep the
- * two-digit year register under the default century.  That is a real
+ * century -- a failure no later log line explains. Decode a known century
+ * (19..21), then validate the complete calendar window. Missing/malformed or
+ * unknown centuries use the default. That is a real
  * narrowing, not a workaround: a PC whose firmware left the century register
  * at 0x00 while the year register says 84 gets 2084 here, not 1984.
  *
@@ -174,41 +203,35 @@ static int64_t cmos_days_from_civil(int year, int month, int mday)
 static int cmos_rtc_read(cmos_rtc_t *rtc, uint64_t *epoch_out,
                          int *century_fallback)
 {
-    uint8_t reg_a, reg_b, hour_raw, century_raw;
+    uint8_t reg_b, hour_raw, century_raw;
     int binary, hour24, century;
     int year2;
 
     *century_fallback = 0;
-    reg_a = cmos_read(rtc, CMOS_RTC_REG_A);
-    reg_b = cmos_read(rtc, CMOS_RTC_REG_B);
-    if (reg_a == 0xff && reg_b == 0xff)
-        return -ENODEV; /* no CMOS behind these ports: an open bus reads all ones */
-
-    /* Register A carries no data-format or hour-format bit on this part --
- * both live in register B -- so these two registers are all the mode the
- * driver needs. */
+    cmos_calendar_t sample;
+    int ret = cmos_snapshot(rtc, &sample);
+    if (ret)
+        return ret;
+    reg_b = sample.control;
     hour24 = (reg_b & CMOS_RTC_REGB_24HOUR) != 0;
     binary = (reg_b & CMOS_RTC_REGB_BINARY) != 0;
 
-    if (cmos_wait_uip_clear(rtc) < 0)
-        return -ETIMEDOUT;
-
-    hour_raw = cmos_read(rtc, CMOS_RTC_HOUR);
-    century_raw = cmos_read(rtc, CMOS_RTC_CENTURY);
+    hour_raw = sample.hour;
+    century_raw = sample.century;
     rtc->century_raw = century_raw;
 
-    rtc->sec   = cmos_decode(cmos_read(rtc, CMOS_RTC_SEC), binary);
-    rtc->min   = cmos_decode(cmos_read(rtc, CMOS_RTC_MIN), binary);
-    rtc->mday  = cmos_decode(cmos_read(rtc, CMOS_RTC_MDAY), binary);
-    rtc->month = cmos_decode(cmos_read(rtc, CMOS_RTC_MONTH), binary);
-    rtc->hour  = cmos_decode(hour_raw & 0x7fu, binary);
-    year2      = cmos_decode(cmos_read(rtc, CMOS_RTC_YEAR), binary);
+    rtc->sec   = cmos_decode(sample.sec, binary);
+    rtc->min   = cmos_decode(sample.min, binary);
+    rtc->mday  = cmos_decode(sample.mday, binary);
+    rtc->month = cmos_decode(sample.month, binary);
+    rtc->hour  = cmos_decode(hour24 ? hour_raw : hour_raw & 0x7fu, binary);
+    year2      = cmos_decode(sample.year, binary);
     /* An all-ones century register is the classic "never programmed" marker;
      * treat it as absent rather than as BCD 171. */
     century = (century_raw == 0xff) ? 0 : cmos_decode(century_raw, binary);
 
     if (!hour24) {
-        if (rtc->hour < 0 || rtc->hour > 12)
+        if (rtc->hour < 1 || rtc->hour > 12)
             return -ERANGE;
         if (rtc->hour == 12)
             rtc->hour = 0;
@@ -219,11 +242,6 @@ static int cmos_rtc_read(cmos_rtc_t *rtc, uint64_t *epoch_out,
     if (rtc->sec < 0 || rtc->min < 0 || rtc->hour < 0 || rtc->mday < 0 ||
         rtc->month < 0 || year2 < 0 || year2 > 99)
         return -ERANGE;
-    if (century == 0)
-        century = CMOS_DEFAULT_CENTURY;
-    if (century < 0)
-        return -ERANGE;
-
     int assumed = cmos_rtc_resolve_year(year2, century, &rtc->year);
     rtc->binary = (uint8_t)binary;
     /* SET means the update cycle is inhibited, so these registers hold the
@@ -268,9 +286,17 @@ static int cmos_rtc_probe(device_t *dev)
 {
     resource_t *index_res = device_get_resource(dev, RES_IOPORT, 0);
     resource_t *data_res = device_get_resource(dev, RES_IOPORT, 1);
-    if (!index_res || index_res->end < index_res->start || index_res->start > 0xffff ||
-        (data_res && (data_res->end < data_res->start || data_res->start > 0xffff)) ||
+    if (!index_res || index_res->end < index_res->start || index_res->end > 0xffff ||
+        (data_res && (data_res->end < data_res->start || data_res->end > 0xffff ||
+                      data_res->start == index_res->start)) ||
         (!data_res && index_res->end - index_res->start < 1)) return -ENODEV;
+    /* Only probe reads CMOS; no DMA, IRQ, class callback or background work
+     * can outlive it. Ordinary devres rollback suffices for partial claims. */
+    int ret = device_claim_resource(dev, index_res);
+    if (!ret && data_res)
+        ret = device_claim_resource(dev, data_res);
+    if (ret)
+        return ret;
 
     cmos_rtc_t *rtc = (cmos_rtc_t *)drv_alloc(sizeof(*rtc));
     if (!rtc)
@@ -281,7 +307,7 @@ static int cmos_rtc_probe(device_t *dev)
 
     uint64_t epoch = 0;
     int century_fallback = 0;
-    int ret = cmos_rtc_read(rtc, &epoch, &century_fallback);
+    ret = cmos_rtc_read(rtc, &epoch, &century_fallback);
     if (ret == 0) {
         rtc->have_time = 1;
         rtc->epoch = epoch;
