@@ -69,6 +69,11 @@ docker run --rm -it -v "$PWD:/src" -w /src a20os-buildenv:riscv bash
 
 每个构建都检出固定子模块。宿主检查使用稳定的 Ubuntu 24.04，并显式安装 Markdown、MkDocs、FAT 工具和所用的 RISC-V 交叉编译器；测试不依赖开发机 `.git` 里的私有脚本。运行镜像仍可按已有架构 tag 选择，当前多架构 job 使用 multi。
 
+宿主脚本还包含 C/Rust 布局与交叉编译探针：按 `rust-toolchain.toml` 安装固定版本、
+rust-src，以及 RV64、RV32、x86_64、AArch64 的 no_std core；RV32 自定义 ABI
+检查使用 bare-metal GCC/binutils。各脚本使用私有输出目录，可在无本地协调器的
+冷 checkout 运行。
+
 ### 首次启用 / 更新镜像
 
 `buildenv.yml` 需要推 ghcr，首次使用前：
