@@ -84,19 +84,19 @@ rust-src，以及 RV64、RV32、x86_64、AArch64 的 no_std core；RV32 自定�
 
 ### ccache
 
-CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，`restore-keys` 前缀回退）。本地容器构建想复用同一套缓存，把目录挂进去即可：`-v $PWD/build/cache/ccache:/src/build/cache/ccache`。
+CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，`restore-keys` 前缀回退）。smoke 和发布构建还可复用同架构已成功的 Native/内核编译缓存；配置与源码由编译缓存校验，运行结果仍由本次门禁产生。本地容器构建想复用同一套缓存，把目录挂进去即可：`-v $PWD/build/cache/ccache:/src/build/cache/ccache`。
 
 ## ci.yml 的工作分解
 
 1. resolver 从 Makefile 读取 `CI_KERNEL_ARCHES`，保留六架构唯一来源；另解析小写构建镜像名。
 2. 宿主 job 先检查实例、工具和公共行为。它失败时，不启动后续重量级构建/运行。
 3. 六个架构各执行 `check-<arch>-bringup` 和 `check-user-build-stamp`；ARM32 行另跑 STM32 固件门禁，x86 行另跑已有 FP 状态回归。内核/用户态构建不是该架构的所有运行行为认证。
-4. RV64 运行 Linux ABI、调度/进程 SMP2、futex SMP2、MM、VFS SMP2 和两项网络检查；RV64/AArch64 各运行 Native contract、deepen、MM、IPC。不要求每个架构重复全部负载。
-5. 仅扩展层再运行完整 Native 套件、额外单核/swap 变体、AArch64 压力、集群模拟与 guest 工具链。TCG 下的结果不外推到实板。
+4. RV64 运行 Linux ABI、进程生命周期 SMP2 和默认 BSD 后端的网络 API 套件；RV64/AArch64 各运行 Native contract、deepen、MM、IPC。不要求每个架构重复全部负载。
+5. 仅扩展层再运行调度/futex/MM/VFS 压力、旧 fast/lwIP 模式比较（显式 `NET_STACK=native`）、完整 Native 套件、额外单核/swap 变体、AArch64 压力、集群模拟与 guest 工具链。TCG 下的结果不外推到实板。
 
 常规 CI 的并发来客使用 SMP2，包括 x86 FP 回归；四核 runner 留出宿主余量。资源保护不变，等待上限为 120 秒，避免不匹配的配置空等 15 分钟。smoke 构建显式限制为两个并行任务，避免 Python 子进程丢失 make jobserver 后退化为串行。
 
-扩展层包含 SMP4 和更大组合，运行前需设置 repository variable `A20_EXTENDED_RUNNER` 为已配置且有足够余量的 runner 标签（按所选最大来客和并发数配置 CPU/内存）。未配置时在 resolver 明确失败，不自动购买或创建 runner。正式 tag 默认依赖常规 CI 和实际 base/devel 产物验证；长时压力不隐式成为每次发布的必需组合。
+扩展层包含 SMP4 和更大组合，运行前需设置 repository variable `A20_EXTENDED_RUNNER` 为已配置且有足够余量的 runner 标签（按所选最大来客和并发数配置 CPU/内存）。未配置时在 resolver 明确失败。正式 tag 默认依赖常规 CI 和实际 base/devel 产物验证；长时压力不隐式成为每次发布的必需组合。
 
 源码构建缓存用于加速，不能代替冷检出的依赖准备。CI 使用并发组淘汰同一分支的过时检查；发布 job 不放进该组。运行日志即使失败也上传，job 与步骤的 skipped 分别分类。
 

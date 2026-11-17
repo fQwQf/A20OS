@@ -100,7 +100,10 @@ jobs:
         with:
           path: build/cache/ccache
           key: ccache-release-${{ matrix.arch }}-${{ github.sha }}
-          restore-keys: ccache-release-${{ matrix.arch }}-
+          restore-keys: |
+            ccache-release-${{ matrix.arch }}-
+            ccache-kernel-${{ matrix.arch }}-
+            ccache-native-${{ matrix.arch }}-
 
       - name: Build kernel, userspace and bootstrap FAT
         env:
