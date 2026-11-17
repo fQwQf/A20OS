@@ -25,6 +25,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/core/workqueue.h"
 #include "core/errno.h"
 #include "core/poll.h"
 #include "core/lock.h"
@@ -86,6 +87,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #define HDA_BDL_ENTRIES    2U
 #define HDA_PERIOD_BYTES   (HDA_DMA_BYTES / HDA_BDL_ENTRIES)
 #define HDA_START_BYTES    (HDA_DMA_BYTES / 2U)
+#define HDA_PROGRESS_MS    10U
 
 static int hda_stop(void *context);
 
@@ -165,26 +167,28 @@ reset_asserted:
 
 static int hda_stream_stop(hda_controller_t *hda)
 {
-    int ret = 0;
-    writel(readl(hda_stream_reg(hda, HDA_SD_CTL)) & ~HDA_SD_CTL_RUN,
+    uint32_t ctl = readl(hda_stream_reg(hda, HDA_SD_CTL));
+    if (ctl == UINT32_MAX)
+        return -ENODEV;
+    writel(ctl & ~HDA_SD_CTL_RUN,
            hda_stream_reg(hda, HDA_SD_CTL));
-    uint64_t deadline = timer_get_ticks() + MS_TO_TICKS(HDA_TIMEOUT_MS);
-    while (readb(hda_stream_reg(hda, HDA_SD_CTL)) & HDA_SD_CTL_RUN) {
-        if ((int64_t)(timer_get_ticks() - deadline) >= 0) {
-            ret = -ETIMEDOUT;
-            break;
-        }
-        proc_yield();
+    for (unsigned ms = 0; ms < HDA_TIMEOUT_MS; ms++) {
+        uint8_t value = readb(hda_stream_reg(hda, HDA_SD_CTL));
+        if (value == UINT8_MAX)
+            return -ENODEV;
+        if (!(value & HDA_SD_CTL_RUN))
+            goto stopped;
+        mdelay(1);
     }
-    if (ret < 0)
-        return ret;
+    return -ETIMEDOUT;
+stopped:
     writeb(HDA_SD_STS_BCIS | HDA_SD_STS_FIFO_ERR | HDA_SD_STS_DESC_ERR,
            hda_stream_reg(hda, HDA_SD_STS));
     hda->stream_running = 0;
     hda->queued_bytes = 0;
     hda->write_pos = 0;
     hda->last_lpib = 0;
-    return ret;
+    return 0;
 }
 
 static int hda_stream_prepare(hda_controller_t *hda)
@@ -223,6 +227,14 @@ static int hda_stream_run(hda_controller_t *hda, uint32_t generation)
     if (__atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE) != generation) {
         spin_unlock_irqrestore(&hda->state_lock, flags);
         return -EINTR;
+    }
+    /* Arm progress before RUN: a stream must not depend on another write to
+     * silence played data or notice that its producer has gone idle. */
+    int scheduled = driver_work_schedule(hda->progress_work,
+                         timer_get_ticks() + MS_TO_TICKS(HDA_PROGRESS_MS));
+    if (scheduled < 0) {
+        spin_unlock_irqrestore(&hda->state_lock, flags);
+        return scheduled;
     }
     uint32_t ctl = readl(hda_stream_reg(hda, HDA_SD_CTL)) & 0x000fffffU;
     writeb(HDA_SD_STS_BCIS | HDA_SD_STS_FIFO_ERR | HDA_SD_STS_DESC_ERR,
@@ -266,7 +278,6 @@ static int hda_stream_refresh(hda_controller_t *hda, uint32_t generation)
                         HDA_DMA_BYTES - hda->last_lpib + lpib;
     if (!advanced && period_complete)
         advanced = HDA_DMA_BYTES;
-    hda->last_lpib = lpib;
     if (!advanced)
         return 0;
     if (advanced >= hda->queued_bytes) {
@@ -274,8 +285,39 @@ static int hda_stream_refresh(hda_controller_t *hda, uint32_t generation)
             hda->stream_underruns++;
         return hda_stream_stop(hda);
     }
+    /* The consumed interval is outside the queued interval. Leave silence
+     * behind the DMA cursor so an underrun cannot replay retired samples. */
+    size_t first = HDA_DMA_BYTES - hda->last_lpib;
+    if (first > advanced)
+        first = advanced;
+    memset(hda->pcm + hda->last_lpib, 0, first);
+    dma_sync_for_device(hda->pcm + hda->last_lpib, first);
+    if (first < advanced) {
+        memset(hda->pcm, 0, advanced - first);
+        dma_sync_for_device(hda->pcm, advanced - first);
+    }
+    hda->last_lpib = lpib;
     hda->queued_bytes -= advanced;
     return 0;
+}
+
+static void hda_progress(void *context)
+{
+    hda_controller_t *hda = context;
+    if (__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE))
+        return;
+    int again = 1;
+    if (mutex_trylock(&hda->lock)) {
+        uint32_t generation = __atomic_load_n(&hda->generation, __ATOMIC_ACQUIRE);
+        (void)hda_stream_refresh(hda, generation);
+        again = hda->stream_running;
+        mutex_unlock(&hda->lock);
+    }
+    /* RUN and callback rearming both precede closing. Destroy permanently
+     * rejects a racing submission and joins this callback before release. */
+    if (again && !__atomic_load_n(&hda->closing, __ATOMIC_ACQUIRE))
+        (void)driver_work_schedule(hda->progress_work,
+                         timer_get_ticks() + MS_TO_TICKS(HDA_PROGRESS_MS));
 }
 
 static void hda_ring_copy(hda_controller_t *hda, const uint8_t *data,
@@ -659,6 +701,14 @@ static int hda_stop(void *context)
         __atomic_add_fetch(&hda->generation, 1U, __ATOMIC_ACQ_REL);
     }
     spin_unlock_irqrestore(&hda->state_lock, flags);
+    /* Never join while holding the PCM mutex: the callback can own it. A
+     * failed join retains its code, context and DMA for the same stop retry. */
+    if (hda->progress_queue) {
+        int ret = driver_workqueue_destroy(&hda->progress_queue,
+                            timer_get_ticks() + MS_TO_TICKS(HDA_TIMEOUT_MS));
+        if (ret)
+            return ret;
+    }
     if (!mutex_trylock(&hda->lock))
         return -EBUSY;
     int ret = hda_quiesce(hda);
@@ -671,6 +721,8 @@ static void hda_release(hda_controller_t *hda)
     if (!hda)
         return;
     /* Successful lifecycle stop and class drain own all remaining storage. */
+    if (hda->progress_work)
+        driver_work_put(hda->progress_work);
     if (hda->pcm)
         dma_free_coherent_aligned(hda->pcm, HDA_DMA_BYTES, hda->pcm_dma);
     if (hda->bdl)
@@ -745,8 +797,15 @@ static int hda_probe(device_t *dev)
         ret = -EOPNOTSUPP;
         goto fail_io;
     }
+    hda->progress_queue = driver_workqueue_create();
+    if (!hda->progress_queue)
+        goto fail_nomem;
+    hda->progress_work = driver_work_create(hda->progress_queue, hda_progress, hda);
+    if (!hda->progress_work)
+        goto fail_nomem;
 #ifdef CONFIG_HDA_SMOKE_TEST
     stage = "stream-smoke";
+    mutex_lock(&hda->lock);
     memset(hda->pcm, 0, PAGE_SIZE);
     size_t smoke_accepted;
     ret = hda_queue_pcm(hda, hda->pcm, PAGE_SIZE, hda->generation,
@@ -755,6 +814,7 @@ static int hda_probe(device_t *dev)
         ret = hda_stream_run(hda, hda->generation);
     if (ret == 0)
         ret = hda_drain(hda, hda->generation);
+    mutex_unlock(&hda->lock);
     if (ret < 0)
         goto fail_io;
     kinfo("HDA_STREAM_SMOKE: PASS\n");
