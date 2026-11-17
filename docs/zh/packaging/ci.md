@@ -1,23 +1,27 @@
 # CI/CD 详解
 
-## 构建与发布 workflow
+## CI/CD 的职责与层次
 
-| 文件 | 触发 | 职责 |
-|------|------|------|
-| `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 按架构构建构建容器镜像并自检，推 `ghcr.io/<owner小写>/a20os-buildenv:<target>`，`multi` 另发 `:latest` |
-| `ci.yml` | PR / push main / 手动 | 宿主侧源码契约门禁（快速）→ 逐架构内核 bring-up 构建矩阵 → 四架构打包建库 + 组 base 镜像 → 独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
-| `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release（附件 = 各架构镜像） |
-| `quickstart.yml` | PR / push main / 手动 | Ubuntu 24.04 从干净 checkout 安装单架构依赖与固定 Rust，环境检查 → 完整开发镜像 → shell / 外部命令 / 正常关机；不依赖 GHCR 构建镜像或编译缓存 |
+CI 回答“这次修改是否破坏保留目标的编译和关键行为”；发布验收回答“准备交付的这些文件能否安装、启动和使用”；CD 只分发通过检查的产物。长时压力、性能和特定设备实验保留入口，不作为每次修改的默认全量组合。
 
-首次体验优先按 [构建指南](../dev/build.md) 操作。`quickstart.yml` 与综合门禁独立，可以直接观察新用户路径是否成功；新增 workflow 的定义本身不代表远端已运行通过。
+| 层次 / 文件 | 触发 | 必须证明的内容 |
+| --- | --- | --- |
+| 常规 `ci.yml` | PR、main、手动、供 release 调用 | 冷 checkout 的宿主检查；六个 hosted 架构的内核/用户态编译；RISC-V64 Linux/网络/SMP 与 RV64/AArch64 Native 代表性契约；x86 FP 状态回归 |
+| 扩展 `ci.yml` | 手动 `extended=true`；正式 tag 发布调用 | 全 Native 套件、额外压力变体、独立集群与 MCU 模拟、Alpine guest 工具链。结果单列；未执行不计覆盖 |
+| 候选 `release.yml` | 手动，默认常规检查 + base | 复用同一 CI，四个发行版架构打包、签名、组 base 镜像；直接启动冻结后的内核/FAT/world，确认镜像中程序执行、读写和自然关机 |
+| 正式 `release.yml` | tag `v*` | 扩展 CI、base/devel 产物检查均成功后，发布同一批冻结文件；仅发布 job 有 `contents: write` |
+| `buildenv.yml` | `tools/ci/**` 变更、手动 | 构建并自检声明的工具环境，不代替 OS 源码/运行验证 |
+| `quickstart.yml` | PR、main、手动 | Ubuntu 24.04 按文档安装单架构依赖，从无构建缓存的源码进入 shell 并关机 |
 
-镜像名小写：ghcr 镜像名必须全小写，而 `github.repository_owner` 可能含大写（如 `fQwQf`，buildx 会直接报 `repository name must be lowercase`）。三个 workflow 都先经一个 `buildenv-image` 解析 job 用 shell 小写化 owner，再在`container.image` / build-push `tags` 里引用结果；`container.image` 在 job 启动前解析、用不了步骤内 shell，所以必须走独立的 resolver job。
+常规 CI 不再同时制作四套 apk/world 后，又在 release 中重复制作。手动派发 release 已包含 CI，无需为同一候选再并行派发一次 CI。共享入口使用 [GitHub reusable workflow](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)，产物和证据按 [workflow artifacts](https://docs.github.com/en/actions/concepts/workflows-and-actions/workflow-artifacts) 保存。
 
-2026-11-17 已核对远端发布与自检：8 个构建镜像 tag 均存在，真实 STM32 云端依赖门禁已通过；[证据与候选边界](../status/current/buildenv-publication.md)区分镜像完成、旧 CI 失败和当前候选尚未派发。
+默认层的跳过项包括扩展集群、额外压力、Alpine 工具链和 AArch64 扩展压力；手动候选还跳过 devel 和 tag 专属发布。这些是未运行的范围，不是成功结果。实际错误、超时、依赖失败导致的跳过必须分别报告，不能靠调整分层把已发现的产品缺陷写成通过。
+
+2026-11-17 的第一轮真实云端 [CI](https://github.com/fQwQf/A20OS/actions/runs/44034951962) 和 [release](https://github.com/fQwQf/A20OS/actions/runs/44034957500) 对应 `1b667fe8e`，均失败。它们发现了子模块检出、BSD Clang 依赖、宿主工具和本机私有脚本假设等阻塞；原结果保留，不作为新分层的通过证据。最新状态见[候选记录](../status/current/v1.0-candidate.md)。
 
 ## 构建容器（环境可复现的关键）
 
-镜像分两层：一个与架构无关的 `base`，和每个架构一个 target。`base` 装`debian:trixie-slim` + 镜像工具（mtools / dosfstools / e2fsprogs）、`fakeroot`、`ccache`、`openssl`、Python 3、宿主 gcc，以及 **Rust**（`rustc`
+镜像分两层：一个与架构无关的 `base`，和每个架构一个 target。`base` 装`debian:trixie-slim` + 镜像工具（mtools / dosfstools / e2fsprogs）、`fakeroot`、`ccache`、`openssl`、Python 3、宿主 gcc、BSD 后端需要的 `clang-19`，以及 **Rust**（`rustc`
 + `cargo` + `rust-src` + 宿主 std）。每个架构 target 只加自己的交叉 gcc、它的 `libc6-dev-*-cross`、对应的 QEMU 和它自己的 no_std Rust target。
 
 | target | 额外内容 | 约 |
@@ -41,7 +45,7 @@
 
 `tools/ci/image-selftest.sh <target>` 只回答一个问题：**这个镜像声称的工具链在不在**。它为每个 target 编一个 freestanding 对象、预处理一次 libc 头、为每个声明的 Rust target 编一个 no_std crate（`riscv` 还会真的跑一次`-Z build-std=core`，因为那是最容易静默坏掉的一步），并检查每个 QEMU 能起来。
 
-它**刻意不跑** `check-<arch>-bringup`。那条门禁回答的是"这棵树能不能编"，是源码问题；把两者混在一起，镜像缺件会被误读成源码坏了，源码坏了又会让镜像看起来缺件。
+自检现在也检查 `clang-19` 并实际编译一个 freestanding 对象。它**刻意不跑** `check-<arch>-bringup`。那条门禁回答的是"这棵树能不能编"，是源码问题；把两者混在一起，镜像缺件会被误读成源码坏了，源码坏了又会让镜像看起来缺件。
 
 ### 本地构建镜像
 
@@ -61,9 +65,9 @@ docker run --rm -it -v "$PWD:/src" -w /src a20os-buildenv:riscv bash
 
 ### CI 里怎么用
 
-`buildenv.yml` 对每个 target 构建、推送、再把**发布出去的镜像**拉回来跑自检，所以绿的断言覆盖的是别人实际拉到的东西。`:latest` 仍指向 `multi`，`ci.yml`里未改动的 job 照旧工作。
+`buildenv.yml` 发布后会拉取公开镜像自检；日常 job 使用 resolver 给出的镜像，并在日志记录真实拉取的 digest 和工具版本。旧镜像尚未包含新声明的 Clang 依赖时，版本化的 `build-setup` action 在 job 内安装 `clang-19`；这不等于旧 registry tag 已更新。Dockerfile 和镜像自检已声明该依赖，后续构建镜像时会直接携带它。
 
-按架构切换容器是**可选的后续项**，需要先跑过一次 `buildenv.yml` 让各 tag 存在。改法只有两处：在 `ci.yml` 的 `buildenv-image` resolver 里多输出`image_riscv`/`image_aarch64`/…（`riscv32` 映射到 `riscv`），再把`kernel-build` matrix job 的 `container.image` 指向对应 arch 的 tag。其余 job（打包、smoke、cluster）保留 `:latest`：`check-kernel-build-all`、`check-user-build-all` 与 `tools/check-cluster-instance.py --arches riscv64,aarch64,x86_64` 本来就需要多架构同时在手。
+每个构建都检出固定子模块。宿主检查使用稳定的 Ubuntu 24.04，并显式安装 Markdown、FAT 工具和所用的 RISC-V 交叉编译器；测试不依赖开发机 `.git` 里的私有脚本。运行镜像仍可按已有架构 tag 选择，当前多架构 job 使用 multi。
 
 ### 首次启用 / 更新镜像
 
@@ -79,95 +83,39 @@ CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，`restore
 
 ## ci.yml 的工作分解
 
+1. resolver 从 Makefile 读取 `CI_KERNEL_ARCHES`，保留六架构唯一来源；另解析小写构建镜像名。
+2. 宿主 job 先检查实例、工具和公共行为。它失败时，不启动后续重量级构建/运行。
+3. 六个架构各执行 `check-<arch>-bringup` 和 `check-user-build-stamp`；ARM32 行另跑 STM32 固件门禁，x86 行另跑已有 FP 状态回归。内核/用户态构建不是该架构的所有运行行为认证。
+4. RV64 运行 Linux ABI、调度/进程 SMP2、futex SMP4、MM、VFS SMP2 和两项网络检查；RV64/AArch64 各运行 Native contract、deepen、MM、IPC。不要求每个架构重复全部负载。
+5. 仅扩展层再运行完整 Native 套件、额外单核/swap 变体、AArch64 压力、集群模拟与 guest 工具链。TCG 下的结果不外推到实板。
+
+源码构建缓存用于加速，不能代替冷检出的依赖准备。CI 使用并发组淘汰同一分支的过时检查；发布 job 不放进该组。运行日志即使失败也上传，job 与步骤的 skipped 分别分类。
+
+可单独运行常规或扩展检查：
+
+```bash
+gh workflow run ci.yml --ref <candidate-branch>
+gh workflow run ci.yml --ref <candidate-branch> -f extended=true
 ```
-buildenv-image（几秒）：把 owner 小写化，产出容器镜像名供其余 job 引用
-
-toolchain-gates（裸 runner，不进容器，~20 s + 装 linux-headers）：
-  全部是宿主侧、与架构无关、无需交叉工具链、无需 QEMU 的门禁，刻意不拉
-  submodule（vendored 的 kernel/external/lwip 是 tracked tree，其余只读
-  instances/、components/、tools/、Makefile、docs/ 和 kernel/ 的一方源文件）
-    → make check-manifests
-    → make check-a20-tests
-    → make check-honesty-policy      # ~25 条 fail-closed 反回归断言
-    → make check-smoke-cases
-    → make host-tests
-    → make check-drm-abi             # 需要宿主 linux-headers；跳过即判失败
-    → make check-task-lifetime-boundary / check-smp-platform-boundary
-      check-io-progress-model / check-external-dependency-boundary
-    → make check-abi-boundary / check-envelope-coverage
-    → make check-native-abi-coverage / check-abi-config-guard   # Native 侧同一件事
-
-ci-kernel-arches（几秒）：make -s print-ci-kernel-arches，把 CI 的内核构建
-  矩阵从 Makefile 的 CI_KERNEL_ARCHES 解析成 JSON 输出。矩阵列表不写在 YAML
-  里——手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES 之后悄悄落后。
-
-kernel-build-<arch> ×7 并行（容器，无 submodule）：
-    → make check-<arch>-bringup       # = make ARCH=<arch> BRINGUP=1 kernel-only
-    → upload-artifact（kernel.elf；include-hidden-files 显式开启）
-                                      # 架构专属构建断裂没有日志很难定位
-
-build-<arch> ×4 并行：
-  checkout（核心构建的第三方源码全部 vendored；actions/checkout 仍带 submodules: recursive 作为防御）
-    → git safe.directory（容器内 root 跑 git 的常规处理）
-    → 恢复 ccache
-    → make dev-build            # 内核 + 用户态（沿用旧构建系统）
-    → make pkg-repo             # 打 a20-base/a20-drivers/a20-kernel 三个包 + 签名建库
-    → make image-world PKG_WORLD=base PKG_ALPINE=0   # 纯本地仓库组镜像
-    → upload-artifact           # kernel.elf + 镜像 + 仓库包
-
-smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
-  checkout → git safe.directory → 恢复 ccache
-    → make dev-build + pkg-repo # both-ABI dev 产物 + 包仓库（smoke-devtools 依赖）
-    → QEMU 冒烟门禁（docs/zh/testing-gates.md 核心 runtime 门禁）：
-        smoke-riscv64           # bring-up + 主动关机（watchdog 超时即失败）
-        smoke-abi-linux         # syscall_smoke
-        smoke-syscall-ext       # keyring/AIO/io_uring/landlock 等扩展 syscall
-        smoke-sched-stress / smoke-proc-stress / smoke-futex-stress
-        smoke-sched-stress-smp2 / smoke-proc-stress-smp2  # 2 核 SMP 变体；单核 target 保留
-        smoke-mm-stress / smoke-vfs-stress   # FAT/ext4/ISO9660 压力
-        smoke-smp-bringup       # 2 核 SMP bring-up
-        smoke-native-contract   # 唯一的 Native 运行时门禁（riscv64；见 docs/zh/testing-gates.md
-                                # 「Native 门禁的架构覆盖现状」：21 条 native smoke 全是 riscv64）
-    → make smoke-devtools       # 上游 Alpine gcc 在 guest 内编译+运行
-    → 失败也上传 .kernel-build/smoke/ 日志 artifact（smoke-riscv64-logs）
-```
-
-## CI 的内核构建矩阵
-
-`SUPPORTED_HOSTED_ARCHES` 是六个活跃 hosted 架构的单一真源，CI 逐架构构建的也是这六项（`CI_KERNEL_ARCHES` = `riscv64 loongarch64 aarch64 x86_64 arm32 riscv32`，由`make print-ci-kernel-arches` 解析给 `strategy.matrix`）。ARM32 和 RISC-V32 仍在矩阵中； LoongArch32/PPC64LE 已按 1.0 平台决策退出，相关源码与历史门禁证据保留在文档和版本历史中，但不再安装旧工具链、不进入 active matrix。
-
-`arm32` 曾因缺少架构 hook 导致编译异常，该缺陷修复后（两处故障路径改为经 `fault.c` 的架构 hook 调用）已纳入 CI 矩阵。若 arm32 在 CI 中报错，即为真实回归。
-
-### 架构验证与交叉工具链边界
-
-- **arm32 本地语法沙箱验证**：arm32 本地快速检查可使用宿主 gcc 语法沙箱——提取 `make ARCH=arm32 ABI=both BRINGUP=1 kernel-only -n` 编译命令，保留全部 `-I` / `-D` / `-Werror`，将交叉编译器替换为宿主 gcc、移除 ARM 专属代码生成标志，并加入 `-fsyntax-only`。该方式可快速验证头文件包含拓扑与声明可见性，但不能替代 ARM 真实指令生成与汇编验证，完整验证以 CI `kernel-build-arm32` 为准。
-- **本地完整矩阵复验机制**：在配置交叉工具链环境下，可执行 `make -j8 check-build-matrix` 验证全架构 bring-up 内核及用户态。
-- **构建目标分工**：`kernel-build` 是纯内核 bring-up 门禁，与 `check-kernel-build-all` 对应同一类构建目标；`build` 负责产出完整的发布包产物（apk 仓库与 world 镜像），需依赖用户态完整编译。
-- **测试门禁调度策略**：`make check-doc-test-gates` 聚合了多个长耗时 QEMU 运行时测试。为了提高 CI 反馈速度并充分利用并发能力，CI 未直接调用单一聚合目标，而是将宿主侧子门禁与各独立 smoke job 拆分并行调度。
-
-`smoke-devtools` 是唯一需要外网的 CI 步骤（从 Alpine 镜像站拉包；本地有`build/cache/apk` 缓存）。它是 trap.S 内核栈守卫修复的回归门禁。
-
-注意：QEMU 在公共 runner 上没有 KVM，冒烟跑在 TCG 下；riscv64 QEMU 在 x86 宿主上本来就只有 TCG，各 smoke 目标的超时按 TCG 校准，适合 CI。
 
 ## release.yml 的工作分解
 
+1. 检查源码版本，tag 还须匹配版本号；调用上述 CI，正式 tag 使用扩展层。
+2. CI 成功后，四个发行版架构构建内核/用户态、bootstrap FAT、签名仓库和 base world；tag 或显式扩展模式再制作 devel。保留正式发布的四架构和 base/devel 能力。
+3. 把最终内核、FAT、world、公钥和仓库复制到本次交付目录。此后不再构建这些文件。
+4. `check_release_image.py` 直接启动这些文件：base 在 `/extra` 执行镜像内 BusyBox 并复制/比较/删除镜像内文件；devel 要进入 Alpine 根。两者还检查普通命令、文件操作、sync、正常退出。QEMU snapshot 写入临时覆盖层，检查前后输入散列必须相同；本条不是断电持久化验收。
+5. 只对通过检查的文件制作各架构 bundle，附源码提交、配置、`SHA256SUMS-<arch>` 和串口报告。bundle 含内核与 bootstrap，不再只给出缺少启动配套的孤立 world。
+6. 只有 tag 且全部依赖成功才创建 GitHub Release；发布的是检查过的 bundle 与镜像，不重新编译。候选分支运行不创建正式 Release。
+
+手动候选验收只需派发这一条：
+
+```bash
+gh workflow run release.yml --ref <candidate-branch>
+# 若需要完整 tag 前演练：
+gh workflow run release.yml --ref <candidate-branch> -f extended=true
 ```
-check-release-version（轻量 runner）：checkout → 校验 A20OS_VERSION 与
-  A20OS_RELEASE 的 20.<version> 配对；tag ref 还要求 tag 严格等于 v<version>
 
-每个架构并行：
-  装发布密钥（默认要求 secret A20_REPO_SIGNING_KEY；缺失则失败）
-  → dev-build → pkg-repo → image-world base + devel
-  → 上传 artifact（镜像 + 各架构仓库目录 + 公钥）
-
-release（等全部架构完成）：
-  合并 artifact → 取注解 tag 正文作发布说明
-  → softprops/action-gh-release 发 Release（附件 = 全部镜像）
-
-该 job 刻意不挂 github-pages environment：该 environment 只允许 main
-分支，带 environment 的 tag 触发会在任何 step 之前被拒绝，Release 就永远
-建不出来。包仓库的对外发布（Pages）暂缓，见 repository.md。
-```
+原始 Actions 结果、确切提交、每个 job 的结论、跳过原因、实际工具/镜像身份和产物散列共同构成证据。工作流文件存在、通过 YAML 检查或本地定向测试，都不等于云端候选已经通过。
 
 ### 发布准备（一次性）
 

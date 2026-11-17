@@ -17,7 +17,7 @@ N18 关键并发和 N20 本地交付已按[当前候选矩阵](../status/current
 已运行的 handle、MM、deepen、contract 用例覆盖权限上限、区域约束、对象生命周期和 `remap-owner-rollback PASS`，通过结果与配置见测试日志。
 
 - [ ] 在云端复验 Native CI 与发布前置门禁
-  - `.github/workflows/native.yml` 已接线；当前仅验证本地配方，未触发云端 CI 或发布。
+  - 真实 CI/release 已执行首轮，结果失败并保留；当前按[CI/CD 分层](../packaging/ci.md)修复依赖和验收流程，仍需新候选的实际云端结果。
   - RTC、服务注册表 RTC 重启和 UBD 依赖 RISC-V 私有 MMIO/IRQ，AArch64 明确跳过，跳过不计为覆盖。AArch64 PTY 与 timeout 新增入口本地已通过。
 
 ## 验证环境说明
