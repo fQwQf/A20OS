@@ -22,16 +22,16 @@
 | `mcopy` 逐个塞 FAT32 / `mkfs -d` 暂存目录 | `mkrootfs.py` + world 清单 | 内容有清单、有版本、有依赖 |
 | 已删除的 `user/extra.mk` 里 `vim) stamp=.vim-built ;;` 硬编码 case | world 清单里直接写 Alpine 上游包名 | 加包 = 往 `packages/world/*.world` 加一行 |
 | extra 镜像（独立 ext4 挂 /extra） | extra 包进仓库，world 引用 | 保留 /extra 布局，见下 |
-| 发布 = 手工拷贝 `disk.img` | tag → release workflow → Release + Pages 仓库 | 自动、多架构、带签名 |
+| 发布 = 手工拷贝 `disk.img` | tag → 构建打包 → Release bundle | 多架构，包含仓库、公钥与启动配套 |
 | 环境 = 宿主机手装 apt 依赖 | `tools/ci/Dockerfile` 固化 | CI 与本地同一容器 |
 
-## 迁移路线（建议顺序，每一步都可独立落地）
+## 迁移现状与兼容边界
 
-1. **CI 先行**：启用 buildenv → ci.yml。不改任何开发者习惯，立刻获得四架构 PR 门禁与 artifact。
-2. **打包并行运行**：日常使用 `make pkgs / pkg-repo / image-world`，与旧 `disk.img` 并存验证一段时间（两者内容应等价，a20-base 就是按旧镜像内容对齐的）。
-3. **源码构建的 userland 退役（已完成）**：`user/extra.mk` 与`user/external/` 下的 vendored 树（vim、git、zlib、curl+mbedtls、 binutils+GCC、Rust、Lamina1）全部删除，移植软件一律作为 Alpine 上游包直接写进 `packages/world/*.world`：`devel` 带 musl busybox vim git curl ca-certificates less，`devtools` 再加 gcc musl-dev fastfetch。`a20-extra-git`/`a20-extra-vim` 这两个孤儿 recipe 一并删除（它们不在任何 world 里，也不在 `PKG_RECIPES` 中）。仍然从源码构建的用户程序只剩 `user/cmds/` 与 fastfetch。
-4. **distro 路径归并**：`user/rootfs/alpine/packages.txt` 实际就是一份 world。后续可将 `desktop.world` 纳入 packages/world/，让`build.sh` 变成 mkrootfs 的薄封装（保留 chroot init 等 overlay 逻辑）；在此之前两者并存。
-5. **淘汰 objcopy-进内核（未做）**：`user/extra.mk` 已退役，但 RAMFS_USER blob 这条路径仍在，尚未移除。等 base.world 镜像在所有日常流程中稳定替代 disk.img 之后再动它（注意保留 EARLY_DRVMOD，那是根盘驱动的引导路径，不是同一回事）。
+1. **CI 与发布**：常规门禁保留六个 hosted 架构编译和代表性行为；四架构 world 制作与分发归 release，见 [CI/CD 说明](ci.md)。
+2. **打包入口**：`make pkgs / pkg-repo / image-world` 与旧 `disk.img` 路径并存；`a20-base` 的平铺布局按旧镜像对齐，发行版 overlay 保留各自用途。
+3. **源码构建的 userland 退役（已完成）**：`user/extra.mk` 与`user/external/` 下的 vendored 树（vim、git、zlib、curl+mbedtls、 binutils+GCC、Rust、Lamina1）全部删除，移植软件一律作为 Alpine 上游包直接写进 `packages/world/*.world`：`devel` 带 musl busybox vim git curl ca-certificates less，`devtools` 再加 gcc musl-dev fastfetch。`a20-extra-git`/`a20-extra-vim` 这两个孤儿 recipe 一并删除（它们不在任何 world 里，也不在 `PKG_RECIPES` 中）。保留的源码输入包括 `user/cmds/`、固定版本 BusyBox、fastfetch 与 libc，具体版本由子模块和打包配方固定。
+4. **distro 路径**：`user/rootfs/alpine/packages.txt` 与 `packages/world/` 是现有的两组组装入口，保留各自的 chroot init 和 overlay。
+5. **启动路径**：RAMFS_USER blob 与 EARLY_DRVMOD 引导路径保留；world 打包不要求淘汰内嵌启动支持。
 
 ## 兼容性承诺
 

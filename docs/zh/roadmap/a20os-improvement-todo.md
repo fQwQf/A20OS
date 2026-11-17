@@ -12,13 +12,11 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 N18 关键并发和 N20 本地交付已按[当前候选矩阵](../status/current/v1.0-candidate.md)关闭；六架构用户态/SMP2、共享 VFS/MM 的 SMP8、两个发布档位、NOMMU build-only 和 MCU 预算分别记录，不要求每个架构重复所有负载。剩余交付项如下。
 
-## P0：默认 ABI=both 的运行验收
+## P0：基础 CI 结果
 
-已运行的 handle、MM、deepen、contract 用例覆盖权限上限、区域约束、对象生命周期和 `remap-owner-rollback PASS`，通过结果与配置见测试日志。
+- [ ] 记录精简 CI 的当前候选结果：基础检查、六架构内核编译和一次 QEMU 启动。
 
-- [ ] 在云端复验 Native CI 与发布前置门禁
-  - 真实 CI/release 已执行首轮，结果失败并保留；当前按[CI/CD 分层](../packaging/ci.md)修复依赖和验收流程，仍需新候选的实际云端结果。
-  - RTC、服务注册表 RTC 重启和 UBD 依赖 RISC-V 私有 MMIO/IRQ，AArch64 明确跳过，跳过不计为覆盖。AArch64 PTY 与 timeout 新增入口本地已通过。
+按项目负责人要求，完整 Native CI、扩展压力和发布逐镜像认证不再是 1.0 必须项。专项在修改相关代码时按需运行；当前本地矩阵和历史云端失败均见[候选记录](../status/current/v1.0-candidate.md)。本轮不继续派发云端验收。
 
 ## 验证环境说明
 

@@ -1,22 +1,13 @@
-# 构建环境镜像：tools/ci/Dockerfile 变更时重建并推送到 ghcr.io。
-#
-# 每个架构一个 target（原因见 Dockerfile 顶部）：单镜像要求每个 job 拉下所有
-# 架构的工具链，而且缺包是隐形的——这个镜像就曾经一个 Rust 都没有、armhf 的
-# libc 开发头也没有，而账面看不出来。这里对每个 target 构建、推送，再把**推上去
-# 的那个镜像**拉回来跑 tools/ci/image-selftest.sh：绿的断言覆盖的是别人实际会
-# 拉到的东西，不是 runner 本地的构建产物。
-#
-# :latest 仍指向 multi（全集），所以 ci.yml 里未改动的 job 照旧工作；按架构
-# 切换容器是后续单独的可选项，见 docs/zh/packaging/ci.md。
-#
-# 首次启用需手动跑一次（Actions 页面 → buildenv → Run workflow）。
 name: buildenv
 
 on:
-  push:
-    branches: [main]
-    paths: [tools/ci/**, .github/workflows/buildenv.yml]
   workflow_dispatch:
+    inputs:
+      target:
+        description: Build environment to publish
+        type: choice
+        default: multi
+        options: [multi, base, riscv, aarch64, x86_64, loongarch64, arm32, armv7m]
 
 permissions:
   contents: read
@@ -24,16 +15,9 @@ permissions:
 
 jobs:
   build:
-    name: build-${{ matrix.target }}
+    name: build-${{ inputs.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        # 各 target 相互独立：都从 base 起，缓存按 target 分 scope，互不覆盖。
-        # multi 也在这里，它自己会重建一次 base 层（缓存只影响速度，不影响
-        # 正确性），换来的是一个 jobs 列表而不是两个几乎相同的 job。
-        target: [base, riscv, aarch64, x86_64, loongarch64, arm32, armv7m, multi]
     steps:
       - uses: actions/checkout@v4
 
@@ -43,11 +27,11 @@ jobs:
         run: |
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_REPO=ghcr.io/$owner/a20os-buildenv" >> "$GITHUB_ENV"
-          if [ "${{ matrix.target }}" = multi ]; then
+          if [ "${{ inputs.target }}" = multi ]; then
             # multi 是全集，发布为 :latest；:sha 保留回滚到某次构建的能力。
             echo "TAG=latest" >> "$GITHUB_ENV"
           else
-            echo "TAG=${{ matrix.target }}" >> "$GITHUB_ENV"
+            echo "TAG=${{ inputs.target }}" >> "$GITHUB_ENV"
           fi
 
       - uses: docker/setup-buildx-action@v3
@@ -61,13 +45,13 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: tools/ci
-          target: ${{ matrix.target }}
+          target: ${{ inputs.target }}
           push: true
           tags: |
             ${{ env.IMAGE_REPO }}:${{ env.TAG }}
             ${{ env.IMAGE_REPO }}:${{ env.TAG }}-${{ github.sha }}
-          cache-from: type=gha,scope=buildenv-${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=buildenv-${{ matrix.target }}
+          cache-from: type=gha,scope=buildenv-${{ inputs.target }}
+          cache-to: type=gha,mode=max,scope=buildenv-${{ inputs.target }}
 
       # 自检必须在 pull 回来的镜像上跑。构建缓存、多阶段 target 与推送环节都
       # 可能改变最终内容，本地 build 通过不等于发布出去的那个能编。
@@ -75,4 +59,4 @@ jobs:
         run: |
           docker pull "$IMAGE_REPO:$TAG"
           docker run --rm -v "$PWD:/src" -w /src "$IMAGE_REPO:$TAG" \
-            sh tools/ci/image-selftest.sh "${{ matrix.target }}"
+            sh tools/ci/image-selftest.sh "${{ inputs.target }}"

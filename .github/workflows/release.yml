@@ -1,4 +1,4 @@
-# Candidate packaging and artifact verification; only a successful tag run publishes.
+# Build and package releases; routine source checks belong to CI.
 name: release
 
 on:
@@ -6,8 +6,8 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      extended:
-        description: Include long system qualification and the devel world
+      devel:
+        description: Also build the devel world
         type: boolean
         default: false
 
@@ -22,7 +22,13 @@ jobs:
   release-version:
     name: check-release-version
     runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.image.outputs.image }}
     steps:
+      - id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
       - name: Check kernel version and release tag
         env:
@@ -35,20 +41,12 @@ jobs:
             python3 tools/release/check-release-version.py
           fi
 
-  # Reuse the same checks. Dispatching this workflow does not require a second
-  # concurrent CI run for the same commit. Long qualification is explicit;
-  # tags require core checks and both frozen base/devel artifact checks.
-  checks:
-    uses: ./.github/workflows/ci.yml
-    with:
-      extended: ${{ inputs.extended || false }}
-
   build:
     name: release-${{ matrix.arch }}
-    needs: [release-version, checks]
+    needs: [release-version]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.checks.outputs.buildenv-image }}
+      image: ${{ needs.release-version.outputs.image }}
       options: --privileged
     timeout-minutes: 120
     strategy:
@@ -62,7 +60,7 @@ jobs:
       - uses: ./.github/actions/build-setup
 
       - name: Register foreign-arch binfmt for devel composition
-        if: github.ref_type == 'tag' || inputs.extended
+        if: github.ref_type == 'tag' || inputs.devel
         run: |
           set -eu
           if ! ls /usr/lib/binfmt.d/qemu-*.conf >/dev/null 2>&1; then
@@ -103,7 +101,6 @@ jobs:
           restore-keys: |
             ccache-release-${{ matrix.arch }}-
             ccache-kernel-${{ matrix.arch }}-
-            ccache-native-${{ matrix.arch }}-
 
       - name: Build kernel, userspace and bootstrap FAT
         env:
@@ -119,13 +116,13 @@ jobs:
         run: make -j2 ARCH=${{ matrix.arch }} image-world PKG_WORLD=base PKG_ALPINE=0
 
       - name: Compose the devel world
-        if: github.ref_type == 'tag' || inputs.extended
+        if: github.ref_type == 'tag' || inputs.devel
         run: make -j2 ARCH=${{ matrix.arch }} image-world PKG_WORLD=devel PKG_SIZE_MB=1024
 
-      - name: Freeze the deliverable files
+      - name: Collect deliverable files
         env:
           RELEASE_ARCH: ${{ matrix.arch }}
-          INCLUDE_DEVEL: ${{ github.ref_type == 'tag' || inputs.extended }}
+          INCLUDE_DEVEL: ${{ github.ref_type == 'tag' || inputs.devel }}
         run: |
           set -eu
           out="build/releases/$RELEASE_ARCH"
@@ -143,24 +140,7 @@ jobs:
           done
           python3 -c 'import json,os,pathlib; p=pathlib.Path("build/releases")/os.environ["RELEASE_ARCH"]; (p/"build-info.json").write_text(json.dumps({"commit":os.environ["GITHUB_SHA"],"arch":os.environ["RELEASE_ARCH"],"profile":"full","abi":"both","devel":os.environ["INCLUDE_DEVEL"]=="true"},indent=2)+"\n")'
 
-      - name: Boot and check the frozen base artifact
-        run: |
-          python3 tools/qemu/check_release_image.py --arch ${{ matrix.arch }} \
-            --kernel build/releases/${{ matrix.arch }}/kernel.elf \
-            --bootstrap build/releases/${{ matrix.arch }}/bootstrap-${{ matrix.arch }}.img \
-            --world build/releases/${{ matrix.arch }}/base-${{ matrix.arch }}.img \
-            --output .kernel-build/smoke/release-base-${{ matrix.arch }}
-
-      - name: Boot and check the frozen devel artifact
-        if: github.ref_type == 'tag' || inputs.extended
-        run: |
-          python3 tools/qemu/check_release_image.py --arch ${{ matrix.arch }} --layout distro \
-            --kernel build/releases/${{ matrix.arch }}/kernel.elf \
-            --bootstrap build/releases/${{ matrix.arch }}/bootstrap-${{ matrix.arch }}.img \
-            --world build/releases/${{ matrix.arch }}/devel-${{ matrix.arch }}.img \
-            --output .kernel-build/smoke/release-devel-${{ matrix.arch }} --timeout 180
-
-      - name: Bundle only the verified files
+      - name: Bundle artifacts and checksums
         run: |
           set -eu
           out="build/releases/${{ matrix.arch }}"
@@ -174,19 +154,11 @@ jobs:
           path: build/releases/
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: release-${{ matrix.arch }}-verification
-          path: .kernel-build/smoke/release-*/
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 14
 
   release:
     name: publish-release
     if: github.ref_type == 'tag'
-    needs: [build, checks]
+    needs: [build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

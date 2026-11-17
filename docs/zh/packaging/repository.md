@@ -56,15 +56,15 @@ openssl rsa -in a20os-release.rsa -pubout -out a20os-release.rsa.pub
 ```
 
 - 私钥 → GitHub 仓库 secret `A20_REPO_SIGNING_KEY`（release workflow 自动使用）；
-- 公钥 → 由 workflow 从私钥导出（`build/keys/a20os-release.rsa.pub`），随各架构的 workflow artifact 上传；对外分发方式待定（见下节）；
-- 未配置 secret 时，release workflow 仍能运行，但产物**不签名**（workflow 会打印醒目警告），消费侧需要 `--allow-untrusted`；
+- 公钥 → 由 workflow 从私钥导出（`build/keys/a20os-release.rsa.pub`），随各架构 artifact 和交付 bundle 分发；
+- 未配置 secret 时，release workflow 默认失败。仅 repository variable `ALLOW_UNSIGNED_RELEASE=1` 明确允许无签名产物，并输出警告；消费侧需要 `--allow-untrusted`；
 - 私钥泄露 = 立刻吊销：换密钥对、重发索引、公告用户换公钥。
 
-## 发布仓库（对外发布暂缓）
+## 仓库分发
 
-**当前状态**：release workflow 会签名并组装好每个架构的仓库（`build/repo/<arch>/`，含 `APKINDEX.tar.gz`），但产物只随 workflow artifact（`release-<arch>`）上传，**尚未对外发布**；GitHub Release 只附带各架构镜像。
+当前工作流将每个架构的仓库（`build/repo/<arch>/`，含 `APKINDEX.tar.gz`）、公钥、内核、bootstrap 和 world 一起装入交付 bundle。手动候选运行上传 artifact；成功的 tag 流程将同一批构建的 bundle 与镜像发布到 GitHub Release。
 
-原先的 Pages 部署已移除：它既与 `pages.yml`（它拥有 GitHub Pages 站点）互相覆盖，又组装了错误的目录树（把 `build/repo` 拷进仓库自己的 `site/`源目录，且从不执行 `site/build.sh`）。恢复对外发布前需先定发布模型，见`.github/workflows/release.yml` 头部的 TODO。
+独立 HTTP apk 仓库服务不在当前发布链路中。GitHub Pages 网站由 `pages.yml` 管理；包仓库通过上述 bundle 分发，职责见 [CI/CD 说明](ci.md)。
 
 **目标形态**（发布后）：仓库是静态目录，每个架构一个子目录：
 

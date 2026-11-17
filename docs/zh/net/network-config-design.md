@@ -1,5 +1,9 @@
 # 网络配置设计
 
+本文的 `tcpmode fast/lwip`、PCB 和自定义 CUBIC 细节针对 `NET_STACK=native/lwip`
+后端。Hosted 默认 BSD 后端可按需运行网络 API 套件；旧模式比较在本地专项中
+显式选择 `NET_STACK=native`，范围见 [CI/CD 说明](../packaging/ci.md)。
+
 `kernel/net/backends/lwip/lwip_stack.c` 不再直接硬编码地址，但部分板级 `arch_bootargs_get()` 仍返回编译进内核的 `a20.*` 参数；这与由启动器传入 bootargs 是两个不同来源。
 
 ## 设计决策
@@ -99,7 +103,7 @@ tcpmode=fast
 
 **运行时切换与静态配置建议**：写入口支持运行时 `tcpmode` 切换，`smoke-net-accept` 及双向切换压力测试均可正常通过。但由于系统引导初期首个 listener 通常由早期用户态服务建立，通过 `/proc/net/config` 运行时切换可能晚于 listener 初始化时机，因此推荐使用内核命令行参数 `a20.tcpmode=lwip` 进行静态配置。详见 [net-lanes.md](net-lanes.md)。
 
-**未来计划**：可以增加 `sys_net_get_config`/`sys_net_set_config` 来支持地址的原子更新。当前没有这些 syscall，地址类字段仍不能作为运行时设置入口。
+**地址更新边界**：当前通过启动参数和 DHCP 配置地址；地址类字段在该接口中只读。
 
 ## 配置面的三个平面
 
@@ -312,7 +316,7 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
 - [x] 档位新增三项预算宏（`NET_PROFILE_SOCKET_BUDGET` / `_TOTAL_BUDGET` / `_FILTER_BUDGET`）与 EMBEDDED 档的 `NET_PROFILE_CONNTRACK_ENTRIES` 64 → 32；三条预算由 `socket_internal.h` 与 `netfilter_nat.c` 的 `_Static_assert` 钉住，未定义档位在 `/proc/a20/netmem` 打印 `budget=n/a` 而不是 `0`。
 - [x] `SIOCSIFMTU` 的 ioctl 分支补齐（此前派发得到 `-ENOTTY`），两个入口共用`a20_lwip_if_set_mtu()` 的档位封顶；`netlink_test` 的 `test_mtu_ceiling()`二分发现档位上限并断言边界两侧。
 - [x] 套接字缓冲实现有界自动调优（初始值低于上限、需求驱动倍增、显式设置关闭），见上文；IPv6 地址 `RTM_DELADDR` 已实现，DAD 契约与 ND6 自学地址不发通知的边界已写入本文；conntrack 不跟踪 ICMP 差错报文（PMTU 探测因此不可用）仍是有意边界。
-- [ ] **未做**：CUBIC 的 HyStart / DCTCP / `W_max` 跨 pcb 持久化；Eq. 4 的 RTT 分母只能是 `pcb->sa`（整个 `TCP_SLOW_INTERVAL` = 500 ms 一档），所以该区域只在`W_max` 低于约 3.25 段时可能成为约束项——见上面那一节。
+- **CUBIC 边界**：该后端不提供 HyStart / DCTCP / `W_max` 跨 pcb 持久化；Eq. 4 的 RTT 分母只能是 `pcb->sa`（整个 `TCP_SLOW_INTERVAL` = 500 ms 一档），所以该区域只在 `W_max` 低于约 3.25 段时可能成为约束项——见上面那一节。
 - [x] 三个档位的池上限与 `MEM_SIZE` 都有求和断言（`NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE`）；DEFAULT 的`MEM_SIZE` 从 512 KiB 调到 1 MiB，因为按真实元素尺寸（含每元素堆头和空闲链终止符）计算需要约 771 KiB。EMBEDDED 的 44 KiB 总预算按实测值重新对账。
-- [ ] **待观测**：`a20.tcpmode` 运行时写入口在 fast↔lwip 切换后数据传输的边缘行为持续观测。功能未削减，建议部署仍使用命令行参数。
-- [ ] **待覆盖**：ASAN 深度压力测试与全量端到端回归，含 `smoke-network-suite`、`smoke-net-accept`、`smoke-netfilter*`、`smoke-net-lanes*`、`smoke-socket-stress`。
+- **模式切换范围**：fast↔lwip 的运行时切换属于旧后端的本地按需测试；部署使用启动参数选择模式。
+- **验证入口**：网络 API、旧模式比较和深度压力均按需运行，自动检查范围见 [CI/CD 说明](../packaging/ci.md)，实际结果见[候选记录](../status/current/v1.0-candidate.md)。

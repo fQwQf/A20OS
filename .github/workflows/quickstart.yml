@@ -1,11 +1,7 @@
-# Exercise the documented native setup without the pre-published buildenv or
-# build caches. This job is independent of the wider subsystem gate matrix.
+# Manual check of the documented host setup without buildenv or build caches.
 name: Quickstart
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:

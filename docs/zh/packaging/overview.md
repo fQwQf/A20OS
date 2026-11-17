@@ -10,7 +10,7 @@
 
 ## 核心决策：复用 apk，而不是自研包管理器
 
-A20OS 拥有完整的 Linux ABI 兼容层，能直接运行 musl/Alpine 生态的程序。因此用户态包管理**不需要重新发明**：Alpine 的 apk 格式简单（gzip 分段 tar + 文本元数据）、工具体积小（单个静态二进制）、支持异架构离线组装（`apk --root --arch`），且上游仓库 already 提供 riscv64 / aarch64 / x86_64 / loongarch64 的大量现成包。
+A20OS 的 Linux ABI 兼容层可运行已验证范围内的 musl/Alpine 程序。用户态包管理复用 Alpine 的 apk：格式为 gzip 分段 tar + 文本元数据，工具体积小（单个静态二进制），支持异架构离线组装（`apk --root --arch`），上游仓库提供 riscv64 / aarch64 / x86_64 / loongarch64 的现成包。
 
 项目里已有的 `user/rootfs/alpine/build.sh` 正是用 `apk.static` 组装 Alpine rootfs。新体系把这一已被验证的做法**泛化到整个系统**：A20OS 自己的内核、用户态、驱动也打成 apk 包，与上游包在同一个解析器下混装。
 
@@ -19,7 +19,7 @@ A20OS 拥有完整的 Linux ABI 兼容层，能直接运行 musl/Alpine 生态�
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 5. 发布层   .github/workflows/release.yml                     │
-│             tag → 多架构镜像 → GitHub Release + Pages 包仓库   │
+│             tag → 构建打包 → GitHub Release bundle       │
 ├─────────────────────────────────────────────────────────────┤
 │ 4. CI 层    .github/workflows/ci.yml（PR 门禁）               │
 │             tools/ci/Dockerfile（固化工具链，CI=本地）          │

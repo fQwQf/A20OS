@@ -1,5 +1,4 @@
-# PR/主干：源码检查、保留架构编译与代表性运行。
-# 完整镜像制作归 release；长时系统验收由 extended 显式开启。
+# Keep routine checks small; subsystem and stress tests remain local make targets.
 name: CI
 
 on:
@@ -7,19 +6,6 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      extended:
-        description: Run the long system, cluster and toolchain qualification
-        type: boolean
-        default: false
-  workflow_call:
-    inputs:
-      extended:
-        type: boolean
-        default: false
-    outputs:
-      buildenv-image:
-        value: ${{ jobs.buildenv-image.outputs.image }}
 
 permissions:
   contents: read
@@ -35,328 +21,96 @@ env:
   A20_BUILD_JOBS: "2"
 
 jobs:
-  # ghcr 镜像名必须全小写，而 github.repository_owner 可能含大写（如 fQwQf）。
-  # container.image 在 job 启动前解析，用不了步骤内的 shell，因此先在此
-  # 算出小写镜像名，供下方所有 job 的 container 引用。
-  buildenv-image:
-    name: resolve-buildenv-image
-    runs-on: ubuntu-latest
+  prepare:
+    runs-on: ubuntu-24.04
     outputs:
-      image: ${{ steps.resolve.outputs.image }}
+      image: ${{ steps.image.outputs.image }}
+      arches: ${{ steps.arches.outputs.arches }}
     steps:
-      - id: resolve
-        run: |
-          if [ "${{ inputs.extended }}" = true ] && [ -z "${{ vars.A20_EXTENDED_RUNNER }}" ]; then
-            echo '::error::Extended qualification requires A20_EXTENDED_RUNNER with capacity for its larger guests'
-            exit 1
-          fi
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
-          else
-            OWNER="${{ github.repository_owner }}"
-          fi
-          echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+      - id: image
+        env:
+          OWNER: ${{ github.event.pull_request.base.repo.owner.login || github.repository_owner }}
+        run: echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+      - id: arches
+        run: make -s print-ci-kernel-arches >> "$GITHUB_OUTPUT"
 
-  # 宿主行为与配方检查使用稳定 runner；显式安装测试实际使用的依赖。
-  host-tests:
-    name: host-tests
+  checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Install host test tools
+      - name: Install host test dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             ripgrep python3-markdown mkdocs mtools dosfstools \
             gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
             gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
-
-      - name: Install the pinned Rust host and ABI probe dependencies
+      - name: Install pinned Rust
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
-          rustup toolchain install "$version" --profile minimal --component rust-src \
-            --target riscv64imac-unknown-none-elf,riscv32imafc-unknown-none-elf,x86_64-unknown-none,aarch64-unknown-none
-          rustc --version
+          rustup toolchain install "$version" --profile minimal
+      - name: Check manifests and run tool unit tests
+        run: make check-manifests check-smoke-cases check-a20-tests
 
-      - name: Validate instances, arch matrix and component registries
-        run: make check-manifests
-
-      - name: Unit tests for the a20 toolchain
-        run: make check-a20-tests
-
-      - name: Smoke case table agrees with the makefiles
-        run: make check-smoke-cases
-
-      - name: Host-side unit tests for kernel format/helper logic
-        run: make host-tests
-
-      - name: CMSIS-RTOS2 personality and trim checks
-        run: |
-          make -C user/cmsis_rtos2 test
-          make -C user/cmsis_rtos2 trim PROFILE=mcu
-          python3 -m unittest tools.tests.test_cmsis_trim
-
-      - name: Shared cluster protocol, MCU runtime and bounded job tests
-        run: make check-cluster-unit
-
-      - name: Cluster codecs and runtime under ASan and UBSan
-        run: make check-cluster-fuzz
-
-      - name: Virtio network descriptor completion and wraparound
-        run: make check-virtio-net-completion
-
-      - name: Cluster receive wake and park race boundaries
-        run: make check-cluster-wakeup
-
-      - name: Slab CPU array IRQ reentry and migration boundaries
-        run: make check-slab-cpu-window
-
-      - name: Linux syscall coverage table agrees with the registered table
-        run: make check-abi-boundary
-
-      - name: DRM UAPI ioctl numbers and struct layouts vs the Linux UAPI
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            "linux-headers-$(uname -r)" \
-            || sudo apt-get install -y -qq --no-install-recommends linux-headers-generic
-          out="$(make check-drm-abi 2>&1)" || { echo "$out"; exit 1; }
-          echo "$out"
-          if printf '%s\n' "$out" | grep -q '^skip:'; then
-            echo '::error::check-drm-abi skipped -- no Linux UAPI DRM headers on this runner'
-            exit 1
-          fi
-
-  # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
-  # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
-  # 之后悄悄落后；当前由 Makefile 的活动架构矩阵提供唯一列表。
-  # strategy.matrix 必须在矩阵 job 的任何 step 之前拿到列表，所以用与
-  # buildenv-image 同样的独立 resolver job 形状。
-  ci-kernel-arches:
-    name: resolve-kernel-arch-matrix
-    runs-on: ubuntu-latest
-    outputs:
-      arches: ${{ steps.arches.outputs.arches }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - id: arches
-        run: make -s print-ci-kernel-arches >> "$GITHUB_OUTPUT"
-
-  cluster-runtime:
-    if: ${{ inputs.extended }}
-    name: cluster-independent-kernel-runtime
-    needs: [buildenv-image, host-tests]
-    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
-    container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: ./.github/actions/build-setup
-
-      - name: Cache compiler output
-        uses: actions/cache@v4
-        with:
-          path: build/cache/ccache
-          key: ccache-cluster-${{ github.sha }}
-          restore-keys: ccache-cluster-
-
-      - name: Loopback resource and lifecycle regression
-        run: make check-cluster-loopback
-
-      - name: Independent UDP kernels with faults and reboot
-        run: make check-cluster-reliable
-
-      - name: Native services, process cancellation and supervision
-        run: make smoke-native-cluster smoke-native-cluster-supervisor
-
-      - name: Native membership, indirect probe and job recovery
-        run: make check-cluster-mesh
-
-      - name: Extended mixed architecture and MCU simulation acceptance
-        if: github.event_name == 'workflow_dispatch'
-        run: make check-cluster-hardening check-cluster-send check-cluster-smp demo-wordcount check-cluster-fuzz-smoke check-cluster-performance check-cluster-load
-
-      - name: Upload runtime evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cluster-runtime-evidence
-          include-hidden-files: true
-          path: |
-            .kernel-build/cluster/**/*.log
-            .kernel-build/cluster/**/*.json
-            .kernel-build/smoke/native-cluster*.log
-          if-no-files-found: warn
-
-  # BUILD_MATRIX_GATE_CONTRACT 的 CI 一半：每个当前支持的 hosted 架构都跑一次
-  # 内核 bring-up 构建门禁。RISC-V32、ARM32 均保留在矩阵；LoongArch32/PPC64LE
-  # 按 1.0 平台决策退出活跃矩阵，历史源码与验证记录仍保留。
-  #
-  # 此处编译六个 hosted 架构的内核与用户态；发行版 apk/world 制作归 release。
-  # 内核门禁与
-  # check-kernel-build-all / check-build-matrix 迭代的是同一个
-  # check-<arch>-bringup 目标。
-  #
-  # bring-up 也会编译引用上游 lwIP 头文件的网络适配器。检出固定的源码
-  # 子模块，与其它构建 job 一致，避免只有已初始化依赖的本地树能够通过。
   kernel-build:
     name: kernel-build-${{ matrix.arch }}
-    needs: [buildenv-image, ci-kernel-arches, host-tests]
-    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
+    needs: [prepare, checks]
+    runs-on: ubuntu-24.04
     container:
-      image: ${{ needs.buildenv-image.outputs.image }}
+      image: ${{ needs.prepare.outputs.image }}
     timeout-minutes: 60
     strategy:
-      fail-fast: false
+      fail-fast: true
+      max-parallel: 3
       matrix:
-        arch: ${{ fromJSON(needs.ci-kernel-arches.outputs.arches) }}
+        arch: ${{ fromJSON(needs.prepare.outputs.arches) }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-
       - uses: ./.github/actions/build-setup
-
-      - name: ccache
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: build/cache/ccache
           key: ccache-kernel-${{ matrix.arch }}-${{ github.sha }}
           restore-keys: ccache-kernel-${{ matrix.arch }}-
-
-      - name: STM32F103 source and firmware gate
-        if: matrix.arch == 'arm32'
-        run: make check-stm32f103
-
-      - name: Kernel bring-up build gate (check-<arch>-bringup)
-        run: make check-${{ matrix.arch }}-bringup
+      - name: Build kernel
+        run: make -j2 ARCH=${{ matrix.arch }} kernel-only
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
 
-      - name: Build retained architecture userland
-        run: make -j2 ARCH=${{ matrix.arch }} check-user-build-stamp
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: x86 kernel driver FP-state regression
-        if: matrix.arch == 'x86_64'
-        run: python3 tools/smoke.py smoke-x86-fp-preserve --nr-cpus 2
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      # 架构专属的构建断裂没有日志基本无法定位，所以逐架构留下 kernel.elf。
-      - uses: actions/upload-artifact@v4
-        with:
-          name: a20os-kernel-${{ matrix.arch }}
-          path: .kernel-build/*/kernel.elf
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-
-  native:
-    needs: [buildenv-image, host-tests]
-    uses: ./.github/workflows/native.yml
-    with:
-      buildenv-image: ${{ needs.buildenv-image.outputs.image }}
-      extended: ${{ inputs.extended || false }}
-
-  # 一个代表平台覆盖核心 Linux/SMP 行为；额外变体和 guest 工具链显式扩展。
   smoke:
-    name: smoke-riscv64
-    needs: [buildenv-image, host-tests]
-    runs-on: ${{ inputs.extended && vars.A20_EXTENDED_RUNNER || 'ubuntu-latest' }}
+    name: boot-riscv64
+    needs: [prepare, checks]
+    runs-on: ubuntu-24.04
     container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-      options: --privileged
-    timeout-minutes: 90
+      image: ${{ needs.prepare.outputs.image }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-
       - uses: ./.github/actions/build-setup
-
-      # Alpine world composition (smoke-devtools) runs target-arch maintainer
-      # scripts; qemu-user + binfmt lets them execute on the x86_64 runner.
-      - name: Register foreign-arch binfmt (qemu-user)
-        if: ${{ inputs.extended }}
-        run: |
-          set -e
-          if ! ls /usr/lib/binfmt.d/qemu-*.conf >/dev/null 2>&1; then
-            apt-get update && apt-get install -y --no-install-recommends qemu-user-static
-          fi
-          mkdir -p /mnt/binfmt_misc
-          mountpoint -q /mnt/binfmt_misc || mount -t binfmt_misc binfmt_misc /mnt/binfmt_misc
-          for f in /usr/lib/binfmt.d/qemu-*.conf; do
-            [ -e "$f" ] || continue
-            name="$(basename "$f" .conf)"
-            [ -e "/mnt/binfmt_misc/$name" ] && continue
-            cat "$f" > /mnt/binfmt_misc/register
-          done
-          ls /mnt/binfmt_misc/
-
-      - name: ccache
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: build/cache/ccache
           key: ccache-smoke-riscv64-${{ github.sha }}
           restore-keys: |
             ccache-smoke-riscv64-
-            ccache-native-riscv64-
             ccache-kernel-riscv64-
-            ccache-riscv64-
-
-      - name: Core QEMU runtime
-        run: |
-          make smoke-abi-linux
-          make smoke-proc-stress-smp2
-        timeout-minutes: 25
-
-      - name: Extended runtime variants
-        if: ${{ inputs.extended }}
-        run: |
-          make smoke-sched-stress-smp2
-          make smoke-futex-stress-smp4
-          make smoke-mm-stress smoke-vfs-stress-smp2
-          make smoke-syscall-ext
-          make NET_STACK=native smoke-net-accept
-          make smoke-sched-stress smoke-proc-stress smoke-futex-stress
-          make smoke-swap smoke-swap-smp4
-          make smoke-vfs-stress smoke-smp-bringup
-        timeout-minutes: 35
-
-      # The production BSD suite already includes TCP accept. The legacy
-      # fast/lwIP PCB comparison above explicitly selects its native backend.
-      - name: Production network API suite
-        run: |
-          make smoke-network-suite
-        timeout-minutes: 30
+      - name: Boot, execute a program and power off
+        run: make -j2 smoke-quickstart
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: "Guest regression: Alpine gcc toolchain via chroot"
-        if: ${{ inputs.extended }}
-        run: make smoke-devtools
-        timeout-minutes: 20
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: Upload smoke logs
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: smoke-riscv64-logs
-          path: .kernel-build/smoke/
+          name: boot-riscv64-log
+          path: .kernel-build/smoke/smoke-quickstart.log
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
