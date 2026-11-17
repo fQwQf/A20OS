@@ -39,7 +39,7 @@
 | CLI 登录会话、尺寸、回收、respawn 与普通关机 | `cli-console/verified/report.json` 为 PASS，耗时 27.946 秒；同一启动中的两个 getty 会话 SID 11/91 均验证控制终端/前台组、120×40 尺寸、termios 恢复、当前 zsh 的 resize-console 变量更新和孤儿回收。exit 后新会话恢复；普通 poweroff 由 BusyBox init 完成，自然关机及 ext4/FAT 只读检查均为 0。 |
 | 原版 OpenRC PID 1、监督/控制 FIFO 与普通关机 | `openrc-runtime/control-verified/report.json` 为 PASS，耗时 11.335 秒；PID 1 的 `/proc/1/exe` 为 `/sbin/init`，文件哈希与 OpenRC 相同；default runlevel、proc environ、监督进程 161 的子进程 162→168→170、真实控制 FIFO 信号与服务停止通过；PID 1 接收普通关机 FIFO 命令并完成 TERM/KILL/sync，自然退出 0、ext4/FAT 只读检查均为 0。范围为精简 OpenRC world，不代表图形桌面、可选硬件服务或实机复位通过。 |
 
-此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失、UDP DNS 阻塞和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。CLI 启动控制终端与尺寸问题已关闭，契约和范围见[CLI 控制台](cli-console.md)。OpenRC 的上述有界服务生命周期不再列为未验证项；上述应用功能与下节关键错误/权限证据共同关闭 N08；N21 保留其已声明的其它恢复要求。
+此前复现的 Python 清理 EIO、Node fork/输出失败、npm 写回关机拒绝、CLI bash 管道崩溃、chroot mountinfo 路径及目标 PID 丢失、UDP DNS 阻塞和 trace 扫描器竞争均已修复，不再作为当前缺口。初始失败、根因、实现和验证边界保留在[本轮归档](../../archive/v1-closeout-2026-11-16.md#rv64-pynode-实际运行与构建阻塞)；具体修复见归档后续的 fork advice、Unix 地址、目录 rename、ordered data 与 trace 小节。CLI 启动控制终端与尺寸问题已关闭，契约和范围见[CLI 控制台](cli-console.md)。OpenRC 的上述有界服务生命周期不再列为未验证项；上述应用功能与下节关键错误/权限证据共同关闭 N08。
 
 ## x86_64 桌面与 JVM 的直接运行（2026-11-16）
 
