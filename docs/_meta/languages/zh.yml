@@ -259,7 +259,6 @@ pages:
   status/gaps/cluster-ssi: 集群 SSI 缺口
   status/gaps/notes/README: 索引
   status/gaps/notes/net-ipv6-pbuf: IPv6 pbuf
-  status/gaps/notes/fs-ext4-orphan: ext4 孤儿
   status/current/delivery-baseline: 交付基线
   status/current/cluster-implementation-status: 集群与服务
   status/current/drivers-implementation-status: 驱动
@@ -274,7 +273,6 @@ pages:
   status/current/platforms-status: 平台
   status/current/distro-status: 发行版与引导
   status/current/desktop-minecraft-status: 桌面与 Minecraft
-  status/current/ext4-orphan-gap: Ext4 孤儿 inode
   status/current/validation-dontunmap: DONTUNMAP 验证范围
   status/history/README: 历史索引
   status/history/desktop-1.0-2026-10-23: 桌面 1.0 验证

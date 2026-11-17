@@ -300,7 +300,6 @@ nav:
       children:
       - status/gaps/notes/README
       - status/gaps/notes/net-ipv6-pbuf
-      - status/gaps/notes/fs-ext4-orphan
   - section: subsystem-implementation-status
     children:
     - status/current/delivery-baseline
@@ -317,7 +316,6 @@ nav:
     - status/current/platforms-status
     - status/current/distro-status
     - status/current/desktop-minecraft-status
-    - status/current/ext4-orphan-gap
     - status/current/validation-dontunmap
   - section: history
     children:
