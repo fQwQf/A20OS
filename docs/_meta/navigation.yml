@@ -16,6 +16,7 @@ nav:
 - section: native-abi
   children:
   - native-abi/README
+  - native-abi/checkpoint-signals
   - native-abi/00-overview
   - native-abi/syscalls
   - native-abi/01-types
@@ -58,6 +59,9 @@ nav:
     - kernel/linux-abi/unix-ancillary
     - kernel/linux-abi/child-exit-notification
     - kernel/linux-abi/tty-jobcontrol
+    - kernel/linux-abi/application-contracts
+    - kernel/linux-abi/cli-console
+    - kernel/linux-abi/udp-error-queue
     - kernel/linux-abi/keyring
     - kernel/linux-abi/init-compatibility
   - kernel/resource-namespaces
@@ -193,6 +197,7 @@ nav:
   - section: engineering-practices
     children:
     - drivers/meta/testing-and-submission
+    - drivers/meta/v1-pc-qemu-scope
     - drivers/meta/documentation-consistency
 - section: platforms-and-porting
   children:
@@ -278,6 +283,8 @@ nav:
   - status/current/docs-gates
   - status/current/server-readiness
   - status/current/v1.0-progress
+  - status/current/v1.0-candidate
+  - status/current/buildenv-publication
   - section: version-1-0-gap-tracker
     children:
     - status/gaps/README

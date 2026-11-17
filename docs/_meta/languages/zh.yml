@@ -297,6 +297,13 @@ pages:
   CONTRIBUTING: 贡献指南
   ACKNOWLEDGMENTS: 致谢
   THIRD_PARTY_NOTICES: 第三方声明
+  native-abi/checkpoint-signals: "Native 信号与通知的设计边界"
+  kernel/linux-abi/application-contracts: "目标应用的 Linux ABI 契约与证据"
+  kernel/linux-abi/cli-console: "CLI 控制台会话"
+  kernel/linux-abi/udp-error-queue: "UDP 扩展错误队列"
+  drivers/meta/v1-pc-qemu-scope: "1.0 常见 PC 与 QEMU 驱动范围"
+  status/current/v1.0-candidate: "1.0 本地候选与验收状态"
+  status/current/buildenv-publication: "构建镜像与 STM32 云端依赖核对"
 site_name: A20OS 文档
 language_tag: zh-CN
 contents: 目录

@@ -20,10 +20,10 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 ## P1：既有驱动的安全与恢复
 
-- [ ] 收口已有支持的常见 PC/QEMU 设备的 DMA 归属、越权拒绝、在途取消及停止失败回收
+- [ ] 完成冻结候选中常见 PC/QEMU 驱动的正常 I/O、退出与关机集成
   - 范围以[常见 PC/QEMU 驱动](../drivers/meta/v1-pc-qemu-scope.md)为准，不逐项完善 Hi3861 等开发板外设，也不要求所有厂商的实体故障认证。
   - 当前实现与已通过的样板见 [驱动现状](../status/current/drivers-implementation-status.md)。
-  - 剩余安全关闭条件见 [驱动缺口](../status/gaps/drivers.md)，同源双态、MSI-X 扩展与 DRM/GPU 新功能另见 [后续路线](next-horizon.md#后续版本功能强化)。
+  - 已关闭的软件缺陷不重复列为旧驱动迁移；候选集成关闭条件见 [驱动缺口](../status/gaps/drivers.md)，同源双态、MSI-X 扩展与 DRM/GPU 新功能另见 [后续路线](next-horizon.md#后续版本功能强化)。
 
 ## P1：发布配置与工具链
 
