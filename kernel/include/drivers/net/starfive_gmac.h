@@ -12,7 +12,7 @@
 #define STARFIVE_GMAC_PLATFORM_VENDOR 0x5F56U
 #define STARFIVE_GMAC_PLATFORM_DEVICE 2U
 
-int  starfive_gmac_init(uintptr_t base);
+/* Initialization and fallible stop belong to the managed platform binding. */
 int  starfive_gmac_send(uintptr_t base, const void *pkt, size_t len);
 int  starfive_gmac_recv(uintptr_t base, void *buf, size_t maxlen);
 void starfive_gmac_get_mac(uintptr_t base, uint8_t *mac);
