@@ -30,16 +30,22 @@ static int rtc_probe(device_t *dev)
     if (!dev)
         return -ENODEV;
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
-    if (!res || res->end < res->start)
+    /* Both 32-bit registers must fit before mapping or touching the device.
+     * Map only the read-only snapshot window, not a possibly huge resource. */
+    if (!res || res->end < res->start || res->end > UINTPTR_MAX ||
+        (res->start & 3u) || res->end - res->start < RTC_TIME_HIGH + 3u)
         return -ENODEV;
     uintptr_t va = drv_map_mmio(dev, (uintptr_t)res->start,
-                                (size_t)(res->end - res->start + 1));
+                                RTC_TIME_HIGH + sizeof(uint32_t));
     if (!va)
         return -EIO;
     uint32_t lo = drv_read32(dev, RTC_TIME_LOW);
     uint32_t hi = drv_read32(dev, RTC_TIME_HIGH);
     uint64_t t = ((uint64_t)hi << 32) | lo;
-    drv_log("[GOLDFISH-RTC] probe ok: epoch=%llu\n", t);
+    /* Nothing uses the mapping after this synchronous diagnostic read. The
+     * user service retains exclusive ownership of alarms and IRQ state. */
+    drv_unmap_mmio(dev);
+    drv_log("[GOLDFISH-RTC] probe ok: epoch_ns=%llu\n", (unsigned long long)t);
     return 0;
 }
 
