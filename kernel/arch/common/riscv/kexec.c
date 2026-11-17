@@ -30,7 +30,9 @@ static void *g_kexec_page;
 static uintptr_t g_kexec_page_pa;
 static uintptr_t g_kexec_control_pa;
 static volatile int g_kexec_stop_pending;
+#if (defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || defined(CONFIG_BOARD_QEMU_VIRT_RISCV32)) && !defined(CONFIG_NOMMU)
 static volatile int g_kexec_stop_error;
+#endif
 static uint32_t g_kexec_saved_affinity;
 static int g_kexec_affinity_changed;
 
@@ -48,6 +50,7 @@ void riscv64_kexec_ipi(void)
 #endif
 }
 
+#if (defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || defined(CONFIG_BOARD_QEMU_VIRT_RISCV32)) && !defined(CONFIG_NOMMU)
 static int stop_other_harts(void)
 {
     uint32_t online = smp_online_cpu_mask();
@@ -85,6 +88,7 @@ static int stop_other_harts(void)
     }
     return 0;
 }
+#endif
 
 void machine_kexec_cancel(void)
 {

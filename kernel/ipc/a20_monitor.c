@@ -7,7 +7,7 @@
  * (monitor_query) and, when a period is configured, pushes the count to
  * every event queue watching the MONITOR handle as A20_EVENT_SIGNALED.
  *
- * Design reference: docs/native-abi/09-native-abi-deepening.md §3.
+ * Design reference: docs/zh/native-abi/09-native-abi-deepening.md §3.
  * The global registry holds one reference per registered monitor; a monitor
  * unregisters itself on handle release, dropping that reference.
  */

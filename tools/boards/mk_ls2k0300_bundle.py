@@ -91,12 +91,12 @@ help tftpboot
 # verifies CRC32 against the local ELF and only then sends bootelf -p.
 # USB / SD: python3 tools/ls2k0300_handoff.py boot --serial DEVICE --transfer usb
 # TFTP: add --transfer tftp --server-ip HOST_IPV4 --board-ip BOARD_IPV4
-# Full source: docs/platforms/2k0300.md. Missing proof stops before any RAM load.
+# Full source: docs/zh/platforms/2k0300.md. Missing proof stops before any RAM load.
 ''')
     (args.out / 'README.md').write_text('''# LS2K0300 久久派 RAM-only handoff bundle
 
 Cross-built; physical hardware validation is pending. No firmware is flashed.
-Read docs/platforms/2k0300.md for the complete from-arrival workflow.
+Read docs/zh/platforms/2k0300.md for the complete from-arrival workflow.
 
 kernel.elf is a scalar-FPU LoongArch ELF64 program. It is not a Linux Image,
 uImage or EFI image. Keep the existing bootloader and boot media intact.

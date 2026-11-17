@@ -1,0 +1,411 @@
+# 驱动锁顺序契约
+
+`kernel/include/core/lock.h` 给出全局锁顺序；驱动私有锁的局部顺序、例外与嵌套规则都在这里。
+
+## 范围
+
+覆盖的驱动：
+
+| 驱动 | 文件 | 私有锁 |
+|--------|------|--------------|
+| virtio-blk | `kernel/drivers/block/virtio_blk.c` | `inst->lock` |
+| virtio-net | `kernel/drivers/net/virtio_net.c` | `net->lock` |
+| UART | `kernel/drivers/char/uart.c` | `rx_lock` |
+| PTY | `kernel/drivers/char/pty.c` | `g_pty_alloc_lock`、每个 pair 的 `lock` |
+| loop | `kernel/drivers/block/loop.c` | `g_loop[i].lock` |
+| DW SDIO | `kernel/drivers/block/dw_sdio.c` | 每主机 `sdio_priv_t.lock`（mutex，`lock` → `irq_lock`）；`irq_lock` 只保护中断 latch |
+| StarFive GMAC | `kernel/drivers/net/starfive_gmac.c` | 无 |
+| Loongson-2K GMAC | `kernel/drivers/net/ls2k_gmac.c` | 无 |
+| AHCI | `kernel/drivers/block/ahci.c` | sleepable `port->lock` mutex |
+| VirtIO-SCSI | `kernel/drivers/block/virtio_scsi.c` | sleepable `dev->lock` mutex |
+| E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
+| RTL8139 | `kernel/drivers/net/rtl8139.c` | `nic->lock`：RX/TX ring、描述符、游标与统计；无局部顺序（lwIP 投递在锁外，见 `rtl8139.c:242` 的 `LOCK_ORDER` 注释） |
+| VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
+| DRM/KMS/virtio-gpu 3D | `kernel/drivers/gpu/drm.c` | 每 publication 的 `store_lock`、`gpu_lock`、`vblank.lock`；namespace registry 与单控制台 owner mutex |
+| VirtIO-GPU transport | `kernel/drivers/gpu/virtio_gpu.c` | `inst->command_lock`（另有 `gpu_core.c` 的 `g_gpu_lock`，spinlock） |
+| VirtIO input | `kernel/drvmod/examples/vinput.c (inst->lock 在模块内)` | `inst->lock` |
+| virtio-console | `kernel/drivers/char/virtio_console.c`（generic 模块 `virtio-console.a20drv`，锁在模块内） | `g_vport.lock`：字节环、控制台镜像缓冲、两个 last_used 游标与计数器；无局部顺序（镜像投递在锁外） |
+| virtio-rng | `kernel/drivers/char/virtio_rng.c`（generic 模块 `virtio-rng.a20drv`，锁在模块内） | `g_vrng.lock`：字节环、每槽 posted 标志、last_used 游标与计数器；无局部顺序（熵池投递与有界等待都在锁外） |
+| xHCI | `kernel/drivers/usb/host/xhci.c`（generic 模块 `xhci.a20drv`） | `xhci->lock`：HCD 全部 ops 与 IRQ handler 都取它；**锁下不得等待硬件**，同步传输靠 `xfer_busy` 所有权标志串行化 |
+| USB HID | `kernel/drivers/usb/class/usb_hid.c` | 每接口 `h->lock`；局部顺序 `h->lock -> xhci->lock`（单向） |
+| USB storage | `kernel/drivers/usb/class/usb_storage.c` | 每实例 `st->lock` 是 sleepable `mutex_t`；局部顺序 `st->lock -> xhci->lock`（单向）；`msc_command()` 跨同步 bulk wait 持有它是允许的，因为等待方不持 spinlock |
+
+virtio-gpu 的 command mutex 位于每个绑定独占的原生 DMA allocation 中，其他设备不共享锁、队列或 closing/fault 状态。execution stop/最终 remove 失败保留整块 allocation；成功退出先在 drain 前确认 reset、排空 IRQ并退休请求，再由 remove 交还 staging/framebuffer owner，再解锁，最后 put allocation，不能先释放包含 mutex 的存储。初始化 allocation 的分配/失败回滚由既有 DMA buffer 管理，见 [每设备实例](native-runtime.md#virtio-gpu-的每设备实例)。
+
+## 用户 MMIO 映射事务
+
+`mm_mmap_physical()` 由 Rust 拥有 eager 物理映射事务，fbdev 旧 get_fb 分支与用户驱动服务共用。未发布记录在锁外分配，fixed 覆盖只能在已开启的事务内调用 mm_munmap_locked；不能持 mm->lock 调用会重新进入 TLB/MM 锁的公开 mm_munmap。整个 hint 区间及旧叶 PTE 均先检查，失败先撤销当前页空路径和映射前缀，锁外完成 TLB/退休后释放记录。mprotect 保留 Device 缓存属性。调用期间的 class lease 不延长映射 backing 的存储寿命，另见 [物理视图契约](native-runtime.md#驱动-cpu-物理映射事务)。
+
+`udriver_map_mmio()` 在白名单检查后委托共享 MM 接口，在锁外分配临时 VMA，再按 `mm->tlb_lock`（可睡眠）→ `mm->lock` → 页表节点锁执行映射。全部 PTE 成功才发布 VMA；失败时先清理失败页的空页表路径，再逆序撤销已映射前缀，登记 TLB 失效范围。释放 `mm->lock` 后完成本地/远端 TLB fence，再释放临时 VMA 和 deferred 对象。MMIO 不拥有设备数据帧引用，回滚仅回收中间页表。页表退休复用既有 reader grace period，不引入驱动私有锁。
+
+Landlock 的 `g_landlock_policy_lock` 是叶锁，仅保护有界的策略增补、冻结和匹配；不得持有它做 VFS、usercopy、分配、引用释放或任务发布。fd/task 引用计数独立使用原子操作；fork 在子任务发布前取得策略引用，安装规则后才能原子发布任务指针。
+
+## 全局顺序摘要
+
+`kernel/include/core/lock.h` 中的全局顺序为：
+
+```text
+tasklist_lock -> park_lock -> runq_lock -> pfa.lock
+tasklist_lock -> runq_lock
+park_lock -> signal_state.lock
+park_lock -> g_wait_timer_lock
+park_lock -> files_struct.lock -> VFS global-file/vnode locks
+park_lock -> mm_struct.lock
+park_lock -> a20_handle_table.lock
+driver registry/IRQ locks -> device-private locks
+lwIP ingress -> stage frame -> release ingress -> lane/control core
+lwIP lane/control -> keyed shared guard (released before socket/ingress locks)
+lwIP core -> heap -> allocator SYS_ARCH_PROTECT
+lwIP TX staging -> conntrack/NAT guard (released) -> nonblocking driver
+```
+
+`cg_node.lock` 不与 `tasklist_lock` 同持。lwIP core 锁不与 socket 或 socket-table bucket 锁嵌套，回调通过延后工作进入 socket 状态；设备回调必须非阻塞且不得同步重入 lwIP。具体多 lane 顺序见 [网络锁契约](../../net/network-lock-contract.md)。
+
+对驱动而言，这意味着：
+
+- 设备私有锁永远是最内层锁。
+- 持有设备私有锁时，绝不能获取 `tasklist_lock`、`park_lock`、`g_wait_timer_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
+- 持有 spinlock 时绝不能阻塞、睡眠或调入调度器。
+- 持有设备锁或 lwIP 锁时，绝不能调用内存分配、VFS 或 scheduler 路径，除非 callee 明确记录为非阻塞。
+
+## 各驱动契约
+
+### virtio-blk
+
+`virtio_blk_inst_t.lock`（`inst->lock`）每实例一个，保护请求 slot（`inst->req[]`）、descriptor/available/used ring 状态、`inst->in_flight`、`inst->status[]`、`inst->req_hdr[]` 和 `blk->last_used`、`blk->desc_idx`。它没有局部顺序：`inst->lock` 从不与其他内核锁嵌套。
+
+规则：
+
+- 提交、完成投递和请求分配都在 `inst->lock` 下运行。完成可以由中断驱动，也可以由轮询驱动，两者取的是同一把锁、走的是同一条排空路径，所以锁契约不变。
+- 完成路径在 `inst->lock` 下通过 `wait_queue_collect_all()` 把 task 引用和 `wait_seq` 转移到局部 wake queue；释放 `inst->lock` 后才调用 `proc_wake_q_flush()` 进入 scheduler。
+- 当没有可用 slot 时，`virtio_blk_rw()` 在 yield CPU 前释放锁。
+- 不要在 `inst->lock` 下调用 VFS、`kmalloc` 或阻塞式 scheduler 函数。
+
+中断模型是三级阶梯（`virtio_blk.c` 的 probe 与 `virtio_blk_irq_handler`）：每队列一个 MSI-X 向量优先，其次共享 INTx 线，最后才是轮询。每级只在前一级失败时才进入，所以提供了 MSI-X 的设备不会再落到那条电平触发的共享线上。`inst->irq_registered` 是"完成走中断"的唯一判据，`.poll` 只在它为 0 时才是进度来源。这里没有 cmdline 开关去强制轮询，阶梯完全由 `request_irq()` 成功与否决定。MSI-X 部分注册成功时会把已注册的那些 `free_irq()` 掉再退回 INTx，不留下半接管状态。
+
+注意 virtio-blk 与 AHCI/E1000 的一个差别：`/proc/a20/perf` 里 `virtio_blk_*` 的计数器不区分完成是由中断还是轮询投递的，所以从外部看不出中断路径是否真的在工作。这是已知缺口。
+
+### virtio-net
+
+`virtio_net_inst_t.lock`（`net->lock`）每实例一个，保护 TX/RX descriptor ring、`tx_busy[]`、`rx_buf[]`、`tx_buf[]`、队列索引（`last_used`、`avail->idx`）和统计信息（`rx_packets`、`tx_packets`、`rx_drops`、`tx_drops`）。局部顺序是 `g_lwip_lock -> net->lock`：
+
+- lwIP raw-API send 路径在持有 `g_lwip_lock` 时调用。
+- `virtio_net_send()` 且 `nonblock == 1` 是唯一可以在 `g_lwip_lock` 下运行的 virtio-net 入口点。
+- nonblock 路径绝不睡眠等待 TX 完成。它提交 descriptor 后立即返回。
+- 阻塞 send/recv 路径（`nonblock == 0`，或 `virtio_net_recv()`）不得在 `g_lwip_lock` 下调用，因为它们可能睡眠。
+
+由此得到的规则：
+
+- 绝不跨 scheduler wait 持有 `net->lock`。
+- 持有 `net->lock` 时绝不调用 lwIP 函数（顺序是 lwIP 外层、net 内层）。
+- `virtio_net_class_poll()` 只获取 `net->lock`。它内部调用的 `virtio_net_complete_tx_locked()` 是唯一在 `net->lock` 下清 `tx_busy[]` 的地方，由 TX 完成中断和该 poll hook 两条路径触达。
+
+### UART
+
+`rx_lock` 是单个全局 spinlock，保护接收环形缓冲区（`rx_buffer`、`rx_head`、`rx_tail`）和 `rx_waiters`。它没有局部顺序，`rx_lock` 不与 `tasklist_lock` 或 `park_lock` 嵌套：
+
+- 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区与接收注册。
+- RX 唤醒在 `rx_lock` 下 collect wait entry，释放锁后 flush wake queue。
+- ISIG 控制字符在 `rx_lock` 内只做判定（`tty_console_isig_signal()` 不取锁），信号发送放在解锁之后（`tty_console_isig_raise()` 查询共用终端会话，再固定任务引用发送内核信号），因此驱动在任何持锁区间都不获取额外锁。
+
+因此所有 UART 路径在持有 `rx_lock` 时都不得获取额外锁。`uart_getc()` 使用 prepare → 锁内重查/link → unlock → commit 的 Park/Wake 协议，并在阻塞当前任务前释放 `rx_lock`。
+
+### PTY
+
+有两个锁。`g_pty_alloc_lock` 是用于 pair 分配和初始设置的全局 spinlock，`g_ptys[idx].lock` 是某个 pair 所有运行时操作的 per-pair spinlock。
+
+`g_pty_alloc_lock` 保护分配期间的 `in_use` 标志，以及 `m2s_buf` / `s2m_buf` 分配和初始字段设置。per-pair `lock` 保护环形缓冲区（`m2s_*`、`s2m_*`）、`master_refs`、`slave_refs`、`locked`、`master_nonblock`、`slave_nonblock`、`master_waiting`、`slave_waiting` 和 termios 状态，以及窗口大小（`ws_row`、`ws_col`）。
+
+`g_pty_alloc_lock` 与 per-pair lock 从不嵌套；阻塞 read 入队时使用 `per-pair lock -> wait-queue lock`。
+
+- `pty_alloc()` 在 `g_pty_alloc_lock` 下预留槽位，释放锁后分配缓冲区，再在该锁下发布初始字段；分配期间不持有 pair 或分配锁，失败时退还预留槽。
+- 数据操作由 per-pair lock 保护；会话与前后台检查使用公共控制锁，信号通知在 pair 锁外完成。
+- master/slave close 路径获取 per-pair lock 来更新各自的引用计数；只有两端引用和等待者都清零后才释放缓冲区并清除 `in_use`。
+- 阻塞 read 在持有 per-pair lock 时把任务加入对应 wait queue，再释放 pair lock 并调度；write 和对端 close 会唤醒该队列。
+
+由此得出的规则：
+
+- 不要跨 VFS 操作持有 per-pair lock。等待队列操作只按 `per-pair lock -> wait-queue lock` 的局部顺序短暂嵌套。
+- `g_pty_alloc_lock` 在 `kmalloc` 期间保持持有，`pty_maybe_free_locked()` 也在 per-pair lock 下执行 `kfree`。两者都是现存例外；新的代码不得复制这种模式。
+
+### loop
+
+`g_loop[i].lock` 每个 loop device 一个，保护 `in_use`、`backing_vf` 和 `backing_size`，没有局部顺序。
+
+- `loop_set_fd()` 在获取 loop lock 之前先从 VFS 获得 `vfile_t` 引用和大小。
+- `loop_clr_fd()` 在 loop lock 下清除状态，然后释放锁，再释放 `vfile_t` 引用。
+- `loop_dev_read()` 和 `loop_dev_write()` 在 loop lock 下复制 `backing_vf` 和 `backing_size`，释放锁后再无锁调用 backing file 的 `lseek`/`read`/`write` 操作。
+
+loop lock 从不跨 backing-file VFS 操作持有，loop lock 下也不发生内存分配。
+
+### DW SDIO
+
+每个绑定的主机都有独立 `sdio_priv_t`，没有跨设备的全局控制器状态。
+
+- `lock` 是可睡眠 mutex，串行化命令/数据寄存器、卡状态和扇区传输；`sdio_io()` 获取它。
+- `irq_lock` 是 spinlock，只保护中断 latch。传输可在持有 `lock` 时获取它，反向禁止。
+- IRQ 顶半部只收集/清除状态并唤醒等待者，释放 `irq_lock` 后才 flush 唤醒队列。
+- 完成等待先短暂轮询，再按最多 5 ms 的 chunk park；所有循环都有 deadline。 FIFO 循环每次重新读取实际 FIFO 状态，中断事件不能代替 FIFO 空/满条件。
+- probe 的卡枚举全程轮询；完成枚举后才申请 IRQ、打开控制器中断。无 IRQ 或显式`a20.dw-sdio.poll=1` 时仍通过同一寄存器协议轮询。
+- class 核心在 remove 前排空活动操作；remove 屏蔽中断并等待在途 IRQ，随后受管动作释放主机状态。受管动作在 MMIO 取消映射前执行，probe 失败也执行同一路径。
+
+传输锁内不分配、不调用 VFS。CRC 或数据超时后停止该卡继续传输，显式重新绑定后重新枚举，避免继续使用未知的卡/控制器数据状态。
+
+### StarFive GMAC
+
+每实例 `starfive_gmac_priv_t.lock` 是 spinlock，保护 TX/RX descriptor ring 与 `tx_busy/rx_busy`。
+
+- 实例池 `g_gmac_insts[]`（最多 4 个）按 MMIO 基址查找，probe 时分配。
+- `starfive_gmac_send()`、`starfive_gmac_recv()`、`starfive_gmac_poll()` 在锁内完成寄存器轮询路径并检查 descriptor ownership bit。
+- 锁内不做分配、VFS 或回调网络栈；`mdelay()` 只出现在 init/PHY 阶段（锁外）。
+
+IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。多实例已支持，但数据面仍是轮询，未接 IRQ。
+
+### Loongson-2K GMAC
+
+每实例 `ls2k_gmac_priv_t.lock` 是 spinlock，保护 TX/RX descriptor ring 与 `tx_busy/rx_busy`。
+
+- 实例池 `g_ls2k_gmac_insts[]`（最多 4 个）按 MMIO 基址查找，probe 时分配。
+- `ls2k_gmac_send()`、`ls2k_gmac_recv()`、`ls2k_gmac_poll()` 在锁内完成寄存器轮询路径并检查 descriptor ownership bit。
+- 锁内不做分配、VFS 或回调网络栈。
+
+IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面仍是轮询，未接 IRQ。
+
+### AHCI
+
+`ahci_port_t.lock`（`port->lock`）是 sleepable mutex，保护单端口 command slot、command table 和共享 transfer buffer。它没有局部顺序，类 read/write 获取该锁后串行完成分块 I/O。
+
+等待模型：mutex 串行化整个命令。提交后先做有界短轮询；有 IRQ 时在仍持有 sleepable mutex 的情况下 park 到 wait queue，top-half 不获取 mutex，只记录状态并唤醒；无 IRQ 时回退有界轮询。这里允许睡眠是因为它不是 spinlock，但仍限制每端口一个 in-flight 命令。
+
+**AHCI_IRQ_MODEL**（完成路径中断化后）：
+
+- 驱动默认走中断路径。probe 时先 `request_irq()`，成功后才写 `PxIE` 和`GHC.IE`；`a20.ahci.poll=1`（或平台没有可路由的 IRQ）时两条都不写，保持纯轮询。**顺序不能反**：PxIE 先于 handler 打开会让一个无人清理源的 level 线打爆 CPU。
+- `port->last_is` 是唯一跨越 IRQ 边界的共享状态：top-half 先把它发布出去再写清 `PxIS`，等待者必须还能看到已被确认的 `TFES`。因此它用`__atomic_load_n/store_n` 的 acquire/release 访问，而不是 `volatile` ——在弱序 ISA 上 `volatile` 不提供任何顺序，而 handle 里 publish `last_is` 与紧随其后的 `proc_wake_q_flush()` 之间正好存在这个窗口。
+- top-half 只做：读 `PxIS` → 发布 `last_is` → 写清 `PxIS` → `wait_queue_collect_all()` → **在锁外** `proc_wake_q_flush()`。它不获取 `port->lock`，不 park，不分配，也不碰调度器内部锁。
+- 等待者 park 前后各重查一次 `PxCI`/`PxIS`/`last_is`，所以"完成先于入队"不会睡过去；park 分片有上限（`AHCI_PARK_CHUNK_MS`），丢唤醒只会退化成重查，不会变成停滞。
+- 计数：驱动自有计数器经 `/proc/a20/perf` 暴露（`ahci_commands` / `ahci_irq_completions` / `ahci_irq_wakeups` / `ahci_park_rounds` / `ahci_poll_completions` / `ahci_errors`）。中断路径和轮询回退从外部看都"盘能用"，只有把两者分开计数才能区分。
+
+仍存在的限制：单 controller / 单 port / 单 command slot；`port->last_is`是单字，所以同一端口一次只允许一个 in-flight 命令；驱动没有 MSI-X 路径，只走 INTx 或轮询。
+
+### VirtIO-SCSI
+
+`virtio_scsi_dev_t.lock`（`dev->lock`）保护 request queue descriptor、avail/used index、共享 request/response、单命令 buffer 和计数器（`commands`/`flushes`/`timeouts`/`irq_completions`/`spin_completions`）。它没有局部顺序；`dev->lock` 是 sleepable mutex，当前每控制器只有一个同步 in-flight 命令。
+
+**已知限制**在于每控制器当前只有一个同步 in-flight 命令，且使用混合完成窗口：先在锁内短时自旋轮询（`VIRTIO_SCSI_HYBRID_PRE_POLL_US`），随后 park 等待（IRQ 注册失败时回退纯轮询）。睡眠锁 `dev->lock` 不被 IRQ top-half 持有，因此轮询窗口不会阻塞中断路径。未来多队列实现必须改为 per-request 状态与 completion。
+
+**VIRTIO_SCSI_IRQ_MODEL**（完成路径中断化后）：
+
+- probe 按 virtio_blk 同样的三级阶梯选路：先 `msix_prepare()` + `request_irq(msix_base)`并 `msix_arm()`（requestq 一个 vector；controlq/eventq 建了但当前不驱动）；失败则 `dev->vt.irq >= 0` 时按 `shared_irq` 注册 `IRQF_SHARED` 的 INTx；都失败、或 `a20.virtio-scsi.poll=1`、或平台没给出 IRQ，才落到纯轮询。`dev->irq_mode` 记录实际走的那一级，只有 `A20_BLK_IRQ_MSIX` 才写 `INTERRUPT_ACK`。
+- top-half（`virtio_scsi_irq_handler`）不获取 `dev->lock`，不读 descriptor/avail/used，只做三件事：`irq_count` 用 `__atomic_fetch_add(RELAXED)` 累加 → 读`VIRTIO_MMIO_INTERRUPT_STATUS` 并在非 legacy 时写 `INTERRUPT_ACK` → `wait_queue_collect_all()` 收集后**在锁外** `proc_wake_q_flush()`。`irq_count` 是锁外原子而不是 `dev->lock` 下的普通自增，正是为了让 top-half 完全不碰睡眠锁；它只用于统计，不参与完成判定。
+- top-half **不**按 `isr == 0` 提前返回。MSI-X 下一条 used entry 不会置`INTERRUPT_STATUS`，沿用 virtio_blk 那类 "无 ISR 即返回" 的写法会让 MSI-X 的 park 等待永远收不到唤醒。
+- 等待者（`virtio_scsi_command`）在 link 进 wait queue 后重查一次 used index，若发现完成发生在 park 之前则记 `irq_completions`，否则记 `spin_completions`；分片 park 有上限，丢唤醒只退化成重查。
+- 计数经类接口 `A20_BLK_IOCTL_GET_STATS` 暴露（**不用** `/proc/a20/perf`： perf 是全局计数器，无法把数字归属到被测的那一个控制器）。读计数在`dev->lock` 下取快照。
+- remove 回收：MSI-X 路径 `free_irq(dev->vt.msix_base)` + `msix_teardown()`；否则 `free_irq(dev->vt.irq)`；随后清 `irq_registered`/`irq_mode`。
+
+### E1000
+
+`e1000_device_t.lock`（`nic->lock`）保护 RX/TX descriptor、buffer、`rx_next/tx_next/tx_done`和驱动私有的中断计数。局部顺序是 `g_lwip_lock -> nic->lock`。send/recv/poll 可由 lwIP 在外层锁下调用，驱动锁下不得回调 lwIP、分配或睡眠。
+
+数据面改为中断驱动后，IRQ top-half 的锁用法必须按下面记录，否则它就是未登记的嵌套：
+
+- `e1000_irq_handler()` 先取 `nic->lock` 做 `e1000_reclaim_tx_locked()`，**释放锁之后**再去取`g_lwip_lock` 排空 RX。因此两条锁之间不存在任何方向的嵌套，不与 `g_lwip_lock -> nic->lock`冲突，也没有为它新增局部顺序条目。
+- `e1000_poll()` 只取 `nic->lock`（读 ICR + reclaim）。它**不**排空 RX：排空是 lwIP 栈在`g_lwip_lock` 下做的，poll 路径再排一次会把同一个包投递两次。
+- ISR 不跨 `nic->lock` 等待硬件，也不在任一锁下分配或睡眠。
+
+已知限制：`a20_lwip_process_netif_irq_locked()` 按 ring 上限一次性排空，没有 NAPI 式的每次 IRQ 处理预算，所以 ISR 在包量很大时会长时间占用 `g_lwip_lock`。加预算要改`kernel/net/backends/lwip/lwip_stack.c` 的共享函数（virtio-net 同样调用它），不是驱动内的改动。
+
+### VMSVGA/SVGAv3
+
+`vmsvga_device_t.lock`（`svga->lock`）保护 command buffer header、command submission 和 update 序列，没有局部顺序。`flush` 在锁内提交并轮询短 command completion；不得在此锁下执行 framebuffer 映射、VFS 或用户 copy。
+
+### GPU 默认选择与 class 调用
+
+默认选择修改在 lifecycle 协调域内完成；`g_gpu_lock` 只保护所选 device 元数据引用与缓存的原生角色优先级。锁内允许 device_get 保留快照，不能解引用可撤销的驱动 ops、调用驱动、分配、日志或做最后 put。被替换 device 在锁外交还。重新选择在 lifecycle 域内枚举在线 class，使用短 active call 查询候选角色，排除 headless；渲染同级时原生输出优先于保留固件输出。
+
+默认读取先在选择锁内 pin device，解锁后取 class 引用并交还临时 device；读取与 active-call 准入不取 lifecycle mutex。退出持 lifecycle 等候 active call 时，新的离线读取必须能够返回 `-ENODEV`。active call 内不能发起或等待依赖自身 drain 的生命周期动作。access_end 先清空调用者句柄，再 call_end/put，不持选择锁执行最终回收。fbdev/sysfs 一次操作只使用捕获的同一 device/ops；此顺序本身不建立存储租约；RAM scanout 另以 VMO 引用交接给 VMA，旧物理分支仍需存储协议，DRM 已使用下述每 publication namespace。
+
+能力 provider 只复制缓存，不做 I/O、分配、VFS 或等待，不能重入 lifecycle。注册在串行绑定所有权内调用，普通 `gpu_device_capabilities_get` 复用已有 class access，不获取 lifecycle mutex。provider 总在 `g_gpu_lock` 外执行，失败声明不修改选择。核心优先级须保留全部等级，不能截断为 bool 或找到保留固件输出的 renderer 就提前停止重选；它只是策略元数据，不是资源引用，见 [原生能力](native-runtime.md#原生-gpu-能力与默认选择)。
+
+### DRM/KMS/virtio-gpu 3D
+
+每个 publication 有独立 `gpu_lock`、`store_lock`、vblank mutex/等待队列。GPU mutex 串行化该 namespace 的命令和状态操作；等待 mutex 时尚未取得 active class call。文件、dma-buf pin 和临时 operations 计数分别保护 CPU namespace，不能将 active call 当存储引用。
+
+普通入口仅短暂取 registry mutex 增减 operations，GPU mutex 释放后才唤醒等待者并归还 operation；worker 持 registry mutex 遍历，但只能 trylock GPU mutex，忙则延迟重试，不能阻塞等待反向持有者。offline observer 不取 registry mutex，只唤醒和调度。持 active call 不得等待自己的 lifecycle drain。
+
+store mutex 保护 GEM/FB/name/CRTC、每文件 handle 集合/对象 handle_refs 与清理列表。owner 安装、失败输出回滚和 close 都在同一 device GPU 操作中串行，不能先发布到用户再补引用；framebuffer owner 在 close 的对象释放前清除，已停止文件仅持 ID 条目。GEM 对象、初始 handle 条目与 resident RAM 在 store 锁外完整构造，仅 ID/引用发布进入 store mutex；失败销毁同样在锁外。cg_task_group_pin 会取 task park_lock，DRM 必须在 GPU mutex 前捕获，不能在持设备操作锁后再读取任务归属。原生工厂持有自己的 charge owner pin，outer ioctl 在 GPU 操作结束后交还临时 pin。detach 在锁内，VMO release、resource_unref 和 context destroy 在 store 锁外；GEM pin 可跨锁保留存储，导出 dma-buf 也持 pin。store 与 vblank mutex 不同时持有；vblank 只保护 pending flip/FIFO，read 不持它或 class call 进入 park。单控制台 owner mutex 继续串行化实际 present 与 console 恢复。
+
+PRIME 导入的 fd lookup/ref 和最终 put、导出的 fd 安装与错误 close 在 GPU 操作作用域之外。即使并发 fd close 使 put 成为最后一次引用，也不能在 GPU A mutex 内调用 GPU B 的 close。成功停止后的 reaper 不进入任何旧驱动回调；已有 VMA/导出 fd 自持 CPU backing。完整语义见 [DRM 退休](native-runtime.md#drm-文件命名空间与失败退休)。
+
+### 连续 RAM 与 scanout 交接
+
+连续 VMO 工厂的对象/页表分配和清零不持 MM 或外层 spinlock；已有 PFA split 在内部短暂锁住元数据，将高阶独占块转换为 canonical 页引用，成功后只用 frame_put 交还尾部。发布后的 extent/slot 不再变化，info 在调用者保留 VMO 的前提下读取。
+
+get_scanout 必须在 scoped class access 内与 producer 模式替换协调，先取得 VMO 引用再交出一致描述符。fbdev 持临时 snapshot 调用 unlocked mm_mmap_vmo_cap；wrapper 开启 TLB window、取得 MM lock、调用既有 locked mapper，解锁后 finish/deferred release。VMA 自持 VMO，不把驱动 release callback 带入 MM。临时 snapshot 先清描述符再 put，producer remove 只交还自己的引用；最终 MM 释放不需要 class/lifecycle 锁或设备代码。引用存活不能替代硬件停止。
+
+### VirtIO reset 与命令封闭
+
+原生 lifecycle 串行化 probe/remove；每绑定独立 DMA instance，claim 不覆盖保留对象。四种命令共用 native request queue，仍在 command mutex 内建立 staging/descriptor 并驱动 IRQ/poll 等待。command_active 覆盖整个事务；未知完成封闭暂存区，不提前 signal native fence。
+
+execution stop 在 class drain 前先设置 closing，检查 command_active 并 trylock；忙返回 EBUSY，不在 lifecycle 下等待 issuer 私有锁。成功持锁后有界 reset；status=0 才 free_irq/排空 handler，随后队列退休请求并在锁外 signal fence。remove 在 drain 后释放默认选择、staging、VMO 和队列引用，解锁后才 put 包含 mutex 的 allocation。队列 stop 失败保留代码/IRQ/context，既有 issuer 观察 closing 后能退出，调用者显式重试。
+
+### VirtIO-GPU transport
+
+`inst->command_lock`（`virtio_gpu.c`）保护共享请求/响应暂存区（`big_req`/`big_resp`）、descriptor 表、avail/used ring 索引。四种命令的 staging 和共同 execute 路径都在它之下运行。
+
+关键规则：`inst->big_req` 是**每实例一块**共享缓冲，四条路径都会增长、`kfree` 并重填它。因此 ATTACH_BACKING 与 SUBMIT_3D 的请求体必须在锁内构建，descriptor 里 `va_to_pa(inst->big_req)` 也必须在（可能的）重新分配之后计算，否则拿到的是刚被释放的指针。DRM 侧一次 EXECBUFFER 会为每个 buffer 各调一次 ATTACH_BACKING，所以这条路径天然并发。
+
+局部顺序：`inst->command_lock` 之下可进行 task allocation 和 IRQ-assisted park，不得取得 lifecycle 串行化或进入 VFS。native queue 后端 issue 不再取得该 mutex；IRQ handler 只确认中断并锁外唤醒 waiters，不等待 issuer。内部 native request fence 不暴露给外部通知回调；其他 provider 调用 queue_run/stop 时不能持有其 fence callback 需要的外锁。
+
+### VirtIO input
+
+每实例 `virtio_input_inst_t.lock` 保护 event virtqueue、用户事件 ring 和 waiter，没有局部顺序。IRQ/poll 路径在锁内 drain 有界队列并 collect 一个带token 的 waiter，释放实例锁后 flush wake queue；阻塞 read 使用 Park/Wake协议并在调度前释放锁。
+
+### virtio-console
+
+单实例 `g_vport.lock` 保护字节环、控制台镜像缓冲（`echo`/`echo_len`/`echo_pos`）、rx/tx 两个 `last_used` 游标和计数器。它**没有局部顺序**，因为镜像投递按下面的写法完全在锁外：
+
+- `vport_rx_pump()`（IRQ top-half 与 read/poll 共用）在锁内排空 used ring、推进字节环、重填 avail ring；notify 和控制台镜像都在**解锁之后**做。
+- 镜像不能简单地在锁内调 `uart_receive_char()`：那是 UART 的 `rx_lock`（另一个设备私有锁），在本文档里没有记录的嵌套顺序就是 bug；IRQ top-half 也不能用 4 KiB 的栈缓冲。`vport_console_flush()` 因此每轮在锁内只拷 `VPORT_ECHO_BATCH`（64）字节到栈上，释放锁后再逐字节喂给 `uart_receive_char()`，两把锁从不同时持有。
+- 发送是同步的：单描述符在飞，`write()` 先在锁内填缓冲与 avail，**释放锁之后**才有界等待 used 游标前进（2 s），超时计 `tx_timeouts` 返回 `-ETIMEDOUT`。等待硬件从不发生在自旋锁内。
+
+### virtio-rng
+
+单实例 `g_vrng.lock` 保护字节环、每槽 `slot_posted[]` 记账、`last_used` 游标、`entropy_bytes`/`read_timeouts` 与 `valid`。它**没有局部顺序**，因为驱动不在锁内调用任何别的锁持有者：
+
+- `vrng_pump()`（IRQ top-half 与 read/poll 共用）在锁内排空 used ring、把字节推进字节环、清 `slot_posted[]`；`dma_sync_for_cpu()` 与 notify 都不在它里面。
+- `vrng_post_free()` 按 descriptor → `wmb()` → avail entry → `wmb()` → notify 排序，notify 在**解锁之后**发出。
+- read 的有界等待（500 ms `proc_yield()` 循环）在**锁外**进行，每轮只短暂取锁排空。这条是硬约束：等待设备应答属于"等待硬件"，绝不能发生在自旋锁内。
+- 熵池投递在锁外。`random_reseed()`（`kernel/core/random.c`）自己取 `rng_lock`，并且经 `arch_entropy_sample()` 触及 `proc_current()` 与 `frame_free_count()`；调用点因此放在 read 路径（进程上下文）而不是 ISR。若将来要让 ISR 喂池，必须先把 `arch_entropy_sample()` 改成中断安全，否则就是在一个中断里读调度器状态。
+
+### xHCI
+
+`xhci_controller_t.lock` 现在是真实生效的 controller 锁：全部 `usb_hcd_ops_t` 回调、`xhci_irq_handler()` 和 `xhci_remove()` 都取它，它保护 command/event ring、endpoint 链、事件环游标、`xfer_busy` 与 `irq_events`/`poll_events`。
+
+规范上「spinlock 下不得等待硬件」不能因为缺锁而绕开，所以等待被移出锁外，用一个所有权标志串行化：
+
+- `xhci_xfer_acquire()` 在锁下自旋取 `xfer_busy`；**持有者取到标志时同时发布 `xfer_deadline`（`XHCI_XFER_HOLD_BUDGET_MS`），自旋方读这个 tick 截止时间而不是数自己的轮数**，过期返回 `-EBUSY`。这是拒绝而不是排队：controller 同时被中断路径和多个 class 驱动使用，而一轮自旋的耗时随机器而变，固定轮数等于在别人的临界区里给出无界时间。两侧共用同一个预算是结构性的：自旋方读到的截止时间不可能早于持有者手上的那个。USB storage 现在用 sleepable mutex 串行自己的 BOT 交换，但 xHCI 这一层仍是自旋语义，因为它的另一个使用方是中断上下文。
+- `xhci_drain_events()`/`xhci_wait_event()` 只在锁下取 TRB、分类，更新 `ERDP`；**completion 回调成批在锁外执行**（`xhci_run_completions()` 用同一个 `*flags` 释放再取回），因为 HID completion 会重提 URB，重提直接回到本函数的同一个非递归锁，锁内回调即死锁。
+- `xhci_wait_event()` **每轮尝试各取一次锁，取到 TRB 或确认 ring 为空后立刻释放**，锁（含本地中断）绝不跨等待持有：整个 `XHCI_WAIT_LOOPS` 预算一直持锁会让本 CPU 丢掉定时器 tick、其它设备中断和 IPI 服务，`-smp 1` 下就是整机。
+- `xhci_irq_handler()` 在 `xfer_busy` 置位时**只 ack `INTR0.IP` 不消费 ring**：只有同步传输的持有者能把自己的 TRB 匹配回请求，抢走它会让控制传输拿到错误的完成；同时电平触发的 INTx 在有界忙等期间会反复重入，只 ack 是让它退化的唯一办法。
+
+因此 HCD **不在持 `xhci->lock` 时回调 class**，class 可以安全地在自己的锁下走到 `xhci->lock`：单向顺序 `class lock -> xhci->lock`。
+
+IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`irq_events`/`poll_events` 由 process-context 的 `xhci_op_poll()` 快照后打印成 `[XHCI] completions: irq=N poll=M`。
+
+已收集的锁外 completion 用全局/每 slot 计数保留存储；prepare 或 abort 发现相关回调在途返回 `-EBUSY`，不在生命周期锁下等待。标量 slot 快照和计数保留的 endpoint 记录避免回调自行释放 URB 后再解引用；slot abort 同样等相关回调归零后才释放记录。双 CPU 的控制器和 HID/hub 独立退出/重绑与 host 线程交错已验证；storage 及其他 DMA 错误阶段仍需各自协议。
+
+### USB 部分枚举清理
+
+USB register/scan/enumerate/unregister 使用原生生命周期协调器串行保护拓扑；poll 通过 try 入口，忙时清除防重入并跳过。普通协调不压制 probe，支持不同 HCD 的同步嵌套，拒绝同 HCD 重入及活动下游期间注销上游。注册前保留容量，扫描按当前注册表重新选择，避免回调增删导致旧行失效。端口清理对象先于 slot 分配建立，硬件已交还 token 后的错误路径无需再分配保留记录。部分 interface 发布失败也要先 offline、确认 abort_slot 成功，再解绑和释放；不能先 remove 再停止可能读 pending URB 的事件环。失败保留对象/计数/阶段，slot 已停后的 remove 重试不重复控制器命令。HCD 的自旋锁不跨等待，完整协议见 [原生运行时](native-runtime.md#部分-usb-枚举的所有权交还)。
+
+### USB HID
+
+每接口 `usb_hid_dev_t.lock` 保护 event ring 和 previous report；URB 的重提交在锁外进行；`usb_hid_complete()` 现在自己取该锁，因此不论 completion 来自 IRQ handler、`usb_core_poll()` 还是别的 endpoint 的 event wait，锁覆盖都是一致的。
+
+解析 report 在 `h->lock` 下，随后释放锁再通知 input mux、发送控制台字符及重提 URB。HCD completion 也在 controller 锁外执行；不能在 HID spinlock 内调度唤醒或同步控制传输。
+
+配套的两条写法也是规范的一部分：
+
+- `usb_hid_read()`/`usb_hid_poll()` 在取 `h->lock` **之前**调用 `usb_device_poll()`；该入口尝试生命周期协调，忙时直接返回，不阻塞 teardown 排空当前 class 调用。成功后验证注册表、端口归属和全部祖先仍可使用，再在协调域内调用 HCD poll。class 活动调用另保留接口存储。
+- 端口退出先确认 slot 停止且相关锁外回调计数归零，再解绑 HID；同一物理控制器的 pending 端口在彻底清理前阻止新 slot 分配，避免编号提前复用。HID/hub 独立 remove 使用 `usb_interface_release_endpoints()`，后端单向关闭收集/提交，相关回调仍在途则返回 `-EBUSY`；不能清空回调字段后直接释放 URB。失败保留绑定/存储，重试不重复已确认的停止阶段，其他 endpoint 继续运行。
+
+### VMO 快照到 DMA
+
+Rust VMO 生命周期层持 VMO lock 验证全部 canonical slot，再由 frame_get_many 在 PFA 锁下保留整批引用；不在锁下分配、物化缺页或访问 pager。单批最多 4096 页，输出数组不与 VMO 元数据别名。DMA adapter 在锁外分配数组，快照返回后才取得 managed domain mutex、检查 policy/调用 provider/sync，最后归还临时 pin。provider 可以在事务后协调 source resize，不能要求自己仍持 VMO lock；页快照与源对象后续 extent/charge 独立，跨 mapping 的访问排他仍由调用方负责。
+
+### DMA buffer 与同步 bulk
+
+显式 `driver_dma_map_buffer()` 使用现有 managed domain mutex，和页数组 map、unmap、shutdown 串行。policy 在额外保留 buffer 及调用 provider 前预检完整页覆盖；map 期间调用者保留自己的引用。mapping 只取得整块 buffer 引用，不取得高阶尾页引用；全部失效确认前不交还，CPU 同步也推迟至全部成功。RISC-V native provider 借用这份存储，用户态旧入口另有 order-0 pin；两者不得混用。多个 domain 映射同一 buffer 时，CPU/device 访问的排他交接由调用方协调。
+
+buffer 分配不取核心 lifecycle mutex，只用既有设备引用/registry 查询和 PFA 锁；这允许 active class 调用分配，不会阻塞正在持生命周期锁排空自己的退出。状态核对不是提交 lease，驱动仍须协调 mask/请求。最后 put 限任务上下文，使用保存的 PFN/order，不从请求尺寸推导实际回收阶数。xHCI 在 probe 预分配并持有暂存对象；同步 bulk 用 xfer_busy 独占 copy/wait，复制和 DMA sync 在 controller spinlock 外，提交前重新查退出状态。失败保留私有暂存区，成功的 controller remove 才交还它，不会向硬件提交调用者地址。
+
+### USB storage
+
+每实例 `usb_storage_dev_t.lock` 是 sleepable `mutex_t`，保护 BOT tag、CBW/CSW 和共享 4 KiB data buffer。局部顺序 **`st->lock -> xhci->lock`（单向）**。
+
+`msc_command()` 从 CBW、data 到 CSW 全程持有这把 mutex，而 xHCI bulk submit 会同步等待 transfer event。这在 mutex 下是允许的：等待期间可以让出 CPU，也不会在别人持 spinlock 时把中断关掉数秒。块层从进程上下文调用，因此这里不存在“在原子上下文睡眠”的问题；同一实例的第二条命令会阻塞在 mutex 上，而不是并发改写 CBW/CSW。xHCI 侧的 `xfer_busy` 仍用有界自旋，因为 controller 可能被中断上下文的路径访问；它把「两个同步传输同时抢一个 controller」降级为一次 `-EBUSY`，与 storage 的 mutex 是两个层次。
+
+## 跨驱动规则
+
+1. **禁止反向顺序。** 如果必须在持有驱动锁时获取全局锁，需要在本文档中把它记录为局部顺序。未记录的嵌套就是 bug。
+2. **禁止在 spinlock 下阻塞。** 任何可能阻塞的路径都必须先释放所有 spinlock。
+3. **除非已记录，否则禁止在驱动锁下执行 VFS 和分配。** 唯一已记录的分配例外是：
+   - `PTY` 在 `g_pty_alloc_lock` 下执行 `kmalloc`，并在 per-pair lock 下执行最终 `kfree`。驱动完成路径若需要唤醒任务，只能在驱动锁内 collect，在解锁后 flush。 USB storage 的锁内同步硬件等待和 USB HID completion 的锁覆盖缺口是已知不符合项，不属于允许例外。
+4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
+
+> 不要在设备锁下调用 `kmalloc`、VFS 或 scheduler；不要在 spinlock 里轮询硬件直到超时；不要临时发明"先拿设备锁，再拿 tasklist_lock/park_lock"这种嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../../testing-gates.md)。
+
+## 参考
+
+- `kernel/include/core/lock.h`：全局锁顺序和 spinlock 原语。
+- `kernel/drivers/block/virtio_blk.c`：`inst->lock` 实现。
+- `kernel/drivers/net/virtio_net.c`：`net->lock` 与 `g_lwip_lock` 交互。
+- `kernel/drivers/net/e1000.c`：`nic->lock`，中断排空与发送路径共用。
+- `kernel/drivers/net/rtl8139.c`：`nic->lock`，中断处理函数与 send/recv/poll 共用。
+- `kernel/drivers/char/uart.c`：`rx_lock`（接收环形缓冲区、前台 PGID，以及接收路径上的 ISIG 判定）。
+- `kernel/drivers/char/virtio_console.c`：`g_vport.lock`，锁外 notify、锁外控制台镜像与锁外的同步发送等待。
+- `kernel/drivers/char/pty.c`：`g_pty_alloc_lock` 和 per-pair `lock`。
+- `kernel/drivers/block/loop.c`：per-device loop lock。
+- `kernel/drivers/block/dw_sdio.c`：每主机 `sdio_priv_t.lock`（mutex）串行化轮询与中断传输路径，`irq_lock` 保护中断 latch。
+- `kernel/drivers/net/starfive_gmac.c`：per-instance lock 串行化 descriptor ring。
+- `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
+- `kernel/arch/riscv64/boards/visionfive2/board.c`、`kernel/arch/loongarch64/boards/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。
+
+### probe 清理的调用帧
+
+`device_probe_use_remove()` 的意图放在 lifecycle mutex 保护的私有栈帧，不分配内存、不增加公开字段。只允许当前帧的设备选择，嵌套 probe 返回后恢复前一帧；尚在构造的设备/祖先拒绝递归解绑。probe 返回后先弹帧，再进入既有可失败退出管线。PROBE_CLEANUP 的 class offline 位于私有 removal 帧内，防止 offline observer 递归销毁实例；consumer 阻塞时不提前标 REMOVING，否则重试会漏掉首次 quiesce。
+
+### 可失败的驱动退出
+
+`g_driver_core_ops` 仍是 lifecycle mutex，`g_driver_core_lock` 仅在数组/claim 变更时持有；quiesce/remove/class drain 与 bus 通知不持 registry spinlock。驱动退出和设备递归移除的意图栈只在 lifecycle mutex 下读写，不分配公开生命周期对象。正在退出的驱动拒绝新匹配，正在移除的 provider/parent 链拒绝新消费关系；递归退出同一对象返回 `-EBUSY`。
+
+新异步驱动的 execution stop 先于 class drain，可失败返回，成功项 checkpoint；全部成功后才 quiesce/drain/remove。旧 void quiesce 保持兼容顺序。回调不能等待必须取得 lifecycle mutex 的工作；pre-consumer prepare 更早冻结仍被 consumer 借用的硬件存储，execution stop 不替代它。完整错误/重试契约见[原生运行时](native-runtime.md#可失败的解绑与显式重试)。
+
+native queue 的 spinlock 仅保护状态和链表，嵌套 workqueue 调度/fence status 查询，不跨 prepare/issue/retire/stop、fence signal 或 native owner 最后 put。同队列 dispatch lease 串行化任务回调；并发 pump/stop 返回 EBUSY。IRQ complete 只修改状态并调度 work，不调用后端或释放存储。signal 前释放 dispatch lease，允许通知重新查询/推动队列；不承诺通知次序。
+
+### 提前退出准备
+
+`device_add_remove_prepare()` 的私有记录在当前 probe 分配，并要求先选择可失败 probe 清理；退出本身不分配记录。核心在自己的 removal 帧内 offline class、设置 PREPARING，再依次执行尚未完成的准备。回调失败时还没有递归解除 consumer，成功记录保留到最终 devres 释放；不能等待需要 lifecycle mutex 的工作。xHCI 在控制器自旋锁下封闭提交后释放锁，再 free_irq、检查 active transfer、等待硬件状态和访问 PCI；新的准备路径不在设备自旋锁下调用 PCI/discovery API。USB 拓扑已接入同一协调器，锁外 completion 另由 controller 私有计数保留；旧 timeout 的独立 DMA 回收仍需审查。详见 [原生运行时](native-runtime.md#在-consumer-解绑前准备退出)。
+
+### PC I²C 与独立无线服务
+
+- I²C 注册表 spinlock 只保护 adapter/owner/refcount；transfer 始终在锁外。控制器 remove 必须传播引用仍在时的 `-EBUSY`。
+- I²C-HID 的 `io_lock` 串行报告、恢复与停止；`event_lock` 只保护事件 ring。workqueue 的 cancel/destroy 在 `io_lock` 外等待，退出失败保留 context、work 和 adapter。每设备独立 work，回调不持注册表锁。
+- RTW broker 的顺序是 `wifi_open_lock -> wifi.control -> packets_lock`；最后一把只保护固定容量队列，不做用户拷贝、映射或分配。probe/open/remove/close 通过外层 mutex 串行化；存活 owner 或隔离 DMA 阻止新实例覆盖传输状态。
+- R8169 的 ring/counter 锁是每设备对象；remove 先停止新 I/O、屏蔽并归还 IRQ，再确认 TX/RX 停止，随后释放 DMA 和实例。停止超时保留 ring，不能以释放内存冒充清理成功。
+
+### DMA 的 VMO owner 与锁外退休
+
+`driver_dma_map_owned_vmo` 仅接受工厂固定 RAM（kind 4/5），在 provider 前保留 VMO，不持 VMO lock 调用 provider。复用快照的 VMO → PFA 顺序，释放 VMO lock 后才进入 managed domain mutex。失败清理仍持整个 VMO/charge，设备只映射请求视图。普通 unmap/构造回滚先确认全部失效与 CPU sync，退休 mapping/counter；try_unmap 清空 caller 指针后退出 domain mutex，再 put buffer/VMO owner；try_unmap 最后 put 临时 domain 引用，构造回滚依靠 caller 全程保留的 domain 引用。裸 frame_put 保持原页路径；不要把 provider 回调允许重入与锁外 owner 析构混为一谈。
+
+buffer allocation owner 可与 mapping device 不同。其最后 put 可能触发设备 release；owner 回调必须看到 domain 锁已退出且 mapping 已退休，允许按自身生命周期规则重新进入 shutdown。managed provider 的 map/unmap/deactivate 仍不允许重入本 domain。调用者也不能持 owner 析构所需的其他锁跨 unmap。
+
+### 原生 fence 通知的退休边界
+
+fence spinlock 保护 terminal status 与 watch 链和状态。create 在锁外分配，锁内重新验证 pending、取得引用并发布；try_remove 在锁内 O(1) 解除 pending 或检查 RUNNING，成功后在锁外交还 fence/watch。signal 在锁内发布 status，锁外 wake waiters，随后逐个在锁内选择/标记 RUNNING，锁外 callback，返回后再锁内发布 DONE；之后不再解引用 watch。通知与 waiters 不在 fence 锁下执行，不引入 fence → workqueue 的嵌套锁序。外层 producer 仍须避免持有通知所需的锁跨 signal；锁外只指 fence 自己的锁。
+
+producer 引用覆盖整个 signal，watch 另持 fence 引用；IRQ 不做 watch 最后 put/free。callback 必须短小、IRQ-safe、不分配或阻塞；其他任务看到 status terminal 时，try_remove 仍可能 EBUSY，必须保留代码/context 及登记对象后重试。成功 remove 只证明该 callback 不会再运行，已调度的工作由 workqueue 取消/排空协议另行管理，不能在其所需锁下等待。
+
+### 原生协议发布与调用
+
+描述符登记与快照构造由既有 lifecycle owner 串行执行。元数据保存在 devres，publication 一次分配不可变排序数组；没有全局协议注册表。hosted 的设备 endpoint 引用查询沿用 g_class_lock，MCU 仅有设备指针的短保护锁；调用准入只取 endpoint state_lock，不取 lifecycle mutex，随后无锁二分查询不可变元数据。caller 持引用到 end，end 清空 access 后只交还 active call，不在 IRQ/外层锁下触发最后 put。
+
+NET_STATS 的方法是非阻塞计数快照，继承调用者 IRQ 状态，读计数时使用 NIC 的锁，不调用 VFS/分配/生命周期操作。lwIP 的控制面统计路径允许 g_lwip_lock → NIC stats lock；NIC 的 IRQ/收包路径必须先释放自己的锁再进入 stack，禁止反向嵌套。协议本身不允许把这个顺序推广到阻塞 I/O 方法。退出仍先 offline，再 quiesce/排空 active call，最后 remove；metadata ref 不是在线许可。
+
+### 控制终端锁
+
+控制台/PTY 的会话与前台组由 `kernel/fs/tty_control.c` 的控制锁保护，详见[控制终端协议](../../kernel/linux-abi/tty-jobcontrol.md)。PTY pair 锁可嵌套该锁以核对 I/O 代数或发布挂断；控制锁内不取 pair/UART/任务列表锁，不查询 capability，也不发送信号。挂断先发布代数变化，再在锁外唤醒和通知；任务列表内固定引用，释放列表锁后才投递信号。
+
+
+## HDA 播放进度与退出
+
+每个 HDA controller 的 PCM mutex 保护 ring 游标、队列字节及进度回收；work callback
+只 trylock，不等待正在提交的 writer。写入/启动与 callback 使用同一组真实 LPIB/BCIS
+采样及 played-region 清零，不根据墙钟推测消费。state_lock 仅串行化 RUN、generation
+与 closing 的短更新，不能跨延时或 worker join。
+
+生命周期 stop 先在 state_lock 下设置 closing/generation，然后释放该锁。队列 destroy
+在本调用未持 PCM mutex 的情况下进行；其它 writer 可以仍持该锁，callback 遇忙直接
+退出/延后，并在 closing 后不再重排。join 成功后才 trylock PCM mutex 确认硬件停止，
+失败保留绑定、work/context 和 DMA。只有 join、硬件停止与 class drain 全部完成后
+remove 才交还存储。用户 STOP 仅停止当前流，不销毁进度队列，允许后续播放重用。

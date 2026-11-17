@@ -14,7 +14,7 @@
  * split replaces that data-plane lock with one lock per lane. Shared protocol
  * caches use narrow domain guards; control mutation, fragments, multicast,
  * service timers and loopback retain an all-lane barrier. See
- * docs/net/net-lanes.md for the boundaries and measured gates.
+ * docs/zh/net/net-lanes.md for the boundaries and measured gates.
  *
  * CONFIG_NET_LANES=1 removes lane queues/context and keeps the serial NO_SYS
  * path. Its externally visible semantics are checked against the same traffic
@@ -308,7 +308,7 @@ void net_lane_rx_count_processed(unsigned lane);
  * the scheduler hot path's way when nothing is arriving.  It counts frames
  * staged and not yet popped, so it is raised by the producer itself rather than
  * by the event a blocked reader is waiting for -- see the liveness note in
- * docs/net/net-lanes.md, stage D. */
+ * docs/zh/net/net-lanes.md, stage D. */
 unsigned net_lane_rx_queued_total(void);
 /* Ingress must reserve room before removing a frame whose owner is unknown.
  * The single producer holds ingress; consumers can only increase this room. */

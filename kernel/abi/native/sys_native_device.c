@@ -1,7 +1,7 @@
 /*
  * A20OS Native ABI — user-space driver (udriver) syscalls.
  *
- * Design reference: docs/hybrid-kernel/00-design.md §3.2.
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §3.2.
  * The kernel authorizes device windows and delivers IRQs to event
  * queues; device logic lives in user tasks.
  */

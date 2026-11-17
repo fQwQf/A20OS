@@ -1,8 +1,8 @@
 /*
- * A20OS Linux ABI — Capability Envelope mediator (docs/research/05).
+ * A20OS Linux ABI — Capability Envelope mediator (docs/zh/research/05).
  *
  * A capability envelope attaches a budgeted-capability policy (type x rights
- * x time x ops x data, docs/research/03) to an unmodified Linux-ABI process.
+ * x time x ops x data, docs/zh/research/03) to an unmodified Linux-ABI process.
  * The kernel mediates every resource acquisition (open/socket/...) and every
  * resource use (read/write/...) through env_mediate_* entry points; a NULL
  * envelope pointer on the task is the zero-cost fast path.
@@ -19,7 +19,7 @@
  *     attached tasks are killed at their next mediation point.
  *
  * Escape-surface semantics that v1 implements are documented in
- * docs/research/05 §2.5; unmediated surfaces remaining in W2 are listed
+ * docs/zh/research/05 §2.5; unmediated surfaces remaining in W2 are listed
  * there as A4-A10 follow-ups.
  */
 #ifndef _ABI_LINUX_ENVELOPE_H
@@ -47,7 +47,7 @@ struct vfile;
 #define A20_ENV_TYPE_MASK_ALL 0xFFFFFFFFu
 
 /*
- * a20_env_policy — deployment-time policy snapshot (docs/research/05 §2.1).
+ * a20_env_policy — deployment-time policy snapshot (docs/zh/research/05 §2.1).
  * Zero budget fields mean "no limit" for that dimension.
  */
 typedef struct a20_env_policy {
@@ -75,7 +75,7 @@ typedef struct a20_env_stats {
     int      n_shadows;
 } a20_env_stats_t;
 
-/* Runtime invariant audit (E8, docs/research/10 §E8 / 08 §2.4):
+/* Runtime invariant audit (E8, docs/zh/research/10 §E8 / 08 §2.4):
  * walks every registered envelope and re-verifies the safety invariants
  * that TLA+ model checks statically (TypeAllowed, RightsSubCap, budget
  * bounds) plus task-attachment consistency. */

@@ -85,7 +85,7 @@ extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 /* Cluster proxy errno mapping (kernel/abi/native/sys_native_cluster.c,
- * docs/cluster/03-kernel-impl.md §1). */
+ * docs/zh/cluster/03-kernel-impl.md §1). */
 extern int64_t a20_clx_map_send_err(int64_t r, const a20_channel_ep_t *ep);
 
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
@@ -277,7 +277,7 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
     if (kargs.flags)
         return -A20_ERR_INVALID_ARGUMENT;
 
-    /* Typed channel (docs/native-abi/05-ipc.md §2.3): copy the type
+    /* Typed channel (docs/zh/native-abi/05-ipc.md §2.3): copy the type
      * signature from userspace and normalize its limits. */
     a20_channel_type_t ktype;
     const a20_channel_type_t *typep = NULL;
@@ -411,7 +411,7 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
 
             a20_rights_t xfer_rights = (rights_count > 0)
                                        ? user_rights[i] : he.rights;
-            /* docs/native-abi/06-security.md §4.1: ρ_recv = ρ_send ∩ ρ_transfer */
+            /* docs/zh/native-abi/06-security.md §4.1: ρ_recv = ρ_send ∩ ρ_transfer */
             hinfos[actual_hcount].object = he.object;
             hinfos[actual_hcount].type = he.type;
             hinfos[actual_hcount].transfer_rights = he.rights & xfer_rights;
@@ -432,7 +432,7 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
 
     r = a20_channel_send(ep, kdata, kargs.data_len,
                          hinfos, actual_hcount, ht, kargs.flags);
-    /* Cluster proxy endpoints (docs/cluster/03-kernel-impl.md §1): the
+    /* Cluster proxy endpoints (docs/zh/cluster/03-kernel-impl.md §1): the
      * typed-channel refusal of a cross-node handle maps to
      * A20_ERR_CLUSTER_UNSUPPORTED instead of TYPE_MISMATCH. */
     r = a20_clx_map_send_err(r, ep);
@@ -486,7 +486,7 @@ out_ep:
 }
 
 /*
- * sys_a20_channel_call — fused RPC (docs/hybrid-kernel/00-design.md §4.1).
+ * sys_a20_channel_call — fused RPC (docs/zh/hybrid-kernel/00-design.md §4.1).
  *
  * One trap performs channel_send(request) + channel_recv(reply) on the same
  * endpoint with a single handle lookup (READ|WRITE) and a single args
@@ -688,7 +688,7 @@ int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
     }
 
     /* FS watches are keyed on the directory vnode so every handle referencing
-     * the same directory receives the same change events (docs/native-abi/
+     * the same directory receives the same change events (docs/zh/native-abi/
      * 09-native-abi-deepening.md §6).  The vnode is referenced by the fd
      * throughout the watch; vnode_put() cleans up the watch on release. */
     vfile_t *vf = (vfile_t *)dir_entry.object;

@@ -91,7 +91,7 @@ int64_t sys_a20_vm_protect(const a20_syscall_args_t *args)
 
 /*
  * prot_eff — requested protection intersected with the handle's rights
- * (docs/native-abi/04-memory.md §4.2: prot_eff = prot_req ∩ prot_handle).
+ * (docs/zh/native-abi/04-memory.md §4.2: prot_eff = prot_req ∩ prot_handle).
  */
 static uint32_t a20_vm_prot_eff(uint32_t prot, a20_rights_t rights)
 {
@@ -264,7 +264,7 @@ out:
 /* vm_create_vmar — sub-allocate an address-range reservation under a
  * parent (or create a root when parent is NULL).  Ceilings narrow
  * monotonically down the tree; ranges must be page-aligned, inside the
- * parent, and disjoint from siblings (docs/native-abi/04-memory.md §3). */
+ * parent, and disjoint from siblings (docs/zh/native-abi/04-memory.md §3). */
 int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args)
 {
     a20_vm_create_vmar_args_t *uargs =
@@ -395,7 +395,7 @@ out_vmo:
 
 /*
  * vm_share_region — export an address range of the caller's own address space
- * as a new MEMORY handle (docs/native-abi/09-… §7).  The range must be fully
+ * as a new MEMORY handle (docs/zh/native-abi/09-… §7).  The range must be fully
  * covered by a single VM_VMO VMA (a VMO-backed mapping created by vm_map /
  * vm_alloc); the exported handle references the same canonical VMO frames.
  */
@@ -470,7 +470,7 @@ int64_t sys_a20_vm_flush(const a20_syscall_args_t *args)
     if (flags & A20_FLUSH_CLEAN) {
         /* Range writeback for file-backed mappings; VMO frames are owned by
          * the VMO and have no per-range writeback path, so a full cache sync
-         * covers the file range (docs/native-abi/09-… §7). */
+         * covers the file range (docs/zh/native-abi/09-… §7). */
         return vfs_sync();
     }
     if (flags & A20_FLUSH_INVALIDATE)
@@ -513,7 +513,7 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
 
 /*
  * vm_remap is VMA-aware: grow/shrink/move preserve file mappings and
- * shared VMO frames (docs/native-abi/09-… §8 vm_remap row).  prot, when
+ * shared VMO frames (docs/zh/native-abi/09-… §8 vm_remap row).  prot, when
  * non-zero, re-applies protection over the resulting range.
  */
 int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)

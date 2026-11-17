@@ -10,7 +10,7 @@
  * uses.
  *
  * Object model: a debug session is an A20_OBJ_DEBUG handle whose object is
- * a stable task identity object. Operation rights (docs/native-abi/06-security.md §3.2):
+ * a stable task identity object. Operation rights (docs/zh/native-abi/06-security.md §3.2):
  *   READ      debug_read / debug_read_regs / debug_map_memory
  *   WRITE     debug_write / debug_write_regs
  *   WAIT      debug_wait / debug_event
@@ -113,7 +113,7 @@ int64_t sys_a20_debug_attach(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    /* docs/native-abi/06-security.md §8.1: attach requires ADMIN right on
+    /* docs/zh/native-abi/06-security.md §8.1: attach requires ADMIN right on
      * the target task handle; proc_debug_attach re-checks uid/capability. */
     task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
     int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,

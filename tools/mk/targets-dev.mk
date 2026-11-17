@@ -2,8 +2,13 @@
 # Development build (for `make run-riscv64` / `make run-loongarch64`)
 # ----------------------------------------------------------------
 
+ifeq ($(RAMFS_BUSYBOX),1)
+dev-build: $(KERNEL_BIN)
+	@echo "Dev build complete: $(KERNEL_BIN) (self-contained BusyBox RAMFS)"
+else
 dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG) $(ISOFS_IMG)
 	@echo "Dev build complete: $(KERNEL_BIN), $(FAT32_IMG), $(EXT4_IMG), $(ISOFS_IMG)"
+endif
 
 .PHONY: force_user_build force_vbox_rootfs_verify
 force_user_build:

@@ -1,7 +1,7 @@
 /*
  * svcman — hybrid-kernel service supervisor + self-healing demo driver.
  *
- * Design reference: docs/hybrid-kernel/00-design.md §5.
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §5.
  *
  * Responsibilities demonstrated end to end:
  *   1. spawn a service (echod) via task_spawn, passing its service channel

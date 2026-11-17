@@ -27,7 +27,7 @@
  * LicheeRV Nano (same IP, same boot chain) is the better first target.
  *
  * Verified: builds clean under -Werror.  NOT run on hardware.  See
- * docs/platforms/milk-v-duo.md.
+ * docs/zh/platforms/milk-v-duo.md.
  */
 
 #include "core/arch.h"

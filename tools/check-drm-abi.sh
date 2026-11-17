@@ -167,7 +167,8 @@ check_size() {
         echo '  return 0; }'
     } > "$c"
     if ! "${CC:-cc}" -w -o "$WORK/sz" "$c" 2>"$WORK/sz.err"; then
-        printf '  ??  struct %-22s %s\n' "$struct" "$(head -2 "$WORK/sz.err" | tr '\n' ' ')"
+        printf '  BAD struct %-22s compile failed: %s\n' "$struct" "$(head -2 "$WORK/sz.err" | tr '\n' ' ')"
+        sizes_bad=$((sizes_bad + 1))
         return
     fi
     actual="$("$WORK/sz")"
@@ -187,7 +188,7 @@ check_size() {
     echo 'typedef uint32_t __u32; typedef uint64_t __u64;'
     echo 'typedef int32_t __s32; typedef int64_t __s64;'
     awk '
-        /^struct (drm|virtio_gpu)_[a-z0-9_]+ *\{/ { buf=$0; inb=1; next }
+        /^struct (drm_gem_(close|flink|open)|drm_mode_(fb_cmd|fb_cmd2|crtc|modeinfo)) *\{/ { buf=$0; inb=1; next }
         inb { buf = buf "\n" $0
               if ($0 ~ /^\};/) { print buf; inb=0; buf="" } }
     ' "$REPO_ROOT/kernel/drivers/gpu/drm.c"

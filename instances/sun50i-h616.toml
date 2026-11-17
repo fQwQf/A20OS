@@ -7,7 +7,7 @@
 #
 # No [package] section: the SD controller is Allwinner's own sunxi-mmc, not a
 # DesignWare part, so there is no storage path to put an image on.  See
-# docs/platforms/sun50i-h616.md.
+# docs/zh/platforms/sun50i-h616.md.
 name = "sun50i-h616"
 description = "Allwinner H616/H618 (Orange Pi Zero 2 / Zero 3 / Zero 2W) aarch64 bring-up, blob-free boot chain"
 arch = "aarch64"

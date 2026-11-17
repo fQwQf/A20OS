@@ -1,6 +1,6 @@
 /*
  * First Linux-personality brick: a pipe-shaped stream facade over a
- * Native channel pair (docs/hybrid-kernel/05-idl-and-personality.md).
+ * Native channel pair (docs/zh/hybrid-kernel/05-idl-and-personality.md).
  *
  * This is intentionally a small, message-preserving subset. It proves the
  * object translation and close/readiness path before adding a byte-stream

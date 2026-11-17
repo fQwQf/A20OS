@@ -64,7 +64,9 @@ static void dump_user_pt_path(pt_root_t *root, vaddr_t va,
 
 /* Task objects are freed, while the counter registry keeps pointers forever.
  * Aggregate park contention into one static sink, including callsite samples. */
+#if CONFIG_A20_METRICS
 static spinlock_t park_counters = SPINLOCK_INIT;
+#endif
 
 task_t *proc_task_alloc_storage(void)
 {
@@ -84,7 +86,9 @@ task_t *proc_task_alloc_storage(void)
      * global list. Initialize the lock before any publication; task_init must
      * never reset an observable lock. */
     spin_init(&t->park_lock);
+#if CONFIG_A20_METRICS
     t->park_lock.counter_sink = &park_counters;
+#endif
     spin_init(&t->eevdf_deadline_lock);
     spin_init(&t->jobctl_lock);
     return t;
@@ -92,8 +96,10 @@ task_t *proc_task_alloc_storage(void)
 
 void proc_task_park_counters_init(void)
 {
+#if CONFIG_A20_METRICS
     lock_counters_register(&park_counters, "park_lock");
     lock_counters_enable_callsite(&park_counters);
+#endif
 }
 
 void proc_task_init_idle_state(task_t *t, unsigned cpu)
@@ -101,7 +107,9 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
     if (!t)
         return;
     spin_init(&t->park_lock);
+#if CONFIG_A20_METRICS
     t->park_lock.counter_sink = &park_counters;
+#endif
     spin_init(&t->eevdf_deadline_lock);
     spin_init(&t->jobctl_lock);
     refcount_set(&t->refs, 1);

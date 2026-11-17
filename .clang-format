@@ -17,11 +17,11 @@
 # satisfy this file; fix the file's keys if the tree's actual style is the one
 # worth keeping, which is the cheaper direction.
 #
-# See docs/CONTRIBUTING.md 4.2.
+# See docs/zh/CONTRIBUTING.md 4.2.
 #
 # Deliberately NOT set, because the tree does not use them:
 #   - Doxygen comment markers: the project uses plain /* */ blocks and a named
-#     `<THING>_CONTRACT:` convention instead (see docs/CONTRIBUTING.md).
+#     `<THING>_CONTRACT:` convention instead (see docs/zh/CONTRIBUTING.md).
 #   - Include sorting: the include order in each file is meaningful in places
 #     (arch headers before generic ones); `SortIncludes` is left off so a
 #     future run cannot silently reorder them.

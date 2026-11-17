@@ -17,7 +17,7 @@
  * hardware.  The arch default 0x80200000 is kept because it is where every
  * other RISC-V port in this tree loads; if the board hangs before the first
  * printf, this is the first value to check.  See
- * docs/platforms/milk-v-duo.md.
+ * docs/zh/platforms/milk-v-duo.md.
  */
 
 #define PHYS_MEMORY_BASE   0x80000000UL

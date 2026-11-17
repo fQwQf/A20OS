@@ -1,7 +1,7 @@
 # ================================================================
 # A20OS package system (apk) —— 包构建、仓库与镜像组装
 # ================================================================
-# 文档：docs/packaging/overview.md
+# 文档：docs/zh/packaging/overview.md
 #
 #   make pkgs          # 将构建产物打成 .apk（默认 a20-base a20-drivers a20-kernel）
 #   make pkg-repo      # pkgs + 建立本地仓库 build/repo/<arch>（签名索引）
@@ -79,7 +79,7 @@ GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
 .PHONY: pkg-key pkgs pkgs-check pkg-repo image-world run-world run-world-gui
 
 # 本地开发签名密钥：不入库，仅用于本机/CI 内的签名验证闭环。
-# 正式发布密钥由 CI secret 注入（见 docs/packaging/repository.md）。
+# 正式发布密钥由 CI secret 注入（见 docs/zh/packaging/repository.md）。
 pkg-key:
 	$(PYTHON) tools/pkg.py pkg-key  \
 	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
@@ -97,7 +97,7 @@ pkgs-check:
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
 	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
-# 链式语义（与 docs/packaging/overview.md 一致，也是 CI 的调用方式）：
+# 链式语义（与 docs/zh/packaging/overview.md 一致，也是 CI 的调用方式）：
 #   pkg-key 生成签名密钥 → pkgs 打包（需先有内核与用户态构建产物）→
 #   pkg-repo 建 repo → image-world 组镜像。重构进 pkg.py 时这些边曾被丢掉，
 #   导致干净树上 `make pkg-repo` 复制空目录并让 mka20repo.sh 直接失败。

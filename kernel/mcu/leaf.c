@@ -3,7 +3,7 @@
  * serial-window primitives with the host and replays one retained reply.
  * A full unacknowledged cache rejects admission instead of re-executing.
  * Board byte I/O is the only transport dependency. No heap allocation.
- * See docs/cluster/02-wire-protocol.md and 04-transports.md. */
+ * See docs/zh/cluster/02-wire-protocol.md and 04-transports.md. */
 #include "leaf.h"
 #include "uapi/a20/cluster_words.h"
 #include "cluster/operator.h"

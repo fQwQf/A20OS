@@ -45,7 +45,7 @@
  *   PT_A20_START_INFO), never configured: a row says what this channel *can*
  *   serve, and whether a given image belongs to that row is the loader's
  *   answer.  A native-ABI translator is therefore a new row here, not a new
- *   branch in the loader -- docs/kernel/exec-xlator/04-extending.md has the
+ *   branch in the loader -- docs/zh/kernel/exec-xlator/04-extending.md has the
  *   step-by-step.
  *
  * Column 4 -- <argv_template>
@@ -94,7 +94,7 @@
  * NOTE: membership here does not enable anything.  A guest becomes translatable
  * only when the administrator configures a translator path for it on the
  * cmdline; until then it stays on the plain ENOEXEC path.  See
- * docs/kernel/exec-xlator/README.md.
+ * docs/zh/kernel/exec-xlator/README.md.
  */
 
 XLATOR_GUEST(x86_64,  62,  XLATOR_ABI_LINUX, "-0 @A @P @*")

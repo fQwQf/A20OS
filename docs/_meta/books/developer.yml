@@ -1,0 +1,9 @@
+chapters:
+- dev/build
+- CONTRIBUTING
+- dev/instances
+- dev/debug
+- dev/tooling-internals
+- drivers/guide/getting-started
+- drivers/guide/core-model
+- dev/documentation-i18n

@@ -23,8 +23,8 @@ serial = "/dev/serial/by-id/REPLACE_WITH_LS2K0300_UART"
 baud = 115200
 boot_wait = 3
 boot_timeout = "120s"
-# Wait for init to launch mksh; this profile remains interactive.
-console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+# Wait for init to launch ash; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve sh"]
 
 [handoff]
 method = "uboot-elf"
@@ -32,7 +32,7 @@ prompt_timeout = "60s"
 command_timeout = "30s"
 commands = ["version", "bdinfo", "printenv", "help bootelf", "help tftpboot"]
 note = """RAM shell with existing videoplay and audioplay. retained firmware LCD scanout; no panel modesetting.
-Physical execution is pending; see docs/platforms/2k0300.md.
+Physical execution is pending; see docs/zh/platforms/2k0300.md.
 Video/audio devices are exposed only after their hardware probe succeeds.
 Files remain in RAM and disappear at reset. No SSH service is provided.
 """

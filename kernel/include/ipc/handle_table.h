@@ -13,7 +13,7 @@
 #include "proc/proc.h"
 #include "ipc/ipc.h"
 
-/* Temporal sweeper cadence (docs/native-abi/03-handle.md §2.6.4). */
+/* Temporal sweeper cadence (docs/zh/native-abi/03-handle.md §2.6.4). */
 #define A20_SWEEP_INTERVAL_TICKS  (TICKS_PER_SEC / 10 > 0 ? TICKS_PER_SEC / 10 : 1)
 
 /* Handle-table sizing (per-task quota, M2). */
@@ -33,7 +33,7 @@
 #define A20_TEMPORAL_OP_COUNT         (1u << 1)
 #define A20_TEMPORAL_AUTO_CLOSE       (1u << 2)
 
-/* Handle states (docs/native-abi/03-handle.md §3.1). */
+/* Handle states (docs/zh/native-abi/03-handle.md §3.1). */
 typedef enum a20_handle_state {
     A20_HS_FREE      = 0,
     A20_HS_ACTIVE    = 1,
@@ -111,7 +111,7 @@ int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
                                         a20_rights_t required_rights,
                                         a20_handle_entry_t *out);
 /* Task-like variants accept TASK or THREAD handles (threads are
- * task-like objects; docs/native-abi/09-native-abi-deepening.md §8). */
+ * task-like objects; docs/zh/native-abi/09-native-abi-deepening.md §8). */
 int64_t a20_handle_lookup_task_like(struct a20_ht_internal *ht,
                                     a20_handle_t h,
                                     a20_rights_t required_rights,

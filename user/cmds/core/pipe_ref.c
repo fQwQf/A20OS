@@ -1,6 +1,6 @@
 /*
  * pipe_ref — Linux ABI reference for the native pipe personality
- * (docs/hybrid-kernel/05-idl-and-personality.md).
+ * (docs/zh/hybrid-kernel/05-idl-and-personality.md).
  *
  * Runs the same sequence as test_native_personality's byte-stream and
  * level-triggered readiness checks on a real Linux pipe(2) and prints

@@ -17,7 +17,7 @@
  *     smoke-rtc-cmos pins that flag so the guest clock and the host clock are
  *     comparable.  A PC whose CMOS holds local time needs the UTC offset
  *     applied on top of this, which is not implemented (see
- *     docs/status/current/drivers-implementation-status.md).
+ *     docs/zh/status/current/drivers-implementation-status.md).
  *
  * On a successful read the driver hands the epoch to the kernel through
  * timekeeping_wallclock_set_hw(), which re-seeds the wall clock that

@@ -1,5 +1,5 @@
 /*
- * A20OS service registry channel (docs/hybrid-kernel/02-mainstream-plan.md
+ * A20OS service registry channel (docs/zh/hybrid-kernel/02-mainstream-plan.md
  * M3): one well-known channel pair created at boot.  The client endpoint
  * is installed into every native task's start_info (service_registry);
  * the server endpoint is claimed by the supervisor (svcman) via

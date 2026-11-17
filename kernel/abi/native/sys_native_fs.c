@@ -614,7 +614,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
                                                A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    /* Temporal capability management (docs/native-abi/03-handle.md §2.6).
+    /* Temporal capability management (docs/zh/native-abi/03-handle.md §2.6).
      * The user ABI speaks CLOCK_MONOTONIC nanoseconds; entries store ticks. */
     if (op == A20_HANDLE_CTRL_SET_TEMPORAL) {
         a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)(uintptr_t)arg0;

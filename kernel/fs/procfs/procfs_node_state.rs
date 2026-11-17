@@ -162,7 +162,11 @@ pub const PF_FSTYPE: i32 = 122;
 pub const PF_SWAPS: i32 = 123;
 pub const PF_SYSRQ_TRIGGER: i32 = 124;
 /// Number of members, used by the harness assertion.
-pub const PF_TYPE_COUNT: i32 = 125;
+pub const PF_A20_BOOT_REPORT: i32 = 125;
+pub const PF_A20_PORTING_REPORT: i32 = 126;
+pub const PF_A20_TRACE: i32 = 127;
+pub const PF_A20_OBSERVABILITY: i32 = 128;
+pub const PF_TYPE_COUNT: i32 = 129;
 pub const MAX_SWAPFILES: c_int = 16;
 pub const PAGE_SIZE: u64 = 4096;
 
@@ -305,6 +309,12 @@ pub unsafe extern "C" fn a20_procfs_name_type(
     n!(b"pidmap", PF_SYS_KERNEL_PIDMAP);
     n!(b"a20", PF_A20);
     n!(b"bcache", PF_A20_BCACHE);
+    #[cfg(a20_boot_report)]
+    n!(b"boot_report", PF_A20_BOOT_REPORT);
+    #[cfg(a20_porting_report)]
+    n!(b"porting_report", PF_A20_PORTING_REPORT);
+    #[cfg(a20_trace)]
+    n!(b"trace", PF_A20_TRACE);
     n!(b"anonprov", PF_A20_ANONPROV);
     n!(b"hyp_selftest", PF_A20_HYP_SELFTEST);
     n!(b"sched_base_slice", PF_A20_SCHED_BASE_SLICE);
@@ -315,6 +325,7 @@ pub unsafe extern "C" fn a20_procfs_name_type(
     n!(b"oom", PF_A20_OOM);
     n!(b"task_lifetime", PF_A20_TASK_LIFETIME);
     n!(b"perf", PF_A20_PERF);
+    n!(b"observability", PF_A20_OBSERVABILITY);
     n!(b"lock_contention", PF_A20_LOCK_CONTENTION);
     n!(b"driver_lifecycle", PF_A20_DRIVER_LIFECYCLE);
     n!(b"objects", PF_A20_OBJECTS);
@@ -727,11 +738,18 @@ pub unsafe extern "C" fn a20_procfs_child_node(
     }
     if parent_type == PF_A20 {
         let a20 = [
+            #[cfg(a20_boot_report)]
+            (&b"boot_report"[..], PF_A20_BOOT_REPORT),
+            #[cfg(a20_porting_report)]
+            (&b"porting_report"[..], PF_A20_PORTING_REPORT),
+            #[cfg(a20_trace)]
+            (&b"trace"[..], PF_A20_TRACE),
             (&b"bcache"[..], PF_A20_BCACHE),
             (&b"page_cache"[..], PF_A20_PAGE_CACHE),
             (&b"oom"[..], PF_A20_OOM),
             (&b"task_lifetime"[..], PF_A20_TASK_LIFETIME),
             (&b"perf"[..], PF_A20_PERF),
+            (&b"observability"[..], PF_A20_OBSERVABILITY),
             (&b"lock_contention"[..], PF_A20_LOCK_CONTENTION),
             (&b"driver_lifecycle"[..], PF_A20_DRIVER_LIFECYCLE),
             (&b"objects"[..], PF_A20_OBJECTS),
@@ -952,12 +970,19 @@ pub unsafe extern "C" fn a20_procfs_content_plan(
             fixed_len: 0,
             meta_len_zero: 1,
         }
-    } else if ty == PF_A20_PERF || ty == PF_A20_LOCK_CONTENTION || ty == PF_PID_ENVIRON {
+    } else if ty == PF_A20_PERF || ty == PF_A20_LOCK_CONTENTION || ty == PF_PID_ENVIRON || (cfg!(a20_porting_report) && ty == PF_A20_PORTING_REPORT) || (cfg!(a20_trace) && ty == PF_A20_TRACE) {
         // stat/lookup must neither arm collection nor take a partial snapshot.
         // Open starts small; the C adapter grows only if the formatter fills it.
         ProcfsContentPlan {
             generator: GEN_GROW_CONTENT,
             capacity: 4096,
+            fixed_len: 0,
+            meta_len_zero: 1,
+        }
+    } else if cfg!(a20_boot_report) && ty == PF_A20_BOOT_REPORT {
+        ProcfsContentPlan {
+            generator: GEN_CONTENT,
+            capacity: 16 * 1024,
             fixed_len: 0,
             meta_len_zero: 1,
         }

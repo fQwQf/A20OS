@@ -1,6 +1,6 @@
 """Artifact ledger for a20 instances (tools/a20 ledger).
 
-The board bring-up records in docs/platforms/ used to be prose: an image size
+The board bring-up records in docs/zh/platforms/ used to be prose: an image size
 and a SHA-256 copied by hand out of a terminal, dated, alongside a path under
 one contributor's home directory.  Nothing about that is checkable, and a
 changed byte is invisible unless someone re-reads the paragraph.

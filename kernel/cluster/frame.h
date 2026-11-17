@@ -3,12 +3,12 @@
 
 /*
  * Cluster wire-frame codec -- the canonical kernel-side frame encoder and
- * layer-1 decoder (docs/cluster/02-wire-protocol.md §1-§2, WA1 track).
+ * layer-1 decoder (docs/zh/cluster/02-wire-protocol.md §1-§2, WA1 track).
  *
  * Ownership and seams (all registered in the docs, 2026-10):
  *   - This header owns the frame PUBLIC interface: field-by-field encode and
  *     verdict-classified decode, pure functions, no locks, no allocation,
- *     every buffer caller-owned (docs/cluster/03-kernel-impl.md §2 frame.c
+ *     every buffer caller-owned (docs/zh/cluster/03-kernel-impl.md §2 frame.c
  *     row).  WC1's uart.c/mcu leaf need only these signatures; anything they
  *     miss lands here, not in a second codec.
  *   - Byte-order accessors, CRC16-CCITT and FNV-1a are the shared header-only

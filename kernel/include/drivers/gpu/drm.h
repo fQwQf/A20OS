@@ -98,7 +98,7 @@
  * the legacy DRM_IOCTL_VIRGL_* family (command letter 'A'); that one is unused
  * by modern Mesa.  Commands sit at DRM_COMMAND_BASE + n, type letter 'd'.
  * Numbers below were derived from the kernel uapi header and checked against
- * the _IOWR encoding; see docs/graphics/gpu-3d-roadmap.md section 1.
+ * the _IOWR encoding; see docs/zh/graphics/gpu-3d-roadmap.md section 1.
  */
 #define DRM_VIRTGPU_MAP                  0x40 + 0x01
 #define DRM_VIRTGPU_EXECBUFFER           0x40 + 0x02

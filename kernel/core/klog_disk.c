@@ -53,7 +53,24 @@ static int g_full;
 static const char *g_state = "booting";
 static int g_diag_write;
 static int g_diag_current;
+static int g_io_error;
+static const char *g_storage = "none";
 static char g_dir[128];
+
+static const char *klog_file_storage(const vfile_t *file) {
+    if (!file || !file->vnode || !file->vnode->mnt) return "unknown";
+    switch (file->vnode->mnt->type) {
+    case FS_TYPE_RAMFS: return "ram";
+    case FS_TYPE_FAT32: case FS_TYPE_EXT4: case FS_TYPE_NTFS: case FS_TYPE_LITTLEFS:
+        return "persistent";
+    default: return "unknown"; /* a proxy/virtual filesystem is not evidence of disk backing */
+    }
+}
+
+static void klog_sync_file(vfile_t *file) {
+    int result = vfs_fsync_vfile(file);
+    if (result < 0) __atomic_store_n(&g_io_error, result, __ATOMIC_RELEASE);
+}
 
 /* The loader increments this counter before every handoff and passes it on
  * the kernel command line.  Recording it in CURRENT lets a host correlate the
@@ -133,10 +150,11 @@ static void write_current(const char *state) {
     memset(buf, ' ', sizeof(buf));
     int n = snprintf(buf, sizeof(buf),
                      "boot=%s\nbootcount=%u\nseq=%u\nbytes=%llu\n"
-                     "session=%d\nstate=%s\n",
+                     "session=%d\nstate=%s\nstorage=%s\nwriter=%s\n",
                      klog_boot_id(), klog_bootcount(),
                      (unsigned)klog_record_next(),
-                     (unsigned long long)g_bytes, CONFIG_KLOG_SESSION, state);
+                     (unsigned long long)g_bytes, CONFIG_KLOG_SESSION, state,
+                     g_storage, klog_disk_health());
     if (n < 0)
         return;
     if ((size_t)n >= sizeof(buf))
@@ -151,10 +169,12 @@ static void write_current(const char *state) {
     n = (int)sizeof(buf);
     (void)vfs_lseek_vfile(g_current_vf, 0, SEEK_SET);
     int wr = vfs_write_file(g_current_vf, buf, (size_t)n);
-    if (wr < 0 && !g_diag_current)
-        kerr("[LOG] CURRENT write failed: %d\n", wr);
-    g_diag_current = 1;
-    (void)vfs_fsync_vfile(g_current_vf);
+    if (wr < 0 || wr != n) {
+        __atomic_store_n(&g_io_error, wr < 0 ? wr : -EIO, __ATOMIC_RELEASE);
+        if (!g_diag_current) kerr("[LOG] CURRENT write incomplete: %d/%d\n", wr, n);
+        g_diag_current = 1;
+    }
+    klog_sync_file(g_current_vf);
 }
 
 static void klog_disk_drain(int force);
@@ -180,6 +200,7 @@ int klog_disk_attach(const char *dir) {
         kerr("[LOG] boot file reference failed\n");
         return -ENOMEM;
     }
+    g_storage = klog_file_storage(g_boot_vf);
 
     snprintf(path, sizeof(path), "%s/CURRENT", g_dir);
     fd = vfs_open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -193,7 +214,7 @@ int klog_disk_attach(const char *dir) {
     /* Explain the files to a person who pulls the stick and mounts it on a
      * machine that has never heard of A20OS. */
     static const char readme[] =
-        "A20OS persistent boot log\n"
+        "A20OS boot log (RAM sinks are volatile; check CURRENT storage)\n"
         "=========================\n"
         "\n"
         "boot-<id>.jsonl  one JSON object per line\n"
@@ -256,6 +277,15 @@ const char *klog_disk_dir(void) {
     return g_ready ? g_dir : "";
 }
 
+const char *klog_disk_storage(void) { return g_ready ? g_storage : "none"; }
+const char *klog_disk_health(void) {
+    if (!g_ready) return "unavailable";
+    if (__atomic_load_n(&g_io_error, __ATOMIC_ACQUIRE)) return "io-error";
+    if (__atomic_load_n(&g_full, __ATOMIC_ACQUIRE)) return "capped";
+    if (!g_current_vf) return "metadata-unavailable";
+    return "ready";
+}
+
 static int flush_batch(const char *buf, size_t len) {
     if (!len)
         return 0;
@@ -271,9 +301,11 @@ static int flush_batch(const char *buf, size_t len) {
     int r = vfs_write_file(g_boot_vf, buf, len);
     if (r > 0)
         g_bytes += (uint64_t)r;
-    else if (r < 0 && !g_diag_write)
-        kerr("[LOG] journal write failed: %d\n", r);
-    g_diag_write = 1;
+    if (r < 0 || (size_t)r != len) {
+        __atomic_store_n(&g_io_error, r < 0 ? r : -EIO, __ATOMIC_RELEASE);
+        if (!g_diag_write) kerr("[LOG] journal write incomplete: %d/%lu\n", r, (unsigned long)len);
+        g_diag_write = 1;
+    }
     return r < 0 ? r : 0;
 }
 
@@ -336,7 +368,7 @@ static void klog_disk_drain_locked(int force) {
     int due = force || urgent || !g_last_fsync_tick ||
               now - g_last_fsync_tick >= MS_TO_TICKS(5000);
     if (due) {
-        (void)vfs_fsync_vfile(g_boot_vf);
+        klog_sync_file(g_boot_vf);
         write_current(g_state);
         g_last_fsync_tick = now;
     }
@@ -364,7 +396,7 @@ void klog_disk_panic(void) {
     klog_disk_drain_locked(1);
     g_state = "panic";
     write_current(g_state);
-    (void)vfs_fsync_vfile(g_boot_vf);
+    klog_sync_file(g_boot_vf);
     mutex_unlock(&g_disk_lock);
 }
 
@@ -379,7 +411,7 @@ void klog_disk_mark_ready(void) {
     mutex_lock(&g_disk_lock);
     g_state = "ready";
     write_current(g_state);
-    (void)vfs_fsync_vfile(g_boot_vf);
+    klog_sync_file(g_boot_vf);
     mutex_unlock(&g_disk_lock);
 }
 
@@ -390,7 +422,7 @@ void klog_disk_mark_clean(void) {
     mutex_lock(&g_disk_lock);
     g_state = "clean";
     write_current(g_state);
-    (void)vfs_fsync_vfile(g_boot_vf);
+    klog_sync_file(g_boot_vf);
     mutex_unlock(&g_disk_lock);
 }
 
@@ -405,6 +437,8 @@ void klog_disk_thread(void) {
 
 int klog_disk_attach(const char *dir) { (void)dir; return -EOPNOTSUPP; }
 int klog_disk_ready(void) { return 0; }
+const char *klog_disk_storage(void) { return "none"; }
+const char *klog_disk_health(void) { return "unavailable"; }
 void klog_disk_sync(void) {}
 void klog_disk_poll(void) {}
 void klog_disk_panic(void) {}

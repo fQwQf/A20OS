@@ -258,7 +258,7 @@ typedef struct {
      * e1000_send/e1000_recv take it alone, e1000_poll takes it alone, and the
      * ISR takes it alone before dropping it again -- it never holds this lock
      * across the g_lwip_lock drain, so there is no nesting between the two in
-     * either direction.  See docs/drivers/guide/lock-order.md. */
+     * either direction.  See docs/zh/drivers/guide/lock-order.md. */
     spinlock_t lock;
     int irq;
     int irq_registered;

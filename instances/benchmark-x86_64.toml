@@ -17,7 +17,7 @@ world_size_mb = 512
 
 [net]
 # Protocol stack selected by this instance (NOT the QEMU netdev spec).
-# Build derives NET_STACK from this field; see docs/net/instance-config.md.
+# Build derives NET_STACK from this field; see docs/zh/net/instance-config.md.
 stack = "bsd"
 # QEMU user networking publishes the kernel path as the Multiboot cmdline
 # when no -append is supplied.  Declare the SLIRP static lease explicitly so

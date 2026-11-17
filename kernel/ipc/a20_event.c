@@ -369,7 +369,7 @@ static uint32_t evq_first_event(uint64_t events)
 
 /*
  * a20_eventq_wait — dequeue up to max_events events, blocking while the
- * ring is empty (docs/native-abi/05-ipc.md §3.4).
+ * ring is empty (docs/zh/native-abi/05-ipc.md §3.4).
  * timeout_ns == 0 polls; A20_TIMEOUT_INFINITE waits without a deadline;
  * any other value is a relative timeout in nanoseconds.
  * The queue is referenced for the duration of the call so a concurrent
@@ -583,7 +583,7 @@ void a20_event_notify(void *target_object, uint16_t target_type,
 }
 
 /*
- * Filesystem watch event (docs/native-abi/09-native-abi-deepening.md §6).
+ * Filesystem watch event (docs/zh/native-abi/09-native-abi-deepening.md §6).
  * Fires A20_EVENT_FS_* on every event queue watching @vn (a directory vnode)
  * and carries the changed entry name in the event's fs_name field.  @name
  * may be NULL (e.g. self-delete); the name is truncated to 31 bytes.

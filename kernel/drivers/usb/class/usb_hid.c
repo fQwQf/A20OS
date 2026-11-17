@@ -329,7 +329,7 @@ static void usb_hid_parse_tablet(usb_hid_dev_t *h)
  *
  * The documented order is h->lock -> xhci->lock (the re-arm below reaches the
  * HCD), and the HCD never holds its own lock while calling in here -- it drops
- * it before every callback.  See docs/drivers/guide/lock-order.md. */
+ * it before every callback.  See docs/zh/drivers/guide/lock-order.md. */
 static void usb_hid_complete(usb_urb_t *urb)
 {
     usb_hid_dev_t *h = (usb_hid_dev_t *)urb->ctx;

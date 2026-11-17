@@ -148,7 +148,7 @@ void udriver_revoke_mmio(mm_struct_t *mm, uint64_t phys)
 #endif
 }
 
-/* ---- Device ownership claims (docs/hybrid-kernel/04-dual-placement.md) ----
+/* ---- Device ownership claims (docs/zh/hybrid-kernel/04-dual-placement.md) ----
  *
  * A user task may exclusively claim a whitelisted user-owned window.
  * Claims are per-window, idempotent for the owner, and auto-released

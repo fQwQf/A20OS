@@ -2,6 +2,7 @@
 #define _CORE_LOCK_H
 
 #include "core/types.h"
+#include "core/metrics_config.h"
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/cpu.h"
@@ -19,7 +20,7 @@ extern int proc_task_pid(const void *task);
 /*
  * Global lock order contract (outermost -> innermost).
  * For the full driver-private lock contracts see
- * docs/drivers/guide/lock-order.md.
+ * docs/zh/drivers/guide/lock-order.md.
  *
  * Scheduler/task locks (lock-serialization-split §1.2).  There is no global
  * proc_lock any more; the states it used to cover are split three ways:
@@ -60,7 +61,7 @@ extern int proc_task_pid(const void *task);
  *
  * Rules:
  *
- * Lock-safe network entry points (see docs/net/network-lock-contract.md):
+ * Lock-safe network entry points (see docs/zh/net/network-lock-contract.md):
  * - CONFIG_NET_LANES=1 retains the single core lock. With multiple lanes,
  *   a20_lwip_lane_lock() protects ordinary owner-lane traffic and
  *   a20_lwip_lock() is the ingress gate or the outer part of a control barrier
@@ -78,7 +79,7 @@ extern int proc_task_pid(const void *task);
  *   socket-table locks; callbacks defer socket work to bottom-halves.
  *
  * Socket locks and socket-table bucket locks (stage E of
- * docs/net/net-lanes.md; full text in docs/net/network-lock-contract.md):
+ * docs/zh/net/net-lanes.md; full text in docs/zh/net/network-lock-contract.md):
  * - Every per-socket field -- receive and accept queues, rx_count, closed /
  *   shut_rd / shut_wr / peer_closed, local / peer addresses and their lengths,
  *   lane, timeouts, the accept stage -- is protected by net_socket_t.lock and by
@@ -151,11 +152,11 @@ extern int proc_task_pid(const void *task);
  *   __switch.  context_switch_locked() panics on a nonzero count, so a switch
  *   under a held lock fails loudly instead of corrupting the counter.  Waiting
  *   for a lock does NOT raise the counter -- a spinner stays a legal
- *   switch-out target.  See docs/kernel/process-scheduler.md §4.1.
+ *   switch-out target.  See docs/zh/kernel/process-scheduler.md §4.1.
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
  * - New locks must either fit this order or document a narrower local order in
- *   docs/drivers/guide/lock-order.md before use.
+ *   docs/zh/drivers/guide/lock-order.md before use.
  */
 
 typedef struct spinlock {
@@ -243,8 +244,10 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
      * once the inner loop drains, and it has to land on the same slot the
      * acquire is charged to; resolving it up front is what lets the audit show
      * per-site spin cost instead of a column that merely repeats the acquires. */
+#if CONFIG_A20_METRICS
     lock_callsite_sample_t *site = NULL;
     spinlock_t *counters = lock;
+#endif
     for (;;) {
         /* Publish non-preemptibility before ownership becomes visible.  If an
          * enabled timer IRQ lands after the exchange but before this counter
@@ -256,13 +259,16 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
             break;
         preempt_enable();
 
+#if CONFIG_A20_METRICS
         uint64_t spun_before = spins;
+#endif
         /* The stall clock and the reporting identity are read on the first
          * contended observation, not before the exchange: timer_get_ticks()
          * costs rdtsc plus two 64-bit divisions and proc_current() costs a
          * cpuid on SMP x86, and neither value means anything until this CPU
          * has actually failed to take the lock. */
         if (!armed) {
+#if CONFIG_A20_METRICS
             counters = lock->counter_sink ? lock->counter_sink : lock;
             lock_callsite_sample_t *samples =
                 __atomic_load_n(&counters->samples, __ATOMIC_ACQUIRE);
@@ -276,14 +282,17 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                 if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra)
                     site = NULL;
             }
+#endif
             armed = 1;
             stall_start = timer_get_ticks();
             next_report = stall_start + MS_TO_TICKS(5000);
             cur = proc_current();
         }
+#if CONFIG_A20_METRICS
         __atomic_fetch_add(&counters->contended_acquires, 1, __ATOMIC_RELAXED);
         if (site)
             __atomic_fetch_add(&site->contended, 1, __ATOMIC_RELAXED);
+#endif
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
             if ((++spins & ((1UL << 20) - 1)) == 0) {
                 uint64_t now = timer_get_ticks();
@@ -318,16 +327,20 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
             }
             arch_cpu_relax();
         }
+#if CONFIG_A20_METRICS
         if (site)
             __atomic_fetch_add(&site->spins, spins - spun_before,
                                __ATOMIC_RELAXED);
+#endif
     }
+#if CONFIG_A20_METRICS
     if (spins) {
         __atomic_fetch_add(&counters->contended_spins, spins, __ATOMIC_RELAXED);
         spin_atomic_max(&counters->contended_max_spins, spins);
         if (site)
             spin_atomic_max(&site->max_spins, spins);
     }
+#endif
     #if CONFIG_DEBUG_LOCKS
     /* The owner is diagnostic state: it feeds nothing but [LOCK-STALL]'s
      * reporting identity and the owner == cur self-deadlock test, and only

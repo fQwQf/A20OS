@@ -41,7 +41,7 @@
  * unconditional green one.
  *
  * Requires a QEMU virtio-gpu-gl device: build the instance with GPU_3D=1.
- * See docs/graphics/gpu-3d-roadmap.md.
+ * See docs/zh/graphics/gpu-3d-roadmap.md.
  *
  * The command stream below is transcribed from virglrenderer 1.1.0 --
  * src/virgl_protocol.h, the vrend_decode.c decoders that consume it, and the

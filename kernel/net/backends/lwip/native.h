@@ -117,7 +117,7 @@ typedef struct net_accept_stage_slot {
  * allocating a net_socket_t, installing its callbacks, registering it, pushing
  * it on the listener's accept queue and waking accept_waitq -- needs
  * a socket lock and the allocator, and
- * docs/net/network-lock-contract.md forbids
+ * docs/zh/net/network-lock-contract.md forbids
  * both inside an lwIP callback.  So the callback only parks the pcb here and
  * the bottom half finishes the job, which is the same split the receive path
  * already uses.

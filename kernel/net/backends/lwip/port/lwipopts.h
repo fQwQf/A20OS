@@ -313,7 +313,7 @@ _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
  * (src/include/lwip/opt.h:227) unless the port defines it, which is why the
  * lock contract used to be prose only: the ~50 sites in tcp.c/tcp_in.c/
  * raw.c/udp.c all expanded to nothing, so a path that touched PCB lists
- * without g_lwip_lock corrupted them silently.  docs/net/net-lanes.md
+ * without g_lwip_lock corrupted them silently.  docs/zh/net/net-lanes.md
  * ("为什么没有任何断言拦住它") records the concrete damage that let through.
  *
  * The owner is recorded as a CPU id rather than a boolean because a boolean
@@ -345,7 +345,7 @@ void a20_lwip_assert_core_locked(void *site);
  * Left undefined it means "no lane concept", which is upstream's behaviour and
  * what a CONFIG_NET_LANES == 1 build has to keep.  memp.c tests it with
  * #ifdef, so at one lane not one statement of the lane-indexed pool path is
- * compiled -- see the equivalence rule at the top of docs/net/net-lanes.md.
+ * compiled -- see the equivalence rule at the top of docs/zh/net/net-lanes.md.
  */
 #if CONFIG_NET_LANES > 1
 unsigned a20_lwip_memp_lane(void);

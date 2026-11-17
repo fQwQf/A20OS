@@ -12,7 +12,7 @@ arch = "aarch64"
 # no longer reproduce. sched/proc/futex/mm/scm stress pass under NR_CPUS=4 at
 # -smp 4 for 30+ minutes with scheduler violations at 0, and the desktop cold
 # boots and renders with all four CPUs online and no panic. See
-# docs/status/history/desktop-1.0-2026-10-23.md.
+# docs/zh/status/history/desktop-1.0-2026-10-23.md.
 smp = 4
 memory = "2G"
 

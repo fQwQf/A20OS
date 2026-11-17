@@ -7,7 +7,7 @@
 # started by BIOS or by UEFI boot services.  That matters because most 2025
 # thin clients are UEFI-only with no CSM option.  Writing that ISO to a USB
 # stick and booting it is the whole deployment path; see
-# docs/platforms/x86_64-pc.md.
+# docs/zh/platforms/x86_64-pc.md.
 #
 # The tree does now carry an x86_64 UEFI loader (kernel/arch/x86_64/boot/uefi/x86_64_loader.c),
 # which is the better artifact because its ESP hands the kernel the ACPI RSDP that

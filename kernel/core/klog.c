@@ -31,6 +31,7 @@ static spinlock_t klog_lock = SPINLOCK_INIT;
 static klog_record_t klog_recs[KLOG_REC_COUNT];
 static uint32_t klog_rec_tail __attribute__((section(".data"))) = 0;
 static uint32_t klog_rec_count __attribute__((section(".data"))) = 0;
+static uint32_t klog_error_records, klog_warning_records;
 static uint32_t klog_rec_seq __attribute__((section(".data"))) = 0;
 
 static uint8_t klog_boot_id_bytes[16] __attribute__((section(".data")));
@@ -81,6 +82,7 @@ void klog_init(void) {
     klog_rec_tail = 0;
     klog_rec_count = 0;
     klog_rec_seq = 0;
+    klog_error_records = klog_warning_records = 0;
     klog_boot_id_ready = 0;
     klog_boot_id_str[0] = '\0';
     klog_boot_id_init();
@@ -150,6 +152,8 @@ static void klog_append_record(int level, const char *msg, size_t len) {
     }
 
     klog_record_t *rec = &klog_recs[idx];
+    if (rec->level >= KLOG_ERR && rec->msg_len) klog_error_records--;
+    else if (rec->level >= KLOG_WARN && rec->msg_len) klog_warning_records--;
     memset(rec, 0, sizeof(*rec));
     rec->mono_ns = mono[0] * 1000000000ULL + mono[1];
     rec->realtime_s = rt[0];
@@ -161,6 +165,13 @@ static void klog_append_record(int level, const char *msg, size_t len) {
     memcpy(rec->msg, msg, copy);
     rec->msg[copy] = '\0';
     rec->msg_len = (uint16_t)copy;
+    /* Normalize legacy printf diagnostics once, rather than searching every
+     * retained message on every report timer tick. New producers use level. */
+    if (strstr(rec->msg, "[ERR]") || strstr(rec->msg, "FATAL") ||
+        strstr(rec->msg, "PANIC") || strstr(rec->msg, "controller disabled after command timeout"))
+        rec->level = KLOG_ERR;
+    if (rec->level >= KLOG_ERR) klog_error_records++;
+    else if (rec->level >= KLOG_WARN) klog_warning_records++;
 }
 #endif /* CONFIG_KLOG_ENABLED */
 
@@ -342,125 +353,6 @@ int klog_record_read(uint32_t *cursor, klog_record_t *out) {
     return 1;
 }
 
-/* Records worth putting on the final screen: every warning/error plus the
- * subsystem lines that answer "did the keyboard, the log and the controller
- * come up?".  Everything else is still in the ring/JSONL; this is a summary,
- * not a second log. */
-static int klog_report_record(const klog_record_t *rec) {
-    if (rec->level >= KLOG_WARN)
-        return 1;
-    static const char *const facilities[] = {
-        "XHCI", "PS2", "USB", "USB-HID", "LOG", "NVME", "I2C-HID", "INPUT",
-    };
-    for (unsigned i = 0; i < sizeof(facilities) / sizeof(facilities[0]); i++) {
-        size_t len = strlen(facilities[i]);
-        if (rec->facility_len == len &&
-            memcmp(rec->facility, facilities[i], len) == 0)
-            return 1;
-    }
-    return 0;
-}
-
-void klog_boot_report(void) {
-    uint32_t first = klog_record_oldest();
-    uint32_t end = klog_record_next();
-    klog_record_t rec;
-    unsigned total = 0;
-    int ps2_any = 0, ps2_ok = 0, ps2_fail = 0;
-    int fatal_seen = 0;
-    char fatal_identity[KLOG_REC_MSG_MAX] = {0};
-
-    for (uint32_t cursor = first; cursor < end; ) {
-        if (!klog_record_read(&cursor, &rec))
-            break;
-        if (klog_report_record(&rec))
-            total++;
-        if (strcmp(rec.facility, "PS2") == 0) {
-            ps2_any = 1;
-            if (strstr(rec.msg, "[PS2] module init ok"))
-                ps2_ok = 1;
-            if (strstr(rec.msg, "[PS2] controller init failed"))
-                ps2_fail = 1;
-        }
-        if (strstr(rec.msg, "[XHCI] FATAL")) {
-            fatal_seen = 1;
-            if (!fatal_identity[0] && strstr(rec.msg, "[XHCI] FATAL identity"))
-                snprintf(fatal_identity, sizeof(fatal_identity), "%s", rec.msg);
-        }
-    }
-
-    const unsigned max_lines = 48;
-    unsigned skip = total > max_lines ? total - max_lines : 0;
-
-    /* Assemble the whole report before touching the console.  Emitting it one
-     * line at a time lets the shell's echo, or another CPU, land in the middle
-     * of the block -- exactly the "o" in the middle of the PS/2 lines seen in
-     * the first run.  One klog_write_raw() holds the console lock for the
-     * complete block. */
-    static char report[16384];
-    size_t used = 0;
-#define REPORT_APPEND(...)                                                   \
-    do {                                                                     \
-        if (used < sizeof(report)) {                                         \
-            int n = snprintf(report + used, sizeof(report) - used,           \
-                             __VA_ARGS__);                                   \
-            if (n > 0)                                                       \
-                used += (size_t)n < sizeof(report) - used                    \
-                            ? (size_t)n : sizeof(report) - used - 1;         \
-        }                                                                    \
-    } while (0)
-
-    REPORT_APPEND("\n===== A20OS BOOT REPORT =====\n");
-    REPORT_APPEND("boot: %s\n", klog_boot_id());
-    if (klog_disk_ready() && klog_disk_dir()[0])
-        REPORT_APPEND("log: persistent at %s\n", klog_disk_dir());
-    else
-        REPORT_APPEND("log: NOT persistent (no writable log surface)\n");
-    REPORT_APPEND("showing last %u of %u diagnostic records\n",
-                  total > max_lines ? max_lines : total, total);
-
-    unsigned shown = 0;
-    for (uint32_t cursor = first; cursor < end; ) {
-        if (!klog_record_read(&cursor, &rec))
-            break;
-        if (!klog_report_record(&rec))
-            continue;
-        if (shown++ < skip)
-            continue;
-        REPORT_APPEND("%s", rec.msg);
-        if (rec.msg_len && rec.msg[rec.msg_len - 1] != '\n')
-            REPORT_APPEND("\n");
-    }
-    REPORT_APPEND("summary: log=%s ps2=%s xhci_fatal=%s\n",
-                  klog_disk_ready() ? "persistent" : "none",
-                  ps2_ok ? "driver-ok" :
-                  ps2_fail ? "driver-fail" :
-                  ps2_any ? "board-only" : "no-records",
-                  fatal_seen ? "yes" : "no");
-    if (fatal_identity[0]) {
-        REPORT_APPEND("key: %s", fatal_identity);
-        if (fatal_identity[strlen(fatal_identity) - 1] != '\n')
-            REPORT_APPEND("\n");
-    }
-    REPORT_APPEND("===== END BOOT REPORT =====\n");
-#undef REPORT_APPEND
-    klog_write_raw(report, used);
-}
-
-int klog_has_fatal(void) {
-    uint32_t cursor = klog_record_oldest();
-    uint32_t end = klog_record_next();
-    klog_record_t rec;
-    while (cursor < end) {
-        if (!klog_record_read(&cursor, &rec))
-            break;
-        if (strstr(rec.msg, "[XHCI] FATAL") ||
-            strstr(rec.msg, "controller disabled after command timeout"))
-            return 1;
-    }
-    return 0;
-}
-
 static const char *klog_arg_value(const char *args, const char *key) {
     if (!args || !key)
         return NULL;
@@ -541,6 +433,8 @@ uint64_t klog_max_bytes(void) { return klog_runtime_max_bytes; }
  * paths need no #ifdef of their own. */
 __attribute__((weak)) int klog_disk_attach(const char *dir) { (void)dir; return -EOPNOTSUPP; }
 __attribute__((weak)) int klog_disk_ready(void) { return 0; }
+__attribute__((weak)) const char *klog_disk_storage(void) { return "none"; }
+__attribute__((weak)) const char *klog_disk_health(void) { return "unavailable"; }
 __attribute__((weak)) const char *klog_disk_dir(void) { return ""; }
 __attribute__((weak)) void klog_disk_sync(void) {}
 __attribute__((weak)) void klog_disk_poll(void) {}
@@ -548,3 +442,50 @@ __attribute__((weak)) void klog_disk_panic(void) {}
 __attribute__((weak)) void klog_disk_mark_ready(void) {}
 __attribute__((weak)) void klog_disk_mark_clean(void) {}
 __attribute__((weak)) void klog_disk_thread(void) {}
+
+int klog_event_write(int level, const char *facility, const char *format, ...) {
+    if (level < klog_level) return 0;
+    char message[896];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    char name[KLOG_REC_FAC_MAX];
+    snprintf(name, sizeof(name), "%s", facility ? facility : "kernel");
+    return klog_write_ex(level, "[%s] %s", name, message);
+}
+int klog_has_errors(void) {
+    uint64_t flags = spin_lock_irqsave(&klog_lock);
+    int result = klog_error_records != 0;
+    spin_unlock_irqrestore(&klog_lock, flags);
+    return result;
+}
+#if CONFIG_BOOT_REPORT
+/* Numeric selection only under the lock. No allocation, string search,
+ * callbacks, sorting, formatting or console I/O while holding the ring. */
+void klog_snapshot_select(klog_snapshot_t *snapshot, klog_record_t *records,
+                          unsigned capacity, int context) {
+    memset(snapshot, 0, sizeof(*snapshot));
+    uint64_t flags = spin_lock_irqsave(&klog_lock);
+    snapshot->first = klog_rec_count ? klog_recs[klog_rec_tail].seq : klog_rec_seq;
+    snapshot->end = klog_rec_seq;
+    snapshot->retained = klog_rec_count;
+    snapshot->warnings = klog_warning_records;
+    snapshot->errors = klog_error_records;
+    snapshot->matching = context ? klog_rec_count : klog_warning_records + klog_error_records;
+    for (int priority = 2; priority >= (context ? 0 : 1); priority--) {
+        for (uint32_t i = klog_rec_count; i && snapshot->shown < capacity; i--) {
+            const klog_record_t *rec = &klog_recs[(klog_rec_tail + i - 1) % KLOG_REC_COUNT];
+            int p = rec->level >= KLOG_ERR ? 2 : rec->level >= KLOG_WARN ? 1 : 0;
+            if (p == priority) records[snapshot->shown++] = *rec;
+        }
+    }
+    spin_unlock_irqrestore(&klog_lock, flags);
+    for (unsigned i = 1; i < snapshot->shown; i++) {
+        klog_record_t rec = records[i];
+        unsigned j = i;
+        while (j && records[j - 1].seq > rec.seq) { records[j] = records[j - 1]; j--; }
+        records[j] = rec;
+    }
+}
+#endif

@@ -136,6 +136,24 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"LOG_PERSISTENT={_b(l.persistent)}")
     if l.mode is not None:
         v.append(f"LOG_MODE={l.mode}")
+    for field, var in (("metrics", "METRICS_ENABLED"), ("porting_report", "DIAG_BOOT"), ("trace", "DIAG_TRACE"), ("trace_boot", "DIAG_TRACE_BOOT")):
+        value = getattr(l, field)
+        if value is not None:
+            v.append(f"{var}={_b(value)}")
+    for field, var in (("porting_records", "DIAG_RECORDS"), ("trace_records", "DIAG_TRACE_RECORDS"), ("trace_mask", "DIAG_TRACE_MASK")):
+        value = getattr(l, field)
+        if value is not None:
+            v.append(f"{var}={value}")
+    if l.boot_report is not None:
+        v.append(f"LOG_BOOT_REPORT={_b(l.boot_report)}")
+    if l.report is not None:
+        v.append(f"LOG_REPORT={l.report}")
+    for field in ("report_window_ms", "report_settle_ms", "report_max_records"):
+        value = getattr(l, field)
+        if value is not None:
+            v.append(f"LOG_{field.upper()}={value}")
+    if l.report_context is not None:
+        v.append(f"LOG_REPORT_CONTEXT={_b(l.report_context)}")
     if l.partition_mb is not None:
         v.append(f"LOG_PARTITION_MB={l.partition_mb}")
     if l.max_bytes is not None:

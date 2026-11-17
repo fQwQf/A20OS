@@ -11,7 +11,7 @@
  * the DMW alias of physical 0x0200_0000 used by the U-Boot RAM loader.
  *
  * This board remains single-core: device-IRQ bring-up starts with UART0
- * source 0 routed only to CPU0.  See docs/platforms/physical-boards.md for
+ * source 0 routed only to CPU0.  See docs/zh/platforms/physical-boards.md for
  * the exact bring-up checklist.
  *
  * Reference: RocketOS (MIT), used as reference for LoongArch board bring-up

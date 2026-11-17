@@ -19,8 +19,9 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args) {
      * scheduling fields.  Accept it and zero-pad; only a structure that
      * covers the original layout may be used.
      */
-    if (a20_validate_struct_header(uargs, A20_THREAD_CREATE_V1_SIZE, 1) < 0)
-        return -A20_ERR_INVALID_ARGUMENT;
+    int validation = a20_validate_struct_header(uargs, A20_THREAD_CREATE_V1_SIZE, 1);
+    if (validation < 0)
+        return validation;
     uint32_t user_size;
     if (copy_from_user(&user_size, uargs, sizeof(user_size)) < 0)
         return -A20_ERR_FAULT;
@@ -109,7 +110,7 @@ int64_t sys_a20_handle_close(const a20_syscall_args_t *args) {
 
     /*
      * handle_remove detaches the entry and drops the object reference
-     * (docs/native-abi/03-handle.md §4.1): vfile-backed objects are closed,
+     * (docs/zh/native-abi/03-handle.md §4.1): vfile-backed objects are closed,
      * channels see peer_closed, event queues and VMOs are released, and
      * watches keyed by the object are torn down.  Closing consumes no
      * operation budget because no lookup is performed.
@@ -129,7 +130,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
 
-    /* Lookup task handle with WAIT right docs/native-abi/06-security.md §3.2) */
+    /* Lookup task handle with WAIT right docs/zh/native-abi/06-security.md §3.2) */
     task_t *target = NULL;
     int64_t ret = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
                                       A20_RIGHT_WAIT, &target);

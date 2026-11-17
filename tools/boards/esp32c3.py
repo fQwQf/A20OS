@@ -109,7 +109,7 @@ def package(elf: Path) -> None:
     record = verify_image(temporary, elf)
     temporary.replace(image)
     shutil.copyfile(elf, OUT / "kernel.elf")
-    shutil.copyfile(ROOT / "docs/platforms/esp32-c3.md", OUT / "README.md")
+    shutil.copyfile(ROOT / "docs/zh/platforms/esp32-c3.md", OUT / "README.md")
     record.update(format="a20-esp32c3-rom-v1", flash_offset=0,
                   hardware_validated=False, esptool=ESPTOOL_VERSION,
                   sha256=hashlib.sha256(image.read_bytes()).hexdigest(),

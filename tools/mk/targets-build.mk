@@ -49,7 +49,7 @@ check-arm-board-builds:
 check-x86_64-pc-build:
 	$(MAKE) ARCH=x86_64 BOARD=x86_64-pc ABI=$(ABI) BRINGUP=1 kernel-only
 
-# VisionFive 2 on-hardware boot artifacts (see docs/platforms/visionfive2-boot.md).
+# VisionFive 2 on-hardware boot artifacts (see docs/zh/platforms/visionfive2-boot.md).
 # vf2-firmware builds OpenSBI + U-Boot SPL from pinned upstream sources;
 # vf2-image wraps the kernel and FAT32 userspace as a direct-boot FIT
 # (BootROM -> SPL -> OpenSBI -> A20OS) plus a raw SD-card image.
@@ -225,9 +225,16 @@ check-build-matrix-all: check-kernel-build-all check-user-build-all
 
 # EXTERNAL_USERLAND_UPGRADE_CHECKLIST: run every gate group that must pass
 # before an upgraded musl/sbase/mksh (or other imported userland) is
-# accepted -- see docs/dev/external-dependencies.md.
+# accepted -- see docs/zh/dev/external-dependencies.md.
 .PHONY: check-upgrade-userland-smokes
 check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
+
+.PHONY: check-boot-report
+check-boot-report:
+	$(PYTHON) -m unittest tools.tests.test_boot_report tools.tests.test_a20log
+	EVIDENCE_DIR="$(CURDIR)/.kernel-build/smoke/boot-report-procfs" \
+	    RUST_TEST_TARGETS=riscv64imac-unknown-none-elf BOOT_REPORT_SUPPORT=1 sh tools/host-tests/test-procfs-node-state-host.sh
+	$(PYTHON) tools/qemu/check_boot_report.py --x86
 
 # The kernel bring-up targets may also build per-arch user driver blobs.  Route
 # matrix user builds through USER_BUILD_STAMP so both paths take stamps.py's
@@ -259,3 +266,21 @@ check-dev-build:
 check-release-build:
 	$(MAKE) all
 
+
+# End-to-end observability gate. These paths isolate images from daily runs.
+OBSERVABILITY_GATE_DIR ?= .kernel-build/smoke/observability-gate
+.PHONY: check-observability-host check-observability
+check-observability-host:
+	$(PYTHON) -m unittest tools.tests.test_perf_windows tools.tests.test_diagnostics tools.tests.test_lock_metrics tools.tests.test_observe tools.tests.test_procfs_diag_snapshot tools.tests.test_boot_report
+	EVIDENCE_DIR=$(OBSERVABILITY_GATE_DIR)/procfs DIAGNOSTICS_SUPPORT=1 BOOT_REPORT_SUPPORT=1 RUST_TEST_TARGETS=riscv64imac-unknown-none-elf sh tools/host-tests/test-procfs-node-state-host.sh
+
+check-observability: check-observability-host
+	$(MAKE) ARCH=riscv64 BUILD_DIR=$(OBSERVABILITY_GATE_DIR)/dev RAMFS_USER=1 LOG_BOOT_REPORT=1 DIAG_BOOT=1 DIAG_TRACE=1 DIAG_TRACE_BOOT=1 DIAG_TRACE_MASK=3 kernel-only
+	$(PYTHON) tools/qemu/check_observability_elf.py --mode enabled --kernel $(OBSERVABILITY_GATE_DIR)/dev/kernel.elf
+	$(PYTHON) tools/qemu/check_observability.py --arch riscv64 --diagnostics --kernel $(OBSERVABILITY_GATE_DIR)/dev/kernel.elf --output $(OBSERVABILITY_GATE_DIR)/riscv64-guest
+	$(MAKE) ARCH=x86_64 BUILD_DIR=$(OBSERVABILITY_GATE_DIR)/x86 RAMFS_USER=1 DRIVER_DEPLOYMENT=embedded LOG_BOOT_REPORT=1 DIAG_BOOT=1 DIAG_TRACE=1 DIAG_TRACE_BOOT=1 DIAG_TRACE_MASK=3 kernel-only
+	$(PYTHON) tools/qemu/check_observability_elf.py --mode enabled --kernel $(OBSERVABILITY_GATE_DIR)/x86/kernel.elf
+	$(PYTHON) tools/qemu/check_observability.py --arch x86_64 --diagnostics --kernel $(OBSERVABILITY_GATE_DIR)/x86/kernel.elf --output $(OBSERVABILITY_GATE_DIR)/x86_64-guest
+	$(MAKE) ARCH=riscv64 BUILD_DIR=$(OBSERVABILITY_GATE_DIR)/cut RAMFS_USER=1 LOG_ENABLED=0 LOG_PERSISTENT=0 LOG_BOOT_REPORT=0 METRICS_ENABLED=0 DIAG_BOOT=0 DIAG_TRACE=0 kernel-only
+	$(PYTHON) tools/qemu/check_observability_elf.py --mode off --kernel $(OBSERVABILITY_GATE_DIR)/cut/kernel.elf
+	$(PYTHON) tools/qemu/check_observability.py --arch riscv64 --cut --kernel $(OBSERVABILITY_GATE_DIR)/cut/kernel.elf --output $(OBSERVABILITY_GATE_DIR)/off-guest

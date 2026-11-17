@@ -58,7 +58,7 @@ uint32_t mm_pt_anon_prov_max(void)
  * mm_pt_provision_anon() to read the cap at all.  In both cases the capability
  * does not exist, so the write is refused with -ENOSYS instead of being
  * accepted and silently ignored -- a knob that accepts a value nothing reads
- * is a fabricated capability (docs/security/hardening.md).  The read side stays
+ * is a fabricated capability (docs/zh/security/hardening.md).  The read side stays
  * available everywhere and reports 0, which is the truth: provisioning off. */
 int mm_pt_set_anon_prov_max(uint32_t pages)
 {

@@ -310,11 +310,11 @@ int a20_cow_map_child_anon_batch(
     mm_struct_t *child = child_ptr;
     if (!child || !child->pgdir)
         return -EINVAL;
-    int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-    uint64_t begin = timed ? timer_get_ticks() : 0;
+    a20_perf_token_t timing = a20_perf_begin();
+    int timed = timing.generation != 0;
     int result = pt_map_anon_batch(child->pgdir, va, pages, nr, shared);
     if (timed)
-        a20_perf_add(A20_PERF_MM_FORK_MAP_TICKS, timer_get_ticks() - begin);
+        a20_perf_finish(A20_PERF_COUNTER_COUNT, A20_PERF_MM_FORK_MAP_TICKS, timing);
     return result;
 #else
     (void)child_ptr;
@@ -902,13 +902,12 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             if (nr > vma_pages)
                 nr = vma_pages;
             if (nr >= 2) {
-                int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-                uint64_t begin = timed ? timer_get_ticks() : 0;
+                a20_perf_token_t timing = a20_perf_begin();
+                int timed = timing.generation != 0;
                 int batch = a20_cow_clone_anon_batch_rust(
                     child, parent, entry_base, table, nr, shared);
                 if (timed) {
-                    a20_perf_count(A20_PERF_MM_FORK_BATCH_CALLS);
-                    a20_perf_add(A20_PERF_MM_FORK_BATCH_TICKS, timer_get_ticks() - begin);
+                    a20_perf_finish(A20_PERF_MM_FORK_BATCH_CALLS, A20_PERF_MM_FORK_BATCH_TICKS, timing);
                 }
                 if (batch < 0)
                     return batch;
@@ -939,8 +938,8 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
             if (checked && entry_base < start)
                 continue;
             int r;
-            int timed = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-            uint64_t begin = timed ? timer_get_ticks() : 0;
+            a20_perf_token_t timing = a20_perf_begin();
+            int timed = timing.generation != 0;
 #if defined(ARCH_HAS_PGTABLE_OPS)
             /* This leaf and its table came from the active walker. The caller
              * holds parent->lock, so Rust can apply checked policy/dst rules
@@ -955,8 +954,7 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
                                          shared);
 #endif
             if (timed) {
-                a20_perf_count(A20_PERF_MM_FORK_SCALAR_CALLS);
-                a20_perf_add(A20_PERF_MM_FORK_SCALAR_TICKS, timer_get_ticks() - begin);
+                a20_perf_finish(A20_PERF_MM_FORK_SCALAR_CALLS, A20_PERF_MM_FORK_SCALAR_TICKS, timing);
             }
             if (r < 0)
                 return r;

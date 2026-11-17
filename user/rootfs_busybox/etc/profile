@@ -1,0 +1,6 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export SHELL=/bin/sh
+export TERM=vt100
+export PS1='# '
+cd /root

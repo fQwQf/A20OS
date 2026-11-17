@@ -7,7 +7,7 @@ on:
       - 'site/**'
       - 'docs/**'
       - 'mkdocs.yml'
-      - 'tools/docs/mkdocs_repo_links.py'
+      - 'tools/docs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -43,7 +43,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site/_pages
+          path: build/docs/site
 
   deploy:
     needs: build

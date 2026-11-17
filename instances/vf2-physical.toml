@@ -7,7 +7,7 @@
 # 存在这个段不代表真机已验证。串口设备节点、波特率、复位命令与 console_check
 # 都是按 JH7110 / VisionFive 2 的硬件事实填的，但每一条都要在接上板子之后用
 # `tools/a20 console vf2-physical` 实测确认；本仓库的真机验收记录以
-# docs/platforms/physical-boards.md 为准。
+# docs/zh/platforms/physical-boards.md 为准。
 name = "vf2-physical"
 description = "VisionFive 2 with a physical serial target for a20 console/deploy"
 arch = "riscv64"

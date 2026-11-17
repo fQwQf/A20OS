@@ -1,0 +1,41 @@
+name: Documentation checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'README*.md'
+      - 'docs/**'
+      - 'site/**'
+      - 'mkdocs.yml'
+      - 'Makefile'
+      - 'tools/docs/**'
+      - 'tools/tests/test_*doc*.py'
+      - '.github/workflows/docs*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'README*.md'
+      - 'docs/**'
+      - 'site/**'
+      - 'mkdocs.yml'
+      - 'Makefile'
+      - 'tools/docs/**'
+      - 'tools/tests/test_*doc*.py'
+      - '.github/workflows/docs*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r site/requirements.txt
+      - run: python3 -m unittest tools.tests.test_doc_translator tools.tests.test_check_doc_citations tools.tests.test_mkdocs_repo_links tools.tests.test_docs_layout
+      - run: make check-docs
+      - run: bash site/build.sh

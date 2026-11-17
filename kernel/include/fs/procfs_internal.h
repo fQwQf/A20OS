@@ -149,6 +149,10 @@ typedef enum {
     PF_FSTYPE,
     PF_SWAPS,
     PF_SYSRQ_TRIGGER,
+    PF_A20_BOOT_REPORT,
+    PF_A20_PORTING_REPORT,
+    PF_A20_TRACE,
+    PF_A20_OBSERVABILITY,
 } pf_type_t;
 
 int generate_pid_maps_alloc(int pid, int smaps, char **buf_out,

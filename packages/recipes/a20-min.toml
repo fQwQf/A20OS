@@ -25,7 +25,7 @@ version = "0.1.0"
 release = 0
 description = "A20OS minimal userland for real devices: init, shell, core file ops and diagnostics"
 url = "https://github.com/fQwQf/A20OS"
-license = "Apache-2.0"
+license = "Apache-2.0 AND GPL-2.0-only AND MIT"
 maintainer = "A20OS developers"
 archs = ["riscv64", "aarch64", "x86_64", "loongarch64", "riscv32", "arm32", "ppc64le"]
 # 虚拟包：任何实现了"根文件系统里有可用用户态"这一点的包都 provide 它。
@@ -37,8 +37,8 @@ provides = ["a20-userland"]
 src = "{build_dir}/*"
 dest = "/"
 include = [
-    # 启动必需：init 是 PID 1，mksh 是唯一的 shell。
-    "init", "mksh",
+    # 启动必需：init 是 PID 1，sh 是唯一的 shell。
+    "init", "busybox", "sh",
     # 与内核内建 initramfs（RAMFS_USER_PROGRAMS）保持一致的那一组，
     # 保证"内建 initramfs 启动"和"根文件系统启动"下用户能敲到同样的命令。
     "help", "ls", "cat", "ps", "echo", "sleep",
@@ -57,15 +57,6 @@ src = "{repo}/user/external/musl/build-{variant}/lib/libc.so"
 dest = "/musl/lib/libc.so"
 mode = "0755"
 optional = true
-
-# sh/bash 都指向 mksh（旧镜像里是硬拷贝，包里用符号链接）。
-[[files]]
-dest = "/sh"
-symlink = "/mksh"
-
-[[files]]
-dest = "/bash"
-symlink = "/mksh"
 
 # 网络协议表（与 Makefile PROTOCOLS_LINES 一致）。
 [[files]]

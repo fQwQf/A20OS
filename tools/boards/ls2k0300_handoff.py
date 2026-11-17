@@ -358,7 +358,7 @@ def run_handoff(transport, inst=None, *, bundle=None, transfer='mmc',
             # h is PMON's read-only command help. Never send U-Boot loaders.
             transport.write(b'h\r')
             session.prompt(command_timeout)
-            raise HandoffError('pmon', 'PMON detected. Preserve this log and run h load, h g, devls, set (no arguments); see docs/platforms/2k0300.md#pmon')
+            raise HandoffError('pmon', 'PMON detected. Preserve this log and run h load, h g, devls, set (no arguments); see docs/zh/platforms/2k0300.md#pmon')
         stage = 'firmware'
         version = session.command('version', command_timeout)
         if 'U-Boot' not in version:

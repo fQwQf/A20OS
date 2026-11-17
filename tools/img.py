@@ -102,15 +102,16 @@ def build_fat32(a) -> int:
     spawn = user_build / ("native-spawn-" + a.tag)
     if spawn.is_file():
         mcopy(str(img), str(spawn), "::/SPAWN.ELF")
-    # sh and bash are the mksh binary, as symlinks.
-    for alias in ("sh", "bash"):
-        mcopy(str(img), str(user_build / "mksh"), f"::/{alias}")
+    # sh is the upstream BusyBox shell ELF (FAT cannot store symlinks).
+    for alias in ("sh",):
+        mcopy(str(img), str(user_build / "sh"), f"::/{alias}")
 
     for d in ("::/etc", "::/lib", "::/lib/drivers", "::/musl", "::/musl/lib"):
         mdir(str(img), d)
 
+    driver_build = Path(getattr(a, "driver_build_dir", "") or a.user_build_dir)
     for m in a.runtime_drvmod.split():
-        mcopy(str(img), str(user_build / m), f"::/lib/drivers/{m}")
+        mcopy(str(img), str(driver_build / m), f"::/lib/drivers/{m}")
     for u in a.driver_store.split():
         mcopy(str(img), str(user_build / u), f"::/lib/drivers/{u}")
 
@@ -440,8 +441,8 @@ def _build_ext4(a, *, journal: bool, journal_checksums: bool = True) -> int:
         for f in sorted(user_build.iterdir()):
             if f.is_file() and not f.name.startswith("."):
                 shutil.copy2(f, staging / f.name)
-        for alias in ("sh", "bash"):
-            shutil.copy2(user_build / "mksh", staging / alias)
+        for alias in ("sh",):
+            shutil.copy2(user_build / "sh", staging / alias)
 
         (staging / "test.txt").write_text(
             "Hello from ext4!\nThis file is on the ext4 filesystem.\n")
@@ -560,8 +561,8 @@ def build_release_disk(a) -> int:
         if not f.is_file() or f.name.startswith("."):
             continue
         mcopy(str(img), str(f), f"::/{f.name}", overwrite=False)
-    for alias in ("sh", "bash"):
-        mcopy(str(img), str(user_build / "mksh"), f"::/{alias}")
+    for alias in ("sh",):
+        mcopy(str(img), str(user_build / "sh"), f"::/{alias}")
 
     mdir(str(img), "::/etc")
     mdir(str(img), "::/lib")
@@ -703,7 +704,7 @@ def main() -> int:
                              "mlibc-dynamic-rootfs", "copy", "verify-vbox",
                              "vf2-minimal"])
     for f in (
-              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "guest-kernel", "guest-kernel-ramfs", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "tag", "mlibc-sysroot" ):
+              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-build-dir", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "guest-kernel", "guest-kernel-ramfs", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "tag", "mlibc-sysroot" ):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4,

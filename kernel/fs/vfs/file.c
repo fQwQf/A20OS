@@ -1,5 +1,6 @@
 #include "fs/tty_control.h"
 #include "core/ioctl.h"
+#include "core/trace.h"
 #include "fs/vfs/file.h"
 #include "fs/vfs/file_state.h"
 #include "fs/quota.h"
@@ -122,7 +123,7 @@ static int vfs_rw_needs_mount_gate(vfile_t *vf)
     return type != S_IFCHR && type != S_IFIFO;
 }
 
-int vfs_read_file(vfile_t *vf, char *buf, size_t count)
+static int vfs_read_file_gated(vfile_t *vf, char *buf, size_t count)
 {
     if (!vfs_rw_needs_mount_gate(vf))
         return vfs_read_file_impl(vf, buf, count);
@@ -213,7 +214,7 @@ static int vfs_write_file_impl(vfile_t *vf, const char *buf, size_t count)
     return -EBADF;
 }
 
-int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
+static int vfs_write_file_gated(vfile_t *vf, const char *buf, size_t count)
 {
     if (!vfs_rw_needs_mount_gate(vf))
         return vfs_write_file_impl(vf, buf, count);
@@ -222,6 +223,19 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
         return ret;
     ret = vfs_write_file_impl(vf, buf, count);
     mntns_fileop_leave();
+    return ret;
+}
+
+int vfs_read_file(vfile_t *vf, char *buf, size_t count) {
+    a20_trace_token_t span = a20_trace_begin(A20_TRACE_IO, count, (uint64_t)proc_task_pid(proc_current()) << 1);
+    int ret = vfs_read_file_gated(vf, buf, count);
+    a20_trace_end(span, ret);
+    return ret;
+}
+int vfs_write_file(vfile_t *vf, const char *buf, size_t count) {
+    a20_trace_token_t span = a20_trace_begin(A20_TRACE_IO, count, ((uint64_t)proc_task_pid(proc_current()) << 1) | 1);
+    int ret = vfs_write_file_gated(vf, buf, count);
+    a20_trace_end(span, ret);
     return ret;
 }
 

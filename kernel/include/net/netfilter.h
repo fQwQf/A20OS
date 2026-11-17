@@ -82,7 +82,7 @@
 #define NETFILTER_PROTO_UDP  17
 
 /* ICMP echo types (RFC 792).  The only two this tree tracks; see
- * netfilter_frame_t::icmp_off and docs/net/conntrack-nat.md. */
+ * netfilter_frame_t::icmp_off and docs/zh/net/conntrack-nat.md. */
 #define NETFILTER_ICMP_ECHO_REPLY   0
 #define NETFILTER_ICMP_ECHO_REQUEST 8
 

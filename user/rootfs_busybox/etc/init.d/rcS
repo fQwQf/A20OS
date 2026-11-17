@@ -1,0 +1,13 @@
+#!/bin/sh
+# A20OS mounts /proc, /sys and /dev before starting PID 1.
+# Derive command links from the binary's actual applet set.
+/bin/busybox mkdir -p /bin /sbin /usr/bin /usr/sbin /tmp /run /var/run /root
+# Preserve BusyBox's standard bin/sbin layout. Putting every applet into /bin
+# would exceed the small RAMFS per-directory entry limit.
+/bin/busybox --install -s
+# Existing board probes use these historical paths.
+ln -s /bin/busybox /bin/poweroff
+ln -s /bin/busybox /bin/reboot
+chmod 1777 /tmp
+echo
+echo 'A20OS BusyBox RAMFS'

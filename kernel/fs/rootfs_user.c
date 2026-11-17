@@ -2,13 +2,16 @@
 
 #ifdef CONFIG_RAMFS_USER
 
+extern const unsigned char _binary_busybox_start[], _binary_busybox_end[];
+#ifdef CONFIG_RAMFS_BUSYBOX
+extern const unsigned char _binary_busybox_inittab_start[], _binary_busybox_inittab_end[];
+extern const unsigned char _binary_busybox_rcS_start[], _binary_busybox_rcS_end[];
+extern const unsigned char _binary_busybox_profile_start[], _binary_busybox_profile_end[];
+#endif
+
 extern const unsigned char _binary_init_start[], _binary_init_end[];
-extern const unsigned char _binary_mksh_start[], _binary_mksh_end[];
+extern const unsigned char _binary_sh_start[], _binary_sh_end[];
 extern const unsigned char _binary_help_start[], _binary_help_end[];
-extern const unsigned char _binary_ls_start[], _binary_ls_end[];
-extern const unsigned char _binary_cat_start[], _binary_cat_end[];
-extern const unsigned char _binary_ps_start[], _binary_ps_end[];
-extern const unsigned char _binary_sleep_start[], _binary_sleep_end[];
 extern const unsigned char _binary_timer_preempt_start[];
 extern const unsigned char _binary_timer_preempt_end[];
 extern const unsigned char _binary_timer_idle_start[];
@@ -17,14 +20,6 @@ extern const unsigned char _binary_timer_idle_end[];
 extern const unsigned char _binary_fork_fpu_probe_start[], _binary_fork_fpu_probe_end[];
 extern const unsigned char _binary_arm_fp_signal_test_start[], _binary_arm_fp_signal_test_end[];
 #endif
-extern const unsigned char _binary_echo_start[], _binary_echo_end[];
-extern const unsigned char _binary_uname_start[], _binary_uname_end[];
-extern const unsigned char _binary_mkdir_start[], _binary_mkdir_end[];
-extern const unsigned char _binary_rm_start[], _binary_rm_end[];
-extern const unsigned char _binary_cp_start[], _binary_cp_end[];
-extern const unsigned char _binary_sync_start[], _binary_sync_end[];
-extern const unsigned char _binary_poweroff_start[], _binary_poweroff_end[];
-extern const unsigned char _binary_reboot_start[], _binary_reboot_end[];
 extern const unsigned char _binary_nvme_stress_start[], _binary_nvme_stress_end[];
 #ifdef CONFIG_RAMFS_FASTFETCH
 extern const unsigned char _binary_fastfetch_start[], _binary_fastfetch_end[];
@@ -99,7 +94,16 @@ static const unsigned char ramfs_shell_marker[] = "ram-only\n";
 rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     { "/etc/a20-ramfs-shell", ramfs_shell_marker,
       sizeof(ramfs_shell_marker) - 1, 0644 },
+    USER_ENTRY("/bin/busybox", busybox),
+#ifdef CONFIG_RAMFS_BUSYBOX
+    { "/etc/inittab", _binary_busybox_inittab_start,
+      (size_t)(uintptr_t)_binary_busybox_inittab_end, 0644 },
+    USER_ENTRY("/etc/init.d/rcS", busybox_rcS),
+    { "/etc/profile", _binary_busybox_profile_start,
+      (size_t)(uintptr_t)_binary_busybox_profile_end, 0644 },
+#else
     USER_ENTRY("/bin/init", init),
+#endif
 #ifdef CONFIG_RAMFS_ROUTER
     USER_ENTRY("/bin/wanctl", wanctl),
 #endif
@@ -127,28 +131,22 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
 #ifdef CONFIG_RAMFS_RT_TESTS
     USER_ENTRY("/bin/sched_stress", sched_stress),
 #endif
-    USER_ENTRY("/bin/mksh", mksh),
+#ifndef CONFIG_RAMFS_BUSYBOX
+    USER_ENTRY("/bin/sh", sh),
     USER_ENTRY("/bin/help", help),
-    USER_ENTRY("/bin/ls", ls),
-    USER_ENTRY("/bin/cat", cat),
-    USER_ENTRY("/bin/ps", ps),
-    USER_ENTRY("/bin/sleep", sleep),
+#endif
+#if !defined(CONFIG_RAMFS_BUSYBOX) || defined(CONFIG_RAMFS_DIAGNOSTICS)
     USER_ENTRY("/bin/timer_preempt", timer_preempt),
     USER_ENTRY("/bin/timer_idle", timer_idle),
+#endif
 #ifdef CONFIG_RAMFS_FPU_TESTS
     USER_ENTRY("/bin/fork_fpu_probe", fork_fpu_probe),
     USER_ENTRY("/bin/arm_fp_signal_test", arm_fp_signal_test),
 #endif
-    USER_ENTRY("/bin/echo", echo),
-    USER_ENTRY("/bin/uname", uname),
-    USER_ENTRY("/bin/mkdir", mkdir),
-    USER_ENTRY("/bin/rm", rm),
-    USER_ENTRY("/bin/cp", cp),
-    USER_ENTRY("/bin/sync", sync),
-    USER_ENTRY("/bin/poweroff", poweroff),
-    USER_ENTRY("/bin/reboot", reboot),
+#if !defined(CONFIG_RAMFS_BUSYBOX) || defined(CONFIG_RAMFS_DIAGNOSTICS)
     USER_ENTRY("/bin/nvme_stress", nvme_stress),
     USER_ENTRY("/bin/nvstress", nvme_stress),
+#endif
 #ifdef CONFIG_RAMFS_FASTFETCH
     USER_ENTRY("/bin/fastfetch", fastfetch),
 #endif

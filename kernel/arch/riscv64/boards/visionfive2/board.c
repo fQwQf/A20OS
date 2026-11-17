@@ -12,7 +12,7 @@
  * DTB memory node in riscv64_memory_init().
  *
  * Reference: RocketOS (MIT) StarFive VisionFive 2 board/driver bring-up.
- * See docs/ACKNOWLEDGMENTS.md and docs/platforms/physical-boards.md.
+ * See docs/zh/ACKNOWLEDGMENTS.md and docs/zh/platforms/physical-boards.md.
  */
 
 #include "drivers/core/driver_core.h"

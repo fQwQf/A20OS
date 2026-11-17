@@ -8,7 +8,7 @@ int main(int argc, char *argv[]) {
         printf("\033[1mBuilt-in commands:\033[0m\n");
         printf("  cd, echo, exit, export, history, pwd\n");
         printf("\n\033[1mPrograms in /bin:\033[0m\n");
-        printf("  help, ls, cat, ps, sleep, timer_preempt, timer_idle, mksh\n");
+        printf("  help, ls, cat, ps, sleep, timer_preempt, timer_idle, sh\n");
         if (access("/bin/storage_read_test", X_OK) == 0)
             printf("  storage_read_test FILE [sample]\n");
         printf("\n\033[1mFilesystem:\033[0m\n");

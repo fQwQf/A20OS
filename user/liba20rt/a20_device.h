@@ -2,7 +2,7 @@
  * A20OS Native SDK — user-space driver support.
  *
  * Maps whitelisted device MMIO windows and delivers device IRQs to an
- * event queue (docs/hybrid-kernel/00-design.md §3.2).
+ * event queue (docs/zh/hybrid-kernel/00-design.md §3.2).
  */
 #ifndef _A20_DEVICE_H
 #define _A20_DEVICE_H
@@ -103,7 +103,7 @@ static inline a20_status_t a20_device_block_complete(uint32_t n_done)
 }
 
 /* Exclusive ownership claim on a whitelisted user-owned device window
- * (docs/hybrid-kernel/04-dual-placement.md).  Claims are auto-released
+ * (docs/zh/hybrid-kernel/04-dual-placement.md).  Claims are auto-released
  * at task death; a second claimant gets -A20_ERR_BUSY. */
 static inline a20_status_t a20_device_claim(uint64_t phys_base)
 {

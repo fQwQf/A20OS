@@ -213,7 +213,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_event_watch_fs 0x0507
 #define A20_SYS_channel_call 0x0508
 
-/* ===== Cluster (0x0520, docs/cluster/01-abi.md) ===== */
+/* ===== Cluster (0x0520, docs/zh/cluster/01-abi.md) ===== */
 #define A20_SYS_cluster_set_self 0x0520
 #define A20_SYS_cluster_export 0x0521
 #define A20_SYS_cluster_connect 0x0522

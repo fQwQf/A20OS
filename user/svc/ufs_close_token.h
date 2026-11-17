@@ -1,6 +1,6 @@
 /*
  * ufs_close_token.h — bounded open-token registry for the UFSD close-token
- * idempotency protocol (docs/fs/ufs-close-token.md).
+ * idempotency protocol (docs/zh/fs/ufs-close-token.md).
  *
  * A token identifies exactly one open instance of one inode on one mount
  * channel. Issue happens at OPEN, consumption at the first accepted CLOSE;

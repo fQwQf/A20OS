@@ -116,7 +116,7 @@ def main():
             for i, case in enumerate(config):
                 token = f"{run}_{i}"
                 if not args.no_counters:
-                    script += ["echo 1 > /proc/a20/perf", "echo reset > /proc/a20/lock_contention",
+                    script += ["echo stop > /proc/a20/perf", "echo start > /proc/a20/perf", "echo reset > /proc/a20/lock_contention",
                                f"echo DIAG_PRE_{token}", "cat /proc/a20/perf", "cat /proc/stat",
                                f"echo DIAG_PRE_END_{token}"]
                 elif not args.preserve_counter_state:
@@ -124,7 +124,7 @@ def main():
                 script += [f"echo APK_BENCH_BEGIN_{token}", shlex.join(case["argv"]),
                            f"r=$?; echo APK_BENCH_END_{token} $r"]
                 if not args.no_counters:
-                    script += [f"echo DIAG_POST_{token}", "cat /proc/a20/perf", "cat /proc/stat",
+                    script += ["echo stop > /proc/a20/perf", f"echo DIAG_POST_{token}", "cat /proc/a20/perf", "cat /proc/stat",
                                f"echo DIAG_LOCKS_{token}", "cat /proc/a20/lock_contention",
                                "echo 0 > /proc/a20/perf", f"echo DIAG_POST_END_{token}"]
                 elif not args.preserve_counter_state:

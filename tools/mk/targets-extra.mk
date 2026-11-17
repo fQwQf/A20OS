@@ -28,7 +28,7 @@ extra-img _extra-img extra-user-apps force_extra_image_stamp:
 	@echo "[extra]   make ARCH=$(ARCH) image-world PKG_WORLD=devel" >&2
 	@echo "[extra] 'devel' carries musl busybox vim git curl ca-certificates less." >&2
 	@echo "[extra] Add PKG_WORLD=devtools for gcc and musl-dev." >&2
-	@echo "[extra] See docs/packaging/images.md for the world list." >&2
+	@echo "[extra] See docs/zh/packaging/images.md for the world list." >&2
 	@exit 2
 
 # The glibc sysroot only ever existed so the vendored glibc-linked

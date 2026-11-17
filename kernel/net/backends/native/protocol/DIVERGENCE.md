@@ -157,7 +157,7 @@ bind 算出的值相同——两处都是"哈希零地址"，所以这是一致�
 §2.9 的 `LWIP_MEMP_LANE()` 是同一族概念的另一处：**"当前 lane"是移植层维护的
 上下文**（`net_lane.h` 的 `net_lane_ctx_push/pop/get`），由进入 lwIP 核心的各入口
 设置，而不是 lwIP 自己推导出来的。它刻意**不是**第二种 lane 定义——从 CPU 派生
-lane 的 `net_lane_of_cpu()` 已经存在，`docs/net/net-lanes.md` 记录了那正是
+lane 的 `net_lane_of_cpu()` 已经存在，`docs/zh/net/net-lanes.md` 记录了那正是
 `16304db8` 与 `f7f3d670` 两次事故的成因：一条连接上的 pcb 与 pbuf 必须落在同一条
 lane 上，而这件事只有在"lane 是什么"全树只有一个定义时才可能成立。
 
@@ -190,7 +190,7 @@ HEAD 的 2 行差异属于 §0.1 的"上游漂移"，不是我们的编辑）。
 上游 `src/include/lwip/opt.h:227` 把 `LWIP_ASSERT_CORE_LOCKED()` 定义成**空宏**，
 除非移植层自己 `#define` 它。本树此前没有定义，于是 `tcp.c` / `tcp_in.c` / `raw.c` /
 `udp.c` / `dns.c` / `ethernet.c` 里那几十处断言**全部是空操作**——
-`docs/net/network-lock-contract.md` 里的锁纪律在运行时没有任何强制手段。
+`docs/zh/net/network-lock-contract.md` 里的锁纪律在运行时没有任何强制手段。
 
 现在 `kernel/net/lwip_port/lwipopts.h` 在 `CONFIG_NET_LOCK_ASSERT=1` 下把它映射到
 `a20_lwip_assert_core_locked()`（`kernel/net/lwip_stack.c`）：
@@ -212,7 +212,7 @@ HEAD 的 2 行差异属于 §0.1 的"上游漂移"，不是我们的编辑）。
 所以这些是纯新增行）：`tcp_new()`、`tcp_new_ip_type()`、`tcp_slowtmr()`、
 `tcp_fasttmr()`、`tcp_netif_ip_addr_changed()`、`tcp_process_refused_data()`、
 `tcp_trigger_input_pcb_close()`。`tcp_abort()` 在本树**已经**带断言
-（`tcp.c:656`），`docs/net/net-lanes.md` 说它没有，那条记录已过时。
+（`tcp.c:656`），`docs/zh/net/net-lanes.md` 说它没有，那条记录已过时。
 
 默认构建 `CONFIG_NET_LOCK_ASSERT=0`，宏仍为空，代价为零。
 
@@ -477,7 +477,7 @@ ceiling 双向（下调与抬高）写进去。这是为了让抬高在**已建�
 ### 2.11 意向登记：per-netif 校验和卸载（**未实施**，不要当成已生效能力）
 
 **状态：只调查，未启用。** 本节记录"如果将来要做 TX/RX 校验和卸载，本树需要哪些
-偏离上游的改动"，以及为什么现在不做。完整调查见 `docs/net/checksum-offload.md`。
+偏离上游的改动"，以及为什么现在不做。完整调查见 `docs/zh/net/checksum-offload.md`。
 
 **先更正一个此前的错误说法。** 上一轮记录的是"vendored lwIP 2.2.2 没有任何承载
 握手协商的 flag"。这句话不成立，登记在案的载体是：
@@ -507,7 +507,7 @@ ceiling 双向（下调与抬高）写进去。这是为了让抬高在**已建�
 过滤。
 
 **设备侧现状（决定了 RX 一半本机不可验证）：** `VIRTIO_NET_HDR_F_DATA_VALID`
-在外部 Debian QEMU 10.0.13+ds 源树 `qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h:132` 有定义（解包定位见 `docs/dev/external-dependencies.md`），
+在外部 Debian QEMU 10.0.13+ds 源树 `qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h:132` 有定义（解包定位见 `docs/zh/dev/external-dependencies.md`），
 但 `hw/net/virtio-net.c` 全文不使用它（只有 e1000e / igb / vmxnet3 用），即 QEMU
 10.0 的 virtio-net 不逐帧上报校验和有效性。TX 一半设备侧是通的：
 `hw/net/net_tx_pkt.c:833-838` 会为带 `VIRTIO_NET_HDR_F_NEEDS_CSUM` 的帧补算校验和。
@@ -546,7 +546,7 @@ TCP OOM reclamation 与 `tcp_pcbs_sane()` 在普通 owner-lane 路径只访问�
 PCB lane hash 的端口单位是 host order：socket sockaddr 和 raw wire 端口在参与 hash 前
 转换为 host order，PCB 内的 port 字段已经是 host order。首轮 N=4 外部 host-forward
 测试曾因把 network-order 端口直接 hash 而将流放入错误 lane；该回归已由修复后的
-`smoke-net-lanes-hostfwd` 覆盖，具体日志与结果记录在 `docs/net/net-lanes.md`。
+`smoke-net-lanes-hostfwd` 覆盖，具体日志与结果记录在 `docs/zh/net/net-lanes.md`。
 
 锁顺序边界：lane/control -> 独立 shared-domain guard；shared-domain 内不得取得
 lane/control/socket/ingress 锁（UDP/RAW callback 仅执行上述受限事件暂存）。分配可在 ARP/ND6 cache guard 内发生，其已检查顺序是
@@ -558,7 +558,7 @@ cache guard -> lwIP heap lock -> allocator `SYS_ARCH_PROTECT`；allocator 的 he
 逐字节/机器码等价。
 
 这些描述记录当前源码结构，不是整体运行验证报告。`smoke-net-lanes-hostfwd` 这一项
-N=1/N=4 外部收包门禁已通过，日志与探针边界记录在 `docs/net/net-lanes.md`；其他构建、
+N=1/N=4 外部收包门禁已通过，日志与探针边界记录在 `docs/zh/net/net-lanes.md`；其他构建、
 SMP/runtime 门禁仍需以各自实际执行日志确认，不从这一项推断 PASS。
 
 ## 3. 重新同步上游的流程
@@ -594,7 +594,7 @@ git -C /path/to/upstream merge-base --is-ancestor <fix-sha> d08f477 && echo "fix
 ```
 
 在该核验完成前，本文件**不声称**本树不受 CVE-2026-91018 影响。这是
-`docs/security/hardening.md` 诚实性原则的直接应用：宁可缺数据，也不能让一个
+`docs/zh/security/hardening.md` 诚实性原则的直接应用：宁可缺数据，也不能让一个
 未核验的结论看起来像结论。
 
 ## 5. 板级诊断代码（非上游，注意信息泄露面）

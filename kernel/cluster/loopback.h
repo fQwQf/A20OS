@@ -1,5 +1,5 @@
 /*
- * loopback transport (docs/cluster/04-transports.md §2) -- WA-owned, all
+ * loopback transport (docs/zh/cluster/04-transports.md §2) -- WA-owned, all
  * tiers.  4-byte virtual-node-number link addresses; send copies the frame
  * into this kernel's RX upcall (zero loss, ordered, no shared buffer).
  */

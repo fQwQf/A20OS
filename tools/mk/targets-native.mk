@@ -463,7 +463,7 @@ native-contract-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-contract-arch
 native-contract-all: native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32
 
-# Cluster ABI contract (docs/cluster/01-abi.md, stage W0). Same shape as the
+# Cluster ABI contract (docs/zh/cluster/01-abi.md, stage W0). Same shape as the
 # contract recipe above: freestanding, no libc, boots as a native program.
 define NATIVE_CLUSTER_RECIPE
 @mkdir -p $(dir $(4))

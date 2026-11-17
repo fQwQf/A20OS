@@ -38,6 +38,10 @@ extern void acpi_os_start_worker(void);
 #include "drivers/input/virtio_input.h"
 #include "fs/block_cache.h"
 #include "core/klog.h"
+#include "core/boot_report.h"
+#include "core/diagnostics.h"
+#include "core/trace.h"
+#include "core/perf.h"
 #include "proc/signal.h"
 #include "drivers/block/loop.h"
 #include "net/socket.h"
@@ -152,31 +156,11 @@ static void boot_advance(enum boot_phase expected, enum boot_phase next) {
     /* Flush at every phase boundary.  This is process context and happens
      * before the step that could hang, so the persistent log always names the
      * last completed phase even if the next one never returns. */
+    a20_diag_phase(next);
+    a20_trace_event((A20_TRACE_BOOT << 8) | 3, next, expected, 0);
     klog_disk_sync();
 }
 
-#if CONFIG_KLOG_ENABLED
-/* One-shot diagnostic report, deliberately late: the shell has started, the
- * USB stack has had time to fail its first command, and the user is looking
- * at a screen they cannot scroll.  It is bounded and self-contained, so the
- * last lines (the fatal controller state) stay visible without a keyboard. */
-static void boot_report_thread(void) {
-    proc_set_name(proc_current(), "bootreport");
-    /* Wait long enough for the shell to start, but break out as soon as the
-     * xHCI fatal block lands so the user does not have to time a screenshot.
-     * Ten seconds is the ceiling when no fatal appears. */
-    for (unsigned i = 0; i < 20; i++) {
-        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(500));
-        if (klog_has_fatal()) {
-            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(500));
-            break;
-        }
-    }
-    klog_boot_report();
-    for (;;)
-        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(3600000));
-}
-#endif
 
 void kernel_main(void) {
     arch_boot_context_init();
@@ -218,6 +202,9 @@ void kernel_main(void) {
     timer_init();
     printf("[INIT] Timer initialized\n");
     timekeeping_init();
+    a20_perf_init();
+    a20_trace_init();
+    a20_diag_init(BOOT_PHASE_HANDOFF);
     printf("[INIT] Timekeeping initialized\n");
     boot_advance(BOOT_PHASE_HANDOFF, BOOT_PHASE_EARLY);
     mm_init();
@@ -243,6 +230,7 @@ void kernel_main(void) {
     stack_protector_init();
     bootargs_init();
     klog_configure();
+    boot_report_configure();
     printf("[INIT] Boot arguments parsed\n");
     /* The W^X policy depends on the cmdline (a20.wx=deny|strip|off), so this
      * must run after bootargs */
@@ -495,6 +483,7 @@ void init_kthread(void) {
     task_t *cur = proc_current();
     printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
 
+    boot_report_start();
     driver_runtime_selftest_boot();
     arch_run_bootarg_selftests();
     a20_driver_boot_selftests();
@@ -504,13 +493,6 @@ void init_kthread(void) {
      * available. Embedded deployments link all drivers into the kernel. */
 #ifdef CONFIG_DRIVER_DEPLOYMENT_GENERIC
     driver_manager_init();
-#endif
-    /* Start the one-shot diagnostic before the network attach: a hung NIC or
-     * protocol stack must not be able to take the final screen report with
-     * it.  The thread sleeps first, so it does not race normal boot output. */
-#if CONFIG_KLOG_ENABLED
-    if (proc_alloc(boot_report_thread) < 0)
-        kerr("[LOG] failed to spawn boot report thread\n");
 #endif
 
     /* BSD starts a process-context executor here even when the NIC driver is
@@ -781,6 +763,7 @@ void init_kthread(void) {
     printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n", ret,
            (unsigned long)info.entry, (unsigned long)user_sp);
 
+    boot_report_init_prepared(init_path, ret);
     proc_publish_deferred_task(init_task);
     proc_put(init_task);
 

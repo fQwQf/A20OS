@@ -1,7 +1,7 @@
 /*
  * A20OS user-space driver (udriver) support — kernel side.
  *
- * Design reference: docs/hybrid-kernel/00-design.md §3.2 (driver
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §3.2 (driver
  * migration model).  The kernel keeps interrupt dispatch and MMIO
  * authorization; device logic moves to user tasks:
  *

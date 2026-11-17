@@ -1,6 +1,6 @@
 /*
  * uinputd — user placement of the dual-placement virtio-input driver
- * (docs/hybrid-kernel/04-dual-placement.md).
+ * (docs/zh/hybrid-kernel/04-dual-placement.md).
  *
  * Same shared protocol source as the kernel probe
  * (kernel/drvmod/examples/vinput_probe.c).  This shell owns the

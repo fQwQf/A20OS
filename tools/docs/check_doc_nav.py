@@ -2,7 +2,7 @@
 """Check MkDocs navigation completeness, link validity, and anchor resolution.
 
 Ensures:
-  1. All files listed in site/mkdocs.yml nav exist under docs/.
+  1. All files listed in docs/_meta/navigation.yml nav exist under docs/.
   2. 100% of active markdown docs (excluding archive/ and research/) are indexed.
   3. All relative markdown links in active docs resolve to real files.
   4. All markdown anchor links (#anchor) match real headings in target docs.
@@ -18,8 +18,11 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DOCS_DIR = os.path.join(ROOT, "docs")
-MKDOCS_FILE = os.path.join(ROOT, "site/mkdocs.yml")
+DOCS_DIR = os.path.join(ROOT, "docs/zh")
+MKDOCS_FILE = os.path.join(ROOT, "docs/_meta/navigation.yml")
+sys.path.insert(0, ROOT)
+from pathlib import Path
+from tools.docs.layout import navigation, book
 
 EXCLUDE_DIRS = {"archive", "research"}
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.M)
@@ -36,21 +39,11 @@ def slugify(text: str) -> str:
 
 def parse_mkdocs_nav(mkdocs_path: str) -> set:
     """Extract all markdown file paths referenced in mkdocs.yml nav."""
-    nav_files = set()
-    if not os.path.exists(mkdocs_path):
-        raise FileNotFoundError(f"Missing {mkdocs_path}")
-    with open(mkdocs_path, "r", encoding="utf-8") as f:
-        in_nav = False
-        for line in f:
-            if line.strip().startswith("nav:"):
-                in_nav = True
-                continue
-            if in_nav:
-                # Capture all foo/bar.md occurrences in nav
-                matches = re.findall(r"[\s:\'\"]+([\w\-./]+\.md)", line)
-                for m in matches:
-                    nav_files.add(m)
-    return nav_files
+    _, ids = navigation(Path(ROOT))
+    navigation(Path(ROOT), 'en')
+    for manifest in (Path(ROOT) / 'docs/_meta/books').glob('*.yml'):
+        book(Path(ROOT), manifest.stem)
+    return {doc_id + '.md' for doc_id in ids}
 
 
 def collect_active_docs(docs_dir: str) -> list:
@@ -62,7 +55,7 @@ def collect_active_docs(docs_dir: str) -> list:
         if any(ex in parts for ex in EXCLUDE_DIRS):
             continue
         for f in files:
-            if f.endswith(".md"):
+            if f.endswith(".md") and not f.endswith(".en.md"):
                 p = os.path.relpath(os.path.join(root, f), docs_dir)
                 active_docs.append(p)
     return sorted(active_docs)
@@ -96,19 +89,19 @@ def main():
     # 1. Parse MkDocs nav
     nav_files = parse_mkdocs_nav(MKDOCS_FILE)
     if args.verbose:
-        print(f"Parsed {len(nav_files)} navigation entries from site/mkdocs.yml")
+        print(f"Parsed {len(nav_files)} navigation entries from docs/_meta/navigation.yml")
 
     # 2. Check nav targets exist
     for f in sorted(nav_files):
         target = os.path.join(DOCS_DIR, f)
         if not os.path.exists(target):
-            errors.append(f"MkDocs nav points to missing file: docs/{f}")
+            errors.append(f"MkDocs nav points to missing file: docs/zh/{f}")
 
     # 3. Check 100% nav coverage for active docs
     active_docs = collect_active_docs(DOCS_DIR)
     unmapped = [f for f in active_docs if f not in nav_files]
     for u in unmapped:
-        errors.append(f"Active doc missing from site/mkdocs.yml: docs/{u}")
+        errors.append(f"Active doc missing from docs/_meta/navigation.yml: docs/zh/{u}")
 
     # 4. Check relative links and anchors
     headings_map = build_headings_map(DOCS_DIR, active_docs)

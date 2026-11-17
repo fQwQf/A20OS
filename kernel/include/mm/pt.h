@@ -41,7 +41,7 @@
  *     decoration: removing mm->lock from a fault path without accounting for it
  *     turns each entry into a concurrent unlocked RMW against cursor-locked
  *     faults on the same leaf.  That is not hypothetical -- it is what the
- *     Phase 3 attempt hit (see docs/archive/mm/mm-single-level-migration-log.md 11.7
+ *     Phase 3 attempt hit (see docs/zh/archive/mm/mm-single-level-migration-log.md 11.7
  *     item 1).  A new bypass has to be added here, which is what makes it a
  *     decision rather than an oversight; check-mm-pt-lock-order asserts the list
  *     still matches the code.
@@ -113,7 +113,7 @@
  * that will never hold a swapped-out page.  The paper specifies no
  * replacement encoding, so removing PTE_SWAP is not "following the paper"
  * but an undesigned format change.  Decision and measurements:
- * docs/archive/mm/mm-single-level-migration-log.md (P7 record).
+ * docs/zh/archive/mm/mm-single-level-migration-log.md (P7 record).
  *
  * The exception is arch-dependent, and on three of six architectures it is
  * larger than "one bit":
@@ -263,7 +263,7 @@ struct pt_share {
 };
 
 /* ------------------------------------------------------------------ *
- * Backing-object segments  (P6, see docs/archive/mm/mm-single-level-migration-log.md 12.6)
+ * Backing-object segments  (P6, see docs/zh/archive/mm/mm-single-level-migration-log.md 12.6)
  * ------------------------------------------------------------------ *
  * The status byte records WHAT a page is (class + COW + prot) but cannot
  * record WHICH OBJECT backs it -- a vnode, an offset, a VMO.  Until fault

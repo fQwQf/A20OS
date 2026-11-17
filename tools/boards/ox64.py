@@ -168,7 +168,7 @@ def prepare(args) -> None:
         "After success power off, release BOOT, move UART to GPIO16/17 (pins32/31),\n"
         "insert prepared SD, power on, capture 2000000 baud console.\n"
         "This overwrites SPI boot firmware. Preserve any customized firmware first.\n"
-        "See docs/platforms/ox64.md for adapters and failure recovery.\n")
+        "See docs/zh/platforms/ox64.md for adapters and failure recovery.\n")
     print(f"Ox64 firmware/DTB ready: {out}; SPI was not written")
 
 

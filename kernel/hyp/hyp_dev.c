@@ -1,7 +1,7 @@
 /*
  * Guest device model: the MMIO half of the second-stage fault handler.  The
  * frozen contract is kernel/include/hyp/hyp_vcpu.h (v2); the design record is
- * docs/hypervisor/00-design.md.
+ * docs/zh/hypervisor/00-design.md.
  *
  * The active-run claim serializes guest device accesses. Managed console
  * queues additionally use console_lock for concurrent host readers/writers;
@@ -27,7 +27,7 @@
 #include "mm/pt.h"
 #include "drivers/char/uart.h"
 
-/* qemu-virt's map, from the platform spec (docs/hypervisor/00-design.md S5):
+/* qemu-virt's map, from the platform spec (docs/zh/hypervisor/00-design.md S5):
  * a 16550 at 0x10000000 and the CLINT at 0x02000000.  Only these two ranges
  * are modelled; the region above them is memory-mapped devices the guest may
  * probe, which is the RAZ/WI path. */

@@ -40,5 +40,5 @@ at its prompt and validate each load. Console GPIO16/17 (physical32/31),
 D0-only RV64 S-mode with Sv39. A20 has no BL808 SD, USB, Ethernet or M0 IPC driver;
 this instance checks early kernel allocation and exits, with no shell. SPI SRST
 poweroff is firmware-dependent: part ok is the completion marker. No physical
-board validation. See docs/platforms/ox64.md.
+board validation. See docs/zh/platforms/ox64.md.
 """

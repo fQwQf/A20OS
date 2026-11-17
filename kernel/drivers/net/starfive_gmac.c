@@ -2,8 +2,8 @@
  * A20OS StarFive EQOS GMAC driver.
  *
  * Developed for the StarFive VisionFive 2 board, referencing RocketOS (MIT)
- * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md and
- * docs/platforms/physical-boards.md.
+ * board/driver bring-up.  See docs/zh/ACKNOWLEDGMENTS.md and
+ * docs/zh/platforms/physical-boards.md.
  *
  * LOCK_ORDER: control_lock owns task-context initialization/MDIO. The ring
  * spinlock protects short packet operations. Managed stop closes admission

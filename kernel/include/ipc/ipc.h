@@ -1,7 +1,7 @@
 /*
  * A20OS core — internal IPC subsystem and object model.
  *
- * Ownership principle (docs/architecture.md): the internal kernel
+ * Ownership principle (docs/zh/architecture.md): the internal kernel
  * implementation (kernel/ipc, kernel/proc, kernel/mm, kernel/drivers)
  * is self-contained and exposes its API here; the ABI layers
  * (kernel/abi/native, kernel/abi/linux) are thin wrappers that call into
@@ -16,7 +16,7 @@
 #include "core/refcount.h"
 #include "core/sync.h"
 
-/* ---- Object model (docs/native-abi/03-handle.md) ---- */
+/* ---- Object model (docs/zh/native-abi/03-handle.md) ---- */
 
 typedef uint32_t a20_handle_t;   /* process-local handle index */
 typedef uint64_t a20_rights_t;   /* capability rights bitmask */
@@ -39,15 +39,15 @@ typedef enum a20_object_type {
     A20_OBJ_NAMESPACE        = 12,
     A20_OBJ_DEBUG            = 13,
     A20_OBJ_EXT_PROG         = 14,
-    A20_OBJ_PAGER            = 15,  /* user-space pager (docs/native-abi/09) */
+    A20_OBJ_PAGER            = 15,  /* user-space pager (docs/zh/native-abi/09) */
     A20_OBJ_MONITOR          = 16,  /* perf-style counter object */
     A20_OBJ_VMAR             = 17,  /* address-region reservation node */
     A20_OBJ_HYP_VM           = 18,
     A20_OBJ_HYP_VCPU         = 19,
 } a20_object_type_t;
 
-/* 15 capability rights bits (docs/native-abi/06-security.md §1, plus
- * A20_RIGHT_CLUSTER_ADMIN from docs/cluster/01-abi.md §3) */
+/* 15 capability rights bits (docs/zh/native-abi/06-security.md §1, plus
+ * A20_RIGHT_CLUSTER_ADMIN from docs/zh/cluster/01-abi.md §3) */
 #define A20_RIGHT_READ       (1ull << 0)
 #define A20_RIGHT_WRITE      (1ull << 1)
 #define A20_RIGHT_EXEC       (1ull << 2)
@@ -63,7 +63,7 @@ typedef enum a20_object_type {
 #define A20_RIGHT_ADMIN      (1ull << 12)
 #define A20_RIGHT_SIGNAL     (1ull << 13)
 /* Cluster administration: cluster_set_self / cluster_route / cluster_export
- * (docs/cluster/01-abi.md §3). A plain cluster_connect does not need it. */
+ * (docs/zh/cluster/01-abi.md §3). A plain cluster_connect does not need it. */
 #define A20_RIGHT_CLUSTER_ADMIN (1ull << 14)
 
 #define A20_RIGHTS_ALL  (A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_EXEC | \
@@ -75,7 +75,7 @@ typedef enum a20_object_type {
 
 #define A20_RIGHTS_NONE ((a20_rights_t)0)
 
-/* ---- Internal status codes (docs/native-abi/02-errors.md) ---- */
+/* ---- Internal status codes (docs/zh/native-abi/02-errors.md) ---- */
 
 #define A20_OK                       0
 #define A20_ERR_PERM                 1
@@ -104,7 +104,7 @@ typedef enum a20_object_type {
 #define A20_ERR_TYPE_MISMATCH        23
 #define A20_ERR_EXPIRED              25
 
-/* ---- Cluster status codes (docs/cluster/01-abi.md) ----
+/* ---- Cluster status codes (docs/zh/cluster/01-abi.md) ----
  * Appended after the 25 codes above; each one has exactly one trigger so a
  * remote failure can be mapped back to a cause without ambiguity. */
 #define A20_ERR_NODE_UNREACHABLE     26   /* no route, link DOWN, TTL exhausted, no set_self */
@@ -134,7 +134,7 @@ typedef enum a20_object_type {
 #define A20_ERR_NO_LOCKS 47
 #define A20_ERR_DEADLOCK 48
 
-/* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ---- */
+/* ---- Observable event types (docs/zh/native-abi/05-ipc.md §3.3) ---- */
 
 #define A20_EVENT_READABLE        0u   /* file/socket/pipe: data readable   */
 #define A20_EVENT_WRITABLE        1u   /* file/socket/pipe: space writable  */
@@ -148,7 +148,7 @@ typedef enum a20_object_type {
 #define A20_EVENT_PEER_CLOSED     9u   /* channel: peer endpoint closed     */
 #define A20_EVENT_SIGNALED       10u   /* device: irq/signaled (udriver)    */
 
-/* Filesystem watch events (docs/native-abi/09-native-abi-deepening.md §6). */
+/* Filesystem watch events (docs/zh/native-abi/09-native-abi-deepening.md §6). */
 #define A20_EVENT_FS_CREATE      16u
 #define A20_EVENT_FS_DELETE      17u
 #define A20_EVENT_FS_MODIFY      18u
@@ -189,7 +189,7 @@ typedef struct a20_channel_type {
 
 #define A20_CHAN_TYPE_ORDERED (1u << 0)
 #define A20_CHAN_TYPE_STRICT  (1u << 1)
-/* Cluster proxy endpoint (docs/cluster/03-kernel-impl.md §1): the peer is
+/* Cluster proxy endpoint (docs/zh/cluster/03-kernel-impl.md §1): the peer is
  * off-node, so the cluster ABI maps the typed-channel handle refusal
  * (send_handle_types == 0) to A20_ERR_CLUSTER_UNSUPPORTED instead of
  * A20_ERR_TYPE_MISMATCH.  Set only by kernel/cluster/remote_ep.c. */
@@ -325,7 +325,7 @@ typedef struct a20_debug {
 /* User-space pager: owns the request channel fed by PAGED-VMO page faults.
  * A PAGED VMO holds one reference to its pager while attached; the pager
  * holds no VMO reference (fault requests are resolved by the pager task).
- * See docs/native-abi/09-native-abi-deepening.md §2. */
+ * See docs/zh/native-abi/09-native-abi-deepening.md §2. */
 typedef struct a20_pager {
     refcount_t            refcount;
     spinlock_t            lock;
@@ -403,7 +403,7 @@ void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep);
  * the paired endpoint, or NULL when the peer is gone.  The peer pointer may
  * only be read under the channel lock discipline; this is that read plus a
  * reference, in one place.  Registered as the minimal a20_channel.c patch
- * in docs/cluster/03-kernel-impl.md §1 (2026-10). */
+ * in docs/zh/cluster/03-kernel-impl.md §1 (2026-10). */
 a20_channel_ep_t *a20_channel_ep_peer_ref(a20_channel_ep_t *ep);
 
 /* ---- Event queue API ---- */

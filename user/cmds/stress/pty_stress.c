@@ -21,15 +21,15 @@ static int run_round(int round)
         return 1;
     }
     if (pid == 0) {
-        char *argv[] = {"mksh", "-c", "printf PTY_OK", NULL};
+        char *argv[] = {"sh", "-c", "printf PTY_OK", NULL};
         char *envp[] = {
             "PATH=/bin:/usr/bin",
             "HOME=/",
-            "SHELL=/bin/mksh",
+            "SHELL=/bin/sh",
             "TERM=xterm",
             NULL,
         };
-        execve("/bin/mksh", argv, envp);
+        execve("/bin/sh", argv, envp);
         _exit(127);
     }
 

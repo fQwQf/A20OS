@@ -1,7 +1,7 @@
 /*
  * Native ABI deepening smoke test.
  *
- * Exercises the mechanisms added in docs/native-abi/09-native-abi-deepening.md:
+ * Exercises the mechanisms added in docs/zh/native-abi/09-native-abi-deepening.md:
  *   1. Pager: a PAGED VMO whose page faults are satisfied by a user-space
  *      pager thread over the request channel.
  *   2. Monitor: a perf-style counter object sampled on demand.

@@ -52,6 +52,8 @@ int main(int argc,char **argv) {
     size_t again=read_all(fd,repeat);
     if(close(fd)||initial!=again||memcmp(first,repeat,initial))return fail(__LINE__);
     int stat_no_arm=st.st_size==0&&state(first)==0&&value(first,"syscall_172_count")<1000;
+    fd=open("/proc/a20/perf",O_WRONLY);
+    if(fd<0||write(fd,"start",5)!=5||close(fd))return fail(__LINE__);
     /* Verify these rejected numbers are still profiled without invoking any
      * registered operation; the source table has no entries in 950..999 (1000+ has aliases). */
     for(long nr=950;nr<1000;nr++) {

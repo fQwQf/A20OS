@@ -209,6 +209,82 @@ Debian灯光报文只在USB路径有效，A20编码与实测一致，但ACK不�
 最终门控见native-acceptance.json，物理修复见desktop-repair-readback.json，交付见usb-readback.json。
 第15轮采集脚本在相邻boot-15/目录。
 
+## 第 13 次启动后的当前状态（2026-11-12）
+
+用户已确认 WHU-WLAN 可用，桌面和触控板可以继续测试。本轮内置 ESP 保存 1385 条
+连续有效内核记录，启动计数 13；Wi-Fi 关联、授权、DHCP 和 GUI 成功状态均有记录。
+新反馈为 CapsLock/NumLock 灯不亮、Firefox 冷启动慢、关机/重启无反应、MAC 非硬件地址。
+
+已定位关机在 VFS admission 阶段返回 EBUSY，尚未进入 ACPI；阻塞字符设备/匿名管道
+不应持有 mount transaction。电源服务重试失败也不应退出。补齐 ITE HID LED 输出报告，
+将 efuse 硬件 MAC 在 carrier 开启前发布到实际 BSD 协议栈，重启优先使用 FADT reset。
+用户提供的 FACP 指定 I/O `0xB0`、值 `0xFB`；HPET 为 MMIO `0xFED00000`、32 位。
+
+日志时间倒退及固定 CPU 的宿主探测又揭示 TSC 跨核 epoch 不一致：invariant rate
+不能充当共同 epoch 证明。SMP 优先共享 HPET，停用原始 TSC vDSO，并实现 32 位回绕维护。
+HPET32 原生门控捕获通用锁诊断递归调用计时器的启动 double fault，已改用不依赖时钟的原始锁。
+完整 Firefox 门控还捕获 ext4 deferred orphan EIO；修复并发 cold lookup 返回同 inode
+多个 vnode 的竞态。原生最终结果和实际安装状态统一记录于
+`build/evidence/lenovo-83eg-2026-11-11/boot-13/README.md`，失败记录保留，不作为通过依据。
+
+最终 EFI `140a80c0b7db077fbd809f5819cf7a80a99bfafac4f7b708e7f979331df40847`
+已通过4 CPU/8 GiB、HPET32 多次真实回绕的两项完整原生门控：USB 桌面/Firefox/LED/ACPI
+重启，NVMe 桌面/Firefox/LED/图形 S5。两轮虚拟根分区只读 fsck 无一致性错误。
+已更新测试 U 盘 ESP，卸载后只读重挂校验新 EFI、manifest、20个原文件和 BOOT13 回退副本，
+启动计数仍为13；三个分区全部卸载，宿主未改写桌面 ext4 或 SSD。
+锁定灯的物理效果、永久 MAC 下 DHCP/门户、真实 FADT reset/S5仍待第14轮实机验收。
+
+核心提交：`f55304eda`（共享HPET/32位回绕）、`4693e7b91`（关机门控/设备引用）、
+`4d5bc15ed`（ext4唯一vnode）。原暂存条目保留。版本0.19与v0.19 tag一致。
+
+宿主相同 Firefox 文件的 O_DIRECT 测量：USB 顺序约 21.1 MiB/s、随机约 2.745 MiB/s；
+SSD 副本约 1940/48.85 MiB/s。该结果支持后续 SSD 部署，但不等于 A20OS 驱动性能。
+两块内置盘无现成 4 GiB 空闲区，本轮不缩分区；先验证 NVMe 桌面完整负载。
+Firefox 仍为软件渲染，不能只凭介质解释全部卡顿。
+
+## 第 12 次启动后的历史状态（2026-11-12）
+
+实机进入桌面，WHU-WLAN 扫描、5220 MHz 开放网络关联和 DHCP 已成功。
+随后 GUI 状态检查失败，重复连接触发已关联 -16；网页认证和外网仍未验收。
+本轮触控板持续有真实 motion，一次 I2C 超时自行恢复；未见上一轮 USB 根盘
+失效与文件页填充失败链。用户选择 Rime 后顶栏和 dock 消失，旧会话日志为空，
+不能仅凭旧日志认定是哪一个进程先退出。
+
+继续原生回归确认并修复：accept 错误继承 listener 非阻塞模式、CLOEXEC 丢失、
+匿名 socket 缺少 fstat（导致标准 PyGObject/ibus-setup EBADF），以及相同 Wi-Fi
+连接错误地停止 DHCP 后重入关联。增加会话 stderr 到内置 ESP 的镜像与致命信号记录。
+Wayland IBus 布局通过同源 vendor override 提供默认值，由 compositor 管理
+Rime 的 default layout；保留用户偏好文件，不在启动中写入 gsettings。
+
+长时 QEMU 又捕获 memfd dirty cache 与 vnode 的引用循环：仍有约 37.5 GiB
+空闲 RAM 时，遗留的共享缓冲区占满 1 GiB cache，导致文件分配和代码页失败。
+同时修复最终 open file description 的 cache 释放，以及页表名称槽位已满时
+预留引用却未登记的泄漏；关闭 fd 后仍存活的映射、dup 与
+SCM_RIGHTS 所有权继续保留。原失败现场、精确符号和磁盘 overlay 已归档。
+继续冷启动设置服务回归，最终确认内核把 D-Bus 对启动辅助进程的正常 SIGKILL
+错误扩散给其子进程，误杀设置服务、通知及输入法 portal。已修正 Rust 重托管策略与
+C adapter，保留显式 PDEATHSIG 和线程组退出语义；新增信号发起方/强制退出因果日志。
+
+证据、负对照和最终门控结果见
+`build/evidence/lenovo-83eg-2026-11-11/boot-12/README.md`。
+最终 EFI `ee5d22aa17f3e780a8438104ca0eee219d771e87c9f210d2902523fe935b003c`
+已写入测试 U 盘。卸载后重新只读挂载，完整校验 EFI、manifest、18 个原文件与
+`EFI/A20OS/BOOT12.EFI` / `BOOT12.MANIFEST` 回退副本，启动计数仍为 12。
+宿主未写入桌面 ext4 分区；两个 FAT 分区在交付前卸载。
+
+同一最终 EFI 原生 QEMU 验证：16 CPU、约 40 GiB 内存、25931 次并发 USB 读取、
+3 GiB memfd churn、24 组 accept flags、4 组孤儿进程语义、5 个冷启动 dconf profile、
+标准 ibus-setup、Rime 实际保存“你好”、Firefox 模拟网页认证及认证后的联网复查。
+labwc、xfdesktop、xfce4-panel 在输入法和网络操作后保持原进程。
+完整串口、截图、镜像 SHA 与结构化结果绑定于 `qemu-native-matrix.json`。
+首次 Wi-Fi fixture 下载因关闭输入法窗口后的焦点竞态丢失首字母，原门控 timeout
+完整保留；在同一未更改的虚拟机只重跑 Wi-Fi 阶段通过，未将原结果改成 PASS。
+模拟认证验证浏览器和 GUI 通路，WHU-WLAN 实际网页认证与新 EFI 的触控板仍待实机复测。
+
+核心修复已按当前时间提交：`c7ddab6bd`（socket）、`c4a91f46c`（共享缓存/页表引用）、
+`b896df173`（父进程退出语义）。其他平台集成、日志和文档改动仍在工作区，
+原有文档迁移与两项暂存内容保持不变。
+
 ## 从实机与规范得到的结论
 
 | 证据 | 判读与修改 |
@@ -390,14 +466,51 @@ Debian 导出的 665 字节 HID 报告描述符定义了兼容鼠标报告 2、
 i8042 后，USB 键盘仍能打开 XFCE 图形终端并执行命令。Lenovo HID 报告
 描述符的主机回放另行验证了两个触点坐标和点击事件。原始证据为
 `boot-6/qemu-gui.log`、`boot-6/qemu-gui-appended.log` 和
-`boot-6/synaptics-report-replay.log`。该测试覆盖软件路径，
-真实 I²C 传输和实机桌面启动仍待验收。
+`boot-6/synaptics-report-replay.log`。第 7 次启动随后完成了实机桌面验收。
 
 现有测试 U 盘的 ESP 和日志分区保留。部署脚本先保存原 GPT，迁移旧镜像
 留下的备份 GPT，再在剩余空间创建桌面分区。读回校验 ext4 后才切换默认
 EFI，同时在 ESP 的 `EFI/A20OS/SHELLX64.EFI` 保存第 6 次验收的 shell。
-下次从 U 盘启动后，用 `Super+Enter` 打开终端，输入 `echo a20-gui-ok`，
-然后用触控板移动指针并点击窗口。内核日志使用 `bootcount=7` 归档。
+### 第 7 次实机桌面验收
+
+用户确认 XFCE 可用，触控板无响应，系统约显示 6 GiB 和 4 个逻辑处理器。
+内置 ESP 的 `CURRENT` 为 `bootcount=7`、`state=ready`，保留了序号
+0–633 的 634 条记录。4.744 s 挂载 U 盘桌面分区，31.964 s 首次提交
+1920×1080 画面。内核、UEFI 和桌面会话原始日志归档在
+`build/evidence/lenovo-83eg-2026-11-10/boot-7/`。
+
+- CPU 在 4.774 s 报告 `4/4 configured CPUs online`，正好达到桌面实例
+  的编译上限。Debian 基线为 Ryzen 7 7840H 的 8 核 16 线程。下一版
+  桌面实例将上限设为 16，并让各 CPU 共用按 GS 定位本地数据的
+  syscall 入口，仍由 MADT 决定启动哪些 CPU。
+- 内存日志中 4 GiB 以上只有 `0x100000000..0x200000000`，旧内核把
+  直接映射限制在物理地址 8 GiB 以内，并丢弃高地址不足 1 GiB 的尾部。
+  Debian 基线的 `MemTotal` 为 40,337,540 KiB，最高 RAM 地址为
+  `0xa3e2fffff`。下一版映射 64 GiB 物理地址范围内的固件可用页，
+  以 4 KiB 映射保留区边界，避免吞掉相邻 RAM。物理页元数据在内核
+  所在连续区放不下时，改放到另一段足够大的可用区。
+- 触控板在 2.133 s 完成 HID 枚举，注册为 `input/event1`，10.093 s
+  的首个运行时输入读取返回 `-ETIMEDOUT`。当时的首个报告和指针事件
+  日志来自自检。之后 eudev 的触控板探测和其他输入设备 worker 也超时。
+  下一版从 `_CRS` 解析 `AMDI0030` 的低有效 GPIO9，后台线程只在线路
+  有效时发起输入读取。evdev 只访问事件队列，DesignWare 等到 STOP 或
+  abort 才结束传输。日志分别记录 GPIO 首次有效、复位应答、触控模式
+  设置、首个真实报告及首个入队事件。
+  [Linux AMD GPIO 读取](https://github.com/torvalds/linux/blob/v6.12/drivers/pinctrl/pinctrl-amd.c)
+  · [Linux HID-over-I²C 输入路径](https://github.com/torvalds/linux/blob/v6.12/drivers/hid/i2c-hid/i2c-hid-core.c)
+
+下一次实机启动后，用 `Super+Enter` 打开终端，运行
+`grep -c '^processor' /proc/cpuinfo` 和 `grep '^MemTotal:' /proc/meminfo`，
+然后用内置触控板移动指针并按下点击。按启动号归档内置 ESP 日志。
+
+用于第 8 次启动的 EFI 已写入实机测试 U 盘并重新挂载读回校验，
+SHA-256 为 `54bcd94f2d5dc054a4aec543403d66cdec83b4d24e91c1ac3ac750a83d2cbc04`。
+第 7 次的桌面 EFI 保留在 `EFI/A20OS/DESKTOP7.EFI`。同一 EFI 在复刻
+实机三分区布局的 QEMU 中，从 USB hub 下游挂载 XFCE。40 GiB、16 vCPU
+的来宾进入桌面后，用 USB 键盘打开终端，读到 16 条 `processor` 记录和
+`MemTotal: 41935276 kB`。I²C 主机模型和 HID 回放通过，真实触控板
+的移动与点击待第 8 次启动验证。记录见
+`boot-7/qemu-physical-layout-40g-16cpu.log` 与 `boot-7/usb-readback-sha256.txt`。
 
 ```sh
 tools/a20log show --dir /media/"$USER"/A20OSLOG --boot loader
@@ -415,6 +528,134 @@ sudo tools/a20log show --dir /boot/efi/A20LOG --grep 04f2:b7b8
 命令执行结果用于验收 shell。若仍报参数错误，用新日志中
 打印的上下文字段对照 Linux 的 `/sys/kernel/debug/usb/xhci/0000:06:00.3`。
 读取 debugfs 应使用 `cat` 或 `hexdump`，这类文件报告的长度常为 0。
+
+## RTL8852BE 无线候选实现（2026-11-11）
+
+用户新增需求：内置无线网卡连接 Wi-Fi 上网。Debian 本机的 PCI 证据为
+`03:00.0 10ec:b852 / 17aa:4853`，驱动 `rtw89_8852be`。
+新实例启用 `wifi_rtw89=true`，从固定 submodule 构建独立 `rtw89d`，
+通过内核的 PCI/DMA/Ethernet transport 接入 BSD 网络栈。
+固件与工具随 EFI 内嵌，启动时复制到 `/a20` 的 tmpfs；原桌面分区可继续使用。
+使用方法、精确来源、日志及实机验收标准见
+[RTL8852BE 无线网卡](../drivers/classes/rtl8852be-wifi.md)。
+
+集成检查发现两处启动问题并已修复：A20OS 暂无 bind mount ABI；内核原先
+直接 chroot 到 distro init，绕过了内置 init 的服务准备。Wi-Fi 实例现在先进入
+内置 init，准备工具和服务后再执行原有 `/sbin/init`。无 Wi-Fi 的实例维持原路径。
+
+主机运行 215 项测试：214 项通过、1 项跳过，包含平台回调取消、重定时、执行中释放与锁
+所有权测试。完整桌面模拟已执行内嵌无线协议自检，通过 QEMU E1000 实际获取
+DHCP 租约并读回默认路由、DNS。记录保存在
+`build/evidence/lenovo-83eg-2026-11-11/wifi/`。
+与测试 U 盘相同三分区布局的最终 EFI（SHA-256
+`61723c6c8ea78710319ebb01ae3b841bae3f46175c4cf9691b9317e50b6c431a`）
+还通过了 DNS + HTTPS 请求。已替换测试 U 盘的默认 EFI 和 manifest；
+前一候选版保留为 `EFI/A20OS/DESKTOP8.EFI` / `DESKTOP8.MANIFEST`，
+启动计数仍为 7。原有 DESKTOP7、shell、日志及桌面分区保留。
+RTL8852BE 的固件启动、实际热点扫描、密码认证、无线收发和互联网访问仍待实机验收。
+
+### GUI 与 WHU-WLAN 网页认证
+
+用户要求改用 GUI，目标热点为 `WHU-WLAN`。Debian 的当前连接与缓存扫描确认该
+SSID 无无线层密码，在本机可见 2.4 GHz 和 5 GHz BSS（当前连接为频道 44）。
+武汉大学官方说明确认 Web 认证；未使用任何真实校园网账号进行自动登录。
+
+Wi-Fi 工具现提供 GTK 3 窗口、桌面快捷方式及应用菜单入口，支持刷新、选择、连接、
+断开、认证页打开和网络状态复检。开放热点发空无线密码，获取 DHCP 地址后检测
+传统 HTTP 门户或可用的 DHCP option 114 / CAPPORT API，认证页面交给正常 Firefox。
+联网结果须经 HTTP 和可信 HTTPS 检查，不以 DHCP 租约作为完成网页认证的证据。
+
+QEMU 完整打包镜像已通过 GUI 与真实 Firefox 的门户测试：关联由测试 socket 模拟，
+HTTP 302、JavaScript 表单、POST、Cookie 和重定向在 A20OS 中实际执行，登录后
+GUI 再次检测为在线。9 项主机测试通过，包含无密码协议、SSID 原始字节、重定向、
+CAPPORT 解析与证书错误处理。记录位于
+`build/evidence/lenovo-83eg-2026-11-11/wifi-gui/`。
+此测试认证页为本地 fixture，不等同于 WHU-WLAN 的实机验收。
+
+GUI 最终 EFI SHA-256 为
+`2e191bb400d64f43ad2d0476b57798a1b505a017af0e75b01fcf45df55ead1e9`。
+它已替换测试 U 盘的默认 EFI 与 manifest，并经卸载、只读重挂验证。
+前一命令行版保留为 `EFI/A20OS/WIFI-CLI.EFI` / `WIFI-CLI.MANIFEST`。
+最终模拟记录为 `wifi-gui/qemu-final-fixed.log`：包含实际生产入口启动、桌面快捷方式、
+密码框取消、诊断弹窗和完整 Firefox 门户流程，无 Python 异常。
+早期 `qemu-final.log` 发现 `Gtk.Dialog.run()` 触发 Python signal wakeup fd 的
+`EBADF`；已统一改用 `GLib.MainContext` 循环，验证后才写入测试 U 盘。
+
+## 第 8 次实机：触控板仍不可用
+
+用户确认触控板无响应。`CURRENT` 指向 `7064814b2698f8b3212f52d9429e2f81`，
+bootcount=8，state=ready，560 条记录；归档在
+`build/evidence/lenovo-83eg-2026-11-11/touchpad/A20LOG/`。
+
+- GPIO9 可用，2.092 s 收到复位完成；67.952 s 收到真实 report 3（32 字节），
+  并送入指针事件队列。采样期间也记录了 libinput-fuzz-extract 探测超时。
+- 实际 665 字节描述符包含 InputMode 4、LatencyMode 13、Surface/ButtonSwitch 6。
+  初始化现补齐 3/0/3，并通过 GET_REPORT 读回，分别记录结果。
+- evdev 增加 EVIOCGMTSLOTS 及每设备独立槽状态；空闲 tracking id 为 -1，
+  追踪范围从 0..0 修正为 0..65535。真实 host libevdev 快照正/负对照已验证；
+  host libinput 会容忍缺失槽查询并修正部分元数据，因此这些修复不能单独证明
+  本机故障已经消失，下一步仍需实机验证。
+- 增加自动用户态探测：真实 evdev 轴范围、槽查询、libevdev 和 libinput 接受结果
+  写入 touchpad.log 与 A20LOG；内核每 30 秒汇总读取、触摸、移动及错误计数。
+  探测不会读取或记录键盘事件、触控坐标。
+
+发行版 90-libinput-fuzz-override.rules 会在设备登记过程中启动日志中的超时 helper。
+这条原生驱动的 fuzz 全为零，下一候选仅对 `I2C HID touchpad` 跳过 fuzz 提取和
+归零 helper，其他设备保留原路径，避免无效转换阻塞设备登记。
+覆盖文件经 udevadm 校验，且已在同 U 盘布局 QEMU 中读回。
+
+修复 EFI SHA-256：`f254b2090445f8e1d00ce5352896b6d5de2ba17c0a1b0bffe42a8b38cfc6589d`。
+已用于更新测试 U 盘，第 8 次 GUI EFI 备份为 `EFI/A20OS/GUI8.EFI` 与相应 manifest。
+启动计数保留为 8。下一次实机需验证移动与点击，并检查自动 `[TOUCHPAD]` 记录，
+不能以 QEMU 启动或合成库测试替代本机触控板验收。
+
+## 第 9 次实机：触控板基本可用，输入中断与无线地址错误
+
+用户确认 `f254b209...` 版触控板已可用，但在网络配置窗口点击按钮后失效。
+boot `be6e22834c216b630e78e59bcf83e467`（607 条）证明真实 libevdev 初始化为 0，
+libinput accepted=True / pointer=True；累计 2152 份有效报告、1362 个移动帧。
+80 秒发生一次 I2C 超时，随后仍有报告，不能直接断言网络按钮使总线永久停止。
+详见 `build/evidence/lenovo-83eg-2026-11-11/boot-9/README.md`。
+
+发现并修复无线 transport 的确定性缺陷：本内核 usercopy 成功返回字节数，旧 broker
+却把非零成功值解释为 EFAULT，导致 INFO 初始化即退出。PCI 配置、DMA、link 的
+判断一并修正。网卡 BAR2 的实机值仍为 `a1a00000`，无需盲目改物理地址。
+
+输入侧增加整帧发布、源队列溢出的 SYN_DROPPED 与完整状态重建、超时后的触点/按键
+释放及 reset/报告模式恢复；DesignWare 失败时执行 ABORT 后再 disable。
+模拟输入自检覆盖积压溢出、丢失 release、读超时、reset 和下一次正常触摸。
+自动诊断延长至 180 秒，记录 libinput 移动、按下、松开计数；网络按钮与无线初始化
+阶段直接进入 ESP 日志。下一轮需验收连续操作后的触控板，以及真实热点扫描和关联。
+
+最终 EFI 为 `9bb05563975989e55d58dca8e49df244115314f4e0ce44cfb961f8878347f0fb`。
+15 项主机测试与完整 QEMU 桌面/输入恢复/模拟网页认证门控通过；测试 U 盘已更新，
+旧镜像备份为 `EFI/A20OS/TOUCH9.EFI`。卸载后重新挂载读回一致，12 个既有日志与
+备份文件未改变，启动计数保留为 9。连续输入与真实无线联网仍待第 10 次实机验收。
+
+## 第 10 次实机：JBD2 格式变化导致桌面挂载失败
+
+boot `5410bdcb894e909f9061167c6bff61b2` 的 524 条日志确认：桌面根在 4.893 秒
+因 JBD2 `-95` 被拒绝，系统进入 RAM shell。I2C-HID 的周期记录没有读取错误、
+没有复位重试，并实际收到了触摸报告；屏幕出现这些记录不能作为它阻塞桌面的证据。
+
+测试分区的 journal checksum v3 位已被清除，只剩 64bit；当前 filesystem VALID、
+journal start=0、errno=0、无 recover flag。Linux 挂载可能调整 journal 校验特性；
+普通 `ro` 也不能保证不写 ext4。此前普通 ro 检查是不充分的取证措施，今后读取该
+测试分区须使用原始只读 FD 或 `ro,noload`；未经恢复的内容不能当成一致性验收。
+
+新内核仅对干净、空、UUID/几何匹配、无错误且只含已知基础 feature 的无校验日志，
+同步恢复 checksum v3 后再启用 writer；脏日志、v1/v2 与未知格式仍拒绝升级。
+周期触控板状态改为仅保存到日志，错误仍显示。17 项主机测试通过。
+
+已完整备份实际桌面分区，在副本上修复字体缓存临时文件引用计数、空闲计数及目录
+索引，e2fsck 强制复查通过。使用实际 GPT/ESP 与修复副本进行对照：旧内核复现相同
+JBD2 -95，新内核升级后进入桌面、16 CPU/40 GiB 和 USB 输入通过，再以同一写入盘
+验证再次启动。证据位于 `build/evidence/lenovo-83eg-2026-11-11/boot-10/`。
+
+用户已完成管理员分区修复，整个 4 GiB 回读与 e2fsck 通过的修复副本 SHA-256 一致。
+默认 EFI 已切换为 `f598641a92936b439afbbfec3c913cc70f243b39dba07ccee70122168ae84e55`，
+重新挂载读回一致，14 个既有日志/备份文件未变；旧内核备份为 `EFI/A20OS/TOUCH10.EFI`。
+启动计数仍为十六进制 `0000000a`（10），下一轮第 11 次实机验收待进行。
 
 ## 回归
 

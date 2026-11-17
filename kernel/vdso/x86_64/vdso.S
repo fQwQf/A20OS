@@ -152,7 +152,7 @@ __vdso_gettimeofday:
  * EDX[27] and bound the decoded id against a CPU count published in the vvar
  * page before shifting EDX right 12.  Until the kernel half exists,
  * reporting "does not exist" is the honest answer
- * (docs/security/hardening.md).  See kernel/include/mm/vdso.h. */
+ * (docs/zh/security/hardening.md).  See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function
 __vdso_getcpu:

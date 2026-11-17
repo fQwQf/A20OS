@@ -46,7 +46,7 @@ kind = "uefi-disk"
 serial = "/dev/ttyUSB0"
 baud = 38400
 boot_timeout = "180s"
-console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+console_check = ["System ready", "[init] fork=0, calling execve sh"]
 boot_media = ["build/x86_64-pc/a20os-laptop-shell.img"]
 # Replace with the whole disposable USB device, never a partition.
 media_device = "/dev/sdX"

@@ -2,7 +2,7 @@
  * ufs_proto.h -- wire protocol between the uxfs kernel proxy and the
  * user-space uxfs service (ufsd); shared by both sides.
  *
- * Architectural placement: docs/hybrid-kernel/06-user-fs.md.  The VFS core
+ * Architectural placement: docs/zh/hybrid-kernel/06-user-fs.md.  The VFS core
  * stays in the kernel while filesystem implementations (FAT32 and friends) run
  * as crashable, restartable user-space services; the kernel-side uxfs proxy
  * forwards vnode operations to the service process over Channel IPC.  This

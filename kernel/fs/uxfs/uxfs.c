@@ -4,7 +4,7 @@
  * It turns VFS vnode/vfile operations into ufs_proto.h wire messages, sent
  * over Channel IPC to the user-space file service (ufsd).  The VFS core, page
  * cache and block layer stay in the kernel; the filesystem runs crashable and
- * restartable in user space (docs/hybrid-kernel/06-user-fs.md).
+ * restartable in user space (docs/zh/hybrid-kernel/06-user-fs.md).
  *
  * Concurrency: one request mutex per mount serialises each send/wait pair; the
  * service is single-threaded, and stale or reordered replies are dropped by

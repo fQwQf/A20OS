@@ -10,7 +10,7 @@
  * makes it the cleanest boot path of any ARM board in the tree.
  *
  * Verified: builds clean under -Werror.  NOT run on hardware.  See
- * docs/platforms/sun50i-h616.md.
+ * docs/zh/platforms/sun50i-h616.md.
  *
  * Scope: RAM, the console UART, GICv2, and PSCI power off.  The SD card
  * controller is Allwinner's own sunxi-mmc rather than a DesignWare part, so

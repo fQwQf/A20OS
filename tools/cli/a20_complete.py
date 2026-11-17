@@ -32,7 +32,7 @@ HIDDEN_COMMANDS = frozenset({"complete"})
 # Commands whose positional(s) are instance names.  check's positional is a
 # manifest *path*, so it gets no candidates and falls back to filenames.
 INSTANCE_COMMANDS = frozenset({
-    "console", "deploy", "ledger", "show", "show-vars",
+    "console", "deploy", "diagnose", "ledger", "show", "show-vars",
     "build", "prepare", "run", "debug", "test", "flash", "package", "ports",
 })
 

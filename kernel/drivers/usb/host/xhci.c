@@ -13,7 +13,7 @@
  * forces the polling fallback for a board whose line the platform does not
  * route.  xhci->lock is real: it serializes the command/endpoint/event ring
  * state and the port state, and completion callbacks run with it released
- * because they re-arm through this same lock (see docs/drivers/guide/
+ * because they re-arm through this same lock (see docs/zh/drivers/guide/
  * lock-order.md).
  */
 #include "drivers/usb/usb.h"

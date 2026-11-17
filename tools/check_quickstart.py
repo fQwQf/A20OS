@@ -27,7 +27,7 @@ TOOLS = {
     "mmd": "mtools",
     "dd": "coreutils",
     "flock": "util-linux",
-    "rustc": "rustup; see docs/dev/build.md",
+    "rustc": "rustup; see docs/zh/dev/build.md",
 }
 TARGETS = ("riscv64imac-unknown-none-elf", "riscv64gc-unknown-none-elf")
 
@@ -110,7 +110,7 @@ def main():
                            "--emit=metadata", "--target", target, str(rs), "-o", str(tmp / f"{target}.rmeta")],
                            f"rustup target add --toolchain {version} {target}") and ok
 
-    print("quickstart prerequisites: " + ("PASS" if ok else "FAIL; see docs/dev/build.md"))
+    print("quickstart prerequisites: " + ("PASS" if ok else "FAIL; see docs/zh/dev/build.md"))
     return 0 if ok else 1
 
 

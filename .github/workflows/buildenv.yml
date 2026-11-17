@@ -7,7 +7,7 @@
 # 拉到的东西，不是 runner 本地的构建产物。
 #
 # :latest 仍指向 multi（全集），所以 ci.yml 里未改动的 job 照旧工作；按架构
-# 切换容器是后续单独的可选项，见 docs/packaging/ci.md。
+# 切换容器是后续单独的可选项，见 docs/zh/packaging/ci.md。
 #
 # 首次启用需手动跑一次（Actions 页面 → buildenv → Run workflow）。
 name: buildenv

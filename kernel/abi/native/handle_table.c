@@ -1,9 +1,9 @@
 #if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
 /*
  * A20OS Native ABI — Handle table implementation.
- * Design reference: docs/native-abi/03-handle.md §2
+ * Design reference: docs/zh/native-abi/03-handle.md §2
  * Design inspiration: unified kernel-object handles with a rights model and
- * capability-transfer semantics; see docs/ACKNOWLEDGMENTS.md §3.
+ * capability-transfer semantics; see docs/zh/ACKNOWLEDGMENTS.md §3.
  * NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT: lookup/install/remove paths are the
  * checked surface for rights downgrade, temporal limits, labels, close/dup/
  * transfer, and partial-delivery consistency gates.
@@ -124,7 +124,7 @@ static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e)
 }
 
 /*
- * a20_blp_read_ok  — No Read Up (docs/native-abi/06-security.md §5.2).
+ * a20_blp_read_ok  — No Read Up (docs/zh/native-abi/06-security.md §5.2).
  * Process label must dominate object label: ℓ(p) ≥ ℓ(o).
  */
 static inline int a20_blp_read_ok(uint8_t proc_label, uint8_t obj_label)
@@ -133,7 +133,7 @@ static inline int a20_blp_read_ok(uint8_t proc_label, uint8_t obj_label)
 }
 
 /*
- * a20_blp_write_ok — No Write Down (docs/native-abi/06-security.md §5.2).
+ * a20_blp_write_ok — No Write Down (docs/zh/native-abi/06-security.md §5.2).
  * Process label must be dominated by object label: ℓ(p) ≤ ℓ(o).
  */
 static inline int a20_blp_write_ok(uint8_t proc_label, uint8_t obj_label)
@@ -292,7 +292,7 @@ struct a20_ht_internal *a20_ht_create(void)
      * state as well as slots before publishing this table. */
     memset(ht, 0, sizeof(*ht));
 
-    ht->security_label = 0; /* default: L (docs/native-abi/06-security.md §5.1) */
+    ht->security_label = 0; /* default: L (docs/zh/native-abi/06-security.md §5.1) */
     refcount_set(&ht->refcount, 1);
     spin_init(&ht->lock);
     spin_set_debug(&ht->lock, "a20_handle_table", ht);
@@ -495,7 +495,7 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
 
 /*
  * a20_handle_install_temporal — install handle inheriting temporal constraints
- * from a source handle. Enforces non-refreshability (docs/native-abi/06-security.md §6.4):
+ * from a source handle. Enforces non-refreshability (docs/zh/native-abi/06-security.md §6.4):
  * the new handle's expiry ≤ source expiry, ops ≤ source remaining_ops.
  */
 int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
@@ -753,7 +753,7 @@ int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h)
     return A20_OK;
 }
 
-/* ---- Reserve/abort/commit (docs/native-abi/03-handle.md §2.5) ----
+/* ---- Reserve/abort/commit (docs/zh/native-abi/03-handle.md §2.5) ----
  * channel_recv uses this to guarantee atomic delivery: slots are reserved
  * before the message is dequeued, so a full table yields NO_SPACE with the
  * message still queued instead of a partial delivery.
@@ -890,7 +890,7 @@ struct a20_ht_internal *task_get_a20_ht_ref(task_t *t)
     return ht;
 }
 
-/* ---- Temporal constraint control (docs/native-abi/06-security.md §6.4) ----
+/* ---- Temporal constraint control (docs/zh/native-abi/06-security.md §6.4) ----
  * SET is strengthening-only (non-refreshability): flags can only be added,
  * an existing absolute expiry can only be lowered, and an existing
  * operation budget can only be decreased.
@@ -1022,7 +1022,7 @@ int64_t a20_handle_set_label(struct a20_ht_internal *ht, a20_handle_t h,
 #endif
 }
 
-/* ---- Temporal sweeper docs/native-abi/03-handle.md §3.1, §5) ---- */
+/* ---- Temporal sweeper docs/zh/native-abi/03-handle.md §3.1, §5) ---- */
 
 #define A20_SWEEP_BATCH 16
 

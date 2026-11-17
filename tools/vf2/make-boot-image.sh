@@ -13,7 +13,7 @@
 #                              [path/to/extra.ext4.img]
 #
 # The same a20os.itb goes to QSPI flash offset 0x100000 for flash boot
-# (see docs/platforms/visionfive2-boot.md).
+# (see docs/zh/platforms/visionfive2-boot.md).
 set -euo pipefail
 
 # Administrative disk utilities commonly live outside an unprivileged

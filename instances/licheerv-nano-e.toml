@@ -38,5 +38,5 @@ uses the Nano B DTB for common UART/MMC early bring-up; Ethernet, Wi-Fi, video
 and optional secondary RTOS are not enabled. scriptaddr is moved away from
 the A20OS Image. Original vendor E firmware with verified Ethernet may instead
 use the separate licheerv-nano-e-tftp instance. No physical run has occurred.
-See docs/platforms/licheerv-nano.md.
+See docs/zh/platforms/licheerv-nano.md.
 """

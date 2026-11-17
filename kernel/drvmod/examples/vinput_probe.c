@@ -2,7 +2,7 @@
  * virtio-input kernel probe — drvmod module.
  *
  * The kernel placement of the dual-placement virtio-input driver now runs
- * as a loadable module (docs/hybrid-kernel/04-dual-placement.md).  It uses
+ * as a loadable module (docs/zh/hybrid-kernel/04-dual-placement.md).  It uses
  * the same shared protocol source as the user driver (user/svc/uinputd.c)
  * through the DRV_ENV_DRVMOD placement of drv_env.h; the probe is
  * deliberately read-only (config-space queries only), because full device

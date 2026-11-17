@@ -381,7 +381,7 @@ void proc_park_finish(proc_wait_token_t token)
 
 /*
  * proc_park_commit_donate — time-slice donation for synchronous IPC
- * (docs/hybrid-kernel/02-mainstream-plan.md M1).
+ * (docs/zh/hybrid-kernel/02-mainstream-plan.md M1).
  *
  * Identical to proc_park_commit up to marking the caller BLOCKED, but
  * instead of a full runqueue sched() it hands the CPU directly to

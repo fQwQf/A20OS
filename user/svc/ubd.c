@@ -1,5 +1,5 @@
 /*
- * ubd — user-space virtio-blk driver (docs/hybrid-kernel/02-mainstream-plan.md
+ * ubd — user-space virtio-blk driver (docs/zh/hybrid-kernel/02-mainstream-plan.md
  * M4, mainstream hybrid form).
  *
  * Owns the reserved second virtio-mmio block device entirely from user

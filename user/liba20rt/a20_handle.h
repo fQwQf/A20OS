@@ -144,7 +144,7 @@ static inline a20_status_t a20_hdl_control(a20_handle_t h, uint32_t op,
     return a20_syscall6(A20_SYS_handle_control, h, op, arg0, arg1, 0, 0);
 }
 
-/* ---- Temporal capabilities (docs/native-abi/03-handle.md §2.6) ---- */
+/* ---- Temporal capabilities (docs/zh/native-abi/03-handle.md §2.6) ---- */
 
 static inline a20_status_t a20_hdl_set_temporal(a20_handle_t h, uint64_t expiry_ns,
                                                   uint32_t remaining_ops,

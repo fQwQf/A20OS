@@ -1,5 +1,5 @@
 /*
- * rtcd supervisor e2e test (docs/hybrid-kernel/01-roadmap.md phase 4).
+ * rtcd supervisor e2e test (docs/zh/hybrid-kernel/01-roadmap.md phase 4).
  *
  * Spawns the user-space RTC driver service and verifies end to end:
  *   1. time RPC: board RTC read via user-mapped MMIO (sec plausible);

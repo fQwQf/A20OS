@@ -1,11 +1,11 @@
 /*
  * A20OS Native ABI — hypervisor VM / vcpu syscalls (0x0F00).
  *
- * Design record: docs/hypervisor/00-design.md S5.  The kernel-side objects
+ * Design record: docs/zh/hypervisor/00-design.md S5.  The kernel-side objects
  * and their lifetime rules are frozen in kernel/include/hyp/hyp_vcpu.h; this
  * file only turns them into capability calls: a VM and a vcpu are objects, so
  * they live in the caller's handle table and travel as handles, never as
- * pointers (docs/native-abi/03-handle.md §2).
+ * pointers (docs/zh/native-abi/03-handle.md §2).
  *
  * Both VM and vCPU are ordinary typed capability objects. Lookup pins an
  * object under the handle-table lock; each syscall drops that temporary pin.

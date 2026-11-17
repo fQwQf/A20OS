@@ -1,5 +1,5 @@
 # PR/主干门禁：多架构矩阵构建 + 打包 + 组镜像 + QEMU 冒烟。
-# 所有 job 运行在 ghcr 的构建容器里，本地可用同一镜像复现（docs/packaging/ci.md）。
+# 所有 job 运行在 ghcr 的构建容器里，本地可用同一镜像复现（docs/zh/packaging/ci.md）。
 name: CI
 
 on:
@@ -285,7 +285,7 @@ jobs:
       buildenv-image: ${{ needs.buildenv-image.outputs.image }}
 
   # QEMU 冒烟门禁（riscv64，TCG）：PR 与主干同一标准，套件对应
-  # docs/testing-gates.md 的核心 runtime 门禁（bring-up、Linux ABI syscall、
+  # docs/zh/testing-gates.md 的核心 runtime 门禁（bring-up、Linux ABI syscall、
   # 调度/进程/futex/MM/VFS 压力、SMP），最后跑需要网络与包仓库的
   # smoke-devtools（Alpine gcc 在 guest 内编译运行）。
   # 各 make 目标自带的 dev-build 增量复用同一构建目录与 ccache。

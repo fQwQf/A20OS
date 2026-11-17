@@ -1,7 +1,7 @@
 /*
  * Native ABI IPC fast-path test: fused channel_call RPC.
  *
- * Covers (docs/hybrid-kernel/01-roadmap.md phase 1):
+ * Covers (docs/zh/hybrid-kernel/01-roadmap.md phase 1):
  *   1. functional RPC: client channel_call <-> server recv+send echo
  *   2. handle transfer in both directions over a channel_call exchange
  *   3. NONBLOCK reply stage returns WOULDBLOCK when no reply is queued

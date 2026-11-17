@@ -5,7 +5,7 @@
  * Monitor (0x0D10): perf-style software-event counter objects.
  * task_mem (0x0211/0x0212): rights-checked cross-process memory access.
  *
- * Design reference: docs/native-abi/09-native-abi-deepening.md §2-§4.
+ * Design reference: docs/zh/native-abi/09-native-abi-deepening.md §2-§4.
  */
 #include "core/types.h"
 #include "core/defs.h"

@@ -1,7 +1,7 @@
 /*
  * Hypervisor foundation, machine-independent half: the stage-2 address
  * space and the VM container.  See kernel/include/hyp/hyp.h for the
- * contract and docs/hypervisor/00-design.md for the design record.
+ * contract and docs/zh/hypervisor/00-design.md for the design record.
  */
 #include "hyp/hyp.h"
 #include "hyp/hyp_vcpu.h"
@@ -327,7 +327,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 }
 
-/* ---- kernel-side selftest (docs/hypervisor/00-design.md, S4) ---- */
+/* ---- kernel-side selftest (docs/zh/hypervisor/00-design.md, S4) ---- */
 
 #if (defined(ARCH_HAS_PGTABLE_OPS) || defined(ARCH_HAS_HYP_S2)) && !defined(CONFIG_NOMMU)
 

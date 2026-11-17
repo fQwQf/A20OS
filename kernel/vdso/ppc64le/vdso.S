@@ -141,7 +141,7 @@ __vdso_gettimeofday:
  * pointer; neither is a per-CPU base, and the global vvar page
  * (kernel/mm/vdso.c) is shared by every CPU.  *r3 and *r4 are left
  * untouched: a plausible wrong CPU 0 is worse than no answer at all
- * (docs/security/hardening.md).  See kernel/include/mm/vdso.h. */
+ * (docs/zh/security/hardening.md).  See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function
 __vdso_getcpu:

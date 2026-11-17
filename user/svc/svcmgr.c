@@ -1,7 +1,7 @@
 /*
  * svcmgr — hybrid-kernel service manager with a global registry,
  * declarative manifest, dependency-ordered startup, health probes and
- * flap protection (docs/hybrid-kernel/02-mainstream-plan.md M3/M2).
+ * flap protection (docs/zh/hybrid-kernel/02-mainstream-plan.md M3/M2).
  *
  * Runs as the system supervisor: claims the registry endpoint, spawns
  * manifest services in dependency order, serves name lookups, watches

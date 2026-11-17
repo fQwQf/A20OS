@@ -40,12 +40,12 @@ static void serve_client(int socket_fd)
     if (socket_fd > STDERR_FILENO)
         close(socket_fd);
 
-    char *argv[] = { "mksh", "-i", NULL };
+    char *argv[] = { "sh", "-i", NULL };
     char *envp[] = {
-        "PATH=/bin:/usr/bin", "HOME=/", "SHELL=/bin/mksh",
+        "PATH=/bin:/usr/bin", "HOME=/", "SHELL=/bin/sh",
         "TERM=xterm", "USER=root", NULL
     };
-    execve("/bin/mksh", argv, envp);
+    execve("/bin/sh", argv, envp);
 }
 
 static void reap_children(int signal_number)

@@ -24,7 +24,7 @@ the sentence claims.  That needs a reader, not a regex; pretending otherwise
 would produce a gate that cries wolf and gets ignored.  Range validity is the
 part that can be decided exactly, so only that part is a gate.
 
-See docs/CONTRIBUTING.md for how to run it.
+See docs/zh/CONTRIBUTING.md for how to run it.
 """
 
 import argparse
@@ -67,8 +67,22 @@ CITE = re.compile(
 KNOWN_MOVING: dict[str, str] = {}
 
 
-def find_all(named):
+def build_basename_index():
+    """Scan once per check, so translated citations do not multiply tree walks."""
+    index = {}
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for filename in filenames:
+            if os.path.splitext(filename)[1] in SRC_EXT:
+                path = os.path.relpath(os.path.join(dirpath, filename), ROOT)
+                index.setdefault(filename, []).append(path)
+    return index
+
+
+def find_all(named, index=None):
     """Every path in the tree whose basename is `named`."""
+    if index is not None:
+        return index.get(named, [])
     hits = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
@@ -78,7 +92,7 @@ def find_all(named):
     return hits
 
 
-def resolve(path):
+def resolve(path, index=None):
     """Map a cited path onto a tree-relative path.
 
     Returns (target, ambiguous).  `target` is None when nothing in this tree
@@ -115,7 +129,7 @@ def resolve(path):
            for i in range(len(parts) - len(marker) + 1)):
         return None, False
 
-    hits = find_all(os.path.basename(path))
+    hits = find_all(os.path.basename(path), index)
     if not hits:
         return None, False
     if len(hits) == 1:
@@ -180,6 +194,7 @@ def main():
     log_lines = []
     failures = []
     skipped_docs = []
+    source_index = build_basename_index()
 
     for rel, full in markdown_files():
         if rel in KNOWN_MOVING:
@@ -206,7 +221,7 @@ def main():
                             f"{rel}:{lineno}: malformed range `{m.group(0)}`")
                         continue
 
-                    target, ambiguous = resolve(cited)
+                    target, ambiguous = resolve(cited, source_index)
                     if target is None:
                         external.append((rel, lineno, m.group(0)))
                         continue

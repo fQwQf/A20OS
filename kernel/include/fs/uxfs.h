@@ -1,7 +1,7 @@
 /*
  * uxfs.h -- kernel-side interface to the user-space filesystem proxy (uxfs).
  *
- * Design and boundaries: docs/hybrid-kernel/06-user-fs.md.  The ABI-layer
+ * Design and boundaries: docs/zh/hybrid-kernel/06-user-fs.md.  The ABI-layer
  * fs_serve / fs_block_io syscalls (kernel/abi/native/sys_native_fs.c) use this
  * interface to perform mount registration and controlled block IO.
  */

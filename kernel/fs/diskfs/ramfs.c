@@ -1299,7 +1299,16 @@ int ramfs_populate_overlay(void) {
     if (r < 0)
         return r;
 #ifdef CONFIG_RAMFS_USER
-    r = vfs_symlink("/bin/mksh", "/bin/sh");
+#ifdef CONFIG_RAMFS_BUSYBOX
+    /* Only bootstrap links belong in the kernel. rcS installs the applets
+     * supported by this exact BusyBox binary before starting the shell. */
+    r = vfs_symlink("/bin/busybox", "/bin/init");
+    if (r < 0 && r != -EEXIST)
+        return r;
+    r = vfs_symlink("/bin/busybox", "/bin/sh");
+#else
+    r = vfs_symlink("/bin/busybox", "/bin/sh");
+#endif
     if (r < 0 && r != -EEXIST)
         return r;
 #endif

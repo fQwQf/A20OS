@@ -1,5 +1,5 @@
 /*
- * Cluster transport contract (docs/cluster/04-transports.md §1) -- WA-owned
+ * Cluster transport contract (docs/zh/cluster/04-transports.md §1) -- WA-owned
  * seam every transport plugs into (03-kernel-impl.md §2 transport.c row).
  *
  * Registrants (04-§1): loopback id 0 (kernel/cluster/loopback.c, all tiers),

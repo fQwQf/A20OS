@@ -1,5 +1,5 @@
 /*
- * hyp_test — end-to-end vcpu slice test (docs/hypervisor/00-design.md S5).
+ * hyp_test — end-to-end vcpu slice test (docs/zh/hypervisor/00-design.md S5).
  *
  * Creates a VM, writes a minimal guest into its RAM, runs it, and asserts the
  * guest left through the legacy SBI shutdown call.  The guest's own output

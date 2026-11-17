@@ -207,7 +207,14 @@ mlibc-upstream-tests: $(MLIBC_UPSTREAM_BINS)
 # disables job control, so the shell needs no setpgid/tcsetpgrp.  mksh's own
 # strlcpy.c is dropped (mlibc provides strlcpy).
 # ------------------------------------------------------------------
-MLIBC_MKSH_DIR     := user/external/mksh-cvs2git
+MLIBC_MKSH_DIR     := build/cache/test-sources/mksh
+# Optional upstream application fixtures are fetched only when these ABI tests
+# are selected; production builds do not initialize shell/coreutils submodules.
+$(MLIBC_MKSH_DIR)/.a20-fixture-ready: tools/packaging/fetch_test_source.py
+	$(PYTHON) tools/packaging/fetch_test_source.py mksh --output $(MLIBC_MKSH_DIR)
+$(MLIBC_MKSH_DIR)/%.c: $(MLIBC_MKSH_DIR)/.a20-fixture-ready
+	@test -f "$@"
+
 MLIBC_MKSH_OBJDIR  := $(NATIVE_BUILD_DIR)/mlibc-mksh-obj
 MLIBC_MKSH_BIN     := $(NATIVE_BUILD_DIR)/mlibc-mksh-$(NATIVE_TAG)
 MLIBC_MKSH_SRCS    := edit eval exec expr funcs histrap jobs lalloc lex main misc shf syn tree ulimit var
@@ -215,9 +222,9 @@ MLIBC_MKSH_OBJS    := $(addprefix $(MLIBC_MKSH_OBJDIR)/,$(addsuffix .o,$(MLIBC_M
 MLIBC_MKSH_CFLAGS  := -O2 -ffreestanding -std=gnu99 -D_GNU_SOURCE \
 	-DMKSH_USE_AUTOCONF_H -DMKSH_DISABLE_DEPRECATED -DMKSH_UNEMPLOYED \
 	-DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599 \
-	$(MLIBC_FAST_TYPE_FLAGS) -Iuser/ports/mksh -I$(MLIBC_MKSH_DIR) -isystem $(MLIBC_SYSROOT)/include
+	$(MLIBC_FAST_TYPE_FLAGS) -Itools/test-fixtures/mksh -I$(MLIBC_MKSH_DIR) -isystem $(MLIBC_SYSROOT)/include
 
-MLIBC_MKSH_PORT_HEADERS := $(wildcard user/ports/mksh/*.h user/ports/mksh/*.gen user/ports/mksh/*.inc)
+MLIBC_MKSH_PORT_HEADERS := $(wildcard tools/test-fixtures/mksh/*.h tools/test-fixtures/mksh/*.gen tools/test-fixtures/mksh/*.inc)
 $(MLIBC_MKSH_OBJDIR)/%.o: $(MLIBC_MKSH_DIR)/%.c $(MLIBC_MKSH_PORT_HEADERS) | $(MLIBC_SYSROOT)/lib/libc.a
 	@mkdir -p $(dir $@)
 	$(MLIBC_CC) $(MLIBC_MKSH_CFLAGS) -c $< -o $@
@@ -240,7 +247,12 @@ mlibc-mksh: $(MLIBC_MKSH_BIN)
 # They are launched unchanged from the mksh (Linux ABI) shell: the kernel
 # detects the PT_A20_START_INFO phdr and switches the task to native mode.
 # ------------------------------------------------------------------
-MLIBC_SBASE_DIR       := user/external/sbase
+MLIBC_SBASE_DIR       := build/cache/test-sources/sbase
+$(MLIBC_SBASE_DIR)/.a20-fixture-ready: tools/packaging/fetch_test_source.py
+	$(PYTHON) tools/packaging/fetch_test_source.py sbase --output $(MLIBC_SBASE_DIR)
+$(MLIBC_SBASE_DIR)/%.c: $(MLIBC_SBASE_DIR)/.a20-fixture-ready
+	@test -f "$@"
+
 MLIBC_SBASE_OBJDIR    := $(NATIVE_BUILD_DIR)/mlibc-sbase
 MLIBC_SBASE_TOOLS     := true false sync echo uname seq yes cat mkdir rmdir ln sleep \
 	basename dirname hostname head tail rm cp mv wc
@@ -256,7 +268,7 @@ MLIBC_SBASE_LIBUTF_SRC := \
 	libutf/isprintrune.c libutf/ispunctrune.c libutf/isspacerune.c libutf/istitlerune.c \
 	libutf/isxdigitrune.c libutf/lowerrune.c libutf/rune.c libutf/runetype.c \
 	libutf/upperrune.c libutf/utf.c libutf/utftorunestr.c
-MLIBC_SBASE_LIBUTIL_SRC := $(wildcard $(MLIBC_SBASE_DIR)/libutil/*.c)
+MLIBC_SBASE_LIBUTIL_SRC := $(addprefix $(MLIBC_SBASE_DIR)/,libutil/concat.c libutil/confirm.c libutil/cp.c libutil/crypt.c libutil/ealloc.c libutil/enmasse.c libutil/eprintf.c libutil/eregcomp.c libutil/estrtod.c libutil/fnck.c libutil/fshut.c libutil/getlines.c libutil/human.c libutil/linecmp.c libutil/md5.c libutil/memmem.c libutil/mkdirp.c libutil/mode.c libutil/parseoffset.c libutil/putword.c libutil/reallocarray.c libutil/recurse.c libutil/rm.c libutil/sha1.c libutil/sha224.c libutil/sha256.c libutil/sha384.c libutil/sha512-224.c libutil/sha512-256.c libutil/sha512.c libutil/strcasestr.c libutil/strlcat.c libutil/strlcpy.c libutil/strnsubst.c libutil/strsep.c libutil/strtonum.c libutil/unescape.c libutil/writeall.c)
 MLIBC_SBASE_LIBUTF_OBJS := $(addprefix $(MLIBC_SBASE_OBJDIR)/,$(MLIBC_SBASE_LIBUTF_SRC:.c=.o))
 MLIBC_SBASE_LIBUTIL_OBJS := $(patsubst $(MLIBC_SBASE_DIR)/%.c,$(MLIBC_SBASE_OBJDIR)/%.o,$(MLIBC_SBASE_LIBUTIL_SRC))
 MLIBC_SBASE_LIBUTF_A   := $(MLIBC_SBASE_OBJDIR)/libutf.a

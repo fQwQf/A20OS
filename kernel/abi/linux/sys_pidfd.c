@@ -269,7 +269,7 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
     }
     /* A7 acquire side: the stolen descriptor is a fresh authority entering
      * this task, so the receiver's envelope decides whether it may be used
-     * (docs/research/05 §2.5.1).  Mediation keys on the NEW fd number, which
+     * (docs/zh/research/05 §2.5.1).  Mediation keys on the NEW fd number, which
      * is a current-task gfd exactly like on the SCM_RIGHTS receive path -- the
      * foreign fd number it came from never needs to be meaningful.  A denied
      * fd is closed rather than left installed, so a denial cannot be

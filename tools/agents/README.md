@@ -42,7 +42,7 @@ python3 tools/agents/run_opencode.py --mode smoke
 Its read-only audit mode was also an isolated diagnostic and is not the ordinary model path:
 
 ```sh
-python3 tools/agents/run_opencode.py --mode readonly --message 'Read docs/platforms/loongarch32.md and docs/platforms/ppc64le.md. Identify only claims that conflict with current active build configuration; cite path and line. Do not modify files.'
+python3 tools/agents/run_opencode.py --mode readonly --message 'Read docs/zh/platforms/loongarch32.md and docs/zh/platforms/ppc64le.md. Identify only claims that conflict with current active build configuration; cite path and line. Do not modify files.'
 ```
 
 Model output is untrusted and must be independently checked. The repository helper never grants shell access or permission to write project files through OpenCode.

@@ -1,5 +1,5 @@
 /*
- * Isolation audit (docs/hybrid-kernel/02-mainstream-plan.md M2).
+ * Isolation audit (docs/zh/hybrid-kernel/02-mainstream-plan.md M2).
  *
  * Reads /proc/a20/objects, runs 100 spawn->crash->reap cycles of a
  * service, then re-reads the counters: every native object class

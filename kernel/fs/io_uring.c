@@ -300,7 +300,7 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
             cqe->res = 0;
             return 0;
         }
-        /* Execution-point mediation (docs/research/05 §2.5.2): io_uring
+        /* Execution-point mediation (docs/zh/research/05 §2.5.2): io_uring
          * ops bypass the read/write syscalls, so the budget is charged
          * where the authority is consumed, per SQE. */
         if (env_active(proc_current())) {
@@ -477,7 +477,7 @@ int io_uring_register(int gfd, unsigned opcode, const void *arg,
 {
     switch (opcode) {
     case IORING_REGISTER_FILES:
-        /* Fixed-file tables are descriptor-transfer events (docs/research/05
+        /* Fixed-file tables are descriptor-transfer events (docs/zh/research/05
          * §2.5.1 A9): enveloped tasks may not bulk-import authorities in
          * v1; the executor resolves fds through the task fd table anyway,
          * so registration stays a pure fast-path hint elsewhere. */

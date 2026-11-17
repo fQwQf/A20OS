@@ -61,7 +61,7 @@ The software BOOT button is GPIO2; the hardware BOOT strap pad is different.
 blink_baremetal.uf2 is the official example to restore/test the application
 using the existing M0SENSE UF2 volume. It is not a ROM recovery image.
 
-Full steps: docs/platforms/m0sense-bl702.md
+Full steps: docs/zh/platforms/m0sense-bl702.md
 Official guide: https://wiki.sipeed.com/hardware/en/maixzero/sense/start.html
 ''')
 

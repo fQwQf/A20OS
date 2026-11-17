@@ -36,4 +36,4 @@ python3 tools/probes/tty_jobcontrol_probe.py \
 
 AArch64 使用 `--arch aarch64 --kernel <kernel.bin> --cpus 4 --require-audit`。门禁复制输入 FAT，按需注入对应架构的两个程序；逐段核对结果，要求 QEMU 自然退出，运行 `fsck.fat -n` 并核对输入哈希。`--require-audit` 还要求关机审计 0。
 
-2026-11-16 的 RV64 SMP2 与 AArch64 SMP4 均完成两次冷启动、每次三轮所有分项；四次自然关机与 FAT 检查通过，AArch64 两次审计均为 0。RV64 UART 无读者 Ctrl-C 回归约 11 ms，IRQ 字节增加 1、poll 字节保持 0。详细输入哈希、失败尝试和后续桌面回归见[收口记录](../../archive/v1-closeout-2026-11-16.md)。这些结果不等于完整 Native 异步信号或所有平台的发布认证。
+2026-11-16 的 RV64 SMP2 与 AArch64 SMP4 均完成两次冷启动、每次三轮所有分项；四次自然关机与 FAT 检查通过，AArch64 两次审计均为 0。RV64 UART 无读者 Ctrl-C 回归约 11 ms，IRQ 字节增加 1、poll 字节保持 0。详细输入哈希、失败尝试和后续桌面回归见[收口记录](../../archive/v1-closeout-2026-11-16.md)。这些结果不等于所有平台的发布认证；Native 普通通知另遵守[检查点式设计边界](../../native-abi/checkpoint-signals.md)。

@@ -1,0 +1,17 @@
+name = "qemu-x86_64-diagnostics"
+arch = "x86_64"
+[kernel]
+driver_deployment = "embedded"
+ramfs_user = true
+[net]
+stack = "bsd"
+[log]
+boot_report = true
+report = "off"
+porting_report = true
+porting_records = 128
+metrics = true
+trace = true
+trace_records = 128
+trace_mask = 3
+trace_boot = true

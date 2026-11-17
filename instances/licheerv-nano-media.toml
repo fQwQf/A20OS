@@ -21,8 +21,8 @@ baud = 115200
 boot_wait = 0
 boot_timeout = "120s"
 # BRINGUP without RAMFS_USER checks allocator then shuts down, no shell.
-# Wait for init to launch mksh; this profile remains interactive.
-console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+# Wait for init to launch ash; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve sh"]
 boot_media = ["build/licheerv-nano/a20os-licheerv-nano-media-sdcard.img"]
 media_device = "/dev/sdX"
 
@@ -42,6 +42,6 @@ commands = [
 note = """RAM shell with existing audioplay and videoplay. Onboard SG2002 DAC
 PCM requires successful C906 cache-instruction and hardware resource probes.
 The board has no initialized DSI scanout in this firmware profile.
-Physical execution is pending; see docs/platforms/licheerv-nano.md.
+Physical execution is pending; see docs/zh/platforms/licheerv-nano.md.
 Files remain in RAM and disappear at reset. No SSH service is provided.
 """

@@ -1,5 +1,5 @@
 /*
- * Cluster export table (docs/cluster/03-kernel-impl.md §2 export.c row,
+ * Cluster export table (docs/zh/cluster/03-kernel-impl.md §2 export.c row,
  * 01-abi.md §cluster_export).
  *
  * - Slot numbers are per-node monotonic and never reused; slot 0 is

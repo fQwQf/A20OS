@@ -18,7 +18,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include "../../external/sbase/md5.h"
+#include "../../crypto/md5.h"
 
 enum {
     DISC = 0x8863, SESS = 0x8864, ETH_HEADER = 14, HEADER = 20, MTU = 1492,

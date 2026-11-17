@@ -1,5 +1,5 @@
 /*
- * Core VMAR object engine (docs/native-abi/04-memory.md §3).
+ * Core VMAR object engine (docs/zh/native-abi/04-memory.md §3).
  *
  * The tree is a reservation hierarchy only: page tables and VMAs stay in
  * the owning mm_struct.  A VMAR adds three rules on top of plain mmap:

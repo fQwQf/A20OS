@@ -236,7 +236,7 @@ int64_t sys_a20_handle_set_meta(const a20_syscall_args_t *args)
     /* Reserved and unhonoured bits are rejected before anything is modified:
      * a request naming both a supported and an unsupported field must not
      * half-apply, and reporting A20_OK for a field the kernel dropped would
-     * be a lie (docs/native-abi/02-errors.md §4).  Naming no field at all is
+     * be a lie (docs/zh/native-abi/02-errors.md §4).  Naming no field at all is
      * rejected for the same reason. */
     if ((flags & ~(A20_SET_META_MODE | A20_SET_META_OWNER | A20_SET_META_ATIME |
                    A20_SET_META_MTIME | A20_SET_META_CTIME |

@@ -9,7 +9,7 @@
 #   危险得多。
 #
 # TODO(publishing): 包仓库暂未发布到 Pages——原先的部署既与 pages.yml 抢同一个
-#   站点，又把 build/repo 拷进 site/ 源目录且从不执行 site/build.sh；见 docs/packaging/repository.md。
+#   站点，又把 build/repo 拷进 site/ 源目录且从不执行 site/build.sh；见 docs/zh/packaging/repository.md。
 name: release
 
 on:

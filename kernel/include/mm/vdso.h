@@ -1,7 +1,7 @@
 /*
  * A20OS vDSO (virtual dynamic shared object) — trap-free time queries.
  *
- * Design reference: docs/hybrid-kernel/00-design.md §7 (Linux ABI
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §7 (Linux ABI
  * transparent benefit path).  The kernel maps a tiny read-only code page
  * plus one shared read-only data page (vvar) into every Linux-ABI task at
  * exec and advertises the code page via AT_SYSINFO_EHDR.  musl then serves
@@ -40,7 +40,7 @@
  *
  * Storing 0 here, as this used to do, was the one unacceptable answer: it
  * reported a plausible, wrong CPU 0 on an SMP guest, where reporting "does
- * not exist" is honest (docs/security/hardening.md).
+ * not exist" is honest (docs/zh/security/hardening.md).
  *
  * Making it real needs a kernel-side export, not more assembly: a per-CPU
  * vvar page plus a way for user space to find the current one (a per-task

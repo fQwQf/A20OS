@@ -262,13 +262,17 @@ $if(a20-styling)$
 \setlist{topsep=0.45em,itemsep=0.2em,parsep=0pt}
 \fi
 
+\renewcommand{\figurename}{$figure-name$}
+\renewcommand{\tablename}{$table-name$}
+\AtBeginDocument{\hypersetup{pdflang={$doc-language$}}}
+
 % ---- headers and footers ----
 \pagestyle{fancy}
 \fancyhf{}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{\hbox to\headwidth{\color{a20rule}\leaders\hrule height \headrulewidth\hfill}}
-\fancyhead[L]{\small\color{a20muted}A20OS \textbar\ 标准参考手册}
-\fancyhead[R]{\small\color{a20muted}\nouppercase{\leftmark}}
+\fancyhead[L]{\small\color{a20muted}A20OS \textbar\ $subtitle$}
+\fancyhead[R]{}
 \ifdefined\chaptermark
 \renewcommand{\chaptermark}[1]{\markboth{#1}{}}
 \fi
@@ -284,9 +288,9 @@ $if(a20-styling)$
 \ifdefined\chapter
 \titleformat{\chapter}[display]
   {\normalfont\sffamily\bfseries\color{a20ink}}
-  {\Large\color{a20accent}第\thechapter 章}
+  {\Large\color{a20accent}$chapter-prefix$\thechapter\ $chapter-suffix$}
   {1.4ex}
-  {\Huge}
+  {\LARGE\raggedright}
   [{\vspace{1.2ex}\color{a20rule}\titlerule}]
 \titlespacing*{\chapter}{0pt}{0pt}{4.2ex}
 \fi
@@ -388,9 +392,9 @@ $endif$
       \color{a20muted}\small
       \renewcommand{\arraystretch}{1.35}
       \begin{tabular}{@{}ll@{}}
-        文档类型 & 技术手册 \\
-        生成日期 & \@date \\
-        发布主体 & \@author
+        $document-type-label$ & $document-type$ \\
+        $date-label$ & \@date \\
+        $author-label$ & \@author
       \end{tabular}
     \end{minipage}\par
     \vspace{0.8cm}

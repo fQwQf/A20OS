@@ -4,7 +4,7 @@
  * backend module or a protocol type.  The implementation lives in
  * kernel/net/core/stack.c and dispatches to the selected net_backend_t.
  *
- * See net/backend.h for the backend contract and docs/net/backend-interface.md
+ * See net/backend.h for the backend contract and docs/zh/net/backend-interface.md
  * for the ownership rules.
  */
 #ifndef A20_NET_STACK_H

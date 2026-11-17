@@ -1,6 +1,6 @@
 /*
  * Cluster core internals -- shared declarations of the WA kernel data plane
- * (docs/cluster/03-kernel-impl.md §2 file table).  kernel/cluster/-private:
+ * (docs/zh/cluster/03-kernel-impl.md §2 file table).  kernel/cluster/-private:
  * nothing outside the cluster directory may include this.
  *
  * Lock hierarchy (03-§3), outermost -> innermost:

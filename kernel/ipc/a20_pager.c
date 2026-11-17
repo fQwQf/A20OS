@@ -8,7 +8,7 @@
  * faulting thread on the VMO's faulter wait queue until the pager supplies
  * the page (a20_pager_supply_pages) and wakes it.
  *
- * Design reference: docs/native-abi/09-native-abi-deepening.md §2.
+ * Design reference: docs/zh/native-abi/09-native-abi-deepening.md §2.
  * Ownership:
  * - The pager object holds the request channel endpoint (one reference).
  * - Each attached PAGED VMO holds one reference to the pager

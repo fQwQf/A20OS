@@ -1,0 +1,317 @@
+sections:
+  architecture: 总体设计
+  hybrid-kernel: 混合内核架构
+  native-abi: 原生 ABI
+  real-time-operating-system: 实时操作系统
+  kernel-subsystems: 内核子系统
+  scheduling: 调度
+  memory-management: 内存管理
+  linux-abi-compatibility: Linux ABI 兼容细节
+  logging: 日志与诊断
+  architecture-features: 架构特性
+  cross-architecture-execution-exec-xlator: 外来架构翻译 (exec-xlator)
+  file-systems: 文件系统
+  networking: 网络
+  graphics: 图形
+  virtualization: 虚拟化
+  clustering: 集群系统
+  core-specifications: 核心规范
+  technical-reference: 技术参考
+  security-and-hardening: 安全与加固
+  driver-development: 驱动开发
+  developer-guides: 开发指南
+  device-classes: 设备类参考
+  engineering-practices: 工程实践
+  platforms-and-porting: 平台移植
+  risc-v-platforms: RISC-V 平台
+  arm-aarch64-platforms: ARM / AArch64 平台
+  loongarch-platforms: 龙芯 LoongArch 平台
+  x86-64-and-virtualization: x86_64 与虚拟化
+  build-and-test: 构建与测试
+  packaging-and-distribution: 打包与发行
+  distribution-rootfs: 发行版 rootfs
+  status-and-progress: 状态与进度
+  version-1-0-gap-tracker: 1.0 缺口台账
+  section-33: 诊断笔记
+  subsystem-implementation-status: 各子系统实现状态
+  history: 历史记录
+  releases: 版本发布
+  roadmap: 路线图
+  contributing: 参与贡献
+pages:
+  kernel/logging/README: 使用与扩展
+  kernel/logging/persistent-logging: 持久日志与故障取证
+  kernel/logging/boot-report: Boot Report 与屏幕诊断
+  kernel/logging/observability: 移植测试与性能分析
+  kernel/logging/observability-validation-2026-11-15: 可观测性验证记录
+  kernel/logging/boot-report-validation-2026-11-15: Boot Report 验证记录
+  README: 首页
+  architecture: 设计方案总览
+  hybrid-kernel/README: 索引与总览
+  hybrid-kernel/00-design: 概览与设计
+  hybrid-kernel/01-mechanisms: 核心机制
+  hybrid-kernel/02-mainstream-plan: 主流化计划
+  hybrid-kernel/03-refactor-plan: 重构计划
+  hybrid-kernel/04-dual-placement: 双重放置策略
+  hybrid-kernel/05-idl-and-personality: IDL 与 Personality
+  hybrid-kernel/06-user-fs: 用户态文件系统
+  native-abi/README: 规范索引
+  native-abi/00-overview: 总览与架构
+  native-abi/syscalls: 系统调用速查与调用指南
+  native-abi/01-types: 类型系统
+  native-abi/02-errors: 错误处理
+  native-abi/03-handle: Handle 与能力
+  native-abi/04-memory: 内存管理
+  native-abi/05-ipc: IPC 通信
+  native-abi/06-security: 安全模型
+  native-abi/07-startup: 启动流程
+  native-abi/09-native-abi-deepening: ABI 深化
+  native-abi/10-runtime-extensions: 运行时扩展
+  rtos/README: 索引与总览
+  rtos/overview: 架构与执行模型
+  rtos/cmsis-rtos2: CMSIS-RTOS2 人格层
+  rtos/execution-model: 任务与执行机制
+  rtos/synchronization: 同步与优先级继承
+  rtos/interrupts: 中断模型与分发器
+  rtos/porting-guide: 移植与配置指南
+  rtos/experiments: 实验 4.1–4.5
+  rtos/latency: 时延分析与基准
+  kernel/README: 核心机制总览
+  kernel/eevdf-scheduler: EEVDF 调度器
+  kernel/process-scheduler: 进程调度
+  kernel/mm/README: 索引与总览
+  kernel/mm/single-level-page-table: 单级页表模型
+  kernel/mm/fork-mprotect-cow: Fork 与 COW 并发约束
+  kernel/mm/slab-cpu-cache: Slab CPU 缓存归属
+  kernel/linux-abi/cpuinfo: 在线 CPU 上报
+  kernel/linux-abi/interface-enumeration: 接口枚举语义
+  kernel/linux-abi/unix-ancillary: Unix 附属数据
+  kernel/linux-abi/child-exit-notification: 子进程退出通知
+  kernel/linux-abi/keyring: 内核密钥环 (Keyring)
+  kernel/resource-namespaces: 资源命名空间
+  kernel/extensions: 内核扩展
+  kernel/kexec-hot-update: Kexec 热更新
+  kernel/arch/aarch64-fex-preconditions: AArch64 FEX 前置条件
+  kernel/arch/x86_64-cpu-id: x86_64 CPU ID
+  kernel/exec-xlator/README: 索引与机制说明
+  kernel/exec-xlator/01-usage: 使用手册
+  kernel/exec-xlator/02-integration: 接入指南
+  kernel/exec-xlator/03-internals: 内核内部实现
+  kernel/exec-xlator/04-extending: 扩展手册
+  fs/README: 索引与总览
+  fs/vfs-edge-semantics: VFS 边界语义
+  fs/fs-consistency-model: 一致性模型
+  fs/ufs-close-token: UFS 关闭令牌
+  fs/ntfs: NTFS 实现
+  net/README: 索引与总览
+  net/architecture: 网络架构
+  net/routing: 路由与转发
+  net/router: 路由器实现
+  net/router-completion: 路由器补全记录
+  net/pppoe: PPPoE
+  net/conntrack-nat: 连接跟踪与 NAT
+  net/nat: NAT 状态与边界
+  net/nat-host-oracle: NAT 宿主探针
+  net/backend-interface: 后端接口契约
+  net/backend-policy: 后端选择策略
+  net/checksum-offload: 校验和卸载
+  net/lan-services: LAN 局域网服务
+  net/lwip-upstream: lwIP 上游适配
+  net/lwip-allocator-locks: lwIP 分配器与锁
+  net/net-lanes: 多 Lane 并发
+  net/network-lock-contract: 网络锁契约
+  net/network-config-design: 网络配置设计
+  net/instance-config: 实例配置
+  net/benchmark-method: 基准测试方法
+  net/bsd-port: BSD 协议栈移植
+  graphics/README: 索引与总览
+  graphics/3d-graphics: 3D 图形栈
+  graphics/gpu-3d-roadmap: 3D GPU 路线图
+  graphics/real-hardware-gpu: 物理硬件 GPU
+  graphics/virtgpu-native-allocation: VirtGPU 原生分配
+  graphics/virtgpu-sharing-and-sync: VirtGPU 共享与同步
+  graphics/drm-sysfs-discovery: DRM sysfs 发现
+  graphics/firmware-video: 固件视频
+  graphics/host-tools: 宿主图形工具
+  hypervisor/README: 索引与总览
+  hypervisor/overview: 架构规范
+  hypervisor/03-usage: 使用指南
+  hypervisor/08-multiarch-backends: 多架构后端
+  hypervisor/10-riscv-sbi: 虚拟 SBI 规范
+  hypervisor/06-host-runtime: 宿主运行时
+  hypervisor/07-guest-supervisor: 监管协议
+  hypervisor/09-smp-validation: 多核验证
+  hypervisor/00-design: 基础设计契约
+  hypervisor/01-a20os-guest: Guest 运行契约
+  hypervisor/02-roadmap: 演进路线图
+  hypervisor/04-platform-design: 平台设计
+  cluster/README: 索引与总览
+  cluster/overview: 架构与拓扑
+  cluster/02-wire-protocol: 线缆帧协议与事务
+  cluster/runtime-ssi: 单系统映像 (SSI)
+  cluster/mcu-shared-kernel: 多 MCU 共享内存内核
+  cluster/cluster-apps: 应用开发与工作负载
+  cluster/01-abi: 集群 ABI 契约
+  cluster/03-kernel-impl: 内核内部实现
+  cluster/04-transports: 传输层抽象
+  cluster/05-userspace: 用户态服务契约
+  cluster/10-operator-guide: 运维部署手册
+  cluster/02-udp-demo: 双节点 UDP 示例
+  security/README: 索引与总览
+  security/hardening: 系统加固指南
+  security/kernel-wx: 内核 W^X 保护
+  security/release-acceptance: 发布验收标准
+  drivers/README: 驱动文档总览
+  drivers/guide/getting-started: 快速上手
+  drivers/guide/core-model: 核心模型
+  drivers/guide/bus-and-platform: 总线与平台设备
+  drivers/guide/device-classes: 设备类
+  drivers/guide/pci-and-virtio: PCI 与 VirtIO
+  drivers/guide/hotplug-and-pnp: 热插拔与 PnP
+  drivers/guide/kernel-modules: 内核模块
+  drivers/guide/runtime-contracts: 运行时契约
+  drivers/guide/lock-order: 锁顺序
+  drivers/guide/deployment-profiles: 部署配置
+  drivers/classes/input: 输入
+  drivers/classes/display: 显示
+  drivers/classes/audio: 音频
+  drivers/classes/tun: TUN 虚拟网卡
+  drivers/classes/virtio-console: VirtIO 控制台
+  drivers/classes/usb-design: USB 设计
+  drivers/classes/userspace-and-devfs: 用户态与 devfs
+  drivers/meta/testing-and-submission: 测试与提交
+  platforms/README: 索引与开发板全景
+  platforms/porting-guide: 移植指南
+  platforms/physical-boards: 物理开发板清单
+  platforms/not-yet-ported: 待移植硬件清单
+  platforms/visionfive2-boot: 昉·星光 2 (VisionFive 2)
+  platforms/k230: 嘉楠勘智 K230
+  platforms/milk-v-duo: 算能 Milk-V Duo
+  platforms/licheerv-nano: 矽速 LicheeRV Nano
+  platforms/d1s-f133: 全志 D1s / F133
+  platforms/ox64: 矽速 Ox64
+  platforms/esp32-c3: 乐鑫 ESP32-C3
+  platforms/m0sense-bl702: 博流 BL702 / M0sense
+  platforms/raspberrypi4: 树莓派 Raspberry Pi 4
+  platforms/pine-a64: Pine64 PINE A64
+  platforms/quartz64-zero: Pine64 Quartz64-Zero
+  platforms/rk3328: 友善 NanoPi R2S (RK3328)
+  platforms/sun50i-h616: 全志 H616 (Orange Pi Zero 2)
+  platforms/huawei-ct5100: 华为 CT5100 瘦客户机
+  platforms/lichee-pi-zero: 矽速 Lichee Pi Zero
+  platforms/stm32f103-port: STM32F103 移植
+  platforms/hi3861: 海思 Hi3861
+  platforms/2k1000: 龙芯 LS2K1000
+  platforms/2k0300: 龙芯 2K0300
+  platforms/x86_64-pc: x86_64 PC 通用机
+  platforms/j1900: Intel J1900 工控机
+  platforms/virtualbox: VirtualBox
+  platforms/virtualbox-x86_64: VirtualBox x86_64
+  platforms/virtualbox-aarch64: VirtualBox AArch64
+  dev/documentation-i18n: 文档国际化
+  dev/README: 开发者总览
+  dev/build: 构建指南
+  dev/boot-model: 启动模型
+  testing-gates: 测试门禁
+  dev/debug: 调试指南
+  kernel/debugging-internals: 内核调试技术参考
+  dev/instances: 实例化构建与运行
+  dev/userland-submodules: 用户态子模块
+  dev/tooling-internals: 构建与宿主工具技术参考
+  dev/external-dependencies: 外部依赖
+  packaging/README: 包管理与镜像分发
+  packaging/overview: 体系总览
+  packaging/quickstart: 快速上手
+  packaging/packages: 包清单
+  packaging/apk-format: apk 格式
+  packaging/images: 镜像组装
+  packaging/repository: 仓库与签名
+  packaging/ci: CI/CD
+  packaging/migration: 迁移路线
+  distro/README: 总览
+  distro/boot: 引导
+  distro/build: 构建
+  distro/kernel-requirements: 内核要求
+  distro/source-software-porting: 源码软件移植
+  distro/xfce-input: XFCE 输入与热键
+  distro/minecraft: Minecraft 运行
+  distro/minecraft-components: Minecraft 组件状态
+  status/README: 状态目录说明
+  status/current/module-status: 模块状态
+  status/current/docs-gates: 文档与门禁
+  status/current/server-readiness: 服务器就绪度
+  status/current/v1.0-progress: 1.0 进度台账
+  status/gaps/README: 说明与用法
+  status/gaps/delivery: 交付
+  status/gaps/core: 核心与调度
+  status/gaps/mm: 内存管理
+  status/gaps/fs: 文件系统
+  status/gaps/abi-ipc: ABI/IPC/信号
+  status/gaps/net: 网络
+  status/gaps/drivers: 驱动
+  status/gaps/runtime: 运行时
+  status/gaps/cluster: 集群
+  status/gaps/hyp: 虚拟化
+  status/gaps/desktop: 桌面
+  status/gaps/security: 安全
+  status/gaps/docs: 文档与门禁
+  status/gaps/triage-matrix: 人工 Triage 需求明细
+  status/gaps/cluster-ssi: 集群 SSI 缺口
+  status/gaps/notes/README: 索引
+  status/gaps/notes/net-ipv6-pbuf: IPv6 pbuf
+  status/gaps/notes/fs-ext4-orphan: ext4 孤儿
+  status/current/delivery-baseline: 交付基线
+  status/current/cluster-implementation-status: 集群与服务
+  status/current/drivers-implementation-status: 驱动
+  status/current/hypervisor-implementation-status: Hypervisor
+  status/current/hybrid-kernel-status: 混合内核
+  status/current/native-abi-runtime-status: Native ABI 运行时
+  status/current/native-runtime-1.0: Native 运行时 1.0
+  status/current/security-status: 安全状态
+  status/current/graphics-status: 图形
+  status/current/net-status: 网络
+  status/current/fs-status: 文件系统
+  status/current/platforms-status: 平台
+  status/current/distro-status: 发行版与引导
+  status/current/desktop-minecraft-status: 桌面与 Minecraft
+  status/current/ext4-orphan-gap: Ext4 孤儿 inode
+  status/current/validation-dontunmap: DONTUNMAP 验证范围
+  status/history/README: 历史索引
+  status/history/desktop-1.0-2026-10-23: 桌面 1.0 验证
+  status/history/desktop-apps-apk-2026-10-23: 桌面应用与 apk 集成
+  status/history/desktop-regressions-2026-10-22: 桌面回归排查
+  status/history/mlibc-native-hardening-2026-10-23: mlibc Native 加固
+  status/history/perf-worklog-2026-10-22: 内存优化工作记录
+  status/history/serial-fidelity: 串口保真度
+  status/history/xfce-x86_64-validation: XFCE x86_64 验证
+  releases/README: 发行版本说明
+  releases/v1.0: v1.0 正式版
+  releases/v1.0-validation: v1.0 验证报告
+  releases/v1.0-comparison: v1.0 对照基准
+  releases/v0.18: v0.18 里程碑
+  releases/v0.17: v0.17 里程碑
+  roadmap/README: 索引与总览
+  roadmap/a20os-improvement-todo: 工程改进 TODO
+  roadmap/perf-overhaul: 性能大修
+  roadmap/park-wake-protocol-split: Park/Wake 协议拆分
+  roadmap/lock-serialization-split: 锁串行化拆分
+  roadmap/next-horizon: 远期演进规划
+  CONTRIBUTING: 贡献指南
+  ACKNOWLEDGMENTS: 致谢
+  THIRD_PARTY_NOTICES: 第三方声明
+site_name: A20OS 文档
+language_tag: zh-CN
+contents: 目录
+chapter_prefix: 第
+chapter_suffix: 章
+figure: 图
+table: 表
+subject: 架构、内核与工程实现
+books:
+  reference: 标准参考手册
+  developer: 开发者手册
+  user: 用户手册
+document_type_label: 文档类型
+document_type: 技术手册
+date_label: 生成日期
+author_label: 发布主体

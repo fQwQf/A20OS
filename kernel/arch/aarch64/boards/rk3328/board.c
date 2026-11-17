@@ -10,7 +10,7 @@
  * PSCI interfaces the aarch64 port already uses are the ones available here.
  *
  * Verified: builds clean under -Werror.  NOT run on hardware.  See
- * docs/platforms/rk3328.md.
+ * docs/zh/platforms/rk3328.md.
  *
  * Scope of this port: RAM, the console UART, the GIC, and SBI-style power off.
  * The two devices this SoC is actually useful for -- its DesignWare eMMC
@@ -31,7 +31,7 @@
 /* Rock64 with 2 GiB hands the kernel four cores; the NanoPi R2S has two.  The
  * board does not claim secondary_start here: which CPUs exist is a bootloader
  * and DT question that has not been checked on hardware, and
- * docs/platforms/porting-guide.md is explicit that a board which cannot start
+ * docs/zh/platforms/porting-guide.md is explicit that a board which cannot start
  * secondaries must leave .smp NULL rather than supply a fake ops table. */
 static const smp_platform_ops_t *const rk3328_no_smp = NULL;
 

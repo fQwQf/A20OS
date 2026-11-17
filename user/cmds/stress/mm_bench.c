@@ -35,27 +35,15 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* Arm the kernel counter bank: a read both starts collection and takes the
- * snapshot, so counters left dormant report zero regardless of the workload. */
-static int perf_arm(void)
-{
-    char buf[4096];
-    int fd = open(PERF_PATH, O_RDONLY);
-    if (fd < 0)
-        return -1;
-    ssize_t n = read(fd, buf, sizeof(buf));
-    close(fd);
-    return n > 0 ? 0 : -1;
-}
-
-static int perf_reset(void)
+/* Explicit controls; snapshots do not change collection. */
+static int perf_command(const char *command)
 {
     int fd = open(PERF_PATH, O_WRONLY);
-    if (fd < 0)
-        return -1;
-    ssize_t n = write(fd, "reset", 5);
+    if (fd < 0) return -1;
+    size_t length = strlen(command);
+    ssize_t n = write(fd, command, length);
     close(fd);
-    return n == 5 ? 0 : -1;
+    return n == (ssize_t)length ? 0 : -1;
 }
 
 static unsigned long perf_get(const char *key)
@@ -100,7 +88,7 @@ static void phase_a(void)
     for (size_t off = 0; off < span; off += 4096)
         base[off] = (char)off;
 
-    if (perf_arm() || perf_reset()) {
+    if (perf_command("stop") || perf_command("start")) {
         printf("MM_BENCH: FAIL perf errno=%d\n", errno);
         munmap(base, span);
         return;
@@ -113,6 +101,7 @@ static void phase_a(void)
     int rc = madvise(base, span, MADV_DONTNEED);
     uint64_t t1 = now_ns();
 
+    (void)perf_command("stop");
     unsigned long lookups = perf_get("vma_lookups");
     unsigned long steps = perf_get("vma_lookup_steps");
 

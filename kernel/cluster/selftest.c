@@ -1,5 +1,5 @@
 /*
- * Cluster subsystem self-check (docs/cluster/03-kernel-impl.md §5 step 6).
+ * Cluster subsystem self-check (docs/zh/cluster/03-kernel-impl.md §5 step 6).
  *
  * Boot-gated with "clxselftest=1" on the kernel command line (bootargs
  * convention, same as CHTRACE_BOOTARG): a20_clx_core_init() spawns the

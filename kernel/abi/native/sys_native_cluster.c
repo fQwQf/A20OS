@@ -1,5 +1,5 @@
 /*
- * A20OS Native ABI — Cluster syscalls (0x0520, docs/cluster/01-abi.md).
+ * A20OS Native ABI — Cluster syscalls (0x0520, docs/zh/cluster/01-abi.md).
  *
  * W0 froze the six entry points as validating stubs; this file now wires
  * them to the kernel cluster core (kernel/cluster/, WA1).  Argument
@@ -90,7 +90,7 @@ int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args) {
                                                                 : 0;
 }
 
-/* Reserved node identities from docs/cluster/01-abi.md §节点标识. */
+/* Reserved node identities from docs/zh/cluster/01-abi.md §节点标识. */
 static int clx_node_id_is_reserved(const a20_node_id_t *id) {
     int all_zero = 1;
     int all_ff = 1;

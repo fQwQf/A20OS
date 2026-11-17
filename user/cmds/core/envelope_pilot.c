@@ -1,5 +1,5 @@
 /* E2 pilot: package-install scenario matrix across defense mechanisms
- * (docs/research/10-evaluation.md §4.1 -- first paper-data experiment).
+ * (docs/zh/research/10-evaluation.md §4.1 -- first paper-data experiment).
  *
  * Arms:   NONE / LANDLOCK-permissive / LANDLOCK-strict / ENVELOPE
  * Cells:  S0 benign install, A1 credential exfil, A2 runaway loop,
@@ -7,7 +7,7 @@
  *
  * Each cell forks a worker whose exit code encodes the observed outcome;
  * the parent compares it against the expectation derived from the paper's
- * necessity argument (docs/research/09 §4.5 question 5).  All cells green
+ * necessity argument (docs/zh/research/09 §4.5 question 5).  All cells green
  * => "ENVELOPE_PILOT: PASS".
  */
 #include <arpa/inet.h>
@@ -370,7 +370,7 @@ int main(void)
     }
 
     {
-        /* G1: real-binary flow -- a full mksh script runs inside the
+        /* G1: real-binary flow -- a full POSIX shell script runs inside the
          * envelope; execve keeps the envelope attached (05 §2.4: execve
          * cannot shed it) and the script's own openat/write are mediated
          * like any other acquisition. */
@@ -388,7 +388,7 @@ int main(void)
             char rdy = 'R';
             if (write(syn[1], &rdy, 1) != 1)
                 _exit(152);
-            execl("/bin/mksh", "mksh", "-c",
+            execl("/bin/sh", "sh", "-c",
                   "echo ok > /tmp/pilot/build/mk.txt", (char *)0);
             _exit(153);
         }
@@ -408,16 +408,16 @@ int main(void)
             close(fdm);
         unlink("/tmp/pilot/build/mk.txt");
         if (okg) {
-            printf("ENVELOPE_PILOT: mksh-flow PASS\n");
+            printf("ENVELOPE_PILOT: shell-flow PASS\n");
         } else {
-            printf("ENVELOPE_PILOT: mksh-flow FAIL st=%d\n", stg);
+            printf("ENVELOPE_PILOT: shell-flow FAIL st=%d\n", stg);
             failures++;
         }
     }
 
     {
         /* G2: multi-process pipeline flow -- one shared envelope spans an
-         * entire mksh pipeline: pipe2 acquisition (A3) twice by the
+         * entire shell pipeline: pipe2 acquisition (A3) twice by the
          * shell, fork inheritance for every segment (05 §2.3 v1 shared
          * root), execve retention, and openat+write USE charging on the
          * final redirect -- all mediated across three processes using
@@ -438,9 +438,9 @@ int main(void)
             char rdy = 'R';
             if (write(synp[1], &rdy, 1) != 1)
                 _exit(162);
-            execl("/bin/mksh", "mksh", "-c",
-                  "echo hi | { read x; print -r -- \"$x\"; } | "
-                  "{ read y; print -r -- \"$y\" > /tmp/pilot/build/pipe.txt; }",
+            execl("/bin/sh", "sh", "-c",
+                  "echo hi | { read x; printf '%s\\n' \"$x\"; } | "
+                  "{ read y; printf '%s\\n' \"$y\" > /tmp/pilot/build/pipe.txt; }",
                   (char *)0);
             _exit(163);
         }

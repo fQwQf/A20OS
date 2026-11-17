@@ -1,6 +1,6 @@
 /*
  * A20OS Native ABI — Syscall input validation helpers.
- * Design reference: docs/native-abi/06-security.md §3, errors.md §2
+ * Design reference: docs/zh/native-abi/06-security.md §3, errors.md §2
  */
 #include "core/types.h"
 #include "core/defs.h"
@@ -19,7 +19,7 @@ static inline int a20_validate_user_ptr(const void *ptr, uint64_t size)
 }
 
 /*
- * Struct evolution rules (docs/native-abi/01-types.md §2):
+ * Struct evolution rules (docs/zh/native-abi/01-types.md §2):
  *  - size must cover the complete layout for the presented version (short
  *    version-1 structures are rejected rather than zero-padding required
  *    fields);

@@ -571,7 +571,7 @@ int mount_persistent_log(void) {
     if (mode == KLOG_MODE_RAM) {
         ensure_dir("/var/log/a20");
         if (klog_disk_attach("/var/log/a20") == 0) {
-            printf("[LOG] persistent log at /var/log/a20 (RAM mode)\n");
+            printf("[LOG] RAM log at /var/log/a20 (volatile, RAM mode)\n");
             return 0;
         }
         printf("[LOG] RAM log location unavailable\n");
@@ -686,7 +686,7 @@ int mount_persistent_log(void) {
     if (prefix[0]) {
         ensure_dir(mnt);
         if (klog_disk_attach(mnt) == 0) {
-            printf("[LOG] persistent log at %s (rootfs fallback)\n", mnt);
+            printf("[LOG] %s log at %s (rootfs fallback)\n", klog_disk_storage(), mnt);
             return 0;
         }
     }
@@ -699,7 +699,7 @@ int mount_persistent_log(void) {
     }
     ensure_dir("/var/log/a20");
     if (klog_disk_attach("/var/log/a20") == 0) {
-        printf("[LOG] persistent log at /var/log/a20 (RAM fallback)\n");
+        printf("[LOG] RAM log at /var/log/a20 (volatile, RAM fallback)\n");
         return 0;
     }
     printf("[LOG] no writable log location; persistent log unavailable\n");

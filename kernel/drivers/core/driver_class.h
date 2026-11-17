@@ -165,7 +165,7 @@ typedef struct net_iovec {
  * stack can express the handshake end to end.  MRG_RXBUF is different: it is a
  * pure device-side receive property lwIP never sees, so a driver that negotiated
  * it can and should report it.  The full investigation, including what each
- * required change would be, is docs/net/checksum-offload.md.
+ * required change would be, is docs/zh/net/checksum-offload.md.
  */
 #define NET_DEV_CAP_TX_SG           (1u << 0) /* send_sg() consumes a segment list */
 #define NET_DEV_CAP_TX_CSUM_OFFLOAD (1u << 1) /* needs_csum/csum_start in the vnet hdr */

@@ -1,3 +1,5 @@
+#include "core/diagnostics.h"
+#include "core/trace.h"
 #include "mm/process_vm.h"
 #include "proc/resource_ns.h"
 #include "fs/procfs.h"
@@ -41,6 +43,8 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/version.h"
+#include "core/klog.h"
+#include "core/boot_report.h"
 #include "net/socket.h"
 #include "net/socket/socket_internal.h"
 #include "net/net_config.h"
@@ -1100,6 +1104,30 @@ _Static_assert(sizeof(g_procfs_gen) / sizeof(void *) == 58,
 
 int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz)
 {
+    /* Constant capability metadata stays available when collectors are cut.
+     * It does not link report providers, allocate or start any collection. */
+    if (type == PF_A20_OBSERVABILITY)
+        return snprintf(buf, bufsz,
+            "{\"schema\":1,\"kind\":\"capabilities\",\"log\":%u,\"persistent\":%u,"
+            "\"boot_report\":%u,\"porting\":%u,\"metrics\":%u,\"trace\":%u,"
+            "\"porting_capacity\":%u,\"trace_capacity_per_cpu\":%u,\"trace_boot\":%u,"
+            "\"trace_mask\":%u,\"cpus\":%u,\"complete\":true}\n",
+            CONFIG_KLOG_ENABLED, CONFIG_KLOG_PERSISTENT, CONFIG_BOOT_REPORT,
+            CONFIG_A20_DIAG_BOOT, CONFIG_A20_METRICS, CONFIG_A20_TRACE,
+            CONFIG_A20_DIAG_BOOT ? CONFIG_A20_DIAG_RECORDS : 0,
+            CONFIG_A20_TRACE ? CONFIG_A20_TRACE_RECORDS : 0,
+            CONFIG_A20_TRACE ? CONFIG_A20_TRACE_BOOT : 0,
+            CONFIG_A20_TRACE ? CONFIG_A20_TRACE_MASK : 0, CONFIG_NR_CPUS);
+#if CONFIG_A20_DIAG_BOOT
+    if (type == PF_A20_PORTING_REPORT) return a20_diag_format(buf, bufsz);
+#endif
+#if CONFIG_A20_TRACE
+    if (type == PF_A20_TRACE) return a20_trace_format(buf, bufsz);
+#endif
+#if CONFIG_BOOT_REPORT
+    if (type == PF_A20_BOOT_REPORT)
+        return boot_report_format(buf, bufsz);
+#endif
     if (type == PF_PID_ENVIRON) {
         task_t *task = proc_find_get(pid);
         if (!task) return -ESRCH;

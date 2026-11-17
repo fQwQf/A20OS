@@ -1,6 +1,6 @@
 /*
  * A20OS Native ABI — Syscall numbers.
- * Design reference: docs/native-abi/03-handle.md §6
+ * Design reference: docs/zh/native-abi/03-handle.md §6
  */
 #ifndef _ABI_NATIVE_SYSCALL_NR_H
 #define _ABI_NATIVE_SYSCALL_NR_H
@@ -111,7 +111,7 @@
 #define A20_SYS_event_watch_fs 0x0507
 #define A20_SYS_channel_call 0x0508
 
-/* Cluster (0x0520; docs/cluster/01-abi.md) */
+/* Cluster (0x0520; docs/zh/cluster/01-abi.md) */
 #define A20_SYS_cluster_set_self 0x0520
 #define A20_SYS_cluster_export 0x0521
 #define A20_SYS_cluster_connect 0x0522
@@ -202,7 +202,7 @@
 #define A20_SYS_monitor_create 0x0D10
 #define A20_SYS_monitor_query 0x0D11
 
-/* Hypervisor / vcpu slice (0x0F00) — docs/hypervisor/00-design.md S5.
+/* Hypervisor / vcpu slice (0x0F00) — docs/zh/hypervisor/00-design.md S5.
  * VM and vcpu are objects, so they travel as handles like every other
  * capability object; the returned value is a handle, never a pointer. */
 #define A20_SYS_hyp_vm_create      0x0F00

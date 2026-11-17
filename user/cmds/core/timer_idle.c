@@ -78,6 +78,13 @@ int main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("TIMER_IDLE: start\n");
 
+    int ctl = open(PERF_PATH, O_WRONLY);
+    if (ctl < 0 || write(ctl, "stop", 4) != 4 || write(ctl, "start", 5) != 5) {
+        if (ctl >= 0) close(ctl);
+        printf("TIMER_IDLE: FAIL perf-start errno=%d\n", errno);
+        return 1;
+    }
+    close(ctl);
     uint64_t entries_before;
     uint64_t wakes_before;
     if (read_idle_counters(&entries_before, &wakes_before) < 0) {
@@ -104,7 +111,7 @@ int main(void)
 
     uint64_t entries_after;
     uint64_t wakes_after;
-    if (read_idle_counters(&entries_after, &wakes_after) < 0) {
+    if (disable_perf_counters() < 0 || read_idle_counters(&entries_after, &wakes_after) < 0) {
         (void)disable_perf_counters();
         printf("TIMER_IDLE: FAIL perf-after errno=%d\n", errno);
         return 1;

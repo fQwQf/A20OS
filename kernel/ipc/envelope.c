@@ -1,5 +1,5 @@
 /*
- * A20OS Linux ABI — Capability Envelope mediator core (docs/research/05).
+ * A20OS Linux ABI — Capability Envelope mediator core (docs/zh/research/05).
  *
  * Implements the budgeted-capability enforcement object ("envelope") that is
  * attached to unmodified Linux-ABI processes.  See abi/linux/envelope.h for

@@ -98,6 +98,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) $(GUEST_KERNEL_DEP) $(GU
 		--fat32-img "$(FAT32_IMG)" --fat32-mb "$(FAT32_IMAGE_MB)" \
 		--user-build-dir "$(USER_BUILD_DIR)" --tag "$(NATIVE_TAG)" --mkfs-fat "$(MKFS_FAT)" \
 		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
+		--driver-build-dir "$(or $(DRVMOD_BUILD_DIR),$(USER_BUILD_DIR))" \
 		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
 		--libc "$(if $(filter gcc,$(TOOLCHAIN)),$(if $(wildcard user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so,))" \
 		--libgcc "$(LIBGCC_S_ARCH)" \
@@ -190,9 +191,46 @@ $(addprefix $(RAMFS_USER_BLOB_DIR)/,native_futex.o native_spawn.o native_input.o
 # separate userspace output root so its stamp cannot clean or invalidate the
 # full development userland (nor pull fastfetch/media dependencies into a
 # 64 MiB shell image).
-RAMFS_USER_VARIANT = $(USER_VARIANT)-ramfs$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch)$(if $(filter 1,$(WIFI_RTW89)),-wifi)
+RAMFS_USER_VARIANT = $(USER_VARIANT)-ramfs$(if $(filter 1,$(RAMFS_BUSYBOX)),-busybox)$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch)$(if $(filter 1,$(WIFI_RTW89)),-wifi)
 RAMFS_USER_BUILD_DIR = user/build/$(RAMFS_USER_VARIANT)
 RAMFS_USER_BUILD_STAMP = $(RAMFS_USER_BUILD_DIR)/.ramfs-build-id
+RAMFS_BUSYBOX_FILES := busybox busybox_inittab busybox_rcS busybox_profile
+RAMFS_LOCAL_PROGRAMS = $(if $(filter 1,$(RAMFS_BUSYBOX)),$(filter-out $(RAMFS_BUSYBOX_FILES),$(RAMFS_USER_PROGRAMS)),$(RAMFS_USER_PROGRAMS))
+
+# This path never enters user/Makefile for an ordinary BusyBox shell. Cache
+# the verified upstream executable outside kernel variants; only blob objects
+# are architecture/build-directory specific.
+RAMFS_BUSYBOX_BIN = $(BUSYBOX_CACHE_DIR)/$(ARCH)/busybox
+.PHONY: force_busybox_verify
+force_busybox_verify:
+
+$(RAMFS_BUSYBOX_BIN): tools/packaging/prepare_busybox.py tools/packaging/busybox.lock.json $(BUSYBOX_BINARY) force_busybox_verify
+	$(PYTHON) tools/packaging/prepare_busybox.py --arch "$(ARCH)" \
+		--output "$@" --cache-dir "$(BUSYBOX_CACHE_DIR)" --mirror "$(BUSYBOX_MIRROR)" \
+		$(if $(strip $(BUSYBOX_BINARY)),--binary "$(BUSYBOX_BINARY)")
+
+ifeq ($(RAMFS_BUSYBOX),1)
+$(RAMFS_USER_BLOB_DIR)/busybox.o: $(RAMFS_BUSYBOX_BIN)
+	@mkdir -p $(dir $@)
+	cp $< $(RAMFS_USER_BLOB_DIR)/busybox
+	cd $(RAMFS_USER_BLOB_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents busybox $(abspath $@)
+
+endif
+
+$(RAMFS_USER_BLOB_DIR)/busybox_inittab: user/rootfs_busybox/etc/inittab
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(RAMFS_USER_BLOB_DIR)/busybox_rcS: user/rootfs_busybox/etc/init.d/rcS
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(RAMFS_USER_BLOB_DIR)/busybox_profile: user/rootfs_busybox/etc/profile
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(addprefix $(RAMFS_USER_BLOB_DIR)/,busybox_inittab.o busybox_rcS.o busybox_profile.o): $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BLOB_DIR)/%
+	cd $(RAMFS_USER_BLOB_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents $* $(abspath $@)
+
 ifeq ($(RAMFS_NATIVE_TESTS),1)
 RAMFS_USER_BUILD_DIR = $(USER_BUILD_DIR)
 RAMFS_USER_BUILD_STAMP = $(USER_BUILD_STAMP)
@@ -203,7 +241,7 @@ $(RAMFS_USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_D
 		--arch "$(ARCH)" --nommu "$(NOMMU)" \
 		--user-build-dir "$(RAMFS_USER_BUILD_DIR)" --user-variant "$(RAMFS_USER_VARIANT)" \
 		--user-opt="$(USER_OPT)" --profile "$(PROFILE)" \
-		--targets "$(RAMFS_USER_PROGRAMS)" \
+		--targets "$(RAMFS_LOCAL_PROGRAMS)" \
 		--roots "user/Makefile $(USER_BUILD_CHECK_DIRS)" \
 		--skip "*/.git user/build user/external/musl/build-*"
 endif
@@ -221,7 +259,7 @@ $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BUILD_STAMP)
 # BOOTX64.EFI rather than GRUB, because GRUB 2.12 drops the multiboot ACPI tags
 # and the kernel then never learns the RSDP (see instances/vbox-x86_64.toml).
 # 64 MiB "A20OS log" partition: the kernel's only persistent surface that
-# does not depend on the distro rootfs.  See docs/zh/kernel/persistent-logging.md.
+# does not depend on the distro rootfs.  See docs/zh/kernel/logging/persistent-logging.md.
 UEFI_LOG_MB ?= $(LOG_PARTITION_MB)
 ifeq ($(RAMFS_USER),1)
 $(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) tools/boot/mk_uefi_fat_image.sh
@@ -298,11 +336,16 @@ $(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(FAT32_IMG) $(USER
 		--arch "$(ARCH)" --board "$(BOARD)" --abi "$(ABI)" \
 		--bringup "$(BRINGUP)" --nommu "$(NOMMU)" --opt="$(OPT)"
 
+ifeq ($(RAMFS_BUSYBOX),1)
+$(VBOX_AARCH64_IMG) $(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) tools/boot/mk_uefi_fat_image.sh
+	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ - BOOTAA64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
+else
 $(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/boot/mk_uefi_fat_image.sh
 	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG) BOOTAA64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
 
 $(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/boot/mk_uefi_fat_image.sh
 	tools/boot/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG) BOOTAA64.EFI "" $(UEFI_LOG_MB) $(KLOG_SESSION_NUM)
+endif
 
 # ---- kallsyms: two-pass link ----
 # Pass 1 links the kernel without the symbol table; tools/gen_kallsyms.py
@@ -460,14 +503,21 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME
 	@mkdir -p $(dir $@)
 	$(CC) $(if $(and $(filter llvm,$(TOOLCHAIN)),$(filter aarch64,$(ARCH))),$(filter-out -mgeneral-regs-only,$(CFLAGS)),$(CFLAGS)) -c $< -o $@
 
+.PHONY: clean distclean
 clean:
-	$(MAKE) -C user clean
 	@$(PYTHON) tools/stamps.py clean \
 		--find-root "$(KERNEL_DIR)" \
 		--rm-rf .kernel-build \
-		--rm-rf build/tmp \
+		--rm-rf user/build \
+		--build-root build \
+		--keep-build-entry cache --keep-build-entry toolchains --keep-build-entry downloads \
 		$(foreach f,kernel.elf kernel.bin fat32.img ext4.img \
 			kernel-rv kernel-la disk.img disk-la.img,--rm-f $(f))
+
+# Downloaded sources and installed SDKs survive ordinary clean; distclean
+# removes those too. Both targets clean all architectures, not just ARCH.
+distclean: clean
+	@$(PYTHON) tools/stamps.py clean --build-root build
 
 -include $(DEP_FILES)
 

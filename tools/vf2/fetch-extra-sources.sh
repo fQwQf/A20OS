@@ -6,7 +6,7 @@ set -euo pipefail
 # boots before any Alpine world is mounted; every other program the extra disk
 # used to carry (vim, git, zlib, gcc, binutils, musl-cross-make, curl, rust,
 # Lamina1) now comes from an apk world instead -- see tools/mk/targets-extra.mk
-# for the retired targets and docs/packaging/images.md for the world list.
+# for the retired targets and docs/zh/packaging/images.md for the world list.
 #
 # GitHub uses SSH by default; set VF2_GIT_TRANSPORT=https on hosts without a
 # configured SSH key.

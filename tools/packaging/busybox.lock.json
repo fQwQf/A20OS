@@ -1,0 +1,27 @@
+{
+  "repository": "v3.23/main",
+  "version": "1.37.0-r30",
+  "source": "https://gitlab.alpinelinux.org/alpine/aports/-/tree/1e823a60eb85606954b3a5af5f8e5bbd1ea680cf/main/busybox",
+  "architectures": {
+    "x86_64": {
+      "alpine_arch": "x86_64",
+      "package": "busybox-static-1.37.0-r30.apk",
+      "sha256": "bb30365b954f531938a33de18173342185844828863121d7e821115d2f7f29c9"
+    },
+    "aarch64": {
+      "alpine_arch": "aarch64",
+      "package": "busybox-static-1.37.0-r30.apk",
+      "sha256": "44c9abdfb970f398fa72c8382fe2d8808eea16beaf82daf6ac708b92f1b8659e"
+    },
+    "riscv64": {
+      "alpine_arch": "riscv64",
+      "package": "busybox-static-1.37.0-r30.apk",
+      "sha256": "538f48780e21ef78cd171137cecb4197da2cc3c15d3f1895a23eeea99a4a3614"
+    },
+    "loongarch64": {
+      "alpine_arch": "loongarch64",
+      "package": "busybox-static-1.37.0-r30.apk",
+      "sha256": "91e817d5598cdb0cd51706995119fa4058fd1cdd372d8c57db1e2c4a487e7920"
+    }
+  }
+}

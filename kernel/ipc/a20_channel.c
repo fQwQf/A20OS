@@ -1,8 +1,8 @@
 /*
  * A20OS Native ABI — Channel endpoints.
- * Design reference: docs/native-abi/05-ipc.md §2
+ * Design reference: docs/zh/native-abi/05-ipc.md §2
  * Design inspiration: Zircon (Fuchsia) Channel handle-transfer semantics
- * and seL4 Endpoint capability transfer; see docs/ACKNOWLEDGMENTS.md §3.
+ * and seL4 Endpoint capability transfer; see docs/zh/ACKNOWLEDGMENTS.md §3.
  *
  * CH_PEER_TEARDOWN_PROTOCOL:
  * Both endpoints are freed independently once their refcount hits zero, so
@@ -163,12 +163,12 @@ static void ch_msg_free(a20_ch_message_t *msg, int release_refs)
 
 /*
  * ch_check_send_types — verify handles are allowed by the channel's
- * send_handle_types bitmask (docs/native-abi/05-ipc.md §2.3).
+ * send_handle_types bitmask (docs/zh/native-abi/05-ipc.md §2.3).
  */
 
 /*
  * ch_check_recv_types — verify received handles are allowed by the
- * channel's recv_handle_types bitmask (docs/native-abi/05-ipc.md §2.3).
+ * channel's recv_handle_types bitmask (docs/zh/native-abi/05-ipc.md §2.3).
  * Without this check a receiver could be forced to accept handle types
  * it did not agree to handle, breaking the typed-channel contract.
  */
@@ -195,7 +195,7 @@ a20_channel_ep_t *a20_channel_create(uint32_t msg_cap, const a20_channel_type_t 
     ep0->msg_cap = msg_cap;
     ep1->msg_cap = msg_cap;
 
-    /* Typed channel (docs/native-abi/05-ipc.md §2.3): each endpoint keeps
+    /* Typed channel (docs/zh/native-abi/05-ipc.md §2.3): each endpoint keeps
      * its own copy of the type signature so there is no shared-lifetime
      * problem between the two endpoints. */
     if (type) {
@@ -353,7 +353,7 @@ int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_l
 /*
  * a20_channel_recv_begin — wait until a message is available and return
  * with ep->lock HELD and the head message's handle count.  The caller then
- * reserves handle-table slots (docs/native-abi/05-ipc.md §2.6: no partial
+ * reserves handle-table slots (docs/zh/native-abi/05-ipc.md §2.6: no partial
  * delivery) and calls a20_channel_recv_finish, or a20_channel_recv_abort.
  */
 int64_t a20_channel_recv_begin(a20_channel_ep_t *ep, uint32_t flags,
@@ -552,7 +552,7 @@ static void ch_donate_fallback_wake(void *context)
 
 /*
  * a20_channel_recv_begin_donate — recv_begin with time-slice donation
- * (docs/hybrid-kernel/02-mainstream-plan.md M1): when the caller must
+ * (docs/zh/hybrid-kernel/02-mainstream-plan.md M1): when the caller must
  * block for a reply and the peer has a task parked on RECV, the first
  * wait hands the CPU directly to that task instead of queueing in the
  * runqueue.  Later iterations (and all ineligible cases) use the normal
@@ -954,7 +954,7 @@ void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
 
 /*
  * a20_channel_ep_peer_ref — referenced peer lookup for the cluster proxy
- * plumbing (kernel/cluster/remote_ep.c, docs/cluster/03-kernel-impl.md §1).
+ * plumbing (kernel/cluster/remote_ep.c, docs/zh/cluster/03-kernel-impl.md §1).
  *
  * Minimal registered patch: connect() must own the proxy half of a fresh
  * pair and export() the service half's peer, and the peer pointer may only

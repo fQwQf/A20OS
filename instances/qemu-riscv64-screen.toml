@@ -1,0 +1,15 @@
+# Opt-in generic screen diagnostics; ordinary qemu-riscv64 stays quiet.
+name = "qemu-riscv64-screen"
+description = "RISC-V screen diagnostics with a compact warning/error report"
+arch = "riscv64"
+
+[net]
+stack = "bsd"
+
+[log]
+boot_report = true
+report = "always"
+report_window_ms = 2000
+report_settle_ms = 500
+report_max_records = 8
+report_context = false

@@ -1245,7 +1245,7 @@ static int64_t linux_recvmsg_with_socket_header(
                         }
                         /* A6 receive side: an incoming descriptor only
                          * installs if the receiver's envelope authorizes
-                         * its class (docs/research/05 §2.5.3); denied fds
+                         * its class (docs/zh/research/05 §2.5.3); denied fds
                          * are closed like other undeliverable ones. */
                         if (env_active(proc_current())) {
                             const uint64_t base_rights = A20_RIGHT_READ |

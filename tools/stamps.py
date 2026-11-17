@@ -132,7 +132,7 @@ def cmd_user(a) -> int:
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
         need_build = need_clean = False
-        programs = targets or ["init", "mksh"]
+        programs = targets or ["init", "sh", "busybox"]
         binaries = [REPO / a.user_build_dir / program for program in programs]
 
         # Re-evaluate only after taking the output-root lock. Another make
@@ -527,9 +527,25 @@ def cmd_clean(a) -> int:
 
     Replaces the `find ... -delete` / `rm -rf` pairs that `clean` and
     `_reset_obj` each carried, so the two no longer have to agree on what a
-    reset means.  Sub-makes (`make -C user clean`) stay in make: they are
-    recursive builds, not file surgery.
+    reset means. Build-root sweeps remove all generated entries except the
+    explicitly retained download/toolchain caches, independently of ARCH.
     """
+    build_roots = [REPO / d for d in getattr(a, "build_root", [])]
+    keep = set(getattr(a, "keep_build_entry", []))
+    if any(Path(name).name != name or name in (".", "..") for name in keep):
+        raise SystemExit("error: preserved build entries must be simple names")
+    for root in build_roots:
+        if root.is_symlink() or root.resolve() == REPO.resolve() or not root.resolve().is_relative_to(REPO.resolve()):
+            raise SystemExit(f"error: refusing unsafe build root: {root}")
+
+    def remove(path: Path) -> None:
+        # Remove links themselves, never their targets. Permission/I/O errors
+        # must fail clean rather than reporting success with stale artifacts.
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
     n = 0
     for d in a.find_root:
         root = REPO / d
@@ -573,7 +589,15 @@ def cmd_clean(a) -> int:
             # other rm-rf callers do not leave stale links behind.
             path.unlink()
         else:
-            shutil.rmtree(path, ignore_errors=True)
+            remove(path)
+    for root in build_roots:
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            if child.name not in keep:
+                remove(child)
+        if not any(root.iterdir()):
+            root.rmdir()
     for f in a.rm_f:
         (REPO / f).unlink(missing_ok=True)
     print(f"[CLEAN] {n} object file(s) removed")
@@ -657,6 +681,8 @@ def main() -> int:
     s.add_argument("--find-root", action="append", default=[])
     s.add_argument("--rm-rf", action="append", default=[])
     s.add_argument("--rm-f", action="append", default=[])
+    s.add_argument("--build-root", action="append", default=[])
+    s.add_argument("--keep-build-entry", action="append", default=[])
     s = sub.add_parser("adopt")
     s.add_argument("--tmp", required=True)
     s.add_argument("--target", required=True)

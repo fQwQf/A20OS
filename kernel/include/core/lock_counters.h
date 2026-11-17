@@ -15,8 +15,8 @@ void lock_counters_register(spinlock_t *lock, const char *name);
 void lock_counters_enable_callsite(spinlock_t *lock);
 
 /* Render "<name>: <contended_acquires> <contended_spins>\n" for every
- * registered lock.  Returns bytes written. */
-size_t lock_counters_format(char *buf, size_t bufsz);
+ * registered lock. Returns bytes written or a negative error. */
+int lock_counters_format(char *buf, size_t bufsz);
 
 void lock_counters_init(void);
 

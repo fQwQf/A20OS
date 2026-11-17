@@ -8,7 +8,7 @@
 Reads an instance manifest (TOML under instances/), validates it, derives
 the corresponding Makefile variables, and delegates execution to make. The
 Makefile remains the build engine; this tool owns configuration derivation.
-See docs/dev/instances.md for the manifest reference.
+See docs/zh/dev/instances.md for the manifest reference.
 
 # ─── How to run ───
 #   tools/a20 check                        validate every instances/*.toml
@@ -712,13 +712,20 @@ def cmd_show(args: argparse.Namespace) -> int:
     if section_is_set(inst.log):
         l = inst.log
         enabled = "on" if l.enabled is not False else "off"
-        persistent = "off" if l.persistent is False else "on"
-        session = "off" if l.session is False else "on"
-        loader = "off" if l.loader is False else "on"
+        persistent = "off" if l.enabled is False or l.persistent is False else "on"
+        session = "off" if l.enabled is False or l.session is False else "on"
+        loader = "on" if (l.loader if l.loader is not None else l.enabled is not False) else "off"
         print(f"  log         level={l.level or 'info'} enabled={enabled} "
-              f"persistent={persistent} mode={l.mode or 'auto'} "
+              f"persistent={persistent} mode={l.mode or 'auto'} report={l.report or 'off'} "
               f"partition={l.partition_mb if l.partition_mb is not None else 64}MiB "
               f"session={session} loader={loader}")
+    l = inst.log
+    compiled = l.boot_report if l.boot_report is not None else l.report in ("error", "always")
+    print(f"  boot report compiled={'yes' if compiled else 'no'} mode={l.report or 'off'} "
+          f"window={l.report_window_ms if l.report_window_ms is not None else 10000}ms "
+          f"settle={l.report_settle_ms if l.report_settle_ms is not None else 500}ms "
+          f"records={l.report_max_records if l.report_max_records is not None else 48} "
+          f"context={'off' if l.report_context is False else 'on'}")
 
     ports = instance_net_ports(inst)
     print(f"  host ports  {', '.join(format_net_port(p) for p in ports) if ports else 'none (nothing to connect to)'}")
@@ -1023,7 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
     a20_complete) can introspect the real parser instead of a copy of it."""
     parser = argparse.ArgumentParser(
         prog="a20",
-        description="Declarative instance runner for A20OS (see docs/dev/instances.md).",
+        description="Declarative instance runner for A20OS (see docs/zh/dev/instances.md).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1035,6 +1042,18 @@ def build_parser() -> argparse.ArgumentParser:
                            help="print the make/QEMU command instead of executing it")
         return p
 
+    p_compare = sub.add_parser("compare-evidence", help="compare frozen workload evidence across boots")
+    p_compare.add_argument("before", type=Path)
+    p_compare.add_argument("after", type=Path)
+    p_compare.add_argument("--output", type=Path)
+    p_compare.add_argument("--allow-config-change", action="store_true")
+    p_diag = add_instance_cmd("diagnose", "collect porting, trace and performance evidence", False)
+    p_diag.add_argument("--output", type=Path, required=True, help="new evidence directory")
+    p_diag.add_argument("--kernel", type=Path, help="boot this RAMFS kernel in diskless QEMU")
+    p_diag.add_argument("--serial", action="store_true", help="attach to configured physical UART; no flash/reset")
+    p_diag.add_argument("--timeout", type=float, default=120, help="deadline per command in seconds")
+    p_diag.add_argument("--prompt", default=r"(?:^|[\r\n])# ", help="shell prompt regex")
+    p_diag.add_argument("--workload", help="guest shell command to measure; exit status is preserved")
     p_check = sub.add_parser("check", help="validate instance manifests")
     p_check.add_argument("instances", nargs="*", help="manifests to check (default: all)")
     p_check.add_argument("--require-arch", nargs="*", default=(), metavar="ARCH",
@@ -1238,6 +1257,23 @@ def _dispatch(ns: argparse.Namespace) -> int | None:
             return cmd_boards(ns)
         case "resources":
             return cmd_resources(ns)
+        case "compare-evidence":
+            import json
+            from a20_observe import compare_evidence
+            try:
+                result = compare_evidence(ns.before,ns.after,allow_config_change=ns.allow_config_change)
+                text = json.dumps(result,indent=2)+"\n"
+                if ns.output:
+                    with ns.output.open("x") as stream:
+                        stream.write(text)
+                else:
+                    print(text,end="")
+            except (OSError,ValueError,KeyError,TypeError) as exc:
+                raise A20Error(str(exc)) from None
+            return EXIT_OK
+        case "diagnose":
+            from a20_observe import run
+            return run(ns, _load(ns.instance))
         case "console":
             return cmd_console(ns)
         case "deploy":

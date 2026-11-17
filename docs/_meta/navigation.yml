@@ -1,0 +1,352 @@
+nav:
+- README
+- section: architecture
+  children:
+  - architecture
+  - section: hybrid-kernel
+    children:
+    - hybrid-kernel/README
+    - hybrid-kernel/00-design
+    - hybrid-kernel/01-mechanisms
+    - hybrid-kernel/02-mainstream-plan
+    - hybrid-kernel/03-refactor-plan
+    - hybrid-kernel/04-dual-placement
+    - hybrid-kernel/05-idl-and-personality
+    - hybrid-kernel/06-user-fs
+- section: native-abi
+  children:
+  - native-abi/README
+  - native-abi/00-overview
+  - native-abi/syscalls
+  - native-abi/01-types
+  - native-abi/02-errors
+  - native-abi/03-handle
+  - native-abi/04-memory
+  - native-abi/05-ipc
+  - native-abi/06-security
+  - native-abi/07-startup
+  - native-abi/09-native-abi-deepening
+  - native-abi/10-runtime-extensions
+- section: real-time-operating-system
+  children:
+  - rtos/README
+  - rtos/overview
+  - rtos/cmsis-rtos2
+  - rtos/execution-model
+  - rtos/synchronization
+  - rtos/interrupts
+  - rtos/porting-guide
+  - rtos/experiments
+  - rtos/latency
+- section: kernel-subsystems
+  children:
+  - kernel/README
+  - section: scheduling
+    children:
+    - kernel/eevdf-scheduler
+    - kernel/process-scheduler
+  - section: memory-management
+    children:
+    - kernel/mm/README
+    - kernel/mm/single-level-page-table
+    - kernel/mm/fork-mprotect-cow
+    - kernel/mm/slab-cpu-cache
+  - section: linux-abi-compatibility
+    children:
+    - kernel/linux-abi/cpuinfo
+    - kernel/linux-abi/interface-enumeration
+    - kernel/linux-abi/unix-ancillary
+    - kernel/linux-abi/child-exit-notification
+    - kernel/linux-abi/tty-jobcontrol
+    - kernel/linux-abi/keyring
+    - kernel/linux-abi/init-compatibility
+  - kernel/resource-namespaces
+  - kernel/extensions
+  - kernel/kexec-hot-update
+  - section: logging
+    children:
+    - kernel/logging/README
+    - kernel/logging/persistent-logging
+    - kernel/logging/boot-report
+    - kernel/logging/observability
+    - kernel/logging/observability-validation-2026-11-15
+    - kernel/logging/boot-report-validation-2026-11-15
+  - section: architecture-features
+    children:
+    - kernel/arch/aarch64-fex-preconditions
+    - kernel/arch/x86_64-cpu-id
+  - section: cross-architecture-execution-exec-xlator
+    children:
+    - kernel/exec-xlator/README
+    - kernel/exec-xlator/01-usage
+    - kernel/exec-xlator/02-integration
+    - kernel/exec-xlator/03-internals
+    - kernel/exec-xlator/04-extending
+  - section: file-systems
+    children:
+    - fs/README
+    - fs/vfs-edge-semantics
+    - fs/fs-consistency-model
+    - fs/ufs-close-token
+    - fs/ntfs
+  - section: networking
+    children:
+    - net/README
+    - net/architecture
+    - net/routing
+    - net/router
+    - net/router-completion
+    - net/pppoe
+    - net/conntrack-nat
+    - net/nat
+    - net/nat-host-oracle
+    - net/backend-interface
+    - net/backend-policy
+    - net/checksum-offload
+    - net/lan-services
+    - net/lwip-upstream
+    - net/lwip-allocator-locks
+    - net/net-lanes
+    - net/network-lock-contract
+    - net/network-config-design
+    - net/instance-config
+    - net/benchmark-method
+    - net/bsd-port
+  - section: graphics
+    children:
+    - graphics/README
+    - graphics/3d-graphics
+    - graphics/gpu-3d-roadmap
+    - graphics/real-hardware-gpu
+    - graphics/virtgpu-native-allocation
+    - graphics/virtgpu-sharing-and-sync
+    - graphics/drm-sysfs-discovery
+    - graphics/firmware-video
+    - graphics/host-tools
+  - section: virtualization
+    children:
+    - hypervisor/README
+    - hypervisor/overview
+    - hypervisor/03-usage
+    - hypervisor/08-multiarch-backends
+    - hypervisor/10-riscv-sbi
+    - hypervisor/06-host-runtime
+    - hypervisor/07-guest-supervisor
+    - hypervisor/09-smp-validation
+    - hypervisor/00-design
+    - hypervisor/01-a20os-guest
+    - hypervisor/02-roadmap
+    - hypervisor/04-platform-design
+- section: clustering
+  children:
+  - cluster/README
+  - section: core-specifications
+    children:
+    - cluster/overview
+    - cluster/02-wire-protocol
+    - cluster/runtime-ssi
+    - cluster/mcu-shared-kernel
+    - cluster/cluster-apps
+  - section: technical-reference
+    children:
+    - cluster/01-abi
+    - cluster/03-kernel-impl
+    - cluster/04-transports
+    - cluster/05-userspace
+    - cluster/10-operator-guide
+    - cluster/02-udp-demo
+- section: security-and-hardening
+  children:
+  - security/README
+  - security/hardening
+  - security/kernel-wx
+  - security/release-acceptance
+- section: driver-development
+  children:
+  - drivers/README
+  - drivers/classes/rtl8852be-wifi
+  - section: developer-guides
+    children:
+    - drivers/guide/getting-started
+    - drivers/guide/x86-hardware-reuse
+    - drivers/guide/core-model
+    - drivers/guide/framework-development
+    - drivers/guide/bus-and-platform
+    - drivers/guide/device-classes
+    - drivers/guide/pci-and-virtio
+    - drivers/guide/hotplug-and-pnp
+    - drivers/guide/kernel-modules
+    - drivers/guide/runtime-contracts
+    - drivers/guide/native-runtime
+    - drivers/guide/request-queues
+    - drivers/guide/lock-order
+    - drivers/guide/deployment-profiles
+  - section: device-classes
+    children:
+    - drivers/classes/input
+    - drivers/classes/display
+    - drivers/classes/audio
+    - drivers/classes/tun
+    - drivers/classes/virtio-console
+    - drivers/classes/usb-design
+    - drivers/classes/userspace-and-devfs
+  - section: engineering-practices
+    children:
+    - drivers/meta/testing-and-submission
+    - drivers/meta/documentation-consistency
+- section: platforms-and-porting
+  children:
+  - platforms/README
+  - platforms/x86_64-laptop
+  - platforms/x86_64-laptop-handoff
+  - platforms/porting-guide
+  - platforms/physical-boards
+  - platforms/not-yet-ported
+  - section: risc-v-platforms
+    children:
+    - platforms/visionfive2-boot
+    - platforms/k230
+    - platforms/milk-v-duo
+    - platforms/licheerv-nano
+    - platforms/d1s-f133
+    - platforms/ox64
+    - platforms/esp32-c3
+    - platforms/m0sense-bl702
+  - section: arm-aarch64-platforms
+    children:
+    - platforms/raspberrypi4
+    - platforms/pine-a64
+    - platforms/quartz64-zero
+    - platforms/rk3328
+    - platforms/sun50i-h616
+    - platforms/huawei-ct5100
+    - platforms/lichee-pi-zero
+    - platforms/stm32f103-port
+    - platforms/hi3861
+  - section: loongarch-platforms
+    children:
+    - platforms/2k1000
+    - platforms/2k0300
+  - section: x86-64-and-virtualization
+    children:
+    - platforms/x86_64-pc
+    - platforms/j1900
+    - platforms/virtualbox
+    - platforms/virtualbox-x86_64
+    - platforms/virtualbox-aarch64
+- section: build-and-test
+  children:
+  - dev/documentation-i18n
+  - dev/README
+  - dev/build
+  - dev/llvm-toolchain
+  - dev/busybox-ramfs
+  - dev/userland-cleanup-validation
+  - dev/boot-model
+  - testing-gates
+  - dev/debug
+  - kernel/debugging-internals
+  - dev/instances
+  - dev/userland-submodules
+  - dev/tooling-internals
+  - dev/external-dependencies
+- section: packaging-and-distribution
+  children:
+  - packaging/README
+  - packaging/overview
+  - packaging/quickstart
+  - packaging/packages
+  - packaging/apk-format
+  - packaging/images
+  - packaging/repository
+  - packaging/ci
+  - packaging/migration
+  - section: distribution-rootfs
+    children:
+    - distro/README
+    - distro/boot
+    - distro/build
+    - distro/kernel-requirements
+    - distro/source-software-porting
+    - distro/xfce-input
+    - distro/minecraft
+    - distro/minecraft-components
+- section: status-and-progress
+  children:
+  - status/README
+  - status/current/module-status
+  - status/current/docs-gates
+  - status/current/server-readiness
+  - status/current/v1.0-progress
+  - section: version-1-0-gap-tracker
+    children:
+    - status/gaps/README
+    - status/gaps/delivery
+    - status/gaps/core
+    - status/gaps/mm
+    - status/gaps/fs
+    - status/gaps/abi-ipc
+    - status/gaps/net
+    - status/gaps/drivers
+    - status/gaps/runtime
+    - status/gaps/cluster
+    - status/gaps/hyp
+    - status/gaps/desktop
+    - status/gaps/security
+    - status/gaps/docs
+    - status/gaps/triage-matrix
+    - status/gaps/cluster-ssi
+    - section: section-33
+      children:
+      - status/gaps/notes/README
+      - status/gaps/notes/net-ipv6-pbuf
+      - status/gaps/notes/fs-ext4-orphan
+  - section: subsystem-implementation-status
+    children:
+    - status/current/delivery-baseline
+    - status/current/cluster-implementation-status
+    - status/current/drivers-implementation-status
+    - status/current/hypervisor-implementation-status
+    - status/current/hybrid-kernel-status
+    - status/current/native-abi-runtime-status
+    - status/current/native-runtime-1.0
+    - status/current/security-status
+    - status/current/graphics-status
+    - status/current/net-status
+    - status/current/fs-status
+    - status/current/platforms-status
+    - status/current/distro-status
+    - status/current/desktop-minecraft-status
+    - status/current/ext4-orphan-gap
+    - status/current/validation-dontunmap
+  - section: history
+    children:
+    - status/history/README
+    - status/history/desktop-1.0-2026-10-23
+    - status/history/desktop-apps-apk-2026-10-23
+    - status/history/desktop-regressions-2026-10-22
+    - status/history/mlibc-native-hardening-2026-10-23
+    - status/history/perf-worklog-2026-10-22
+    - status/history/serial-fidelity
+    - status/history/xfce-x86_64-validation
+- section: releases
+  children:
+  - releases/README
+  - releases/v1.0
+  - releases/v1.0-validation
+  - releases/v1.0-comparison
+  - releases/v0.18
+  - releases/v0.17
+- section: roadmap
+  children:
+  - roadmap/README
+  - roadmap/a20os-improvement-todo
+  - roadmap/perf-overhaul
+  - roadmap/park-wake-protocol-split
+  - roadmap/lock-serialization-split
+  - roadmap/next-horizon
+- section: contributing
+  children:
+  - CONTRIBUTING
+  - ACKNOWLEDGMENTS
+  - THIRD_PARTY_NOTICES

@@ -9,14 +9,14 @@
 
 /*
  * Hypervisor foundation: guest physical address spaces (stage-2) and the VM
- * container around them.  Design record: docs/hypervisor/00-design.md.
+ * container around them.  Design record: docs/zh/hypervisor/00-design.md.
  *
  * The RISC-V backend reuses the host page-table metadata machinery. Other
  * backends provide their own second-stage representation through hyp_backend:
  *
  *   - every stage-2 page-table page carries a pt_meta_t (same node MCS lock,
  *     same per-entry status byte), so the concurrency and audit story of
- *     docs/kernel/mm/single-level-page-table.md applies unchanged;
+ *     docs/zh/kernel/mm/single-level-page-table.md applies unchanged;
  *   - a mapped stage-2 leaf carries class MM_ST_GUEST_MEM -- never a host
  *     anon/file class, which would describe the wrong plane -- and the host
  *     auditor counts GUEST_MEM in a host table as a mismatch;

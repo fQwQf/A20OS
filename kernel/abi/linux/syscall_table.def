@@ -435,7 +435,7 @@ LINUX_SYSCALL(a20_task_restore, 1, sys_linux_task_restore(args))
 LINUX_SYSCALL(a20_registry_client, 0, sys_a20_registry_client_fd(args))
 
 /* A20OS extensions: capability envelope control plane (sys_a20_bridge.c +
- * envelope.c, docs/research/05). */
+ * envelope.c, docs/zh/research/05). */
 LINUX_SYSCALL(a20_envelope_create, 0, sys_a20_envelope_create(args))
 LINUX_SYSCALL(a20_envelope_enter, 0, sys_a20_envelope_enter(args))
 LINUX_SYSCALL(a20_envelope_revoke, 0, sys_a20_envelope_revoke(args))
@@ -446,7 +446,7 @@ LINUX_SYSCALL(a20_envelope_acquire_race_test, 0, sys_a20_envelope_acquire_race_t
 #endif
 
 /* A20OS extensions: hypervisor VM/vcpu bridge (sys_a20_bridge.c,
- * docs/hypervisor/00-design.md S5). */
+ * docs/zh/hypervisor/00-design.md S5). */
 LINUX_SYSCALL(hyp_vm_create, 0, sys_hyp_vm_create(args))
 LINUX_SYSCALL(hyp_vm_load, 0, sys_hyp_vm_load(args))
 LINUX_SYSCALL(hyp_vcpu_create, 0, sys_hyp_vcpu_create(args))

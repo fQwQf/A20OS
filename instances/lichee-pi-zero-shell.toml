@@ -1,5 +1,5 @@
 name = "lichee-pi-zero-shell"
-description = "V3s ARM32 serial mksh in RAM; physical validation pending"
+description = "V3s ARM32 serial BusyBox ash in RAM; physical validation pending"
 arch = "arm32"
 board = "lichee-pi-zero"
 abi = "linux"
@@ -18,7 +18,7 @@ serial = "/dev/ttyUSB0"
 baud = 115200
 boot_wait = 0
 boot_timeout = "120s"
-console_check = ["[V3s] allocator RAM=", "System ready", "[init] fork=0, calling execve mksh"]
+console_check = ["[V3s] allocator RAM=", "System ready", "[init] fork=0, calling execve sh"]
 boot_media = ["build/lichee-pi-zero/a20os-lichee-pi-zero-shell-sdcard.img"]
 media_device = "/dev/sdX"
 
@@ -36,9 +36,9 @@ commands = [
 ]
 note = """Interactive RAMFS shell profile: prepare firmware using lichee-pi-zero,
 then package this instance. The existing U-Boot/uImage/DTB handoff is retained.
-Init, mksh and basic external commands are embedded in the kernel; all file
+Init, BusyBox and basic external commands are embedded in the kernel; all file
 changes are RAM-only and disappear at reset. No SD root mount or network is
 required. Kernel initialization, fork/exec/wait, sleep and shell file I/O have
 QEMU ARM32 coverage; V3s hardware operation remains unverified. This profile
-does not provide Ethernet, SSH, display or audio. See docs/platforms/lichee-pi-zero.md.
+does not provide Ethernet, SSH, display or audio. See docs/zh/platforms/lichee-pi-zero.md.
 """

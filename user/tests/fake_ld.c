@@ -1,6 +1,6 @@
 /*
  * Minimal PT_INTERP interpreter stand-in ("fakeld") — dynamic-entry
- * bring-up probe for docs/status/current/native-abi-runtime-status.md §8a.
+ * bring-up probe for docs/zh/status/current/native-abi-runtime-status.md §8a.
  *
  * Kernel contract for native-dynamic tasks (kernel/mm/elf.c):
  *   - app and interpreter are both pre-mapped; entry is the interp's

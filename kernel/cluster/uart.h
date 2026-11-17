@@ -14,15 +14,15 @@
  * without linking any kernel object.
  *
  * Spec basis, quoted by section:
- *   docs/cluster/02-wire-protocol.md  -- frame layout (§1), types (§2),
+ *   docs/zh/cluster/02-wire-protocol.md  -- frame layout (§1), types (§2),
  *                                        flags (§3), HELLO payload (§6),
  *                                        counters (§10).
- *   docs/cluster/04-transports.md     -- UART transport (§4): SLIP variant,
+ *   docs/zh/cluster/04-transports.md     -- UART transport (§4): SLIP variant,
  *                                        MTU 256, 50 ms inter-byte timeout,
  *                                        2-byte short address.
- *   docs/cluster/01-abi.md            -- node hash (FNV-1a 32), caps, errno
+ *   docs/zh/cluster/01-abi.md            -- node hash (FNV-1a 32), caps, errno
  *                                        values carried in ERROR frames.
- *   docs/cluster/03-kernel-impl.md    -- §4 tiering (CLUSTER_PROFILE), §2
+ *   docs/zh/cluster/03-kernel-impl.md    -- §4 tiering (CLUSTER_PROFILE), §2
  *                                        "pure functions, no locks, no
  *                                        allocation, caller supplies the
  *                                        buffer" for the codec half.

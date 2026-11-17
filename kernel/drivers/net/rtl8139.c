@@ -11,12 +11,12 @@
  * The tree's only other emulated-PCI NIC (e1000) claims five Intel IDs, so a
  * QEMU machine configured with -nic user,model=rtl8139 -- which is what a lot
  * of older guest images and CI recipes ask for -- produced no NET class device
- * at all.  That is exactly the gap docs/platforms/x86_64-pc.md recorded as
+ * at all.  That is exactly the gap docs/zh/platforms/x86_64-pc.md recorded as
  * "not implemented".
  *
  * The register map below was checked against the external Debian QEMU
  * 10.0.13+ds source tree (hw/net/rtl8139.c). Source provenance and the
- * external-unpack locator are in docs/dev/external-dependencies.md:
+ * external-unpack locator are in docs/zh/dev/external-dependencies.md:
  *   - register file            hw/net/rtl8139.c:96-140
  *   - ISR/IMR bit names        hw/net/rtl8139.c:161-172
  *   - TX status bit names      hw/net/rtl8139.c:174-181
@@ -128,7 +128,7 @@
  * (hw/net/rtl8139.c:745-777), while every smaller size is only taken when the
  * RXCFGWRAP bit is clear.  Real silicon documents 0b11 as the "8K + 16K" mode,
  * whose ring geometry this driver has NOT verified -- see risks in the commit
- * message and docs/status/current/drivers-implementation-status.md. */
+ * message and docs/zh/status/current/drivers-implementation-status.md. */
 #define RTL8139_RCR_RING_64K  0x1800U
 
 /*
@@ -251,7 +251,7 @@ typedef struct {
      * calls into lwIP; send/recv/poll take only nic->lock and never call back
      * into lwIP. The control-plane NET_STATS reader may take this lock under
      * the stack lock; no IRQ/RX path enters the stack while holding it. See
-     * docs/drivers/guide/lock-order.md. */
+     * docs/zh/drivers/guide/lock-order.md. */
     spinlock_t lock;
     uint8_t *rx;                  /* RTL8139_RX_BUF_SIZE ring */
     uint8_t (*tx)[RTL8139_TX_BUF_SIZE];

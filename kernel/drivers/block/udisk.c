@@ -1,6 +1,6 @@
 /*
  * udisk — kernel block proxy for a user-space virtio-blk driver
- * (docs/hybrid-kernel/02-mainstream-plan.md M4, mainstream hybrid form).
+ * (docs/zh/hybrid-kernel/02-mainstream-plan.md M4, mainstream hybrid form).
  *
  * The page cache and filesystems stay in the kernel (they consume this
  * device through the normal block_dev_t / bcache interface).  Block
@@ -288,7 +288,7 @@ int udisk_attach(struct vmo *vmo, uint64_t capacity,
 /*
  * udisk_task_exit — driver death: fail every in-flight request and wake
  * its waiter so the kernel caller observes -EIO instead of hanging
- * (docs/hybrid-kernel/02-mainstream-plan.md M4 crash recovery).  The
+ * (docs/zh/hybrid-kernel/02-mainstream-plan.md M4 crash recovery).  The
  * instance itself survives so a supervisor respawn can re-attach the
  * same block device (mount included).
  */
