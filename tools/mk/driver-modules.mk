@@ -74,7 +74,19 @@ endif
 # rebuilds USER_BUILD_STAMP, its clean step can remove driver files that Make
 # had already found during dependency discovery.  A normal dependency makes
 # those packages stale and rebuilds them after the clean finishes.
-$(addprefix $(DRVMOD_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/mk/driver-modules.mk $(DRVMOD_USER_BUILD_PREREQ)
+# Ordinary kernels share user/build/<arch> across CPU and driver profiles.
+# A changed inline CPU helper or smoke/read-only flag must rebuild the packages
+# even when their C sources and the userspace build identity are unchanged.
+# Keep one current stamp so switching A -> B -> A also invalidates B's objects.
+drvmod_shellquote = '$(subst ','"'"',$(1))'
+DRVMOD_BUILD_FLAGS := $(DRVMOD_BUILD_DIR)/.driver-build-flags
+.PHONY: FORCE_DRVMOD_FLAGS
+FORCE_DRVMOD_FLAGS:
+$(DRVMOD_BUILD_FLAGS): FORCE_DRVMOD_FLAGS $(DRVMOD_USER_BUILD_PREREQ)
+	@mkdir -p $(dir $@)
+	@printf '%s\n' $(call drvmod_shellquote,$(DRVMOD_GCC)) $(call drvmod_shellquote,$(DRVMOD_CFLAGS)) $(call drvmod_shellquote,DRVMOD_SMOKE=$(DRVMOD_SMOKE)) > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+$(addprefix $(DRVMOD_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/mk/driver-modules.mk $(DRVMOD_USER_BUILD_PREREQ) $(DRVMOD_BUILD_FLAGS)
 
 # Early DriverStore packages: linked into the kernel root ramfs and loaded
 # before the real root disk is mounted.  Every driver that can own the root
