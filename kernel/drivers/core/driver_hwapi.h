@@ -124,6 +124,8 @@ static inline void writel_relaxed(uint32_t val, volatile void *addr) {
  * ignore writes; drivers must only use ports supplied as RES_IOPORT. */
 uint8_t ioport_read8(uint16_t port);
 void ioport_write8(uint16_t port, uint8_t value);
+uint32_t ioport_read32(uint16_t port);
+void ioport_write32(uint16_t port, uint32_t value);
 
 /* ============================================================
  * DMA API — delegates to arch_dma_sync_for_*

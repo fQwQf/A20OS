@@ -10,8 +10,8 @@
 #include "core/string.h"
 #include "mm/mm.h"
 
-/* VMware SVGAv3, as exposed by VirtualBox ARM.  This is not the legacy
- * SVGA-II index/value I/O device used by an x86 VirtualBox guest. */
+/* SVGA-II uses indexed registers plus a VRAM FIFO; SVGAv3 uses direct
+ * MMIO registers and command buffers. Keep their layouts and queues distinct. */
 #define VMSVGA_VENDOR_ID       0x15ADU
 #define VMSVGA2_DEVICE_ID      0x0405U
 #define VMSVGA3_DEVICE_ID      0x0406U
@@ -23,9 +23,18 @@
 #define SVGA2_REG_WIDTH        2U
 #define SVGA2_REG_HEIGHT       3U
 #define SVGA2_REG_BPP          7U
+#define SVGA2_REG_BYTES_PER_LINE 12U
 #define SVGA2_REG_FB_START     13U
+#define SVGA2_REG_FB_OFFSET    14U
 #define SVGA2_REG_FB_SIZE      16U
+#define SVGA2_REG_MEM_SIZE     19U
 #define SVGA2_REG_CONFIG_DONE  20U
+#define SVGA2_REG_SYNC         21U
+#define SVGA2_REG_BUSY         22U
+#define SVGA2_FIFO_MIN         0U
+#define SVGA2_FIFO_MAX         4U
+#define SVGA2_FIFO_NEXT        8U
+#define SVGA2_FIFO_STOP        12U
 #define SVGA2_ID               0x90000002U
 
 #define SVGA3_REG_ID           0x000U
@@ -90,7 +99,10 @@ typedef struct vmsvga_device {
     uint32_t height;
     uint32_t bpp;
     uint32_t pitch;
-    int legacy;
+    int legacy, port_io;
+    uintptr_t fifo;
+    uint32_t fifo_bytes, fifo_min, fifo_max;
+    int fifo_ready;
     mutex_t lock;
     int closing, pending, pending_stop, context_live;
     int pci_touched, configured, published, stopped;
@@ -129,16 +141,21 @@ static int vmsvga_scanout_self_test(device_t *dev, vmsvga_device_t *svga) {
         fb[svga->width * 7U / 8U],
     };
     int update = vmsvga_flush(dev, 0, 0, svga->width, svga->height);
-    kinfo("[GPU] SVGAv3 scanout test: pixels=%08x,%08x,%08x,%08x update=%s\n",
-          samples[0], samples[1], samples[2], samples[3],
+    kinfo("[GPU] SVGA%s scanout test: pixels=%08x,%08x,%08x,%08x update=%s\n",
+          svga->legacy ? "-II" : "v3", samples[0], samples[1], samples[2], samples[3],
           update == 0 ? "completed" : "failed");
     return update;
 }
 
 static void vmsvga_write(vmsvga_device_t *svga, uint32_t offset, uint32_t value) {
     if (svga->legacy) {
-        writel(offset, (volatile void *)svga->regs);
-        writel(value, (volatile void *)(svga->regs + 4U));
+        if (svga->port_io) {
+            ioport_write32((uint16_t)svga->regs, offset);
+            ioport_write32((uint16_t)(svga->regs + 1U), value);
+        } else {
+            writel(offset, (volatile void *)svga->regs);
+            writel(value, (volatile void *)(svga->regs + 4U));
+        }
         return;
     }
     writel(value, (volatile void *)(svga->regs + offset));
@@ -146,6 +163,10 @@ static void vmsvga_write(vmsvga_device_t *svga, uint32_t offset, uint32_t value)
 
 static uint32_t vmsvga_read(vmsvga_device_t *svga, uint32_t offset) {
     if (svga->legacy) {
+        if (svga->port_io) {
+            ioport_write32((uint16_t)svga->regs, offset);
+            return ioport_read32((uint16_t)(svga->regs + 1U));
+        }
         writel(offset, (volatile void *)svga->regs);
         return readl((const volatile void *)(svga->regs + 4U));
     }
@@ -221,8 +242,71 @@ static int vmsvga_submit(vmsvga_device_t *svga, const void *command,
     return ret;
 }
 
+static int vmsvga_fifo_state(vmsvga_device_t *svga, uint32_t *next, uint32_t *stop) {
+    uint32_t min = readl((const volatile void *)(svga->fifo + SVGA2_FIFO_MIN));
+    uint32_t max = readl((const volatile void *)(svga->fifo + SVGA2_FIFO_MAX));
+    *next = readl((const volatile void *)(svga->fifo + SVGA2_FIFO_NEXT));
+    *stop = readl((const volatile void *)(svga->fifo + SVGA2_FIFO_STOP));
+    if ((min | max | *next | *stop) == 0xffffffffU)
+        return -ENODEV;
+    if (min != svga->fifo_min || max != svga->fifo_max ||
+        ((min | max | *next | *stop) & 3U) ||
+        *next < min || *next >= max || *stop < min || *stop >= max)
+        return -EIO;
+    return 0;
+}
+
+static int vmsvga_fifo_drain(vmsvga_device_t *svga, int cleanup) {
+    if (!svga->fifo_ready)
+        return 0;
+    uint64_t start = clock_get_ticks(), limit = clock_ticks_per_sec() / 10U;
+    if (!limit) limit = 1;
+    vmsvga_write(svga, SVGA2_REG_SYNC, 1);
+    for (uint32_t i = 0; i < SVGA3_CMD_WAIT_LOOPS; i++) {
+        if (!cleanup && __atomic_load_n(&svga->closing, __ATOMIC_ACQUIRE))
+            return -ESHUTDOWN;
+        uint32_t next, stop;
+        int ret = vmsvga_fifo_state(svga, &next, &stop);
+        if (ret) return ret;
+        uint32_t busy = vmsvga_read(svga, SVGA2_REG_BUSY);
+        if (busy == 0xffffffffU) return -ENODEV;
+        if (!busy && next == stop) return 0;
+        if (clock_get_ticks() - start >= limit) return -ETIMEDOUT;
+        arch_cpu_relax();
+    }
+    return -ETIMEDOUT;
+}
+
+static int vmsvga_fifo_update(vmsvga_device_t *svga, uint32_t x, uint32_t y,
+                              uint32_t width, uint32_t height) {
+    if (__atomic_load_n(&svga->closing, __ATOMIC_ACQUIRE))
+        return -ESHUTDOWN;
+    /* One synchronous producer, one whole UPDATE packet, one spare word.
+     * A timed-out packet remains in place for stop/drain, never overwritten. */
+    int ret = vmsvga_fifo_drain(svga, 0);
+    if (!ret) {
+        uint32_t next, stop;
+        ret = vmsvga_fifo_state(svga, &next, &stop);
+        if (!ret) {
+            const uint32_t packet[] = {1U, x, y, width, height};
+            for (unsigned i = 0; i < sizeof(packet) / sizeof(packet[0]); i++) {
+                writel(packet[i], (volatile void *)(svga->fifo + next));
+                next += 4U;
+                if (next == svga->fifo_max) next = svga->fifo_min;
+            }
+            wmb();
+            writel(next, (volatile void *)(svga->fifo + SVGA2_FIFO_NEXT));
+            ret = vmsvga_fifo_drain(svga, 0);
+        }
+    }
+    if (ret) __atomic_store_n(&svga->closing, 1, __ATOMIC_RELEASE);
+    return ret;
+}
+
 static int vmsvga_update_locked(vmsvga_device_t *svga, uint32_t x, uint32_t y,
                                 uint32_t width, uint32_t height) {
+    if (svga->legacy)
+        return vmsvga_fifo_update(svga, x, y, width, height);
     svga3_update_t update = {
         .command = SVGA3_CMD_UPDATE,
         .x = x, .y = y, .width = width, .height = height,
@@ -247,6 +331,14 @@ static int vmsvga_get_fb(device_t *dev, uintptr_t *fb_paddr, size_t *fb_size) {
         return -1;
     *fb_paddr = svga->fb_phys;
     *fb_size = svga->fb_size;
+    return 0;
+}
+
+static int vmsvga_get_layout(device_t *dev, gpu_scanout_layout_t *out) {
+    vmsvga_device_t *svga = dev ? dev->drv_priv : NULL;
+    if (!svga || !out) return -EINVAL;
+    *out = (gpu_scanout_layout_t){svga->pitch, 0x00ff0000U, 0x0000ff00U,
+                                 0x000000ffU, 0xff000000U};
     return 0;
 }
 
@@ -305,6 +397,7 @@ static const gpu_dev_ops_t vmsvga_ops = {
     .get_capabilities = vmsvga_get_capabilities,
     .get_info = vmsvga_get_info,
     .get_fb = vmsvga_get_fb,
+    .get_layout = vmsvga_get_layout,
     .flush = vmsvga_flush,
     .ioctl = vmsvga_ioctl,
     .get_features = vmsvga_get_features,
@@ -321,7 +414,14 @@ static int vmsvga_stop(void *context) {
         uint32_t id_reg = svga->legacy ? SVGA2_REG_ID : SVGA3_REG_ID;
         uint32_t id = svga->legacy ? SVGA2_ID : SVGA3_ID;
         if (vmsvga_read(svga, id_reg) != id) { ret = -ENODEV; goto out; }
-        if (!svga->legacy) {
+        if (svga->legacy) {
+            if (!svga->fifo_ready && vmsvga_read(svga, SVGA2_REG_BUSY)) {
+                ret = -EIO;
+                goto out;
+            }
+            ret = vmsvga_fifo_drain(svga, 1);
+            if (ret) goto out;
+        } else {
             vmsvga_write(svga, SVGA3_REG_IRQ_MASK, 0);
             if (vmsvga_read(svga, SVGA3_REG_IRQ_MASK) != 0) { ret = -EIO; goto out; }
             if (svga->context_live) {
@@ -351,6 +451,8 @@ static int vmsvga_stop(void *context) {
         }
     }
     svga->stopped = 1;
+    if (svga->legacy && svga->configured)
+        kinfo("[GPU] SVGA-II stopped: FIFO drained, scanout disabled\n");
 out:
     mutex_unlock(&svga->lock);
     return ret;
@@ -376,20 +478,36 @@ static int vmsvga_probe(device_t *dev) {
     ret = pci_enable_and_assign_bars(dev);
     if (ret) return ret;
 
-    /* The SVGAv3 PCI layout is fixed: BAR0 is its MMIO register aperture and
-     * BAR2 is VRAM.  Looking them up by BAR number is essential on ARM. */
-    resource_t *regs = pci_get_bar_resource(dev, 0);
-    resource_t *fb = pci_get_bar_resource(dev, 2);
-    if (!fb)
-        fb = pci_get_bar_resource(dev, 1);
-    if (!regs || !fb || regs->end < regs->start || fb->end < fb->start)
-        return -1;
-
     svga->legacy = pci_device_id(dev) ==
                    ((uint32_t)VMSVGA_VENDOR_ID << 16 | VMSVGA2_DEVICE_ID);
-    svga->regs = (uintptr_t)device_map_resource(dev, regs);
+    resource_t *regs = pci_get_bar_resource(dev, 0);
+    resource_t *fb = pci_get_bar_resource(dev, svga->legacy ? 1 : 2);
+    resource_t *fifo = svga->legacy ? pci_get_bar_resource(dev, 2) : NULL;
+    if (!regs || !fb || regs->end < regs->start || fb->end < fb->start ||
+        fb->type != RES_MMIO || fb->end - fb->start >= SIZE_MAX)
+        return -ENODEV;
+    if (svga->legacy && (!fifo || fifo->type != RES_MMIO || fifo->end < fifo->start))
+        return -ENODEV;
+    svga->port_io = regs->type == RES_IOPORT;
+    size_t reg_bytes = svga->legacy ? (svga->port_io ? 5U : 8U) : SVGA3_REG_IRQ_STATUS + 4U;
+    if (regs->end - regs->start < reg_bytes - 1U ||
+        (!svga->legacy && svga->port_io)) return -ENODEV;
+    if (svga->port_io) {
+        if (regs->end > 0xffffU) return -ERANGE;
+        ret = device_claim_resource(dev, regs);
+        if (ret) return ret;
+        svga->regs = (uintptr_t)regs->start;
+    } else {
+        if (regs->type != RES_MMIO) return -ENODEV;
+        svga->regs = (uintptr_t)device_map_resource(dev, regs);
+        if (!svga->regs) return -EIO;
+    }
     svga->fb_virt = (uintptr_t)device_map_resource(dev, fb);
-    if (!svga->regs || !svga->fb_virt) return -EIO;
+    if (!svga->fb_virt) return -EIO;
+    if (fifo) {
+        svga->fifo = (uintptr_t)device_map_resource(dev, fifo);
+        if (!svga->fifo) return -EIO;
+    }
     svga->fb_phys = (uintptr_t)fb->start;
     svga->fb_size = (size_t)(fb->end - fb->start + 1U);
 
@@ -401,6 +519,23 @@ static int vmsvga_probe(device_t *dev) {
         }
         svga->configured = 1;
         vmsvga_write(svga, SVGA2_REG_ENABLE, 0);
+        vmsvga_write(svga, SVGA2_REG_CONFIG_DONE, 0);
+        if (vmsvga_read(svga, SVGA2_REG_ENABLE) ||
+            vmsvga_read(svga, SVGA2_REG_CONFIG_DONE) ||
+            vmsvga_read(svga, SVGA2_REG_BUSY)) return -EIO;
+        uint32_t bytes = vmsvga_read(svga, SVGA2_REG_MEM_SIZE);
+        if (bytes == 0xffffffffU) return -ENODEV;
+        if (bytes < 16U + 24U || bytes - 1U > fifo->end - fifo->start)
+            return -EIO;
+        svga->fifo_bytes = bytes;
+        svga->fifo_min = 16U;
+        svga->fifo_max = bytes & ~3U;
+        writel(svga->fifo_min, (volatile void *)(svga->fifo + SVGA2_FIFO_MIN));
+        writel(svga->fifo_max, (volatile void *)(svga->fifo + SVGA2_FIFO_MAX));
+        writel(svga->fifo_min, (volatile void *)(svga->fifo + SVGA2_FIFO_NEXT));
+        writel(svga->fifo_min, (volatile void *)(svga->fifo + SVGA2_FIFO_STOP));
+        svga->fifo_ready = 1;
+        wmb();
         vmsvga_write(svga, SVGA2_REG_WIDTH, 1024U);
         vmsvga_write(svga, SVGA2_REG_HEIGHT, 768U);
         vmsvga_write(svga, SVGA2_REG_BPP, 32U);
@@ -410,25 +545,25 @@ static int vmsvga_probe(device_t *dev) {
         svga->width = vmsvga_read(svga, SVGA2_REG_WIDTH);
         svga->height = vmsvga_read(svga, SVGA2_REG_HEIGHT);
         svga->bpp = vmsvga_read(svga, SVGA2_REG_BPP);
-        uintptr_t device_fb = (uintptr_t)vmsvga_read(svga, SVGA2_REG_FB_START);
-        size_t device_fb_size = (size_t)vmsvga_read(svga, SVGA2_REG_FB_SIZE);
-        if (!svga->width || !svga->height || svga->bpp != 32U || !device_fb ||
-            device_fb_size < (size_t)svga->width * svga->height * 4U)
-            return -1;
-        if (device_fb < fb->start || device_fb > fb->end ||
-            device_fb_size > fb->end - device_fb + 1) return -ENODEV;
-        svga->fb_phys = device_fb;
-        svga->fb_virt += device_fb - fb->start;
-        svga->fb_size = device_fb_size;
-        dev->drv_priv = svga;
-        if (gpu_device_register(dev) < 0) {
-            return -1;
-        }
+        svga->pitch = vmsvga_read(svga, SVGA2_REG_BYTES_PER_LINE);
+        uint32_t offset = vmsvga_read(svga, SVGA2_REG_FB_OFFSET);
+        uint32_t device_size = vmsvga_read(svga, SVGA2_REG_FB_SIZE);
+        uint64_t visible = (uint64_t)svga->pitch * svga->height;
+        if (!svga->width || !svga->height || svga->bpp != 32U ||
+            (uint64_t)svga->pitch < (uint64_t)svga->width * 4U ||
+            offset >= svga->fb_size || visible > svga->fb_size - offset ||
+            device_size < visible || visible > SIZE_MAX)
+            return -ENODEV;
+        svga->fb_phys += offset;
+        svga->fb_virt += offset;
+        svga->fb_size = (size_t)visible;
+        ret = vmsvga_scanout_self_test(dev, svga);
+        if (ret) return ret;
+        ret = gpu_device_register(dev);
+        if (ret) return ret;
         svga->published = 1;
-        kinfo("[GPU] SVGAv2 ready: %ux%ux%u (VRAM: %lu MiB at 0x%lx)\n",
-              svga->width, svga->height, svga->bpp,
-              (unsigned long)(svga->fb_size / 1024U / 1024U),
-              (unsigned long)svga->fb_phys);
+        kinfo("[GPU] SVGA-II ready: %ux%ux%u pitch=%u FIFO=%u bytes\n",
+              svga->width, svga->height, svga->bpp, svga->pitch, svga->fifo_bytes);
         return 0;
     }
 

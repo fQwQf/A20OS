@@ -13,6 +13,10 @@ class VmsvgaLifecycle(unittest.TestCase):
         production = re.sub(r'^#include[^\n]*\n', '',
                             (ROOT / 'kernel/drivers/gpu/vmsvga.c').read_text(), flags=re.M)
         code = (ROOT / 'tools/tests/vmsvga_lifecycle_host.c').read_text().replace('/* PRODUCTION */', production)
+        hardware = (ROOT / 'kernel/drivers/core/driver_hwapi.c').read_text()
+        ports = '\n'.join(re.search(r'^(?:uint32_t|void) ' + name + r'\([^;{}]*\)\s*\{.*?^\}', hardware, re.M | re.S).group()
+                          for name in ('ioport_read32', 'ioport_write32'))
+        code = code.replace('/* PORT_PRIMITIVES */', ports)
         with tempfile.TemporaryDirectory(prefix='a20-vmsvga-lifetime-') as folder:
             path = Path(folder) / 'vmsvga.c'
             path.write_text(code)
