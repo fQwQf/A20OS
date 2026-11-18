@@ -1,3 +1,4 @@
+#include "core/trace.h"
 #include "proc/proc_internal.h"
 #include "proc/debug.h"
 #include "proc/rseq.h"
@@ -2752,7 +2753,7 @@ void proc_sched_note_zombie(void)
 /*
  * Publish the switch of the CPU from prev to @next.
  *
- * LOCKING (docs/roadmap/lock-serialization-split.md §1.2 INV-P1/P3/P4a):
+ * LOCKING (docs/zh/roadmap/lock-serialization-split.md §1.2 INV-P1/P3/P4a):
  * The publication no longer takes any global lock.  It is split into three
  * single-task-lock windows on this CPU only:
  *
@@ -2927,6 +2928,7 @@ static void context_switch_locked(task_t *next) {
             __atomic_fetch_add(&prev->perf_switches_invol, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_perf_sw_context_switches, 1, __ATOMIC_RELAXED);
     }
+    a20_trace_event((A20_TRACE_SCHED << 8) | 3, 0, prev ? (uint64_t)prev->pid : 0, next->pid);
     if (prev && prev->pid >= 4 && next->pid >= 4)
         ktrace_sched("[SCHED] ctxsw: %d -> %d\n", prev->pid, next->pid);
     if (old)

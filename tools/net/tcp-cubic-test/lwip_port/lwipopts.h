@@ -1,5 +1,5 @@
 /*
- * Host-test lwipopts.h for tools/host-tests/test-tcp-cubic-host.c.
+ * Host-test lwipopts.h for tests/tools/host-tests/test-tcp-cubic-host.c.
  *
  * NOT the kernel's: kernel/net/backends/lwip/port/ ships freestanding <stdio.h>,
  * <stdlib.h> and <string.h> shims that shadow the host libc ones, so pulling it

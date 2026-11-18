@@ -47,7 +47,7 @@
  * Neither is Linux's sk_sndbuf / sk_rcvbuf.  Linux bounds unsent skbs and does
  * memory accounting; this bounds one datagram and one queued byte total.  There is
  * no window-scale folding either -- see the doc note in
- * docs/net/network-config-design.md.
+ * docs/zh/net/network-config-design.md.
  */
 #define NET_DGRAM_SND_BUF_DEFAULT ((uint32_t)NET_MAX_PAYLOAD)
 #define NET_DGRAM_RCV_BUF_DEFAULT                                              \
@@ -59,7 +59,7 @@
  * Both stages below used to embed data[NET_MAX_PAYLOAD] (65535 bytes).  A
  * 1460-byte segment therefore cost ~136 KiB of memset plus three copies, and
  * the memsets ran inside the lwIP critical section -- the source of the
- * single-acquire spin spikes recorded in docs/status/current/server-readiness.md, and the
+ * single-acquire spin spikes recorded in docs/zh/status/current/server-readiness.md, and the
  * reason removing read-path polling did not lower the spin total.  net_msg_t
  * was additionally oversize past SLAB_MAX_OBJ, so mm/slab.c rounded every
  * message up to whole pages: a 100-byte datagram cost 68 KiB.
@@ -347,7 +347,7 @@ typedef struct net_socket {
     /*
      * This socket's own lock: everything above in this struct except the
      * registry slot is protected by it, and by nothing else.  Stage E of
-     * docs/net/net-lanes.md moved it off the socket-table bucket lock, which
+     * docs/zh/net/net-lanes.md moved it off the socket-table bucket lock, which
      * used to serialise every socket against every other socket in the same
      * run of registry slots.  The bucket locks now cover only the slot table
      * itself; see the lock rules below.
@@ -388,7 +388,7 @@ typedef struct sockaddr_alg_kernel {
  * whole registry in one spinlock, so every socket operation -- a send on one
  * connection, a poll on another, the /proc/net walk, a socket() -- serialized
  * on the same word.  2f17a5ba8 sharded that into net_bucket[]; stage E
- * (docs/net/net-lanes.md, "阶段 E") took the per-socket state off the shard,
+ * (docs/zh/net/net-lanes.md, "阶段 E") took the per-socket state off the shard,
  * because a shard is a run of NET_SOCK_SLOTS_PER_BUCKET slots and every socket
  * in that run still fought over one word.
  *
@@ -444,7 +444,7 @@ typedef struct sockaddr_alg_kernel {
  *
  * g_lwip_lock is never held together with either net lock.  That is the
  * unchanged meaning of the old "g_lwip_lock and g_net_lock are never held
- * together" rule (docs/net/network-lock-contract.md).
+ * together" rule (docs/zh/net/network-lock-contract.md).
  */
 /*
  * Shard size, expressed as a shift of the global slot index.

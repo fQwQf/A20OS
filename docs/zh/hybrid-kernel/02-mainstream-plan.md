@@ -1,0 +1,85 @@
+# 混合内核演进方向
+
+本文档分析 A20OS 混合内核设计与主流架构的技术对齐。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
+
+## 目标能力
+
+混合内核的完整形态由五个结构性能力定义（与代码规模无关）：
+
+1. RPC 成本逼近 L4 量级（直接切换 + 时间片捐赠）；
+2. 服务对普通进程可发现、可绑定、崩溃后可重绑；
+3. 资源隔离是硬约束（配额 + 泄漏审计 + 崩溃压力测试）；
+4. 至少一个真实吞吐设备的驱动在用户态运行且系统可恢复；
+5. 双架构（riscv64 + loongarch64）运行时验证。
+
+各个关键机制的工程实现与技术约束详见下述章节。
+
+## 设计方向
+
+### 1. IPC 直接切换与时间片捐赠
+
+同步 RPC 的往返成本主要由两次上下文切换的 runqueue 排队构成；历史 TCG 样本约为 80µs 量级（未在最近核对时重测）。L4 的结论：同步 IPC 应把调用者的剩余时间片直接捐给被调者，跳过两次调度排队。
+
+设计要点：
+
+- `channel_call` 的 send 阶段：若对端有阻塞的 RECV 等待者且优先级不低于当前任务，直接切换（当前任务转入"已回复等待"，CPU 交给被调者，不经过 runqueue 插入/选取）；被调者回复时对称切回；
+- 捐赠时间计入被调者（EEVDF 记账正确）；SMP 下仅同核捐赠，跨核退化为 priority-preempt；
+- 防死锁/防优先级反转：捐赠链深度上限、链上节点不可再发起阻塞调用、高优先级抢占时整体让出。
+
+出站半程直接切换已实现；**捐赠仅限 UP**（SMP 需要跨核唤醒簿记，见 STATUS 边界）。回半程直接切换与 SMP 捐赠是后续工作。
+
+### 2. 服务发现与重绑定
+
+服务端点通过 spawn 固定槽位传递只能服务"监管者自用"；普通进程访问服务需要系统级发现机制。
+
+设计要点：
+
+- 服务注册表：well-known 端点（`start_info.service_registry` 下发给每个 native 任务），服务启动时按名 claim 端点，客户端按名查询（端点经 channel 句柄传递，零拷贝授权）；
+- 重绑定协议：客户端缓存端点，调用返回 `CANCELED` 时自动重新查询；
+- 健康探针：注册表/监管者周期 ping，超时判定僵死 → 强杀 → 重启。
+
+注册表（syscall `0x0A03`）与按名解析、崩溃重绑已实现。监管健康探测走独立的 ping 通道对（`A20_SVC_PING_SLOT`），svcmgr 不读取 client_ep，ping/pong 与客户端 RPC 回复不再共享队列。已知限制：注册表仍分发服务同一个客户端点，多客户端并发 RPC 会共享请求队列（回复可能错配）；主流做法是注册表/服务为每个客户端建新端点对并代理转发。
+
+### 3. 资源硬隔离
+
+服务崩溃不能带走资源、也不能耗尽资源。
+
+设计要点：
+
+- 每服务句柄数上限、VMO 物化页上限、CPU 带宽份额（接入 cgroup，spawn 时按清单设置）；
+- 泄漏审计：全局对象计数（`/proc/a20/objects`），崩溃/重启循环前后计数差必须为 0；
+- DMA 授权模型：用户驱动不允许提供任意物理地址，DMA 缓冲只能来自内核分配的 VMO（pin + 内核翻译 virtqueue 描述符物理地址）。
+
+七项实时对象计数审计 + 句柄硬配额（4096）已实现；按服务分级的配额与 CPU 份额是后续工作。
+
+### 4. 真实吞吐设备外迁
+
+virtio-blk 是"主流水平"的试金石：一个真实吞吐设备驱动运行在用户态，且系统可恢复。
+
+设计要点（复用已有机制）：
+
+- MMIO 白名单授权 + virtqueue 描述符放在内核分配的共享 VMO（DMA 契约）+ IRQ→EventQ；
+- 内核块代理（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动。页缓存命中时零 IPC，未命中才进驱动；这与 Fuchsia 块层等主流设计一致；
+- 崩溃恢复：驱动死亡时内核代理把在飞请求标记失败并唤醒等待者，svcmgr 重启驱动后重挂载。
+
+virtio-blk 用户态驱动（udisk）已实现：页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。历史 TCG 样本中冷读约 1 MiB/s、热读为百 MiB/s 级；这些数字为历史样本，引用前需重测。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见“已做出的设计决策”。
+
+### 5. 双架构与真实测量
+
+loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybrid smoke 的系统化运行矩阵；性能结论应来自明确标注提交和环境的有效样本。
+
+RISC-V64/LoongArch64 整体发布流程曾完成（历史记录），但不覆盖所有 Native/hybrid smoke，也不外推为当前结果。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
+
+## 已做出的设计决策
+
+- **主存储数据面不外迁，scratch 设备外迁**：TCG 数据显示块/网驱动的 I/O 路径是多次上下文切换 + 数据拷贝的长链路，在现有调度成本下外迁必然劣化。因此主存储 virtio-blk 数据面保持内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），仅 scratch 盘走用户态 udisk（`user/svc/ubd.c`），两者并存。该决策应在使用优先级捐赠/直接切换降低切换成本后重估。
+- **页缓存留内核；文件系统实现双态放置**：udisk 形态是"页缓存留内核 + 块请求进用户驱动"，与主流存储栈一致。文件系统实现具备用户态放置（uxfs 代理 + ufsd 宿主，fat/ext4 读写、iso9660/ntfs 只读，见 [06-user-fs.md](06-user-fs.md)）；内核副本因引导期 `/bin` 挂载和 EXTERNAL_ROOT 发行版根依赖而保留并存。
+- **捐赠仅限 UP**：SMP 捐赠需要跨核唤醒/IPI 簿记的完整实现（`PER_CPU_CURRENT_VALIDATION`），在完成前不开放。
+- **外来架构二进制走 execve 就地 re-exec，不走人格服务**：`execve` 的语义要求调用者变成目标进程，转发给常驻服务就必须写一层 syscall 代理人格（starnix 式，量级完全不同），且请求响应要穿过 `kernel/ipc/channel_fd.c:68-72` 丢弃消息携带句柄的缺口。改为在 `exec.c` 的 `ENOEXEC` 回退循环里把 `bprm` 改写成宿主 qemu-user 并重来，guest 对内核完全是一个原生进程。W^X 只对被内核标记的那一个 task 放行，不动全局策略。可翻译的架构集合由 `kernel/proc/xlator_guests.def` 一处注册、由 `check-xlator-guests` 门禁保证与交叉编译器表一致，而不是编译期写死的白名单——加一个外来架构要改两行、不改内核逻辑。控制面分三层且互不依赖：编译期 `CONFIG_XLATOR`（可整块裁掉，`CONFIG_XLATOR=0` 时该文件不参与构建、符号表里搜不到 `xlator_*`）、启动时 `a20.xlator=*`、运行期 `/proc/a20/xlator`。分界与代价见 [../kernel/exec-xlator/03-internals.md](../kernel/exec-xlator/03-internals.md)。
+
+## 能力边界与不承诺项
+
+- 网络协议栈保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
+- loongarch64：有整体平台运行的历史证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前结论需逐项复验；
+- 性能数据全部来自 QEMU TCG 模拟器，真实硬件基准待测；
+- IOMMU/DMA 安全：RISC-V 侧在 QEMU `riscv-iommu-pci` 上完成动态 per-device domain（claim/map/unmap/release）+ fault queue 消费（fail-closed 阻断 + `/proc/a20/iommu` 计数器）+ `drv_dma` 接线，edu/uedud 样板端到端验证授权内 DMA 成功、窗口外 fault 被硬件拒绝并消费（`smoke-iommu-udriver-isolation` 验证通过）。边界：fault 拉取式消费、单 domain 实例、virtio-mmio 设备未接入；其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。

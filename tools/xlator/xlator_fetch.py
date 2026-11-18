@@ -2,7 +2,7 @@
 """Fetch a user-space foreign-architecture translator for the build host.
 
 The translator is a plain Linux-ABI program: the kernel has no in-tree
-implementation of one and does not want one (see docs/hybrid-kernel/07-*).
+implementation of one and does not want one (see docs/zh/hybrid-kernel/07-*).
 So it is obtained the same way the distro world image obtains its
 packages -- from Alpine -- and dropped into the FAT32 build directory,
 where tools/img.py build_fat32 picks it up and it lands at /bin/ inside

@@ -4,10 +4,12 @@ extern void *arch_device_map_mmio(uint64_t, size_t, uint32_t);
 static uintptr_t pci_ecam_base;
 void arch_pci_host_init(uintptr_t ecam_base) { pci_ecam_base = ecam_base; }
 static volatile uint32_t *pci_config(int bus,int dev,int func,uint32_t reg) {
-    if (!pci_ecam_base || pci_ecam_base < PAGE_OFFSET || bus < 0 || bus > 255 ||
+    if (!pci_ecam_base || bus < 0 || bus > 255 ||
         dev < 0 || dev > 31 || func < 0 || func > 7 || reg > 4092 || (reg & 3)) return NULL;
     uint64_t offset = ((uint64_t)bus << 20) | ((uint64_t)dev << 15) | ((uint64_t)func << 12) | reg;
-    uint64_t base = pci_ecam_base - PAGE_OFFSET;
+    uint64_t base;
+    if (__builtin_sub_overflow((uint64_t)pci_ecam_base,
+                              (uint64_t)PAGE_OFFSET, &base)) return NULL;
     if (base > (~(uint64_t)0) - offset) return NULL;
     return arch_device_map_mmio(base + offset, 4, 0);
 }

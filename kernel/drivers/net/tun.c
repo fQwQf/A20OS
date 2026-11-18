@@ -2,7 +2,7 @@
  * TUN — Linux /dev/net/tun, kernel-service form.
  *
  * Driver-form rationale and the ABI coverage table live in
- * docs/drivers/classes/tun.md.  Short version: TUN has no hardware to probe,
+ * docs/zh/drivers/classes/tun.md.  Short version: TUN has no hardware to probe,
  * its instances are created by open() + TUNSETIFF, and its peer is the kernel
  * network stack, so it is a kernel service (like pty), not a DriverStore
  * module. Protocol interface slots belong to the selected backend; this file

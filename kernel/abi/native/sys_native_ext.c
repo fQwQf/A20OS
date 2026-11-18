@@ -7,7 +7,7 @@
  * the capability model (dup/transfer/close) applies; closing the last
  * handle releases the program.
  *
- * Rights (docs/native-abi/06-security.md): READ allows attach/detach,
+ * Rights (docs/zh/native-abi/06-security.md): READ allows attach/detach,
  * CONTROL allows load/release.  An extension program only ever sees the
  * typed context of the extension point it is attached to, and is verified
  * before acceptance (forward jumps only, context-bound memory access), so

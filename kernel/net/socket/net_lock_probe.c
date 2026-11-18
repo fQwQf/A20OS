@@ -10,7 +10,7 @@
  * The net-lock half of the lock contract, made executable.
  *
  * The lwIP half got its probe in 7d217d3fd and is described in
- * docs/net/network-lock-contract.md ("核心锁断言").  This is the other half.
+ * docs/zh/net/network-lock-contract.md ("核心锁断言").  This is the other half.
  * Until now the two rules this file checks were prose that only a reader could
  * enforce, and both are exactly the kind a future edit breaks silently:
  *

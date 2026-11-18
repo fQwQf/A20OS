@@ -17,44 +17,66 @@
 #include "sys/syscall.h"
 #include "sys/usercopy.h"
 
+#if CONFIG_A20_METRICS
 syscall_prof_t sys_prof[SYSCALL_PROFILE_MAX];
+#endif
 
-static inline uint64_t syscall_profile_now(void)
+static inline a20_perf_token_t syscall_profile_now(void)
 {
-    return __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED) ?
-        timer_get_ticks() : 0;
+    return a20_perf_begin();
 }
 
-static inline void syscall_profile_record(uint64_t num, uint64_t start)
+static inline void syscall_profile_record(uint64_t num, a20_perf_token_t start)
 {
-    if (num >= SYSCALL_PROFILE_MAX || start == 0 ||
-        !__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED))
+#if CONFIG_A20_METRICS
+    if (num >= SYSCALL_PROFILE_MAX || !start.generation) return;
+    int cpu = a20_perf_writer_enter(start.generation);
+    if (cpu < 0) {
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+        /* An old call must never contaminate a new measurement window. */
+        uint64_t current = __atomic_load_n(&g_a20_perf_generation, __ATOMIC_ACQUIRE);
+        int active = a20_perf_writer_enter(current);
+        if (active >= 0) {
+            __atomic_fetch_add(&g_a20_perf_excluded_syscalls, 1, __ATOMIC_RELAXED);
+            a20_perf_writer_leave(active);
+        }
+#endif
         return;
-
-    /* A diagnostic read can enable collection inside this syscall. Its zero
-     * entry timestamp is the disabled sentinel, not the start of boot time. */
+    }
     uint64_t end = timer_get_ticks();
-    uint64_t elapsed = (end >= start) ? (end - start) : 0;
+    if (end < start.ticks) {
+        __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[A20_PERF_CLOCK_REGRESSIONS], 1, __ATOMIC_RELAXED);
+        a20_perf_writer_leave(cpu);
+        return;
+    }
+    uint64_t elapsed = end - start.ticks;
     syscall_prof_t *prof = &sys_prof[num];
     __atomic_fetch_add(&prof->count, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&prof->cycles, elapsed, __ATOMIC_RELAXED);
+    a20_perf_writer_leave(cpu);
+#else
+    (void)num; (void)start;
+#endif
 }
 
 void syscall_profile_reset(void)
 {
+#if CONFIG_A20_METRICS
     memset(sys_prof, 0, sizeof(sys_prof));
+#endif
 }
 
 void syscall_init(void)
 {
     syscall_profile_reset();
+    a20_perf_init();
     kdebug("[SYSCALL] Initialized\n");
 }
 
 int64_t syscall_dispatch(trap_context_t *ctx)
 {
     uint64_t num = TRAP_CTX_SYSCALL_NUM(ctx);
-    uint64_t start_time = syscall_profile_now();
+    a20_perf_token_t start_time = syscall_profile_now();
     task_t *cur_task = proc_current();
 
     /*

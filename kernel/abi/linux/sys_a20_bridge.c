@@ -166,7 +166,7 @@ int64_t sys_a20_envelope_stats(const linux_syscall_args_t *args)
 /*
  * SYS_a20_envelope_audit(out) -- E8 runtime invariant audit: re-verifies
  * TypeAllowed / RightsSubCap / budget bounds / attachment consistency
- * across every live envelope (docs/research/08 §2.4).
+ * across every live envelope (docs/zh/research/08 §2.4).
  */
 int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args)
 {

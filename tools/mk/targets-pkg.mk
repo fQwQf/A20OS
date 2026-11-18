@@ -1,7 +1,7 @@
 # ================================================================
 # A20OS package system (apk) —— 包构建、仓库与镜像组装
 # ================================================================
-# 文档：docs/packaging/overview.md
+# 文档：docs/zh/packaging/overview.md
 #
 #   make pkgs          # 将构建产物打成 .apk（默认 a20-base a20-drivers a20-kernel）
 #   make pkg-repo      # pkgs + 建立本地仓库 build/repo/<arch>（签名索引）
@@ -79,7 +79,7 @@ GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
 .PHONY: pkg-key pkgs pkgs-check pkg-repo image-world run-world run-world-gui
 
 # 本地开发签名密钥：不入库，仅用于本机/CI 内的签名验证闭环。
-# 正式发布密钥由 CI secret 注入（见 docs/packaging/repository.md）。
+# 正式发布密钥由 CI secret 注入（见 docs/zh/packaging/repository.md）。
 pkg-key:
 	$(PYTHON) tools/pkg.py pkg-key  \
 	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
@@ -97,7 +97,7 @@ pkgs-check:
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
 	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
-# 链式语义（与 docs/packaging/overview.md 一致，也是 CI 的调用方式）：
+# 链式语义（与 docs/zh/packaging/overview.md 一致，也是 CI 的调用方式）：
 #   pkg-key 生成签名密钥 → pkgs 打包（需先有内核与用户态构建产物）→
 #   pkg-repo 建 repo → image-world 组镜像。重构进 pkg.py 时这些边曾被丢掉，
 #   导致干净树上 `make pkg-repo` 复制空目录并让 mka20repo.sh 直接失败。
@@ -188,7 +188,6 @@ run-world: $(KERNEL_ELF) image-world $(FAT32_IMG)
 #
 # GPU_3D=1 是必需的：GPU_3D=0 时 QEMU 提供 2D-only 设备，Mesa 找不到 virgl，
 # 测的是另一件事。
-.PHONY: smoke-mesa-attach
 SMOKE_MESA_IMG := $(PKG_IMAGE_DIR)/mesa-probe-$(ARCH).img
 
 # GPU_3D=1 is what asks QEMU for the virgl-capable device, and DISPLAY_MODE=gui
@@ -196,55 +195,15 @@ SMOKE_MESA_IMG := $(PKG_IMAGE_DIR)/mesa-probe-$(ARCH).img
 # so without it the guest has no virtio-gpu and every VIRTGPU ioctl answers
 # -ENODEV.  Both are required, and the failure without them is silent: the probe
 # still runs, still reports, and reports a device that is simply not there.
-smoke-mesa-attach: DISPLAY_MODE=gui
 # egl-headless,gl=on rather than the gtk default: gtk needs an X display, and
 # without gl=on QEMU refuses to create the device at all.  Run it under
 # tools/with-virgl-display.sh on a host with two GPU drivers.
-smoke-mesa-attach: QEMU_GUI_DISPLAY=egl-headless
 # Whether "Mesa bound virgl" is a hard failure. On by default because it now
 # holds: stock Mesa reaches virgl and the renderer string says so. Set 0 to
 # downgrade to reporting-only while bisecting an attach regression.
 MESA_REQUIRE_VIRGL_ATTACH ?= 1
-smoke-mesa-attach: $(FAT32_IMG) $(KERNEL_ELF)
-	$(PYTHON) tools/packaging/mkrootfs.py --arch $(ARCH) \
-		--world packages/world/mesa-probe.world \
-		--overlay tools/tests/mesa-probe-overlay \
-		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
-		$(if $(PKG_SIGN_KEY),--keys-dir $(abspath $(PKG_KEYS_DIR)),--allow-untrusted) \
-		--output $(SMOKE_MESA_IMG) --size-mb 1024
-	@$(PYTHON) tools/smoke.py mesa-attach \
-		--label "$(ARCH)" \
-		--log-dir "$(SMOKE_LOG_DIR)" \
-		--qemu "$(QEMU)" \
-		$(addprefix --qemu-flag=,$(QEMU_FLAGS_NO_SDCARD)) \
-		--img "$(SMOKE_MESA_IMG)" \
-		--blk-second "$(QEMU_BLK_SECOND)" \
-		--kernel "$(KERNEL_ELF)" \
-		--timeout 900s \
-		$(if $(filter 1,$(MESA_REQUIRE_VIRGL_ATTACH)),--require-virgl-attach,) \
-		--input-delay "$(SMOKE_INPUT_DELAY)"
-
 # 回归门禁：上游 Alpine 包（gcc/fastfetch）经 chroot 在 guest 内真实运行。
 # 守护 trap.S freemap 的 pfn 翻译修复（历史上 gcc 级负载触发
 # "corrupted kernel stack pointer" 误报 panic）。需要网络拉取上游包
 #（之后走 build/cache/apk 缓存）。
-.PHONY: smoke-devtools
 SMOKE_DEVTOOLS_IMG := $(PKG_IMAGE_DIR)/devtools-smoke-$(ARCH).img
-
-smoke-devtools: $(FAT32_IMG) $(KERNEL_ELF)
-	$(PYTHON) tools/packaging/mkrootfs.py --arch $(ARCH) \
-		--world packages/world/devtools-smoke.world \
-		--overlay tools/tests/devtools-overlay \
-		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
-		$(if $(PKG_SIGN_KEY),--keys-dir $(abspath $(PKG_KEYS_DIR)),--allow-untrusted) \
-		--output $(SMOKE_DEVTOOLS_IMG) --size-mb 768
-	@$(PYTHON) tools/smoke.py devtools \
-		--label "$(ARCH)" \
-		--log-dir "$(SMOKE_LOG_DIR)" \
-		--qemu "$(QEMU)" \
-		$(addprefix --qemu-flag=,$(QEMU_FLAGS_NO_SDCARD)) \
-		--img "$(SMOKE_DEVTOOLS_IMG)" \
-		--blk-second "$(QEMU_BLK_SECOND)" \
-		--kernel "$(KERNEL_ELF)" \
-		--timeout 900s \
-		--input-delay "$(SMOKE_INPUT_DELAY)"

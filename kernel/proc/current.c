@@ -20,7 +20,7 @@
  *   runqueue selection, and current slot lookup agree for the CPU handling the
  *   interrupt.
  *
- * LOCKING (see docs/roadmap/lock-serialization-split.md §1.2):
+ * LOCKING (see docs/zh/roadmap/lock-serialization-split.md §1.2):
  * - The switching-out slot and the outgoing task's ownership release are
  *   serialized by the per-CPU g_cpu_switch_out[cpu].lock. It is strictly
  *   outside every task lock: g_cpu_switch_out[cpu] -> park_lock -> runq_lock.

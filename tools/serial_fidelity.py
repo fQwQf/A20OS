@@ -7,7 +7,7 @@ back out of the guest unchanged.
 
 Why this exists
 ---------------
-`docs/net/net-lanes.md` ("本轮的一个**测量方法**发现：控制台输入会吃掉字符")
+`docs/zh/net/net-lanes.md` ("本轮的一个**测量方法**发现：控制台输入会吃掉字符")
 recorded that roughly 3 of 800 console commands were received by the guest with
 an adjacent character transposed or dropped.  That number came from reading a
 console log, and reading a console log cannot tell these two apart:

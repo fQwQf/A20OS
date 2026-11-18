@@ -136,7 +136,7 @@ __vdso_gettimeofday:
  * wrong answer.  The global vvar page (kernel/mm/vdso.c) is shared by every
  * CPU, and A20OS keeps no per-CPU area pointer, so there is nothing else to
  * read.  *a0 and *a1 are left untouched: a plausible wrong CPU 0 is worse
- * than no answer at all (docs/security/hardening.md).
+ * than no answer at all (docs/zh/security/hardening.md).
  * See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function

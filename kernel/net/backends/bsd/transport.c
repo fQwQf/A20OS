@@ -277,6 +277,49 @@ static void connect_finish(bsd_socket_t *state, int result)
     wait_queue_wake_all(&s->write_waitq, 0, PROC_WAKE_EVENT);
 }
 
+static int connect_wait(bsd_socket_t *state)
+{
+    net_socket_t *s = state->socket;
+    completion_t *done = &state->connect_done;
+    uint64_t timeout = net_socket_timeout_snapshot(s, 1);
+    uint64_t deadline = timeout ? timer_get_ticks() + timeout : 0;
+    for (;;) {
+        proc_wait_token_t token =
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+        if (!token.task) return -EAGAIN;
+        wait_queue_entry_t entry = {0};
+        uint64_t irq = spin_lock_irqsave(&done->lock);
+        /* This completion only broadcasts. Its persistent predicate and
+         * waiter registration share the same lock as complete_all(). */
+        int result = done->done ? state->connect_result :
+            net_task_has_unblocked_signal(proc_current()) ? -ERESTARTSYS :
+            deadline && (int64_t)(timer_get_ticks() - deadline) >= 0 ?
+                -EINPROGRESS : 0;
+        if (done->done || result) {
+            spin_unlock_irqrestore(&done->lock, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return result;
+        }
+        bool linked = wait_queue_link(&done->waiters, &entry, token, 0);
+        spin_unlock_irqrestore(&done->lock, irq);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&done->waiters, &entry);
+        proc_park_finish(token);
+        if (proc_wake_reason_is_task_interrupt(reason)) return -ERESTARTSYS;
+        /* Linux SO_SNDTIMEO bounds this wait, not the connection lifetime.
+         * Leave the attempt active for poll/SO_ERROR or a subsequent close. */
+        if (reason == PROC_WAKE_TIMEOUT) return -EINPROGRESS;
+        if (!linked) return -EAGAIN;
+    }
+}
+
 static int connect_transport(net_socket_t *s, const void *address, size_t length,
                              const void *peer, size_t peer_length)
 {
@@ -301,8 +344,7 @@ static int connect_transport(net_socket_t *s, const void *address, size_t length
         return result;
     }
     if (s->nonblock) return -EINPROGRESS;
-    wait_for_completion(&state->connect_done);
-    return state->connect_result;
+    return connect_wait(state);
 }
 
 typedef struct io_job {

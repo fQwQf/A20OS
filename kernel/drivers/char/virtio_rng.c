@@ -30,7 +30,7 @@
  * Read is bounded: with an empty ring the driver posts the free slots, rings
  * the device and waits up to VRNG_READ_TIMEOUT_MS, yielding between drains.
  * The instance lock is never held across that wait (see
- * docs/drivers/guide/lock-order.md), and the wait gives up rather than
+ * docs/zh/drivers/guide/lock-order.md), and the wait gives up rather than
  * parking, so a device that stops answering cannot wedge a reader.
  *
  * Every byte handed to a reader is also folded into the kernel entropy pool in
@@ -40,7 +40,7 @@
  * arch_entropy_sample(), so calling it from the ISR would sample scheduler
  * state from interrupt context.  A guest that never opens /dev/hwrng
  * therefore does not harvest the device at all; that boundary is recorded in
- * docs/status/current/drivers-implementation-status.md.
+ * docs/zh/status/current/drivers-implementation-status.md.
  */
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/virtio_transport.h"

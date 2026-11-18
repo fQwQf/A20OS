@@ -5,7 +5,7 @@
  * (installed at A20_SVC_ENDPOINT_SLOT by svcman's task_spawn):
  * SVCMGR_REQ_ECHO is echoed back verbatim, SVCMGR_REQ_CRASH makes the
  * service exit with A20_SVC_CRASH_CODE so svcman can demonstrate
- * detection + restart (docs/hybrid-kernel/01-roadmap.md phase 2), and
+ * detection + restart (docs/zh/hybrid-kernel/01-roadmap.md phase 2), and
  * SVCMGR_REQ_HANG parks the service until the supervisor's health
  * deadline force-exits it (supervision self-test, same class as CRASH).
  */

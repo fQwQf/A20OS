@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host peer for tools/mk/targets-smoke.mk:smoke-netfilter-snat.
+"""Host peer for tests/tools/mk/targets-smoke.mk:smoke-netfilter-snat.
 
 The guest initiates to 10.0.2.2:<port> (QEMU's host alias) and this peer
 listens on the host loopback equivalent.  It echoes one byte per connection

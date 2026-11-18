@@ -9,7 +9,7 @@
 #
 # This target packages the Multiboot kernel behind GRUB on a GPT/ESP disk.
 # Architecture-owned standalone EFI loaders are separate build targets.
-# See docs/platforms/x86_64-pc.md for deployment requirements.
+# See docs/zh/platforms/x86_64-pc.md for deployment requirements.
 #
 # GRUB is built with grub-mkimage against an explicit /boot/grub prefix, and the
 # modules live on the ESP.  A grub-mkstandalone image was tried first and did boot,
@@ -160,7 +160,7 @@ if [ "$log_mb" -gt 0 ]; then
 	cat >"$tmp_readme" <<'EOF'
 A20OS persistent log partition
 
-The kernel writes boot-<id>.jsonl here. See docs/zh/kernel/persistent-logging.md.
+The kernel writes boot-<id>.jsonl here. See docs/zh/kernel/logging/persistent-logging.md.
 EOF
 	mcopy -o -i "$output@@$log_offset" "$tmp_readme" ::/README.txt
 	printf 'schema=1\nsession=%s\n' "$log_session" >"$tmp_readme"

@@ -25,8 +25,8 @@
  *   4. The frontend owns fd identity, permissions, queueing and waiters.  The
  *      backend owns protocol state, flow control and protocol buffers.
  *
- * See docs/net/backend-interface.md for the module-by-module contract and
- * docs/net/instance-config.md for how an instance selects a backend.
+ * See docs/zh/net/backend-interface.md for the module-by-module contract and
+ * docs/zh/net/instance-config.md for how an instance selects a backend.
  */
 #ifndef A20_NET_BACKEND_H
 #define A20_NET_BACKEND_H

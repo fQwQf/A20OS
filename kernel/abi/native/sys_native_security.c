@@ -193,7 +193,7 @@ int64_t sys_a20_security_get_context(const a20_syscall_args_t *args)
         ctx.euid = cur->cred.euid;
         ctx.egid = cur->cred.egid;
     }
-    /* docs/native-abi/06-security.md §5.1: label from handle table */
+    /* docs/zh/native-abi/06-security.md §5.1: label from handle table */
     ctx.label = a20_ht_get_label(ht);
     if (copy_to_user(out, &ctx, sizeof(ctx)) < 0) return -A20_ERR_FAULT;
     return A20_OK;
@@ -201,7 +201,7 @@ int64_t sys_a20_security_get_context(const a20_syscall_args_t *args)
 
 /*
  * sys_a20_security_set_context — modify security context.
- * docs/native-abi/06-security.md §5: label can only increase (No Write Down
+ * docs/zh/native-abi/06-security.md §5: label can only increase (No Write Down
  * for self). A process can raise its own label but never lower it.
  * This enforces the monotonic label property required by BLP.
  */

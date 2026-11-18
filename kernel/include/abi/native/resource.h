@@ -48,10 +48,10 @@ struct a20_resource_limits {
 #define A20_LIMIT_THREADS_ABSOLUTE       4096
 #define A20_LIMIT_PENDING_OPS_ABSOLUTE    512
 
-/* Cascading depth limit (docs/native-abi/03-handle.md §3.3) */
+/* Cascading depth limit (docs/zh/native-abi/03-handle.md §3.3) */
 #define A20_CASCADE_DEPTH_MAX            2
 
-/* Cluster subsystem caps (docs/cluster/01-abi.md "限额"). Three tiers:
+/* Cluster subsystem caps (docs/zh/cluster/01-abi.md "限额"). Three tiers:
  * MCU (CLUSTER_PROFILE=1), DEFAULT (=2), ABSOLUTE hard ceiling. Exceeding any
  * of them returns A20_ERR_NO_SPACE; the remote path never blocks a sender
  * waiting for room. */

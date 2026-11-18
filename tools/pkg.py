@@ -106,7 +106,7 @@ def recipes(a) -> list[str]:
 def cmd_pkg_key(a) -> int:
     """Local development signing key: generated here, never committed.
 
-    The release key comes from a CI secret instead (docs/packaging/repository.md).
+    The release key comes from a CI secret instead (docs/zh/packaging/repository.md).
     """
     key = REPO / a.sign_key
     if key.exists():

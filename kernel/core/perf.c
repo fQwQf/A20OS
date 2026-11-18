@@ -2,6 +2,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "sys/syscall.h"
+#include "core/timer.h"
 
 uint32_t g_a20_perf_enabled;
 a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];
@@ -11,6 +12,8 @@ uint64_t g_perf_sw_page_faults_maj;
 uint64_t g_perf_sw_context_switches;
 
 static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
+    [A20_PERF_TIMING_REJECTED] = "timing_rejected",
+    [A20_PERF_CLOCK_REGRESSIONS] = "clock_regressions",
     [A20_PERF_KERNEL_PREEMPTS] = "kernel_preempts",
     [A20_PERF_TRAP_STORMS] = "trap_storms",
     [A20_PERF_RT_THROTTLES] = "rt_throttles",
@@ -143,25 +146,35 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
 void a20_perf_reset(void)
 {
     for (unsigned cpu = 0; cpu < A20_PERF_MAX_CPUS; cpu++)
-        memset(&g_a20_perf_percpu[cpu], 0, sizeof(g_a20_perf_percpu[cpu]));
+        memset(g_a20_perf_percpu[cpu].values, 0, sizeof(g_a20_perf_percpu[cpu].values));
 }
 
 size_t a20_perf_format(char *buf, size_t bufsz)
 {
     size_t off = 0;
+    unsigned syscall_rows = 0;
 
-    /* Collection starts dormant. Report its state before this snapshot; the
-     * first complete read arms cumulative accounting at the end below. */
-    uint32_t was_enabled = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-    if (bufsz) {
-        int n = snprintf(buf, bufsz, "collection_enabled_before_snapshot: %u\n",
-                         was_enabled != 0);
-        if (n < 0)
-            return 0;
-        if ((size_t)n >= bufsz)
-            return bufsz - 1;
-        off = (size_t)n;
-    }
+    if (!buf || !bufsz) return 0;
+    a20_perf_window_t window;
+    a20_perf_snapshot_begin(&window);
+#define PERF_FIELD(name, value) do { \
+    if (off >= bufsz - 1) goto full; \
+    int n = snprintf(buf + off, bufsz - off, name ": %llu\n", (unsigned long long)(value)); \
+    if (n < 0 || (size_t)n >= bufsz - off - 1) goto full; \
+    off += (size_t)n; \
+} while (0)
+    PERF_FIELD("collection_enabled_before_snapshot", window.enabled);
+    PERF_FIELD("snapshot_schema", 2);
+    PERF_FIELD("window_generation", window.generation);
+    PERF_FIELD("window_boot_token", window.boot_token);
+    PERF_FIELD("window_valid", window.valid);
+    PERF_FIELD("window_start_ticks", window.start_ticks);
+    PERF_FIELD("window_stop_ticks", window.stop_ticks);
+    PERF_FIELD("window_elapsed_ticks", window.elapsed_ticks);
+    PERF_FIELD("ticks_per_second", TICKS_PER_SEC);
+    PERF_FIELD("snapshot_frozen", window.valid && !window.enabled);
+    PERF_FIELD("excluded_syscalls", window.excluded_syscalls);
+    PERF_FIELD("metric_count", A20_PERF_COUNTER_COUNT);
 
     for (unsigned counter = 0; counter < A20_PERF_COUNTER_COUNT; counter++) {
         uint64_t total = 0;
@@ -169,14 +182,14 @@ size_t a20_perf_format(char *buf, size_t bufsz)
             total += __atomic_load_n(&g_a20_perf_percpu[cpu].values[counter],
                                      __ATOMIC_RELAXED);
         if (off >= bufsz)
-            break;
-        int n = snprintf(buf + off, bufsz - off, "%s: %lu\n",
-                         g_a20_perf_names[counter], (unsigned long)total);
+            goto full;
+        int n = snprintf(buf + off, bufsz - off, "%s: %llu\n",
+                         g_a20_perf_names[counter], (unsigned long long)total);
         if (n < 0)
-            break;
-        if ((size_t)n >= bufsz - off) {
+            goto full;
+        if ((size_t)n >= bufsz - off - 1) {
             off = bufsz ? bufsz - 1 : 0;
-            break;
+            goto full;
         }
         off += (size_t)n;
     }
@@ -188,22 +201,27 @@ size_t a20_perf_format(char *buf, size_t bufsz)
         uint64_t ticks = __atomic_load_n(&sys_prof[nr].cycles,
                                          __ATOMIC_RELAXED);
         int n = snprintf(buf + off, bufsz - off,
-                         "syscall_%u_count: %lu\n"
-                         "syscall_%u_ticks: %lu\n",
-                         nr, (unsigned long)count,
-                         nr, (unsigned long)ticks);
+                         "syscall_%u_count: %llu\n"
+                         "syscall_%u_ticks: %llu\n",
+                         nr, (unsigned long long)count,
+                         nr, (unsigned long long)ticks);
         if (n < 0)
-            break;
-        if ((size_t)n >= bufsz - off) {
+            goto full;
+        if ((size_t)n >= bufsz - off - 1) {
             off = bufsz ? bufsz - 1 : 0;
-            break;
+            goto full;
         }
         off += (size_t)n;
+        syscall_rows++;
     }
-    /* A grow/retry attempt must not arm counters until the complete initial
-     * snapshot is available. This also preserves the pre-read state in its
-     * header across allocation retries. Existing live collection stays live. */
-    if (bufsz && off < bufsz - 1)
-        __atomic_store_n(&g_a20_perf_enabled, 1, __ATOMIC_RELEASE);
+    PERF_FIELD("syscall_rows", syscall_rows);
+    if (off >= bufsz - 1) goto full;
+    PERF_FIELD("snapshot_complete", 1);
+    a20_perf_snapshot_end();
     return off;
+full:
+    a20_perf_snapshot_end();
+    buf[bufsz - 1] = 0;
+    return bufsz - 1;
+#undef PERF_FIELD
 }

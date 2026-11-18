@@ -2,8 +2,7 @@
 # 镜像自检：这个 target 声称的工具链是否真的在里面。
 #
 # 刻意不跑 check-<arch>-bringup。那条门禁回答的是"这棵树能不能编"，是源码
-# 问题——当前 riscv32/arm32 就还有 MM 之外的源码失败（台账 CORE-11 / NET-12 /
-# FS-10），和镜像无关。把两者混在一起，镜像缺件会被误读成源码坏了，源码坏了
+# 问题。把两者混在一起，镜像缺件会被误读成源码坏了，源码坏了
 # 又会让镜像看起来缺件。这里只证明三件事：工具链在、能为目标产生对象、Rust
 # 侧该有的 target 与组件齐全。
 #
@@ -25,12 +24,13 @@ printf '#![no_std]\npub fn probe() -> u32 { 0 }\n' > "$tmp/probe.rs"
 printf '#include <limits.h>\n#include <stdint.h>\n' > "$tmp/libc.c"
 
 common() {
-    for tool in make python3 ccache mtools mcopy mkfs.ext4 rg; do
+    for tool in make python3 ccache mtools mcopy mkfs.ext4 rg clang-19; do
         command -v "$tool" >/dev/null 2>&1 || fail "$tool missing"
     done
     command -v rustc >/dev/null 2>&1 || fail "rustc missing"
     command -v cargo >/dev/null 2>&1 || fail "cargo missing"
     note "rust: $(rustc --version)"
+    cc_object bsd-frontend clang-19
 }
 
 cc_object() { # cc_object <label> <cc> [flags...]

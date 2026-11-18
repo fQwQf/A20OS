@@ -822,14 +822,11 @@ static void mm_destroy_impl(mm_struct_t *mm) {
 }
 
 void mm_destroy(mm_struct_t *mm) {
-    uint32_t perf_timed =
-        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-    uint64_t start = perf_timed ? timer_get_ticks() : 0;
-    if (perf_timed)
-        a20_perf_count(A20_PERF_MM_DESTROY_CALLS);
+    a20_perf_token_t timing = a20_perf_begin();
+    uint32_t perf_timed = timing.generation != 0;
     mm_destroy_impl(mm);
     if (perf_timed)
-        a20_perf_add(A20_PERF_MM_DESTROY_TICKS, timer_get_ticks() - start);
+        a20_perf_finish(A20_PERF_MM_DESTROY_CALLS, A20_PERF_MM_DESTROY_TICKS, timing);
 }
 
 /* All VMAs have already been cloned (or deliberately omitted). Legacy brk
@@ -868,9 +865,9 @@ static int mm_fork_clone_uncovered(mm_struct_t *child, mm_struct_t *parent,
  *      same time;
  *   2. under SMP, another CPU is handling a page fault in the parent. */
 static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
-    uint32_t perf_timed =
-        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-    uint64_t fork_impl_start = perf_timed ? timer_get_ticks() : 0;
+    a20_perf_token_t timing = a20_perf_begin();
+    uint32_t perf_timed = timing.generation != 0;
+    uint64_t fork_impl_start = timing.ticks;
     uint64_t setup_ticks = 0;
     uint64_t clone_ticks = 0;
     if (!parent) return NULL;
@@ -1079,10 +1076,10 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
 
     mm_tlb_invalidate_finish(parent);
     if (perf_timed) {
-        a20_perf_add(A20_PERF_MM_FORK_SETUP_TICKS, setup_ticks);
-        a20_perf_add(A20_PERF_MM_FORK_CLONE_TICKS, clone_ticks);
-        a20_perf_add(A20_PERF_MM_FORK_FINISH_TICKS,
-                     timer_get_ticks() - finish_start);
+        a20_perf_add_epoch(A20_PERF_MM_FORK_SETUP_TICKS, setup_ticks, timing.generation);
+        a20_perf_add_epoch(A20_PERF_MM_FORK_CLONE_TICKS, clone_ticks, timing.generation);
+        a20_perf_add_epoch(A20_PERF_MM_FORK_FINISH_TICKS,
+                     timer_get_ticks() - finish_start, timing.generation);
     }
     return child;
 fail_locked:
@@ -1099,20 +1096,17 @@ fail_locked:
 
 mm_struct_t *mm_fork(mm_struct_t *parent)
 {
-    uint32_t perf_timed =
-        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-    uint64_t start = perf_timed ? timer_get_ticks() : 0;
-    if (perf_timed)
-        a20_perf_count(A20_PERF_MM_FORK_CALLS);
+    a20_perf_token_t timing = a20_perf_begin();
+    uint32_t perf_timed = timing.generation != 0;
     if (mm_shared_write_enter_wait() < 0) {
         if (perf_timed)
-            a20_perf_add(A20_PERF_MM_FORK_TICKS, timer_get_ticks() - start);
+            a20_perf_finish(A20_PERF_MM_FORK_CALLS, A20_PERF_MM_FORK_TICKS, timing);
         return NULL;
     }
     mm_struct_t *child = mm_fork_impl(parent);
     mm_shared_write_leave();
     if (perf_timed)
-        a20_perf_add(A20_PERF_MM_FORK_TICKS, timer_get_ticks() - start);
+        a20_perf_finish(A20_PERF_MM_FORK_CALLS, A20_PERF_MM_FORK_TICKS, timing);
     return child;
 }
 

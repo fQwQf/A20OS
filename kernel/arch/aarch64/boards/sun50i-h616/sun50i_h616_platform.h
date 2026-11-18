@@ -17,7 +17,7 @@
  * passes the layout -- and A20OS's aarch64 port has no DT-based RAM narrowing
  * (unlike riscv64's riscv64_memory_init), so PHYS_MEMORY_END below is the
  * window the allocator is given, not a measurement.  See
- * docs/platforms/sun50i-h616.md.
+ * docs/zh/platforms/sun50i-h616.md.
  */
 
 #define PHYS_MEMORY_BASE   0x40000000UL

@@ -56,7 +56,7 @@ static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
  *   timers/configuration and loopback delivery use the cold control barrier.
  * - callbacks only stage preallocated socket rings; socket locks are acquired
  *   after all core and shared protocol locks have been released.
- * See docs/net/network-lock-contract.md for shared-cache lock ordering. */
+ * See docs/zh/net/network-lock-contract.md for shared-cache lock ordering. */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
 static unsigned g_lwip_control_held[CONFIG_NR_CPUS];
@@ -126,7 +126,7 @@ static unsigned g_lwip_lock_violations;
  * Pre-arm hits are therefore *not* counted either: a counter that mixes 23
  * known-init hits with real ones reads as noise and trains everyone to ignore
  * the line.  The exemption rests on the earlier probe's site list, recorded in
- * docs/net/net-lanes.md ("运行时证据（已验证）"); a post-arm violation is the
+ * docs/zh/net/net-lanes.md ("运行时证据（已验证）"); a post-arm violation is the
  * only thing this counter is for, and it panics rather than merely counting.
  */
 static volatile int g_lwip_lock_armed;
@@ -140,7 +140,7 @@ static unsigned g_lwip_lock_nsites;
  * is a bounded loop over this ceiling, and a20_lwip_register_netifs() breaks at
  * the first index the device class does not have, so a smaller ceiling means
  * "only that many NICs are ever registered", never an overrun.  See
- * docs/status/current/server-readiness.md.
+ * docs/zh/status/current/server-readiness.md.
  */
 #define A20_NET_MAX_DEVS NET_PROFILE_NETIF_MAX_DEVS
 
@@ -2725,7 +2725,7 @@ void a20_lwip_stack_notify_addr6(unsigned ifindex, const uint8_t addr[16],
  * probe, and the "link" is whatever the character device queues.  The netif
  * object itself lives here because this file owns the per-profile .bss
  * accounting; the instance state, queues and ABI live in drivers/net/tun.c
- * (see docs/drivers/classes/tun.md).
+ * (see docs/zh/drivers/classes/tun.md).
  */
 
 static size_t tun_read_flat(void *source, void *destination, size_t length) {

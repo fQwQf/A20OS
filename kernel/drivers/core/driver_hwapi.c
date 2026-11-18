@@ -1,3 +1,4 @@
+#include "core/trace.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_core.h"
 #include "mm/mm.h"
@@ -333,6 +334,7 @@ void driver_irq_dispatch(uint32_t irq) {
         current_board->irqchip->ack)
         current_board->irqchip->ack();
 
+    a20_trace_token_t span = a20_trace_begin(A20_TRACE_IRQ, irq, 0);
     handler((int)irq, priv);
     /* Shared handlers: free_irq() unlinks under the table lock and only
      * releases node memory after irq_active[irq] drains, so this lockless
@@ -342,6 +344,7 @@ void driver_irq_dispatch(uint32_t irq) {
         shared->handler((int)irq, shared->priv);
         shared = next;
     }
+    a20_trace_end(span, 0);
     if (level && !oneshot)
         irq_enable(irq);
 

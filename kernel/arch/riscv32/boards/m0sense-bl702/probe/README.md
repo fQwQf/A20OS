@@ -25,7 +25,7 @@ Do not use a generic converter with absolute addresses or raw-flash the app.
 The factory loader itself is not included or overwritten by this bundle.
 
 Some board shipments lack the UF2 loader. If BOOT+RESET does not show a volume,
-use the ROM recovery procedure in docs/platforms/m0sense-bl702.md. The software
+use the ROM recovery procedure in docs/zh/platforms/m0sense-bl702.md. The software
 BOOT button is different from the hardware BOOT strap pad used for recovery.
 
 ## Optional UART checks

@@ -801,7 +801,12 @@ pub unsafe extern "C" fn a20_signal_queue_locked(
         s += 1;
     }
 
-    if a20_signal_queue_discard(signum, handler) != 0 {
+    /* A blocked signal remains pending even when its default action ignores
+     * it. sigtimedwait/signalfd consume that occurrence synchronously;
+     * BusyBox init relies on this for SIGCHLD with SIG_DFL. */
+    let synchronously_awaited = (blocked & bit(signum)) != 0
+        || (sigwait_active != 0 && (sigwait_mask & bit(signum)) != 0);
+    if !synchronously_awaited && a20_signal_queue_discard(signum, handler) != 0 {
         result.discard = 1;
         return 0;
     }
@@ -1767,6 +1772,29 @@ mod tests {
             /* A stop signal cancels a pending SIGCONT. */
             a20_signal_queue_locked(&mut st, SIGSTOP, core::ptr::null(), 0, SIG_DFL, 0, 0, 0, 0, &mut r);
             assert_eq!(s.process_pending & bit(SIGCONT), 0);
+        }
+    }
+
+    #[test]
+    fn queue_retains_blocked_default_ignored_signals_for_sigwait() {
+        for thread_directed in [0, 1] {
+            for (blocked, active, wait_mask) in [(bit(SIGCHLD), 0, 0), (0, 1, bit(SIGCHLD))] {
+                let mut s = TxnState::new();
+                let mut r = A20SignalQueueResult { discard: 0, fatal: 0, deliverable: 0, sigwait_match: 0 };
+                let mut info = [0u8; SIGNAL_INFO_SIZE];
+                let mut has_info = 0;
+                unsafe {
+                    let mut st = s.st();
+                    a20_signal_queue_locked(&mut st, SIGCHLD, core::ptr::null(), 0,
+                        SIG_DFL, blocked, thread_directed, active, wait_mask, &mut r);
+                    assert_eq!(r.discard, 0);
+                    assert_eq!(r.deliverable, 0);
+                    assert_eq!(r.sigwait_match, active);
+                    assert_eq!(a20_signal_take_matching_locked(&mut st, bit(SIGCHLD),
+                        info.as_mut_ptr(), info.len(), &mut has_info), SIGCHLD);
+                    assert_eq!(*st.process_pending | *st.thread_pending, 0);
+                }
+            }
         }
     }
 

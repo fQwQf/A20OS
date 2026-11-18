@@ -1,5 +1,5 @@
 name = "pine-a64-shell"
-description = "pine-a64 serial mksh shell in RAM; physical validation pending"
+description = "pine-a64 serial BusyBox ash shell in RAM; physical validation pending"
 arch = "aarch64"
 board = "pine-a64"
 abi = "linux"
@@ -19,8 +19,8 @@ serial = "/dev/ttyUSB0"
 baud = 115200
 boot_wait = 3
 boot_timeout = "120s"
-# Wait for init to launch mksh; this profile remains interactive.
-console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+# Wait for init to launch ash; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve sh"]
 boot_media = ["build/pine-a64/a20os-pine-a64-shell-sdcard.img"]
 # Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
 media_device = "/dev/sdX"
@@ -37,7 +37,7 @@ commands = [
     "fatload mmc 0:1 ${fdt_addr_r} sun50i-a64-pine64.dtb",
     "booti ${loadaddr} - ${fdt_addr_r}",
 ]
-note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, mksh and
+note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, BusyBox and
 basic commands in the kernel; no root disk or network is required. Prepare
 firmware using the base board instance, then package this shell instance.
 The SD image and kernel are rebuilt with this instance's configuration.
@@ -45,5 +45,5 @@ The handoff bundle at build/pine-a64/handoff is refreshed by packaging;
 do not reuse a bundle from a different instance. The shell stays running.
 Filesystem writes are RAM-only and disappear at reset. Ethernet/SSH, video
 and audio are separate capabilities, not enabled by this shell profile.
-Physical board execution is pending; see docs/platforms/pine-a64.md.
+Physical board execution is pending; see docs/zh/platforms/pine-a64.md.
 """

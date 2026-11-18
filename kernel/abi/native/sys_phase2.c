@@ -2,7 +2,7 @@
  * A20OS Native ABI — Phase 2 syscall implementations.
  *
  * All 90 syscalls have real kernel API backing.
- * Design references (see docs/native-abi/):
+ * Design references (see docs/zh/native-abi/):
  *   03-handle.md §4   — handle operation semantics
  *   04-memory.md §4   — vm_* semantics
  *   06-docs/native-abi/06-security.md §3 — operation-rights mapping

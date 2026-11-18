@@ -96,7 +96,7 @@ class LogCfg:
     """Persistent/structured logging policy for one instance.
 
     These are build-time defaults; `a20.log.*` kernel command-line arguments can
-    override level/console/persistent/mode/max_bytes for a single boot.
+    override logging and Boot Report defaults for a single boot.
     """
 
     enabled: bool | None = None
@@ -104,6 +104,19 @@ class LogCfg:
     console: bool | None = None
     persistent: bool | None = None
     mode: str | None = None           # auto | partition | rootfs | ram | esp
+    metrics: bool | None = None         # compile aggregate performance counters (default true)
+    porting_report: bool | None = None  # bounded boot/driver attempt ledger
+    porting_records: int | None = None  # 16..1024
+    trace: bool | None = None           # compile bounded event tracing
+    trace_records: int | None = None    # per CPU, 16..1024
+    trace_boot: bool | None = None      # start at clock-ready, otherwise inactive
+    trace_mask: int | None = None       # boot=1 driver=2 irq=4 io=8 sched=16 user=32
+    boot_report: bool | None = None   # compile support; default inferred from automatic mode
+    report: str | None = None         # off | error | always (screen diagnostics)
+    report_window_ms: int | None = None  # bounded observation window (default 10000)
+    report_settle_ms: int | None = None  # collect follow-up after an error (default 500)
+    report_max_records: int | None = None  # 0..48; zero selects a summary only
+    report_context: bool | None = None  # include informational context (default true)
     partition_mb: int | None = None   # dedicated "A20OS log" GPT partition
     max_bytes: int | None = None      # per-boot JSONL cap
     session: bool | None = None       # L3 session log
@@ -376,8 +389,9 @@ _SECTION_SPECS: Final = {
         "virtio_console_buffer_size", "virtio_console_ring_size",
     } else "str") for f in KernelCfg.__dataclass_fields__},
     "log": {f: ("bool" if f in ("enabled", "console", "persistent", "session",
-                                "loader")
-                else "int" if f in ("partition_mb", "max_bytes") else "str")
+                                "loader", "report_context", "boot_report", "porting_report", "trace", "trace_boot", "metrics")
+                else "int" if f in ("partition_mb", "max_bytes", "report_window_ms",
+                                    "report_settle_ms", "report_max_records", "porting_records", "trace_records", "trace_mask") else "str")
             for f in LogCfg.__dataclass_fields__},
     "machine": {f: ("int" if f in ("smp", "tcg_tb_size_mb") else "bool" if f in ("allow_unverified_smp", "gpu_3d", "vm_manager")
                     else "str_list" if f == "extra_qemu" else "str")

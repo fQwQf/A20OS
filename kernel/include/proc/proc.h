@@ -563,7 +563,7 @@ typedef struct task_t {
     /* Capability envelope (kernel/abi/linux/envelope.c): budgeted-capability
      * policy attached to this Linux-ABI process by its supervisor.  NULL =
      * unenveloped (the mediation fast path).  Survives fork (shared refcount)
-     * and execve; a process cannot shed it.  See docs/research/05. */
+     * and execve; a process cannot shed it.  See docs/zh/research/05. */
     void           *envelope;
 
     /* Restartable sequences (rseq(2)): user-registered per-thread rseq area

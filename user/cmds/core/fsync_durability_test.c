@@ -140,9 +140,12 @@ int main(void)
     int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
     CHK(fd >= 0, "create temp file on a block-backed mount");
 
-    /* Arm perf collection before doing any measured work: the first read of
-     * /proc/a20/perf enables the counters and returns a pre-enable snapshot,
-     * so a single post-hoc read would always report zero. */
+    /* Start a fresh explicit measurement; reading is side-effect free. */
+    int perf_ctl = open("/proc/a20/perf", O_WRONLY);
+    CHK(perf_ctl >= 0, "open perf control");
+    CHK(write(perf_ctl, "stop", 4) == 4, "stop old perf window");
+    CHK(write(perf_ctl, "start", 5) == 5, "start perf window");
+    close(perf_ctl);
     char perf_armed[8192] = {0};
     CHK(read_small("/proc/a20/perf", perf_armed, sizeof(perf_armed)) > 0,
         "arm /proc/a20/perf");
@@ -195,6 +198,9 @@ int main(void)
     /* fsync() returning 0 proves nothing on its own -- it returned 0 before
      * the block layer had a flush primitive at all.  Assert the device-level
      * flush counter actually advanced, which is the claim being tested. */
+    perf_ctl = open("/proc/a20/perf", O_WRONLY);
+    CHK(perf_ctl >= 0 && write(perf_ctl, "stop", 4) == 4, "freeze perf window");
+    close(perf_ctl);
     char perf[8192] = {0};
     CHK(read_small("/proc/a20/perf", perf, sizeof(perf)) > 0,
         "read /proc/a20/perf after fsync");

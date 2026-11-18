@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host side of tools/mk/targets-smoke.mk:smoke-net-udp-hostfwd.
+"""Host side of tests/tools/mk/targets-smoke.mk:smoke-net-udp-hostfwd.
 
 Sends 16 sequenced datagrams to the guest's forwarded UDP port and checks that
 each comes back with the guest's one-byte transform.  UDP is lossy, so each

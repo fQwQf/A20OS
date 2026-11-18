@@ -7,7 +7,7 @@
  * zx_futex_wait / zx_futex_wake; the implementation reuses the kernel futex
  * core (ipc/futex.c) and maps error codes into the native errno
  * space.
- * Design reference: docs/native-abi/01-types.md §22
+ * Design reference: docs/zh/native-abi/01-types.md §22
  */
 #include "core/types.h"
 #include "core/defs.h"

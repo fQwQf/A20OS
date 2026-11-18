@@ -1,5 +1,5 @@
 /*
- * Linux personality facade test (docs/hybrid-kernel/05-idl-and-personality.md).
+ * Linux personality facade test (docs/zh/hybrid-kernel/05-idl-and-personality.md).
  *
  * Covers the object-translation layer over Native A20:
  *   1. fd table: open/create/write/seek/read/dup/close

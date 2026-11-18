@@ -49,7 +49,7 @@ int64_t sys_shmget(int key, size_t size, int shmflg)
 
 int64_t sys_shmat(int shmid, const void *shmaddr, int shmflg)
 {
-    /* A5 (docs/research/05 §2.5.4): attach is a MEMORY-class acquisition;
+    /* A5 (docs/zh/research/05 §2.5.4): attach is a MEMORY-class acquisition;
      * footprint accounting lands with the shmat rework in W2. */
     if (env_active(proc_current())) {
         int mr = env_mediate_class((uint8_t)A20_OBJ_MEMORY);

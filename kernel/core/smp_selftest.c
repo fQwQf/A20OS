@@ -659,8 +659,13 @@ static void __attribute__((unused)) controller(void) {
           timer_stats.timeout_heap_violations == 0);
     printf("[PARK_WAIT_CROSS_CPU_WAKE: PASS waiter_cpu=%u affinity_cpu=%u waker_cpu=%u timer_cancelled=1]\n",
            worker_park_cpu, waiter_affinity, cpu_current_id());
+#endif
+    /* The worker still sleeps briefly after publishing the wake observation.
+     * Reap it before the mutex fixtures sample their own reference baseline;
+     * otherwise its ordinary exit changes that baseline during their run. */
     int status = -1;
     CHECK(proc_wait4(worker_pid, &status, 0) == worker_pid && status == 0);
+#if SMP_WAIT_TIMER_CAPACITY_TEST
     uint64_t finished_flags = spin_lock_irqsave(&worker_task->park_lock);
     CHECK(worker_task->park_state == PROC_PARK_IDLE &&
           worker_task->wait_deadline == 0 && worker_task->wait_timer_index == -1);

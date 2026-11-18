@@ -9,7 +9,3 @@ _check-raspberrypi4: kernel-only
 
 check-fdt-view:
 	$(PYTHON) tools/boards/check-fdt-view.py
-
-.PHONY: check-smp-native
-check-smp-native:
-	$(PYTHON) tools/qemu/check-smp-native.py

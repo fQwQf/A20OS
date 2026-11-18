@@ -260,7 +260,7 @@ pub unsafe extern "C" fn a20_lwip_if_get_addr(ifindex: u32, addr: *mut u8,
 /// Add one IPv6 address, promoted straight to VALID: the address came from an
 /// explicit administrative request, not from a router advertisement, so no DAD
 /// runs.  This is the DAD contract for the write path; see
-/// docs/net/network-config-design.md.
+/// docs/zh/net/network-config-design.md.
 #[no_mangle]
 pub unsafe extern "C" fn a20_lwip_if_set_addr6(ifindex: u32, addr: *const u8,
                                               prefixlen: u8) -> i32 {

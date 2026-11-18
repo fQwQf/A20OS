@@ -4,7 +4,7 @@
  * The service process runs single-threaded, so lock operations degrade to
  * no-ops; only the type and API shape are kept, so that kernel disk filesystem
  * sources can compile as-is into user space
- * (docs/hybrid-kernel/06-user-fs.md).
+ * (docs/zh/hybrid-kernel/06-user-fs.md).
  */
 #ifndef _LOCK_H
 #define _LOCK_H

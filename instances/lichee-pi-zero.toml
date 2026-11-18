@@ -38,5 +38,5 @@ and a CRC-checked boot.scr. prepare builds the board firmware; package creates
 the FAT32 whole-card image. kernel.uimg is a legacy ARM uImage staged at
 0x42000000 and unpacked by bootm to ELF entry 0x40080000. It is not ARM64 Image
 or zImage; do not use booti/bootz/go. Shutdown halts until external power removal.
-Physical hardware validation is pending. See docs/platforms/lichee-pi-zero.md.
+Physical hardware validation is pending. See docs/zh/platforms/lichee-pi-zero.md.
 """

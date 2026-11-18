@@ -91,5 +91,6 @@ int pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t fl
 }
 pte_t *pt_clone(pt_root_t *src_pgdir) { (void)src_pgdir; return (pte_t *)1; }
 void pt_destroy_user(pt_root_t *pgdir) { (void)pgdir; }
+void pt_destroy_user_mm(struct mm_struct *mm) { (void)mm; }
 
 #endif /* CONFIG_NOMMU */

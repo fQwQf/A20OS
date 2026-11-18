@@ -34,7 +34,9 @@ static uintptr_t g_kexec_control_pa;
 static void *g_kexec_l0;
 static void *g_kexec_l1;
 static volatile int g_kexec_stop_pending;
+#if defined(CONFIG_BOARD_QEMU_VIRT_AARCH64) && !defined(CONFIG_NOMMU)
 static volatile int g_kexec_stop_error;
+#endif
 static uint32_t g_kexec_saved_affinity;
 static int g_kexec_affinity_changed;
 
@@ -52,6 +54,7 @@ void aarch64_kexec_ipi(void)
 #endif
 }
 
+#if defined(CONFIG_BOARD_QEMU_VIRT_AARCH64) && !defined(CONFIG_NOMMU)
 static int stop_other_cpus(void)
 {
     uint32_t online = smp_online_cpu_mask();
@@ -86,6 +89,7 @@ static int stop_other_cpus(void)
     }
     return 0;
 }
+#endif
 
 static void free_kexec_pages(void)
 {
@@ -132,6 +136,7 @@ uint32_t machine_kexec_backend_id(void)
 #endif
 }
 
+#if defined(CONFIG_BOARD_QEMU_VIRT_AARCH64) && !defined(CONFIG_NOMMU)
 static void clean_pages_to_poc(void *first, unsigned count)
 {
     size_t line = arch_dcache_line_size();
@@ -142,6 +147,7 @@ static void clean_pages_to_poc(void *first, unsigned count)
     }
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
+#endif
 
 int machine_kexec_prepare(const a20_elf_kexec_ledger_t *image)
 {

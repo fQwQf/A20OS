@@ -20,8 +20,8 @@ serial = "/dev/ttyUSB0"
 baud = 115200
 boot_wait = 3
 boot_timeout = "120s"
-# Wait for init to launch mksh; this profile remains interactive.
-console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+# Wait for init to launch ash; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve sh"]
 boot_media = ["build/pine-a64/a20os-pine-a64-media-sdcard.img"]
 # Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
 media_device = "/dev/sdX"
@@ -39,7 +39,7 @@ commands = [
     "booti ${loadaddr} - ${fdt_addr_r}",
 ]
 note = """RAM shell with existing videoplay and audioplay. HDMI firmware scanout and native headphone PCM.
-Physical execution is pending; see docs/platforms/pine-a64.md.
+Physical execution is pending; see docs/zh/platforms/pine-a64.md.
 Video/audio devices are exposed only after their hardware probe succeeds.
 Files remain in RAM and disappear at reset. No SSH service is provided.
 """

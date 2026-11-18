@@ -23,7 +23,7 @@
 //!
 //! Every rule above is asserted against the live service below.  Unknown but
 //! *valid* message types are asserted to be echoed — that is echod's documented
-//! behaviour (docs/hybrid-kernel/05-idl-and-personality.md §1.4).
+//! behaviour (docs/zh/hybrid-kernel/05-idl-and-personality.md §1.4).
 //!
 //! Syscall-argument structures are mirrored field-for-field from
 //! user/liba20rt/a20_types.h and pinned with size/offset assertions, so any

@@ -1,5 +1,5 @@
 /*
- * Global native-object statistics (docs/hybrid-kernel/02-mainstream-plan.md
+ * Global native-object statistics (docs/zh/hybrid-kernel/02-mainstream-plan.md
  * M2): live counters for leak auditing.  Exposed read-only at
  * /proc/a20/objects; a supervisor crash/heal loop must return them to the
  * baseline exactly.

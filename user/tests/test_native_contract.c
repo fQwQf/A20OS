@@ -1,6 +1,6 @@
 /*
  * Native ABI core-primitive contract tests
- * (docs/hybrid-kernel/03-refactor-plan.md phase 1).
+ * (docs/zh/hybrid-kernel/03-refactor-plan.md phase 1).
  *
  * Each partition pins one externally observable contract:
  *   ralg — handle rights algebra (dup shrink-only, type mask, transfer ∩)
@@ -104,7 +104,7 @@ static int rights_type_mask_converges(void)
     a20_memset(&info, 0, sizeof(info));
     if (a20_status_is_err(a20_hdl_query(cp.endpoints[0], &info)))
         return fail("ralg-mask-query");
-    /* docs/native-abi/03-handle.md: install converges to the type-valid mask;
+    /* docs/zh/native-abi/03-handle.md: install converges to the type-valid mask;
      * channel endpoints carry exactly READ|WRITE|STAT|DUP|TRANSFER (STAT is
      * required for a20_hdl_query to observe the handle at all). */
     if (info.rights != (A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |

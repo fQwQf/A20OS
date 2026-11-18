@@ -1,5 +1,5 @@
 /*
- * ufsd — user-space filesystem host (docs/hybrid-kernel/06-user-fs.md).
+ * ufsd — user-space filesystem host (docs/zh/hybrid-kernel/06-user-fs.md).
  *
  * Together with the kernel uxfs agent, this forms the complete "migrate the
  * filesystem implementation out of kernel mode" path. A single process
@@ -395,7 +395,7 @@ int main(int argc, char **argv, char **envp)
      * Unified wait across both channels: the fs channel and the supervision
      * slot are attached to the same EventQ, blocking in event_wait while idle
      * (the "supervision channel joins the unified EventQ wait" item in
-     * docs/roadmap). Both MESSAGE_READY and peer close wake the loop; the
+     * docs/zh/roadmap). Both MESSAGE_READY and peer close wake the loop; the
      * drain-before-wait order guarantees that messages already published
      * before the watch was registered are still processed.
      */

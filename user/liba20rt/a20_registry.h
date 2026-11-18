@@ -1,5 +1,5 @@
 /*
- * Service registry protocol (docs/hybrid-kernel/02-mainstream-plan.md M3).
+ * Service registry protocol (docs/zh/hybrid-kernel/02-mainstream-plan.md M3).
  *
  * svcman claims the well-known registry server endpoint; clients use the
  * service_registry handle from their start_info to look up services by

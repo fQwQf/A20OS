@@ -78,7 +78,7 @@ def tool(name: str, *fallbacks: str) -> str:
     for path in fallbacks:
         if Path(path).is_file() and os.access(path, os.X_OK):
             return path
-    raise PrepareError(f"missing host tool {name}; install the dependency described in docs/platforms/quartz64-zero.md")
+    raise PrepareError(f"missing host tool {name}; install the dependency described in docs/zh/platforms/quartz64-zero.md")
 
 
 def regular_output(path: Path) -> None:

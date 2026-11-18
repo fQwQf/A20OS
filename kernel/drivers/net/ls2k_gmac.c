@@ -2,8 +2,8 @@
  * A20OS Loongson-2K GMAC driver (DesignWare stmmac-class, "snps,dwmac-3.710").
  *
  * Developed for the Loongson LS2K1000 board, referencing RocketOS (MIT)
- * board/driver bring-up.  See docs/ACKNOWLEDGMENTS.md and
- * docs/platforms/physical-boards.md.
+ * board/driver bring-up.  See docs/zh/ACKNOWLEDGMENTS.md and
+ * docs/zh/platforms/physical-boards.md.
  *
  * LOCK_ORDER: control_lock serializes task-context PHY/control accesses;
  * lock protects short descriptor operations. Stop closes admission before

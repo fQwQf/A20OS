@@ -1,7 +1,7 @@
 /*
  * A20OS Native ABI — user-space driver (udriver) syscalls.
  *
- * Design reference: docs/hybrid-kernel/00-design.md §3.2.
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §3.2.
  * The kernel authorizes device windows and delivers IRQs to event
  * queues; device logic lives in user tasks.
  */
@@ -103,17 +103,23 @@ int64_t sys_a20_device_irq_listen(const a20_syscall_args_t *args)
         return -A20_ERR_ACCESS;
     }
 
-    /* Bind the IRQ key to the queue so SIGNALED events are delivered. */
+    /* Registration remains masked until the queue can receive SIGNALED.
+     * A restarted device may already have a pending level interrupt. */
     int64_t wr = a20_eventq_watch(eq, (a20_handle_t)kargs.irq,
                                   (void *)(uintptr_t)kargs.irq,
                                   A20_OBJ_DEVICE,
                                   A20_EVENT_MASK(A20_EVENT_SIGNALED),
                                   kargs.user_data, 0);
-    a20_object_release(entry.object, entry.type);
+    if (wr >= 0 && udriver_irq_ack(kargs.irq) < 0) {
+        a20_eventq_cancel(eq, (a20_handle_t)kargs.irq);
+        wr = -A20_ERR_BAD_HANDLE;
+    }
     if (wr < 0) {
         udriver_irq_unlisten(kargs.irq);
+        a20_object_release(entry.object, entry.type);
         return wr;
     }
+    a20_object_release(entry.object, entry.type);
     return A20_OK;
 }
 

@@ -1,6 +1,6 @@
 /*
  * A20OS Native SDK — Pager, monitor, task memory, VM region sharing.
- * Design reference: docs/native-abi/09-native-abi-deepening.md
+ * Design reference: docs/zh/native-abi/09-native-abi-deepening.md
  */
 #ifndef _A20_PAGER_H
 #define _A20_PAGER_H

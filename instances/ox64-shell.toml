@@ -1,5 +1,5 @@
 name = "ox64-shell"
-description = "ox64 serial mksh shell in RAM; physical validation pending"
+description = "ox64 serial BusyBox ash shell in RAM; physical validation pending"
 arch = "riscv64"
 board = "ox64"
 abi = "linux"
@@ -22,8 +22,8 @@ boot_media = ["build/ox64/a20os-ox64-shell-sdcard.img"]
 # Deliberate placeholder: select the actual card with deploy --media-device.
 media_device = "/dev/sdX"
 boot_timeout = "120s"
-# Wait for init to launch mksh; this profile remains interactive.
-console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+# Wait for init to launch ash; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve sh"]
 
 [package]
 kind = "board-sdcard"
@@ -38,7 +38,7 @@ commands = [
     "fatload mmc 0:1 ${fdt_addr_r} bl808-pine64-ox64.dtb",
     "booti ${loadaddr} - ${fdt_addr_r}",
 ]
-note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, mksh and
+note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, BusyBox and
 basic commands in the kernel; no root disk or network is required. Prepare
 firmware using the base board instance, then package this shell instance.
 The SD image and kernel are rebuilt with this instance's configuration.
@@ -46,5 +46,5 @@ The handoff bundle at build/ox64/handoff is refreshed by packaging;
 do not reuse a bundle from a different instance. The shell stays running.
 Filesystem writes are RAM-only and disappear at reset. Ethernet/SSH, video
 and audio are separate capabilities, not enabled by this shell profile.
-Physical board execution is pending; see docs/platforms/ox64.md.
+Physical board execution is pending; see docs/zh/platforms/ox64.md.
 """

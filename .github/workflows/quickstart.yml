@@ -1,11 +1,7 @@
-# Exercise the documented native setup without the pre-published buildenv or
-# build caches. This job is independent of the wider subsystem gate matrix.
+# Manual check of the documented host setup without buildenv or build caches.
 name: Quickstart
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -28,7 +24,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential git curl ca-certificates xz-utils file python3 \
-            dosfstools e2fsprogs mtools util-linux \
+            dosfstools e2fsprogs mtools util-linux clang-19 \
             gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
             gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
           sudo apt-get install -y qemu-system-misc

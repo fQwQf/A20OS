@@ -131,7 +131,7 @@
  * ring is full, which makes the lwIP callback answer ERR_MEM and lwIP parks the
  * pbuf in refused_data for a later retry.  A full ring backpressures, it does
  * not lose the segment.  What depth 2 costs is burst absorption -- see
- * docs/status/current/server-readiness.md, "嵌入式档能力边界".
+ * docs/zh/status/current/server-readiness.md, "嵌入式档能力边界".
  */
 #define NET_PROFILE_BH_RING_SIZE     2
 #define NET_PROFILE_INLINE_PAYLOAD   256
@@ -170,7 +170,7 @@
  * ceiling is asserted against the real sizeof() in netfilter_nat.c.
  * Halved from the 64 the tier was launched with.  A conntrack entry is tracked
  * only when netfilter is loaded, and this tier's honest answer to "how many
- * simultaneous flows will it track" is a small one -- see docs/status/current/server-readiness.md
+ * simultaneous flows will it track" is a small one -- see docs/zh/status/current/server-readiness.md
  * for what the reduction costs.  The table is paid for on every boot whether or
  * not netfilter ever runs, so its ceiling belongs in the tier's memory budget
  * rather than in a feature nobody enabled.
@@ -206,7 +206,7 @@
  * and transient conversion buffers are not physical-memory promises.
  * 20 KiB was never achievable for a socket-capable lwIP -- the eight
  * sockets alone exceed it on LP64 -- and the way that used to be expressed was
- * a ceiling that the code violated.  docs/status/current/server-readiness.md
+ * a ceiling that the code violated.  docs/zh/status/current/server-readiness.md
  * carries the numbers.
  */
 #define NET_PROFILE_FILTER_BUDGET    (32 * 64 + 1280)
@@ -265,7 +265,7 @@ _Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
  * (components/trim.toml [profile.mcu].sources) that contains neither the
  * kernel/net sources nor lwIP, so NET_PROFILE has no effect on that target.
  * This profile targets a part with roughly 64 KiB of RAM, not a 20 KiB one.
- * See README.md and docs/status/current/server-readiness.md.
+ * See README.md and docs/zh/status/current/server-readiness.md.
  */
 
 #elif CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_SERVER
@@ -567,7 +567,7 @@ _Static_assert(NET_PROFILE_PACKET_FRAME_SIZE <= NET_PROFILE_NETIF_FRAME_SIZE,
  * The total this profile costs in unconditional .bss.  These two arrays were
  * the reason "embedded" could not mean small: they were compiled outside the
  * profile's scope at 37312 B on every rung, which is 1.8x a 20 KiB part on its
- * own.  docs/status/current/server-readiness.md records the measurement; this assert is what
+ * own.  docs/zh/status/current/server-readiness.md records the measurement; this assert is what
  * keeps a future hardcoded constant from quietly reinstating it.
  */
 _Static_assert(NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +
@@ -647,7 +647,7 @@ _Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
  * Lane count.  One lane per CPU is the target shape: each lane owns a receive
  * queue, its own pbuf magazine and its own timeout wheel, and a socket's PCB
  * stays on one lane for its whole lifetime.  Until the lane plumbing lands
- * (docs/net/network-lock-contract.md tracks it) this stays 1 so the build has a
+ * (docs/zh/net/network-lock-contract.md tracks it) this stays 1 so the build has a
  * single netif scratch buffer and a single timeout wheel to reason about.
  */
 #ifndef CONFIG_NET_LANES
@@ -716,7 +716,7 @@ _Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
  * fault into a deterministic one and reveal which side corrupts the list.
  *
  * A measuring tool, not a fix: leave it at 0 in any real build and remove it
- * once the fault is reproducible.  See docs/net/net-lanes.md.
+ * once the fault is reproducible.  See docs/zh/net/net-lanes.md.
  */
 #ifndef CONFIG_NET_RACE_DELAY_US
 #define CONFIG_NET_RACE_DELAY_US 0

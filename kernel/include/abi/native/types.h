@@ -2,7 +2,7 @@
  * A20OS Native ABI — User-visible type definitions.
  *
  * This header defines all fundamental types for the Native ABI.
- * Design reference: docs/native-abi/01-types.md
+ * Design reference: docs/zh/native-abi/01-types.md
  */
 #ifndef _ABI_NATIVE_TYPES_H
 #define _ABI_NATIVE_TYPES_H
@@ -275,8 +275,8 @@ typedef struct a20_ctl_flags_args {
     int32_t        flags;
 } a20_ctl_flags_args_t;
 
-/* Temporal capability control (docs/native-abi/03-handle.md §2.6,
- * docs/native-abi/06-security.md §6).  SET_TEMPORAL is strengthening-only
+/* Temporal capability control (docs/zh/native-abi/03-handle.md §2.6,
+ * docs/zh/native-abi/06-security.md §6).  SET_TEMPORAL is strengthening-only
  * (non-refreshability): an existing expiry can only be lowered, an existing
  * operation count can only be decreased, and set flags cannot be cleared. */
 typedef struct a20_handle_temporal_args {
@@ -478,7 +478,7 @@ typedef struct a20_task_status {
     uint64_t       stime_ns;
 } a20_task_status_t;
 
-/* task_wait flags (docs/native-abi/09-native-abi-deepening.md §8).
+/* task_wait flags (docs/zh/native-abi/09-native-abi-deepening.md §8).
  * Unknown bits must be zero. */
 #define A20_TASK_WAIT_NONBLOCK 0x1u
 
@@ -602,7 +602,7 @@ typedef struct a20_vm_map_args {
 #define A20_MAP_PRIVATE 0x02u
 
 /* vm_create_vmar: sub-allocate an address range under a parent VMAR
- * (docs/native-abi/04-memory.md §3).  Ceiling bits are the existing
+ * (docs/zh/native-abi/04-memory.md §3).  Ceiling bits are the existing
  * A20_VMAR_CAN_MAP_* above. */
 typedef struct a20_vm_create_vmar_args {
     uint32_t       size;
@@ -793,7 +793,7 @@ typedef struct a20_fs_mount_args {
 } a20_fs_mount_args_t;
 
 /* fs_serve: registers one of the caller's channel endpoints as the user-space
- * file service for a mount point (docs/hybrid-kernel/06-user-fs.md).
+ * file service for a mount point (docs/zh/hybrid-kernel/06-user-fs.md).
  * block_index < 0 means there is no block backing. */
 typedef struct a20_fs_serve_args {
     uint32_t       size;
@@ -915,7 +915,7 @@ typedef struct a20_msg_recv_args {
 } a20_msg_recv_args_t;
 
 /*
- * Fused RPC (docs/hybrid-kernel/00-design.md §4.1): one trap performs the
+ * Fused RPC (docs/zh/hybrid-kernel/00-design.md §4.1): one trap performs the
  * request send and the reply wait, sharing a single handle lookup and a
  * single rights check (READ|WRITE).  Semantics equal channel_send followed
  * by channel_recv on the same endpoint; the reply stage honors
@@ -1196,7 +1196,7 @@ typedef struct a20_futex_wake_args {
     uint32_t       reserved;
 } a20_futex_wake_args_t;
 
-/* ---- Pager structures (docs/native-abi/09-native-abi-deepening.md §2) ---- */
+/* ---- Pager structures (docs/zh/native-abi/09-native-abi-deepening.md §2) ---- */
 
 typedef struct a20_pager_create_args {
     uint32_t       size;
@@ -1226,7 +1226,7 @@ typedef struct a20_pager_supply_args {
     uint64_t       out_supplied;
 } a20_pager_supply_args_t;
 
-/* ---- Monitor structures (docs/native-abi/09-native-abi-deepening.md §3) ----
+/* ---- Monitor structures (docs/zh/native-abi/09-native-abi-deepening.md §3) ----
  * A20_MONITOR_* kind constants are defined in ipc/ipc.h (core, ABI-free). */
 
 typedef struct a20_monitor_create_args {
@@ -1250,7 +1250,7 @@ typedef struct a20_monitor_value {
     uint64_t       prev;
 } a20_monitor_value_t;
 
-/* ---- Task memory structures (docs/native-abi/09-native-abi-deepening.md §4) ---- */
+/* ---- Task memory structures (docs/zh/native-abi/09-native-abi-deepening.md §4) ---- */
 
 typedef struct a20_task_mem_args {
     uint32_t       size;
@@ -1289,7 +1289,7 @@ typedef struct a20_system_info {
     uint64_t       uptime_ns;
 } a20_system_info_t;
 
-/* ---- Cluster structures (docs/cluster/01-abi.md) ----
+/* ---- Cluster structures (docs/zh/cluster/01-abi.md) ----
  *
  * Frozen. Append-only: new fields may be added at the tail, gated by the
  * size/version header every args struct carries, never inserted into the

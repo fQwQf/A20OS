@@ -2,7 +2,7 @@
  * single byte-stream writer. The poll owner mutates the state machine and
  * publishes snapshots under g_uart_lock; concurrent senders only enqueue.
  * Driver I/O and upcalls run outside locks. Register/unregister refuse an
- * active per-link pump. See docs/cluster/04-transports.md. */
+ * active per-link pump. See docs/zh/cluster/04-transports.md. */
 #include "cluster/uart.h"
 #include <stdint.h>
 

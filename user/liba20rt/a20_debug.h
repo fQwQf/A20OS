@@ -6,7 +6,7 @@
  *
  * Thin user-side wrappers over sys_native_debug.c.  A debug session is an
  * A20_OBJ_DEBUG handle; the traced task must be stopped before register or
- * memory access (see docs/native-abi/06-security.md §8.1).
+ * memory access (see docs/zh/native-abi/06-security.md §8.1).
  */
 
 #include "a20_types.h"

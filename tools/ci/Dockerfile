@@ -14,7 +14,7 @@
 #   tools/ci/build-image.sh riscv          # 构建 + 自检某一个 target
 #
 # CI：.github/workflows/buildenv.yml 构建并推送全部 target。
-# 文档：docs/packaging/ci.md、docs/dev/build.md
+# 文档：docs/zh/packaging/ci.md、docs/zh/dev/build.md
 #
 # 各架构的包清单只写在下面的 ARG 里，`multi` 直接组合它们，因此单架构镜像与
 # 全能镜像不会各记一份而漂移。
@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl git ca-certificates xz-utils file \
         dosfstools e2fsprogs mtools fakeroot sudo openssl \
         qemu-user-static \
-        python3 ccache ripgrep \
+        python3 ccache ripgrep clang-19 \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust 放在 base：每个架构的内核与用户态构建都要它。rust-src 不是可选项——
@@ -93,7 +93,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends $X86_64_PKGS \
 
 # loongarch64 的交叉工具链只在 Debian cross-ports 里。这里不吞掉安装失败：
 # 一个"少一个架构"的镜像正是本轮要消除的那类静默缺失，装不上就让这个 target
-# 构建失败，由 docs/dev/build.md 记录的备选工具链路径接手。
+# 构建失败，由 docs/zh/dev/build.md 记录的备选工具链路径接手。
 FROM base AS loongarch64
 ARG RUST_VERSION
 ARG LOONGARCH64_PKGS LOONGARCH64_RUST_TARGETS

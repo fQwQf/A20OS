@@ -10,7 +10,7 @@
  * is wrong, escalate and change it in ONE place before anything codes
  * against it -- never fork it per agent.
  *
- * Design record: docs/hypervisor/00-design.md S5.  Run shape (decided, do
+ * Design record: docs/zh/hypervisor/00-design.md S5.  Run shape (decided, do
  * not redesign per agent):
  *
  *   hyp_vcpu_run() [C, kernel/hyp/hyp_vcpu.c]
@@ -213,7 +213,7 @@ int  hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
 
 /* ================================================================
  * v2 -- A20OS as guest (real kernel, two-stage MMU, delegated traps).
- * Design record: docs/hypervisor/01-a20os-guest.md.  These additions
+ * Design record: docs/zh/hypervisor/01-a20os-guest.md.  These additions
  * supersede the v1 "intercept everything" shape where they conflict.
  * ================================================================ */
 
@@ -290,7 +290,7 @@ uint64_t hyp_vm_console_bytes(hyp_vm_t *vm);
 /* ================================================================
  * v3 -- guest console INPUT: host keystrokes reach the guest's UART.
  * Append-only; no field above moved.  Design record:
- * docs/hypervisor/01-a20os-guest.md.
+ * docs/zh/hypervisor/01-a20os-guest.md.
  * ================================================================
  *
  * v3 changed two things the v2 text above states as constants, so they are

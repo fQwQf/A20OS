@@ -45,6 +45,8 @@
 #include "core/lock.h"
 #include "core/cpu.h"
 #include "core/perf.h"
+#include "core/diagnostics.h"
+#include "core/trace.h"
 #include "core/progress.h"
 #include "core/random.h"
 #include "proc/proc.h"
@@ -560,8 +562,20 @@ const struct drv_export drv_export_table[] = {
     { "proc_yield",          (void *)proc_yield },
     { "signal_task_has_unblocked", (void *)signal_task_has_unblocked },
     { "arch_current_cpu_id", (void *)arch_current_cpu_id },
+#if CONFIG_A20_DIAG_BOOT
+    { "a20_diag_begin", (void *)a20_diag_begin },
+    { "a20_diag_end", (void *)a20_diag_end },
+#endif
+#if CONFIG_A20_TRACE
+    { "a20_trace_begin", (void *)a20_trace_begin },
+    { "a20_trace_end", (void *)a20_trace_end },
+    { "a20_trace_event", (void *)a20_trace_event },
+#endif
+#if CONFIG_A20_METRICS
     { "g_a20_perf_enabled", (void *)&g_a20_perf_enabled },
+    { "g_a20_perf_generation", (void *)&g_a20_perf_generation },
     { "g_a20_perf_percpu", (void *)g_a20_perf_percpu },
+#endif
     { "proc_park_commit",    (void *)proc_park_commit },
     { "proc_park_cancel",    (void *)proc_park_cancel },
     { "proc_park_finish",    (void *)proc_park_finish },

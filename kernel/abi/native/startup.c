@@ -1,6 +1,6 @@
 /*
  * A20OS Native ABI — Task startup protocol implementation.
- * Design reference: docs/native-abi/07-startup.md §1.3–1.4
+ * Design reference: docs/zh/native-abi/07-startup.md §1.3–1.4
  */
 #include "core/types.h"
 #include "core/string.h"

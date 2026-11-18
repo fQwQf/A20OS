@@ -254,7 +254,7 @@ int64_t sys_a20_timer_cancel(const a20_syscall_args_t *args)
 /*
  * a20_timer_tick — called from the scheduler tick path (sched(), process
  * context).  Fires expired A20 timers and periodically runs the temporal
- * sweeper across all handle tables (docs/native-abi/03-handle.md §2.6.4).
+ * sweeper across all handle tables (docs/zh/native-abi/03-handle.md §2.6.4).
  * Each sweep re-arms the next scan deadline so the cadence is sustained
  * even with no armed timers or task alarms.
  */

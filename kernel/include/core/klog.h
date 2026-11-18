@@ -57,7 +57,6 @@
 #define KLOG_MODE_ROOTFS    2
 #define KLOG_MODE_ESP       4
 #define KLOG_MODE_RAM       3
-
 typedef struct klog_record {
     uint64_t mono_ns;
     uint64_t realtime_s;
@@ -103,12 +102,25 @@ int klog_record_read(uint32_t *cursor, klog_record_t *out);
 uint32_t klog_record_oldest(void);
 uint32_t klog_record_next(void);
 
-/* Write a bounded, self-contained diagnostic summary to the console.  Called
- * once after the shell has started, so a machine with no readable early
- * scrollback and no working input still leaves the important boot evidence
- * on the final screen. */
-void klog_boot_report(void);
-int klog_has_fatal(void);
+/* Event producers supply an explicit subsystem; existing printf/kerr callers
+ * remain supported. Snapshots expose owned copies, never logging internals. */
+int klog_event_write(int level, const char *facility, const char *format, ...);
+#if CONFIG_KLOG_ENABLED
+#define klog_event(...) klog_event_write(__VA_ARGS__)
+#else
+/* A call expression can be ignored under -Wunused-value, while the dead
+ * producer branch keeps argument checking without evaluating arguments. */
+static inline int klog_event_omitted(void) { return 0; }
+#define klog_event(...) (0 ? klog_event_write(__VA_ARGS__) : klog_event_omitted())
+#endif
+int klog_has_errors(void);
+typedef struct klog_snapshot {
+    uint32_t first, end, retained;
+    unsigned warnings, errors, matching, shown;
+} klog_snapshot_t;
+void klog_snapshot_select(klog_snapshot_t *snapshot, klog_record_t *records,
+                          unsigned capacity, int context);
+void klog_console_replay(const char *buffer, size_t length);
 
 /* Persistent writer (kernel/core/klog_disk.c).  The mount code calls attach()
  * once the "A20OS log" partition is mounted; attach() is the only function
@@ -118,6 +130,10 @@ int klog_has_fatal(void);
 #endif
 int  klog_disk_attach(const char *dir);
 int  klog_disk_ready(void);
+/* Ready means a writable sink exists, including RAM. Storage describes its
+ * actual backing; it is not a claim that every pending write is durable. */
+const char *klog_disk_storage(void);
+const char *klog_disk_health(void);
 const char *klog_disk_dir(void);
 void klog_disk_sync(void);
 void klog_disk_poll(void);
@@ -134,7 +150,13 @@ void klog_disk_thread(void);
 
 extern int klog_level;
 
+#if CONFIG_KLOG_ENABLED
 #define klog(lvl, ...) do { if ((lvl) >= klog_level) klog_write_ex((lvl), __VA_ARGS__); } while(0)
+#else
+/* Keep arguments type-checked and locals referenced, but emit no call or
+ * argument evaluation in the disabled build. */
+#define klog(lvl, ...) do { if (0) klog_write_ex((lvl), __VA_ARGS__); } while (0)
+#endif
 #define kdebug(...)  klog(KLOG_DEBUG, __VA_ARGS__)
 #define kinfo(...)   klog(KLOG_INFO,  __VA_ARGS__)
 #define kwarn(...)   klog(KLOG_WARN,  "[WARN] " __VA_ARGS__)

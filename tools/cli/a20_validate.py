@@ -191,6 +191,31 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append(f"log.level: '{l.level}' must be debug|info|warn|err")
     if l.mode is not None and l.mode not in ("auto", "partition", "rootfs", "ram", "esp"):
         e.append(f"log.mode: '{l.mode}' must be auto|partition|rootfs|ram|esp")
+    if l.report is not None and l.report not in ("off", "error", "always"):
+        e.append(f"log.report: '{l.report}' must be off|error|always")
+    if (l.porting_report or l.trace) and k.profile == "mcu":
+        e.append("log.porting_report/trace: requires a full kernel profile")
+    if l.trace_boot and l.trace is not True:
+        e.append("log.trace_boot: requires log.trace=true")
+    for field in ("porting_records", "trace_records"):
+        value = getattr(l, field)
+        if value is not None and not 16 <= value <= 1024:
+            e.append(f"log.{field}: must be between 16 and 1024")
+    if l.trace_mask is not None and not 1 <= l.trace_mask <= 63:
+        e.append("log.trace_mask: must be between 1 and 63")
+    if l.boot_report is False and l.report in ("error", "always"):
+        e.append("log.report: automatic display requires log.boot_report=true")
+    if (l.boot_report is True or l.report in ("error", "always")) and k.profile == "mcu":
+        e.append("log.boot_report: requires a full kernel profile, not MCU")
+    if l.boot_report is True and l.enabled is False:
+        e.append("log.boot_report: requires log.enabled=true")
+    for field, upper in (("report_window_ms", 120000), ("report_settle_ms", 10000),
+                         ("report_max_records", 48)):
+        value = getattr(l, field)
+        if value is not None and not 0 <= value <= upper:
+            e.append(f"log.{field}: must be between 0 and {upper}")
+    if l.report in ("error", "always") and (l.enabled is False or l.console is False):
+        e.append("log.report: screen diagnostics require log.enabled and log.console")
     if l.partition_mb is not None and not 0 <= l.partition_mb <= 4096:
         e.append("log.partition_mb: must be between 0 and 4096")
     if l.max_bytes is not None and not 65536 <= l.max_bytes <= 268435456:

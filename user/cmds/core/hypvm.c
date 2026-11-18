@@ -22,7 +22,7 @@
  *     whole stage-2 pages) and the identity map entry.S lays down over
  *     BOOT_MAP_PHYS .. +16 GiB, without which __boot_dtb_ptr is not
  *     dereferenceable once the guest has installed its own satp
- *     (hyp_vcpu.h §"Guest boot protocol", docs/hypervisor/01-a20os-guest.md
+ *     (hyp_vcpu.h §"Guest boot protocol", docs/zh/hypervisor/01-a20os-guest.md
  *     §7.4).
  *
  * PASS is the same judgement hyp_boot makes and for the same reason: the guest

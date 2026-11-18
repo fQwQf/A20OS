@@ -1,4 +1,4 @@
 [toolchain]
 channel = "1.96.0"
 profile = "minimal"
-# Install only the targets needed for your architecture; see docs/dev/build.md.
+# Install only the targets needed for your architecture; see docs/zh/dev/build.md.

@@ -1,7 +1,7 @@
 /*
  * Hypervisor run loop, machine-independent half.  The frozen contract is
  * kernel/include/hyp/hyp_vcpu.h; the design record is
- * docs/hypervisor/00-design.md S5.
+ * docs/zh/hypervisor/00-design.md S5.
  *
  * This file owns three things and nothing else: vcpu lifetime, guest RAM
  * provisioning, and what a guest trap MEANS.  Register save/restore and the

@@ -3,7 +3,7 @@
  * into CL transactions. Proxy slots remain pinned until their worker exits.
  * Export workers bind a peer reference at spawn and cannot touch a replaced
  * registration. Registry locks never cover channel I/O or wire sends.
- * See docs/cluster/03-kernel-impl.md for ownership and bounded failures. */
+ * See docs/zh/cluster/03-kernel-impl.md for ownership and bounded failures. */
 #include "cluster/clx_internal.h"
 
 #include "core/klog.h"

@@ -2,7 +2,8 @@
 """Diff two /proc/a20/perf snapshots or a diagnostic runner manifest.
 
 Ticks measure aggregate elapsed syscall time, including waits, not CPU use.
-Capture both snapshots in the same boot without resetting or disabling counters.
+Capture both snapshots in the same boot and measurement generation. New
+windows may be explicitly stopped before the final snapshot.
 """
 from __future__ import annotations
 
@@ -18,6 +19,10 @@ STATE = 'collection_enabled_before_snapshot'
 FIELD = re.compile(r'([A-Za-z0-9_]+): ([0-9]+)')
 SYSCALL = re.compile(r'syscall_([0-9]+)_(count|ticks)')
 MAX_U64 = (1 << 64) - 1
+METADATA = frozenset((STATE, 'snapshot_schema', 'window_generation', 'window_boot_token',
+                      'window_valid', 'window_start_ticks', 'window_stop_ticks',
+                      'window_elapsed_ticks', 'ticks_per_second', 'snapshot_frozen',
+                      'excluded_syscalls', 'snapshot_complete', 'metric_count', 'syscall_rows'))
 
 
 def validate(fields):
@@ -33,6 +38,18 @@ def validate(fields):
                 raise ValueError(f'{name}: missing paired field {other}; snapshot may be truncated')
     if STATE in fields and fields[STATE] not in (0, 1):
         raise ValueError('invalid collection state')
+    if fields.get('snapshot_schema') == 2:
+        missing = METADATA - fields.keys()
+        if missing or fields['snapshot_complete'] != 1:
+            raise ValueError('incomplete window snapshot: missing metadata or completion marker')
+        actual_metrics = sum(name not in METADATA and not SYSCALL.fullmatch(name) for name in fields)
+        actual_syscalls = sum(bool(re.fullmatch(r'syscall_[0-9]+_count', name)) for name in fields)
+        if actual_metrics != fields['metric_count'] or actual_syscalls != fields['syscall_rows']:
+            raise ValueError('snapshot record count mismatch; data may be omitted')
+        if fields['ticks_per_second'] == 0:
+            raise ValueError('snapshot has no valid clock frequency')
+        if fields['window_valid'] and (not fields['window_generation'] or not fields['window_boot_token']):
+            raise ValueError('valid window has no generation or boot identity')
     return fields
 
 
@@ -67,11 +84,29 @@ def diff(before, after, ticks_per_second=None):
              'Whole omitted trailing records cannot be detected without an external expected record count.']
     if STATE not in before or STATE not in after:
         notes.append('Old snapshot has no collection-state header; collection continuity is unknown.')
-    if after.get(STATE) == 0:
+    schema = before.get('snapshot_schema')
+    if schema == 2 or after.get('snapshot_schema') == 2:
+        if schema != 2 or after.get('snapshot_schema') != 2:
+            raise ValueError('cannot mix legacy and window snapshots')
+        for field in ('window_generation', 'window_boot_token', 'window_start_ticks', 'ticks_per_second'):
+            if before[field] != after[field]:
+                raise ValueError(f'measurement identity changed: {field}')
+        if not before['window_valid'] or not after['window_valid']:
+            raise ValueError('measurement window has not started')
+        notes[2] = 'Schema counts and completion markers checked; frozen final snapshot recommended.'
+        frequency = after['ticks_per_second']
+        if ticks_per_second is not None and ticks_per_second != frequency:
+            raise ValueError('requested clock frequency disagrees with snapshot')
+        ticks_per_second = frequency
+        if after.get(STATE) == 0 and not after['snapshot_frozen']:
+            raise ValueError('ending snapshot is not a frozen window')
+        if not after['snapshot_frozen']:
+            notes.append('Ending snapshot is live; stop collection for a stable final measurement.')
+    elif after.get(STATE) == 0:
         raise ValueError('collection was disabled before the ending snapshot')
     counters = {}
     for name in before.keys() | after.keys():
-        if name == STATE:
+        if name in METADATA:
             continue
         if name not in before or name not in after:
             if not SYSCALL.fullmatch(name):
@@ -101,6 +136,7 @@ def diff(before, after, ticks_per_second=None):
     rows.sort(key=lambda row: (-row['ticks'], row['nr']))
     return dict(collection_before=before.get(STATE), collection_after=after.get(STATE),
                 ticks_per_second=ticks_per_second, notes=notes, syscalls=rows,
+                window=({key: after[key] for key in METADATA} if schema == 2 else None),
                 counters=dict(sorted(counters.items())))
 
 

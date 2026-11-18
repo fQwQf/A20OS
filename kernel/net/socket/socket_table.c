@@ -10,7 +10,7 @@
  * renders its rows from the walk callback, so that callback executes in
  * spinlock context: no blocking, no allocation, and no lwIP call, because
  * g_lwip_lock and a net lock are never held together
- * (docs/net/network-lock-contract.md).
+ * (docs/zh/net/network-lock-contract.md).
  *
  * The walk takes ONE bucket lock at a time and releases it before taking the
  * next.  Taking all of them would be the livelock fs/vfs/dcache.c records --

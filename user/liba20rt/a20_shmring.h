@@ -1,7 +1,7 @@
 /*
  * a20_shmring — SPSC byte-stream ring over a shared VMO.
  *
- * Design reference: docs/hybrid-kernel/00-design.md §4.2 (data plane).
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §4.2 (data plane).
  *
  * The ring lives entirely in a shared VMO so two tasks mapping the VMO at
  * different virtual addresses share the same physical frames.  All indices

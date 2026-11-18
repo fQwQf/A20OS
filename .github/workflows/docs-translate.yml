@@ -1,0 +1,96 @@
+name: Translate documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - 'tools/docs/doc_translator.py'
+      - 'tools/docs/layout.py'
+      - 'tools/docs/i18n/**'
+      - '.github/workflows/docs-translate.yml'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Maximum changed files (0 = all; merge each batch to continue)'
+        default: '20'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: docs-translation
+  cancel-in-progress: false
+
+jobs:
+  translate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DOC_TRANSLATION_API_KEY: ${{ secrets.DOC_TRANSLATION_API_KEY }}
+      DOC_TRANSLATION_BASE_URL: ${{ vars.DOC_TRANSLATION_BASE_URL }}
+      DOC_TRANSLATION_MODEL: ${{ vars.DOC_TRANSLATION_MODEL }}
+      TRANSLATION_LIMIT: ${{ inputs.limit || vars.DOC_TRANSLATION_BATCH_SIZE || '20' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check provider configuration
+        id: provider
+        run: |
+          if [ -z "$DOC_TRANSLATION_API_KEY" ] || [ -z "$DOC_TRANSLATION_BASE_URL" ] || [ -z "$DOC_TRANSLATION_MODEL" ]; then
+            echo '::notice::Translation is not configured. Set DOC_TRANSLATION_API_KEY (secret), DOC_TRANSLATION_BASE_URL and DOC_TRANSLATION_MODEL (variables).'
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Reuse pending translation work
+        if: steps.provider.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Avoid paying again for an unmerged batch. A merge triggers the next
+          # batch; source changes meanwhile are picked up from the new main.
+          count=$(gh pr list --head codex/docs-translation --base main --state open --json number --jq length)
+          echo "TRANSLATION_PR_COUNT=$count" >> "$GITHUB_ENV"
+      - name: Translate changed sources
+        if: steps.provider.outputs.ready == 'true' && env.TRANSLATION_PR_COUNT == '0'
+        id: translate
+        continue-on-error: true
+        run: python3 tools/docs/doc_translator.py --limit "$TRANSLATION_LIMIT"
+      - name: Validate and build both languages
+        if: steps.provider.outputs.ready == 'true' && env.TRANSLATION_PR_COUNT == '0'
+        run: |
+          pip install -r site/requirements.txt
+          python3 -m unittest selftests.test_doc_translator selftests.test_check_doc_citations selftests.test_mkdocs_repo_links selftests.test_docs_layout
+          make check-docs
+          bash site/build.sh
+      - name: Open translation pull request
+        if: steps.provider.outputs.ready == 'true' && env.TRANSLATION_PR_COUNT == '0'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: codex/docs-translation
+          title: 'docs(i18n): synchronize English documentation'
+          commit-message: 'docs(i18n): synchronize English documentation'
+          body: |
+            Incremental English translations of Chinese source documentation.
+
+            Please review terminology, support status and technical meaning.
+            Protected code, links, numbers, cache integrity and both language
+            builds were checked by the translation workflow. This PR is not
+            merged automatically. Merging a batch starts the next pending batch.
+          add-paths: |
+            README.en.md
+            docs/en/**/*.md
+            docs/en/*.md
+            docs/.translation_cache.json
+      - name: Report incomplete translation
+        if: steps.translate.outcome == 'failure'
+        run: |
+          echo '::error::Translation stopped early. Successfully validated files were preserved in the translation PR; inspect the translation step for the failed file.'
+          exit 1

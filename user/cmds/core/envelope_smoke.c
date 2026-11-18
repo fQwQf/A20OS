@@ -1,4 +1,4 @@
-/* Capability envelope attack suite (docs/research/05 §2.5, 11 §4.6).
+/* Capability envelope attack suite (docs/zh/research/05 §2.5, 11 §4.6).
  *
  * Runs as supervisor: creates envelopes, forks workers that enter() an
  * envelope and then attempt legitimate work plus policy violations.

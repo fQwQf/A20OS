@@ -1,5 +1,5 @@
 /*
- * Dual-placement driver environment (docs/hybrid-kernel/04-dual-placement.md).
+ * Dual-placement driver environment (docs/zh/hybrid-kernel/04-dual-placement.md).
  *
  * A dual-placement driver is written once against the drv_* ops below and
  * compiled either into the kernel (DRV_ENV_KERNEL) or into a user-space

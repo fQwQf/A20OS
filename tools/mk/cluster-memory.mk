@@ -23,7 +23,7 @@ MEMORY_SERVICE_BIN := $(NATIVE_BUILD_DIR)/cluster-memory-$(NATIVE_TAG)
 MEMORY_TEST_BIN := $(NATIVE_BUILD_DIR)/native-cluster-memory-$(NATIVE_TAG)
 MEMORY_DEPS := $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 
-.PHONY: native-cluster-memory check-cluster-memory check-cluster-memory-network FORCE_MEMORY_FLAGS print-cluster-memory-paths
+.PHONY: native-cluster-memory FORCE_MEMORY_FLAGS print-cluster-memory-paths
 print-cluster-memory-paths:
 	@printf '%s\n' '$(MEMORY_SERVICE_BIN)' '$(MEMORY_TEST_BIN)'
 native-cluster-memory:
@@ -57,9 +57,3 @@ NATIVE_OUTPUTS += $(MEMORY_SERVICE_BIN) $(MEMORY_TEST_BIN)
 USER_BUILD_ID := $(USER_BUILD_ID):CLUSTER_MEMORY=1:CLUSTER_MEMORY_PAGES=$(CLUSTER_MEMORY_PAGES)
 native-programs: native-cluster-memory
 endif
-
-check-cluster-memory:
-	$(PYTHON) tools/cluster/check-cluster-memory.py
-
-check-cluster-memory-network:
-	$(PYTHON) tools/cluster/check-cluster-memory-network.py

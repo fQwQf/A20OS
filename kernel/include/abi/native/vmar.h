@@ -1,6 +1,6 @@
 /*
  * A20OS Native ABI — Virtual Memory Address Region (VMAR).
- * Design reference: docs/native-abi/04-memory.md §3
+ * Design reference: docs/zh/native-abi/04-memory.md §3
  *
  * VMAR operations are thin wrappers over the core MM layer (mm_mmap_vmo,
  * mm_munmap, mm_mprotect); see abi/native/vmar.c.

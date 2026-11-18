@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host side of tools/mk/targets-smoke.mk:smoke-net-rtl8139.
+"""Host side of tests/tools/mk/targets-smoke.mk:smoke-net-rtl8139.
 
 Connects to a QEMU hostfwd port, sends one byte, and requires it back.
 

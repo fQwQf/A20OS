@@ -1,6 +1,6 @@
 /*
  * A20OS Native ABI — Syscall entry types and dispatch interface.
- * Design reference: docs/native-abi/00-overview.md
+ * Design reference: docs/zh/native-abi/00-overview.md
  */
 #ifndef _ABI_NATIVE_SYSCALL_ENTRY_H
 #define _ABI_NATIVE_SYSCALL_ENTRY_H

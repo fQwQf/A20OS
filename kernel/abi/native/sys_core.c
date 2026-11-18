@@ -12,7 +12,7 @@
  * Debug ABI calls in sys_phase2.c are intentionally limited compatibility
  * implementations until ptrace-grade debug semantics are specified.
  *
- * Design references (see docs/native-abi/):
+ * Design references (see docs/zh/native-abi/):
  *   03-handle.md §4 — syscall operation semantics
  *   04-memory.md §4 — vm_alloc/unmap semantics
  *   06-security.md §3.2 — operation-rights mapping
@@ -167,7 +167,7 @@ int64_t sys_a20_handle_dup(const a20_syscall_args_t *args)
                                                  &src);
     if (ret < 0) return ret;
 
-    /* rights_mask must be subset of source rights docs/native-abi/06-security.md §2.2) */
+    /* rights_mask must be subset of source rights docs/zh/native-abi/06-security.md §2.2) */
     if (kargs.rights_mask != 0 && (kargs.rights_mask & ~src.rights) != 0) {
         a20_object_release(src.object, src.type);
         return -A20_ERR_ACCESS;

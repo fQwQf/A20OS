@@ -1,5 +1,5 @@
 /* E11: envelope mediation overhead microbenchmark
- * (docs/research/10-evaluation.md §5.5 -- cost-side paper evidence).
+ * (docs/zh/research/10-evaluation.md §5.5 -- cost-side paper evidence).
  *
  * One process measures each operation family twice: unrestricted
  * ("off") and inside a fresh envelope ("on"), then reports ns/op and

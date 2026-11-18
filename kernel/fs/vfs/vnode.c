@@ -55,7 +55,7 @@ void vnode_put(vnode_t *vn)
     if (refcount_dec_and_test(&vn->ref_count)) {
         __atomic_fetch_sub(&g_vnode_live, 1, __ATOMIC_RELAXED);
         /* Remove filesystem watches keyed on this vnode before it is freed
-         * (docs/native-abi/09-native-abi-deepening.md §6). */
+         * (docs/zh/native-abi/09-native-abi-deepening.md §6). */
         a20_eventq_on_object_destroy(vn, A20_OBJ_DIRECTORY);
         xattr_cleanup_vnode(vn);
         if (vn->ops && vn->ops->release)

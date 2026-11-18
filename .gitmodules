@@ -7,29 +7,25 @@
 	path = user/external/musl
 	url = https://git.musl-libc.org/git/musl
 
-[submodule "user/external/sbase"]
-	path = user/external/sbase
-	url = https://git.suckless.org/sbase
-
-[submodule "user/external/mksh-cvs2git"]
-	path = user/external/mksh-cvs2git
-	url = https://github.com/mirabilos/mksh-cvs2git.git
-
 [submodule "user/external/mlibc"]
 	path = user/external/mlibc
 	url = https://github.com/fQwQf/mlibc.git
 
-[submodule "user/external/tlse"]
-	path = user/external/tlse
-	url = https://github.com/eduardsui/tlse.git
 [submodule "kernel/external/lwip-upstream"]
 	path = kernel/external/lwip-upstream
 	url = https://github.com/lwip-tcpip/lwip.git
 	shallow = true
+
 [submodule "kernel/external/f-stack"]
 	path = kernel/external/f-stack
 	url = https://github.com/F-Stack/f-stack.git
 	shallow = true
+
 [submodule "user/external/rtw89"]
 	path = user/external/rtw89
 	url = https://github.com/FranciumOS-org/AirPort_RTW89.git
+
+[submodule "tests"]
+	path = tests
+	url = https://github.com/fQwQf/a20-tests.git
+	shallow = true

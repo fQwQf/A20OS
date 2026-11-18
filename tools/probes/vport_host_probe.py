@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host side of tools/mk/targets-smoke.mk:smoke-virtio-console.
+"""Host side of tests/tools/mk/targets-smoke.mk:smoke-virtio-console.
 
 The guest runs user/cmds/core/vport_test, which opens /dev/vport0 and prints
 "VPORT_TEST: READY" once the driver is bound and the console mirror is

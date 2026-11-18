@@ -41,13 +41,13 @@ user/external/sbase/id
 *.blg
 *.fls
 *.fdb_latexmk
-/paper/*.pdf
+docs/zh/research/paper/*.pdf
 # OpenCode work plans / session state
 .omo/
 # GitHub Pages 组装产物（site/build.sh 生成）
 site/_pages/
 # corpus 工具统计产物（tools/corpus/ 生成）
-docs/research/verification/corpus_stats.json
+docs/zh/research/verification/corpus_stats.json
 # 临时工作树与本地评审产物（不属于源码树，不要提交）
 .worktrees/
 ccfa-review-reports/
@@ -58,8 +58,10 @@ tools/virgl/
 # Local crash-repro logs from diagnosing the multi-lane fault
 .diag/
 
-# Compiler dependency output accidentally emitted in the repository root
-/*.d
+# Compiler dependency output accidentally emitted in the repository root or subtrees
+*.d
+.debug-journal.md
+httpd.log
 # Locally built shared libraries and Python bytecode/cache
 *.so
 *.so.*

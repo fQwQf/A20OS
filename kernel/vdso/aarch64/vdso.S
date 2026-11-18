@@ -140,7 +140,7 @@ __vdso_gettimeofday:
  * the id — and the vvar page the vDSO may read is one global page shared by
  * every CPU (kernel/mm/vdso.c), which cannot hold a per-CPU value.  *x0 and
  * *x1 are therefore left untouched: a plausible wrong CPU 0 is worse than no
- * answer at all (docs/security/hardening.md).
+ * answer at all (docs/zh/security/hardening.md).
  * See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,%function

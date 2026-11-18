@@ -144,8 +144,12 @@ def _rpc(host: str, op: int, payload: bytes = b"", *, expected_epoch: int | None
 
 
 def _profile(value: str) -> dict:
-    path = Path(value) if "/" in value or value.endswith(".toml") else (
-        REPO_ROOT / "vm-profiles" / f"{value}.toml")
+    if "/" in value or value.endswith(".toml"):
+        path = Path(value)
+    else:
+        new_path = REPO_ROOT / "instances" / "vm-profiles" / f"{value}.toml"
+        old_path = REPO_ROOT / "vm-profiles" / f"{value}.toml"
+        path = new_path if new_path.exists() else old_path
     try:
         with path.open("rb") as src:
             profile = tomllib.load(src)

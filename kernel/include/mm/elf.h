@@ -272,7 +272,7 @@ typedef struct {
  * PT_A20_START_INFO is a native-ABI program whatever the administrator has
  * provisioned, and one without it is a Linux-ABI program.  Deriving it is
  * what lets the channel treat the two as separate rows of one registry
- * instead of as "foreign" and "not foreign" -- see docs/kernel/exec-xlator/
+ * instead of as "foreign" and "not foreign" -- see docs/zh/kernel/exec-xlator/
  * 04-extending.md for why that distinction has to exist before a native-ABI
  * translator exists, not after.
  *

@@ -1,16 +1,13 @@
 # Development launch, VirtualBox image, and GDB entry points.
 #
 # The per-arch run/debug targets are thin compatibility wrappers around the
-# declarative instances in instances/*.toml (see docs/dev/instances.md).  New
+# declarative instances in instances/*.toml (see docs/zh/dev/instances.md).  New
 # configurations should be added as instance files and launched with
 # `tools/a20 run <instance>`; the generic variable-driven `run` target and
 # the *_impl targets below remain the execution engine shared by
 # `make run ARCH=...` and tools/a20.
 
-.PHONY: run _run_impl _debug_impl _qemu_argv _qemu_argv_debug \
-	run-nommu-riscv64 run-nommu-loongarch64 \
-	run-nommu-aarch64 run-nommu-arm64 run-nommu-x86_64 \
-	run-nommu-arm32 run-nommu-riscv32
+.PHONY: run _run_impl _debug_impl _qemu_argv _qemu_argv_debug run-nommu-riscv64 run-nommu-loongarch64 run-nommu-aarch64 run-nommu-arm64 run-nommu-x86_64 run-nommu-arm32 run-nommu-riscv32
 
 # run-<arch> boots the text instance; BRINGUP=1 selects the -bringup variant.
 define A20_RUN
@@ -74,11 +71,11 @@ pc-rescue-iso: $(if $(filter 1,$(BRINGUP) $(RAMFS_USER)),kernel-only,dev-build)
 # BIOS or UEFI alike.  The UEFI disk below is the better artifact where it can
 # be used -- its ESP hands the kernel the ACPI RSDP that GRUB 2.12 drops -- but
 # it is built for the qemu-virt board, so pc-rescue-disk stays the generic
-# thin-client route described in docs/platforms/x86_64-pc.md.
+# thin-client route described in docs/zh/platforms/x86_64-pc.md.
 pc-rescue-disk: dev-build
 	@mkdir -p build/x86_64-pc
 	A20_X86_LOG_MB=$(LOG_PARTITION_MB) A20_LOG_SESSION=$(KLOG_SESSION_NUM) tools/boot/mk_grub_disk_image.sh \
-		$(KERNEL_ELF) build/x86_64-pc/a20os-rescue-disk.img $(FAT32_IMG)
+		$(KERNEL_ELF) build/x86_64-pc/a20os-rescue-disk.img $(if $(filter 1,$(RAMFS_BUSYBOX)),,$(FAT32_IMG))
 	@echo "rescue disk ready: build/x86_64-pc/a20os-rescue-disk.img"
 
 # The BOOTX64.EFI disk at a path an instance can name in [target].boot_media.

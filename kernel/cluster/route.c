@@ -1,7 +1,7 @@
 /* Bounded exact-match node routes and immutable local identity.
  * Hash collisions are rejected. Configuration is serialized without holding
  * an IRQ-disabled lock over adapter startup; failed setup is rolled back.
- * Read-side lookup never allocates. See docs/cluster/03-kernel-impl.md. */
+ * Read-side lookup never allocates. See docs/zh/cluster/03-kernel-impl.md. */
 #include "cluster/clx_internal.h"
 #include "cluster/udp.h"
 

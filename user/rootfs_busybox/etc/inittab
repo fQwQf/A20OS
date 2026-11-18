@@ -1,0 +1,6 @@
+# BusyBox owns PID 1, child reaping, shell restart and shutdown.
+::sysinit:/bin/sh /etc/init.d/rcS
+::respawn:-/bin/sh
+::ctrlaltdel:/bin/reboot
+::shutdown:/bin/sync
+# The kernel's reboot syscall performs the final VFS shutdown.

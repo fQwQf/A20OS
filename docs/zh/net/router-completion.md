@@ -1,0 +1,197 @@
+# F-Stack 实例统一与软路由补全
+
+本工作在 `codex/fstack-router` 独立 worktree 进行。目标是 64 位非嵌入式实例统一使用 F-Stack，并完成软路由功能与运行验证；编译通过不代替网络运行验证。
+
+用户确认按用途划分，并进一步明确 **32 位保留 lwIP**。因此桌面、服务器、发布/基准和普通带 MMU 的 64 位虚拟机使用 F-Stack；32 位、NOMMU 与明确的嵌入式板卡保留 lwIP，MCU 默认 none。静态驱动打包不等于嵌入式用途。
+
+## 验收范围
+
+| 项目 | 所需证据 | 状态 |
+|---|---|---|
+| 64 位非嵌入式实例统一后端 | 实例检查、四架构真实 BSD 内核编译及 QEMU 网络收发 | 基础迁移完成 |
+| BSD 网卡 IPv4 分片 NAT | 重组后过滤/NAT；乱序、重叠、超时、配额及回包验证 | x86_64 双网口 QEMU 通过 |
+| BSD 连接容量 | 可配置预算、满表行为、数千连接负载及回收 | 4096 / 16384 条双网口 QEMU 通过 |
+| PPPoE 宽带接入 | discovery/session、认证、MTU、IPv6CP、IPCP DNS 与断线重连 | Linux PAP、CHAP 双栈和 IPv4 回归通过 |
+| IPv6 | RA/SLAAC、DHCPv6-PD 与 LAN 前缀/路由发布的对端验证 | WAN RA/SLAAC、Kea 委派与续租、Linux LAN 自动地址与转发、租约撤销和重编号通过 |
+| 策略路由 | 多 FIB 与源策略、IPv4/IPv6、正反向及阴性对照 | IPv4 和 IPv6 转发、本机 TCP/UDP 双 WAN 均通过 |
+| LAN DHCP 与 DNS | 原版服务、Linux LAN 客户端、上游转发、服务重启 | dnsmasq DHCPv4、DNS A 转发和租约文件恢复通过 |
+| WAN 配置与恢复 | DHCP/静态配置、租约更新、链路恢复、服务监督与持久配置 | IPv4 DHCP、静态配置和开机恢复通过。IPv6 PD 的两条 LAN 均通过跨重启前缀撤销和重编号验证 |
+| 稳定性与性能 | 多客户端持续流量、吞吐/延迟/丢包/内存、故障恢复 | VirtIO-net 双 LAN 30 分钟通过，另有 OVMF/E1000e 路由镜像回归 |
+| 真机验证 | 具体硬件 PCI ID、双网口收发、中断/链路恢复和长时负载 | 待硬件验收 |
+
+## 初始审计
+
+- Makefile 支持 x86_64 BSD router，但实例校验器仍拒绝 router，需统一。
+- BSD 对象编译工具写死 amd64 机器头、x86 指令选项和宿主 binutils。切换 RISC-V/AArch64/LoongArch 实例前必须完成实际移植。
+- 现有文档含历史状态：README 与实例说明还声称 BSD 不能构建，部分状态页尚未同步已实现的动态 NAPT/ICMP RELATED。后续以源码和本 worktree 新证据更新。
+- 原有三节点证据路径未随仓库提交；本工作重新生成验证结果，不沿用口头通过结论。
+
+构建及运行证据保存在本 worktree 的 `build/evidence/fstack-router/`。
+
+## 实例迁移进展
+
+- 已将普通 64 位实例明确设为 BSD，普通 ARM32/RV32 实例明确保留 lwIP；`NET_INSTANCE` 同时传递 NOMMU，CLI 已允许 BSD router。
+- 四个 64 位架构均已通过真实内核网络测试：TCP/UDP 与 IPv6 回环、512 个空闲 socket、四路外部 TCP 共 256 KiB、外部 UDP 16×512 B、正常关机。这些是网络基础回归，不代表桌面应用、软路由转发或真机性能已验收。
+- 修复静态驱动部署未启动 BSD 执行器、UMA 引导元数据初始化顺序，以及 LoongArch 新内核线程中断关闭导致远端 TLB shootdown 超时。
+- LoongArch 使用显式的任务 TLS 访问器，其余架构使用编译器 emulated TLS；两种路径的所有者隔离、配额、回收已通过 ASan/UBSan host 测试。
+- 32 位 BSD 试验已按用户最新范围撤回；保留试验日志用于追溯，不列为支持能力。
+- ARM32/RV32 的 lwIP 构建与启动/关机 smoke 已通过。修复了 lwIP 的`set_flags` 声明与后端接口不一致的问题：RV32 的 `uint32_t` 是 unsigned long，用 unsigned 代替会导致函数指针类型检查失败。
+
+## 本轮验证记录
+
+四架构最终运行结果均为 PASS（2 vCPU）。下列目录位于`build/evidence/fstack-router/`，各 `manifest.json` 包含完整内核 SHA-256、 QEMU 参数、逐项通过结果；串口日志为 `serial.log`。
+
+| 架构 | 证据目录 | 内核 SHA-256 前 16 位 |
+|---|---|---|
+| x86_64 | `x86_64-final-network-02` | `278b56f5fefe30ae` |
+| AArch64 | `aarch64-final-network-02` | `5dd57aa3f26c09d4` |
+| RV64 | `riscv64-final-network-02` | `3c8873a49a1b642c` |
+| LoongArch64 | `loongarch64-final-network-02` | `a50b0a61892bbd30` |
+
+复现构建：`make -j6 ARCH=<架构> NET_STACK=bsd NR_CPUS=2 DRIVER_DEPLOYMENT=embedded RAMFS_USER=1 RAMFS_NET_TESTS=1 kernel-only`， LoongArch64 追加 `UART_CMDLINE=y`。测试命令为`python3 tools/net/tests/test-bsd-backend-qemu.py --arch <架构> --kernel <实际生成的内核路径> --out <新证据目录>`。
+
+- `tools/a20 check`：全部 103 个实例通过。
+- `python3 -m unittest discover -s tools/tests -p test_a20.py`：共 212 项， 211 项通过、1 项跳过；最新 32/64 位策略又单独通过 `TestRepositoryInstances`。
+- `runtime-host-01`：内存、编译器 TLS、显式 TLS 的 ASan/UBSan 测试全部通过，`inputs.json` 的源码哈希已复核。
+- `tools/a20 test smoke-arm32` 与 `tools/a20 test smoke-riscv32`：lwIP 构建、启动检查与正常关机通过；这两项不是 32 位完整网络性能验收。
+
+## 双栈策略路由验证
+
+`policy-v4-icmp/manifest.json` 和同目录的三份链路抓包记录 x86_64 三网口回归。两个 LAN 源访问同一个目的地址时分别走预期的 WAN，另一条 WAN 无对应报文。同一套测试覆盖回 LAN、TTL 超时回包、空表回退、最长前缀、metric 接管与替换、撤销规则后使用主表，以及拒绝不可达的备用网关。命令见 [IPv4 路由说明](routing.md)。
+
+`policy-v6/manifest.json` 和同目录的抓包记录 IPv6 三网口回归。两个 WAN 使用相同的链路本地网关。测试覆盖源与目的规则、空表回退、反向转发、Hop Limit 超时回包、网关拒绝、最长前缀、metric 接管与替换，以及双栈共用表号时的删除隔离。
+
+`policy-local-final/manifest.json` 记录本机套接字的 7 项三网口回归。绑定源地址的 IPv4 和 IPv6 TCP/UDP 连接在增删规则后切换出口，原连接继续收发。目的策略也可为未绑定套接字选择只在附加表中存在的路由。测试同时覆盖 IPv6 显式绑定网口及 TCP 使用策略出口 MTU 通告 MSS。
+
+## IPv4 分片验证
+
+BSD 网卡入口先校验和重组，出口在重新分片前处理 NAT。重叠及冲突终点丢弃整组，队列按入口和 FIB 隔离，等待分片不占用 NIC RX token。出口沿用入站 DNAT 的连接绑定，避免为已改写的正向元组重复建表。
+
+- `fragment-wire-04/manifest.json` 记录双网口 x86_64 回归的 10 项通过结果。正反向 UDP 报文均超过 MTU，测试验证内容、地址、端口、TTL、IPv4/UDP 校验和和重分片，并覆盖过滤、重叠、配额、超时、跨接口隔离和故障后转发。同目录的 `link0.pcap`、`link1.pcap` 是两侧实际报文。
+- `fragment-{x86_64,aarch64,riscv64,loongarch64}-final` 记录四个架构的 TCP/UDP/IPv6 回环、并发外部收发和关机回归。
+- `fragment-nat-host-03` 覆盖 TCP DNAT 正向出口复用，默认、嵌入式和高时钟三个生产状态机配置均通过。独立过滤回归为 `fragment-filter-host-02`。
+- 实现边界和命令见 [NAT 说明](nat.md)。lwIP/native 保持分片保护策略。
+
+## 连接跟踪容量验证
+
+BSD 路由默认 4096 条，可在构建时通过 `NET_CONNTRACK_ENTRIES` 或实例`[net].conntrack_entries` 选择容量。空闲链表使分配无需扫描全表， BSD 执行器在无流量时也定期回收。诊断输出报告容量和表的静态字节数。
+
+| 容量 | 条目与索引 | 初次填满 | 超时回收 | 二次填满后累计建连 | 证据目录 |
+|---|---:|---:|---:|---:|---|
+| 4096 | 231424 B | 4096 | 4096 | 8192 | `conntrack-wire-default-final` |
+| 16384 | 925696 B | 16384 | 16384 | 32768 | `conntrack-wire-max-final` |
+
+双网口 x86_64 QEMU 用真实 UDP 报文验证唯一 WAN 映射、满表拒绝新流、存量映射回包和无流量时的回收。两组均为零驱逐。为缩短测试，填满后将 UDP 空闲超时设为 2 秒。该测试用于验证容量与状态，吞吐量另行验收。
+
+四架构 BSD 网络回归位于 `conntrack-sockets-<arch>-final`。主机 NAT/过滤回归位于 `conntrack-nat-final` 和 `conntrack-filter-final`。实例 CLI 共 214 项测试，213 项通过、1 项跳过。ARM32/RV32 lwIP 启动关机 smoke 通过。
+
+## PPPoE 数据面准备
+
+BSD TUN 支持 IPv4 接口路由。配置 TUN 的 /32 地址后，可通过`RTM_NEWROUTE` 指定出口设备并添加无网关默认路由。Linux 主路由表 254 同步到 F-Stack RIB，关闭 TUN 时清除与该接口关联的路由。 TUN IPv4 复用 BSD 重组、过滤和 NAT；普通网卡的 AF_PACKET 捕获由 BSD 执行器交付给套接字，并使用正确的公开接口索引。
+
+`tun-route-wire-07` 用双网口 x86_64 QEMU、无 IPv4 地址的 WAN 网卡和固定 PPPoE 会话验证了 1492 字节 MTU、LAN 出口 NAT、回包以及关闭后重新安装默认路由。会话封装和 MTU 依据 [RFC 2516](https://www.rfc-editor.org/rfc/rfc2516)。证据目录包含两侧抓包和内核哈希。此回归使用固定会话参数，PADI/PADO、 LCP、PAP/CHAP 和 IPCP 的对端协商见下一节。
+
+构建方法与分片回归相同，运行`python3 tools/net/tests/test-bsd-router-tun.py --kernel <kernel.bin> --out <新证据目录>`。四架构网络回归位于 `tun-socket-<arch>-dataplane`，分片转发复测位于 `tun-fragment-final`。
+
+## PPPoE 拨号与认证
+
+`pppoe` 已接入 BSD TUN。真实 Linux `pppoe-server` 与 `pppd` 对端的 PAP 和 CHAP-MD5 两套回归记录为 `pppoe-pap-racefix`、`pppoe-chap-racefix`。两套测试均完成 IPCP、超过 MTU 的 LAN UDP 往返、对端断线换地址、复用原五元组以及错误密码拒绝。CHAP 测试还暂停了对端进程，验证 LCP Echo 超时会触发重新拨号。
+
+断线后从 `198.18.0.10` 改拨到 `198.18.0.11`。TUN 关闭清除相应出口的 MASQUERADE 绑定，保留其他接口的状态。生产状态机的选择性清理验证位于 `pppoe-nat-host-final`。使用和复现方法见 [PPPoE 配置](pppoe.md)。
+
+固定会话复测曾在第二次打开 TUN 时触发内核异常，回溯位于`pppoe-tun-regression`。`complete()` 现于发布完成并释放锁之前收集唤醒，避免请求者返回后仍访问栈上的完成对象。修复后 20 轮连续打开、关闭和重开均通过，记录为 `pppoe-tun-fixed-01` 至 `pppoe-tun-fixed-20`。四架构 BSD 网络回归为 `pppoe-sockets-<arch>-racefix`。ARM32/RV32 的 lwIP 启动关机 smoke 通过。双栈和 DNS 的后续验证见下文。
+
+## WAN DHCPv4 和载波事件
+
+`dhcp4-wan-virtio-net-pci-verified`、`dhcp4-wan-e1000-verified` 和`dhcp4-wan-e1000e-verified` 保存三网口 QEMU 的抓包。原版 BusyBox 在没有 IPv4 地址的 en3 上取得租约，并从租约地址发出单播续租。测试从 LAN 注入同一事务的 ACK，确认客户端只接受 WAN 上的回应。IPv4 UDP 绑定 WAN 后，发往其他接口的请求返回不可达。QMP 模拟物理链路中断和恢复，`RTM_NEWLINK` 与`SIOCGIFFLAGS` 都能区分载波变化和管理员的 UP 状态。
+
+E1000 多卡验证复现了共享设备状态导致 en3 报文从第三张卡发出的问题。驱动改为每设备分配状态后，三个网口各自用配置的地址与 MAC 回应 ARP，en3 载波中断与恢复也从正确的接口报告。
+
+## IPv4 WAN 服务监督与持久配置
+
+`wan-config-virtio-net-pci-verified` 和 `wan-config-e1000e-verified` 各记录三次 x86_64 QEMU 启动及链路抓包。DHCP 用例验证从配置盘启动、默认路由的实际转发、续租更换 DNS 后的查询、载波丢失后的撤销、恢复后采用不同地址和网关、客户端被终止后重启，以及短租约的续租与失效清理。静态用例验证配置从同一磁盘重新加载、链路恢复、正常退出和配置安装冲突时的回滚。运行方法见 [WAN 配置](router.md#开机配置和链路恢复)。
+
+## WAN IPv6 RA 与 SLAAC
+
+`ra-before` 在原内核收到有效 WAN RA 后未观察到 SLAAC DAD。`ra-wire-final`验证了通过 `a20.ipv6_ra=en3` 启用后，LAN RA 和错误 Hop Limit 的 RA 被拒绝。有效 RA 生成了可达的 WAN 地址和可用的默认路由。PCAP 记录了双向 LAN 转发、零寿命撤销、无续期自然过期和收到新通告后恢复。同一 x86_64 内核通过了 TUN 与 Linux CHAP PPPoE 回归。四个 64 位架构通过 BSD socket 回归，ARM32 和 RV32 通过 lwIP 启动关机 smoke。
+
+`rs-before` 在没有主动通告的对端上复现了 WAN 无法主动发现路由器。`rs-wire-final` 验证了 WAN 上的 Router Solicitation 组播、校验和及重试，错误 Hop Limit、错误链路层选项和零寿命通告均不会终止探测。对端在收到第二次请求后才发送有效通告。随后观察到 SLAAC、双向转发和停止探测。管理命令关闭并重开 WAN 时，重新发送了三次请求。
+
+
+## DHCPv6-PD 首次租约
+
+`pd-stock-02` 复现了原版 BusyBox 因 `RTM_GETADDR` 缺少 WAN IPv6 地址而无法开始。BSD 地址现在从实际接口地址表读取，返回给 Linux 兼容层，并保留链路本地作用域、前缀长度和 DAD 状态。`pd-route-final`验证了 BusyBox 读到链路本地和 SLAAC 地址，与 Kea 完成四报文交换，并用收到的 /56 在 LAN 配置一个 /64 后与 Linux 双向通信。测试中的 LAN 地址和上游返程路由由测试程序配置。
+
+`pd-renew-baseline` 进一步复现了续租失败。BusyBox 在切换到 IPv6 UDP 续租套接字时请求绑定 `en3`，当时 BSD 的 `SO_BINDTODEVICE` 对次级网卡返回 `EOPNOTSUPP`。四个 64 位架构通过 BSD socket 回归，x86_64 通过 RA 回归，ARM32 和 RV32 通过 lwIP 启动关机测试。
+
+### 续租与 IPv6 UDP 绑定
+
+`pd-renew-bind-wire` 验证了 BusyBox 同时申请 IA_NA 和 IA_PD 时，可通过绑定 `en3` 的套接字接收第一个单播续租 Reply。双网口对照还验证了绑定状态拒收 LAN 报文、拒绝从 LAN 作用域发送，以及解除绑定后使用 Linux 公共接口索引进行 LAN 收发。四个 64 位架构通过 BSD socket 回归。
+
+`pd-renew-01` 记录了 BusyBox 1.37.0 使用 `-r no` 时在其 UDP 发送函数中解引用空地址指针的用户态崩溃。首次仅前缀委派继续通过。
+
+
+### 仅前缀续租与 IPv6 原始套接字
+
+原版 odhcp6c 使用 `-N none -P 56 -F` 与 Kea 交换报文。`pd-odhcp6c-stock-verified` 在 WAN 抓包中确认四报文交换和续租都只含 IA_PD，Kea 对 `2001:db8:400::/56` 返回 24 秒首选寿命和 36 秒有效寿命。`bound` 脚本事件收到扣除启动等待后的剩余寿命，`updated` 事件收到续租后的 24 秒和 36 秒。测试仍手动将该前缀的第一个 /64 配到 LAN 并验证双向转发。[OpenWrt odhcp6c](https://github.com/openwrt/odhcp6c)
+
+`odhcp-netlink-raw-wire-verified` 从第二张网卡收到用户态发送的 ICMPv6 报文并校验了校验和、跳数与接口作用域，同时验证了 ICMPv6 过滤和接收。该测试还使用 `NETLINK_ROUTE` 数据报套接字连接内核、订阅链路组，观察网口关闭事件，并在退订后确认未收到重开事件。该轮使用内核处理 WAN RA，尚未验证 odhcp6c 通过 SIGIO 响应链路变化的恢复路径。
+
+
+### LAN 地址与直连前缀的租约寿命
+
+`lan-addr6-lifetime-shared` 通过 rtnetlink 在同一 LAN /64 上配置两个有寿命的地址。重复的排他添加返回 `EEXIST`。测试随后续租其中一个地址，越过原有效期后仍收到该地址的回包和该前缀的转发报文。新租约到期后，LAN 上不再出现目标主机的邻居请求、转发报文或路由器地址的回包。主机端测试覆盖 `IFA_CACHEINFO` 的寿命校验和响应布局。该测试直接设置地址寿命，仍需将 DHCPv6-PD 租约事件接到 LAN 配置和 RA。
+
+
+### LAN 自动配置、撤销与重编号
+
+`pd-lan-verified` 使用 A20OS 路由器、运行 Kea 与 radvd 的 Linux WAN、运行 SLAAC 的独立 Linux LAN 三个节点。原版 odhcp6c 续租只带 IA_PD， Linux LAN 从子网编号 `0x2a` 对应的 /64 自动生成地址，并使用通告的默认路由与 WAN 通信。抓包校验了通告的跳数、链路本地源地址、校验和、前缀寿命与网口隔离。测试撤销并恢复 WAN 默认路由时，LAN 的默认路由随之变化，委派前缀继续有效。
+
+停止 Kea 后，通告撤销过期前缀，Linux 地址和 A20OS 的 LAN 地址到期。 Kea 改用另一个 /56 恢复后，原有发布进程重新获得委派，Linux 使用新地址恢复通信。正常退出时，发布进程撤销新通告并移除它管理的地址。这轮同时验证了 UDP 546 复拨需要的 Linux `SO_REUSEADDR` 和`SOCK_CLOEXEC` 行为。
+
+`pd-lan-persistent-final` 在同一 /56 委派下为两条 LAN 分配不同的/64 并分别抓包。停止 Kea 后强杀并重启管理进程，两条 LAN 收到旧前缀撤销，路由器清理自己管理的旧地址。保持 Linux 对端运行，终止路由器虚拟机并使用原磁盘重新启动，新的通告在 Kea 回应前继续撤销各自的旧前缀。Kea 更换委派后，两条 LAN 分别通告新 /64，独立的 Linux LAN 客户端通过 SLAAC 恢复与 WAN 的通信。
+
+
+### 双栈 PPPoE 与 IPCP DNS
+
+`pppoe-dual-chap-final` 和 `pppoe-dual-pap-silent` 使用 Linux pppoe-server 和 pppd。在首次拨号和重拨中，抓包确认双方交换 IPv6CP 配置确认，对端建议的地址标识得到采用，IPv6 数据使用 PPP 协议号 `0x0057`。Linux 可以探测 A20OS 的 PPP 链路本地地址， LAN 可通过 IPv6 默认路由和 PPP 到达 WAN；同一会话也通过 IPv4 NAT 转发。暂停 PAP 对端会触发 LCP Echo 超时，恢复后重拨成功。
+
+IPCP 确认了 `192.0.2.53` 和 `192.0.2.54`。解析器文件在重拨后重新生成并在正常停止后清理。`pppoe-ipcp-dns-reject` 验证对端拒绝 DNS 选项时 IPv4 仍可拨号和转发。此轮 IPv6 转发使用测试配置的 LAN 前缀。PPP 上的自动委派与重拨恢复见下节。
+
+
+### PPP 上的前缀委派与链路恢复
+
+`pppoe-pd-verified` 使用 Linux pppoe-server、pppd、Kea 和独立 Linux LAN 主机。`pd-lan` 在 PPP 接口出现前启动，随后在 PPP 上从 Kea 取得并续租 `2001:db8:400::/56`，为 LAN 发布`2001:db8:400:2a::/64`。Linux 客户端通过 SLAAC 获取地址并与 WAN 双向通信。
+
+关闭 Linux PPP 对端时，旧 TUN 的 `RTM_DELLINK` 通知带原接口索引， LAN 收到旧前缀和默认路由的撤销通告。重拨复用了接口索引，原发布服务启动新的 DHCPv6 客户端，取得 `2001:db8:500::/56` 并恢复转发。抓包校验了两次拨号的 DUID、IAID 和委派寿命。模拟 ISP 的返程路由由测试对端配置。Kea 对端测试保留 pppd 协商出的本地链路地址，将其以单地址形式配置，以免 Kea 绑定到 Linux PPP 地址对中的远端地址。
+
+## 多客户端持续负载与链路恢复
+
+`soak-smoke-04` 在 VirtIO-net KVM 拓扑中启动两台独立 Linux LAN 客户端和一台运行 BusyBox udhcpd 的 Linux WAN。两台 LAN 各持续 30 秒校验 TCP 和 UDP 回显。两路 TCP 单向有效负载分别为 6.57 和 6.71 MiB/s，UDP 回显 p99 往返延迟分别为 14.04 和 11.42 ms。两台客户端各发出 30 次 ICMP 探测，全部收到模拟 ISP 的回应。 Linux WAN 的 TCP 表同时看到两个来自同一 NAT 地址的不同源端口， DHCP 服务在负载期间记录初始应答和续租。
+
+注入 WAN 载波中断后，两台客户端都观察到探测序列缺口。恢复载波后， DHCP 地址和默认路由恢复，两条 LAN 均可重新建立 TCP 和 UDP 会话。缩短空闲超时后，17 条测试连接全部回收。采样期间 F-Stack 后备分配失败为零。长时间验收沿用同一个测试入口，默认负载 30 分钟。[复现命令](https://github.com/fQwQf/a20-tests/blob/main/tools/net/tests/README.md#f-stack-router-soak)
+
+测试还定位了 IPv4 ICMP Echo 回包在入站反向转换后再次被 NAT 的问题。修复后，回包保留远端源地址。宿主回归使用两台客户端相同的 Echo 标识符，验证 WAN 标识符分配、回包归属及相关 ICMP 错误引用中的标识符和校验和恢复。
+
+首轮长测 `soak-virtio-30m` 在约 90 秒出现一批出口丢弃，两条 UDP 连接随后停止，而 TCP 继续转发。约 19 分钟后串口采样超时，整轮失败。 UDP 探针现记录每次发送和超时，保留负载并校验后续回显，串口采样单独记录缺测。用于定点排查的 `soak-ttl-nat-repro` 复现了另一条确定的出口问题。启用 NAT 时，BSD 输出钩子收到的本机 ICMP Time Exceeded 报文还没有填 IPv4 首部校验和，RELATED 校验因此丢弃了它。在钩子中填好校验和后，`soak-ttl-nat-fixed` 验证了回包、引用的原 UDP 报头、校验和及原有策略路由。
+
+`soak-virtio-loss-30m` 在内核 `9991fd418d576085` 上通过 7 项检查。两台 Linux 客户端同时运行 TCP、UDP 和 ICMP，四条 TCP/UDP 流各持续 1800 秒。TCP 吞吐为单向回显有效负载，p99 为往返延迟。
+
+| Linux 客户端 | TCP 吞吐（MiB/s） | TCP p99（ms） | UDP p99（ms） | UDP 超时／发送 | ICMP 应答／发送 |
+|---|---:|---:|---:|---:|---:|
+| LAN A | 6.93 | 14.97 | 13.72 | 13 / 453663 | 1799 / 1800 |
+| LAN B | 7.03 | 12.29 | 11.75 | 13 / 471974 | 1799 / 1800 |
+
+稳态过滤器丢弃和三网口驱动报告的丢弃均为零，端到端探针仍记录了上表的超时。51 次有效内存采样覆盖到 1800.33 秒，另有两次串口采样超时。F-Stack 后备分配失败为零，预热后在用内存为 1,391,828 至 1,392,413 字节。WAN 在负载期间收到 115 次 DHCP ACK，包含首次租约和续租。断开模拟 WAN 载波后默认路由撤销，恢复载波约 0.30 秒后 DHCP 完成配置，两个 LAN 的 TCP 和 UDP 均恢复。缩短空闲超时后，18 条测试连接全部回收。
+
+## x86_64 PC 启动镜像
+
+`router-x86_64-pc` 使用原生 UEFI、内存根文件系统和 F-Stack 路由模式。普通路由器内核随镜像提供 `netctl`、`wanctl`、`pppoe` 和 `pd-lan`，可通过 `RAMFS_DISTRO=1` 挂载持久配置卷。实例按 PC 板级现有验证范围配置单核。仓库的 104 个实例和 UEFI GPT/ESP 打包测试均通过。[打包和真机验收步骤](router.md#x86_64-pc-的-uefi-镜像)
+
+`pc-router-uefi-final` 直接启动打包生成的磁盘镜像，使用 OVMF、SATA 和三张模拟 Intel 82574L 网卡（PCI `8086:10d3`）。串口日志记录了每张网卡的 MSI-X 向量和 SATA 配置卷挂载。两台 Linux LAN 客户端同时完成 30 秒 TCP、UDP 回显，各收到 30/30 次 ICMP 应答。断开模拟 WAN 载波后，默认路由撤销。恢复载波后约 0.60 秒重新配置 WAN，两台客户端的流量恢复，空闲连接全部回收。双物理网卡验收仍需可用的实体测试机与对端。
+
+修复 ICMP 输出首部后重新打包。`pc-router-uefi-loss-final` 对新镜像再次通过 8 项验收，镜像 SHA-256 前 16 位为 `e93acc2d14c5b48c`。两条 UDP 流分别丢失 2/1248 和 0/1879 个探针，两台客户端的 ICMP 均为 30/30，稳态过滤器出入站丢弃计数均为零。
+
+## LAN DHCP 与 DNS 的最终内核回归
+
+`lan-services-fstack-second` 使用与 30 分钟长测相同的 F-Stack 内核`9991fd418d576085`。原版 dnsmasq 2.91 在 A20OS 上向 Linux LAN 客户端发放 `192.168.10.53`、默认网关和 DNS 地址。抓包记录同一 DHCP 事务的 Discover、Offer、Request 和 ACK。Linux 客户端通过路由器解析了上游专属名称。停止 dnsmasq 后，租约保留在 `/extra`，重启服务后同一客户端重新取得原地址，并解析了另一个上游名称。WAN 抓包记录两次 DNS 请求和回应。[复现命令](lan-services.md#f-stack-三节点复验)

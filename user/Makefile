@@ -28,7 +28,7 @@ MUSL_BUILD_WAS_OVERRIDDEN := $(if $(filter undefined,$(origin MUSL_BUILD)),0,1)
 MUSL_CRT := $(MUSL_BUILD)/lib
 
 ARCH_STAMP := $(BUILD_DIR)/.build-id
-ARCH_BUILD_ID := $(ARCH):$(NOMMU):$(OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)
+ARCH_BUILD_ID := upstream-busybox-1.37:$(ARCH):$(NOMMU):$(OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)
 
 .PHONY: arch-stamp-refresh
 arch-stamp-refresh:
@@ -101,12 +101,6 @@ MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-
 MUSL_CONFIG_CFLAGS_riscv32 := $(OPT) -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -static
 MUSL_CONFIG_CFLAGS_ppc64le := $(OPT) -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS := $(MUSL_CONFIG_CFLAGS_$(ARCH)) -D__A20OS__
-
-ifeq ($(NOMMU),1)
-ifeq ($(ARCH),aarch64)
-TLSE_NOMMU_CFLAGS := -mgeneral-regs-only
-endif
-endif
 
 CCACHE ?= $(shell command -v ccache 2>/dev/null)
 CCACHE_PREFIX := $(if $(CCACHE),$(CCACHE) ,)
@@ -214,7 +208,7 @@ RISCV32_LIBGCC_AR ?= $(RISCV_ELF_PREFIX)ar
 ifeq ($(origin LIBGCC),undefined)
 LIBGCC := $(shell $(RISCV32_LIBGCC_CC) $(ARCH_CFLAGS_riscv32) -print-libgcc-file-name 2>/dev/null)
 endif
-RISCV32_LIBGCC_VALID := $(shell $(PYTHON) ../tools/check-riscv-libgcc.py --ar $(RISCV32_LIBGCC_AR) "$(LIBGCC)" >/dev/null 2>&1; echo $$?)
+RISCV32_LIBGCC_VALID := $(shell $(PYTHON) ../tools/check/check_riscv_libgcc.py --ar $(RISCV32_LIBGCC_AR) "$(LIBGCC)" >/dev/null 2>&1; echo $$?)
 ifneq ($(RISCV32_LIBGCC_VALID),0)
 $(error RV32 requires an ELF32 RISC-V ILP32D LIBGCC archive; selected '$(LIBGCC)'. Set LIBGCC to a matching multilib archive)
 endif
@@ -230,7 +224,7 @@ endif
 # identity and the complete target/compiler configuration. An explicit
 # MUSL_BUILD override is allowed for a pre-provisioned matching tree, but is
 # never cleaned or repurposed by this makefile.
-USERLAND_REQUIRED_INPUTS := external/musl/configure external/sbase/util.h external/mksh-cvs2git/sh.h external/tlse/tlse.c
+USERLAND_REQUIRED_INPUTS := external/musl/configure
 USERLAND_MISSING_INPUTS := $(filter-out $(wildcard $(USERLAND_REQUIRED_INPUTS)),$(USERLAND_REQUIRED_INPUTS))
 ifneq ($(strip $(USERLAND_MISSING_INPUTS)),)
 $(error Missing userland submodules: $(USERLAND_MISSING_INPUTS). Run git submodule update --init --recursive from the repository root)
@@ -282,57 +276,22 @@ MUSL_CHECK_FILES := $(MUSL_CRT)/crt1.o \
                     $(MUSL_BUILD)/obj/include/bits/syscall.h \
                     $(MUSL_BUILD_STAMP)
 
-SBASE_DIR := external/sbase
-WGET_CMD_SRC := cmds/net/wget.c
-WGET_OBJ := $(OBJ_DIR)/cmds/net/wget.o
-WGET_CMD := $(BUILD_DIR)/wget
-LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*/*.c))
+# Common UNIX tools come from upstream BusyBox, including the download applet.
+UPSTREAM_APPLETS := basename cat chgrp chmod chown chroot cksum cmp comm cp cut date dd \
+    dirname du echo env expand expr false find fold grep head hostname id install kill \
+    link ln logger logname ls mkdir mkfifo mknod mktemp mv nice nl nohup od paste \
+    printenv printf pwd readlink rev rm rmdir sed seq setsid sleep sort split strings \
+    sync tail tar tee test time touch tr true tty uname unexpand uniq unlink \
+    uudecode uuencode wc which whoami xargs yes mount umount ps free dmesg \
+    reboot poweroff wget
+LOCAL_CMD_SRCS := $(filter-out $(addprefix cmds/core/,$(addsuffix .c,$(UPSTREAM_APPLETS))) cmds/net/wget.c,$(wildcard cmds/*/*.c))
 ARCH_CMD_SRCS := $(wildcard arch/$(ARCH)/cmds/*.c)
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
-
-SBASE_ALL_BINS := basename cat chgrp chmod chown chroot cksum cmp comm cp cut date dd \
-                  dirname du echo env expand expr false find fold grep head hostname \
-                  id join kill link ln logger logname ls mkdir mkfifo mknod mktemp mv \
-                  nice nl nohup od paste pathchk printenv printf pwd readlink rev rm \
-                  rmdir sed seq setsid sleep sort split sponge strings sync tail tar \
-                  tee test time touch tr true tty uname unexpand uniq unlink uudecode \
-                  uuencode wc which whoami xargs xinstall yes
-SBASE_BINS := $(filter-out $(LOCAL_CMD_NAMES),$(SBASE_ALL_BINS))
-SBASE_CMDS := $(addprefix $(BUILD_DIR)/,$(SBASE_BINS))
-SBASE_OBJS := $(addprefix $(OBJ_DIR)/sbase/,$(addsuffix .o,$(SBASE_BINS)))
-SBASE_LIBUTF_SRCS := $(wildcard $(SBASE_DIR)/libutf/*.c)
-SBASE_LIBUTIL_SRCS := $(wildcard $(SBASE_DIR)/libutil/*.c)
-SBASE_LIBUTF_OBJS := $(patsubst $(SBASE_DIR)/%.c,$(OBJ_DIR)/sbase/%.o,$(SBASE_LIBUTF_SRCS))
-SBASE_LIBUTIL_OBJS := $(patsubst $(SBASE_DIR)/%.c,$(OBJ_DIR)/sbase/%.o,$(SBASE_LIBUTIL_SRCS))
-SBASE_LIBUTF := $(OBJ_DIR)/sbase/libutf.a
-SBASE_LIBUTIL := $(OBJ_DIR)/sbase/libutil.a
-SBASE_CPPFLAGS := -DPREFIX=\"/\" \
-                  -D_DEFAULT_SOURCE \
-                  -D_NETBSD_SOURCE \
-                  -D_BSD_SOURCE \
-                  -D_XOPEN_SOURCE=700 \
-                  -D_FILE_OFFSET_BITS=64 \
-                  -I$(SBASE_DIR)
-SBASE_CFLAGS := $(CFLAGS) $(SBASE_CPPFLAGS)
-
-TLSE_DIR := external/tlse
-TLSE_OBJ := $(OBJ_DIR)/tlse/tlse.o
-TLSE_ARCH_CFLAGS_aarch64 := -mgeneral-regs-only -DLTC_NO_TABLES -DNO_TLS_FORWARD_SECRECY
-TLSE_ARCH_CFLAGS := $(TLSE_ARCH_CFLAGS_$(ARCH))
-TLSE_BASE_CFLAGS := $(filter-out -O0 -O1 -O2 -O3 -Os -Oz,$(CFLAGS))
-TLSE_OPT_aarch64 := -O0
-TLSE_OPT := $(if $(TLSE_OPT_$(ARCH)),$(TLSE_OPT_$(ARCH)),-O1)
-TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_CFLAGS) -fno-strict-aliasing -fno-strict-overflow -fwrapv \
-                -I$(TLSE_DIR) -fsigned-char \
-                -DTLS_AMALGAMATION \
-                -DNO_SSL_COMPATIBLE_INTERFACE \
-                -DNO_TLS_WITH_CHACHA20_POLY1305 \
-                -DNO_TLS_LEGACY_SUPPORT \
-                -DNO_TLS_13 \
-                -DNO_TLS_CLIENT_ECDHE \
-                -DNO_TLS_ECDSA_SUPPORTED \
-                -DNO_TLS_CURVE25519 \
-                -DNO_TLS_ROBOT_MITIGATION
+BUSYBOX_APPLETS := $(filter-out $(LOCAL_CMD_NAMES),$(UPSTREAM_APPLETS))
+BUSYBOX_BIN := $(BUILD_DIR)/busybox
+BUSYBOX_TOOL_TARGETS := $(addprefix $(BUILD_DIR)/,$(BUSYBOX_APPLETS))
+BUSYBOX_STAGE_STAMP := $(BUILD_DIR)/.busybox-applets
+BUSYBOX_JOBS ?= 4
 
 LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
 LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES) $(basename $(notdir $(ARCH_CMD_SRCS))))
@@ -660,25 +619,8 @@ INIT_MAIN_SRC := init.c
 INIT_EXTRA_OBJS := $(INIT_COMMON_OBJS)
 INIT_OBJ := $(OBJ_DIR)/init.o
 
-MKSH_DIR := external/mksh-cvs2git
-MKSH_SRCS := $(MKSH_DIR)/edit.c $(MKSH_DIR)/eval.c $(MKSH_DIR)/exec.c $(MKSH_DIR)/expr.c \
-             $(MKSH_DIR)/funcs.c $(MKSH_DIR)/histrap.c $(MKSH_DIR)/jobs.c $(MKSH_DIR)/lalloc.c \
-             $(MKSH_DIR)/lex.c $(MKSH_DIR)/main.c $(MKSH_DIR)/misc.c $(MKSH_DIR)/shf.c \
-             $(MKSH_DIR)/syn.c $(MKSH_DIR)/tree.c $(MKSH_DIR)/ulimit.c $(MKSH_DIR)/var.c \
-             $(MKSH_DIR)/strlcpy.c
-MKSH_OBJS := $(patsubst $(MKSH_DIR)/%.c,$(OBJ_DIR)/mksh/%.o,$(MKSH_SRCS))
-MKSH_PORT_HEADERS := $(wildcard ports/mksh/*.h ports/mksh/*.gen ports/mksh/*.inc)
-$(MKSH_OBJS): $(MKSH_PORT_HEADERS)
-MKSH_CFLAGS := $(CFLAGS) -Iports/mksh -I$(MKSH_DIR) \
-               -DMKSH_USE_AUTOCONF_H -DMKSH_DISABLE_DEPRECATED \
-               -DMKSH_UNEMPLOYED \
-               -DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599
-
-USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
-                             $(LOCAL_CMD_OBJS) $(ARCH_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
-                             $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
-                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) \
-                             $(HYP_GUEST_OBJ)
+USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(LOCAL_CMD_OBJS) $(ARCH_CMD_OBJS) \
+    $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) $(HYP_GUEST_OBJ) $(OBJ_DIR)/crypto/md5.o
 
 ifneq ($(wildcard $(FF_DIR)/src/fastfetch.c),)
 FF_AVAILABLE := 1
@@ -688,15 +630,18 @@ FF_AVAILABLE :=
 FASTFETCH_TARGET :=
 endif
 
-all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(FASTFETCH_TARGET)
+all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/sh $(BUSYBOX_TOOL_TARGETS) $(LOCAL_CMDS) $(FASTFETCH_TARGET)
 
 fastfetch: build_dir $(FF_CMD)
 
 build_dir: $(ARCH_STAMP)
 	@mkdir -p $(BUILD_DIR) $(OBJ_DIR)
 
+# GNU make executes the whole recursive recipe under -n. Check only compact
+# flags (not long options like --no-print-directory) before any lock or write.
 musl_prepare:
-	@set -e; \
+	@case '$(filter-out --%,$(firstword $(MAKEFLAGS)))' in *n*) exit 0 ;; esac; \
+	set -e; \
 	lock_file="$(MUSL_BUILD).lock"; \
 	if command -v flock >/dev/null 2>&1; then \
 		mkdir -p "$(dir $(MUSL_BUILD))"; \
@@ -744,15 +689,24 @@ musl_prepare:
 		echo "[MUSL] build-$(MUSL_VARIANT) ready"; \
 	fi
 
-$(BUILD_DIR)/mksh: $(MKSH_OBJS) | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(MKSH_OBJS) $(CRT_END) $(LIBC)
+# BusyBox remains upstream source, with the same musl CRT as A20 test programs.
+# The RISC-V compiler can target bare metal while these binaries implement
+# the Linux ABI. Upstream uses __linux__ to select headers and OS behavior.
+BUSYBOX_CFLAGS = $(CFLAGS) -D__linux__ $(FF_LINUX_INC) -idirafter /usr/include
+.PHONY: busybox busybox-stage
+busybox: $(BUSYBOX_BIN)
+$(BUSYBOX_BIN): Makefile $(ARCH_STAMP) ../tools/packaging/build_busybox.py ../tools/packaging/prepare_busybox.py | build_dir musl_prepare
+	$(PYTHON) ../tools/packaging/build_busybox.py --arch $(ARCH) --nommu $(NOMMU) \
+	    --output "$(abspath $@)" --jobs $(BUSYBOX_JOBS) --cc='$(CC)' \
+	    --cflags='$(BUSYBOX_CFLAGS)' --ldflags='$(LDFLAGS)' \
+	    --crt-start='$(CRT_START)' --crt-end='$(CRT_END)' --libc='$(LIBC)'
+$(BUSYBOX_STAGE_STAMP): $(BUSYBOX_BIN) Makefile ../tools/packaging/stage_busybox.py
+	$(PYTHON) ../tools/packaging/stage_busybox.py --binary "$(abspath $(BUSYBOX_BIN))" \
+	    --output "$(abspath $(BUILD_DIR))" --applets "$(BUSYBOX_APPLETS)"
+	@touch $@
+$(BUILD_DIR)/sh $(BUSYBOX_TOOL_TARGETS): $(BUSYBOX_STAGE_STAMP)
+	@test -x "$@" || { rm -f "$(BUSYBOX_STAGE_STAMP)"; $(MAKE) "$(BUSYBOX_STAGE_STAMP)"; }
 
-$(BUILD_DIR)/sh: $(BUILD_DIR)/mksh | build_dir
-	@mkdir -p $(dir $@)
-	cp $< $@
-
-# The GPL radio stack runs as a separate Linux-ABI process.
 $(BUILD_DIR)/rtw89d: $(wildcard wifi/*.c wifi/*.h wifi/compat/*/*.h wifi/compat/*.h) \
                     ../tools/drivers/build_rtw89.py external/rtw89/Makefile | build_dir musl_prepare
 	@test "$(ARCH)" = x86_64
@@ -819,8 +773,11 @@ $(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o
 	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$^ $(CRT_END) $(LIBC)
 endef
 $(foreach src,$(LOCAL_CMD_SRCS),$(eval $(call LOCAL_CMD_RULE,$(src))))
-$(BUILD_DIR)/pppoe: $(OBJ_DIR)/sbase/libutil/md5.o
-$(OBJ_DIR)/cmds/net/pppoe.o: $(SBASE_DIR)/md5.h
+$(BUILD_DIR)/pppoe: $(OBJ_DIR)/crypto/md5.o
+$(OBJ_DIR)/cmds/net/pppoe.o: crypto/md5.h
+$(OBJ_DIR)/crypto/%.o: crypto/%.c crypto/md5.h | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 define ARCH_CMD_RULE
 $(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst %.c,$(OBJ_DIR)/%.o,$(1)) | build_dir musl_prepare
@@ -836,14 +793,6 @@ $(OBJ_DIR)/arch/%.o: arch/%.c Makefile | build_dir musl_prepare
 # The two guest-boot commands additionally link the shared loader.  Prerequisite
 # only, no recipe: the rule above already gave both targets one.
 $(BUILD_DIR)/hyp_boot $(BUILD_DIR)/hypvm $(BUILD_DIR)/a20-vmd: $(HYP_GUEST_OBJ)
-
-$(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $< $(CRT_END) -Wl,--start-group $(SBASE_LIBUTIL) $(SBASE_LIBUTF) $(LIBC) -Wl,--end-group
-
-$(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
 
 $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
@@ -879,40 +828,6 @@ $(OBJ_DIR)/cmds/core/gpu3d_test.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/vport_test.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/vport_test.o: ../kernel/include/drivers/char/virtio_console.h
 
-$(OBJ_DIR)/sbase/id.o: ports/sbase/id.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(SBASE_CFLAGS) -c $< -o $@
-
-$(OBJ_DIR)/sbase/%.o: $(SBASE_DIR)/%.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(SBASE_CFLAGS) -c $< -o $@
-
-$(OBJ_DIR)/sbase/libutf/%.o: $(SBASE_DIR)/libutf/%.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(SBASE_CFLAGS) -c $< -o $@
-
-$(OBJ_DIR)/sbase/libutil/%.o: $(SBASE_DIR)/libutil/%.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(SBASE_CFLAGS) -c $< -o $@
-
-$(WGET_OBJ): $(WGET_CMD_SRC) Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(TLSE_DIR) -c $< -o $@
-
-$(TLSE_OBJ): $(TLSE_DIR)/tlse.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(TLSE_CFLAGS) -c $< -o $@
-
-$(SBASE_LIBUTF): $(SBASE_LIBUTF_OBJS) | build_dir
-	@mkdir -p $(dir $@)
-	$(AR) rcs $@ $^
-	$(RANLIB) $@
-
-$(SBASE_LIBUTIL): $(SBASE_LIBUTIL_OBJS) | build_dir
-	@mkdir -p $(dir $@)
-	$(AR) rcs $@ $^
-	$(RANLIB) $@
-
 $(OBJ_DIR)/init_common/%.o: init_common/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -920,10 +835,6 @@ $(OBJ_DIR)/init_common/%.o: init_common/%.c Makefile | build_dir musl_prepare
 $(OBJ_DIR)/lib/%.o: lib/%.c Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJ_DIR)/mksh/%.o: $(MKSH_DIR)/%.c Makefile | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(MKSH_CFLAGS) -c $< -o $@
 
 $(FF_GEN)/.headers-stamp: extra/fastfetch_gen_headers.sh \
                           $(shell find $(FF_DIR)/src/logo/ascii -name '*.txt' 2>/dev/null) \

@@ -4363,14 +4363,14 @@ FORCE_RUST_PROCFS_NODE_STATE_FLAGS:
 
 $(RUST_PROCFS_NODE_STATE_FLAGS_STAMP): FORCE_RUST_PROCFS_NODE_STATE_FLAGS
 	@mkdir -p $(dir $@)
-	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_PROCFS_NODE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_PROCFS_NODE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(if $(filter 1,$(LOG_BOOT_REPORT)),--cfg a20_boot_report,) $(if $(filter 1,$(DIAG_BOOT)),--cfg a20_porting_report,) $(if $(filter 1,$(DIAG_TRACE)),--cfg a20_trace,) $(RUST_TARGET_BUILD_ID)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
 $(RUST_PROCFS_NODE_STATE_OBJECT): $(RUST_PROCFS_NODE_STATE_SRC) kernel/include/fs/procfs_node_state.h tools/mk/rust-kernel.mk $(RUST_PROCFS_NODE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
 	@mkdir -p $(dir $@)
 	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
 		--target $(RUST_PROCFS_NODE_STATE_TARGET) \
-		$(RUST_TARGET_OBJECT_FLAGS) \
+		$(RUST_TARGET_OBJECT_FLAGS) $(if $(filter 1,$(LOG_BOOT_REPORT)),--cfg a20_boot_report,) $(if $(filter 1,$(DIAG_BOOT)),--cfg a20_porting_report,) $(if $(filter 1,$(DIAG_TRACE)),--cfg a20_trace,) \
 		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \

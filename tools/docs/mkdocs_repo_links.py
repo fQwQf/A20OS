@@ -17,6 +17,10 @@ def published_url(url, source, docs_dir, repo_url):
     root = docs_dir.parent
     if not target.is_relative_to(root):
         raise ValueError(f"repository link escapes checkout: {url}")
+    if not target.exists() and target.is_relative_to(docs_dir / 'en'):
+        original = docs_dir / 'zh' / target.relative_to(docs_dir / 'en')
+        if original.exists():
+            target = original
     if not target.exists():
         # Let MkDocs name missing targets in its ordinary strict diagnostics.
         return url
@@ -25,7 +29,7 @@ def published_url(url, source, docs_dir, repo_url):
         target = target / "README.md"
     if in_docs:
         relative = target.relative_to(docs_dir)
-        if relative.parts[0] not in EXCLUDED and target.is_file():
+        if not EXCLUDED.intersection(relative.parts) and target.is_file():
             # Resolve directory shorthand while retaining local anchor checks.
             if parsed.path.endswith("/") or Path(unquote(parsed.path)).name != target.name:
                 return urlunsplit(("", "", parsed.path.rstrip("/") + "/README.md",

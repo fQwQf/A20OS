@@ -34,3 +34,45 @@ function Para(paragraph)
     return blocks
   end
 end
+
+-- Paths and ABI identifiers often exceed table cells or text width. Add
+-- invisible break opportunities without changing the printed/copied text.
+local function breakable_text(text)
+  local escapes = {
+    ['\\'] = '\\textbackslash{}', ['{'] = '\\{', ['}'] = '\\}',
+    ['#'] = '\\#', ['$'] = '\\$', ['%'] = '\\%', ['&'] = '\\&',
+    ['_'] = '\\_', ['^'] = '\\textasciicircum{}', ['~'] = '\\textasciitilde{}'
+  }
+  local printed, plain, run = {}, {}, 0
+  for _, point in utf8.codes(text) do
+    local char = utf8.char(point)
+    local escaped = escapes[char] or char
+    table.insert(printed, escaped)
+    table.insert(plain, escaped)
+    run = run + 1
+    if char:match('[%s%p]') or run >= 6 then
+      table.insert(printed, '\\allowbreak{}')
+      run = 0
+    end
+  end
+  return table.concat(printed), table.concat(plain)
+end
+
+function Code(code)
+  if not FORMAT:match('latex') then return nil end
+  local printed, plain = breakable_text(code.text)
+  return pandoc.RawInline('latex', '\\texorpdfstring{\\texttt{' .. printed .. '}}{' .. plain .. '}')
+end
+
+-- Some reference tables use bare identifiers instead of Markdown Code nodes.
+function Str(str)
+  if not FORMAT:match('latex') or not str.text:find('[_/=]') then return nil end
+  local printed, plain = breakable_text(str.text)
+  return pandoc.RawInline('latex', '\\texorpdfstring{' .. printed .. '}{' .. plain .. '}')
+end
+
+function Math(math)
+  if FORMAT:match('latex') and math.mathtype == 'InlineMath' and math.text:find(',') then
+    return pandoc.RawInline('latex', '\\(' .. math.text:gsub(',', ',\\allowbreak{}') .. '\\)')
+  end
+end

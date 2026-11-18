@@ -1,4 +1,4 @@
-# Cluster UDP demo, node A (docs/cluster/02-udp-demo.md).
+# Cluster UDP demo, node A (docs/zh/cluster/02-udp-demo.md).
 #
 # One half of the WB2 two-instance environment: A and B share one L2 segment
 # through QEMU's socket netdev in UDP-tunnel mode.  Each side binds its own
@@ -12,7 +12,7 @@
 # 10.0.3.3/24 with 52:54:00:12:34:02.  The subnet deliberately is not SLIRP's
 # 10.0.2.0/24, so cluster traffic can never be confused with user-mode
 # networking.  WA2's kernel cluster transport will later bind the guest UDP
-# port 44020 on this link (docs/cluster/04-transports.md §3: default
+# port 44020 on this link (docs/zh/cluster/04-transports.md §3: default
 # 44020 + instance index); this instance's kernel argument surface is
 # [net].guest_ip, extended in this schema change, not the cluster port.
 #

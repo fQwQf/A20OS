@@ -2,7 +2,10 @@
 #define _CORE_PERF_H
 
 #include "core/cpu.h"
+#include "core/preempt.h"
+#include "core/timer.h"
 
+#include "core/metrics_config.h"
 #define A20_PERF_MAX_CPUS 32
 
 typedef enum a20_perf_counter {
@@ -219,14 +222,41 @@ typedef enum a20_perf_counter {
     A20_PERF_KERNEL_PREEMPTS,
     A20_PERF_TRAP_STORMS,
     A20_PERF_RT_THROTTLES,
+    A20_PERF_TIMING_REJECTED,
+    A20_PERF_CLOCK_REGRESSIONS,
     A20_PERF_COUNTER_COUNT,
 } a20_perf_counter_t;
 
 typedef struct a20_perf_cpu_counters {
     uint64_t values[A20_PERF_COUNTER_COUNT];
+    uint32_t writers;
 } __attribute__((aligned(64))) a20_perf_cpu_counters_t;
 
 extern uint32_t g_a20_perf_enabled;
+extern uint64_t g_a20_perf_generation;
+extern uint64_t g_a20_perf_excluded_syscalls;
+
+typedef struct a20_perf_token {
+    uint64_t generation;
+    uint64_t ticks;
+} a20_perf_token_t;
+
+typedef struct a20_perf_window {
+    uint64_t generation, boot_token, start_ticks, stop_ticks, elapsed_ticks;
+    uint64_t excluded_syscalls;
+    unsigned enabled, valid;
+} a20_perf_window_t;
+
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+void a20_perf_init(void);
+/* Process context only. Commands are exact tokens; stop freezes counters. */
+int a20_perf_control(const char *command, size_t length);
+void a20_perf_snapshot_begin(a20_perf_window_t *window);
+void a20_perf_snapshot_end(void);
+#else
+static inline void a20_perf_init(void) {}
+int a20_perf_control(const char *command, size_t length);
+#endif
 extern a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];
 
 /* System-wide software counters backing perf_event_open(2)
@@ -235,23 +265,99 @@ extern uint64_t g_perf_sw_page_faults;
 extern uint64_t g_perf_sw_page_faults_maj;
 extern uint64_t g_perf_sw_context_switches;
 
+/* Guard both metric updates and syscall count/time pairs. Stop disables new
+ * entries and waits for writers; a new generation rejects delayed old tokens.
+ * Writers never sleep, format text, allocate, or acquire a shared spinlock. */
+static inline int a20_perf_writer_enter(uint64_t generation)
+{
+#if defined(CONFIG_MCU) || !CONFIG_A20_METRICS
+    (void)generation;
+    return -1;
+#else
+    if (!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_ACQUIRE)) return -1;
+    preempt_disable();
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= A20_PERF_MAX_CPUS) cpu = 0;
+    /* SC doorway pairs with stop's SC disabled store and drain loads.
+     * Acquire/release alone permits the store-buffering outcome in which
+     * stop misses this writer and this writer misses the disabled flag. */
+    __atomic_fetch_add(&g_a20_perf_percpu[cpu].writers, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_SEQ_CST) &&
+        __atomic_load_n(&g_a20_perf_generation, __ATOMIC_ACQUIRE) == generation)
+        return (int)cpu;
+    __atomic_fetch_sub(&g_a20_perf_percpu[cpu].writers, 1, __ATOMIC_RELEASE);
+    preempt_enable();
+    return -1;
+#endif
+}
+static inline void a20_perf_writer_leave(int cpu)
+{
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+    __atomic_fetch_sub(&g_a20_perf_percpu[cpu].writers, 1, __ATOMIC_RELEASE);
+    preempt_enable();
+#else
+    (void)cpu;
+#endif
+}
 static inline void a20_perf_add(a20_perf_counter_t counter, uint64_t value)
 {
-#ifdef CONFIG_MCU
-    /* The MCU profile excludes perf.c and its per-CPU accounting storage. */
-    (void)counter;
-    (void)value;
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+    if (__builtin_expect(!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED), 1) || !value)
+        return;
+    uint64_t generation = __atomic_load_n(&g_a20_perf_generation, __ATOMIC_ACQUIRE);
+    int cpu = a20_perf_writer_enter(generation);
+    if (cpu < 0) return;
+    __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[counter], value, __ATOMIC_RELAXED);
+    a20_perf_writer_leave(cpu);
 #else
-    if (__builtin_expect(
-            __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED) == 0, 1))
+    (void)counter; (void)value;
+#endif
+}
+
+/* Elapsed samples must belong to the window in which they began. */
+static inline a20_perf_token_t a20_perf_begin(void) {
+    a20_perf_token_t token = {0};
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+    if (!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED)) return token;
+    /* Read the epoch before the ordered state check. Otherwise an old true
+     * state could be paired with a newly reset, still inactive generation. */
+    uint64_t generation = __atomic_load_n(&g_a20_perf_generation, __ATOMIC_ACQUIRE);
+    if (!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_SEQ_CST)) return token;
+    uint64_t ticks = timer_get_ticks();
+    if (__atomic_load_n(&g_a20_perf_generation, __ATOMIC_ACQUIRE) == generation)
+        token = (a20_perf_token_t){generation, ticks};
+#endif
+    return token;
+}
+static inline void a20_perf_add_epoch(a20_perf_counter_t counter, uint64_t value, uint64_t generation) {
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+    if (!generation || !value) return;
+    int cpu = a20_perf_writer_enter(generation);
+    if (cpu < 0) return;
+    __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[counter], value, __ATOMIC_RELAXED);
+    a20_perf_writer_leave(cpu);
+#else
+    (void)counter; (void)value; (void)generation;
+#endif
+}
+static inline void a20_perf_finish(a20_perf_counter_t calls, a20_perf_counter_t ticks,
+                                   a20_perf_token_t token) {
+#if !defined(CONFIG_MCU) && CONFIG_A20_METRICS
+    if (!token.generation) return;
+    int cpu = a20_perf_writer_enter(token.generation);
+    if (cpu < 0) {
+        a20_perf_add(A20_PERF_TIMING_REJECTED, 1);
         return;
-    if (value == 0)
-        return;
-    unsigned cpu = arch_current_cpu_id();
-    if (cpu >= A20_PERF_MAX_CPUS)
-        cpu = 0;
-    __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[counter], value,
-                       __ATOMIC_RELAXED);
+    }
+    uint64_t now = timer_get_ticks();
+    if (now >= token.ticks) {
+        if (calls < A20_PERF_COUNTER_COUNT)
+            __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[calls], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[ticks], now - token.ticks, __ATOMIC_RELAXED);
+    } else __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[A20_PERF_CLOCK_REGRESSIONS], 1, __ATOMIC_RELAXED);
+    a20_perf_writer_leave(cpu);
+#else
+    (void)calls; (void)ticks; (void)token;
 #endif
 }
 

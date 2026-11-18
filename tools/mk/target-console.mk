@@ -1,4 +1,4 @@
-# Physical-target actions for `a20 console` / `a20 deploy` (docs/dev/instances.md).
+# Physical-target actions for `a20 console` / `a20 deploy` (docs/zh/dev/instances.md).
 #
 # The instance declares which board and which console via the TARGET_* variables
 # that tools/a20 derives from its [target] section; the recipes that act on the

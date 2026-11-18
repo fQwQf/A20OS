@@ -1,0 +1,16 @@
+name = "qemu-riscv64-diagnostics"
+arch = "riscv64"
+[kernel]
+ramfs_user = true
+[net]
+stack = "bsd"
+[log]
+boot_report = true
+report = "off"
+porting_report = true
+porting_records = 128
+metrics = true
+trace = true
+trace_records = 128
+trace_mask = 3
+trace_boot = true

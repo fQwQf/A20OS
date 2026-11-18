@@ -224,7 +224,7 @@ static int net_ip_group_membership(net_socket_t *s, const net_ip_mreqn_t *mreq,
 
     /* g_lwip_lock alone: the netif list and the IGMP group table are lwIP
      * state, and the two kernel locks must never be held together (see
-     * docs/net/network-lock-contract.md).  Nothing here allocates. */
+     * docs/zh/net/network-lock-contract.md).  Nothing here allocates. */
     uint64_t flags = a20_lwip_lock();
     struct netif *nif = net_ip_group_netif(mreq);
     if (!nif) {

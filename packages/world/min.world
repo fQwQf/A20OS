@@ -1,6 +1,6 @@
 # min profile —— 真机最小用户态（a20-min）
 #
-# 面向真实设备出厂：只含 init、mksh、核心文件操作和一条可用的诊断链，
+# 面向真实设备出厂：只含 init、BusyBox ash、核心文件操作和一条可用的诊断链，
 # 不含任何 *_test / *_stress 回归程序和开发工具。相对 base.world 的取舍
 # 见 packages/recipes/a20-min.toml 的注释。
 #

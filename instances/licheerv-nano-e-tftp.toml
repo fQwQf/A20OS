@@ -41,5 +41,5 @@ this buffer overlaps firmware/RTOS reservations. Passing the original control
 DTB directly can fail because it belongs to U-Boot's reserved malloc region.
 Alternatively load a separately verified matching DTB by TFTP into this buffer.
 A20OS has no SG2002 Ethernet or SDHCI driver yet.
-No hardware run has been performed. See docs/platforms/licheerv-nano.md.
+No hardware run has been performed. See docs/zh/platforms/licheerv-nano.md.
 """

@@ -1,6 +1,6 @@
 /*
  * Hierarchical VMAR (Virtual Memory Address Region) — core object model.
- * Design: docs/native-abi/04-memory.md §3 (Zircon-style sub-allocation).
+ * Design: docs/zh/native-abi/04-memory.md §3 (Zircon-style sub-allocation).
  *
  * A VMAR is a reserved address-range node.  Children sub-allocate from
  * parents; capability ceilings only narrow down the tree; mappings created

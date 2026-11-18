@@ -1,5 +1,5 @@
 /*
- * Host-test arch/cc.h for tools/host-tests/test-tcp-cubic-host.c.
+ * Host-test arch/cc.h for tests/tools/host-tests/test-tcp-cubic-host.c.
  *
  * The kernel's own arch/cc.h (kernel/net/backends/lwip/port/arch/cc.h) includes
  * core/types.h, core/stdio.h, core/panic.h and core/random.h -- kernel headers

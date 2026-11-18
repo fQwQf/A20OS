@@ -4,6 +4,7 @@
 #include "core/stdio.h"
 #include "core/kallsyms.h"
 #include "core/string.h"
+#include "core/errno.h"
 #include "mm/slab.h"
 
 /* Fixed registry of the locks the performance audit cares about.  Registration
@@ -21,7 +22,6 @@ typedef struct {
 static spinlock_t g_lock_counters_lock = SPINLOCK_INIT;
 static lock_counter_entry_t g_lock_counters[LOCK_COUNTERS_MAX];
 static int g_lock_counter_count;
-static int g_lock_counters_initialized;
 /*
  * Registrations refused because the table was full.
  *
@@ -35,13 +35,7 @@ static int g_lock_counters_initialized;
  */
 static unsigned g_lock_counters_dropped;
 
-void lock_counters_init(void)
-{
-    if (g_lock_counters_initialized)
-        return;
-    spin_init(&g_lock_counters_lock);
-    g_lock_counters_initialized = 1;
-}
+void lock_counters_init(void) { /* Registry lock is statically initialized. */ }
 
 unsigned lock_counters_count(void)
 {
@@ -97,7 +91,9 @@ void lock_counters_enable_callsite(spinlock_t *lock)
         LOCK_CALLSITE_SAMPLES, sizeof(lock_callsite_sample_t));
     if (!arr)
         return;
-    __atomic_store_n(&lock->samples, arr, __ATOMIC_RELEASE);
+    lock_callsite_sample_t *expected = NULL;
+    if (!__atomic_compare_exchange_n(&lock->samples, &expected, arr, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED)) kfree(arr);
 }
 
 static size_t lock_counters_format_one(char *buf, size_t bufsz,
@@ -110,12 +106,12 @@ static size_t lock_counters_format_one(char *buf, size_t bufsz,
                                    __ATOMIC_RELAXED);
     uint64_t mx = __atomic_load_n(&lock->contended_max_spins,
                                   __ATOMIC_RELAXED);
-    int n = snprintf(buf + off, bufsz - off, "%s: %lu %lu max=%lu\n",
-                     name ? name : "?", (unsigned long)acq, (unsigned long)spn,
-                     (unsigned long)mx);
+    int n = snprintf(buf + off, bufsz - off, "%s: %llu %llu max=%llu\n",
+                     name ? name : "?", (unsigned long long)acq, (unsigned long long)spn,
+                     (unsigned long long)mx);
     if (n < 0)
         return bufsz ? bufsz - 1 : 0;
-    if ((size_t)n >= bufsz - off)
+    if ((size_t)n >= bufsz - off - 1)
         return bufsz ? bufsz - 1 : 0;
     off += (size_t)n;
 
@@ -137,13 +133,12 @@ static size_t lock_counters_format_one(char *buf, size_t bufsz,
          * than silently losing whatever could not be symbolised. */
         const char *sym = ra ? kallsyms_lookup(ra, &sym_off) : NULL;
         n = snprintf(buf + off, bufsz - off,
-                     "  [%s] %s+0x%lx: %lu %lu max=%lu\n",
+                     "  [%s] %s+0x%lx: %llu %llu max=%llu\n",
                      name ? name : "?", sym ? sym : "?",
-                     (unsigned long)sym_off, (unsigned long)c,
-                     (unsigned long)s, (unsigned long)sm);
-        if (n < 0)
-            break;
-        if ((size_t)n >= bufsz - off) {
+                     (unsigned long)sym_off, (unsigned long long)c,
+                     (unsigned long long)s, (unsigned long long)sm);
+        if (n < 0) return bufsz ? bufsz - 1 : 0;
+        if ((size_t)n >= bufsz - off - 1) {
             off = bufsz ? bufsz - 1 : 0;
             break;
         }
@@ -152,43 +147,42 @@ static size_t lock_counters_format_one(char *buf, size_t bufsz,
     return off;
 }
 
-size_t lock_counters_format(char *buf, size_t bufsz)
+int lock_counters_format(char *buf, size_t bufsz)
 {
-    if (!buf || bufsz == 0)
-        return 0;
-    size_t off = 0;
-    /* Also mark the collection live, like a20_perf_format(). */
+    if (!buf || bufsz == 0) return -EINVAL;
+    /* Registered locks/names have static kernel lifetime. Copy membership
+     * under the registry lock; symbolize and render live atomic counters
+     * outside it. This is a live snapshot, not a frozen perf window. */
+    lock_counter_entry_t *entries = kmalloc(sizeof(g_lock_counters));
+    if (!entries) return -ENOMEM;
     lock_counters_init();
     uint64_t flags = spin_lock_irqsave(&g_lock_counters_lock);
-    for (int i = 0; i < g_lock_counter_count; i++) {
-        off = lock_counters_format_one(buf, bufsz,
-                                       g_lock_counters[i].lock,
-                                       g_lock_counters[i].name, off);
-        if (off >= bufsz)
-            break;
-    }
+    unsigned held = g_lock_counter_count, dropped = g_lock_counters_dropped;
+    memcpy(entries, g_lock_counters, held * sizeof(*entries));
     spin_unlock_irqrestore(&g_lock_counters_lock, flags);
-    /*
-     * The audit's own coverage line, and the only honest way to report that a
-     * lock was left out: a report that silently omits a contended lock reads
-     * exactly like a report that found no contention.  `dropped` is the number
-     * of lock_counters_register() calls the fixed table refused.
-     */
-    unsigned dropped = lock_counters_dropped();
-    unsigned held = (unsigned)g_lock_counter_count;
+    size_t off = 0;
+    for (unsigned i = 0; i < held; i++) {
+        off = lock_counters_format_one(buf, bufsz, entries[i].lock, entries[i].name, off);
+        if (off >= bufsz - 1) goto full;
+    }
     int n = snprintf(buf + off, bufsz - off,
                      "lock_counters: registered=%u capacity=%u dropped=%u\n",
                      held, (unsigned)LOCK_COUNTERS_MAX, dropped);
-    if (n > 0 && (size_t)n < bufsz - off)
-        off += (size_t)n;
-    return off;
+    if (n < 0 || (size_t)n >= bufsz - off - 1) goto full;
+    off += (size_t)n;
+    kfree(entries);
+    return (int)off;
+full:
+    buf[bufsz - 1] = 0;
+    kfree(entries);
+    return (int)(bufsz - 1);
 }
 
 /*
  * Zero every registered lock's counters, keeping the registrations themselves.
  *
  * The counters are cumulative since boot with no way to narrow the window, so a
- * stress spike cannot be told apart from boot-time traffic.  docs/status/current/server-readiness.md
+ * stress spike cannot be told apart from boot-time traffic.  docs/zh/status/current/server-readiness.md
  * records a wrong conclusion drawn from exactly that: an extreme per-acquire
  * spin count was first attributed to the stress window and had to be retracted
  * after the boot window was measured separately.  A gate can work around this by
@@ -210,9 +204,14 @@ void lock_counters_reset(void)
         __atomic_store_n(&lock->contended_max_spins, 0, __ATOMIC_RELAXED);
         lock_callsite_sample_t *samples =
             __atomic_load_n(&lock->samples, __ATOMIC_ACQUIRE);
-        if (samples)
-            memset(samples, 0, sizeof(lock_callsite_sample_t) *
-                                LOCK_CALLSITE_SAMPLES);
+        if (samples) {
+            for (unsigned j = 0; j < LOCK_CALLSITE_SAMPLES; j++) {
+                __atomic_store_n(&samples[j].ra, 0, __ATOMIC_RELAXED);
+                __atomic_store_n(&samples[j].contended, 0, __ATOMIC_RELAXED);
+                __atomic_store_n(&samples[j].spins, 0, __ATOMIC_RELAXED);
+                __atomic_store_n(&samples[j].max_spins, 0, __ATOMIC_RELAXED);
+            }
+        }
     }
     spin_unlock_irqrestore(&g_lock_counters_lock, flags);
 }

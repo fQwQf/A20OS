@@ -55,10 +55,11 @@ static pid_t telnet_pid;
 static pid_t vmd_pid;
 static pid_t wan_pid;
 static volatile sig_atomic_t got_signal;
+static volatile sig_atomic_t shutdown_command = RB_POWER_OFF;
 
 static void sig_handler(int sig)
 {
-    (void)sig;
+    shutdown_command = sig == SIGTERM ? RB_AUTOBOOT : RB_POWER_OFF;
     got_signal = 1;
     if (shell_pid > 0)
         kill(shell_pid, SIGTERM);
@@ -144,15 +145,66 @@ static void setup_signals(void)
     sa.sa_flags = 0;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
 
     sa.sa_handler = SIG_IGN;
     sigaction(SIGHUP, &sa, NULL);
+}
+
+/* The platform init keeps only A20-specific service and root handoff policy.
+ * Generic commands and the shell are the upstream BusyBox implementation. */
+static void setup_upstream_tools(void)
+{
+    const char *binary = access("/bin/busybox", X_OK) == 0 ? "/bin/busybox" : "/a20/busybox";
+    if (binary[1] == 'a') {
+        xmkdir("/bin");
+        symlink("/a20/sh", "/bin/sh");
+        symlink("/a20/busybox", "/bin/busybox");
+    }
+    printf("[init] BusyBox user tools ready\n");
+    /* FAT32 images already carry small applet scripts. Only the writable
+     * RAMFS needs BusyBox to install its standard command links at boot. */
+    if (access("/etc/a20-ramfs-shell", F_OK) != 0)
+        return;
+    const char *dirs[] = {"/bin", "/sbin", "/usr", "/usr/bin", "/usr/sbin", NULL};
+    for (const char **dir = dirs; *dir; dir++)
+        xmkdir(*dir);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *args[] = {"busybox", "--install", "-s", NULL};
+        execv(binary, args);
+        _exit(127);
+    }
+    if (pid > 0)
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    symlink("/bin/busybox", "/bin/poweroff");
+    symlink("/bin/busybox", "/bin/reboot");
 }
 
 static void reap_children(void)
 {
     while (waitpid(-1, NULL, WNOHANG) > 0)
         ;
+}
+
+static void stop_shell_child(pid_t *child)
+{
+    if (*child <= 0) return;
+    kill(*child, SIGTERM);
+    for (int i = 0; i < 10; i++) {
+        pid_t reaped = waitpid(*child, NULL, WNOHANG);
+        if (reaped == *child || (reaped < 0 && errno == ECHILD)) {
+            *child = 0;
+            return;
+        }
+        usleep(10000);
+    }
+    /* An interactive shell can ignore SIGTERM. Its script descriptor must
+     * close before filesystem shutdown can quiesce a FAT root. */
+    kill(*child, SIGKILL);
+    while (waitpid(*child, NULL, 0) < 0 && errno == EINTR) {}
+    *child = 0;
 }
 
 /*
@@ -331,8 +383,10 @@ static void enter_distro_rootfs(void)
 static void do_shutdown(void)
 {
     sync();
+    puts(shutdown_command == RB_AUTOBOOT ? "Rebooting system." :
+         "System is going down for power-off NOW.");
     printf("[init] shutting down\n");
-    reboot(RB_POWER_OFF);
+    reboot(shutdown_command);
     for (;;) __asm__ volatile("");
 }
 
@@ -343,6 +397,7 @@ int main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     setup_signals();
+    setup_upstream_tools();
 
     if (detect_distro_rootfs())
         enter_distro_rootfs();
@@ -350,11 +405,11 @@ int main(void)
     ioctl(STDIN_FILENO, TIOCSCTTY, 0);
 
 #if defined(__powerpc64__)
-    char *argv[] = {"mksh", NULL};
-    char *envp[] = {"PATH=/bin", "HOME=/", "SHELL=/bin/mksh",
+    char *argv[] = {"sh", NULL};
+    char *envp[] = {"PATH=/bin", "HOME=/", "SHELL=/bin/sh",
                     "TERM=vt100", NULL};
-    execve("/bin/mksh", argv, envp);
-    perror("execve mksh");
+    execve("/bin/sh", argv, envp);
+    perror("execve sh");
     do_shutdown();
 #else
     int external_root =
@@ -385,7 +440,7 @@ int main(void)
     /* /extra is the extra image: programs at its root, /extra/bin wrappers,
      * package prefixes under /extra (see tools/mk/targets-extra.mk). */
     static const char *path_dirs[] = {
-        "/usr/bin", "/extra", "/extra/bin",
+        "/sbin", "/usr/bin", "/usr/sbin", "/extra", "/extra/bin",
         NULL,
     };
     for (const char **p = path_dirs; *p; p++)
@@ -402,20 +457,20 @@ int main(void)
         append_if_dir(ld_val, sizeof(ld_val), *p);
     if (!ld_val[0]) strcpy(ld_val, "/lib:/bin/lib");
 
-    const char *shell_path = external_root ? "/a20/mksh" : "/bin/mksh";
+    const char *shell_path = external_root ? "/a20/sh" : "/bin/sh";
     char path_env[576], ld_env[320], shell_env[64];
     snprintf(path_env, sizeof(path_env), "PATH=%s", path_val);
     snprintf(ld_env, sizeof(ld_env), "LD_LIBRARY_PATH=%s", ld_val);
     snprintf(shell_env, sizeof(shell_env), "SHELL=%s", shell_path);
 
     char *legacy_envp[] = {
-        path_env, ld_env, "HOME=/", shell_env, "TERM=vt100",
+        path_env, ld_env, "HOME=/", shell_env, "TERM=vt100", "PS1=# ",
         "XDG_RUNTIME_DIR=/tmp", "WAYLAND_DISPLAY=wayland-0",
         "XDG_CONFIG_DIRS=/bin/etc/xdg",
         "XDG_CONFIG_HOME=/bin/etc/xdg", NULL
     };
     char *minimal_envp[] = {
-        path_env, "HOME=/", shell_env, "TERM=vt100", NULL
+        path_env, "HOME=/", shell_env, "TERM=vt100", "PS1=# ", NULL
     };
     char **envp = external_root ? minimal_envp : legacy_envp;
 
@@ -446,14 +501,14 @@ int main(void)
         }
     }
 
-    char *argv[] = {"mksh", NULL};
+    char *argv[] = {"sh", NULL};
 
     printf("[init] forking...\n");
     shell_pid = fork();
     if (shell_pid == 0) {
-        printf("[init] fork=0, calling execve mksh\n");
+        printf("[init] fork=0, calling execve sh\n");
         execve(shell_path, argv, envp);
-        perror("execve mksh");
+        perror("execve sh");
         _exit(127);
     }
     if (shell_pid < 0) {
@@ -462,9 +517,9 @@ int main(void)
             /* NOMMU kernels do not implement fork().  Replace this
              * process with the shell so the system still reaches an
              * interactive prompt. */
-            printf("[init] errno=EINVAL, calling execve mksh\n");
+            printf("[init] errno=EINVAL, calling execve sh\n");
             execve(shell_path, argv, envp);
-            perror("execve mksh");
+            perror("execve sh");
         } else {
             perror("fork");
         }
@@ -480,6 +535,7 @@ int main(void)
             continue;
         }
         if (w == shell_pid) {
+            printf("[init] shell exited: status=%d\n", status);
             shell_pid = 0;
             break;
         }
@@ -497,6 +553,8 @@ int main(void)
         }
     }
 
+    stop_shell_child(&shell_pid);
+    stop_shell_child(&telnet_pid);
     if (vmd_pid > 0) {
         kill(vmd_pid, SIGTERM);
         while (waitpid(vmd_pid, NULL, 0) < 0 && errno == EINTR) ;

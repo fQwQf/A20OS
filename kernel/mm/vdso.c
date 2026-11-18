@@ -1,7 +1,7 @@
 /*
  * A20OS vDSO — kernel side (riscv64).
  *
- * Design reference: docs/hybrid-kernel/00-design.md §7.
+ * Design reference: docs/zh/hybrid-kernel/00-design.md §7.
  *
  * The vDSO image (built from arch/riscv64/vdso/) is embedded via objcopy
  * and mapped read-only+executable at A20_VDSO_VA into every Linux-ABI task

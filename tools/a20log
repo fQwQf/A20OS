@@ -200,7 +200,8 @@ def cmd_list(args) -> int:
         state = ""
         if latest.get("boot") and latest["boot"] in path.name:
             state = f"  state={latest.get('state', '?')} " \
-                    f"last_seq={latest.get('seq', '?')}"
+                    f"last_seq={latest.get('seq', '?')} " \
+                    f"storage={latest.get('storage', 'unknown')} writer={latest.get('writer', 'unknown')}"
         print(f"{path.name}  {path.stat().st_size:8d} bytes{state}")
     return 0
 
@@ -258,7 +259,8 @@ def cmd_summary(args) -> int:
         print(f"current    boot={latest.get('boot', '?')} "
               f"bootcount={latest.get('bootcount', '?')} "
               f"state={latest.get('state', '?')} "
-              f"seq={latest.get('seq', '?')} bytes={latest.get('bytes', '?')}")
+              f"seq={latest.get('seq', '?')} bytes={latest.get('bytes', '?')} "
+              f"storage={latest.get('storage', 'unknown')} writer={latest.get('writer', 'unknown')}")
     for path in files[: args.limit]:
         levels: dict[str, int] = {}
         sources: dict[str, int] = {}

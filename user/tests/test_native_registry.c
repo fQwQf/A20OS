@@ -1,5 +1,5 @@
 /*
- * Registry client e2e (docs/hybrid-kernel/02-mainstream-plan.md M3).
+ * Registry client e2e (docs/zh/hybrid-kernel/02-mainstream-plan.md M3).
  *
  * Runs as an arbitrary process (not a child of svcmgr): resolves the
  * rtcd service through the well-known registry endpoint from start_info,

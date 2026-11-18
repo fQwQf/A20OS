@@ -7,7 +7,7 @@
 # components/drivers.mk (`make regen-driver-fragment`); `make
 # check-component-registry` fails if that generated copy is stale.  Instances
 # select runtime drivers by name through [rootfs].drivers (see
-# docs/dev/instances.md).
+# docs/zh/dev/instances.md).
 
 [[driver]]
 name = "rtc"

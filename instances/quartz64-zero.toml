@@ -42,5 +42,5 @@ kernel.bin has the AArch64 Image header and is linked at 0x02080000;
 fdt_addr_r is separate, below 1 GiB RAM end. Run manual load commands one at
 a time and stop on any error. Do not saveenv during first bring-up.
 Kernel SD supports default-speed one-bit PIO; Ethernet/USB/HDMI and physical acceptance remain pending. See
-docs/platforms/quartz64-zero.md for SD preparation, serial wiring and acceptance.
+docs/zh/platforms/quartz64-zero.md for SD preparation, serial wiring and acceptance.
 """

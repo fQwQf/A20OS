@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 TABLE = ROOT / "kernel/abi/linux/syscall_table.def"
 DOCUMENT = ROOT / "kernel/abi/linux/syscall_coverage.md"
 BEGIN = "<!-- LINUX_SYSCALL_COVERAGE_BEGIN -->"

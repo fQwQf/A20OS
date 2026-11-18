@@ -565,7 +565,7 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
         /* Head partial page: file bytes preceding p_offset are part of
          * this page too (ELF header + program headers).  Back them so
          * AT_PHDR resolves for dynamically linked natives
-         * (docs/status/current/native-abi-runtime-status.md §8a).
+         * (docs/zh/status/current/native-abi-runtime-status.md §8a).
          * Only when no earlier PT_LOAD already backed this page: the bytes
          * [page, va) then belong to that earlier segment, and overlaying
          * this segment's preceding file bytes would clobber them (a

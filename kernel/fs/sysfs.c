@@ -79,7 +79,7 @@ typedef enum {
     SF_DEV_CHAR_DEVICE, /* /sys/dev/char/<maj>:<min>/device */
     SF_DEV_CHAR_DEVICE_DRM, /* /sys/dev/char/<maj>:<min>/device/drm */
     /* PCI identity the DRM device must expose for libdrm to classify it;
-     * see docs/graphics/3d-graphics.md section 9. */
+     * see docs/zh/graphics/3d-graphics.md section 9. */
     SF_DEV_CHAR_SUBSYS,          /* /sys/dev/char/<maj>:<min>/subsystem (symlink) */
     SF_DEV_CHAR_DEVICE_SUBSYS,   /* .../device/subsystem (symlink) */
     SF_DEV_CHAR_DEVICE_ATTR,     /* .../device/{revision,vendor,device,subsystem_*} */

@@ -17,4 +17,4 @@ BSD 执行器拥有每个地址族一个有界、常驻的 raw ICMP reader，通
 
 2026-11-16，RV64 QEMU virt、ABI=both、BSD、SMP2 的 `cli-application/udp-error-queue-final/report.json` 为 PASS：IPv4/IPv6 回环真实 ICMP 端口不可达、独立错误消费、普通接收错误、短缓冲区、零 iov/名称容量和禁用清队列均通过；实际 dig/nslookup 收到宿主本地 UDP DNS 的答案。正常关机及 ext4/FAT 只读检查退出 0。相同错误探针在宿主 Linux 通过；生产解析器/队列有 1 项主机检查，poll/recv 各 12 项检查通过。
 
-原始报告位于 `build/evidence/v1-closeout-20261116/`，入口为 [CLI 应用探针](../../../../tools/tests/cli_application_guest.py)；应用总状态见[应用契约表](application-contracts.md)。这不证明公网路由器 ICMP、IPv4-mapped IPv6、同步本地错误进入扩展队列、所有 IP 扩展头或其它后端的完整 Linux 兼容。syscall 覆盖表保留 partial。
+原始报告位于 `build/evidence/v1-closeout-20261116/`，入口为 [CLI 应用探针](https://github.com/fQwQf/a20-tests/blob/main/tools/tests/cli_application_guest.py)；应用总状态见[应用契约表](application-contracts.md)。这不证明公网路由器 ICMP、IPv4-mapped IPv6、同步本地错误进入扩展队列、所有 IP 扩展头或其它后端的完整 Linux 兼容。syscall 覆盖表保留 partial。

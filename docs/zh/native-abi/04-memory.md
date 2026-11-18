@@ -1,0 +1,270 @@
+# A20OS Native ABI：内存子系统设计
+
+本文档定义 Native ABI 的虚拟内存子系统架构，包括虚拟内存地址区域（VMAR）、虚拟内存对象（VMO）、内存映射接口与单级页表模型的对接。核心内存架构规范见 [单级页表规范](../kernel/mm/single-level-page-table.md)。
+
+---
+
+## 1. 内存模型概述
+
+核心地址空间里，一个映射由单一记录 `struct mm_seg`（`kernel/include/mm/vm.h`）表示：它既在 `mm->mmap` 链表上维护地址空间区间，又被页表节点条目按名字引用。系统不存在第二份冗余映射表示。
+
+每页的状态由挂在覆盖该页的页表页上的元数据承载，是页状态的**唯一权威**；页表条目与映射记录只提供区间与后端对象，**不是**页状态的副本。查找一次映射用`mm_seg_find()`，没有第二种查询。
+
+VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，独立于地址空间；`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。VMAR (Virtual Memory Address Region) 当前只是 Native syscall 对核心 `mm_seg_t`/`mm_mmap_*` 的称呼和薄包装，不存在独立 VMAR handle 或层级树；VMO 通过 `vm_map` 建立 `VM_VMO` 映射记录。除此之外还有普通映射：`vm_alloc` 建立普通匿名记录，FILE/DEVICE source 建立 `VM_FILE` 记录，二者都不是 MEMORY-handle-backed VMO。
+
+```mermaid
+graph TD
+    subgraph VMAR["进程虚拟地址空间 (VMAR Layout)"]
+        LowGuard["0x0000_0000_0000: 零页保护区 (不可映射)"]
+        CodeSeg["0x0001_0000_0000: 代码段 (ELF / File Backend)"]
+        HeapSeg["0x0001_0001_0000: 堆/匿名映射 (Anonymous Alloc)"]
+        SharedSeg["0x7fff_0000_0000: 共享映射区 (VMO Handle-backed)"]
+        KernelSpace["0x8000_0000_0000: 内核高半区 (受硬件保护)"]
+    end
+```
+
+### 1.1 与 POSIX mmap 的区别
+
+| POSIX mmap | Native ABI |
+|-----------|-----------|
+| 匿名映射没有独立可传递对象 | `vm_alloc` 同样建立普通匿名映射记录；需要共享时显式创建 VMO handle |
+| 共享内存通常通过 SysV/POSIX shm 或共享文件 | Native 共享路径是传递 MEMORY handle，再由接收方 `vm_map` |
+| 保护位与映射绑定 | 当前保护位也保存在映射记录；Native 创建时登记权限上限，后续两套 ABI 的 protect 均检查该上限 |
+| `mremap`、`madvise`、`msync` 分别操作映射 | Native 提供对应操作，但 `vm_remap`/`vm_advise`/`vm_flush` 都只有受限语义 |
+
+---
+
+## 2. VMO (Virtual Memory Object)
+
+### 2.1 定义
+
+VMO 是物理页面的容器：
+
+```c
+typedef struct a20_vmo {
+    refcount_t       refcount;
+    uint64_t         size;              /* 逻辑大小（字节） */
+    uint64_t         phys_size;         /* 已分配物理内存 */
+    uint32_t         type;              /* VMO 类型 */
+    uint32_t         options;           /* 创建选项 */
+    spinlock_t       lock;              /* 保护 pages 数组 */
+    pfn_t           *pages;             /* canonical frame 数组 */
+    uint32_t         page_count;
+    struct cg_node  *charge_cg;
+    uint64_t         charged_pages;
+} a20_vmo_t;
+```
+
+### 2.2 VMO 类型
+
+| 类型 | 说明 | 来源 |
+|------|------|------|
+| `A20_VMO_ANONYMOUS` | 匿名 VMO，按需分配 canonical frame | `vm_create_object` 或 `vm_map(source=NULL)` |
+| `A20_VMO_PHYSICAL` | 预留的 physical VMO 类型 | 当前没有 `vmo_create(VMO_PHYSICAL, ...)` 调用者；`device_alloc_dma` 创建 ANONYMOUS VMO 后手工安装连续页 |
+| `A20_VMO_PAGED` | 预留的 paged VMO 类型 | 当前 file/device `vm_map` 直接走 `mm_mmap_file`，不会创建此类 VMO |
+
+### 2.3 VMO 操作
+
+创建走 `vm_create_object` 或 `vm_map(source=NULL)`，产出匿名 VMO；`vm_alloc` 当前直接调用核心匿名 `proc_mmap`，既不返回也不创建可分享的 VMO handle。映射由 `vm_map` 把 VMO 装到进程地址空间。共享的 `vm_share` 只把已有 MEMORY handle 安装到当前或目标 Native task，不按地址区间导出。调整大小方面，核心有 `vmo_resize()`，但当前没有 `handle_control(VMO_RESIZE)` 用户入口。读取/写入当前不支持 MEMORY handle：`handle_read`/`handle_write` 只走 vfile/global-fd 路径，VMO 内容需先映射。
+
+### 2.4 VMO 四元组
+
+VMO 的核心属性可以形式化为四元组 `(pages, size, type, physical layout)`。当前 `struct vmo` 没有独立 `phys_contiguous` 字段，四个分量分别是：`pages` 是按需分配的物理页面数组，`size` 是逻辑大小，`type` 取 ANONYMOUS / PHYSICAL / PAGED，physical layout 由实际 `pages[]` 决定——`device_alloc_dma` 的匿名 VMO 可以连续，不能只按 `type` 推断。
+
+---
+
+## 3. VMAR (Virtual Memory Address Region)
+
+### 3.1 定义
+
+层级 VMAR 的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查，越界在任何替换映射之前返回 NO_SPACE。关闭句柄仅减引用：子节点持有父引用，映射持有所属节点引用，树随最后一个引用消亡。
+
+Native VMAR 操作的地址空间语义仍直接作用于核心映射记录，与后端相关的字段可简化为：
+
+```c
+struct mm_seg {
+    vaddr_t      start, end;    /* 区间，左闭右开 */
+    uint64_t     vm_flags;      /* VM_* 位：anon / file / vmo / shared / 保护位 */
+    pte_t        pte_flags;     /* 架构叶子保护位（不能由 vm_flags 完全推导，故显式携带）*/
+    uint64_t     backing_offset;/* 后端对象内的偏移：VM_FILE 对 vnode，VM_VMO 对 vmo */
+    struct vfile *file;         /* VM_FILE 后端，持有引用 */
+    struct vmo  *vmo;           /* 仅 VM_VMO 后端非 NULL */
+    /* 另有 magic、共用 refcount、vmar_cap、sysv_shmid、链表指针等 */
+};
+```
+
+原先这里是 `vm_area_t`，并且 `file_offset` 与 `vmo_offset` 是两个字段。二者从来不会同时有效（`mmap.c` 已按 `VM_VMO` 二选一），所以现在是一个 `backing_offset`。记录由 `mm_seg_new()` 构造，**必须**走这个构造函数：`magic` 与初始 refcount 在那里设置，漏掉会让后续 `mm_seg_put()` 把一条从未初始化的记录当作已释放对象而 panic。
+
+### 3.2 VMAR 三元组
+
+概念上可写为：
+
+$$VMAR = ([base, base+len), prot, backing)$$
+
+- `[base, base+len)`：虚拟地址范围
+- `prot`：保护位（R/W/X 组合）
+- `backing`：普通匿名页、FILE/DEVICE 的 file/page-cache 后端，或 MEMORY source 的 VMO
+
+### 3.3 VMAR 能力标志
+
+| 标志 | 说明 |
+|------|------|
+| `A20_VMAR_CAN_MAP_READ` | 允许映射为可读 |
+| `A20_VMAR_CAN_MAP_WRITE` | 允许映射为可写 |
+| `A20_VMAR_CAN_MAP_EXEC` | 允许映射为可执行 |
+| `A20_VMAR_CAN_MAP_SPECIFIC` | 允许在指定地址映射 |
+
+这些常量即 `vm_create_vmar` 的 `flags` 天花板位与 `vm_map` 路由的授权依据；定点映射（MAP_FIXED）额外要求 `SPECIFIC` 位。
+
+---
+
+## 4. 内存操作语义
+
+### 4.1 vm_alloc — 匿名内存分配
+
+```c
+int64_t vm_alloc(a20_vm_alloc_args_t *args);
+```
+
+语义：
+1. 校验版本化参数与非零长度
+2. 在 MM 锁与 TLB 事务内调用 `mm_mmap_native_locked` 建立普通匿名映射记录并登记权限上限；检查 `RLIMIT_AS`
+3. 返回映射地址；不会返回 VMO handle
+
+错误条件有三类。`NO_MEMORY` 表示核心匿名 mmap 失败；`INVALID_ARGUMENT` 表示版本化结构校验失败或 `length == 0`；`FAULT` 表示参数结构不可访问，或结果复制回用户态失败。
+
+拒绝未知 `prot` 位、非零保留 `flags`、长度舍入溢出与超出用户空间的地址提示。地址空间无空洞等核心 mmap 失败统一映射为 `NO_MEMORY`；结果回写失败会解除刚建立的映射。
+
+### 4.2 vm_map — 对象映射
+
+```c
+int64_t vm_map(a20_vm_map_args_t *args);
+```
+
+当前实现语义：
+1. `source == A20_HANDLE_NULL`：创建匿名 VMO 并映射
+2. 否则验证 source handle 有效、检查 `MAP` 权限，类型必须为 `MEMORY`、`FILE` 或 `DEVICE`
+3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界；`offset` 需页对齐
+4. source 是 `FILE`/`DEVICE`：走核心 `mm_mmap_file`，经 page cache **按需分页**填充（不再 eager-load 到匿名 VMO）；`offset` 需页对齐
+5. 计算 READ/WRITE/EXEC 的 `prot_eff` 与 handle rights 交集（`a20_vm_prot_eff`；无 `A20_RIGHT_EXEC` 则不给 EXEC 位）
+6. MEMORY source 创建 `VM_VMO` 映射记录并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有映射记录并持 `vfile` 引用；失败引用在 MM 锁外释放
+
+与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE/EXEC rights 都会收紧对应保护位；此外经 VMAR 路由的映射还要满足节点天花板与 `MAP_FIXED` 的 `VMAR_CAN_MAP_SPECIFIC` 要求（`vmar_cap_allows`）。
+
+实现分层：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
+
+### 4.3 vm_unmap — 解除映射
+
+```c
+int64_t vm_unmap(uint64_t addr, uint64_t length);
+```
+
+语义：
+1. 直接调用核心 `proc_munmap` 解除指定范围内的普通匿名、文件或 VMO 映射记录
+2. 核心 MM 拆分/移除映射记录，并执行所需 TLB invalidation
+3. 仅当移除的是 `VM_VMO` 映射记录时才释放该映射记录持有的 VMO 引用；最后一个 VMO 引用释放 canonical frames
+
+### 4.4 vm_protect — 修改保护
+
+```c
+int64_t vm_protect(uint64_t addr, uint64_t length, uint32_t prot);
+```
+
+语义：
+1. 校验地址、长度和保护位，进入核心 `mm_mprotect`
+2. 核心在 `mm->lock` 内检查整个覆盖区间：带 `VM_NATIVE_CAP` 的记录要求 `new_prot` 不超出 `vmar_cap`，零 cap 代表真实的 `PROT_NONE`，超限返回 `ACCESS`
+3. 检查通过后才拆分记录、更新 PTE 和执行 TLB invalidation；Linux `mprotect` 同样不能放宽 Native 映射。普通 Linux 映射没有 `VM_NATIVE_CAP`，仍遵守 Linux 的保护变更语义。fork、拆分与 remap 保留 cap，只有 cap 与其他后端属性一致的相邻记录才可合并
+
+回归测试在 `user/tests/test_native_mm.c` 第 6 分区：先经 VMAR 以 `R|W` 映射失败（cap 不含 WRITE）、以 `R` 成功，随后对该区间 `vm_protect(R|W)` 必须被拒。
+
+### 4.5 vm_share — 内存共享
+
+```c
+int64_t vm_share(a20_handle_t vmo, a20_handle_t target_task,
+                 a20_rights_t rights);
+```
+
+当前 syscall 形式为 `vm_share(vmo_handle, target_task, rights)`：source 必须是 `A20_OBJ_MEMORY` 并需要 `READ | TRANSFER` right。`target_task == A20_HANDLE_NULL` 时安装到当前进程 HT，否则 task handle 需要 `CONTROL`，内核找到目标进程 HT 再安装。接收权限是 `rights ∩ source.rights`，空集返回 `ACCESS`。新 handle 继承源 VMO handle 的 expiry、remaining_ops、temporal flags 与安全标签，并增加 VMO 引用；安装后还要对目标进程执行 Bell-LaPadula No Read Up 检查。
+
+接收方通过返回的目标 HT handle 编号调用 `vm_map`。另有结构化 `vm_share_region`：在 MM 锁内反查单条 `VM_VMO` 记录，导出相应 MEMORY handle；普通匿名和 FILE 映射不能由此导出。
+
+### 4.6 vm_flush — 刷新
+
+```c
+int64_t vm_flush(uint64_t addr, uint64_t length, uint32_t flags);
+```
+
+| Flag | 说明 |
+|------|------|
+| `A20_FLUSH_CLEAN` | 写回脏页 |
+| `A20_FLUSH_INVALIDATE` | 使缓存无效 |
+| `A20_FLUSH_SYNC` | 等待写回完成 |
+
+当前实现先验证地址范围均有映射记录；`SYNC` 与 `CLEAN` 都调用全局 `vfs_sync()`，`INVALIDATE` 只执行本地 `arch_tlb_flush()`。`CLEAN` 不是 no-op——文件映射区间靠一次全量 cache sync 覆盖（VMO 帧由 VMO 自持，没有按范围写回的路径）。它仍未按给定映射记录的范围执行脏页写回或 page-cache invalidation，多个 flag 组合也因顺序返回而不是完整组合语义。
+
+---
+
+## 5. 共享内存流程
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ProcA as 进程 A
+    participant Kernel as 内核 (MM / VMO)
+    participant ProcB as 进程 B
+
+    ProcA->>Kernel: vm_create_object() 创建物理页容器
+    Kernel-->>ProcA: 返回 vmo_A 句柄
+    ProcA->>Kernel: vm_map(vmo_A) 映射到本进程虚拟地址
+    Kernel-->>ProcA: 返回虚拟基址 addr_A
+
+    ProcA->>Kernel: vm_share(vmo_A, task_B, rights) 授权共享
+    Kernel->>ProcB: 在进程 B 句柄表安装受限句柄 vmo_B
+    ProcB->>Kernel: vm_map(vmo_B) 映射到进程 B 虚拟地址
+    Kernel-->>ProcB: 返回虚拟基址 addr_B
+
+    Note over ProcA,ProcB: 双方通过 addr_A 与 addr_B 零拷贝访问同一组规范 VMO 物理帧
+```
+
+权限传递上，`vm_share` 的 `rights` 参数限制接收方 handle 权限：只有 READ 时，首次 `vm_map` 的 WRITE 会被清除。此后 `vm_protect` 受该 VMA 建立时盖下的 `vmar_cap` 约束，不能把映射放宽到 cap 之外（§4.4）。
+
+---
+
+## 6. 与内核 MM 子系统的集成
+
+### 6.1 映射到现有 mm_struct
+
+```c
+// Native VMAR syscall 是 mm_struct/映射记录（mm_seg_t）操作的薄包装。
+// 普通匿名映射: mm_seg -> anonymous frames
+// FILE/DEVICE source: mm_seg -> vm_file/page cache
+// MEMORY source: mm_seg -> vmo (VM_VMO)
+// 三者共享核心页表、fault 和 TLB invalidation 机制，且共用同一条记录。
+```
+
+### 6.2 缺页处理
+
+1. CPU 触发 page fault。分派先读**该页的每页元数据**（`Status` 字节）与页表节点条目命名的记录；`mm_seg_find()` 只在需要区间策略时按地址查一次链表。
+2. `VM_VMO` 映射从 VMO 的 `pages[]` 获取或首次物化 canonical frame
+3. `VM_FILE` 映射通过 vnode/page cache 填充；当前不会创建 `VMO_PAGED`
+4. 普通匿名映射走核心匿名 fault/COW 路径
+5. 更新页表项并返回用户态
+
+### 6.3 fork 与 VMO 共享
+
+`handle_dup(VMO_handle)` 只创建指向同一 VMO 的新 handle，不提供 COW 选项。`VM_VMO` 映射记录在 fork 后继续映射 VMO 持有的 canonical frames，并按共享映射处理；普通匿名私有映射记录才走核心 fork COW 路径。
+
+---
+
+## 7. 保护位语义
+
+```c
+#define A20_PROT_READ    (1 << 0)   /* 可读 */
+#define A20_PROT_WRITE   (1 << 1)   /* 可写 */
+#define A20_PROT_EXEC    (1 << 2)   /* 可执行 */
+#define A20_PROT_NONE    0          /* 无访问权限（用于 guard page） */
+```
+
+保护位在映射时由以下因素共同决定：
+
+请求保护位必须符合 VMAR 的能力天花板，再与 source handle 的 READ/WRITE/EXEC rights 求交。有效保护位在映射插入及合并前登记为 `vmar_cap`；`VM_NATIVE_CAP` 区分零权限与未设置上限。后续 protect 不能超出这个创建时上限；W^X 仍由核心 MM 独立执行。VMAR 的区间约束用于 map 的选址准入，映射在插入/合并前持有 `vmar_owner`，fork、拆分和 remap 复制引用；不同节点的映射不合并。核心 remap 的原地扩展、目标空隙与显式固定移动都受原节点区间约束，关闭 handle 不撤销约束。

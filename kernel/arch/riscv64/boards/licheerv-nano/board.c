@@ -24,7 +24,7 @@
  * kernel/drivers/irqchip/plic.c applies unchanged.
  *
  * Verified: builds clean under -Werror.  NOT run on hardware.  See
- * docs/platforms/licheerv-nano.md for what has to happen before that
+ * docs/zh/platforms/licheerv-nano.md for what has to happen before that
  * statement can be made.
  */
 
@@ -96,7 +96,7 @@ static const board_config_t licheerv_nano = {
     .timer             = &lrn_timer_ops,
     /* SG2002 has a second C906 core, but the upstream device tree declares
      * only cpu0, so no secondary-start contract is claimed here.  See
-     * docs/platforms/licheerv-nano.md. */
+     * docs/zh/platforms/licheerv-nano.md. */
     .smp               = NULL,
     .early_init        = lrn_early_init,
     .poweroff          = lrn_poweroff,

@@ -45,7 +45,7 @@ enum {
     DEVFS_BLOCK_DIR,
     DEVFS_CHAR_DIR,
     /* /dev/net/tun: a fixed service node, not a dynamic class node.  TUN is a
-     * kernel service (docs/drivers/classes/tun.md), so it is enumerated like
+     * kernel service (docs/zh/drivers/classes/tun.md), so it is enumerated like
      * ptmx rather than published through the driver class registry. */
     DEVFS_NET_DIR,
     DEVFS_TUN,

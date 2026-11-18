@@ -2,7 +2,7 @@
 #
 # 配套 packages/overlay/server/（a20-distro 标记 + stage-2 init），
 # 启动后由 init 自动 chroot 接管（与 pynode / devtools world 同一模式）。
-# 用途：给 docs/status/current/server-readiness.md 记录的"服务器段无落地物"一个最小的
+# 用途：给 docs/zh/status/current/server-readiness.md 记录的"服务器段无落地物"一个最小的
 # 声明式起点：远程接入（dropbear SSH）、时间同步（chrony）、日志与定时
 # 任务（busybox syslogd/crond）。
 #
@@ -34,7 +34,7 @@
 #   2. 内核命令行必须选 `a20.tcpmode=lwip`。默认的 tcpmode=fast 从不把
 #      监听套接字放进 lwIP（listen() 直接丢掉已绑定的 pcb），因此 22 端口在
 #      协议栈里根本不存在，slirp 发的 SYN 会被回 RST —— 表现为宿主侧
-#      "Connection reset by peer"，与认证无关。详见 docs/status/current/server-readiness.md §八。
+#      "Connection reset by peer"，与认证无关。详见 docs/zh/status/current/server-readiness.md §八。
 #
 # 去掉 busybox-suid 是为了绕开无特权环境下的 CAP_MKNOD：它带的 bbsuid 需要
 # mknod，而 fakeroot 只伪造文件属主、不提供 mknod 权限，于是

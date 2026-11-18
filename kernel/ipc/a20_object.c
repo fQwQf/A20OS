@@ -1,7 +1,7 @@
 #if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
 /*
  * A20OS Native ABI — Type-aware object lifetime for handle entries.
- * Design reference: docs/native-abi/03-handle.md §1.1
+ * Design reference: docs/zh/native-abi/03-handle.md §1.1
  *
  * This file lives in kernel/ipc/ (always compiled, unlike abi/native/) so
  * the channel endpoint implementation can release message-carried object

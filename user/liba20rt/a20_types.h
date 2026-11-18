@@ -499,7 +499,7 @@ typedef struct a20_ctl_flags_args {
 } a20_ctl_flags_args_t;
 
 /* Temporal capability control.  SET is strengthening-only
- * (non-refreshability, docs/native-abi/06-security.md §6.4). */
+ * (non-refreshability, docs/zh/native-abi/06-security.md §6.4). */
 typedef struct a20_handle_temporal_args {
     uint32_t       size;
     uint32_t       version;
@@ -859,7 +859,7 @@ typedef struct a20_vm_object_args {
 #define A20_VMO_PHYSICAL   1
 #define A20_VMO_PAGED      2
 
-/* ---- Pager structures (docs/native-abi/09-native-abi-deepening.md §2) ---- */
+/* ---- Pager structures (docs/zh/native-abi/09-native-abi-deepening.md §2) ---- */
 
 typedef struct a20_pager_create_args {
     uint32_t       size;
@@ -889,7 +889,7 @@ typedef struct a20_pager_supply_args {
     uint64_t       out_supplied;
 } a20_pager_supply_args_t;
 
-/* ---- Monitor structures (docs/native-abi/09-native-abi-deepening.md §3) ---- */
+/* ---- Monitor structures (docs/zh/native-abi/09-native-abi-deepening.md §3) ---- */
 
 #define A20_MONITOR_TASK_CPU_TIME     1
 #define A20_MONITOR_TASK_SYS_TIME     2
@@ -920,7 +920,7 @@ typedef struct a20_monitor_value {
     uint64_t       prev;
 } a20_monitor_value_t;
 
-/* ---- Task memory structures (docs/native-abi/09-native-abi-deepening.md §4) ---- */
+/* ---- Task memory structures (docs/zh/native-abi/09-native-abi-deepening.md §4) ---- */
 
 typedef struct a20_task_mem_args {
     uint32_t       size;
@@ -1096,7 +1096,7 @@ typedef struct a20_pending_event {
     char           fs_name[32];   /* FS watch: changed entry name (NUL-padded) */
 } a20_pending_event_t;
 
-/* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ---- */
+/* ---- Observable event types (docs/zh/native-abi/05-ipc.md §3.3) ---- */
 
 #define A20_EVENT_READABLE        0u
 #define A20_EVENT_WRITABLE        1u
@@ -1110,7 +1110,7 @@ typedef struct a20_pending_event {
 #define A20_EVENT_PEER_CLOSED     9u
 #define A20_EVENT_SIGNALED       10u
 
-/* Filesystem watch events (docs/native-abi/09-native-abi-deepening.md §6). */
+/* Filesystem watch events (docs/zh/native-abi/09-native-abi-deepening.md §6). */
 #define A20_EVENT_FS_CREATE      16u
 #define A20_EVENT_FS_DELETE      17u
 #define A20_EVENT_FS_MODIFY      18u
@@ -1517,7 +1517,7 @@ typedef struct a20_system_info {
 } a20_system_info_t;
 
 /* ========================================================================
- * Cluster (kernel/include/abi/native/types.h, docs/cluster/01-abi.md)
+ * Cluster (kernel/include/abi/native/types.h, docs/zh/cluster/01-abi.md)
  * ======================================================================== */
 
 typedef struct a20_node_id {
@@ -1677,7 +1677,7 @@ typedef struct a20_resource_limits {
 #define A20_LIMIT_THREADS_ABSOLUTE          4096
 #define A20_LIMIT_PENDING_OPS_ABSOLUTE       512
 
-/* Cascading depth limit (docs/native-abi/03-handle.md §3.3) */
+/* Cascading depth limit (docs/zh/native-abi/03-handle.md §3.3) */
 #define A20_CASCADE_DEPTH_MAX              2
 
 static inline void a20_resource_limits_init_default(a20_resource_limits_t *l)

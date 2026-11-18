@@ -878,7 +878,7 @@ static int vport_ioctl_impl(device_t *dev, unsigned long req, void *arg)
     }
 
     /* The generic char adapter hands ioctl() the raw user pointer (see
-     * docs/drivers/guide/device-classes.md), so this driver does its own
+     * docs/zh/drivers/guide/device-classes.md), so this driver does its own
      * usercopy rather than dereferencing arg. */
     if (req == VPORT_IOCTL_SET_CONSOLE) {
         int32_t attach = 0;

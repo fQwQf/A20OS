@@ -1,7 +1,7 @@
 /*
- * Cluster wire-frame codec (docs/cluster/02-wire-protocol.md §1-§2).
+ * Cluster wire-frame codec (docs/zh/cluster/02-wire-protocol.md §1-§2).
  *
- * Implementation contract (docs/cluster/03-kernel-impl.md §2 frame.c row):
+ * Implementation contract (docs/zh/cluster/03-kernel-impl.md §2 frame.c row):
  * pure functions, no locks, no allocation, the caller owns every buffer.
  * Every multi-byte field goes through the explicit little-endian accessors
  * of kernel/cluster/uart.h; the 32-byte header is never handled as a struct

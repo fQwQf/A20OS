@@ -42,5 +42,5 @@ kernel.bin has the AArch64 Image header and is linked at 0x40080000;
 fdt_addr_r is separate, below 512 MiB RAM end. Run manual load commands one at
 a time and stop on any error. Do not saveenv during first bring-up.
 No kernel SD/EMAC/USB/HDMI driver or physical acceptance is claimed. See
-docs/platforms/pine-a64.md for SD preparation, serial wiring and acceptance.
+docs/zh/platforms/pine-a64.md for SD preparation, serial wiring and acceptance.
 """

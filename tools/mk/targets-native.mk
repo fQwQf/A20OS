@@ -6,14 +6,7 @@ A20_SERVICES_IDL_GEN := tools/a20idl.py
 A20_SERVICES_IDL_HDR := user/svc/a20_services_idl.h
 A20_IDL_PYTHON      ?= $(PYTHON)
 
-.PHONY: native-mm-arch native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-all \
-	native-signal-arch native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-all \
-	native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-all \
-	native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-all \
-	native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-all \
-	native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-all \
-	native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-all \
-	native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-all
+.PHONY: native-mm-arch native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-all native-signal-arch native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-all native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-all native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-all native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-all native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-all native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-all native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-all
 
 $(A20_SERVICES_IDL_HDR): $(A20_SERVICES_IDL_SRC) $(A20_SERVICES_IDL_GEN)
 	@mkdir -p $(dir $@)
@@ -463,7 +456,7 @@ native-contract-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-contract-arch
 native-contract-all: native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32
 
-# Cluster ABI contract (docs/cluster/01-abi.md, stage W0). Same shape as the
+# Cluster ABI contract (docs/zh/cluster/01-abi.md, stage W0). Same shape as the
 # contract recipe above: freestanding, no libc, boots as a native program.
 define NATIVE_CLUSTER_RECIPE
 @mkdir -p $(dir $(4))

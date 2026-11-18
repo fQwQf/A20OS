@@ -345,7 +345,7 @@ static int handle_transfer_partial(void)
     return 0;
 }
 
-/* ---- Typed channel: signature enforcement (docs/native-abi/05-ipc.md §2.3) ---- */
+/* ---- Typed channel: signature enforcement (docs/zh/native-abi/05-ipc.md §2.3) ---- */
 
 static int typed_channel_enforced(void)
 {
@@ -413,7 +413,7 @@ static int typed_channel_enforced(void)
     return 0;
 }
 
-/* ---- Channel blocking semantics (docs/native-abi/05-ipc.md §2.4-2.5) ---- */
+/* ---- Channel blocking semantics (docs/zh/native-abi/05-ipc.md §2.4-2.5) ---- */
 
 static a20_handle_t g_bch;
 

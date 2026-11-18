@@ -4,8 +4,7 @@
 #
 #   make docs
 #
-# Builds a single combined PDF from every tracked Markdown file under
-# docs/. The script first validates that every required tool
+# Builds a curated, language-aware book from docs/_meta/books/. The script first validates that every required tool
 # and font is present and prints the exact install commands for
 # the host platform when something is missing.
 # It never modifies tracked source documents.
@@ -14,7 +13,6 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-OUT=standard-reference.pdf
 UNAME="$(uname -s)"
 
 case "$UNAME" in
@@ -40,14 +38,13 @@ die()  { say "ERROR: $*" >&2; exit 1; }
 missing_tools=()
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-for t in git pandoc xelatex; do
+for t in git python3 pandoc xelatex; do
     if ! have_cmd "$t"; then
         missing_tools+=("$t")
     fi
 done
 
-# SVG conversion is required: README.md embeds shields.io SVG badges and
-# docs/poster contains SVG artwork.
+# SVG conversion is required for the shared local cover logo.
 RSVG=rsvg-convert
 if ! have_cmd "$RSVG"; then
     missing_tools+=("$RSVG")
@@ -167,87 +164,10 @@ if [[ ${#missing_tools[@]} -gt 0 || ${#missing_fonts[@]} -gt 0 ]]; then
     exit 1
 fi
 
-# --- assemble the document list -------------------------------------------
-# Build from the curated document navigation in site/mkdocs.yml so standard-reference.pdf
-# matches the official documentation structure and excludes raw historical logs/scraps.
-mapfile -t DOCS < <(
-    python3 -c "
-import os, sys, yaml
-class IgnoreTagLoader(yaml.SafeLoader): pass
-IgnoreTagLoader.add_constructor(None, lambda loader, node: None)
-try:
-    with open('site/mkdocs.yml', 'r') as f:
-        config = yaml.load(f, Loader=IgnoreTagLoader)
-    nav = config.get('nav', [])
-    docs = []
-    def extract_docs(item):
-        if isinstance(item, str) and item.endswith('.md'):
-            docs.append(item)
-        elif isinstance(item, dict):
-            for v in item.values(): extract_docs(v)
-        elif isinstance(item, list):
-            for x in item: extract_docs(x)
-    extract_docs(nav)
-    seen = set()
-    for d in docs:
-        p = os.path.join('docs', d)
-        if p not in seen and os.path.exists(p):
-            seen.add(p)
-            print(p)
-except Exception:
-    import subprocess
-    cmd = ['git', 'ls-files', 'docs/**/*.md', 'docs/*.md']
-    out = subprocess.check_output(cmd).decode().splitlines()
-    for line in sorted(out):
-        if not any(skip in line for skip in ['archive/', 'paper/', 'research/', 'status/history/']):
-            print(line)
-"
-)
+python3 -c 'import markdown, mkdocs, yaml, pymdownx' >/dev/null 2>&1 || {
+    die "Python documentation dependencies missing; run: python3 -m pip install -r site/requirements.txt"
+}
 
-# --- build ----------------------------------------------------------------
-# A20OS LaTeX template renders the documentation as a book: each source
-# document begins a new chapter after a distinct cover and front-matter TOC.
-# Override the template with A20OS_LATEX_TEMPLATE if needed.
-TEMPLATE="${A20OS_LATEX_TEMPLATE:-tools/docs/pandoc/a20os.latex}"
-BUILD_DATE="$(date +%Y-%m-%d)"
-# mktemp honours TMPDIR; pin it into the checkout (the repo root was cd'd to
-# above; make exports build/tmp for recipes, this covers a manual run) so the
-# scratch tree lands under build/, where `make clean` can remove it.
-TMPDIR="${TMPDIR:-$PWD/build/tmp}"
-export TMPDIR
-mkdir -p "$TMPDIR"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-LOGO_PDF="$WORK/a20os-logo.pdf"
-rsvg-convert --format=pdf --output="$LOGO_PDF" tools/docs/pandoc/a20os-logo.svg
-
-say "Generating $OUT from $((${#DOCS[@]})) documents ..."
-pandoc "${DOCS[@]}" \
-    --fail-if-warnings \
-    --pdf-engine=xelatex \
-    --template="$TEMPLATE" \
-    --lua-filter=tools/docs/pandoc/a20os_pdf.lua \
-    --toc \
-    --top-level-division=chapter \
-    --number-sections \
-    -V documentclass=report \
-    -V classoption=openany \
-    -V title="A20OS" \
-    -V subtitle="标准参考手册" \
-    -V subject="架构、内核与工程实现" \
-    -V author="A20OS Project" \
-    -V date="$BUILD_DATE" \
-    -V mainfont="$MAIN_FONT" \
-    -V CJKmainfont="$CJK_FONT" \
-    -V sansfont="$SANS_FONT" \
-    -V CJKsansfont="$CJK_SANS_FONT" \
-    -V monofont="$SANS_FONT" \
-    -V CJKmonofont="$CJK_SANS_FONT" \
-    -V a20-styling \
-    -V a20-logo="$LOGO_PDF" \
-    -V geometry:top=2.4cm,bottom=2.3cm,left=2.6cm,right=2.6cm,headheight=15pt \
-    -V toc-title="目录" \
-    -V toc-depth=0 \
-    -o "$OUT"
-say "done: $OUT"
+export DOC_MAIN_FONT="$MAIN_FONT" DOC_SANS_FONT="$SANS_FONT"
+export DOC_CJK_FONT="$CJK_FONT" DOC_CJK_SANS_FONT="$CJK_SANS_FONT"
+exec python3 tools/docs/build_pdf.py "$@"

@@ -2,7 +2,7 @@
  * RX, polling and housekeeping run independently. Driver I/O and channel
  * injection never run under the registry lock. Valid nonlocal frames may
  * be forwarded only by a RELAY, with TTL/CRC updated in the shared codec.
- * See docs/cluster/03-kernel-impl.md and 04-transports.md. */
+ * See docs/zh/cluster/03-kernel-impl.md and 04-transports.md. */
 #include "cluster/clx_internal.h"
 #include "cluster/loopback.h"
 #include "cluster/udp.h"

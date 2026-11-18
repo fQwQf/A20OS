@@ -109,7 +109,7 @@ const char *hyp_guest_call_error(long rc)
      * kernel built without the hyp calls at all answers ENOSYS.  Both mean
      * "nothing was measured", which has to be said rather than folded into a
      * generic failure: this is the case where a boot gate goes green having
-     * tested nothing (see docs/hypervisor/01-a20os-guest.md §8.4). */
+     * tested nothing (see docs/zh/hypervisor/01-a20os-guest.md §8.4). */
     if (errno == ENOTSUP)
         return "kernel refuses the hyp operation: no usable virtualization backend "
                "or operation unsupported by this backend";

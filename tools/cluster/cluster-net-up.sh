@@ -3,7 +3,7 @@
 # bidirectional ICMP ping across QEMU's socket-UDP tunnel.
 #
 # This is the WB2 acceptance environment for the cluster UDP transport
-# (docs/cluster/04-transports.md §3): instances/qemu-riscv64-cluster-a.toml
+# (docs/zh/cluster/04-transports.md §3): instances/qemu-riscv64-cluster-a.toml
 # (10.0.3.2) and -b.toml (10.0.3.3) share one L2 segment, each node binds its
 # own host UDP port, and the script proves A ping B and B ping A with the
 # guests' own `ping` command (user/cmds/net/ping.c).
@@ -15,7 +15,7 @@
 #   --keep        leave both guests running after the verdict, for manual
 #                 inspection (A20_CLUSTER_KEEP=1); connect with
 #                 `tools/a20 run` REPLACED by attaching to the FIFOs -- see
-#                 docs/cluster/02-udp-demo.md
+#                 docs/zh/cluster/02-udp-demo.md
 #
 # The script is idempotent: a rerun stops QEMU processes tagged
 # a20os-cluster-{a,b} from a previous run first, re-checks the host UDP ports
@@ -312,5 +312,5 @@ launch parameters: $LOG_DIR/$INST_A.cmdline, $LOG_DIR/$INST_B.cmdline
 guest transcripts: $LOG_A, $LOG_B
 EOF
 cat "$LOG_DIR/summary.txt"
-log "PASS -- the UDP tunnel between the two instances is up; next: WA2 cluster transport (docs/cluster/02-udp-demo.md)"
+log "PASS -- the UDP tunnel between the two instances is up; next: WA2 cluster transport (docs/zh/cluster/02-udp-demo.md)"
 exit 0

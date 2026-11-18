@@ -146,7 +146,11 @@
 #define A20_PF_FSTYPE 122
 #define A20_PF_SWAPS 123
 #define A20_PF_SYSRQ_TRIGGER 124
-#define A20_PF_TYPE_COUNT 125
+#define A20_PF_A20_BOOT_REPORT 125
+#define A20_PF_A20_PORTING_REPORT 126
+#define A20_PF_A20_TRACE 127
+#define A20_PF_A20_OBSERVABILITY 128
+#define A20_PF_TYPE_COUNT 129
 
 /* Probe kinds for a20_procfs_child_node(). */
 #define A20_PROCFS_PROBE_FD_EXISTS 0u

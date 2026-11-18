@@ -1,5 +1,5 @@
 /*
- * Native shared-VMO ring benchmark (docs/hybrid-kernel/01-roadmap.md ph.3).
+ * Native shared-VMO ring benchmark (docs/zh/hybrid-kernel/01-roadmap.md ph.3).
  *
  * Transfers 16 MiB with an increasing byte pattern over two transports,
  * each with a separate consumer process verifying integrity:

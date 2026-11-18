@@ -1,5 +1,5 @@
 /*
- * A20 Linux personality facade (docs/hybrid-kernel/05-idl-and-personality.md).
+ * A20 Linux personality facade (docs/zh/hybrid-kernel/05-idl-and-personality.md).
  *
  * Maps Linux-style programming constructs onto Native A20 primitives:
  *   fd table  -> handle table slots (path_open/handle_io/dup/close)

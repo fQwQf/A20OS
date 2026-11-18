@@ -1,7 +1,7 @@
 /* E3 corpus replay: real malicious packages from the DataDog
  * malicious-software-packages-dataset, replayed as canonical
  * install-time behavior sequences inside capability envelopes
- * (docs/research/10-evaluation.md -- paper-data experiment).
+ * (docs/zh/research/10-evaluation.md -- paper-data experiment).
  *
  * Each corpus entry was classified by STATIC analysis on the host
  * (tools/corpus/extract_corpus.py); the guest replays only the

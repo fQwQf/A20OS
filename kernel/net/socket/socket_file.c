@@ -236,7 +236,7 @@ net_socket_t *net_socket_from_file(int gfd) {
 
 /*
  * Push an event to every event queue watching this socket's global fd
- * (Native ABI event source wiring, docs/native-abi/09-… §5).  Cheap when no
+ * (Native ABI event source wiring, docs/zh/native-abi/09-… §5).  Cheap when no
  * Native process watches the socket.  Called from the net core; safe with a
  * net lock held (a20_event_notify takes its own IRQ-safe locks).
  */

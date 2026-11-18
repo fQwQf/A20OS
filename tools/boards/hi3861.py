@@ -193,7 +193,7 @@ def package(elf: Path) -> None:
     shutil.copyfile(elf, OUT / "kernel.elf")
     (OUT / "kernel-flat.bin").write_bytes(payload)
     (OUT / "a20os.hupg").write_bytes(image)
-    shutil.copyfile(ROOT / "docs/platforms/hi3861.md", OUT / "README.md")
+    shutil.copyfile(ROOT / "docs/zh/platforms/hi3861.md", OUT / "README.md")
     record = {
         "format": "a20-hi3861-hupg-v1",
         "chip": "Hi3861V100",

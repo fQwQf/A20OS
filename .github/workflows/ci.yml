@@ -1,5 +1,4 @@
-# PR/主干门禁：多架构矩阵构建 + 打包 + 组镜像 + QEMU 冒烟。
-# 所有 job 运行在 ghcr 的构建容器里，本地可用同一镜像复现（docs/packaging/ci.md）。
+# Keep routine checks small; subsystem and stress tests remain local make targets.
 name: CI
 
 on:
@@ -8,393 +7,70 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  LC_ALL: C
+  BSD_CLANG: clang-19
+  A20_WAIT_TIMEOUT: "120"
+  A20_BUILD_JOBS: "2"
+
 jobs:
-  # ghcr 镜像名必须全小写，而 github.repository_owner 可能含大写（如 fQwQf）。
-  # container.image 在 job 启动前解析，用不了步骤内的 shell，因此先在此
-  # 算出小写镜像名，供下方所有 job 的 container 引用。
-  buildenv-image:
-    name: resolve-buildenv-image
-    runs-on: ubuntu-latest
+  prepare:
+    runs-on: ubuntu-24.04
     outputs:
-      image: ${{ steps.resolve.outputs.image }}
-    steps:
-      - id: resolve
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
-          else
-            OWNER="${{ github.repository_owner }}"
-          fi
-          echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
-
-  # 宿主侧测试：与架构无关、无需交叉工具链、无需 QEMU，所以不进容器、
-  # 不做矩阵，排在所有重量级 job 之前。只跑行为测试与构建配置校验。
-  host-tests:
-    name: host-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install host test tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ripgrep
-
-      - name: Validate instances, arch matrix and component registries
-        run: make check-manifests
-
-      - name: Unit tests for the a20 toolchain
-        run: make check-a20-tests
-
-      - name: Smoke case table agrees with the makefiles
-        run: make check-smoke-cases
-
-      - name: Host-side unit tests for kernel format/helper logic
-        run: make host-tests
-
-      - name: CMSIS-RTOS2 personality and trim checks
-        run: |
-          make -C user/cmsis_rtos2 test
-          make -C user/cmsis_rtos2 trim PROFILE=mcu
-          python3 -m unittest tools.tests.test_cmsis_trim
-
-      - name: Shared cluster protocol, MCU runtime and bounded job tests
-        run: make check-cluster-unit
-
-      - name: Cluster codecs and runtime under ASan and UBSan
-        run: make check-cluster-fuzz
-
-      - name: Virtio network descriptor completion and wraparound
-        run: make check-virtio-net-completion
-
-      - name: Cluster receive wake and park race boundaries
-        run: make check-cluster-wakeup
-
-      - name: Slab CPU array IRQ reentry and migration boundaries
-        run: make check-slab-cpu-window
-
-      - name: Linux syscall coverage table agrees with the registered table
-        run: make check-abi-boundary
-
-      - name: DRM UAPI ioctl numbers and struct layouts vs the Linux UAPI
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            "linux-headers-$(uname -r)" \
-            || sudo apt-get install -y -qq --no-install-recommends linux-headers-generic
-          out="$(make check-drm-abi 2>&1)" || { echo "$out"; exit 1; }
-          echo "$out"
-          if printf '%s\n' "$out" | grep -q '^skip:'; then
-            echo '::error::check-drm-abi skipped -- no Linux UAPI DRM headers on this runner'
-            exit 1
-          fi
-
-  # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
-  # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
-  # 之后悄悄落后；当前由 Makefile 的活动架构矩阵提供唯一列表。
-  # strategy.matrix 必须在矩阵 job 的任何 step 之前拿到列表，所以用与
-  # buildenv-image 同样的独立 resolver job 形状。
-  ci-kernel-arches:
-    name: resolve-kernel-arch-matrix
-    runs-on: ubuntu-latest
-    outputs:
+      image: ${{ steps.image.outputs.image }}
       arches: ${{ steps.arches.outputs.arches }}
     steps:
       - uses: actions/checkout@v4
-
+      - id: image
+        env:
+          OWNER: ${{ github.event.pull_request.base.repo.owner.login || github.repository_owner }}
+        run: echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
       - id: arches
         run: make -s print-ci-kernel-arches >> "$GITHUB_OUTPUT"
 
-  cluster-runtime:
-    name: cluster-independent-kernel-runtime
-    needs: buildenv-image
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-    timeout-minutes: 60
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Install host selftest dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential python3
+      - name: Check manifests and run fast selftests
+        run: make check
 
-      - name: Trust workspace ownership
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Cache compiler output
-        uses: actions/cache@v4
-        with:
-          path: build/cache/ccache
-          key: ccache-cluster-${{ github.sha }}
-          restore-keys: ccache-cluster-
-
-      - name: Loopback resource and lifecycle regression
-        run: make check-cluster-loopback
-
-      - name: Independent UDP kernels with faults and reboot
-        run: make check-cluster-reliable
-
-      - name: Native services, process cancellation and supervision
-        run: make smoke-native-cluster smoke-native-cluster-supervisor
-
-      - name: Native membership, indirect probe and job recovery
-        run: make check-cluster-mesh
-
-      - name: Extended mixed architecture and MCU simulation acceptance
-        if: github.event_name == 'workflow_dispatch'
-        run: make check-cluster-hardening check-cluster-send check-cluster-smp demo-wordcount check-cluster-fuzz-smoke check-cluster-performance check-cluster-load
-
-      - name: Upload runtime evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cluster-runtime-evidence
-          path: |
-            .kernel-build/cluster/**/*.log
-            .kernel-build/cluster/**/*.json
-            .kernel-build/smoke/native-cluster*.log
-          if-no-files-found: warn
-
-  build:
-    name: build-${{ matrix.arch }}
-    needs: buildenv-image
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [riscv64, x86_64, aarch64, loongarch64]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Trust workspace ownership (container runs as root)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: ccache
-        uses: actions/cache@v4
-        with:
-          path: build/cache/ccache
-          key: ccache-${{ matrix.arch }}-${{ github.sha }}
-          restore-keys: ccache-${{ matrix.arch }}-
-
-      - name: Build kernel + userland
-        run: make ARCH=${{ matrix.arch }} dev-build
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: x86 kernel driver FP-state regression
-        if: matrix.arch == 'x86_64'
-        run: make smoke-x86-fp-preserve
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: Package build outputs as .apk and index the repo
-        run: make ARCH=${{ matrix.arch }} pkg-repo
-
-      - name: Compose base image from the package repository
-        run: make ARCH=${{ matrix.arch }} image-world PKG_WORLD=base PKG_ALPINE=0
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: a20os-${{ matrix.arch }}
-          path: |
-            .kernel-build/*/kernel.elf
-            build/images/*.img
-            build/repo/${{ matrix.arch }}/
-          # Kernel ELFs live under .kernel-build. Keep the glob narrow so the
-          # artifact includes only the explicitly matched build output there.
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14
-
-      - uses: actions/upload-artifact@v4
-        if: always() && matrix.arch == 'x86_64'
-        with:
-          name: x86-fp-preserve-smoke-log
-          path: .kernel-build/smoke/x86-fp-preserve.log
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14
-
-  # BUILD_MATRIX_GATE_CONTRACT 的 CI 一半：每个当前支持的 hosted 架构都跑一次
-  # 内核 bring-up 构建门禁。RISC-V32、ARM32 均保留在矩阵；LoongArch32/PPC64LE
-  # 按 1.0 平台决策退出活跃矩阵，历史源码与验证记录仍保留。
-  #
-  # 与 build 分开是有原因的，不是重复：build 要产出发布打包产物（apk 仓库 +
-  # world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前构建不过
-  # （user/cmds/stress/poll_edge.c 在 riscv32 上引用了 musl 未声明的
-  # SYS_pselect6/SYS_ppoll）。下面这条是纯内核门禁，与
-  # check-kernel-build-all / check-build-matrix 迭代的是同一个
-  # check-<arch>-bringup 目标。
-  #
-  # 不拉 submodule：bring-up 构建只编译 vendored 源（kernel/external/lwip
-  # 是 tracked tree），本矩阵里的每个架构都已在无 submodule 的 checkout 上
-  # 实测通过；唯一的 gitlink 是 fastfetch，拉它只会把时间花在
-  # 与这个门禁无关的下载上。
   kernel-build:
     name: kernel-build-${{ matrix.arch }}
-    needs: [buildenv-image, ci-kernel-arches]
-    runs-on: ubuntu-latest
+    needs: [prepare, checks]
+    runs-on: ubuntu-24.04
     container:
-      image: ${{ needs.buildenv-image.outputs.image }}
+      image: ${{ needs.prepare.outputs.image }}
     timeout-minutes: 60
     strategy:
-      fail-fast: false
+      fail-fast: true
+      max-parallel: 3
       matrix:
-        arch: ${{ fromJSON(needs.ci-kernel-arches.outputs.arches) }}
+        arch: ${{ fromJSON(needs.prepare.outputs.arches) }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Trust workspace ownership (container runs as root)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: ccache
-        uses: actions/cache@v4
+      - name: Initialize build dependencies
+        run: git submodule update --init --recursive kernel/external/f-stack kernel/external/lwip-upstream user/external/musl
+      - uses: ./.github/actions/build-setup
+      - uses: actions/cache@v4
         with:
           path: build/cache/ccache
           key: ccache-kernel-${{ matrix.arch }}-${{ github.sha }}
           restore-keys: ccache-kernel-${{ matrix.arch }}-
-
-      - name: STM32F103 source and firmware gate
-        if: matrix.arch == 'arm32'
-        run: make check-stm32f103
-
-      - name: Kernel bring-up build gate (check-<arch>-bringup)
-        run: make check-${{ matrix.arch }}-bringup
+      - name: Build kernel
+        run: make -j2 ARCH=${{ matrix.arch }} kernel-only
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      # 架构专属的构建断裂没有日志基本无法定位，所以逐架构留下 kernel.elf。
-      - uses: actions/upload-artifact@v4
-        with:
-          name: a20os-kernel-${{ matrix.arch }}
-          path: .kernel-build/*/kernel.elf
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-
-  native:
-    needs: buildenv-image
-    uses: ./.github/workflows/native.yml
-    with:
-      buildenv-image: ${{ needs.buildenv-image.outputs.image }}
-
-  # QEMU 冒烟门禁（riscv64，TCG）：PR 与主干同一标准，套件对应
-  # docs/testing-gates.md 的核心 runtime 门禁（bring-up、Linux ABI syscall、
-  # 调度/进程/futex/MM/VFS 压力、SMP），最后跑需要网络与包仓库的
-  # smoke-devtools（Alpine gcc 在 guest 内编译运行）。
-  # 各 make 目标自带的 dev-build 增量复用同一构建目录与 ccache。
-  smoke:
-    name: smoke-riscv64
-    needs: buildenv-image
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-      options: --privileged
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Trust workspace ownership (container runs as root)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      # Alpine world composition (smoke-devtools) runs target-arch maintainer
-      # scripts; qemu-user + binfmt lets them execute on the x86_64 runner.
-      - name: Register foreign-arch binfmt (qemu-user)
-        run: |
-          set -e
-          if ! ls /usr/lib/binfmt.d/qemu-*.conf >/dev/null 2>&1; then
-            apt-get update && apt-get install -y --no-install-recommends qemu-user-static
-          fi
-          mkdir -p /mnt/binfmt_misc
-          mountpoint -q /mnt/binfmt_misc || mount -t binfmt_misc binfmt_misc /mnt/binfmt_misc
-          for f in /usr/lib/binfmt.d/qemu-*.conf; do
-            [ -e "$f" ] || continue
-            name="$(basename "$f" .conf)"
-            [ -e "/mnt/binfmt_misc/$name" ] && continue
-            cat "$f" > /mnt/binfmt_misc/register
-          done
-          ls /mnt/binfmt_misc/
-
-      - name: ccache
-        uses: actions/cache@v4
-        with:
-          path: build/cache/ccache
-          key: ccache-smoke-riscv64-${{ github.sha }}
-          restore-keys: |
-            ccache-smoke-riscv64-
-            ccache-riscv64-
-
-      - name: Build kernel + userland (both-ABI dev, feeds pkg-repo & smoke-devtools)
-        run: make ARCH=riscv64 dev-build
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: Package build outputs as .apk and index the repo
-        run: make ARCH=riscv64 pkg-repo
-
-      - name: QEMU smoke gates
-        run: |
-          make smoke-quickstart
-          make smoke-riscv64
-          make smoke-abi-linux
-          make smoke-syscall-ext
-          make smoke-sched-stress
-          make smoke-proc-stress
-          make smoke-futex-stress
-          make smoke-futex-stress-smp4
-          make smoke-swap
-          make smoke-swap-smp4
-          make smoke-mm-stress
-          make smoke-vfs-stress
-          make smoke-vfs-stress-smp2
-          # Scheduler and process-lifecycle concurrency: NR_CPUS=1 never reaches
-          # runqueue migration or cross-CPU wakeup, and until these existed only
-          # vfs/futex/swap had an SMP gate.  Each asserts the boot log reports
-          # both CPUs online, so a mis-wired alias cannot pass by booting the
-          # single-CPU image.  The single-CPU targets above keep running too.
-          make smoke-sched-stress-smp2
-          make smoke-proc-stress-smp2
-          make smoke-smp-bringup
-          # Native coverage runs in the separate shared two-architecture job.
-        timeout-minutes: 60
-
-      # Networking had no CI coverage at all until this block, which is why a
-      # red smoke-network-suite could sit on main unnoticed: the suite requires
-      # a declared non-goal to be asserted explicitly, and without a gate
-      # running it nothing noticed. Kept to the two cheapest gates that cover
-      # distinct ground -- the suite is the broad functional sweep, and
-      # smoke-net-accept is the structural guard for the accept path and its
-      # real LISTEN pcb. smoke-net-lanes and smoke-smp-lock-contention are
-      # deliberately not here: both need a 4-core build plus a fixed RTT-free
-      # workload, and adding them to a 60-minute job is a separate decision.
-      - name: QEMU network smoke gates
-        run: |
-          make smoke-network-suite
-          make smoke-net-accept
-        timeout-minutes: 30
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: "Guest regression: Alpine gcc toolchain via chroot"
-        run: make smoke-devtools
-        timeout-minutes: 20
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: Upload smoke logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-riscv64-logs
-          path: .kernel-build/smoke/
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 14

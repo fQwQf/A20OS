@@ -1,0 +1,57 @@
+sections:
+  architecture: Architecture
+  hybrid-kernel: Hybrid kernel
+  native-abi: Native ABI
+  real-time-operating-system: Real-time operating system
+  kernel-subsystems: Kernel subsystems
+  scheduling: Scheduling
+  memory-management: Memory management
+  linux-abi-compatibility: Linux ABI compatibility
+  logging: Logging and diagnostics
+  architecture-features: Architecture features
+  cross-architecture-execution-exec-xlator: Cross-architecture execution (exec-xlator)
+  file-systems: File systems
+  networking: Networking
+  graphics: Graphics
+  virtualization: Virtualization
+  clustering: Clustering
+  core-specifications: Core specifications
+  technical-reference: Technical reference
+  security-and-hardening: Security and hardening
+  driver-development: Driver development
+  developer-guides: Developer guides
+  device-classes: Device classes
+  engineering-practices: Engineering practices
+  platforms-and-porting: Platforms and porting
+  risc-v-platforms: RISC-V platforms
+  arm-aarch64-platforms: ARM / AArch64 platforms
+  loongarch-platforms: LoongArch platforms
+  x86-64-and-virtualization: x86_64 and virtualization
+  build-and-test: Build and test
+  packaging-and-distribution: Packaging and distribution
+  distribution-rootfs: Distribution rootfs
+  releases: Releases
+  contributing: Contributing
+pages:
+  kernel/logging/README: Usage and extension
+  kernel/logging/persistent-logging: Persistent logs and forensics
+  kernel/logging/boot-report: Boot Report and screen diagnostics
+  kernel/logging/observability: Porting tests and performance analysis
+  kernel/logging/observability-validation-2026-11-15: Observability validation
+  kernel/logging/boot-report-validation-2026-11-15: Boot Report validation
+site_name: A20OS Documentation
+language_tag: en
+contents: Contents
+chapter_prefix: 'Chapter '
+chapter_suffix: ''
+figure: Figure
+table: Table
+subject: Architecture, kernel and engineering
+books:
+  reference: Reference Manual
+  developer: Developer Manual
+  user: User Manual
+document_type_label: Document type
+document_type: Technical manual
+date_label: Build date (UTC)
+author_label: Publisher

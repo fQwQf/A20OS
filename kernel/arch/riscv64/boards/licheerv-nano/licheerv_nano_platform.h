@@ -16,7 +16,7 @@
  * constant. The architecture's 2 MiB Image offset places the kernel above
  * OpenSBI at 0x80200000; actual U-Boot/FDT/reserved-memory placement must be
  * checked before loading, including the kernel's BSS footprint. See
- * docs/platforms/licheerv-nano.md.
+ * docs/zh/platforms/licheerv-nano.md.
  */
 
 #define PHYS_MEMORY_BASE   0x80000000UL

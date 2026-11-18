@@ -5,7 +5,7 @@
 
 /* Board memory map.  The defaults below are QEMU virt's; a board with a
  * different RAM window or MMIO layout supplies its own header instead of
- * editing this file, which docs/platforms/porting-guide.md reserves for
+ * editing this file, which docs/zh/platforms/porting-guide.md reserves for
  * instruction-set mechanisms only. */
 #if defined(CONFIG_BOARD_LICHEERV_NANO)
 #include "licheerv_nano_platform.h"

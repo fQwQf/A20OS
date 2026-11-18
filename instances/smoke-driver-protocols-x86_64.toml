@@ -16,4 +16,5 @@ expect = ["DRIVER_PROTOCOLS: PASS primary=1 extension=1 send=1 stats=1"]
 timeout = "60s"
 
 [net]
+# Explicit override: the protocol probe exercises the lwIP VirtIO net module.
 stack = "lwip"

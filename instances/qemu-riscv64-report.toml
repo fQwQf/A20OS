@@ -1,0 +1,8 @@
+# Keep on-demand reports without automatic console replay.
+name = "qemu-riscv64-report"
+arch = "riscv64"
+[net]
+stack = "bsd"
+[log]
+boot_report = true
+report = "off"

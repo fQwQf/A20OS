@@ -23,7 +23,7 @@
 - VFS：已有很多路径和文件操作，但 mount namespace、symlink、权限、文件系统特定行为和并发语义仍不完整。
 - Sockets：AF_INET/AF_UNIX/AF_ALG 兼容面足够覆盖测试，但没有实现完整 Linux network stack 行为。
 - POSIX timers 和 timerfd：SIGEV_SIGNAL/NONE/THREAD_ID 通知已实现（SIGEV_THREAD 明确拒绝 EINVAL），overrun 计数按 pending 通知真实累计；timerfd 支持 TFD_TIMER_ABSTIME 与 TFD_TIMER_CANCEL_ON_SET（realtime 被设置后读返回 ECANCELED）；ITIMER_REAL/VIRTUAL/PROF 均有真实交付。CLOCK_PROCESS/THREAD_CPUTIME_ID 的 timer_create 与 clock_nanosleep 仍以 -EOPNOTSUPP 拒绝（范围外）；nanosleep 被信号打断后的重放仍用整条原始请求（restart_syscall 不建模剩余时间）。
-- Keyring：Rust 核心和 C 参考实现覆盖文档列出的 add/request/keyctl 子集及 session/user keyring 生命周期，但 stored permission masks 不作为完整 Linux KEYCTL access checks 执行，request callout data 被忽略，describe length query 保留既有兼容 quirk；未支持命令返回 `-EOPNOTSUPP`。详见 `docs/kernel/linux-abi/keyring.md`。
+- Keyring：Rust 核心和 C 参考实现覆盖文档列出的 add/request/keyctl 子集及 session/user keyring 生命周期，但 stored permission masks 不作为完整 Linux KEYCTL access checks 执行，request callout data 被忽略，describe length query 保留既有兼容 quirk；未支持命令返回 `-EOPNOTSUPP`。详见 `docs/zh/kernel/linux-abi/keyring.md`。
 - fanotify：基于共享 notify 后端（`kernel/fs/inotify.c`）实现 FAN_CLASS_NOTIF + FID；content/pre-content 类和 per-event fd 不在范围内。
 - acct(2)：写入 Linux v3 记账记录，但没有 BSD 风格的 `ac_btime` 高精度或完整字段集合。
 - Linux AIO：`kernel/fs/aio.c` 提供上下文与完成队列，但 pread/pwrite/fsync/fdatasync 在当前 VFS 上同步执行，不是后台异步 I/O；`io_cancel` 无法中止正在执行的 op。
@@ -36,7 +36,7 @@
 - userfaultfd（`kernel/ipc/userfaultfd.c`）：MISSING 模式匿名私有区间，UFFDIO_API/REGISTER/UNREGISTER/COPY/ZEROPAGE/WAKE，read/poll 投递 PAGEFAULT 事件，缺页线程 park 直到 handler 用 COPY/ZEROPAGE 解析；不支持 UFFD_FEATURE_EVENT_FORK、shmem 与 WP 模式。
 - perf_event_open（`kernel/abi/linux/sys_perf.c`）：PERF_TYPE_SOFTWARE 事件（CPU/TASK clock、page faults、context switches 及无源的软件事件），read(2) 输出 count/time/id，支持 ENABLE/DISABLE/RESET/PERIOD/ID；无 PMU，硬件/raw/breakpoint 事件返回 -EINVAL，无 mmap 采样环。
 - futex：全部标准命令（含有边界的 PI 变体 LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI），不携带优先级继承提升；FUTEX_FD（Linux 5.4 移除）返回 -EINVAL。
-- Landlock：fd-backed READ_FILE/WRITE_FILE 路径子集，在普通 open、openat2 和 proc fd 重开中按同一次解析所得目标检查，创建/截断前拒绝；fork/exec 继承，关闭 ruleset fd 不解除限制。策略首次安装后冻结，多个任务可安装同一冻结 fd；匹配规则的权限取并集。每任务一个 ruleset、最多 64 个 255 字节前缀，超长规则报 ENAMETOOLONG。它是路径策略，不提供 Linux inode 锚定、网络/scoping、执行或目录修改限制；不发布标准 ABI 版本。详见 `docs/security/release-acceptance.md`。
+- Landlock：fd-backed READ_FILE/WRITE_FILE 路径子集，在普通 open、openat2 和 proc fd 重开中按同一次解析所得目标检查，创建/截断前拒绝；fork/exec 继承，关闭 ruleset fd 不解除限制。策略首次安装后冻结，多个任务可安装同一冻结 fd；匹配规则的权限取并集。每任务一个 ruleset、最多 64 个 255 字节前缀，超长规则报 ENAMETOOLONG。它是路径策略，不提供 Linux inode 锚定、网络/scoping、执行或目录修改限制；不发布标准 ABI 版本。详见 `docs/zh/security/release-acceptance.md`。
 - rseq：注册/注销每线程 rseq 区域，并在注册时与每次调度分发把 cpu_id/cpu_id_start/node_id/mm_cid 经直接映射写入用户区域（非驻留页静默跳过）；抢占时的序列中止（`rseq_ip_fixup`）仍是后续深化方向。
 - `splice`/`vmsplice`/`tee` 是真实语义（核心 `kernel/fs/splice.c` + pipe peek）：file↔pipe、pipe↔pipe、tee 不消耗源；`SPLICE_F_*` 校验、pipe 端点非空 offset 返回 `-ESPIPE`、无 pipe 端点返回 `-EINVAL`；传输基于拷贝（等价 Linux 非页对齐回退路径）。
 - `membarrier` 实现完整命令集：QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_GLOBAL_EXPEDITED/PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)/REGISTER_PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)；`PRIVATE_EXPEDITED` 要求先注册（否则 `-EPERM`），真正的跨 CPU 屏障复用 reschedule IPI（远端处理函数执行 acquire fence 并回 ack）。未知命令与非法 flags 返回 `-EINVAL`。

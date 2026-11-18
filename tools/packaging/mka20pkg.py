@@ -2,7 +2,7 @@
 """mka20pkg — package A20OS build artifacts as a valid apk (v2) package.
 
 Reads a TOML recipe (see packages/recipes/*.toml and
-docs/packaging/packages.md), resolves its file list against the build tree,
+docs/zh/packaging/packages.md), resolves its file list against the build tree,
 and writes an apk v2 package:
 
     <outdir>/<name>-<version>-r<release>.apk

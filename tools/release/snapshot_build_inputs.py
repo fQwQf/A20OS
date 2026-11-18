@@ -27,7 +27,7 @@ EXCLUDED = {
 ROOT_EXCLUDED = {
     ".kernel-build", ".worktrees", ".omo", ".diag", ".pytest_cache",
     ".zcode", "build", "packages", "site", "hardware", "instances",
-    "docs", "vm-profiles", ".github", "standard-reference.pdf",
+    "docs", ".github",
 }
 
 

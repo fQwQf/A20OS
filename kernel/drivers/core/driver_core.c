@@ -1,3 +1,5 @@
+#include "core/diagnostics.h"
+#include "core/trace.h"
 /*
  * A20OS Driver Core — registration, matching, enumeration
  */
@@ -995,7 +997,7 @@ done:
     return result;
 }
 
-static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
+static int driver_probe_bound_device_impl(driver_t *drv, device_t *dev) {
     /* A retry reconstructs its links. A different matching driver must not
      * inherit dependencies retained by an earlier deferred probe. */
     release_dependencies(dev);
@@ -1049,6 +1051,17 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     dev->firmware_match = NULL;
     dev->state = ret == -EPROBE_DEFER ? DEV_STATE_DEFERRED : DEV_STATE_UNINIT;
     driver_progress_binding_changed();
+    return ret;
+}
+
+static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
+    uint64_t check = a20_diag_begin("driver-probe", dev->name, drv->name);
+    a20_trace_token_t span = a20_trace_begin(A20_TRACE_DRIVER, check, 0);
+    int ret = driver_probe_bound_device_impl(drv, dev);
+    a20_trace_end(span, ret);
+    a20_diag_end(check, ret == 0 ? A20_DIAG_PASS :
+                 ret == -EPROBE_DEFER ? A20_DIAG_DEFERRED :
+                 ret == -EOPNOTSUPP || ret == -ENOSYS ? A20_DIAG_UNSUPPORTED : A20_DIAG_FAIL, ret);
     return ret;
 }
 

@@ -1,6 +1,6 @@
 /*
  * clock_bench — verify and measure the vDSO time path
- * (docs/hybrid-kernel/01-roadmap.md phase 3B).
+ * (docs/zh/hybrid-kernel/01-roadmap.md phase 3B).
  *
  * Compares musl clock_gettime (served by the vDSO when AT_SYSINFO_EHDR is
  * present) against the raw syscall in the same process, and cross-checks

@@ -16,6 +16,7 @@ int uart_getc_vfile(struct vfile *vf);
 void uart_tty_wake(void);
 int  uart_try_getc(void);
 int  uart_has_input(void);
+/* NULL on polling-only boards, so readiness uses its timed fallback. */
 wait_queue_t *uart_read_wait_queue(void);
 void uart_puts(const char *s);
 void uart_flush(void);

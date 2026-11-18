@@ -1,0 +1,51 @@
+name: Optional integration tests
+
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Acceptance tier
+        type: choice
+        options: [nightly, release]
+        default: nightly
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+  integration:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: ${{ needs.prepare.outputs.image }}
+    env:
+      LC_ALL: C
+      A20_WAIT_TIMEOUT: '120'
+      A20_BUILD_JOBS: '2'
+      TIER: ${{ inputs.tier || 'nightly' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/build-setup
+      - name: Run the pinned optional suite
+        run: make -j2 "tests-$TIER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-logs
+          path: .kernel-build/smoke/
+          include-hidden-files: true
+          if-no-files-found: ignore

@@ -1,6 +1,6 @@
 #!/bin/sh
 # tuncheck —— /dev/net/tun 冒烟：创建接口、回读名字/flags、确认 netlink 能看到。
-# 完整数据面验收是 tailscaled TUN 模式（docs/drivers/classes/tun.md §7），
+# 完整数据面验收是 tailscaled TUN 模式（docs/zh/drivers/classes/tun.md §7），
 # 这里只证明设备节点、TUNSETIFF、netif 注册与 netlink 可见性。
 
 export HOME=/root

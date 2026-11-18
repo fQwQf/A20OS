@@ -19,7 +19,7 @@ command = ["gcc", "-std=gnu99", "-O1", "-g", "-fno-omit-frame-pointer",
            "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined",
            "-I" + str(ROOT / "kernel/include"),
            str(ROOT / "kernel/core/fdt_view.c"),
-           str(ROOT / "tools/tests/fdt_view.c"),
+           str(ROOT / "tests/tools/tests/fdt_view.c"),
            "-o", str(binary)]
 subprocess.run(command, cwd=ROOT, check=True)
 result = subprocess.run([str(binary), str(blob)], cwd=ROOT, check=True, text=True,

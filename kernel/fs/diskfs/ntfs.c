@@ -9,7 +9,7 @@
  *     run-list extension through the $Bitmap cluster allocator
  *   - Create / unlink regular files and directories
  *
- * Known limitations (see docs/fs/ntfs.md):
+ * Known limitations (see docs/zh/fs/ntfs.md):
  *   - Compressed / encrypted attributes are rejected on read.
  *   - Index growth appends to the index root or an existing index allocation
  *     block and returns -ENOSPC when neither has room (no B-tree block split).

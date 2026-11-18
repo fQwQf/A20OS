@@ -1,0 +1,173 @@
+{
+  "files": {
+    "@repository-readme": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "b93256c30e6476156fb55ca249d7147f31fa5ad2f9d608d383ca429f18bb5c74",
+      "translation_sha256": "fe1f8a269b244358821e44912d4c1ca28992244cf802a662805ac2e0757af960"
+    },
+    "CONTRIBUTING": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "4ab4b93f98ec5325e2dc39994a0f9ace28f0620581ee2e438683d5cd7c830dd4",
+      "translation_sha256": "af80dfee9fae023abe41d2ed44b1a0278e654c9ef5cf46254cce59fa340bbc1f"
+    },
+    "README": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "b872411f945303cffc19808aab49b76e9046cf98fc275540110c3877709d46ae",
+      "translation_sha256": "ef896d271f628182c6b02418ccf31121f60c8c4a9ba5c817ee33fa6e40859aab"
+    },
+    "cluster/01-abi": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "12d73f385698e15949f90da67de61c95a233a6990277fc35236542a6b08b182c",
+      "translation_sha256": "74c4227075f181f68af2ab34b07623a5d86f9406bbcfb2d0720e59c7b2196bf7"
+    },
+    "cluster/02-udp-demo": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "7cf52d4d0fe391edd8d0bc1e9914c058c2560822191dd89417c8c76f4806dce5",
+      "translation_sha256": "c5422ef8fb24366540b4c1f12bb664e535bf021f36402ab6fec9d61995ce41e6"
+    },
+    "cluster/03-kernel-impl": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "580da88facd2a28db027f5c26ceb1ffdd03b93857bb607510003898ef3bed269",
+      "translation_sha256": "e4b197a0688d5dc5ea93ba6f0cebc19f9ae341a5c753d051abc46e4e96e8b384"
+    },
+    "cluster/05-userspace": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "2bc6c052e6d145d043cfd66434c845aa036d7a6a3e5e91900edb30a72a095778",
+      "translation_sha256": "7e8e49500b3a1958c2b0967a237d3f2bd4635b4a5e92b89a742098bda91d5945"
+    },
+    "cluster/10-operator-guide": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "2be94fce8156703f7c1da5cae5c2acfb2e3766b5dede7c53ffba87268ca4584d",
+      "translation_sha256": "0205b48a628118c2ccd1663e525336066c2f308cc9eed7dcfede667acd30d937"
+    },
+    "cluster/cluster-apps": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "d515e04abb3935833a0930eca03dd81e2f26486400e9102cdd072af32871c674",
+      "translation_sha256": "be547a09c65aceb16c4cc9a762a3b977314959dda7b1b31e20186c3f301f9352"
+    },
+    "cluster/mcu-shared-kernel": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "9ba06e38578b24bc2bedf2e148efc2f68a81f07769784d8389c28ac41f57ed5a",
+      "translation_sha256": "c6e17495130a674e02afc27d5d45e231edbb10fda5f6ba41b4c61f4124abd944"
+    },
+    "cluster/runtime-ssi": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "97a6ca576c3241763207c3b78e684025a829787d944e162cb4246953b90c35b8",
+      "translation_sha256": "cb587b603e7f17169f42a51982f230f87b051f1afa4f9749a03e28e9f4b995e1"
+    },
+    "dev/README": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "325272f802335852e6e331269c2ebcabdc47865e1b59937c3c2f5d8fe13cfa99",
+      "translation_sha256": "f0e6b5fc1e733162ead0a70902f5ec402b7b7a23d3fc0dddcda96edfeaf2f6b6"
+    },
+    "dev/build": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "3060ef57f8a31961e7c182dbf54f4ca631ceded1f7917f38ab2e172d11a9c889",
+      "translation_sha256": "4ae1dc709d865adcd12e2d2090c2fb8d1d4cbdb38f81566ce395f0d228112d36"
+    },
+    "dev/test-submodule": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "11f94bfcf12815d099637f15b096cc77bffed038be447010526e149a88d8c908",
+      "translation_sha256": "1ce35c9bbd3b984d6950563607941c46554624ce962e64c04736bafe4223e8f9"
+    },
+    "dev/userland-submodules": {
+      "model": "reviewed",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "source_sha256": "3ef89ebc08d8516991301c755f63f951c7f0961ae8fe5244a30389390ecde582",
+      "translation_sha256": "670ffe2ec976c3f8386942fb36afb16b23de81231a24caf24b43c67decaf2276"
+    },
+    "distro/minecraft": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "bf706c3d88846595711306a5d116085d72599d94e15c1005ee1af36d4cc9953e",
+      "translation_sha256": "4cdfece05e7975693b30452c5cf4593bad755abc8ebf4ad586e679c6b144f546"
+    },
+    "distro/minecraft-components": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "534283f46fe9321d66310e138f5b9bdf71fa14d2762ce3fc49ab849d5bf71607",
+      "translation_sha256": "2f4dce993387ea878cec945d4b6ea7c23e12e03f924f01d534b2628007a0a65a"
+    },
+    "drivers/README": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "74f61db26e7f40b4a834425ec1d3350d5aa68a5e0a75d2c7728b66354bbfb10e",
+      "translation_sha256": "5ef0f92f485315aa9767d5a78a4f5ce11fc7bb7e8ca6c07c4c551847cfc313ac"
+    },
+    "drivers/classes/display": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "5934a779e97b0d0e5e1fe00bf9a6f58c81be494f26f50e11570ee01d61f105d7",
+      "translation_sha256": "f50e4c7366893abdc0a3b81b6a21c56cddcc10c419ec39cedaf87034b74784aa"
+    },
+    "drivers/classes/tun": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "4db2a576e1bfe878a6684c98f36e8b867836200ff4e26744e764f3dd8b8e13bf",
+      "translation_sha256": "c8e19c77723def3387c6c21ea3e8ca55fce0b6d3b0ff4c5d89c033b1d4531e76"
+    },
+    "drivers/guide/deployment-profiles": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "9767e28cec47df1261ed61a2b6dfd39e4323b80acab7c5c23655132943154fda",
+      "translation_sha256": "106347e286002184f92ba3826eedf8ec19cfc348659735dc3b0ad461f2d0a9ca"
+    },
+    "fs/README": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "a6dfdc44f988d7fb232bfc154d4668b83ab7c518dd9efa7a667415457ec3591a",
+      "translation_sha256": "ef4e007cf194e5b5fb9f2b7b29f6078db9a0a1e060eb93cff240ee80367f9c26"
+    },
+    "graphics/README": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "8f7c70fbc427878535aaee1b2859d503c38926429f18aa86e68d58270a10a9c9",
+      "translation_sha256": "5beea87f5b0ec7e2c4dbaeec490d3a7044a37cf9bb6d423efa4f7e98dff07f2a"
+    },
+    "graphics/drm-sysfs-discovery": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "6233d0b5ec2be8c156802030cd25330445d3335575990b26025beb72a33336a2",
+      "translation_sha256": "5ecf00f508d3ae353839a5aab68a556a637a162f6eeba5275d2049f3da593463"
+    },
+    "graphics/virtgpu-native-allocation": {
+      "model": "tencent/Hunyuan-MT-7B",
+      "policy_sha256": "4e1d153ae77675e834499a0044cb312228c1483f4960a226602d0ec75ff82298",
+      "request_template": "hunyuan-official-zh-en-v1",
+      "source_sha256": "553fb394b7fe9bde55d8472f2a124d3e38228bb450c44bc10bf49cf57c20551a",
+      "translation_sha256": "5e5f3480e7f4b8cdc62b59aeabca5afd779e987d9b99e0708161ae8798b28041"
+    }
+  },
+  "version": 2
+}

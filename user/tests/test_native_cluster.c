@@ -1,5 +1,5 @@
 /*
- * Cluster ABI contract tests (docs/cluster/01-abi.md, stage W0).
+ * Cluster ABI contract tests (docs/zh/cluster/01-abi.md, stage W0).
  *
  * The kernel cluster data plane has landed in WA1, so this test pins the
  * implemented identity behavior alongside the frozen syscall surface:
@@ -783,7 +783,7 @@ static int abi_arg_rejection(void) {
 }
 
 /* A struct that is too short for the fields the kernel knows must be refused
- * before anything else is read (docs/native-abi/01-types.md §2). */
+ * before anything else is read (docs/zh/native-abi/01-types.md §2). */
 static int abi_struct_versioning(void) {
     a20_cluster_connect_args_t args;
     args.size = sizeof(args) - 8; /* one pointer short */

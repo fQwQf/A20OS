@@ -1126,15 +1126,10 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
             if (linked) {
-                uint32_t perf_timed =
-                    __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-                uint64_t park_start = perf_timed ? timer_get_ticks() : 0;
-                if (perf_timed)
-                    a20_perf_count(A20_PERF_VIRTIO_BLK_WAIT_PARKS);
+                a20_perf_token_t timing = a20_perf_begin();
                 (void)proc_park_commit(token);
-                if (perf_timed)
-                    a20_perf_add(A20_PERF_VIRTIO_BLK_WAIT_PARK_TICKS,
-                                 timer_get_ticks() - park_start);
+                a20_perf_finish(A20_PERF_VIRTIO_BLK_WAIT_PARKS,
+                                 A20_PERF_VIRTIO_BLK_WAIT_PARK_TICKS, timing);
             } else {
                 (void)proc_park_cancel(token);
             }
@@ -1150,15 +1145,10 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 
 static int virtio_blk_wait_req_timed(virtio_blk_inst_t *inst,
                                      virtio_blk_req_t *req, uint64_t lba) {
-    uint32_t perf_timed =
-        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
-    uint64_t wait_start = perf_timed ? timer_get_ticks() : 0;
-    if (perf_timed)
-        a20_perf_count(A20_PERF_VIRTIO_BLK_WAIT_CALLS);
+    a20_perf_token_t timing = a20_perf_begin();
     int ret = virtio_blk_wait_req(inst, req, lba);
-    if (perf_timed)
-        a20_perf_add(A20_PERF_VIRTIO_BLK_WAIT_TICKS,
-                     timer_get_ticks() - wait_start);
+    a20_perf_finish(A20_PERF_VIRTIO_BLK_WAIT_CALLS,
+                    A20_PERF_VIRTIO_BLK_WAIT_TICKS, timing);
     return ret;
 }
 

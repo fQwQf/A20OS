@@ -85,11 +85,10 @@ xlator-assets-loongarch64:
 xlator-assets-x86_64:
 	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) XLATOR_GUEST=$(XLATOR_GUEST) xlator-assets
 
-.PHONY: xlator-assets xlator-assets-riscv64 xlator-assets-aarch64 \
-	xlator-assets-loongarch64 xlator-assets-x86_64
+.PHONY: xlator-assets xlator-assets-riscv64 xlator-assets-aarch64 xlator-assets-loongarch64 xlator-assets-x86_64
 
 # XLATOR=1 wires the assets into the image.  This is a dependency rather than
-# a `pre` step in tools/smoke_cases.py because of an ordering that is easy to
+# a `pre` step in tests/tools/smoke_cases.py because of an ordering that is easy to
 # get wrong: the assets land in $(USER_BUILD_DIR), and that directory is
 # wiped by `make -C user clean` whenever USER_BUILD_STAMP decides the userspace
 # build id changed.  A pre step that builds them first therefore loses them

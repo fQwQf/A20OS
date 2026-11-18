@@ -1,0 +1,693 @@
+# A20OS Native ABI：Handle 子系统设计
+
+本文档定义 Native ABI 的 Handle 子系统，覆盖 14 种内核对象类型、句柄表管理、生命周期状态机与并发访问协议。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
+
+---
+
+TASK/THREAD/DEBUG 的内部身份与 PID 生命周期已分离。句柄和在途 IPC 引用持有小型身份对象；任务回收后旧身份失去目标，操作返回 BAD_HANDLE，PID 复用不改变结果。关闭旧句柄仍成功，不保留目标的整个地址空间。具体约束见[Handle 生命周期](#3-handle-生命周期)。用户句柄布局和编号未变。
+
+## 1. 对象类型
+
+A20OS Native ABI 的对象类型由公共对象模型定义。`thread_create` 安装并返回 `A20_OBJ_THREAD` handle；TASK 与 THREAD 共用任务操作，但保留各自类型与权限检查。
+
+```c
+typedef enum a20_object_type {
+    A20_OBJ_INVALID           = 0,
+    A20_OBJ_TASK              = 1,
+    A20_OBJ_THREAD            = 2,    /* reserved; not currently installed */
+    A20_OBJ_FILE              = 3,
+    A20_OBJ_DIRECTORY         = 4,
+    A20_OBJ_SOCKET            = 5,
+    A20_OBJ_PIPE_ENDPOINT     = 6,
+    A20_OBJ_CHANNEL_ENDPOINT  = 7,
+    A20_OBJ_EVENT_QUEUE       = 8,
+    A20_OBJ_TIMER             = 9,
+    A20_OBJ_MEMORY            = 10,   /* 共享内存对象 (shm) */
+    A20_OBJ_DEVICE            = 11,
+    A20_OBJ_NAMESPACE         = 12,
+    A20_OBJ_DEBUG             = 13,
+    A20_OBJ_EXT_PROG          = 14,   /* 内核扩展程序 */
+} a20_object_type_t;
+```
+
+### 1.1 类型到内核结构体的映射
+
+| Native 类型 | 内核结构体 | 引用计数机制 |
+|------------|-----------|-------------|
+| A20_OBJ_FILE | global fd（整数编码在 `object`） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_DIRECTORY | global fd（O_DIRECTORY） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_SOCKET | global fd（`object=(void *)(uintptr_t)gfd`） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_PIPE_ENDPOINT | global fd（pipe 端） | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_CHANNEL_ENDPOINT | 新增 `struct a20_channel_ep` | `refcount_t` |
+| A20_OBJ_EVENT_QUEUE | 新增 `struct a20_eventq` | `refcount_t` |
+| A20_OBJ_TIMER | timer slot 编号 `slot+1` | timer slot refcount |
+| A20_OBJ_TASK | 独立任务身份对象 | handle 持身份引用，操作时安全取得原任务引用 |
+| A20_OBJ_THREAD | 独立任务身份对象 | thread_create 返回 THREAD，生命周期同 TASK |
+| A20_OBJ_MEMORY | `struct vmo *` | `vmo_ref` / `vmo_release` |
+| A20_OBJ_DEVICE | global fd | `vfs_ref_fd` / `vfs_close` |
+| A20_OBJ_NAMESPACE | 新增 `struct a20_namespace` | `refcount_t` |
+| A20_OBJ_DEBUG | 与目标 TASK/THREAD 相同的身份对象 | 会话持身份引用，调试状态由 `proc_debug_*` 管理 |
+| A20_OBJ_EXT_PROG | 整数 KEP program id | `kep_prog_release` |
+
+### 1.2 设计原则
+
+- file、directory、device、pipe、socket 都以 global fd 间接引用 `vfile_t`，避免为每种文件相关对象创建独立 handle backing。
+- channel、event queue、timer 等 VFS 无法表达的对象使用独立结构体，独立分配。
+- **handle entry 的 object 字段是 `void *`**，TASK/THREAD/DEBUG 持独立任务身份对象指针，其他类型可持对象指针，也可编码 global fd、timer slot 或 KEP id，必须始终结合 `type` 解释。
+
+---
+
+## 2. Handle Table 数据结构
+
+### 2.1 核心结构
+
+```c
+#define A20_HT_INITIAL_CAP    256
+#define A20_HT_MAX_CAP        65536
+#define A20_HT_GROWTH_FACTOR  2
+
+typedef struct a20_handle_entry {
+    void             *object;    /* 指向内核对象 */
+    uint16_t          type;      /* a20_object_type_t */
+    uint16_t          _pad;
+    a20_rights_t      rights;    /* 该 handle 的声明权限位域 */
+    // 时态能力字段（temporal capability）
+    uint64_t          expiry_tick;    /* 绝对过期时刻（kernel ticks），0 = 无时间过期 */
+    uint32_t          remaining_ops;  /* OP_COUNT 置位时 0 = 已耗尽；未置位时忽略 */
+    uint32_t          temporal_flags; /* 时态标志位 */
+    uint8_t           security_label; /* 0=L, 1=M, 2=H */
+    uint8_t           state;          /* FREE/ACTIVE/EXPIRED/CLOSING */
+} a20_handle_entry_t;
+
+// 时态标志位定义
+#define A20_TEMPORAL_EXPIRY_ABSOLUTE  (1u << 0)  /* 使用绝对过期时刻 */
+#define A20_TEMPORAL_OP_COUNT         (1u << 1)  /* 使用操作次数限制 */
+#define A20_TEMPORAL_AUTO_CLOSE       (1u << 2)  /* 过期后自动关闭（而非仅清零权限） */
+
+typedef struct a20_handle_table {
+    a20_handle_entry_t *entries;     /* 动态数组，索引 = handle 编号 */
+    uint32_t            capacity;    /* 当前数组容量 */
+    uint32_t            count;       /* 已使用条目数 */
+    uint32_t            free_hint;   /* 下一次搜索的起始位置 */
+    spinlock_t          lock;        /* 保护全部字段（L1 级） */
+    uint64_t           *free_bitmap; /* 每个 bit: 1=已占用, 0=空闲 */
+    uint32_t            bitmap_size; /* bitmap 的 uint64 元素数 */
+    uint32_t            max_handles; /* 当前 task hard quota */
+    uint8_t             security_label;
+    refcount_t          refcount;    /* 线程组共享 HT */
+} a20_handle_table_t;
+```
+
+### 2.2 Bitmap 约定
+
+bit = 1 表示槽位已占用（used），bit = 0 表示槽位空闲（free）。分配时 `|= (1ULL << bit)` 标记为已占用；释放时 `&= ~(1ULL << bit)` 标记为空闲。
+
+### 2.3 设计决策
+
+handle 编号是连续 `uint32_t`，所以存储选动态数组而不是红黑树：动态数组提供 O(1) 的 lookup 和 close，树的 lookup 是 O(log n)。当前 64 位布局中 `a20_handle_entry_t` 为 48 bytes（含 16-byte 时态字段与标签/状态），在 65536 个 handle 上限下条目数组约占 3 MB，另有 bitmap 与表结构开销；实际占用应纳入 05 的评估。
+
+free bitmap 解决的是另一头的问题。Free slot 查找在纯数组上是 O(n)，bitmap 将其优化为 O(n/64) 的 word 级扫描，配合 `free_hint` 记录上次释放的位置，实际接近 O(1)。
+
+### 2.4 关键操作
+
+```c
+/* 分配空闲槽位：O(n/64) worst case */
+static int ht_alloc_slot(a20_handle_table_t *ht) {
+    for (uint32_t i = ht->free_hint / 64; i < ht->bitmap_size; i++) {
+        uint64_t word = ht->free_bitmap[i];
+        if (word != UINT64_MAX) {
+            int bit = __builtin_ctzll(~word);  /* 找第一个 0 bit（空闲） */
+            uint32_t slot = i * 64 + bit;
+            if (slot < ht->capacity) {
+                ht->free_bitmap[i] |= (1ULL << bit);  /* 标记已占用 */
+                ht->free_hint = slot + 1;
+                return slot;
+            }
+        }
+    }
+    return -1;  /* 需要扩容 */
+}
+
+/* Handle lookup：O(1)，检查有效权限 ρ_eff */
+int64_t a20_handle_lookup(a20_handle_table_t *ht, a20_handle_t h,
+                          uint16_t expected_type, a20_rights_t required_rights,
+                          a20_handle_entry_t *out) {
+    if (h >= ht->capacity) return -A20_ERR_BAD_HANDLE;
+    a20_handle_entry_t *e = &ht->entries[h];
+    if (e->object == NULL) return -A20_ERR_BAD_HANDLE;
+    if (expected_type != A20_OBJ_INVALID && e->type != expected_type)
+        return -A20_ERR_BAD_HANDLE;
+    /* 计算有效权限：过期或操作次数耗尽则有效权限为空 */
+    a20_rights_t effective = a20_effective_rights(e);
+    if ((effective & required_rights) != required_rights)
+        return -A20_ERR_ACCESS;
+    /* 若启用了操作计数，递减剩余次数 */
+    if (e->temporal_flags & A20_TEMPORAL_OP_COUNT && e->remaining_ops > 0)
+        e->remaining_ops--;
+    *out = *e;
+    out->rights = effective;  /* 返回有效权限 */
+    return A20_OK;
+}
+
+/* 计算有效权限 ρ_eff(h, t) */
+static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e) {
+    /* 检查时间过期 */
+    if (e->expiry_tick > 0 && a20_current_tick() >= e->expiry_tick)
+        return 0;  /* 已过期，有效权限为空 */
+    /* 检查操作次数耗尽（remaining_ops == 0 且 flags 包含 OP_COUNT 表示已耗尽） */
+    if ((e->temporal_flags & A20_TEMPORAL_OP_COUNT) && e->remaining_ops == 0)
+        return 0;  /* 操作次数已耗尽 */
+    return e->rights;  /* 未过期且次数未耗尽，返回声明权限 */
+}
+```
+
+### 2.5 增长策略
+
+当 `count == capacity` 且未达到 task quota 时，按 `A20_HT_GROWTH_FACTOR = 2` 倍扩容。默认 `max_handles` quota 是 4096，绝对数组上限 `A20_HT_MAX_CAP` 是 65536；通常先由 quota 拒绝安装。
+
+### 2.6 时态能力（Temporal Capabilities）
+
+A20OS 的 handle 条目支持**时态约束**，权限可以在时间或操作次数上受限。
+
+#### 2.6.1 有效权限 $\rho_{eff}$
+
+Handle 的有效权限是声明权限的时态投影：
+
+$$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } (\neg EXP(h) \lor expiry(h)=0 \lor t<expiry(h)) \land (\neg OP(h) \lor remaining(h)>0) \\ \emptyset & \text{otherwise} \end{cases}$$
+
+所有 syscall 的权限检查统一使用 $\rho_{eff}$ 而非声明权限 $\rho$。
+
+#### 2.6.2 handle_dup 的时态约束
+
+`handle_dup` 创建的新 handle 的时态参数**不宽松于**源 handle：`expiry' ≤ expiry(source)`，新 handle 的过期时刻不能晚于源；`remaining_ops' ≤ remaining_ops(source)`，新 handle 的操作次数不能多于源。
+
+这保证了**时态不可刷新性**：持有者无法通过 dup 延长自己的能力生命周期。
+
+#### 2.6.3 过期行为
+
+Handle 过期后有两种行为模式：
+
+| `temporal_flags` | 过期后行为 | 资源占用 |
+|---|---|---|
+| 未设 `AUTO_CLOSE` | **惰性化**：$\rho_{eff} = \emptyset$，但 entry 仍占用 slot 和 refcount | 占用，需显式 `handle_close` 释放 |
+| 设 `AUTO_CLOSE` | **自动关闭**：内核 sweeper 在过期时执行 `handle_close` 的效果 | 不占用 |
+
+#### 2.6.4 Sweeper 机制
+
+所有活跃的 handle table 在内核中注册于一个全局注册表。Sweeper 由 **deadline 驱动**，周期运行（节奏约 `A20_SWEEP_INTERVAL_TICKS` = 100ms）：`SET_TEMPORAL` 在设置约束时登记下一个扫描 deadline，每次扫描后续期下一个 deadline（`sched_note_timer_deadline`），扫描在 `sched()` 上下文执行，不依赖任何 per-task alarm，也不会向任务投递信号。
+
+每个扫描周期内 sweeper 遍历全部 handle table：
+
+1. 获取 `ht->lock`
+2. 检查 `current_tick ≥ entry.expiry_tick`（或 `OP_COUNT` 预算耗尽）
+3. 过期条目按 `temporal_flags` 处理：未设 `AUTO_CLOSE` 转为 `EXPIRED`；设 `AUTO_CLOSE` 的条目摘下 slot 并在**锁外**按对象类型释放（channel 端点触发 `peer_closed`，eventq/VMO/timer/namespace 释放，vfile 关闭 fd）
+4. 释放锁
+
+Sweeper 与正常操作的竞争通过同一把 `ht->lock` 串行化，保证过期原子性（定理 3.3，见 09 §3.6）。
+
+#### 2.6.5 时态约束的用户态入口
+
+时态约束通过 `handle_control` 设置与查询（`kernel/abi/native/sys_native_fs.c`）：
+
+| op | 名称 | 参数 | 语义 |
+|---|---|---|---|
+| 2 | `A20_HANDLE_CTRL_SET_TEMPORAL` | arg0 = `a20_handle_temporal_args_t*` | 设置时态约束，**仅可增强**：flag 只能添加不能清除；已有 `expiry` 只能提前不能延后；已有 `remaining_ops` 只能减少不能增加；违反返回 `A20_ERR_ACCESS` |
+| 3 | `A20_HANDLE_CTRL_GET_TEMPORAL` | arg0 = `a20_handle_temporal_args_t*` | 查询当前时态参数 |
+| 4 | `A20_HANDLE_CTRL_SET_LABEL` | arg0 = 新标签（0/1/2） | 上调 handle 条目的 Bell-LaPadula 标签（仅可上调） |
+
+用户态 ABI 中 `expiry_ns` 以 `CLOCK_MONOTONIC` 纳秒表示（0 = 无过期）；内核条目内部以 tick 存储。`remaining_ops` 仅在 `A20_TEMPORAL_OP_COUNT` 置位时有意义，此时 **0 表示已耗尽**（$ho_{eff} = \emptyset$）；flag 未置位时该字段被忽略（即"无限"由 flag 缺省表达，而非特殊值 0）。
+
+Channel 传递、dup、replace、spawn 转移、`vm_share` 都继承源 handle 的时态参数与安全标签，任何路径都不能刷新约束（§6.4 不可刷新性的完整实现）。
+
+### 2.7 类型化控制（A20 对 ioctl 的回答）
+
+ioctl 的三大缺陷是无类型（`void*` 第三参数）、opaque 命令码（magic number、命名空间混乱、文档不全）、无能力纪律（不要求任何句柄权限）。它成为一切"标准接口说不清"操作的逃逸出口（GPU、终端、杂项设备）。
+
+A20 的 Native ABI **没有通用 ioctl**。所有控制操作经 `handle_control(handle, op, args_versioned_struct_ptr)`，且满足：
+
+1. 类型化：每个（对象类型, op）有固定、文档化的参数结构体，不可能是任意指针。
+2. 版本化：参数结构体携带 `{size, version}`，遵循 E-APPEND / E-DEPRECATE / E-RESERVED 演进规则（`docs/zh/native-abi/01-types.md §2`），新内核可扩展结构体而不破坏旧调用方。**所有携带数据的 op 都用版本化结构体**，没有裸 `arg0/arg1` 传数据。
+3. 能力门控：`handle_control` 要求 handle 的 `Control` right（`docs/zh/native-abi/06-security.md` 权限表）。
+4. 命名空间清晰：op 按对象类型解释；终端操作（6-8）只对 file/device 有效，`SET_TEMPORAL`/`SET_LABEL` 对任意 handle 有效，`SET_FLAGS` 对 file/device/socket 有效。
+
+控制操作表如下：
+
+| op | 名称 | 参数结构体 | 语义 |
+|---|---|---|---|
+| 2 | `SET_TEMPORAL` | `a20_handle_temporal_args_t*` | 设置时态约束（仅可增强，见 §2.6） |
+| 3 | `GET_TEMPORAL` | `a20_handle_temporal_args_t*` | 查询时态参数 |
+| 4 | `SET_LABEL` | `a20_ctl_int_args_t*` | 上调 Bell-LaPadula 标签（仅可上调） |
+| 5 | `CHDIR` | —（handle 即目录） | 把 directory handle 设为当前 cwd |
+| 6 | `GET_WINSIZE` | `a20_winsize_args_t*`（out） | 查询终端几何（替代 `TIOCGWINSZ`） |
+| 7 | `SET_WINSIZE` | `a20_winsize_args_t*`（in） | 设置终端几何（替代 `TIOCSWINSZ`） |
+| 8 | `TCFLUSH` | `a20_ctl_int_args_t*`（queue） | 清空终端输入/输出队列（替代 `TCFLSH`） |
+| 9 | `SET_FLAGS` | `a20_ctl_flags_args_t*` | 修改 open-file 标志（`O_NONBLOCK` 等，替代 `fcntl(F_SETFL)` / `FIONBIO`） |
+
+以终端几何为例：`tcgetwinsize` 在 Native 上走 `handle_control(h, A20_HANDLE_CTRL_GET_WINSIZE, &a20_winsize_args_t)`（版本化结构体返回 row/col/xpixel/ypixel），而不是 ioctl `TIOCGWINSZ`。`tcflush`、`tcsetwinsize` 同理走 `TCFLUSH`/`SET_WINSIZE`。
+
+> POSIX 兼容定位：mlibc 的 `ioctl()` 只是一个翻译层，把 `TIOCGWINSZ`/`TIOCSWINSZ`/`TCFLSH`/`FIONBIO` 翻译成上面的类型化 op，未知请求返回 `ENOTTY`。内核 Native ABI **不再暴露**通用 ioctl syscall（`A20_SYS_ioctl` 已移除，历史版本 0x0215）；Linux ABI 的 `sys_ioctl` 只服务 musl 兼容层。文件范围锁新增类型化 `FILE_LOCK` op；原始 fcntl 命令不进入 Native ABI，owner 元数据 F_SETOWN 等仍不支持，见 [1.1 扩展](10-runtime-extensions.md#file-range-locks)。研究文档 01 §2.4 批评的正是 ioctl；A20 的回答是用类型化控制替代它，而不是复刻它。
+
+---
+
+## 3. Handle 生命周期
+
+### 3.1 状态机
+
+Handle 在其生命周期中经历以下状态：
+
+```text
+                    alloc (ht_alloc_slot)
+                         │
+                         v
+    ┌─────────────────────────────────┐
+    │           Free                  │  entry.object == NULL, bitmap bit = 0
+    └─────────────────────────────────┘
+                         │  write entry (object, type, rights, temporal)
+                         │  bitmap bit = 1
+                         v
+    ┌─────────────────────────────────┐
+    │          Active                 │  entry.object != NULL, ρ_eff ≠ {}, 正常使用
+    └─────────────────────────────────┘
+          │            │            │            │
+          │ dup        │ transfer   │ replace    │ temporal expiry
+          v            v            v            v
+    ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐
+    │Duplicated│ │Transient │ │Replacing │ │Expired (惰性化)   │
+    │ (新槽位) │ │ (传递中) │ │ (替换中) │ │ ρ_eff = {}         │
+    └──────────┘ └──────────┘ └──────────┘ │ 但 entry 仍在      │
+          │            │            │      └───────────────────┘
+          │            v            │            │
+          │     ┌──────────┐        │            │ (若 AUTO_CLOSE)
+          │     │ Received │        │            │ = handle_close
+          │     │ (接收端) │        │            v
+          │     └──────────┘        │     ┌───────────────────┐
+          │            │            │     │Auto-Closed        │
+          v            v            v     │(sweeper 自动回收)  │
+    ┌─────────────────────────────────┐  └───────────────────┘
+    │          Closing                │  handle_close 调用中
+    └─────────────────────────────────┘
+                         │
+                         │ entry.object = NULL, bitmap bit = 0
+                         │ refcount_dec → 如果最后引用，object_destroy
+                         v
+    ┌─────────────────────────────────┐
+    │          Released               │  回到 Free 状态
+    └─────────────────────────────────┘
+```
+
+### 3.2 状态转换规则
+
+| 转换 | 触发 | 效果 |
+|------|------|------|
+| Free → Active | handle 分配（dup/recv/spawn/open） | 写入 object/type/rights/temporal，bitmap bit = 1 |
+| Active → Duplicated | handle_dup | 新槽位变为 Active，时态参数不宽松于源 |
+| Active → Transient | channel_send 传递 handle | 原 handle 权限不变，接收方获得新 handle |
+| Active → Replacing | handle_replace | 原 handle 失效，新 handle 继承权限子集 |
+| Active → Expired | current_tick ≥ expiry_tick 或 remaining_ops 递减至 0 | $\rho_{eff} = \emptyset$（惰性化） |
+| Expired → Auto-Closed | sweeper 检测到过期且 AUTO_CLOSE flag | 等同 handle_close |
+| Expired → Closing | handle_close（显式关闭已过期 handle） | 清空 entry，bitmap bit = 0 |
+| Active → Closing | handle_close | 清空 entry，bitmap bit = 0 |
+| Closing → Released | refcount_dec 完成 | 如果是最后引用，销毁对象 |
+
+### 3.3 对象销毁的级联效应
+
+当对象的引用计数降至 0 时，触发 `object_destroy`。这可能导致级联销毁：
+
+```text
+task_destroy
+├── 遍历 handle_table，close 所有 handle
+│   ├── channel endpoint close → 通知对端 peer_closed
+│   ├── event queue close → 清理 watch list + 反向索引
+│   └── memory close → 释放该 handle 的 VMO 引用；既有 VMA 自持引用并继续存活
+└── 释放 task 结构
+
+实现通过引用计数和锁外 release 限制递归持锁风险；文档不对任意对象图给出固定“最大级联深度”保证。
+```
+
+---
+
+## 4. Syscall 操作语义
+
+### 4.1 handle_close
+
+```c
+int64_t handle_close(a20_handle_t handle);
+```
+
+1. 验证 handle 有效（lookup 成功）
+2. 清空 entry（object = NULL, type = INVALID）
+3. 清除 bitmap bit（标记空闲）
+4. 释放 HT lock
+5. `refcount_dec`：如果最后引用，调用 `object_destroy`（可能触发级联）
+
+原子性方面，entry 清空在 HT lock 内完成。object_destroy 在锁外执行（refcount = 0 后无其他线程可访问对象）。
+
+### 4.2 handle_dup
+
+```c
+int64_t handle_dup(a20_handle_dup_args_t *args);
+```
+
+1. 验证源 handle 有效，检查 `DUP` 权限（使用 $\rho_{eff}$）
+2. 验证 `rights_mask ⊆ source.rights`（权限子集检查）
+3. 分配新槽位（ht_alloc_slot）
+4. 写入新 entry（同一 object, 请求的 rights）
+5. 时态约束：`new.expiry_tick ≤ source.expiry_tick`，`new.remaining_ops ≤ source.remaining_ops`
+6. `refcount_inc(object)`（原子增加）
+
+### 4.3 handle_replace
+
+```c
+int64_t handle_replace(a20_handle_t handle, a20_rights_t rights, a20_handle_t *out);
+```
+
+原子替换：原 handle 失效，新 handle 继承权限子集。用于需要不可分割地改变 handle 的场景（如降级后立即使用）。
+
+1. 验证源 handle 有效，检查 `DUP` 权限
+2. 分配新槽位
+3. 写入新 entry（rights 子集）
+4. 清空原 entry（原子替换）
+5. `refcount` 不变（一个引用从旧槽位移到新槽位）
+
+### 4.4 handle_query
+
+```c
+int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
+```
+
+只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
+
+类型合法权限掩码与 STAT 权限严格绑定：`handle_query` 依赖 STAT，因此所有“用户可观察自身属性”的对象类型合法掩码（`a20_type_rights[]`）均包含 STAT。channel 端点创建时安装 `READ|WRITE|STAT|DUP|TRANSFER`，由 `user/tests/test_native_contract.c` 门禁断言。
+
+---
+
+## 5. 并发协议
+
+### 5.1 锁层级
+
+Handle table lock 位于锁层级 L1：
+
+```text
+L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
+```
+
+规则：
+- 获取 L1 后可以获取 L2（但不可以反过来）
+- 任何操作不允许在持有 L1 时调用 `kfree`（L4 级操作）
+- `object_destroy` 延迟到 HT lock 释放后执行
+
+### 5.2 Handle Transfer 的锁序
+
+`channel_send` 时接收方 task 尚不一定已知，因此不会操作接收方 HT：
+
+```text
+1. 在发送方 HT 中验证 channel 与待传 handle，并为消息取得对象引用
+2. 把对象、类型、rights、时态字段和标签放入 endpoint 消息队列
+3. `channel_recv` 在实际接收 task 的 HT 中执行 reserve-many
+4. 只有全部槽位预留成功后才出队并 commit；失败返回 `NO_SPACE`，消息保留
+```
+
+发送方和接收方 HT 不同时加锁；消息持有的对象引用跨越排队期，直到接收 commit 或消息被丢弃。
+
+---
+
+## 6. 完整 Syscall 列表
+
+> [!TIP]
+> 完整的系统调用速查矩阵、宏定义常量（`A20_SYS_*`）、全架构硬件陷入约定与 C 语言调用代码示例，请参阅专门手册：[系统调用手册与调用指南 (syscalls.md)](syscalls.md)。
+
+### Core (0x0000)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0000 | `abi_info` | `int64_t abi_info(a20_abi_info_t *out)` | 查询 ABI 版本和能力 |
+| 0x0001 | `feature_test` | `int64_t feature_test(uint64_t feature_id)` | 测试 feature 可用性 |
+| 0x0003 | `execution_domain_info` | `int64_t execution_domain_info(a20_execution_domain_info_t *out, uint32_t capacity)` | 当前原生执行域状态，见 [契约](../cluster/runtime-ssi.md) |
+| 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/runtime-ssi.md) |
+
+| 0x0004 | `runtime_info` | `int64_t runtime_info(a20_runtime_info_t *out, uint32_t capacity)` | 不可变运行实例命名空间，见 [契约](../cluster/runtime-ssi.md) |
+| 0x0005 | `runtime_bind` | `int64_t runtime_bind(const a20_runtime_binding_t *in, uint32_t capacity)` | 管理员显式绑定；完全相同的重试幂等 |
+
+### Handle (0x0100)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0100 | `handle_close` | `int64_t handle_close(a20_handle_t h)` | 关闭 handle |
+| 0x0101 | `handle_dup` | `int64_t handle_dup(a20_handle_dup_args_t *args)` | 复制 handle（可降级 rights） |
+| 0x0102 | `handle_query` | `int64_t handle_query(a20_handle_t h, a20_handle_info_t *out)` | 查询 handle 信息 |
+| 0x0103 | `handle_replace` | `int64_t handle_replace(a20_handle_t h, a20_rights_t rights, a20_handle_t *out)` | 原子替换 handle |
+| 0x0104 | `handle_close_many` | `int64_t handle_close_many(const a20_handle_t *hs, uint32_t count)` | 批量关闭 |
+| 0x0105 | `handle_seek` | `int64_t handle_seek(a20_handle_t h, a20_off_t *offset, uint32_t whence)` | 设置/查询流偏移 |
+| 0x0106 | `handle_transfer` | `int64_t handle_transfer(a20_transfer_args_t *args)` | 内核缓冲拷贝传输（splice/sendfile/copy_file_range 语义统一；当前为 4 KiB 栈缓冲拷贝，非零拷贝） |
+| 0x0107 | `handle_set_meta` | `int64_t handle_set_meta(a20_handle_t h, uint32_t flags, uint64_t val0, uint64_t val1)` | 修改文件元数据（chmod/chown/utimes/ftruncate）。要求 `WRITE \| STAT`；`flags` 必须非零且只含已定义位，否则 `A20_ERR_INVALID_ARGUMENT`。`val0` = `MODE`→mode、`OWNER`→uid、`ATIME`→atime_ns、`TRUNCATE`→长度 —— 这四个 flag 共用同一个字，因此一次调用最多只能带其中一个；`val1` = `OWNER`→gid、`MTIME`→mtime_ns，所以唯一的合法组合是 `TRUNCATE`+`MTIME`。`CTIME` 与 `ALLOCATE` 无内核实现，返回 `A20_ERR_NOT_SUPPORTED`。全部字段都走 VFS（`vfs_ftruncate`/`vfs_futimens`/`vfs_fchmod`/`vfs_fchown`），`MODE`/`OWNER` 因此需要属主身份或相应能力，只读挂载一律被拒。执行顺序是 truncate → 时间戳 → mode → owner：前两步失败时 mode/owner 不会被改动，但一次调用内部不是原子的，被拒的 chmod 不会回滚同一次调用里已写入的 truncate/时间戳。每次调用都要从进程 fd 表借一个临时 fd（表满返回 `A20_ERR_BAD_HANDLE`），`TRUNCATE` 还要求该文件当初以写方式打开；只读挂载上 `ATIME`/`MTIME`/`TRUNCATE` 返回 `A20_ERR_ACCESS` |
+| 0x0108 | `handle_xattr_set` | `int64_t handle_xattr_set(a20_handle_t h, const char *name, const void *value, uint64_t size)` | 设置扩展属性（要求 `WRITE`；目录句柄的 rights 上限不含 `WRITE`，故对目录句柄恒返回 `A20_ERR_ACCESS`） |
+| 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_handle_t h, const char *name, void *value, uint64_t size)` | 获取扩展属性（要求 `STAT`） |
+| 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_handle_t h, void *list, uint64_t size)` | 列出扩展属性名（要求 `STAT`） |
+| 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性（要求 `WRITE`；同 0x0108，目录句柄不可用） |
+| 0x010C | `handle_poll` | `int64_t handle_poll(a20_handle_t h, uint32_t events, uint64_t timeout_ns)` | 非阻塞就绪查询（底层复用 VFS 事件轮询机制） |
+
+| 0x010D | `handle_identity` | `int64_t handle_identity(a20_handle_t h, a20_handle_identity_t *out, uint32_t capacity)` | TASK/THREAD/DEBUG 统一对象名；要求 STAT，未绑定返回 WOULD_BLOCK |
+
+### Task / Thread (0x0200)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0200 | `task_exit` | `void task_exit(int32_t code)` | 退出当前 task |
+| 0x0201 | `task_spawn` | `int64_t task_spawn(a20_task_spawn_args_t *args)` | 创建新 task |
+| 0x0202 | `task_wait` | `int64_t task_wait(a20_handle_t task, a20_flags_t flags, a20_task_status_t *out)` | 等待 task 退出 |
+| 0x0203 | `task_kill` | `int64_t task_kill(a20_handle_t task, int32_t signal, uint64_t flags)` | 信号/强制退出；flags=0 保留原调用 |
+| 0x0204 | `task_info` | `int64_t task_info(a20_handle_t task, a20_task_info_t *out)` | 查询 task 信息 |
+| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程；返回 `A20_OBJ_THREAD` handle，发布前完成句柄和结果安装 |
+| 0x0206 | `thread_exit` | `void thread_exit(int32_t code)` | 退出当前线程 |
+| 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t duration_ns)` | 线程睡眠指定纳秒数（相对当前时间） |
+| 0x0208 | `thread_yield` | `int64_t thread_yield(void)` | 主动让出 CPU |
+| 0x0209 | `task_set_sched` | `int64_t task_set_sched(a20_handle_t task, a20_sched_args_t *args)` | 设置调度参数（优先级/策略/亲和性） |
+| 0x020A | `task_get_sched` | `int64_t task_get_sched(a20_handle_t task, a20_sched_args_t *out)` | 查询调度参数 |
+| 0x020B | `task_get_limits` | `int64_t task_get_limits(a20_handle_t task, a20_resource_limits_t *out)` | 查询聚合资源限制 |
+| 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_handle_t task, a20_resource_limits_t *args)` | 设置聚合资源限制 |
+| 0x020D | `task_get_usage` | `int64_t task_get_usage(a20_handle_t task, a20_rusage_t *out)` | 查询资源使用量 |
+| 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
+| 0x020F | `signal_check` | `int64_t signal_check(uint64_t flags, uint64_t selected_or_control)` | flags=0 消费原进程级未屏蔽 bitmap；STRUCT 固定宽度形式及 THREAD/PEEK/SELECT 见 [01-types.md](01-types.md) 与 [09-native-abi-deepening.md](09-native-abi-deepening.md) |
+| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old, uint64_t flags)` | flags=0 保留进程级 mask；THREAD/QUERY 见 [01-types.md](01-types.md) 与 [09-native-abi-deepening.md](09-native-abi-deepening.md) |
+| 0x0211 | `task_mem_read` | `int64_t task_mem_read(a20_task_mem_args_t *args)` | 按 iovec 从目标 task 的地址空间读入本地 |
+| 0x0212 | `task_mem_write` | `int64_t task_mem_write(a20_task_mem_args_t *args)` | 按 iovec 把本地数据写入目标 task 的地址空间 |
+| 0x0213 | `task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 按 handle manifest 克隆当前 task 并安装句柄 |
+| 0x0214 | `execve` | `int64_t execve(const char *path, char **argv, char **envp)` | 原地替换当前 task 的映像，成功不返回 |
+| 0x0216 | `task_adopt` | `int64_t task_adopt(const a20_handle_t handles[6])` | 接管当前 task 的 stdio/root/cwd/self 句柄，顺序固定 |
+| 0x0217 | `task_checkpoint` | `int64_t task_checkpoint(int pid, const char *path, uint32_t path_len, uint32_t flags)` | 冻结单线程 task 并序列化寄存器/地址空间/fd 表为 A20CKPT1 镜像（见 docs/zh/kernel/kexec-hot-update.md） |
+| 0x0218 | `task_restore` | `int64_t task_restore(const char *path, uint32_t path_len)` | restore-as-exec：以检查点镜像替换当前 task，成功不返回 |
+| 0x0219 | `sched_lock` | `int64_t sched_lock(int32_t mode, int32_t depth)` | per-task 调度器锁（osKernelLock）；0 获取/1 释放/2 恢复，需 `CAP_SYS_NICE` |
+| 0x021A | `task_self` | `int64_t task_self(void)` | 在当前 task 的共享句柄表中安装并返回自己的 THREAD handle |
+
+### Memory (0x0300)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0300 | `vm_alloc` | `int64_t vm_alloc(a20_vm_alloc_args_t *args)` | 分配匿名内存 |
+| 0x0301 | `vm_unmap` | `int64_t vm_unmap(uint64_t addr, uint64_t len)` | 解除映射 |
+| 0x0302 | `vm_protect` | `int64_t vm_protect(uint64_t addr, uint64_t len, uint32_t prot)` | 修改保护 |
+| 0x0303 | `vm_map` | `int64_t vm_map(a20_vm_map_args_t *args)` | 映射对象到地址空间 |
+| 0x0304 | `vm_share` | `int64_t vm_share(a20_handle_t vmo, a20_handle_t target_task, a20_rights_t rights)` | 向当前或目标 Native task HT 安装共享 VMO handle |
+| 0x0305 | `vm_flush` | `int64_t vm_flush(uint64_t addr, uint64_t len, uint32_t flags)` | 刷新内存 |
+| 0x0306 | `vm_advise` | `int64_t vm_advise(uint64_t addr, uint64_t len, uint32_t advice)` | 内存使用建议（madvise） |
+| 0x0307 | `vm_remap` | `int64_t vm_remap(a20_vm_remap_args_t *args)` | 重映射虚拟内存（mremap） |
+| 0x0308 | `vm_lock` | `int64_t vm_lock(uint64_t addr, uint64_t len, uint32_t flags)` | 设置/清除区间的 VMA 预留标记。地址向下、长度向上页对齐，`flags` bit0 为置位（其余位忽略）。当前实现**只翻转 `VM_NATIVE_LOCKED` 一个 `vm_flags` 位**（`mm_vma_set_lock`），全树无读者：不锁定页面、不参与 `mlock` 记账、也不影响 OOM 驱逐。Linux 侧 `mlock`/`mlockall` 走 `VM_LOCKED` 与 `mm->locked_vm`（`kernel/abi/linux/sys_mm.c`），两者不共用该位 |
+| 0x0309 | `vm_create_object` | `int64_t vm_create_object(a20_vm_object_args_t *args)` | 创建匿名内存对象（memfd） |
+| 0x030A | `vm_share_region` | `int64_t vm_share_region(a20_vm_share_args_t *args)` | 建立共享区域描述并把目标 task 接入 |
+| 0x030B | `vm_create_vmar` | `int64_t vm_create_vmar(a20_vm_create_vmar_args_t *args)` | 创建带权限与长度的虚拟地址区间 |
+
+### Path / Filesystem (0x0400)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0400 | `path_open` | `int64_t path_open(a20_path_open_args_t *args)` | 打开路径 |
+| 0x0401 | `handle_read` | `int64_t handle_read(a20_io_args_t *args)` | 读取 |
+| 0x0402 | `handle_write` | `int64_t handle_write(a20_io_args_t *args)` | 写入 |
+| 0x0403 | `handle_stat` | `int64_t handle_stat(a20_handle_t h, a20_stat_t *out)` | 查询属性 |
+| 0x0404 | `path_create` | `int64_t path_create(a20_path_create_args_t *args)` | 创建节点 |
+| 0x0405 | `path_unlink` | `int64_t path_unlink(const char *path, uint32_t path_len)` | 删除节点（当前按 cwd 解析相对路径） |
+| 0x0406 | `path_rename` | `int64_t path_rename(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 重命名 |
+| 0x0407 | `handle_control` | `int64_t handle_control(a20_handle_t h, uint32_t op, uint64_t arg0, uint64_t arg1)` | 类型化对象控制（见 §2.7，无通用 ioctl）：op 2/3 `SET_TEMPORAL`/`GET_TEMPORAL`（arg0 = `a20_handle_temporal_args_t*`，§2.6）；op 4 `SET_LABEL`（arg0 = `a20_ctl_int_args_t*`，仅可上调）；op 5 `CHDIR`（handle 即目录）；op 6/7 `GET_WINSIZE`/`SET_WINSIZE`（arg0 = `a20_winsize_args_t*`）；op 8 `TCFLUSH`（arg0 = `a20_ctl_int_args_t*`）；op 9 `SET_FLAGS`（arg0 = `a20_ctl_flags_args_t*`）。所有携带数据的 op 用版本化结构体 |
+| 0x0408 | `path_readdir` | `int64_t path_readdir(a20_handle_t dir, a20_dirent_t *entries, uint32_t buf_len)` | 目录列举（`buf_len` 为字节数） |
+| 0x0409 | `path_link` | `int64_t path_link(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 创建硬链接 |
+| 0x040A | `path_symlink` | `int64_t path_symlink(const char *target, uint32_t target_len, const char *linkpath, uint32_t linkpath_len)` | 创建符号链接 |
+| 0x040B | `path_readlink` | `int64_t path_readlink(const char *path, uint32_t path_len, char *buf, uint64_t buf_len)` | 读取符号链接目标 |
+| 0x040C | `path_resolve` | `int64_t path_resolve(a20_path_resolve_args_t *args)` | 解析路径（access/test/readlink 统一） |
+| 0x040D | `fs_stat` | `int64_t fs_stat(a20_handle_t h, a20_fs_stat_t *out)` | 文件系统统计（statfs） |
+| 0x040E | `fs_mount` | `int64_t fs_mount(a20_fs_mount_args_t *args)` | 挂载文件系统 |
+| 0x040F | `fs_umount` | `int64_t fs_umount(const char *target, uint32_t target_len, uint32_t flags)` | 卸载文件系统 |
+| 0x0410 | `fs_sync` | `int64_t fs_sync(void)` | 同步文件系统到磁盘 |
+| 0x0411 | `path_unlink_at` | `int64_t path_unlink_at(a20_handle_t dir, const char *name, uint32_t len)` | 相对目录 handle 删除节点 |
+| 0x0412 | `path_rename_at` | `int64_t path_rename_at(a20_handle_t old_dir, const char *old_name, uint32_t old_len, a20_handle_t new_dir, const char *new_name, uint32_t new_len)` | 相对目录 handle 重命名 |
+| 0x0413 | `path_link_at` | `int64_t path_link_at(a20_handle_t dir, const char *name, uint32_t len, a20_handle_t target_dir, const char *target, uint32_t target_len)` | 相对目录 handle 创建硬链接 |
+| 0x0414 | `path_symlink_at` | `int64_t path_symlink_at(a20_handle_t dir, const char *name, uint32_t len, const char *target, uint32_t target_len)` | 相对目录 handle 创建符号链接 |
+| 0x0415 | `path_readlink_at` | `int64_t path_readlink_at(a20_handle_t dir, const char *name, uint32_t len, char *buf, uint64_t buf_len)` | 相对目录 handle 读取符号链接目标 |
+| 0x0416 | `fs_serve` | `int64_t fs_serve(a20_fs_serve_args_t *args)` | 注册 uxfs 服务：把 channel 端点（需 `READ\|WRITE`）的所有权转交给挂载作为请求队列；注册是异步完成的，调用方就是服务自身（见 [../hybrid-kernel/06-user-fs.md](../hybrid-kernel/06-user-fs.md)） |
+| 0x0417 | `fs_block_io` | `int64_t fs_block_io(a20_fs_block_io_args_t *args)` | 受控块 IO；`count == 0` 是容量查询（`buf` 收到 u64 扇区数），否则单次上限 4096 扇区 / 1 MiB；只有注册该挂载的服务任务可以发起 |
+
+### Event / IPC (0x0500)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0500 | `event_queue_create` | `int64_t event_queue_create(a20_event_queue_create_args_t *args)` | 创建事件队列 |
+| 0x0501 | `event_watch` | `int64_t event_watch(a20_event_watch_args_t *args)` | 注册事件关注 |
+| 0x0502 | `event_wait` | `int64_t event_wait(a20_event_wait_args_t *args)` | 等待事件 |
+| 0x0503 | `event_cancel` | `int64_t event_cancel(a20_handle_t queue, a20_handle_t target)` | 取消关注 |
+| 0x0504 | `channel_create` | `int64_t channel_create(a20_channel_create_args_t *args)` | 创建消息通道 |
+| 0x0505 | `channel_send` | `int64_t channel_send(a20_msg_send_args_t *args)` | 发送消息 |
+| 0x0506 | `channel_recv` | `int64_t channel_recv(a20_msg_recv_args_t *args)` | 接收消息 |
+| 0x0507 | `event_watch_fs` | `int64_t event_watch_fs(a20_handle_t dir, a20_handle_t queue, uint32_t mask, uint64_t user_data)` | 当前为目录普通 watch 占位；路径过滤/VFS 事件源未实现 |
+| 0x0508 | `channel_call` | `int64_t channel_call(a20_channel_call_args_t *args)` | 融合 RPC：一次陷入完成发送请求 + 等待回复 |
+
+### Cluster (0x0520)
+
+集群 ABI（docs/zh/cluster/01-abi.md）。核心是 `cluster_connect` 返回一个普通`A20_OBJ_CHANNEL_ENDPOINT` 句柄，之后调用方用普通 channel 调用即可，不必知道对端在本机还是另一台机器。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0520 | `cluster_set_self` | `int64_t cluster_set_self(a20_cluster_set_self_args_t *args)` | 注入本节点 ID 与能力位，仅一次，需 `A20_RIGHT_CLUSTER_ADMIN` |
+| 0x0521 | `cluster_export` | `int64_t cluster_export(a20_cluster_export_args_t *args)` | 把本机 channel 端点导出为集群可寻址，返回 32 位 slot |
+| 0x0522 | `cluster_connect` | `int64_t cluster_connect(a20_cluster_connect_args_t *args)` | 建立指向远端（`(LOCAL, slot)` 即本机）的代理端点，返回 channel 句柄 |
+| 0x0523 | `cluster_route` | `int64_t cluster_route(a20_cluster_route_args_t *args)` | 注入/更新/删除路由表项，需 `A20_RIGHT_CLUSTER_ADMIN` |
+| 0x0524 | `cluster_event_subscribe` | `int64_t cluster_event_subscribe(a20_cluster_event_subscribe_args_t *args)` | 订阅链路/路由/导出事件，返回 EventQ 句柄 |
+| 0x0525 | `cluster_link_status` | `int64_t cluster_link_status(a20_cluster_link_status_args_t *args)` | 查询链路状态、RTT 与收发计数器 |
+| 0x0526 | `cluster_snapshot` | `int64_t cluster_snapshot(a20_cluster_snapshot_args_t *args)` | 只读枚举当前身份、资源档、路由和导出服务；代数变化时重新枚举，支持控制面重启恢复 |
+
+### Network (0x0600)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0600 | `net_socket` | `int64_t net_socket(int domain, int type, int protocol)` | 创建 socket，成功直接返回 handle |
+| 0x0601 | `net_bind` | `int64_t net_bind(a20_handle_t sock, const a20_net_addr_t *addr)` | 绑定 |
+| 0x0602 | `net_connect` | `int64_t net_connect(a20_handle_t sock, const a20_net_addr_t *addr)` | 连接 |
+| 0x0603 | `net_accept` | `int64_t net_accept(a20_handle_t listener, a20_flags_t flags, a20_handle_t *out)` | 接受连接 |
+| 0x0604 | `net_listen` | `int64_t net_listen(a20_handle_t sock, uint32_t backlog)` | 监听 |
+| 0x0605 | `net_sendmsg` | `int64_t net_sendmsg(a20_net_sendmsg_args_t *args)` | 发送消息 |
+| 0x0606 | `net_recvmsg` | `int64_t net_recvmsg(a20_net_recvmsg_args_t *args)` | 接收消息 |
+| 0x0607 | `net_socketpair` | `int64_t net_socketpair(int domain, int type, int protocol, a20_handle_t out[2])` | 创建已连接的套接字对 |
+| 0x0608 | `net_getname` | `int64_t net_getname(a20_handle_t sock, uint32_t flags, a20_net_addr_t *out)` | 获取套接字本地/对端地址 |
+| 0x0609 | `net_shutdown` | `int64_t net_shutdown(a20_handle_t sock, uint32_t how)` | 关闭套接字读写方向 |
+
+### Time (0x0700)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0700 | `clock_get` | `int64_t clock_get(uint32_t clock_id, a20_time_ns_t *out)` | 获取时钟；id 7/8 为 raw cycle 与频率，AArch64 id 9–12 为 timer IRQ 入口时延统计 |
+| 0x0701 | `timer_create` | `int64_t timer_create(a20_timer_create_args_t *args)` | 创建定时器 |
+| 0x0702 | `timer_set` | `int64_t timer_set(a20_handle_t timer, uint64_t deadline_ns, uint64_t interval_ns)` | 设置定时器 |
+| 0x0703 | `timer_cancel` | `int64_t timer_cancel(a20_handle_t timer)` | 取消定时器 |
+| 0x0704 | `clock_set` | `int64_t clock_set(uint32_t clock_id, a20_time_ns_t value)` | 设置时钟（需 CAP_CLOCK_SET） |
+| 0x0705 | `clock_resolution` | `int64_t clock_resolution(uint32_t clock_id, a20_time_ns_t *out)` | 查询时钟分辨率 |
+
+### Security (0x0800)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0800 | `ns_create` | `int64_t ns_create(uint32_t ns_type, a20_flags_t flags)` | 创建 namespace；namespace handle 由返回值交付（无输出参数）。只有 filesystem 类型可被 `ns_apply` 应用 |
+| 0x0801 | `ns_apply` | `int64_t ns_apply(a20_handle_t ns, a20_handle_t target)` | 应用 namespace；network/PID/device 返回 `A20_ERR_NOT_SUPPORTED`（见 [06-security.md](06-security.md) §7） |
+| 0x0802 | `security_get_context` | `int64_t security_get_context(a20_security_context_t *out)` | 查询安全上下文（身份/能力） |
+| 0x0803 | `security_set_context` | `int64_t security_set_context(const a20_security_context_t *in)` | 修改安全上下文 |
+
+### Debug (0x0900)
+
+调试会话对象（`A20_OBJ_DEBUG`）的操作，包装内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`，ABI 无关）。权限映射见 [06-security.md](06-security.md) §8.1：READ=read/read_regs/map_memory，WRITE=write/write_regs，WAIT=wait/event，SIGNAL=kill，CONTROL=resume/detach，ADMIN=attach。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0900 | `debug_attach` | `int64_t debug_attach(a20_handle_t task)` | 附加调试（需要目标 task handle 的 ADMIN），返回 debug handle；目标在下个信号边界停止 |
+| 0x0901 | `debug_read_regs` | `int64_t debug_read_regs(a20_handle_t dbg, a20_regs_t *out)` | 读寄存器（目标须已停止） |
+| 0x0902 | `debug_write_regs` | `int64_t debug_write_regs(a20_handle_t dbg, const a20_regs_t *in)` | 写寄存器（目标须已停止） |
+| 0x0903 | `debug_map_memory` | `int64_t debug_map_memory(a20_handle_t dbg, uint64_t addr, uint64_t len, uint32_t prot)` | 映射目标内存到本进程匿名映射 |
+| 0x0904 | `debug_traceme` | `int64_t debug_traceme(void)` | 声明本任务可被父任务调试（与 attach 互斥） |
+| 0x0905 | `debug_wait` | `int64_t debug_wait(a20_handle_t dbg, uint64_t timeout_us, a20_debug_event_info_t *out)` | 阻塞等待停止/退出事件（0=非阻塞，A20_TIMEOUT_INFINITE=无限） |
+| 0x0906 | `debug_resume` | `int64_t debug_resume(a20_handle_t dbg, uint32_t mode)` | 恢复运行（CONT/SYSCALL） |
+| 0x0907 | `debug_detach` | `int64_t debug_detach(a20_handle_t dbg)` | 结束会话并恢复目标 |
+| 0x0908 | `debug_event` | `int64_t debug_event(a20_handle_t dbg, a20_debug_event_info_t *out)` | 非阻塞查询停止原因 |
+| 0x0909 | `debug_read` | `int64_t debug_read(a20_handle_t dbg, uint64_t addr, void *buf, uint64_t len)` | 读目标地址空间 |
+| 0x090A | `debug_write` | `int64_t debug_write(a20_handle_t dbg, uint64_t addr, const void *buf, uint64_t len)` | 写目标地址空间（忽略只读、先破 COW） |
+| 0x090B | `debug_kill` | `int64_t debug_kill(a20_handle_t dbg)` | 终止目标 |
+
+### System (0x0A00)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0A00 | `system_info` | `int64_t system_info(a20_system_info_t *out)` | 系统信息（uname + sysinfo 统一） |
+| 0x0A01 | `system_random` | `int64_t system_random(void *buf, uint64_t len, uint32_t flags)` | 获取密码学安全随机字节 |
+| 0x0A02 | `system_reboot` | `int64_t system_reboot(uint32_t cmd, uint64_t arg)` | 重启/关机/电源控制 |
+| 0x0A03 | `registry_claim` | `int64_t registry_claim(a20_handle_t *out)` | 服务注册表：服务 claim 名字/端点，客户端按名解析（见 [../hybrid-kernel/01-mechanisms.md](../hybrid-kernel/01-mechanisms.md)） |
+| 0x0A04 | `system_kexec` | `int64_t system_kexec(uint32_t op, void *arg)` | 查询 kexec 状态与执行控制 |
+
+### Sync (0x0B00)
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
+| 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
+| 0x0B02 | `atomic32` | `int64_t atomic32(a20_atomic32_args_t *args)` | 顺序一致的 load/store/exchange/CAS，MCU 与服务器共享实现 |
+
+### Device / user-space drivers (0x0C00)
+
+用户态驱动框架（`kernel/drivers/core/udriver.c`，syscall 处理在 `sys_native_device.c`）。语义见 [../hybrid-kernel/01-mechanisms.md](../hybrid-kernel/01-mechanisms.md) 的用户态驱动契约。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0C00 | `device_map_mmio` | `int64_t device_map_mmio(a20_device_map_mmio_args_t *args)` | 映射白名单内的完整页跨度（PFNMAP），仅支持读/写；输出拷贝失败撤销映射，范围与所有权拒绝不修改 out_addr |
+| 0x0C01 | `device_irq_listen` | `int64_t device_irq_listen(uint32_t irq, a20_handle_t queue, uint64_t user_data)` | 绑定物理 IRQ 到 EventQ（电平协议：先屏蔽再投递） |
+| 0x0C02 | `device_irq_ack` | `int64_t device_irq_ack(uint32_t irq)` | 重新武装 IRQ（`irq_enable`） |
+| 0x0C03 | `device_irq_unlisten` | `int64_t device_irq_unlisten(uint32_t irq)` | 解绑 IRQ 并释放队列引用 |
+| 0x0C04 | `device_vmo_phys` | `int64_t device_vmo_phys(a20_handle_t vmo, uint64_t *phys, uint64_t count)` | 查询 VMO 页物理地址（peek 语义，未物化页报 0） |
+| 0x0C05 | `device_block_attach` | `int64_t device_block_attach(a20_handle_t ring_vmo, uint64_t capacity, a20_handle_t *out_doorbell)` | 内核块代理：附着共享环，返回门铃 channel 端点 |
+| 0x0C06 | `device_block_complete` | `int64_t device_block_complete(uint32_t n_done)` | 通知内核块代理完成请求数 |
+| 0x0C07 | `device_claim` | `int64_t device_claim(uint64_t phys)` | 声明设备窗口所有权（user-owned 窗口映射前必须 claim） |
+| 0x0C08 | `device_release` | `int64_t device_release(uint64_t phys)` | 释放设备窗口所有权 |
+| 0x0C09 | `device_alloc_dma` | `int64_t device_alloc_dma(uint32_t npages, a20_handle_t *out)` | 分配预物化连续 DMA heap（上限 64 页，帧清零） |
+| 0x0C0A | `device_free_dma` | `int64_t device_free_dma(a20_handle_t h)` | 释放 `device_alloc_dma` 分配的 DMA heap（需 `CONTROL`；先解 IOMMU 映射再释放 VMO） |
+| 0x0C0B | `device_get_info` | `int64_t device_get_info(a20_device_info_args_t *args)` | 按 bus/vendor/device/index 查设备：flags、devid、irq、MMIO 窗口与 IOMMU fault 计数；fault 记录由此拉取，不经中断投递 |
+
+### Pager / monitor (0x0D00)
+
+用户态分页供给与计数器对象，分别对应 Linux 的 userfaultfd 与 perf 软件事件；设计、字段与取舍见 [09-native-abi-deepening.md](09-native-abi-deepening.md) §2/§3。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0D00 | `pager_create` | `int64_t pager_create(a20_pager_create_args_t *args)` | 创建 pager 对象与页请求 channel，输出 pager 与请求端点两个 handle |
+| 0x0D01 | `pager_vmo_attach` | `int64_t pager_vmo_attach(a20_pager_vmo_args_t *args)` | 把 PAGED VMO 关联到 pager（pager 需 `CONTROL`，vmo 需 `CONTROL`）；未关联的 PAGED VMO 缺页退回填零 |
+| 0x0D02 | `pager_supply_pages` | `int64_t pager_supply_pages(a20_pager_supply_args_t *args)` | 回填页：把 source VMO 的区间拷入 paged VMO，两个句柄都需 `WRITE`，长度必须页对齐 |
+| 0x0D10 | `monitor_create` | `int64_t monitor_create(a20_monitor_create_args_t *args)` | 创建计数器对象（`kind` 取 `A20_MONITOR_*`；给出 `queue` 时按 `period_ns` 周期投递 `A20_EVENT_SIGNALED`） |
+| 0x0D11 | `monitor_query` | `int64_t monitor_query(a20_handle_t mon, a20_monitor_value_t *out)` | 采样并返回计数与 `time_active_ns`/上次采样值（需 `READ`）；`period_ns` 非零的 monitor 另按周期向 EventQ 投递 |
+
+### Kernel extension (0x0E00)
+
+扩展程序对象（`A20_OBJ_EXT_PROG`），设计见 docs/zh/kernel/extensions.md：加载经过线性扫描验证的受限字节码程序并附着到内核扩展点。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0E00 | `ext_prog_load` | `int64_t ext_prog_load(const uint32_t *insns, uint32_t len)` | 验证并加载程序，返回 handle |
+| 0x0E01 | `ext_prog_attach` | `int64_t ext_prog_attach(a20_handle_t prog, uint32_t point)` | 附着到扩展点 |
+| 0x0E02 | `ext_prog_detach` | `int64_t ext_prog_detach(a20_handle_t prog, uint32_t point)` | 分离 |
+| 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
+| 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
+
+### Hypervisor / vCPU (0x0F00)
+
+宿主 hypervisor 控制接口。VM 与 vCPU 通过有类型的 handle 管理；guest RAM 加载按页从用户缓冲区复制，执行 vCPU 直到 guest 退出。RISC-V H 扩展不可用时创建/运行接口返回 `A20_ERR_NOT_SUPPORTED`。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0F00 | `hyp_vm_create` | `int64_t hyp_vm_create(uint64_t mem_size)` | 创建 guest 地址空间，返回 VM handle |
+| 0x0F01 | `hyp_vm_load` | `int64_t hyp_vm_load(a20_handle_t vm, uint64_t gpa, const void *buf, uint64_t len)` | 将用户缓冲区复制到 guest GPA；GPA 页对齐，单次最多 16 MiB |
+| 0x0F02 | `hyp_vcpu_create` | `int64_t hyp_vcpu_create(a20_handle_t vm, uint64_t entry_gpa)` | 创建从指定 GPA 启动的 vCPU，返回 vCPU handle |
+| 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
+| 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
+| 0x0F05 | `hyp_vcpu_destroy` | `int64_t hyp_vcpu_destroy(a20_handle_t vcpu)` | 释放 vCPU handle |
+| 0x0F06 | `hyp_console` | `int64_t hyp_console(a20_handle_t vm, uint64_t op, void *buf_or_enable, uint64_t len)` | 配置或读写 guest 控制台；单次读写最多 256 字节 |
+| 0x0F07 | `hyp_vm_set_ram` | `int64_t hyp_vm_set_ram(a20_handle_t vm, uint64_t base, uint64_t size)` | 配置 guest RAM 映射 |
+| 0x0F08 | `hyp_vcpu_set_boot` | `int64_t hyp_vcpu_set_boot(a20_handle_t vcpu, uint64_t hartid, uint64_t dtb_gpa)` | 配置 guest 启动参数 |
+| 0x0F09 | `hyp_vm_set_marker` | `int64_t hyp_vm_set_marker(a20_handle_t vm, const char *marker)` | 配置 guest 控制台完成标记 |
+| 0x0F0A | `hyp_vm_status` | `int64_t hyp_vm_status(a20_handle_t vm, struct hyp_vm_status *out)` | 读取 guest 退出状态和控制台统计 |
+| 0x0F0B | `hyp_vcpu_control` | `int64_t hyp_vcpu_control(a20_handle_t vcpu, uint64_t op)` | 控制 vCPU 生命周期 |
+| 0x0F0C | `hyp_vcpu_irq` | `int64_t hyp_vcpu_irq(a20_handle_t vcpu, uint64_t irq, uint64_t asserted)` | 置位或清除虚拟中断 |
+| 0x0F0D | `hyp_stats` | `int64_t hyp_stats(struct hyp_stats *out)` | 读取 hypervisor 统计快照 |
+| 0x0F0E | `hyp_vm_smp` | `int64_t hyp_vm_smp(a20_handle_t vm, uint64_t count)` | 配置有上限的 guest vCPU 数量 |
+
+总计：178 个 syscall（`syscall_table.def` 当前登记数）。

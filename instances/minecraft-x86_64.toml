@@ -1,5 +1,5 @@
 # Java Edition desktop on the shared XFCE image. Fetch client files first;
-# see docs/distro/minecraft.md. The host display must support virgl/OpenGL.
+# see docs/zh/distro/minecraft.md. The host display must support virgl/OpenGL.
 name = "minecraft-x86_64"
 description = "Minecraft Java desktop with host virgl rendering"
 arch = "x86_64"

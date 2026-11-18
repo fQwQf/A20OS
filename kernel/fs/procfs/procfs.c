@@ -1,3 +1,5 @@
+#include "core/diagnostics.h"
+#include "core/trace.h"
 #include "proc/resource_ns.h"
 /*
  * A20OS — procfs: Virtual /proc filesystem
@@ -173,12 +175,16 @@ _Static_assert(PF_A20_NETFILTER == A20_PF_A20_NETFILTER, "pf_type mirror drifted
 _Static_assert(PF_A20_NETMEM == A20_PF_A20_NETMEM, "pf_type mirror drifted: PF_A20_NETMEM");
 _Static_assert(PF_A20_JOURNAL == A20_PF_A20_JOURNAL, "pf_type mirror drifted: PF_A20_JOURNAL");
 _Static_assert(PF_A20_IRQ_AFFINITY == A20_PF_A20_IRQ_AFFINITY, "pf_type mirror drifted: PF_A20_IRQ_AFFINITY");
+_Static_assert(PF_A20_BOOT_REPORT == A20_PF_A20_BOOT_REPORT, "pf_type mirror drifted: PF_A20_BOOT_REPORT");
+_Static_assert(PF_A20_PORTING_REPORT == A20_PF_A20_PORTING_REPORT, "porting report ID drifted");
+_Static_assert(PF_A20_TRACE == A20_PF_A20_TRACE, "trace ID drifted");
+_Static_assert(PF_A20_OBSERVABILITY == A20_PF_A20_OBSERVABILITY, "capability ID drifted");
 _Static_assert(PF_CGROUPS == A20_PF_CGROUPS, "pf_type mirror drifted: PF_CGROUPS");
 _Static_assert(PF_SELF == A20_PF_SELF, "pf_type mirror drifted: PF_SELF");
 _Static_assert(PF_FSTYPE == A20_PF_FSTYPE, "pf_type mirror drifted: PF_FSTYPE");
 _Static_assert(PF_SWAPS == A20_PF_SWAPS, "pf_type mirror drifted: PF_SWAPS");
 _Static_assert(PF_SYSRQ_TRIGGER == A20_PF_SYSRQ_TRIGGER, "pf_type mirror drifted: PF_SYSRQ_TRIGGER");
-_Static_assert(A20_PF_TYPE_COUNT == PF_SYSRQ_TRIGGER + 1, "pf_type count drifted");
+_Static_assert(A20_PF_TYPE_COUNT == PF_A20_OBSERVABILITY + 1, "pf_type count drifted");
 _Static_assert(S_IFLNK == 0120000 && S_IFDIR == 0040000 && S_IFREG == 0100000,
                "mode-bit mirror drifted");
 
@@ -353,7 +359,8 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd, int fl
     }
     p->pid = real_pid;
     int write_only_diag = (flags & O_ACCMODE) == O_WRONLY &&
-                          (type == PF_A20_PERF || type == PF_A20_LOCK_CONTENTION);
+                          (type == PF_A20_PERF || type == PF_A20_LOCK_CONTENTION ||
+                           (CONFIG_A20_TRACE && type == PF_A20_TRACE));
     if (!write_only_diag) {
         procfs_content_plan_t plan;
         a20_procfs_content_plan((int)type, CONFIG_NR_CPUS, PAGE_SIZE, &plan);
@@ -855,22 +862,17 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (owned) proc_put(target);
         return r < 0 ? r : (int)count;
     }
-    if (p->type == PF_A20_PERF) {
-        char tmp[16];
-        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
-        memcpy(tmp, buf, n);
-        tmp[n] = '\0';
-        procfs_chomp(tmp);
-        if (strcmp(tmp, "reset") == 0) {
-            a20_perf_reset();
-            return (int)count;
-        }
-        if (count == 0 || (buf[0] != '0' && buf[0] != '1'))
-            return -EINVAL;
-        __atomic_store_n(&g_a20_perf_enabled, buf[0] == '1',
-                         __ATOMIC_RELEASE);
-        return (int)count;
+#if CONFIG_A20_TRACE
+    if (p->type == PF_A20_TRACE) {
+        int result = a20_trace_control(buf, count);
+        return result < 0 ? result : (int)count;
     }
+#endif
+    if (p->type == PF_A20_PERF) {
+        int result = a20_perf_control(buf, count);
+        return result < 0 ? result : (int)count;
+    }
+
     if (p->type == PF_A20_JOURNAL) {
         char tmp[64];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -1532,8 +1534,18 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
-        "anonprov", "driver_lifecycle", "objects", "iommu", "netfilter",
-        "netmem", "journal", "hyp_selftest", NULL
+        "observability", "anonprov", "driver_lifecycle", "objects", "iommu", "netfilter",
+        "netmem", "journal", "hyp_selftest",
+#if CONFIG_A20_DIAG_BOOT
+        "porting_report",
+#endif
+#if CONFIG_A20_TRACE
+        "trace",
+#endif
+#if CONFIG_BOOT_REPORT
+        "boot_report",
+#endif
+        NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "pid_for_children", "user", "mnt", "uts", "ipc", "net", "cgroup", NULL

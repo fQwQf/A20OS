@@ -1,0 +1,21 @@
+{
+  "混合内核": "hybrid kernel",
+  "宏内核": "monolithic kernel",
+  "微内核": "microkernel",
+  "用户态": "user space",
+  "内核态": "kernel space",
+  "面向能力": "capability-based",
+  "句柄": "handle",
+  "页缓存": "page cache",
+  "地址空间": "address space",
+  "系统调用": "system call",
+  "抢占": "preemption",
+  "冒烟测试": "smoke test",
+  "门禁": "validation check",
+  "未验证": "unverified",
+  "计划支持": "planned support",
+  "部分实现": "partially implemented",
+  "已验证": "verified",
+  "缺口台账": "gap tracker",
+  "真机": "physical hardware"
+}

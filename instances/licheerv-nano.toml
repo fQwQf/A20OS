@@ -39,5 +39,5 @@ RISC-V Image and size/CRC-checked boot.scr. fip.bin is a FAT file, not raw SPL.
 The prepared firmware moves scriptaddr to 0x8e000000 and disables optional
 secondary RTOS payload. The card autoboots; the commands above are recovery.
 Only SG2002 SD/UART early bring-up is shared with E/WE; no Ethernet promise.
-No SG2002 hardware has run this kernel. See docs/platforms/licheerv-nano.md.
+No SG2002 hardware has run this kernel. See docs/zh/platforms/licheerv-nano.md.
 """

@@ -109,13 +109,18 @@ endif
 
 RETIRED_ARCHES := loongarch32 ppc64le
 ifneq ($(filter $(ARCH),$(RETIRED_ARCHES)),)
-$(error ARCH=$(ARCH) is retired from active builds; for historical reproduction, check out v0.18 or earlier (see docs/releases/v1.0.md))
+$(error ARCH=$(ARCH) is retired from active builds; for historical reproduction, check out v0.18 or earlier (see docs/zh/releases/v1.0.md))
 endif
 # Optional architecture-owned build policy; no board facts in the engine.
 -include kernel/arch/$(ARCH)/config.mk
 ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
+RAMFS_USERLAND ?= auto
+RAMFS_DIAGNOSTICS ?= 0
+BUSYBOX_BINARY ?=
+BUSYBOX_MIRROR ?= https://dl-cdn.alpinelinux.org/alpine
+BUSYBOX_CACHE_DIR ?= build/cache/busybox
 RAMFS_FASTFETCH ?= 0
 WIFI_RTW89 ?= 0
 # Generic desktop diagnostics/session tools are independent of the radio.
@@ -188,7 +193,7 @@ CONFIG_KERNEL_PREEMPT ?= 1
 SMP_SELFTEST ?= 0
 # Explicit freestanding BSD bootstrap diagnostic artifact; never a fallback backend.
 BSD_BOOTSTRAP_OBJECT ?=
-BSD_CLANG ?= $(if $(wildcard $(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang),$(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang,clang)
+BSD_CLANG ?= $(or $(wildcard $(CURDIR)/build/toolchains/bsd-clang19/root/usr/lib/llvm-19/bin/clang),$(shell command -v clang-19 2>/dev/null),$(shell command -v clang 2>/dev/null),clang-19)
 # Optional shared-RAM multi-process QEMU platform; ordinary builds unchanged.
 QEMU_SHARED_SMP ?= 0
 ifneq ($(filter $(QEMU_SHARED_SMP),0 1),$(QEMU_SHARED_SMP))
@@ -201,7 +206,7 @@ endif
 endif
 # Network lanes. 1 keeps every lane index folded to 0, which is the
 # embedded shape and byte-for-byte the pre-lane behaviour. Raise it
-# only together with stage D of docs/net/net-lanes.md; stages A-C
+# only together with stage D of docs/zh/net/net-lanes.md; stages A-C
 # compute and report lanes but do not yet route packets by them.
 NET_LANES ?= 1
 # Compile-time capability: hosts do not transit packets. Router builds enable
@@ -273,7 +278,7 @@ XLATOR_SUPPORTED_ARCHES := $(TRIM_CAP_XLATOR_ARCHES)
 # Synthetic driver lifecycle test, the platform-bus IRQ resource self-check,
 # and the HDA/NVMe in-probe smoke builds.
 # All four default to off and are enabled with the on-value their existing
-# callers already pass (tools/smoke_cases.py and docs/drivers/meta/
+# callers already pass (tests/tools/smoke_cases.py and docs/zh/drivers/meta/
 # testing-and-submission.md use `=y`), so the BUILD_VARIANT components below
 # and the gate invocations keep working unchanged.
 CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
@@ -290,7 +295,7 @@ CONFIG_NVME_SMOKE_TEST ?= 0
 # build (its own BUILD_VARIANT component) rather than a default -- but it is
 # the only detector that can see a slab page being scribbled on while it is
 # still live, which is the shape of the multi-threaded corruption reports in
-# docs/status/current/known-issues.md.
+# docs/zh/status/current/known-issues.md.
 CONFIG_SLAB_DEBUG ?= 0
 
 # Single knob for the CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST macros in
@@ -444,9 +449,6 @@ endif
 endif
 # Instances set NET_STACK through [net].stack (tools/a20 or NET_INSTANCE=).
 # The default above is only for a bare `make` with no manifest.
-.PHONY: check-net-backend-host
-check-net-backend-host:
-	sh tools/tests/net_backend_host.sh
 LWIP_SOURCE_ROOT = $(if $(filter native,$(NET_STACK)),$(KERNEL_DIR)/net/backends/native/protocol,$(if $(filter lwip,$(NET_STACK)),$(KERNEL_DIR)/external/lwip-upstream,))
 ifeq ($(NET_ROLE),router)
 ifeq ($(NET_STACK),none)
@@ -510,6 +512,31 @@ endif
 NOMMU ?= 0
 NOMMU_SUPPORTED_ARCHES := $(TRIM_CAP_NOMMU_ARCHES)
 
+# A diskless MMU shell needs no source-built userland. Keep the established
+# platform init for configurations with distro handoff, drivers or services.
+BUSYBOX_PREBUILT_ARCHES := x86_64 aarch64 riscv64 loongarch64
+RAMFS_LEGACY_REQUIRED = $(filter 1,$(NOMMU) $(RAMFS_DISTRO) $(RAMFS_MEDIA) $(WIFI_RTW89) $(RAMFS_DESKTOP_TOOLS) $(RAMFS_NATIVE_TESTS) $(RAMFS_NET_TESTS) $(STORAGE_READ_ONLY) $(EXTERNAL_ROOT))$(filter router,$(NET_ROLE))
+ifeq ($(filter $(RAMFS_USERLAND),auto busybox legacy),)
+$(error RAMFS_USERLAND must be auto|busybox|legacy)
+endif
+ifeq ($(filter $(RAMFS_DIAGNOSTICS),0 1),)
+$(error RAMFS_DIAGNOSTICS must be 0 or 1)
+endif
+RAMFS_BUSYBOX = $(if $(filter 1,$(RAMFS_USER)),$(if $(filter busybox,$(RAMFS_USERLAND)),1,$(if $(and $(filter auto,$(RAMFS_USERLAND)),$(filter $(ARCH),$(BUSYBOX_PREBUILT_ARCHES)),$(if $(RAMFS_LEGACY_REQUIRED),,1)),1,0)),0)
+ifeq ($(RAMFS_USERLAND),busybox)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_USERLAND=busybox requires RAMFS_USER=1)
+endif
+ifneq ($(RAMFS_LEGACY_REQUIRED),)
+$(error This configuration needs the platform init; use RAMFS_USERLAND=auto or legacy)
+endif
+ifeq ($(filter $(ARCH),$(BUSYBOX_PREBUILT_ARCHES)),)
+ifeq ($(strip $(BUSYBOX_BINARY)),)
+$(error ARCH=$(ARCH) requires BUSYBOX_BINARY=/path/to/static-busybox)
+endif
+endif
+endif
+
 # Swap needs a PTE encoding for the 64-bit swap entry (pte_is_swap /
 # pte_to_swp_entry / swp_entry_to_pte in kernel/arch/<arch>/include/page_table.h).
 # riscv32 and loongarch32 have not defined one, so CONFIG_SWAP=y does not merely
@@ -528,7 +555,7 @@ endif
 endif
 
 # Foreign-architecture translation channel (see CONFIG_XLATOR at the top and
-# docs/kernel/exec-xlator/).  Three ways it gets forced off:
+# docs/zh/kernel/exec-xlator/).  Three ways it gets forced off:
 #   NOMMU=1        no MMU to demand-page guest memory from;
 #   PROFILE=mcu    that build replaces the whole source list anyway;
 #   unsupported    32-bit hosts cannot host a 64-bit guest JIT at all.
@@ -591,68 +618,19 @@ endif
 # chunk contributes no argument (and therefore no blank line) to printf.  The
 # four chunks below cover 16 gate names; the tier has 15, so a gate added past
 # that needs a fifth chunk here rather than silently going unlisted.
-help-gate-chunk = $(if $(wordlist $(1),$(2),$(CHECK_FAST_GATES)),'     $(wordlist $(1),$(2),$(CHECK_FAST_GATES))')
-
 .PHONY: help
 help:
 	@printf '%s\n' \
-	  'A20OS -- hybrid kernel.  Usage: make <target> [VAR=VALUE ...]' \
-	  '' \
-	  "Now building: ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) NR_CPUS=$(NR_CPUS)" \
-	  '' \
-	  '  Day-to-day development' \
-	  '    make run                       build ARCH=$$ARCH and boot it in QEMU' \
-	  '    make run-riscv64               ... same, for a named arch (also -loongarch64,' \
-	  '                                   -aarch64/-arm64, -x86_64, -arm32, -riscv32)' \
-	  '    make debug-riscv64             boot paused with a GDB server on :1234' \
-	  '    make dev-build                 kernel + userspace + test images, no QEMU' \
-	  '    make kernel-only               just the kernel, for ARCH/BOARD' \
-	  '    make clean                     remove build output for the current variant' \
-	  '' \
-	  '  Tests -- fast and host-only (no QEMU, no cross toolchain)' \
-	  '    make check                     the whole fast test tier' \
-	  '' \
-	  "  What 'make check' runs ($(words $(CHECK_FAST_GATES)) entries):" \
-	  $(call help-gate-chunk,1,4) \
-	  $(call help-gate-chunk,5,8) \
-	  $(call help-gate-chunk,9,12) \
-	  $(call help-gate-chunk,13,16) \
-	  '' \
-	  '    make check-manifests           instances/ components/ Makefile agree' \
-	  '    make host-tests                host-gcc unit tests for kernel format/helper logic' \
-	  '' \
-	  '  Tests and builds -- need a cross toolchain and/or QEMU' \
-	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
-	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
-	  '    make check-cluster-send        reliable one-way SEND, loss and mixed routed profiles' \
-	  '    make check-cluster-hardening   random loss/delay/CRC/flood/partition acceptance' \
-	  '    make check-cluster-fuzz-smoke  five minutes of varied sanitizer mutations' \
-	  '    make check-cluster-performance Native local/loopback/UDP RPC measurements' \
-	  '    make demo-wordcount            sixteen shards over eight servers or a mixed MCU cluster' \
-	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
-	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
-	  '' \
-	  '  Release (what a bare `make` does)' \
-	  '    make                           dual-arch release: kernel-rv kernel-la disk*.img' \
-	  '    make image-world               package -> repository -> bootable image' \
-	  '    make docs                      build standard-reference.pdf from docs/' \
-	  '' \
-	  '  Instance tooling (the declarative layer the targets above wrap)' \
-	  '    tools/a20 list                 every predefined instance' \
-	  '    tools/a20 run <instance>       build and boot an instance' \
-	  '    tools/a20 debug <instance>     boot an instance with a GDB server' \
-	  '    tools/a20 test <instance>      run an instance smoke' \
-	  '    tools/a20 check                validate instances/, arch matrix, registries' \
-	  '    docs/dev/instances.md              instance fields and the component registry' \
-	  '' \
-	  '  Boards and MCU' \
-	  '    make BRINGUP=1 run-<arch>      kernel-only bring-up variant' \
-	  '    make vf2-sdcard                VisionFive 2 SD card' \
-	  '    make stm32f103-bringup         STM32F103 firmware (64 KiB flash)' \
-	  '    tools/a20 package hi3861       Hi3861 kernel A image (hupg)' \
-	  '' \
-	  'Docs: docs/dev/build.md (build), docs/testing-gates.md (gates),' \
-	  '      docs/dev/instances.md (instances), docs/CONTRIBUTING.md (style + gates).'
+	  'A20OS: make [ARCH=<arch>] builds the kernel for one architecture.' \
+	  '  make kernel-only / dev-build / image-world  build artifacts' \
+	  '  make run / debug-riscv64                   boot or debug a guest' \
+	  '  make test                                 quick host selftests' \
+	  '  make check                                manifests and selftests' \
+	  '  make check-docs                           documentation consistency' \
+	  '  make clean                                clean current build variant' \
+	  '  make release-rv / release-la               explicit release builds' \
+	  '  git submodule update --init tests          import optional test suite' \
+	  '  make tests-help                           show integration targets'
 
 # ================================================================
 # Build paths and userspace artifacts
@@ -1077,7 +1055,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(if $(filter llvm,$(TOOLCHAIN)),llvm-rt-,)$(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch,)$(if $(filter 1,$(WIFI_RTW89)),-wifi,)$(if $(filter 1,$(RAMFS_DESKTOP_TOOLS)),-desktop-tools,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(if $(filter llvm,$(TOOLCHAIN)),llvm-rt-,)$(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(HI3861_LITEOS_DEMO)),-hi-demo,)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_BUSYBOX)),-busybox,)$(if $(filter 1,$(RAMFS_DIAGNOSTICS)),-diagnostics,)$(if $(filter 1,$(RAMFS_FASTFETCH)),-fastfetch,)$(if $(filter 1,$(WIFI_RTW89)),-wifi,)$(if $(filter 1,$(RAMFS_DESKTOP_TOOLS)),-desktop-tools,)$(if $(filter 1,$(RAMFS_RT_TESTS)),-rt-tests,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_DISTRO)),-distro,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1251,6 +1229,9 @@ endif
 ifeq ($(USER_COPY_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-usercopy-test
 endif
+ifeq ($(CONFIG_DEBUG_SHUTDOWN_AUDIT),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-shutdown-audit
+endif
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
@@ -1304,6 +1285,8 @@ $(error BSD_BOOTSTRAP_OBJECT does not exist)
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)-bsdboot-$(shell sha256sum '$(BSD_BOOTSTRAP_OBJECT)' | cut -c1-12)
 endif
+# Keep routine and instrumented images apart, including their rootfs images.
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(DIAG_BOOT)),-porting,)$(if $(filter 1,$(DIAG_TRACE)),-trace,)$(if $(filter 0,$(METRICS_ENABLED)),-nometrics,)$(if $(filter 0,$(LOG_ENABLED)),-nolog,)$(if $(or $(filter 1,$(LOG_BOOT_REPORT)),$(filter error always,$(LOG_REPORT))),-boot-report,)
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -1356,13 +1339,12 @@ EXT4_IMAGE_MB ?= 128
 # and an apk world image fills it -- see VF2_WORLD in tools/mk/targets-build.mk.
 # RISCV_GNU_CC stays: the vDSO is built with it, not with an extra package.
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)$(if $(filter 1,$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)),:SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST=1,)$(if $(filter 1,$(TRAP_STORM_TEST)),:TRAP_STORM_TEST=1,)$(if $(filter 1,$(FUTEX_COW_WINDOW_TEST)),:FUTEX_COW_WINDOW_TEST=1,)
+USER_BUILD_ID = upstream-busybox-1.37:$(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)$(if $(filter 1,$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)),:SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST=1,)$(if $(filter 1,$(TRAP_STORM_TEST)),:TRAP_STORM_TEST=1,)$(if $(filter 1,$(FUTEX_COW_WINDOW_TEST)),:FUTEX_COW_WINDOW_TEST=1,)
 # $(wildcard) drops uninitialized git submodules (fastfetch).  The
 # build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
 USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/arch user/init_common \
-                        user/external/musl user/external/sbase user/external/mksh-cvs2git \
-                        user/external/tlse user/external/apps/fastfetch \
+                        user/external/musl user/crypto tools/packaging/build_busybox.py tools/packaging/stage_busybox.py user/external/apps/fastfetch \
                         user/extra/fastfetch_gen_headers.sh user/diagnostics packages/overlay/xfce) \
                         $(if $(filter 1,$(WIFI_RTW89)),user/wifi user/external/rtw89 tools/drivers/build_rtw89.py)
 NATIVE_TAG_riscv64     := rv
@@ -1471,7 +1453,7 @@ NET_HOSTFWD ?=
 # every existing instance keeps using.  An instance overrides it through
 # [net].backend (emitted as this variable by tools/a20) to attach its NIC to
 # something else -- the cluster demo uses QEMU's socket UDP tunnel so two
-# instances share one L2 segment (docs/cluster/02-udp-demo.md).  hostfwd only
+# instances share one L2 segment (docs/zh/cluster/02-udp-demo.md).  hostfwd only
 # exists on the user backend, which is why NET_HOSTFWD folds into the default
 # and not into an override.
 NET_BACKEND ?=
@@ -1487,55 +1469,11 @@ NET_MAC ?=
 # these variables), assembled into the kernel's a20.* boot arguments below.
 # Empty = unchanged behaviour: DHCP against the SLIRP backend, or an
 # unconfigured link.  The key names are the kernel contract in
-# kernel/net/control/net_config.c; the net smokes in tools/mk/targets-smoke.mk pass the
+# kernel/net/control/net_config.c; the net smokes in tests/tools/mk/targets-smoke.mk pass the
 # same keys by hand.
 NET_GUEST_IP ?=
 NET_GUEST_NETMASK ?=
 NET_GUEST_GATEWAY ?=
-SMOKE_TIMEOUT ?= 20s
-# The DNAT gate boots a guest, waits for it to install a NAT rule, and then
-# needs the host-side probe's own retry window on top, so it needs more than
-# the single-shot serial gates use.
-SMOKE_TIMEOUT_NAT ?= 90s
-# TCG boot can take longer than two seconds after a full image rebuild.  Wait
-# until the interactive mksh has had time to print its prompt before injecting
-# smoke commands; PASS markers and clean poweroff still decide the result.
-SMOKE_INPUT_DELAY ?= 8
-# A 4-core TCG run plus net_stress_test's 4 concurrent x 4 MiB transfers is
-# much slower than the single-core defaults, so it needs its own budget.
-SMOKE_TIMEOUT_SMP ?= 180s
-# The ext4 journal gate runs eight TCG boots and four host fsck passes, so it
-# needs far longer than a single smoke boot and a longer settle time than the
-# interactive-shell default.
-SMOKE_TIMEOUT_EXT4 ?= 180
-SMOKE_INPUT_DELAY_EXT4 ?= 22
-# The AHCI gate boots x86_64 with an extra controller behind the root bus and
-# runs the fsync test against it, so it needs both a later shell injection
-# point (two HBAs are probed before the shell prompt) and a longer budget than
-# a single-device boot.
-SMOKE_TIMEOUT_AHCI ?= 120s
-SMOKE_INPUT_DELAY_AHCI ?= 20
-# The e1000 gate boots x86_64, injects a listener, and then needs the host-side
-# probe's own retry window on top (the guest must have booted and opened the port
-# before a connection can land).  It also probes a second PCI function behind the
-# root bus before the shell prompt appears, so its injection point is later than
-# the single-device default for the same reason AHCI's is.
-SMOKE_TIMEOUT_E1000 ?= 120s
-SMOKE_INPUT_DELAY_E1000 ?= 20
-# Same shape as the e1000 gate and the same reason for each value: the rtl8139
-# probe's own retry window sits on top of the guest's boot time, and the guest
-# needs to enumerate a PCI function, ring programming and a listener open
-# before the forwarded connection can land.
-SMOKE_TIMEOUT_RTL8139 ?= 120s
-SMOKE_INPUT_DELAY_RTL8139 ?= 20
-# virtio-console: the host probe first waits for the guest to publish
-# "VPORT_TEST: READY" (boot, DriverStore activation of virtio-console.a20drv,
-# /dev/vport0 open), then holds its own 90 s window for the echo.
-SMOKE_TIMEOUT_VPORT ?= 150s
-SMOKE_INPUT_DELAY_VPORT ?= 20
-SMOKE_LOG_DIR ?= .kernel-build/smoke
-STEP35_TIMEOUT ?= 300s
-STEP35_LOG_DIR ?= .kernel-build/smoke/step35
 WAIT_TIMER_HEAP_MAX ?=
 WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS ?= 0
 ifeq ($(WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS),1)
@@ -1852,6 +1790,8 @@ $(error ARCH=armv7m with clang requires llvm-objcopy)
 endif
 CC := $(CCACHE_PREFIX)$(CLANG_ARMV7M) --target=arm-none-eabi
 OBJCOPY := $(LLVM_OBJCOPY_ARMV7M)
+# The automatic fallback compiles the same GNU C as TOOLCHAIN=llvm.
+ARCH_CFLAGS += $(LLVM_KERNEL_WARNINGS)
 ARCH_LDFLAGS += -fuse-ld=lld
 else
 CC := $(CCACHE_PREFIX)$(CROSS_PREFIX)gcc
@@ -1891,7 +1831,9 @@ endif
 
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
+ifneq ($(RAMFS_BUSYBOX),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
+endif
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net$(if $(strip $(NET_MAC)),$(comma)mac=$(NET_MAC))
 # Guest static IPv4, when the instance declares one.  a20.dhcp=0 keeps lwIP
 # from racing a DHCP client against the static address on a link that has no
@@ -2421,6 +2363,12 @@ CFLAGS += -DBRINGUP
 endif
 ifeq ($(RAMFS_USER),1)
 CFLAGS += -DCONFIG_RAMFS_USER
+ifeq ($(RAMFS_BUSYBOX),1)
+CFLAGS += -DCONFIG_RAMFS_BUSYBOX
+endif
+ifeq ($(RAMFS_DIAGNOSTICS),1)
+CFLAGS += -DCONFIG_RAMFS_DIAGNOSTICS
+endif
 endif
 
 ifeq ($(NOMMU),1)
@@ -2688,11 +2636,6 @@ $(SSI_STATE_OBJECT): kernel/cluster/ssi_state.rs $(BUILD_DIR)/rust/.ssi-state-fl
 	@mkdir -p $(dir $@)
 	$(RUSTC) --edition=2021 --crate-type lib --emit=obj --target x86_64-unknown-none -C panic=abort -C code-model=large -C no-redzone=yes -C opt-level=$(RUST_OPT_LEVEL) -o $@ $<
 endif
-.PHONY: check-cluster-ssi check-cluster-ssi-network
-check-cluster-ssi:
-	$(PYTHON) tools/cluster/check-cluster-ssi.py
-check-cluster-ssi-network:
-	$(PYTHON) tools/cluster/check-cluster-ssi-network.py
 KERNEL_OBJ = $(KERNEL_ROUTE_OBJECT) $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(LWIP_SOURCE_ROOT)/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
@@ -3442,8 +3385,14 @@ endif
 # ELF is linked as read-only kernel data, then copied into the root ramfs by
 # kernel/fs/rootfs_user.c.  Keep this opt-in so normal disk-backed images do
 # not grow and existing submission artifacts remain unchanged.
-RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
-                      echo uname mkdir rm cp sync poweroff reboot nvme_stress
+ifeq ($(RAMFS_BUSYBOX),1)
+RAMFS_USER_PROGRAMS := busybox busybox_inittab busybox_rcS busybox_profile
+ifeq ($(RAMFS_DIAGNOSTICS),1)
+RAMFS_USER_PROGRAMS += timer_preempt timer_idle nvme_stress
+endif
+else
+RAMFS_USER_PROGRAMS := init busybox sh help timer_preempt timer_idle nvme_stress
+endif
 ifeq ($(RAMFS_FASTFETCH),1)
 RAMFS_USER_PROGRAMS += fastfetch
 CFLAGS += -DCONFIG_RAMFS_FASTFETCH
@@ -3485,6 +3434,29 @@ endif
 # Instances set these through [log]; the Makefile owns the defaults and the
 # enum-to-number mapping.  Runtime a20.log.* cmdline arguments can override
 # level/console/persistent/mode/max_bytes for one boot.
+METRICS_ENABLED ?= 1
+DIAG_BOOT ?= 0
+DIAG_RECORDS ?= 128
+DIAG_TRACE ?= 0
+DIAG_TRACE_RECORDS ?= 128
+DIAG_TRACE_BOOT ?= 0
+DIAG_TRACE_MASK ?= 63
+ifneq ($(filter-out 0 1,$(DIAG_BOOT) $(DIAG_TRACE) $(DIAG_TRACE_BOOT) $(METRICS_ENABLED)),)
+$(error DIAG_BOOT, DIAG_TRACE, DIAG_TRACE_BOOT must be 0|1)
+endif
+ifneq ($(filter 1,$(DIAG_BOOT) $(DIAG_TRACE)),)
+ifneq ($(MCU_PROFILE_SELECTED),)
+$(error diagnostics require a full kernel profile)
+endif
+endif
+ifeq ($(DIAG_TRACE_BOOT),1)
+ifneq ($(DIAG_TRACE),1)
+$(error DIAG_TRACE_BOOT requires DIAG_TRACE=1)
+endif
+endif
+CFLAGS += -DCONFIG_A20_DIAG_BOOT=$(DIAG_BOOT) -DCONFIG_A20_DIAG_RECORDS=$(DIAG_RECORDS)
+CFLAGS += -DCONFIG_A20_TRACE=$(DIAG_TRACE) -DCONFIG_A20_TRACE_RECORDS=$(DIAG_TRACE_RECORDS)
+CFLAGS += -DCONFIG_A20_TRACE_BOOT=$(DIAG_TRACE_BOOT) -DCONFIG_A20_TRACE_MASK=$(DIAG_TRACE_MASK)
 LOG_ENABLED      ?= 1
 LOG_LEVEL        ?= info
 LOG_CONSOLE      ?= 1
@@ -3493,7 +3465,23 @@ LOG_MODE         ?= auto
 LOG_PARTITION_MB ?= 64
 LOG_MAX_BYTES    ?= 8388608
 LOG_SESSION      ?= 1
-LOG_LOADER       ?= 1
+LOG_LOADER       ?= $(LOG_ENABLED)
+LOG_REPORT       ?= off
+LOG_BOOT_REPORT  ?= $(if $(filter error always,$(LOG_REPORT)),1,0)
+LOG_REPORT_WINDOW_MS ?= 10000
+LOG_REPORT_SETTLE_MS ?= 500
+LOG_REPORT_MAX_RECORDS ?= 48
+LOG_REPORT_CONTEXT ?= 1
+
+ifeq ($(LOG_REPORT),off)
+KLOG_REPORT_NUM := 0
+else ifeq ($(LOG_REPORT),error)
+KLOG_REPORT_NUM := 1
+else ifeq ($(LOG_REPORT),always)
+KLOG_REPORT_NUM := 2
+else
+$(error LOG_REPORT must be off|error|always, got '$(LOG_REPORT)')
+endif
 
 ifeq ($(LOG_LEVEL),debug)
 KLOG_LEVEL_NUM := 0
@@ -3529,14 +3517,72 @@ KLOG_SESSION_NUM := $(LOG_SESSION)
 KLOG_PERSIST_NUM := $(LOG_PERSISTENT)
 endif
 
+ifneq ($(words $(LOG_ENABLED) $(LOG_PERSISTENT) $(LOG_BOOT_REPORT)),3)
+$(error LOG_ENABLED, LOG_PERSISTENT and LOG_BOOT_REPORT require one value each)
+endif
+ifneq ($(filter-out 0 1,$(LOG_ENABLED) $(LOG_PERSISTENT) $(LOG_BOOT_REPORT)),)
+$(error LOG_ENABLED, LOG_PERSISTENT and LOG_BOOT_REPORT must be 0|1)
+endif
+ifeq ($(LOG_BOOT_REPORT),1)
+ifneq ($(MCU_PROFILE_SELECTED),)
+$(error LOG_BOOT_REPORT requires a full kernel profile, not MCU)
+endif
+ifeq ($(LOG_ENABLED),0)
+$(error LOG_BOOT_REPORT=1 requires LOG_ENABLED=1)
+endif
+endif
+ifneq ($(LOG_REPORT),off)
+ifeq ($(LOG_BOOT_REPORT),0)
+$(error LOG_REPORT=$(LOG_REPORT) requires LOG_BOOT_REPORT=1)
+endif
+endif
+# Remove optional translation units from the build, rather than emptying their
+# bodies. This also prevents their buffers/strings entering a non-GC kernel.
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/klog_stub.c,$(KERNEL_SRC))
+ifeq ($(LOG_ENABLED),0)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/klog.c $(KERNEL_DIR)/core/klog_disk.c,$(KERNEL_SRC))
+KERNEL_SRC += $(KERNEL_DIR)/core/klog_stub.c
+else ifeq ($(KLOG_PERSIST_NUM),0)
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/klog_disk.c,$(KERNEL_SRC))
+endif
+# Each report selects its own providers/controller. The common bounded
+# renderer is built only when at least one report module needs it.
+# Legacy aggregate metrics are independently removable, including syscall tables.
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/perf_stub.c $(KERNEL_DIR)/core/lock_counters_stub.c,$(KERNEL_SRC))
+ifeq ($(METRICS_ENABLED),0)
+CFLAGS += -DCONFIG_A20_METRICS=0
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/core/perf.c $(KERNEL_DIR)/core/perf_window.c $(KERNEL_DIR)/core/lock_counters.c,$(KERNEL_SRC))
+ifeq ($(MCU_PROFILE_SELECTED),)
+KERNEL_SRC += $(KERNEL_DIR)/core/perf_stub.c $(KERNEL_DIR)/core/lock_counters_stub.c
+endif
+endif
+REPORT_MODULE_SOURCES :=
+ifeq ($(DIAG_BOOT),1)
+REPORT_MODULE_SOURCES += $(KERNEL_DIR)/core/diagnostics/porting.c
+endif
+ifeq ($(DIAG_TRACE),1)
+REPORT_MODULE_SOURCES += $(KERNEL_DIR)/core/diagnostics/trace.c
+endif
+ifeq ($(LOG_BOOT_REPORT),1)
+REPORT_MODULE_SOURCES += $(KERNEL_DIR)/core/report/boot_report.c $(KERNEL_DIR)/core/report/console.c
+endif
+ifneq ($(strip $(REPORT_MODULE_SOURCES)),)
+KERNEL_SRC += $(KERNEL_DIR)/core/report/report.c $(REPORT_MODULE_SOURCES)
+endif
+CFLAGS += -DCONFIG_BOOT_REPORT=$(LOG_BOOT_REPORT)
 CFLAGS += -DCONFIG_KLOG_ENABLED=$(LOG_ENABLED)
 CFLAGS += -DCONFIG_KLOG_DEFAULT_LEVEL=$(KLOG_LEVEL_NUM)
 CFLAGS += -DCONFIG_KLOG_CONSOLE=$(LOG_CONSOLE)
 CFLAGS += -DCONFIG_KLOG_MODE=$(KLOG_MODE_NUM)
+CFLAGS += -DCONFIG_KLOG_REPORT=$(KLOG_REPORT_NUM)
+CFLAGS += -DCONFIG_KLOG_REPORT_WINDOW_MS=$(LOG_REPORT_WINDOW_MS)
+CFLAGS += -DCONFIG_KLOG_REPORT_SETTLE_MS=$(LOG_REPORT_SETTLE_MS)
+CFLAGS += -DCONFIG_KLOG_REPORT_MAX_RECORDS=$(LOG_REPORT_MAX_RECORDS)
+CFLAGS += -DCONFIG_KLOG_REPORT_CONTEXT=$(LOG_REPORT_CONTEXT)
 CFLAGS += -DCONFIG_KLOG_MAX_BYTES=$(LOG_MAX_BYTES)ULL
 CFLAGS += -DCONFIG_KLOG_SESSION=$(KLOG_SESSION_NUM)
-# Every full (non-MCU) profile compiles the writer; MCU profiles keep the weak
-# no-op stubs and their console-only log.
+# The selected full profiles compile the writer; disabled persistence and
+# MCU profiles use the weak no-op storage adapter.
 ifeq ($(MCU_PROFILE_SELECTED),)
 CFLAGS += -DCONFIG_KLOG_PERSISTENT=$(KLOG_PERSIST_NUM)
 endif
@@ -3642,9 +3688,6 @@ VBOX_X86_64_IMG = $(BUILD_DIR)/a20os-vbox-x86_64-uefi.img
 
 include tools/mk/targets-base.mk
 include tools/mk/targets-build.mk
-include tools/mk/targets-gates.mk
-include tools/mk/targets-smoke.mk
-include tools/mk/targets-steps.mk
 include tools/mk/targets-dev.mk
 include tools/mk/stm32.mk
 include tools/mk/m0sense.mk
@@ -3655,7 +3698,6 @@ include tools/mk/quartz64-zero.mk
 include tools/mk/lichee-pi-zero.mk
 include tools/mk/ox64.mk
 include tools/mk/raspberrypi4.mk
-include tools/mk/execution.mk
 include tools/mk/target-console.mk
 include tools/mk/run-targets.mk
 include tools/mk/targets-images.mk
@@ -3664,26 +3706,30 @@ include tools/mk/targets-pkg.mk
 include tools/mk/targets-distro.mk
 include tools/mk/targets-extra.mk
 include tools/mk/targets-native.mk
-include tools/mk/targets-native-smoke.mk
+include tools/mk/targets-native-services.mk
 include tools/mk/rust-user.mk
 include tools/mk/targets-mlibc.mk
 include tools/mk/targets-xlator.mk
-include tools/mk/targets-bench.mk
 
 # ================================================================
 # Documentation
 # ================================================================
-# Build standard-reference.pdf from every tracked Markdown file under docs/.
+# Build a curated offline book from docs/_meta/books; default: Chinese reference.
 # The generator validates required tools and fonts and reports platform-specific
 # installation commands when a dependency is missing.
+DOC_LANG ?= zh
+DOC_BOOK ?= reference
+DOC_MODE ?= strict
+
 .PHONY: docs check-docs
 docs:
-	@bash tools/docs/gen_docs_pdf.sh
+	@bash tools/docs/gen_docs_pdf.sh --lang "$(DOC_LANG)" --book "$(DOC_BOOK)" --mode "$(DOC_MODE)"
 
 check-docs:
-	@python3 tools/docs/format_markdown.py --check docs README.md
+	@python3 tools/docs/format_markdown.py --check docs README.md README.en.md
 	@python3 tools/docs/check_doc_citations.py
 	@python3 tools/docs/check_doc_nav.py
+	@python3 tools/docs/doc_translator.py --check
 
 # The binaries the native stamp rule requires.  make owns this list so the gate
 # and the build cannot disagree about what "built" means.  This is exactly
@@ -3702,3 +3748,7 @@ include tools/mk/llvm-runtime.mk
 $(KERNEL_NOSYMS_ELF) $(KERNEL_ELF) $(BUILD_DIR)/mcu-test-program.elf $(BUILD_DIR)/mcu-spawn-child.elf: $(LLVM_KERNEL_BUILTINS)
 $(NATIVE_BINS): $(LLVM_USER_BUILTINS)
 endif
+
+# Fast checks never load the optional integration suite.
+include tools/mk/selftests.mk
+include tools/mk/optional-tests.mk

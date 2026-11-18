@@ -1,0 +1,7 @@
+chapters:
+- dev/build
+- dev/instances
+- packaging/quickstart
+- distro/README
+- hypervisor/03-usage
+- cluster/10-operator-guide

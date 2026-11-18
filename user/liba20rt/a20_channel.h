@@ -24,7 +24,7 @@ static inline a20_status_t a20_channel_create(a20_channel_pair_t *out)
 
 /*
  * a20_channel_create_typed — create a channel, optionally with a type
- * signature (docs/native-abi/05-ipc.md §2.3).  type == NULL yields an
+ * signature (docs/zh/native-abi/05-ipc.md §2.3).  type == NULL yields an
  * untyped channel (backward compatible).
  */
 static inline a20_status_t a20_channel_create_typed(a20_channel_pair_t *out,
@@ -116,7 +116,7 @@ static inline a20_status_t a20_channel_recv(a20_handle_t ep,
 }
 
 /*
- * a20_channel_call — fused RPC (docs/hybrid-kernel/00-design.md §4.1):
+ * a20_channel_call — fused RPC (docs/zh/hybrid-kernel/00-design.md §4.1):
  * send a request and wait for the reply in a single trap.  Returns the
  * reply byte count (>= 0) or a negative a20 error.  With A20_MSG_NONBLOCK a
  * -A20_ERR_WOULD_BLOCK means the request was delivered but no reply was

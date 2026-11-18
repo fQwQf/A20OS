@@ -128,6 +128,9 @@ pub unsafe extern "C" fn a20_vfs_shutdown_run(ops: *const ShutdownOps) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // PHASE is the production singleton. Independent scenarios must not reset
+    // each other's phase while the Rust test runner executes them in parallel.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[derive(Default)]
     struct Fake {
@@ -183,6 +186,7 @@ mod tests {
 
     #[test]
     fn all_phase_transitions_and_running_reentry_are_serialized() {
+        let _guard = TEST_LOCK.lock().unwrap();
         unsafe {
             PHASE.store(IDLE, Ordering::Release);
             let mut f = Fake { sync_error: -5, abort_error: -16, ..Fake::default() };
@@ -210,6 +214,7 @@ mod tests {
 
     #[test]
     fn sync_failure_with_successful_abort_reopens_admission() {
+        let _guard = TEST_LOCK.lock().unwrap();
         unsafe {
             PHASE.store(IDLE, Ordering::Release);
             let mut f = Fake { sync_error: -5, ..Fake::default() };

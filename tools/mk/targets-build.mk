@@ -7,11 +7,7 @@
 # sibling smokes can concurrently rebuild the same FAT image.
 .NOTPARALLEL: check-upgrade-userland-smokes
 
-all:
-	$(MAKE) release-rv
-	$(MAKE) release-la
-	@echo "=== release build complete ==="
-	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
+all: kernel-only
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
@@ -49,7 +45,7 @@ check-arm-board-builds:
 check-x86_64-pc-build:
 	$(MAKE) ARCH=x86_64 BOARD=x86_64-pc ABI=$(ABI) BRINGUP=1 kernel-only
 
-# VisionFive 2 on-hardware boot artifacts (see docs/platforms/visionfive2-boot.md).
+# VisionFive 2 on-hardware boot artifacts (see docs/zh/platforms/visionfive2-boot.md).
 # vf2-firmware builds OpenSBI + U-Boot SPL from pinned upstream sources;
 # vf2-image wraps the kernel and FAT32 userspace as a direct-boot FIT
 # (BootROM -> SPL -> OpenSBI -> A20OS) plus a raw SD-card image.
@@ -69,12 +65,12 @@ VF2_IMAGE_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 BOARD=vi
 VF2_WORLD ?= devel
 VF2_WORLD_IMAGE = $(PKG_IMAGE_DIR)/$(VF2_WORLD)-riscv64.img
 vf2-firmware:
-	tools/vf2/build-firmware.sh
+	tools/boards/vf2/build-firmware.sh
 
 # Only fastfetch remains a gitlink: it is the one program compiled into the
 # FAT32 root, which no Alpine world replaces.
 vf2-extra-sources:
-	tools/vf2/fetch-extra-sources.sh
+	tools/boards/vf2/fetch-extra-sources.sh
 
 vf2-world-image:
 	$(MAKE) ARCH=riscv64 PKG_WORLD=$(VF2_WORLD) PKG_ALPINE=1 image-world
@@ -89,7 +85,7 @@ vf2-image: vf2-extra-sources vf2-world-image
 		$(MAKE) -C user ARCH=riscv64 NOMMU=1 OPT="-O3" PROFILE=full \
 			BUILD_DIR=build/riscv64-nommu fastfetch; \
 	fi
-	tools/vf2/make-boot-image.sh \
+	tools/boards/vf2/make-boot-image.sh \
 		$(VF2_IMAGE_BUILD_DIR)/kernel.bin \
 		$(VF2_IMAGE_BUILD_DIR)/fat32.img \
 		$(VF2_WORLD_IMAGE)
@@ -118,8 +114,7 @@ vf2-image: vf2-extra-sources vf2-world-image
 #     VF2_EXTRA_IMAGE=, to use a prebuilt partition instead.
 #
 # Output: build/vf2-firmware/a20os-sd.img (each invocation rewrites it).
-.PHONY: vf2-sdcard vf2-minimal \
-	_vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
+.PHONY: vf2-sdcard vf2-minimal _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
 VF2_MMU ?= 1
 ifeq ($(VF2_MMU),1)
 VF2_ABI             := both
@@ -171,7 +166,7 @@ vf2-sdcard: _vf2_check_firmware _vf2_build_base $(VF2_SDCARD_EXTRA_PREREQ)
 	    { echo "error: no extra image; place sdcard-rv.img in the repo root or set VF2_EXTRA_IMAGE=/path/to.img" >&2; exit 1; }
 	@test -f "$(VF2_EXTRA_IMAGE)" || \
 	    { echo "error: extra image not found: $(VF2_EXTRA_IMAGE)" >&2; exit 1; }
-	tools/vf2/make-boot-image.sh \
+	tools/boards/vf2/make-boot-image.sh \
 		$(VF2_BUILD_DIR)/kernel.bin \
 		$(VF2_BUILD_DIR)/fat32.img \
 		$(VF2_EXTRA_IMAGE)
@@ -182,7 +177,7 @@ vf2-minimal: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
 		--src "$(VF2_BUILD_DIR)/fat32.img" \
 		--dst "$(VF2_BUILD_DIR)/fat32-ff.img" \
 		--payload "$(VF2_USER_BUILD_DIR)/fastfetch"
-	tools/vf2/make-boot-image.sh \
+	tools/boards/vf2/make-boot-image.sh \
 		$(VF2_BUILD_DIR)/kernel.bin \
 		$(VF2_BUILD_DIR)/fat32-ff.img
 
@@ -225,7 +220,7 @@ check-build-matrix-all: check-kernel-build-all check-user-build-all
 
 # EXTERNAL_USERLAND_UPGRADE_CHECKLIST: run every gate group that must pass
 # before an upgraded musl/sbase/mksh (or other imported userland) is
-# accepted -- see docs/dev/external-dependencies.md.
+# accepted -- see docs/zh/dev/external-dependencies.md.
 .PHONY: check-upgrade-userland-smokes
 check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
 
@@ -259,3 +254,28 @@ check-dev-build:
 check-release-build:
 	$(MAKE) all
 
+
+# End-to-end observability gate. These paths isolate images from daily runs.
+OBSERVABILITY_GATE_DIR ?= .kernel-build/smoke/observability-gate
+
+.PHONY: release-rv release-la _release_build _release_disk
+release-rv:
+	tools/a20 package release-riscv64
+
+release-la:
+	tools/a20 package release-loongarch64
+
+_release_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
+	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) PROFILE=$(PROFILE) NR_CPUS=$(NR_CPUS) \
+		EXTERNAL_ROOT=$(EXTERNAL_ROOT) _release_disk DISK_OUT=$(DISK_OUT)
+	@$(PYTHON) tools/img.py copy \
+		--src "$(KERNEL_ELF)" --dst "$(KERNEL_OUT)"
+	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
+
+_release_disk: $(USER_BUILD_STAMP)
+	@$(PYTHON) tools/img.py release-disk \
+		--disk-out "$(DISK_OUT)" \
+		--mkfs-fat "$(MKFS_FAT)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--libgcc "$(LIBGCC_S_ARCH)" \
+		--protocols "$(PROTOCOLS_LINES)"

@@ -1,6 +1,6 @@
 /* A20OS Native cluster syscall wrappers. The kernel provides loopback,
  * UDP/UART adapters and bounded reliable proxies; remote name resolution
- * belongs to the control plane. See docs/cluster/01-abi.md for ownership,
+ * belongs to the control plane. See docs/zh/cluster/01-abi.md for ownership,
  * handshake and channel failure semantics. */
 #ifndef _A20_CLUSTER_H
 #define _A20_CLUSTER_H
@@ -130,7 +130,7 @@ static inline int a20_cluster_parse_udp(const char *text, uint8_t next_hop[6]) {
 }
 
 /* FNV-1a 32-bit node hash, the value that goes in a frame header
- * (docs/cluster/01-abi.md §节点哈希).  Also available host-side so tests can
+ * (docs/zh/cluster/01-abi.md §节点哈希).  Also available host-side so tests can
  * predict what a peer will put on the wire. */
 static inline uint32_t a20_node_hash(const a20_node_id_t *id) {
     uint32_t h = 2166136261u;

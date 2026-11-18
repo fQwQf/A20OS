@@ -2666,7 +2666,7 @@ int a20_lwip_transport_connect(net_socket_t *s, const void *addr, size_t addrlen
  *
  * Must be called under the PCB's owning lane; UDP and RAW callers also hold
  * that PCB's shared guard because receive callbacks access these same fields.
- * It must never allocate (see docs/net/network-lock-contract.md).
+ * It must never allocate (see docs/zh/net/network-lock-contract.md).
  */
 #define NET_IP_TTL_DEFAULT 64
 

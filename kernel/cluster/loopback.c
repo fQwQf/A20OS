@@ -1,5 +1,5 @@
 /*
- * loopback transport (docs/cluster/04-transports.md §2).
+ * loopback transport (docs/zh/cluster/04-transports.md §2).
  *
  * 语义: send = 把帧直接投递到目标虚拟节点的 a20_clx_rx_frame（拷贝，不共享
  * 缓冲），零丢包、保序。链路地址 = 4 字节虚拟节点号；本机节点固定使用
